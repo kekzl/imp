@@ -8,20 +8,21 @@
 #include <vector>
 #include <unistd.h>
 
-namespace imp { namespace test {
+namespace imp {
+namespace test {
 
 // ---- GGUF constants ----
 
-static constexpr uint32_t STUB_GGUF_MAGIC = 0x46554747; // "GGUF" LE
+static constexpr uint32_t STUB_GGUF_MAGIC = 0x46554747;  // "GGUF" LE
 static constexpr uint32_t STUB_GGUF_VERSION = 3;
 static constexpr uint32_t STUB_ALIGNMENT = 32;
 
 // GGUF value types
-static constexpr uint32_t GGUF_TYPE_UINT32  = 4;
-static constexpr uint32_t GGUF_TYPE_INT32   = 5;
+static constexpr uint32_t GGUF_TYPE_UINT32 = 4;
+static constexpr uint32_t GGUF_TYPE_INT32 = 5;
 static constexpr uint32_t GGUF_TYPE_FLOAT32 = 6;
-static constexpr uint32_t GGUF_TYPE_STRING  = 8;
-static constexpr uint32_t GGUF_TYPE_ARRAY   = 9;
+static constexpr uint32_t GGUF_TYPE_STRING = 8;
+static constexpr uint32_t GGUF_TYPE_ARRAY = 9;
 
 // GGML tensor types
 static constexpr uint32_t GGML_TYPE_F32 = 0;
@@ -29,18 +30,19 @@ static constexpr uint32_t GGML_TYPE_F16 = 1;
 
 // ---- Stub model dimensions ----
 
-static constexpr int VOCAB    = 256;
-static constexpr int D_MODEL  = 64;
-static constexpr int N_HEADS  = 2;
-static constexpr int HEAD_DIM = 32; // D_MODEL / N_HEADS
-static constexpr int D_FF     = 128;
+static constexpr int VOCAB = 256;
+static constexpr int D_MODEL = 64;
+static constexpr int N_HEADS = 2;
+static constexpr int HEAD_DIM = 32;  // D_MODEL / N_HEADS
+static constexpr int D_FF = 128;
 static constexpr int N_LAYERS = 1;
-static constexpr int CTX_LEN  = 512;
+static constexpr int CTX_LEN = 512;
 
 // ---- Binary writer ----
 
 class BinaryWriter {
     std::vector<uint8_t> buf_;
+
 public:
     void write_u32(uint32_t v) {
         size_t pos = buf_.size();
@@ -91,38 +93,43 @@ public:
     void write_kv_string_array(const std::string& key, const std::vector<std::string>& arr) {
         write_string(key);
         write_u32(GGUF_TYPE_ARRAY);
-        write_u32(static_cast<uint32_t>(GGUF_TYPE_STRING)); // element type
+        write_u32(static_cast<uint32_t>(GGUF_TYPE_STRING));  // element type
         write_u64(arr.size());
-        for (const auto& s : arr) write_string(s);
+        for (const auto& s : arr)
+            write_string(s);
     }
     void write_kv_i32_array(const std::string& key, const std::vector<int32_t>& arr) {
         write_string(key);
         write_u32(GGUF_TYPE_ARRAY);
         write_u32(GGUF_TYPE_INT32);
         write_u64(arr.size());
-        for (int32_t v : arr) write_i32(v);
+        for (int32_t v : arr)
+            write_i32(v);
     }
     void write_kv_f32_array(const std::string& key, const std::vector<float>& arr) {
         write_string(key);
         write_u32(GGUF_TYPE_ARRAY);
         write_u32(GGUF_TYPE_FLOAT32);
         write_u64(arr.size());
-        for (float v : arr) write_f32(v);
+        for (float v : arr)
+            write_f32(v);
     }
 
     // Tensor info entry (no data, just metadata)
     // dims are in GGUF order: dims[0] = innermost (fastest-changing)
-    void write_tensor_info(const std::string& name, uint32_t n_dims,
-                           const uint64_t* dims, uint32_t type, uint64_t offset) {
+    void write_tensor_info(const std::string& name, uint32_t n_dims, const uint64_t* dims, uint32_t type,
+                           uint64_t offset) {
         write_string(name);
         write_u32(n_dims);
-        for (uint32_t d = 0; d < n_dims; d++) write_u64(dims[d]);
+        for (uint32_t d = 0; d < n_dims; d++)
+            write_u64(dims[d]);
         write_u32(type);
         write_u64(offset);
     }
 
     void pad_to(size_t alignment) {
-        while (buf_.size() % alignment) buf_.push_back(0);
+        while (buf_.size() % alignment)
+            buf_.push_back(0);
     }
 
     size_t size() const { return buf_.size(); }
@@ -130,7 +137,8 @@ public:
 
     bool write_file(const std::string& path) const {
         FILE* f = fopen(path.c_str(), "wb");
-        if (!f) return false;
+        if (!f)
+            return false;
         size_t written = fwrite(buf_.data(), 1, buf_.size(), f);
         fclose(f);
         return written == buf_.size();
@@ -142,17 +150,20 @@ public:
 struct TensorDesc {
     std::string name;
     uint32_t n_dims;
-    uint64_t dims[4];    // GGUF order (innermost first)
-    uint32_t type;       // GGML_TYPE_F16 or GGML_TYPE_F32
+    uint64_t dims[4];  // GGUF order (innermost first)
+    uint32_t type;     // GGML_TYPE_F16 or GGML_TYPE_F32
     size_t byte_size;
 };
 
 static size_t tensor_bytes(uint32_t type, const uint64_t* dims, uint32_t n_dims) {
     uint64_t n_elements = 1;
-    for (uint32_t d = 0; d < n_dims; d++) n_elements *= dims[d];
-    if (type == GGML_TYPE_F16) return n_elements * 2;
-    if (type == GGML_TYPE_F32) return n_elements * 4;
-    return n_elements * 4; // fallback
+    for (uint32_t d = 0; d < n_dims; d++)
+        n_elements *= dims[d];
+    if (type == GGML_TYPE_F16)
+        return n_elements * 2;
+    if (type == GGML_TYPE_F32)
+        return n_elements * 4;
+    return n_elements * 4;  // fallback
 }
 
 std::string generate_gguf_stub(const std::string& arch) {
@@ -168,7 +179,8 @@ std::string generate_gguf_stub(const std::string& arch) {
         td.n_dims = 2;
         td.dims[0] = static_cast<uint64_t>(cols);  // innermost
         td.dims[1] = static_cast<uint64_t>(rows);  // outermost
-        td.dims[2] = 1; td.dims[3] = 1;
+        td.dims[2] = 1;
+        td.dims[3] = 1;
         td.type = type;
         td.byte_size = tensor_bytes(type, td.dims, td.n_dims);
         tensors.push_back(td);
@@ -179,7 +191,9 @@ std::string generate_gguf_stub(const std::string& arch) {
         td.name = name;
         td.n_dims = 1;
         td.dims[0] = static_cast<uint64_t>(size);
-        td.dims[1] = 1; td.dims[2] = 1; td.dims[3] = 1;
+        td.dims[1] = 1;
+        td.dims[2] = 1;
+        td.dims[3] = 1;
         td.type = type;
         td.byte_size = tensor_bytes(type, td.dims, td.n_dims);
         tensors.push_back(td);
@@ -213,7 +227,8 @@ std::string generate_gguf_stub(const std::string& arch) {
     size_t data_offset = 0;
     for (size_t i = 0; i < tensors.size(); i++) {
         size_t rem = data_offset % STUB_ALIGNMENT;
-        if (rem != 0) data_offset += STUB_ALIGNMENT - rem;
+        if (rem != 0)
+            data_offset += STUB_ALIGNMENT - rem;
         offsets[i] = data_offset;
         data_offset += tensors[i].byte_size;
     }
@@ -227,7 +242,7 @@ std::string generate_gguf_stub(const std::string& arch) {
         token_strings[i] = buf;
     }
 
-    std::vector<int32_t> token_types(VOCAB, 1); // all type=1 (normal)
+    std::vector<int32_t> token_types(VOCAB, 1);  // all type=1 (normal)
     std::vector<float> token_scores(VOCAB, 0.0f);
 
     // ---- 4. Count metadata KV pairs ----
@@ -266,15 +281,14 @@ std::string generate_gguf_stub(const std::string& arch) {
 
     // Tensor info entries
     for (size_t i = 0; i < tensors.size(); i++) {
-        w.write_tensor_info(tensors[i].name, tensors[i].n_dims,
-                            tensors[i].dims, tensors[i].type, offsets[i]);
+        w.write_tensor_info(tensors[i].name, tensors[i].n_dims, tensors[i].dims, tensors[i].type, offsets[i]);
     }
 
     // Pad to alignment before tensor data
     w.pad_to(STUB_ALIGNMENT);
 
     // ---- 6. Write tensor data ----
-    std::mt19937 rng(42); // fixed seed for reproducibility
+    std::mt19937 rng(42);  // fixed seed for reproducibility
     std::uniform_real_distribution<float> dist(-0.01f, 0.01f);
 
     for (size_t i = 0; i < tensors.size(); i++) {
@@ -283,7 +297,8 @@ std::string generate_gguf_stub(const std::string& arch) {
 
         const auto& td = tensors[i];
         uint64_t n_elements = 1;
-        for (uint32_t d = 0; d < td.n_dims; d++) n_elements *= td.dims[d];
+        for (uint32_t d = 0; d < td.n_dims; d++)
+            n_elements *= td.dims[d];
 
         if (td.type == GGML_TYPE_F32) {
             // Norm weights: fill with 1.0
@@ -306,9 +321,9 @@ std::string generate_gguf_stub(const std::string& arch) {
 
                 uint16_t h;
                 if (exp > 15) {
-                    h = static_cast<uint16_t>(sign | 0x7C00); // inf
+                    h = static_cast<uint16_t>(sign | 0x7C00);  // inf
                 } else if (exp < -14) {
-                    h = static_cast<uint16_t>(sign); // zero/denorm
+                    h = static_cast<uint16_t>(sign);  // zero/denorm
                 } else {
                     h = static_cast<uint16_t>(sign | ((exp + 15) << 10) | (mantissa >> 13));
                 }
@@ -322,7 +337,8 @@ std::string generate_gguf_stub(const std::string& arch) {
     // ---- 7. Write to temp file ----
     char path[] = "/tmp/imp_stub_XXXXXX.gguf";
     int fd = mkstemps(path, 5);
-    if (fd < 0) return "";
+    if (fd < 0)
+        return "";
 
     ssize_t written = write(fd, w.data(), w.size());
     close(fd);
@@ -335,4 +351,5 @@ std::string generate_gguf_stub(const std::string& arch) {
     return std::string(path);
 }
 
-}} // namespace imp::test
+}  // namespace test
+}  // namespace imp

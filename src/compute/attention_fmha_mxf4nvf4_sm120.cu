@@ -45,14 +45,10 @@ bool mxf4nvf4_blockscale_enabled() {
     return !mxf4nvf4_blockscale_disabled();
 }
 
-bool fmha_sm120_mxf4nvf4_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream)
-{
-    return fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
-                                     sliding_window, softcap, stream,
-                                     /*use_blockscale=*/true);
+bool fmha_sm120_mxf4nvf4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                                 bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+    return fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                    /*use_blockscale=*/true);
 }
 
-} // namespace imp
+}  // namespace imp

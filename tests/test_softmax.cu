@@ -8,7 +8,12 @@
 #include <cmath>
 #include <limits>
 
-#define SKIP_IF_NO_CUDA() do { int dev; if (cudaGetDevice(&dev) != cudaSuccess) GTEST_SKIP(); } while(0)
+#define SKIP_IF_NO_CUDA()                       \
+    do {                                        \
+        int dev;                                \
+        if (cudaGetDevice(&dev) != cudaSuccess) \
+            GTEST_SKIP();                       \
+    } while (0)
 
 namespace imp {
 namespace {
@@ -16,13 +21,13 @@ namespace {
 // ---------------------------------------------------------------------------
 // Helpers (same pattern as test_layernorm.cu)
 // ---------------------------------------------------------------------------
-Tensor make_gpu_tensor(const float* host_data, QType dtype,
-                       std::initializer_list<int64_t> shape_list) {
+Tensor make_gpu_tensor(const float* host_data, QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -41,9 +46,10 @@ Tensor make_gpu_tensor(const float* host_data, QType dtype,
 Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -65,7 +71,10 @@ std::vector<float> read_gpu_tensor(const Tensor& t) {
 }
 
 void free_gpu_tensor(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // ===========================================================================
@@ -79,7 +88,7 @@ TEST(SoftmaxTest, OutputSumsToOne) {
     for (int i = 0; i < rows * cols; i++)
         h_in[i] = std::sin(static_cast<float>(i) * 0.3f) * 2.0f;
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F16, {rows, cols});
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F16, {rows, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
@@ -108,7 +117,7 @@ TEST(SoftmaxTest, OutputSumsToOneFP32) {
     for (int i = 0; i < rows * cols; i++)
         h_in[i] = std::cos(static_cast<float>(i) * 0.17f) * 5.0f;
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
@@ -135,7 +144,7 @@ TEST(SoftmaxTest, AllEqualInput) {
     constexpr int rows = 1, cols = 32;
     std::vector<float> h_in(cols, 3.0f);  // all equal
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
@@ -158,7 +167,7 @@ TEST(SoftmaxTest, SingleElement) {
     SKIP_IF_NO_CUDA();
 
     std::vector<float> h_in = {42.0f};
-    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {1, 1});
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, {1, 1});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1, 1});
 
     softmax(d_in, d_out, nullptr);
@@ -180,10 +189,9 @@ TEST(SoftmaxTest, NegativeInfMasking) {
     constexpr int cols = 8;
     float neg_inf = -std::numeric_limits<float>::infinity();
     // Mask positions 0, 2, 4, 6 to -inf; keep 1, 3, 5, 7 with real values
-    std::vector<float> h_in = {neg_inf, 1.0f, neg_inf, 2.0f,
-                                neg_inf, 3.0f, neg_inf, 0.5f};
+    std::vector<float> h_in = {neg_inf, 1.0f, neg_inf, 2.0f, neg_inf, 3.0f, neg_inf, 0.5f};
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {1, cols});
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, {1, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1, cols});
 
     softmax(d_in, d_out, nullptr);
@@ -207,5 +215,5 @@ TEST(SoftmaxTest, NegativeInfMasking) {
     free_gpu_tensor(d_out);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

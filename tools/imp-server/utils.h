@@ -40,16 +40,11 @@ struct ChannelSegments {
 };
 ChannelSegments split_channel_segments(const std::string& text);
 
-std::string sse_chunk(const std::string& id, int64_t created,
-                      const std::string& model,
-                      const json& delta,
-                      const char* finish_reason,
-                      const json& logprobs = nullptr);
+std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
+                      const char* finish_reason, const json& logprobs = nullptr);
 
-std::string sse_completion_chunk(const std::string& id, int64_t created,
-                                 const std::string& model,
-                                 const std::string& text,
-                                 const char* finish_reason);
+std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
+                                 const std::string& text, const char* finish_reason);
 
 // Pre-formatted SSE chunk writer. Builds envelope templates once per request;
 // hot-path write_content/write_reasoning only JSON-escape the token text and
@@ -69,18 +64,15 @@ struct SSEChunkWriter {
         json_escape_into(esc_id, id.data(), id.size());
         json_escape_into(esc_model, model.data(), model.size());
 
-        std::string envelope_prefix =
-            "data: {\"id\":\"" + esc_id +
-            "\",\"object\":\"chat.completion.chunk\",\"created\":" +
-            std::to_string(created) +
-            ",\"model\":\"" + esc_model +
-            "\",\"choices\":[{\"index\":0,\"delta\":{\"";
+        std::string envelope_prefix = "data: {\"id\":\"" + esc_id +
+                                      "\",\"object\":\"chat.completion.chunk\",\"created\":" +
+                                      std::to_string(created) + ",\"model\":\"" + esc_model +
+                                      "\",\"choices\":[{\"index\":0,\"delta\":{\"";
 
-        std::string envelope_suffix =
-            "\"},\"finish_reason\":null}]}\n\n";
+        std::string envelope_suffix = "\"},\"finish_reason\":null}]}\n\n";
 
-        content_prefix   = envelope_prefix + "content\":\"";
-        content_suffix   = envelope_suffix;
+        content_prefix = envelope_prefix + "content\":\"";
+        content_suffix = envelope_suffix;
         reasoning_prefix = envelope_prefix + "reasoning_content\":\"";
         reasoning_suffix = envelope_suffix;
 

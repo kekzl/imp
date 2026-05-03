@@ -13,14 +13,10 @@ namespace {
 
 // Rollback a partial block allocation: free blocks added after original_size,
 // trim the blocks/hashes vectors, and erase the sequence entries if empty.
-static void rollback_partial_allocation(
-        KVCache* cache,
-        std::unordered_map<int, std::vector<int>>& seq_blocks,
-        std::unordered_map<int, std::vector<size_t>>& seq_block_hashes,
-        int seq_id,
-        std::vector<int>& blocks,
-        std::vector<size_t>& hashes,
-        size_t original_size) {
+static void rollback_partial_allocation(KVCache* cache, std::unordered_map<int, std::vector<int>>& seq_blocks,
+                                        std::unordered_map<int, std::vector<size_t>>& seq_block_hashes,
+                                        int seq_id, std::vector<int>& blocks, std::vector<size_t>& hashes,
+                                        size_t original_size) {
     for (size_t j = original_size; j < blocks.size(); ++j) {
         cache->free_block(blocks[j]);
     }
@@ -32,20 +28,17 @@ static void rollback_partial_allocation(
     }
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
 // ─── Construction / destruction ──────────────────────────────────────
 
-KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache)
-    : cache_(std::move(cache)) {
-}
+KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache) : cache_(std::move(cache)) {}
 
 KVCacheManager::~KVCacheManager() = default;
 
 // ─── Hashing utility ─────────────────────────────────────────────────
 
-size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens,
-                                           size_t parent_hash) {
+size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash) {
     // FNV-1a inspired hash that chains with the parent block's hash.
     // This ensures that block N's hash depends on all preceding blocks,
     // so two sequences must share an identical prefix to match.
@@ -60,7 +53,8 @@ size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens,
 // ─── Sequence management ─────────────────────────────────────────────
 
 bool KVCacheManager::allocate_blocks(int seq_id, int num_blocks) {
-    if (num_blocks <= 0) return true;
+    if (num_blocks <= 0)
+        return true;
 
     auto& blocks = seq_blocks_[seq_id];
     const size_t original_size = blocks.size();
@@ -96,10 +90,12 @@ bool KVCacheManager::allocate_blocks(int seq_id, int num_blocks) {
 int KVCacheManager::append_block(int seq_id) {
     // The sequence must already exist.
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return -1;
+    if (it == seq_blocks_.end())
+        return -1;
 
     int block_id = allocate_block_with_eviction();
-    if (block_id < 0) return -1;
+    if (block_id < 0)
+        return -1;
 
     it->second.push_back(block_id);
     return block_id;
@@ -107,12 +103,14 @@ int KVCacheManager::append_block(int seq_id) {
 
 void KVCacheManager::free_sequence(int seq_id) {
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return;
+    if (it == seq_blocks_.end())
+        return;
 
     for (int block_id : it->second) {
         // -1 sentinel marks a slot whose physical block was freed by
         // evict_middle_blocks (StreamingLLM). Skip — nothing to free.
-        if (block_id < 0) continue;
+        if (block_id < 0)
+            continue;
         // Pinned blocks survive free_sequence: keep ref_count=1, add to
         // cached LRU for reuse. They remain in pinned_blocks_ and cannot
         // be evicted until unpin_prefix() is called.
@@ -142,7 +140,7 @@ void KVCacheManager::free_sequence(int seq_id) {
                     cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
                     reclaimable_cached_count_++;
                 }
-                continue; // Skip cache_->free_block()
+                continue;  // Skip cache_->free_block()
             }
         }
 
@@ -164,13 +162,12 @@ void KVCacheManager::free_sequence(int seq_id) {
 const std::vector<int>& KVCacheManager::block_table(int seq_id) const {
     static const std::vector<int> empty;
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return empty;
+    if (it == seq_blocks_.end())
+        return empty;
     return it->second;
 }
 
-int KVCacheManager::num_free_blocks() const {
-    return cache_->num_free_blocks();
-}
+int KVCacheManager::num_free_blocks() const { return cache_->num_free_blocks(); }
 
 // ─── LRU eviction ────────────────────────────────────────────────────
 
@@ -187,44 +184,50 @@ void KVCacheManager::touch(int seq_id) {
 }
 
 int KVCacheManager::evict_lru() {
-    if (lru_order_.empty()) return -1;
+    if (lru_order_.empty())
+        return -1;
 
     // Skip pinned sequences — find the first unpinned LRU victim.
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
         int candidate = *it;
-        if (pinned_seqs_.find(candidate) != pinned_seqs_.end()) continue;
+        if (pinned_seqs_.find(candidate) != pinned_seqs_.end())
+            continue;
         free_sequence(candidate);  // also removes from lru_order_ / lru_map_
         return candidate;
     }
 
-    return -1; // All sequences are pinned.
+    return -1;  // All sequences are pinned.
 }
 
 bool KVCacheManager::can_allocate(int num_blocks) const {
-    if (num_blocks <= 0) return true;
+    if (num_blocks <= 0)
+        return true;
 
     // Fast path: free pool + reclaimable cached blocks (O(1) via counter)
     int reclaimable = cache_->num_free_blocks() + reclaimable_cached_count_;
-    if (reclaimable >= num_blocks) return true;
+    if (reclaimable >= num_blocks)
+        return true;
 
     // Slow path: count blocks from evictable LRU sequences
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
-        if (pinned_seqs_.find(*it) != pinned_seqs_.end()) continue;
+        if (pinned_seqs_.find(*it) != pinned_seqs_.end())
+            continue;
         auto seq_it = seq_blocks_.find(*it);
         if (seq_it != seq_blocks_.end()) {
             reclaimable += static_cast<int>(seq_it->second.size());
         }
-        if (reclaimable >= num_blocks) return true;
+        if (reclaimable >= num_blocks)
+            return true;
     }
     return false;
 }
 
 // ─── Content-addressed prefix caching ────────────────────────────────
 
-int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
-                                                 std::span<const int32_t> tokens) {
+int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens) {
     const int num_tokens = static_cast<int>(tokens.size());
-    if (num_tokens <= 0) return 0;
+    if (num_tokens <= 0)
+        return 0;
 
     int total_blocks = (num_tokens + cache_->block_size() - 1) / cache_->block_size();
     auto& blocks = seq_blocks_[seq_id];
@@ -253,8 +256,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
         bool is_full_block = (block_tokens == cache_->block_size());
 
         if (prefix_caching_enabled_ && is_full_block) {
-            size_t block_hash = compute_block_hash(
-                tokens.subspan(block_start, block_tokens), parent_hash);
+            size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens), parent_hash);
 
             // Check if this block already exists in the hash table.
             auto hit = block_hash_to_id_.find(block_hash);
@@ -283,8 +285,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
                 // Rollback everything we allocated/shared in this call.
-                rollback_partial_allocation(cache_.get(), seq_blocks_,
-                    seq_block_hashes_, seq_id, blocks, hashes, original_size);
+                rollback_partial_allocation(cache_.get(), seq_blocks_, seq_block_hashes_, seq_id, blocks,
+                                            hashes, original_size);
                 return -1;
             }
 
@@ -297,19 +299,19 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
             // Partial block or prefix caching disabled — plain allocation.
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
-                rollback_partial_allocation(cache_.get(), seq_blocks_,
-                    seq_block_hashes_, seq_id, blocks, hashes, original_size);
+                rollback_partial_allocation(cache_.get(), seq_blocks_, seq_block_hashes_, seq_id, blocks,
+                                            hashes, original_size);
                 return -1;
             }
 
             blocks.push_back(block_id);
             if (is_full_block) {
-                size_t block_hash = compute_block_hash(
-                    tokens.subspan(block_start, block_tokens), parent_hash);
+                size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens),
+                                                       parent_hash);
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
             } else {
-                hashes.push_back(0); // Partial block, not cacheable.
+                hashes.push_back(0);  // Partial block, not cacheable.
             }
         }
     }
@@ -321,20 +323,20 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
     }
 
     if (reused_blocks > 0) {
-        IMP_LOG_DEBUG("PrefixCache: seq %d reused %d/%d blocks (%d tokens skippable)",
-                      seq_id, reused_blocks, total_blocks,
-                      reused_blocks * cache_->block_size());
+        IMP_LOG_DEBUG("PrefixCache: seq %d reused %d/%d blocks (%d tokens skippable)", seq_id, reused_blocks,
+                      total_blocks, reused_blocks * cache_->block_size());
     }
     return reused_blocks;
 }
 
-void KVCacheManager::register_block_hashes(int seq_id,
-                                            std::span<const int32_t> tokens) {
+void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> tokens) {
     const int num_tokens = static_cast<int>(tokens.size());
-    if (!prefix_caching_enabled_) return;
+    if (!prefix_caching_enabled_)
+        return;
 
     auto blocks_it = seq_blocks_.find(seq_id);
-    if (blocks_it == seq_blocks_.end()) return;
+    if (blocks_it == seq_blocks_.end())
+        return;
 
     const auto& blocks = blocks_it->second;
     int total_blocks = static_cast<int>(blocks.size());
@@ -346,7 +348,8 @@ void KVCacheManager::register_block_hashes(int seq_id,
         int block_start = b * cache_->block_size();
         int block_tokens = std::min(cache_->block_size(), num_tokens - block_start);
 
-        if (block_tokens < cache_->block_size()) break; // Only full blocks are cacheable.
+        if (block_tokens < cache_->block_size())
+            break;  // Only full blocks are cacheable.
 
         // Skip recomputation if hash was already computed during allocate_blocks_with_prefix
         int block_id = blocks[b];
@@ -360,8 +363,7 @@ void KVCacheManager::register_block_hashes(int seq_id,
             continue;
         }
 
-        size_t block_hash = compute_block_hash(
-            tokens.subspan(block_start, block_tokens), parent_hash);
+        size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens), parent_hash);
 
         if (b < static_cast<int>(hashes.size())) {
             hashes[b] = block_hash;
@@ -378,9 +380,7 @@ void KVCacheManager::register_block_hashes(int seq_id,
     }
 }
 
-int KVCacheManager::num_cached_blocks() const {
-    return static_cast<int>(cached_blocks_lru_.size());
-}
+int KVCacheManager::num_cached_blocks() const { return static_cast<int>(cached_blocks_lru_.size()); }
 
 bool KVCacheManager::evict_cached_block() {
     int block_id = reclaim_cached_block();
@@ -388,17 +388,19 @@ bool KVCacheManager::evict_cached_block() {
 }
 
 int KVCacheManager::reclaim_cached_block() {
-    if (reclaimable_cached_count_ <= 0) return -1;
+    if (reclaimable_cached_count_ <= 0)
+        return -1;
 
     // Skip pinned blocks at the front of the LRU.
     while (!cached_blocks_lru_.empty()) {
         int front = cached_blocks_lru_.front();
-        if (pinned_blocks_.find(front) == pinned_blocks_.end()) break;
+        if (pinned_blocks_.find(front) == pinned_blocks_.end())
+            break;
         // Move pinned block to the back so we don't re-scan it
-        cached_blocks_lru_.splice(cached_blocks_lru_.end(), cached_blocks_lru_,
-                                   cached_blocks_lru_.begin());
+        cached_blocks_lru_.splice(cached_blocks_lru_.end(), cached_blocks_lru_, cached_blocks_lru_.begin());
     }
-    if (cached_blocks_lru_.empty()) return -1;
+    if (cached_blocks_lru_.empty())
+        return -1;
 
     int block_id = cached_blocks_lru_.front();
     cached_blocks_lru_.pop_front();
@@ -420,28 +422,33 @@ int KVCacheManager::reclaim_cached_block() {
 
 int KVCacheManager::allocate_block_with_eviction() {
     int block_id = cache_->allocate_block();
-    if (block_id >= 0) return block_id;
+    if (block_id >= 0)
+        return block_id;
 
     // Try reclaiming cached blocks (cheaper than evicting a sequence).
     // Loop until we get a usable block or exhaust all reclaimable cached blocks.
     while (!cached_blocks_lru_.empty()) {
-        if (reclaim_cached_block() < 0) break;  // All remaining cached blocks are pinned.
+        if (reclaim_cached_block() < 0)
+            break;  // All remaining cached blocks are pinned.
         block_id = cache_->allocate_block();
-        if (block_id >= 0) return block_id;
+        if (block_id >= 0)
+            return block_id;
     }
 
-    return -1; // Caller should try evict_lru() if needed.
+    return -1;  // Caller should try evict_lru() if needed.
 }
 
 // ─── Prefix block pinning ────────────────────────────────────────
 
 void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return;
+    if (it == seq_blocks_.end())
+        return;
 
     const auto& blocks = it->second;
     int to_pin = std::min(num_blocks, static_cast<int>(blocks.size()));
-    if (to_pin <= 0) return;
+    if (to_pin <= 0)
+        return;
 
     for (int i = 0; i < to_pin; ++i) {
         int bid = blocks[i];
@@ -461,7 +468,8 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
 
 void KVCacheManager::unpin_prefix(int seq_id) {
     auto pin_it = pinned_seqs_.find(seq_id);
-    if (pin_it == pinned_seqs_.end()) return;
+    if (pin_it == pinned_seqs_.end())
+        return;
 
     int num_pinned = pin_it->second;
 
@@ -490,9 +498,11 @@ void KVCacheManager::unpin_prefix(int seq_id) {
         std::unordered_set<int> old_pinned = std::move(pinned_blocks_);
         pinned_blocks_.clear();
         for (const auto& [other_seq, other_count] : pinned_seqs_) {
-            if (other_seq == seq_id) continue;
+            if (other_seq == seq_id)
+                continue;
             auto other_it = seq_blocks_.find(other_seq);
-            if (other_it == seq_blocks_.end()) continue;
+            if (other_it == seq_blocks_.end())
+                continue;
             const auto& other_blocks = other_it->second;
             int n = std::min(other_count, static_cast<int>(other_blocks.size()));
             for (int i = 0; i < n; ++i) {
@@ -501,7 +511,8 @@ void KVCacheManager::unpin_prefix(int seq_id) {
         }
         // Mark previously-pinned blocks that are now unpinned as reclaimable
         for (int bid : old_pinned) {
-            if (pinned_blocks_.count(bid)) continue;  // still pinned by another seq
+            if (pinned_blocks_.count(bid))
+                continue;  // still pinned by another seq
             if (block_id_to_hash_.count(bid)) {
                 if (!cached_blocks_map_.count(bid)) {
                     // Not in LRU yet — add it
@@ -518,29 +529,26 @@ void KVCacheManager::unpin_prefix(int seq_id) {
     IMP_LOG_DEBUG("UnpinPrefix: seq %d unpinned", seq_id);
 }
 
-int KVCacheManager::num_pinned_blocks() const {
-    return static_cast<int>(pinned_blocks_.size());
-}
+int KVCacheManager::num_pinned_blocks() const { return static_cast<int>(pinned_blocks_.size()); }
 
 // ─── Speculative decoding rollback ───────────────────────────────────
 
-int KVCacheManager::evict_middle_blocks(int seq_id,
-                                        int n_sink_tokens,
-                                        int n_window_tokens) {
+int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_window_tokens) {
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return 0;
-    if (n_sink_tokens <= 0 || n_window_tokens <= 0) return 0;
+    if (it == seq_blocks_.end())
+        return 0;
+    if (n_sink_tokens <= 0 || n_window_tokens <= 0)
+        return 0;
 
     auto& blocks = it->second;
     const int block_size = cache_->block_size();
     const int total_blocks = static_cast<int>(blocks.size());
-    if (total_blocks == 0) return 0;
+    if (total_blocks == 0)
+        return 0;
 
     const int sink_end_block = (n_sink_tokens + block_size - 1) / block_size;
-    const int window_block_count =
-        (n_window_tokens + block_size - 1) / block_size;
-    const int window_start_block =
-        std::max(0, total_blocks - window_block_count);
+    const int window_block_count = (n_window_tokens + block_size - 1) / block_size;
+    const int window_start_block = std::max(0, total_blocks - window_block_count);
 
     if (sink_end_block >= window_start_block) {
         // Sinks and window overlap (sequence too short) — nothing to free.
@@ -559,7 +567,8 @@ int KVCacheManager::evict_middle_blocks(int seq_id,
             if (cit != cached_blocks_map_.end()) {
                 cached_blocks_lru_.erase(cit->second);
                 cached_blocks_map_.erase(cit);
-                if (reclaimable_cached_count_ > 0) reclaimable_cached_count_--;
+                if (reclaimable_cached_count_ > 0)
+                    reclaimable_cached_count_--;
             }
         }
     }
@@ -574,7 +583,8 @@ int KVCacheManager::evict_middle_blocks(int seq_id,
     int freed = 0;
     for (int i = sink_end_block; i < window_start_block; ++i) {
         int bid = blocks[i];
-        if (bid < 0) continue;  // already evicted
+        if (bid < 0)
+            continue;  // already evicted
         // Drop from prefix-hash table — chain is broken anyway.
         auto hit = block_id_to_hash_.find(bid);
         if (hit != block_id_to_hash_.end()) {
@@ -591,8 +601,7 @@ int KVCacheManager::evict_middle_blocks(int seq_id,
     auto hash_it = seq_block_hashes_.find(seq_id);
     if (hash_it != seq_block_hashes_.end()) {
         auto& hashes = hash_it->second;
-        for (int i = sink_end_block;
-             i < total_blocks && i < static_cast<int>(hashes.size()); ++i) {
+        for (int i = sink_end_block; i < total_blocks && i < static_cast<int>(hashes.size()); ++i) {
             // Clear hash entry for window blocks too: their original hash
             // chained through the now-freed middle.
             int bid = (i < static_cast<int>(blocks.size())) ? blocks[i] : -1;
@@ -612,10 +621,12 @@ int KVCacheManager::evict_middle_blocks(int seq_id,
 
 void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return;
+    if (it == seq_blocks_.end())
+        return;
 
     auto& blocks = it->second;
-    if (blocks.empty() || new_seq_len < 0) return;
+    if (blocks.empty() || new_seq_len < 0)
+        return;
 
     // Keep exactly ceil(new_seq_len / cache_->block_size()) blocks.
     // A partially-filled last block is retained (its stale slots
@@ -623,7 +634,8 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     int blocks_needed = (new_seq_len + cache_->block_size() - 1) / cache_->block_size();
     while (static_cast<int>(blocks.size()) > blocks_needed) {
         // -1 sentinels (StreamingLLM evicted middle slots) need no free.
-        if (blocks.back() >= 0) cache_->free_block(blocks.back());
+        if (blocks.back() >= 0)
+            cache_->free_block(blocks.back());
         blocks.pop_back();
     }
 
@@ -651,9 +663,7 @@ KVCacheStats KVCacheManager::stats() const {
     return s;
 }
 
-int KVCacheManager::num_active_sequences() const {
-    return static_cast<int>(seq_blocks_.size());
-}
+int KVCacheManager::num_active_sequences() const { return static_cast<int>(seq_blocks_.size()); }
 
 int KVCacheManager::total_allocated_blocks() const {
     int total = 0;
@@ -729,7 +739,8 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     entries.reserve(n_blocks);
     for (int block_id : cached_blocks_lru_) {
         auto hash_it = block_id_to_hash_.find(block_id);
-        if (hash_it == block_id_to_hash_.end()) continue;
+        if (hash_it == block_id_to_hash_.end())
+            continue;
         entries.push_back({block_id, hash_it->second});
     }
 
@@ -750,21 +761,19 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
         size_t offset = 0;
         for (int l = 0; l < nl; l++) {
             cudaError_t err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset,
-                                              cache_->k_ptr(l, block_id),
-                                              bb, cudaMemcpyDeviceToHost, stream);
+                                              cache_->k_ptr(l, block_id), bb, cudaMemcpyDeviceToHost, stream);
             if (err != cudaSuccess) {
-                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d K: %s",
-                              block_id, l, cudaGetErrorString(err));
+                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d K: %s", block_id, l,
+                              cudaGetErrorString(err));
                 block_ok[bi] = false;
                 break;
             }
             offset += bb;
-            err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset,
-                                  cache_->v_ptr(l, block_id),
-                                  bb, cudaMemcpyDeviceToHost, stream);
+            err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset, cache_->v_ptr(l, block_id), bb,
+                                  cudaMemcpyDeviceToHost, stream);
             if (err != cudaSuccess) {
-                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d V: %s",
-                              block_id, l, cudaGetErrorString(err));
+                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d V: %s", block_id, l,
+                              cudaGetErrorString(err));
                 block_ok[bi] = false;
                 break;
             }
@@ -777,7 +786,8 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
 
     int saved = 0;
     for (size_t bi = 0; bi < entries.size(); ++bi) {
-        if (!block_ok[bi]) continue;  // Skip blocks with failed copies.
+        if (!block_ok[bi])
+            continue;  // Skip blocks with failed copies.
 
         size_t hash = entries[bi].hash;
         if (fwrite(&hash, sizeof(hash), 1, f) != 1) {
@@ -794,9 +804,8 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     }
 
     fclose(f);
-    IMP_LOG_INFO("Prefix cache: saved %d blocks (%.1f MiB) to %s",
-                 saved, (sizeof(hdr) + saved * (8 + per_block_total)) / (1024.0 * 1024.0),
-                 path.c_str());
+    IMP_LOG_INFO("Prefix cache: saved %d blocks (%.1f MiB) to %s", saved,
+                 (sizeof(hdr) + saved * (8 + per_block_total)) / (1024.0 * 1024.0), path.c_str());
     return saved;
 }
 
@@ -829,12 +838,12 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
     if (hdr.n_layers != static_cast<uint32_t>(cache_->n_layers()) ||
         hdr.n_kv_heads != static_cast<uint32_t>(cache_->n_kv_heads()) ||
         hdr.head_dim != static_cast<uint32_t>(cache_->head_dim()) ||
-        hdr.dtype != static_cast<uint32_t>(cache_->qtype()) ||
-        hdr.block_bytes != cache_->block_bytes()) {
-        IMP_LOG_WARN("Prefix cache: config mismatch (layers=%u/%d, heads=%u/%d, "
-                     "dim=%u/%d, dtype=%u/%d)",
-                     hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(),
-                     hdr.head_dim, cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->qtype()));
+        hdr.dtype != static_cast<uint32_t>(cache_->qtype()) || hdr.block_bytes != cache_->block_bytes()) {
+        IMP_LOG_WARN(
+            "Prefix cache: config mismatch (layers=%u/%d, heads=%u/%d, "
+            "dim=%u/%d, dtype=%u/%d)",
+            hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(), hdr.head_dim,
+            cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->qtype()));
         fclose(f);
         return -1;
     }
@@ -865,11 +874,16 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
 
     for (int i = 0; i < n_blocks; i++) {
         size_t hash;
-        if (fread(&hash, sizeof(hash), 1, f) != 1) break;
-        if (fread(read_buf.data(), per_block_total, 1, f) != 1) break;
+        if (fread(&hash, sizeof(hash), 1, f) != 1)
+            break;
+        if (fread(read_buf.data(), per_block_total, 1, f) != 1)
+            break;
 
         // Skip if hash already exists (shouldn't happen on fresh start)
-        if (block_hash_to_id_.count(hash)) { skipped++; continue; }
+        if (block_hash_to_id_.count(hash)) {
+            skipped++;
+            continue;
+        }
 
         // Allocate a fresh block
         int block_id = cache_->allocate_block();
@@ -892,21 +906,21 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
         size_t offset = 0;
         for (int l = 0; l < nl; l++) {
             cudaError_t err = cudaMemcpyAsync(cache_->k_ptr(l, entry.block_id),
-                                              all_host_buf.data() + entry.buf_offset + offset,
-                                              bb, cudaMemcpyHostToDevice, stream);
+                                              all_host_buf.data() + entry.buf_offset + offset, bb,
+                                              cudaMemcpyHostToDevice, stream);
             if (err != cudaSuccess) {
-                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d K: %s",
-                              entry.block_id, l, cudaGetErrorString(err));
+                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d K: %s", entry.block_id, l,
+                              cudaGetErrorString(err));
                 entry.copy_ok = false;
                 break;
             }
             offset += bb;
             err = cudaMemcpyAsync(cache_->v_ptr(l, entry.block_id),
-                                  all_host_buf.data() + entry.buf_offset + offset,
-                                  bb, cudaMemcpyHostToDevice, stream);
+                                  all_host_buf.data() + entry.buf_offset + offset, bb, cudaMemcpyHostToDevice,
+                                  stream);
             if (err != cudaSuccess) {
-                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d V: %s",
-                              entry.block_id, l, cudaGetErrorString(err));
+                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d V: %s", entry.block_id, l,
+                              cudaGetErrorString(err));
                 entry.copy_ok = false;
                 break;
             }
@@ -935,10 +949,10 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
         actual_loaded++;
     }
     loaded = actual_loaded;
-    IMP_LOG_INFO("Prefix cache: restored %d blocks (%.1f MiB) from %s%s",
-                 loaded, (loaded * per_block_total) / (1024.0 * 1024.0), path.c_str(),
+    IMP_LOG_INFO("Prefix cache: restored %d blocks (%.1f MiB) from %s%s", loaded,
+                 (loaded * per_block_total) / (1024.0 * 1024.0), path.c_str(),
                  skipped > 0 ? " (some skipped)" : "");
     return loaded;
 }
 
-} // namespace imp
+}  // namespace imp

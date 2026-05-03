@@ -79,13 +79,12 @@ TEST(EngineIntegrationTest, StepPrefillDecode) {
     while (req->status != RequestStatus::FINISHED && steps < 20) {
         bool more = engine.step();
         steps++;
-        if (!more && req->status != RequestStatus::FINISHED) break;
+        if (!more && req->status != RequestStatus::FINISHED)
+            break;
     }
 
-    EXPECT_EQ(req->status, RequestStatus::FINISHED)
-        << "Request did not finish after " << steps << " steps";
-    EXPECT_GE(static_cast<int>(req->output_tokens.size()), 1)
-        << "Expected at least 1 output token";
+    EXPECT_EQ(req->status, RequestStatus::FINISHED) << "Request did not finish after " << steps << " steps";
+    EXPECT_GE(static_cast<int>(req->output_tokens.size()), 1) << "Expected at least 1 output token";
     EXPECT_LE(static_cast<int>(req->output_tokens.size()), 4)
         << "Expected at most max_tokens=4 output tokens";
 
@@ -125,10 +124,8 @@ TEST(EngineIntegrationTest, MultipleRequestsSequential) {
             steps++;
         }
 
-        EXPECT_EQ(req->status, RequestStatus::FINISHED)
-            << "Request " << r << " did not finish";
-        EXPECT_GE(static_cast<int>(req->output_tokens.size()), 1)
-            << "Request " << r << " produced no output";
+        EXPECT_EQ(req->status, RequestStatus::FINISHED) << "Request " << r << " did not finish";
+        EXPECT_GE(static_cast<int>(req->output_tokens.size()), 1) << "Request " << r << " produced no output";
 
         for (int32_t tok : req->output_tokens) {
             EXPECT_GE(tok, 0);
@@ -181,8 +178,7 @@ TEST(EngineIntegrationTest, MoEInitSucceeds) {
 // ---------------------------------------------------------------------------
 // Helper: run a request through engine and verify completion
 // ---------------------------------------------------------------------------
-static void run_request(Engine& engine, std::vector<int32_t> input, int max_tokens,
-                        int vocab_size = 256) {
+static void run_request(Engine& engine, std::vector<int32_t> input, int max_tokens, int vocab_size = 256) {
     auto req = std::make_shared<Request>();
     req->input_tokens = std::move(input);
     req->max_tokens = max_tokens;
@@ -197,8 +193,7 @@ static void run_request(Engine& engine, std::vector<int32_t> input, int max_toke
         steps++;
     }
 
-    ASSERT_EQ(req->status, RequestStatus::FINISHED)
-        << "Request did not finish after " << steps << " steps";
+    ASSERT_EQ(req->status, RequestStatus::FINISHED) << "Request did not finish after " << steps << " steps";
     EXPECT_GE(static_cast<int>(req->output_tokens.size()), 1);
     EXPECT_LE(static_cast<int>(req->output_tokens.size()), max_tokens);
     for (int32_t tok : req->output_tokens) {
@@ -270,5 +265,5 @@ TEST(EngineIntegrationTest, FP8PrefillNVFP4Decode) {
     tm.cleanup();
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

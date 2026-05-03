@@ -21,14 +21,12 @@ namespace imp {
 // input/output: [M, K] FP16 on device. K must be divisible by block_size.
 // In-place: output == input is supported.
 
-void hadamard_transform_fp16(const half* input, half* output,
-                              int M, int K, int block_size,
-                              cudaStream_t stream = nullptr);
+void hadamard_transform_fp16(const half* input, half* output, int M, int K, int block_size,
+                             cudaStream_t stream = nullptr);
 
 // Check if a block size is supported (must be power of 2, 16..128).
 inline bool hadamard_block_size_valid(int block_size) {
-    return block_size == 16 || block_size == 32 ||
-           block_size == 64 || block_size == 128;
+    return block_size == 16 || block_size == 32 || block_size == 64 || block_size == 128;
 }
 
-} // namespace imp
+}  // namespace imp

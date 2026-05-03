@@ -26,11 +26,11 @@ static bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!HasCudaDevice()) {                                                \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!HasCudaDevice()) {                         \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
 // ============================================================================
@@ -105,7 +105,7 @@ TEST(DeviceAllocatorTest, DeviceAllocZeroBytes) {
 TEST(PinnedAllocatorTest, PinnedAllocBasic) {
     SKIP_IF_NO_CUDA();
 
-    PinnedAllocator alloc(1 << 20); // 1 MiB pool
+    PinnedAllocator alloc(1 << 20);  // 1 MiB pool
 
     void* ptr = alloc.allocate(512);
     ASSERT_NE(ptr, nullptr);
@@ -126,7 +126,7 @@ TEST(PinnedAllocatorTest, PinnedAllocBasic) {
 TEST(PinnedAllocatorTest, PinnedAllocPoolReuse) {
     SKIP_IF_NO_CUDA();
 
-    PinnedAllocator alloc(1 << 20); // 1 MiB pool
+    PinnedAllocator alloc(1 << 20);  // 1 MiB pool
 
     void* a = alloc.allocate(1024);
     ASSERT_NE(a, nullptr);
@@ -139,7 +139,7 @@ TEST(PinnedAllocatorTest, PinnedAllocPoolReuse) {
     // Allocate the same size again; should reuse from the free list.
     void* b = alloc.allocate(1024);
     ASSERT_NE(b, nullptr);
-    EXPECT_EQ(alloc.used(), used_after_a); // Same size class, same used.
+    EXPECT_EQ(alloc.used(), used_after_a);  // Same size class, same used.
 
     // The pool-based free-list should hand back the same pointer.
     EXPECT_EQ(a, b);
@@ -166,9 +166,9 @@ TEST(PinnedAllocatorTest, PinnedAllocZeroBytes) {
 TEST(KVCacheTest, KVCacheConstruction) {
     SKIP_IF_NO_CUDA();
 
-    const int n_layers   = 2;
+    const int n_layers = 2;
     const int n_kv_heads = 4;
-    const int head_dim   = 64;
+    const int head_dim = 64;
     const int max_blocks = 8;
 
     KVCache cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
@@ -182,8 +182,8 @@ TEST(KVCacheTest, KVCacheConstruction) {
 
     // block_bytes = kKVBlockSize * n_kv_heads * head_dim * dtype_size(FP16)
     //            = 16 * 4 * 64 * 2 = 8192
-    size_t expected_block_bytes =
-        static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim * dtype_size(QType::F16);
+    size_t expected_block_bytes = static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
+                                  dtype_size(QType::F16);
     EXPECT_EQ(cache.block_bytes(), expected_block_bytes);
     EXPECT_EQ(expected_block_bytes, 8192u);
 }
@@ -258,7 +258,7 @@ TEST(KVCacheTest, KVCacheRefCounting) {
     int free_before = cache.num_free_blocks();
     cache.free_block(block);
     EXPECT_EQ(cache.ref_count(block), 1);
-    EXPECT_EQ(cache.num_free_blocks(), free_before); // Unchanged.
+    EXPECT_EQ(cache.num_free_blocks(), free_before);  // Unchanged.
 
     // Second free: ref_count drops to 0, block IS returned to free list.
     cache.free_block(block);
@@ -270,9 +270,9 @@ TEST(KVCacheTest, KVCacheRefCounting) {
 TEST(KVCacheTest, KVCachePointers) {
     SKIP_IF_NO_CUDA();
 
-    const int n_layers   = 2;
+    const int n_layers = 2;
     const int n_kv_heads = 4;
-    const int head_dim   = 64;
+    const int head_dim = 64;
     const int max_blocks = 8;
 
     KVCache cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
@@ -316,8 +316,8 @@ TEST(KVCacheTest, KVCachePointers) {
     EXPECT_EQ(static_cast<size_t>(block_diff), bb);
 
     // Write a known value via cudaMemcpy to k_ptr(0, b0), read back, verify.
-    size_t num_elements = kKVBlockSize * n_kv_heads * head_dim; // elements per block
-    size_t buf_bytes = num_elements * sizeof(uint16_t);         // FP16 = 2 bytes
+    size_t num_elements = kKVBlockSize * n_kv_heads * head_dim;  // elements per block
+    size_t buf_bytes = num_elements * sizeof(uint16_t);          // FP16 = 2 bytes
     ASSERT_EQ(buf_bytes, bb);
 
     std::vector<uint16_t> host_write(num_elements, 0);
@@ -340,9 +340,9 @@ TEST(KVCacheTest, KVCachePointers) {
 TEST(KVCacheTest, KVCacheReadWriteData) {
     SKIP_IF_NO_CUDA();
 
-    const int n_layers   = 2;
+    const int n_layers = 2;
     const int n_kv_heads = 2;
-    const int head_dim   = 32;
+    const int head_dim = 32;
     const int max_blocks = 4;
 
     KVCache cache(n_layers, n_kv_heads, head_dim, QType::F32, max_blocks);
@@ -403,13 +403,9 @@ TEST(KVCacheTest, KVCacheReadWriteData) {
 // ============================================================================
 
 // Helper to create a KVCacheManager wrapping a fresh KVCache.
-static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks,
-                                                    int n_layers   = 2,
-                                                    int n_kv_heads = 4,
-                                                    int head_dim   = 64,
-                                                    QType dtype    = QType::F16) {
-    auto cache = std::make_unique<KVCache>(n_layers, n_kv_heads, head_dim,
-                                           dtype, max_blocks);
+static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks, int n_layers = 2, int n_kv_heads = 4,
+                                                   int head_dim = 64, QType dtype = QType::F16) {
+    auto cache = std::make_unique<KVCache>(n_layers, n_kv_heads, head_dim, dtype, max_blocks);
     return std::make_unique<KVCacheManager>(std::move(cache));
 }
 
@@ -497,9 +493,9 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
     auto mgr = MakeManager(8);
 
     // Fill the entire pool across three sequences.
-    (void)mgr->allocate_blocks(0, 3); // seq 0: 3 blocks  (LRU order: 0)
-    (void)mgr->allocate_blocks(1, 3); // seq 1: 3 blocks  (LRU order: 0, 1)
-    (void)mgr->allocate_blocks(2, 2); // seq 2: 2 blocks  (LRU order: 0, 1, 2)
+    (void)mgr->allocate_blocks(0, 3);  // seq 0: 3 blocks  (LRU order: 0)
+    (void)mgr->allocate_blocks(1, 3);  // seq 1: 3 blocks  (LRU order: 0, 1)
+    (void)mgr->allocate_blocks(2, 2);  // seq 2: 2 blocks  (LRU order: 0, 1, 2)
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // Touch seq 0, moving it to MRU. LRU order is now: 1, 2, 0.
@@ -829,10 +825,10 @@ TEST(KVCacheManagerTest, UnpinAllowsEviction) {
     EXPECT_EQ(mgr->num_cached_blocks(), 4);
 
     // Try to evict cached blocks — only 2 non-pinned should be reclaimable.
-    EXPECT_TRUE(mgr->evict_cached_block());  // reclaims non-pinned
-    EXPECT_TRUE(mgr->evict_cached_block());  // reclaims non-pinned
-    EXPECT_FALSE(mgr->evict_cached_block()); // pinned blocks remain
-    EXPECT_EQ(mgr->num_cached_blocks(), 2);  // 2 pinned remain in LRU
+    EXPECT_TRUE(mgr->evict_cached_block());   // reclaims non-pinned
+    EXPECT_TRUE(mgr->evict_cached_block());   // reclaims non-pinned
+    EXPECT_FALSE(mgr->evict_cached_block());  // pinned blocks remain
+    EXPECT_EQ(mgr->num_cached_blocks(), 2);   // 2 pinned remain in LRU
 
     // Unpin — now the remaining 2 can be evicted.
     mgr->unpin_prefix(0);
@@ -860,7 +856,7 @@ TEST(KVCacheManagerTest, PinPrefixCanAllocateAccuracy) {
     EXPECT_FALSE(mgr->can_allocate(5));  // Seq 0 is pinned, can't reclaim its blocks.
 
     mgr->unpin_prefix(0);
-    EXPECT_TRUE(mgr->can_allocate(8));   // Both sequences reclaimable now.
+    EXPECT_TRUE(mgr->can_allocate(8));  // Both sequences reclaimable now.
 
     mgr->free_sequence(0);
     mgr->free_sequence(1);
@@ -880,8 +876,7 @@ TEST(KVCacheManagerTest, HashCollisionResistance) {
         // Each block has a unique pattern
         std::iota(tokens.begin(), tokens.end(), i * 16);
         size_t h = KVCacheManager::compute_block_hash(tokens, 0);
-        EXPECT_TRUE(hashes.insert(h).second)
-            << "Hash collision at block " << i;
+        EXPECT_TRUE(hashes.insert(h).second) << "Hash collision at block " << i;
     }
 }
 
@@ -1081,7 +1076,8 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
 
     // Evict all cached blocks one by one
     int evicted = 0;
-    while (mgr->evict_cached_block()) evicted++;
+    while (mgr->evict_cached_block())
+        evicted++;
     EXPECT_EQ(evicted, 8);
     EXPECT_EQ(mgr->num_cached_blocks(), 0);
     EXPECT_EQ(mgr->num_free_blocks(), 8);  // All returned to free pool
@@ -1224,8 +1220,8 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
     // Keep first 4 sink tokens (=> 1 sink block) and last 64 window tokens
     // (=> 4 window blocks). Middle = 20 - 1 - 4 = 15 blocks should be freed.
     int freed = mgr->evict_middle_blocks(/*seq_id=*/0,
-                                          /*n_sink_tokens=*/4,
-                                          /*n_window_tokens=*/64);
+                                         /*n_sink_tokens=*/4,
+                                         /*n_window_tokens=*/64);
     EXPECT_EQ(freed, 15);
 
     const auto& bt_after = mgr->block_table(0);
@@ -1261,7 +1257,7 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksNoOpWhenShort) {
 
     // Sinks (1 block) + Window (3 blocks) >= total 3 blocks → nothing to free.
     int freed = mgr->evict_middle_blocks(0, /*n_sink_tokens=*/4,
-                                            /*n_window_tokens=*/48);
+                                         /*n_window_tokens=*/48);
     EXPECT_EQ(freed, 0);
     EXPECT_EQ(mgr->num_free_blocks(), free_before);
     EXPECT_EQ(mgr->num_pinned_blocks(), 0);
@@ -1277,13 +1273,13 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksZeroArgsAreNoOp) {
     ASSERT_TRUE(mgr->allocate_blocks(0, 8));
 
     EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/0, /*win=*/16), 0);
-    EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/4, /*win=*/0),  0);
+    EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/4, /*win=*/0), 0);
     EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/-1, /*win=*/-1), 0);
-    EXPECT_EQ(mgr->evict_middle_blocks(/*missing_seq=*/99, 4, 16),  0);
+    EXPECT_EQ(mgr->evict_middle_blocks(/*missing_seq=*/99, 4, 16), 0);
 
     EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 8);
     mgr->free_sequence(0);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

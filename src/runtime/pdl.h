@@ -20,12 +20,12 @@ bool is_enabled(const void* kernel_func);
 
 // Convenience: enable PDL for a __global__ function template.
 // Usage: pdl::enable_kernel(my_kernel<float>);
-template<typename KernelFunc>
+template <typename KernelFunc>
 void enable_kernel(KernelFunc func) {
     enable(reinterpret_cast<const void*>(func));
 }
 
-template<typename KernelFunc>
+template <typename KernelFunc>
 void disable_kernel(KernelFunc func) {
     disable(reinterpret_cast<const void*>(func));
 }
@@ -39,10 +39,8 @@ void disable_kernel(KernelFunc func) {
 // Usage:
 //   pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
 // ---------------------------------------------------------------------------
-template<typename KernelFunc, typename... Args>
-void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
-            cudaStream_t stream, Args... args)
-{
+template <typename KernelFunc, typename... Args>
+void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t stream, Args... args) {
     const void* func_ptr = reinterpret_cast<const void*>(func);
     if (is_enabled(func_ptr)) {
         cudaLaunchConfig_t config = {};
@@ -84,6 +82,6 @@ private:
     bool auto_disable_;
 };
 
-} // namespace pdl
+}  // namespace pdl
 
-} // namespace imp
+}  // namespace imp

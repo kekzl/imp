@@ -12,18 +12,15 @@ static constexpr int kTQFP4GroupSize = 32;
 
 // FP4 E2M1 dequant LUT: magnitude code [0-7] → float value
 // Values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-static __constant__ float kTQFP4DequantLUT[8] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f
-};
+static __constant__ float kTQFP4DequantLUT[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 
 // Quantize float magnitude → FP4 E2M1 3-bit code (round-to-nearest)
 // Branchless version: sum of comparisons against midpoint thresholds.
 // Thresholds between adjacent E2M1 values: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
 // The code equals the count of thresholds the value exceeds.
 __device__ __forceinline__ uint8_t tq_fp4_quantize_abs(float abs_val) {
-    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
-                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
-                 + (abs_val >= 5.0f);
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f) + (abs_val >= 1.75f) +
+                   (abs_val >= 2.5f) + (abs_val >= 3.5f) + (abs_val >= 5.0f);
     return code;  // 0..7 maps directly to E2M1 magnitude codes
 }
 
@@ -54,19 +51,24 @@ __device__ __forceinline__ uint8_t tq_fp4_pack_pair(float v0, float v1) {
 
 // Float → UE8M0 (pure-exponent, value = 2^(bits-127), rounds up to next pow2)
 __device__ __forceinline__ uint8_t tq_fp4_float_to_ue8m0(float val) {
-    if (val <= 0.0f) return 0;
+    if (val <= 0.0f)
+        return 0;
     uint32_t fbits;
     memcpy(&fbits, &val, sizeof(float));
     int f_exp = static_cast<int>((fbits >> 23) & 0xFF);
-    if (fbits & 0x7FFFFF) f_exp++;
-    if (f_exp < 0) return 0;
-    if (f_exp > 254) return 254;
+    if (fbits & 0x7FFFFF)
+        f_exp++;
+    if (f_exp < 0)
+        return 0;
+    if (f_exp > 254)
+        return 254;
     return static_cast<uint8_t>(f_exp);
 }
 
 // UE8M0 → float: value = 2^(bits - 127)
 __device__ __forceinline__ float tq_fp4_ue8m0_to_float(uint8_t bits) {
-    if (bits == 0) return 0.0f;
+    if (bits == 0)
+        return 0.0f;
     uint32_t fp32 = static_cast<uint32_t>(bits) << 23;
     return __uint_as_float(fp32);
 }
@@ -92,4 +94,4 @@ __device__ __forceinline__ float tq_fp4_unpack_hi(uint8_t packed) {
 // Reciprocal of INT4 symmetric range max (7) for dequantization: val / 7.0
 static constexpr float kTQINT4InvScale = 1.0f / 7.0f;
 
-} // namespace imp
+}  // namespace imp

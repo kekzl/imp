@@ -37,13 +37,17 @@ private:
 
     bool expect(char c) {
         skip_ws();
-        if (peek() == c) { pos_++; return true; }
+        if (peek() == c) {
+            pos_++;
+            return true;
+        }
         return false;
     }
 
     std::string parse_string() {
         skip_ws();
-        if (peek() != '"') return {};
+        if (peek() != '"')
+            return {};
         pos_++;
         std::string s;
         while (!eof() && peek() != '"') {
@@ -51,27 +55,47 @@ private:
                 pos_++;
                 char esc = next();
                 switch (esc) {
-                    case '"': s += '"'; break;
-                    case '\\': s += '\\'; break;
-                    case '/': s += '/'; break;
-                    case 'n': s += '\n'; break;
-                    case 't': s += '\t'; break;
-                    case 'r': s += '\r'; break;
-                    case 'b': s += '\b'; break;
-                    case 'f': s += '\f'; break;
+                    case '"':
+                        s += '"';
+                        break;
+                    case '\\':
+                        s += '\\';
+                        break;
+                    case '/':
+                        s += '/';
+                        break;
+                    case 'n':
+                        s += '\n';
+                        break;
+                    case 't':
+                        s += '\t';
+                        break;
+                    case 'r':
+                        s += '\r';
+                        break;
+                    case 'b':
+                        s += '\b';
+                        break;
+                    case 'f':
+                        s += '\f';
+                        break;
                     case 'u': {
                         // Skip unicode escape (4 hex digits)
-                        for (int i = 0; i < 4 && !eof(); i++) pos_++;
+                        for (int i = 0; i < 4 && !eof(); i++)
+                            pos_++;
                         s += '?';
                         break;
                     }
-                    default: s += esc; break;
+                    default:
+                        s += esc;
+                        break;
                 }
             } else {
                 s += next();
             }
         }
-        if (peek() == '"') pos_++;
+        if (peek() == '"')
+            pos_++;
         return s;
     }
 
@@ -91,20 +115,27 @@ private:
     void skip_value() {
         skip_ws();
         char c = peek();
-        if (c == '"') { parse_string(); return; }
+        if (c == '"') {
+            parse_string();
+            return;
+        }
         if (c == '{') {
             pos_++;
             int depth = 1;
             while (!eof() && depth > 0) {
                 char ch = next();
-                if (ch == '{') depth++;
-                else if (ch == '}') depth--;
-                else if (ch == '"') { // skip string content
+                if (ch == '{')
+                    depth++;
+                else if (ch == '}')
+                    depth--;
+                else if (ch == '"') {  // skip string content
                     while (!eof() && peek() != '"') {
-                        if (peek() == '\\') pos_++;
+                        if (peek() == '\\')
+                            pos_++;
                         pos_++;
                     }
-                    if (peek() == '"') pos_++;
+                    if (peek() == '"')
+                        pos_++;
                 }
             }
             return;
@@ -114,65 +145,91 @@ private:
             int depth = 1;
             while (!eof() && depth > 0) {
                 char ch = next();
-                if (ch == '[') depth++;
-                else if (ch == ']') depth--;
+                if (ch == '[')
+                    depth++;
+                else if (ch == ']')
+                    depth--;
                 else if (ch == '"') {
                     while (!eof() && peek() != '"') {
-                        if (peek() == '\\') pos_++;
+                        if (peek() == '\\')
+                            pos_++;
                         pos_++;
                     }
-                    if (peek() == '"') pos_++;
+                    if (peek() == '"')
+                        pos_++;
                 }
             }
             return;
         }
         // number, bool, null — skip non-delimiter chars
-        while (!eof() && peek() != ',' && peek() != '}' && peek() != ']'
-               && !std::isspace(static_cast<unsigned char>(peek())))
+        while (!eof() && peek() != ',' && peek() != '}' && peek() != ']' &&
+               !std::isspace(static_cast<unsigned char>(peek())))
             pos_++;
     }
 
     std::vector<std::string> parse_string_array() {
         std::vector<std::string> result;
         skip_ws();
-        if (!expect('[')) return result;
+        if (!expect('['))
+            return result;
         skip_ws();
-        if (peek() == ']') { pos_++; return result; }
+        if (peek() == ']') {
+            pos_++;
+            return result;
+        }
         while (!eof()) {
             result.push_back(parse_string());
             skip_ws();
-            if (peek() == ',') { pos_++; continue; }
-            if (peek() == ']') { pos_++; break; }
+            if (peek() == ',') {
+                pos_++;
+                continue;
+            }
+            if (peek() == ']') {
+                pos_++;
+                break;
+            }
             break;
         }
         return result;
     }
 
     SchemaType type_from_string(const std::string& s) {
-        if (s == "string")  return SchemaType::STRING;
-        if (s == "number")  return SchemaType::NUMBER;
-        if (s == "integer") return SchemaType::INTEGER;
-        if (s == "boolean") return SchemaType::BOOLEAN;
-        if (s == "null")    return SchemaType::NULL_TYPE;
-        if (s == "object")  return SchemaType::OBJECT;
-        if (s == "array")   return SchemaType::ARRAY;
+        if (s == "string")
+            return SchemaType::STRING;
+        if (s == "number")
+            return SchemaType::NUMBER;
+        if (s == "integer")
+            return SchemaType::INTEGER;
+        if (s == "boolean")
+            return SchemaType::BOOLEAN;
+        if (s == "null")
+            return SchemaType::NULL_TYPE;
+        if (s == "object")
+            return SchemaType::OBJECT;
+        if (s == "array")
+            return SchemaType::ARRAY;
         return SchemaType::STRING;  // default fallback
     }
 
     std::unique_ptr<SchemaNode> parse_schema_object() {
         skip_ws();
-        if (!expect('{')) return nullptr;
+        if (!expect('{'))
+            return nullptr;
 
         auto node = std::make_unique<SchemaNode>();
         bool has_type = false;
 
         skip_ws();
-        if (peek() == '}') { pos_++; return node; }
+        if (peek() == '}') {
+            pos_++;
+            return node;
+        }
 
         while (!eof()) {
             std::string key = parse_string();
             skip_ws();
-            if (!expect(':')) break;
+            if (!expect(':'))
+                break;
 
             if (key == "type") {
                 std::string type_str = parse_string();
@@ -185,26 +242,32 @@ private:
                     while (!eof() && peek() != '}') {
                         std::string prop_name = parse_string();
                         skip_ws();
-                        if (!expect(':')) break;
+                        if (!expect(':'))
+                            break;
                         auto prop_schema = parse_schema_object();
                         if (prop_schema) {
-                            node->properties.emplace_back(std::move(prop_name),
-                                                           std::move(prop_schema));
+                            node->properties.emplace_back(std::move(prop_name), std::move(prop_schema));
                         }
                         skip_ws();
-                        if (peek() == ',') { pos_++; skip_ws(); continue; }
+                        if (peek() == ',') {
+                            pos_++;
+                            skip_ws();
+                            continue;
+                        }
                         break;
                     }
                     expect('}');
                 }
-                if (!has_type) node->type = SchemaType::OBJECT;
+                if (!has_type)
+                    node->type = SchemaType::OBJECT;
             } else if (key == "required") {
                 node->required = parse_string_array();
             } else if (key == "additionalProperties") {
                 node->additional_properties = parse_bool();
             } else if (key == "items") {
                 node->items = parse_schema_object();
-                if (!has_type) node->type = SchemaType::ARRAY;
+                if (!has_type)
+                    node->type = SchemaType::ARRAY;
             } else if (key == "enum") {
                 skip_ws();
                 if (expect('[')) {
@@ -213,7 +276,11 @@ private:
                         // Store enum values as raw strings
                         node->enum_values.push_back(parse_string());
                         skip_ws();
-                        if (peek() == ',') { pos_++; skip_ws(); continue; }
+                        if (peek() == ',') {
+                            pos_++;
+                            skip_ws();
+                            continue;
+                        }
                         break;
                     }
                     expect(']');
@@ -225,9 +292,14 @@ private:
                     skip_ws();
                     while (!eof() && peek() != ']') {
                         auto sub = parse_schema_object();
-                        if (sub) node->any_of.push_back(std::move(sub));
+                        if (sub)
+                            node->any_of.push_back(std::move(sub));
                         skip_ws();
-                        if (peek() == ',') { pos_++; skip_ws(); continue; }
+                        if (peek() == ',') {
+                            pos_++;
+                            skip_ws();
+                            continue;
+                        }
                         break;
                     }
                     expect(']');
@@ -239,7 +311,11 @@ private:
             }
 
             skip_ws();
-            if (peek() == ',') { pos_++; skip_ws(); continue; }
+            if (peek() == ',') {
+                pos_++;
+                skip_ws();
+                continue;
+            }
             break;
         }
         expect('}');
@@ -266,10 +342,11 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->enum_values = enum_values;
     for (auto& [name, prop] : properties)
         c->properties.emplace_back(name, prop->clone());
-    if (items) c->items = items->clone();
+    if (items)
+        c->items = items->clone();
     for (auto& sub : any_of)
         c->any_of.push_back(sub->clone());
     return c;
 }
 
-} // namespace imp
+}  // namespace imp

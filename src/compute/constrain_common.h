@@ -22,7 +22,8 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 static inline uint16_t classify_token(const std::string& text) {
-    if (text.empty()) return CAT_WHITESPACE;  // allow empty/special tokens
+    if (text.empty())
+        return CAT_WHITESPACE;  // allow empty/special tokens
 
     uint16_t cat = 0;
     char first = text[0];
@@ -30,17 +31,38 @@ static inline uint16_t classify_token(const std::string& text) {
     if (text.size() == 1) {
         // Single-character tokens get precise structural categories
         switch (first) {
-            case '{': cat |= CAT_OPEN_BRACE; break;
-            case '}': cat |= CAT_CLOSE_BRACE; break;
-            case '[': cat |= CAT_OPEN_BRACKET; break;
-            case ']': cat |= CAT_CLOSE_BRACKET; break;
-            case ':': cat |= CAT_COLON; break;
-            case ',': cat |= CAT_COMMA; break;
-            case '"': cat |= CAT_QUOTE; break;
-            case 't': cat |= CAT_TRUE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-            case 'f': cat |= CAT_FALSE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-            case 'n': cat |= CAT_NULL_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-            default: break;
+            case '{':
+                cat |= CAT_OPEN_BRACE;
+                break;
+            case '}':
+                cat |= CAT_CLOSE_BRACE;
+                break;
+            case '[':
+                cat |= CAT_OPEN_BRACKET;
+                break;
+            case ']':
+                cat |= CAT_CLOSE_BRACKET;
+                break;
+            case ':':
+                cat |= CAT_COLON;
+                break;
+            case ',':
+                cat |= CAT_COMMA;
+                break;
+            case '"':
+                cat |= CAT_QUOTE;
+                break;
+            case 't':
+                cat |= CAT_TRUE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT;
+                break;
+            case 'f':
+                cat |= CAT_FALSE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT;
+                break;
+            case 'n':
+                cat |= CAT_NULL_START | CAT_STRING_CHAR | CAT_LITERAL_CONT;
+                break;
+            default:
+                break;
         }
         if (first >= '0' && first <= '9')
             cat |= CAT_NUMBER_START | CAT_NUMBER_CONT | CAT_STRING_CHAR;
@@ -60,33 +82,51 @@ static inline uint16_t classify_token(const std::string& text) {
         // Multi-character tokens: check whole-token properties
         bool is_ws = true, is_str = true, is_num = true, is_lit = true;
         for (char c : text) {
-            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') is_ws = false;
-            if (c < 32 || c == '"' || c == '\\') is_str = false;
-            if (!std::strchr("0123456789.-+eE", c)) is_num = false;
-            if (!std::islower(static_cast<unsigned char>(c))) is_lit = false;
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+                is_ws = false;
+            if (c < 32 || c == '"' || c == '\\')
+                is_str = false;
+            if (!std::strchr("0123456789.-+eE", c))
+                is_num = false;
+            if (!std::islower(static_cast<unsigned char>(c)))
+                is_lit = false;
         }
 
         // Also tag multi-char tokens that start with structural chars
-        if (first == '{') cat |= CAT_OPEN_BRACE;
-        if (first == '}') cat |= CAT_CLOSE_BRACE;
-        if (first == '[') cat |= CAT_OPEN_BRACKET;
-        if (first == ']') cat |= CAT_CLOSE_BRACKET;
-        if (first == ':') cat |= CAT_COLON;
-        if (first == ',') cat |= CAT_COMMA;
-        if (first == '"') cat |= CAT_QUOTE;
+        if (first == '{')
+            cat |= CAT_OPEN_BRACE;
+        if (first == '}')
+            cat |= CAT_CLOSE_BRACE;
+        if (first == '[')
+            cat |= CAT_OPEN_BRACKET;
+        if (first == ']')
+            cat |= CAT_CLOSE_BRACKET;
+        if (first == ':')
+            cat |= CAT_COLON;
+        if (first == ',')
+            cat |= CAT_COMMA;
+        if (first == '"')
+            cat |= CAT_QUOTE;
 
-        if (is_ws) cat |= CAT_WHITESPACE;
-        if (is_str) cat |= CAT_STRING_CHAR;
+        if (is_ws)
+            cat |= CAT_WHITESPACE;
+        if (is_str)
+            cat |= CAT_STRING_CHAR;
         if (is_num) {
             cat |= CAT_NUMBER_CONT;
-            if (first >= '0' && first <= '9') cat |= CAT_NUMBER_START;
-            if (first == '-') cat |= CAT_NUMBER_START;
+            if (first >= '0' && first <= '9')
+                cat |= CAT_NUMBER_START;
+            if (first == '-')
+                cat |= CAT_NUMBER_START;
         }
         if (is_lit) {
             cat |= CAT_LITERAL_CONT;
-            if (first == 't') cat |= CAT_TRUE_START;
-            if (first == 'f') cat |= CAT_FALSE_START;
-            if (first == 'n') cat |= CAT_NULL_START;
+            if (first == 't')
+                cat |= CAT_TRUE_START;
+            if (first == 'f')
+                cat |= CAT_FALSE_START;
+            if (first == 'n')
+                cat |= CAT_NULL_START;
         }
     }
 
@@ -98,12 +138,9 @@ static inline uint16_t classify_token(const std::string& text) {
 // Sets logits to -FLT_MAX for tokens whose category doesn't match the mask.
 // ---------------------------------------------------------------------------
 
-__global__ inline void constrain_mask_kernel(
-    float* __restrict__ logits,
-    const uint16_t* __restrict__ token_cats,
-    const uint16_t* __restrict__ allowed_mask,
-    int vocab_size)
-{
+__global__ inline void constrain_mask_kernel(float* __restrict__ logits,
+                                             const uint16_t* __restrict__ token_cats,
+                                             const uint16_t* __restrict__ allowed_mask, int vocab_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < vocab_size) {
         if ((token_cats[idx] & *allowed_mask) == 0) {
@@ -118,16 +155,14 @@ __global__ inline void constrain_mask_kernel(
 // is true.
 // ---------------------------------------------------------------------------
 
-__global__ inline void constrain_mask_allow_kernel(
-    float* __restrict__ logits,
-    const uint16_t* __restrict__ token_cats,
-    const uint8_t* __restrict__ token_allow,
-    const uint16_t* __restrict__ allowed_mask,
-    int vocab_size,
-    bool use_token_allow)
-{
+__global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
+                                                   const uint16_t* __restrict__ token_cats,
+                                                   const uint8_t* __restrict__ token_allow,
+                                                   const uint16_t* __restrict__ allowed_mask, int vocab_size,
+                                                   bool use_token_allow) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
 
     uint16_t mask = *allowed_mask;
     bool cat_ok = (token_cats[idx] & mask) != 0;
@@ -144,4 +179,4 @@ __global__ inline void constrain_mask_allow_kernel(
     }
 }
 
-} // namespace imp
+}  // namespace imp

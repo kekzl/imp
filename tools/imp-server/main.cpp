@@ -17,8 +17,7 @@ int main(int argc, char** argv) {
 
     // Load imp.conf (if present) + apply --set overrides; install as the
     // process-wide RuntimeConfig.
-    imp::RuntimeConfig::install(
-        imp::RuntimeConfig::load(args.config_path, args.config_overrides));
+    imp::RuntimeConfig::install(imp::RuntimeConfig::load(args.config_path, args.config_overrides));
 
     if (args.model_path.empty()) {
         fprintf(stderr, "Error: --model is required\n");
@@ -33,15 +32,13 @@ int main(int argc, char** argv) {
     state.default_args = args;
 
     ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
-    std::string resolved_model = imp::resolve_model_auto(
-        args.model_path, resolved_format, args.revision);
+    std::string resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
     if (resolved_model.empty()) {
         fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
         return 1;
     }
     if (resolved_model != args.model_path) {
-        printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(),
-               resolved_model.c_str(),
+        printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(), resolved_model.c_str(),
                resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
     }
 
@@ -50,7 +47,8 @@ int main(int argc, char** argv) {
         state.models_dir = args.models_dir;
     } else {
         auto parent = std::filesystem::path(resolved_model).parent_path().string();
-        if (!parent.empty()) state.models_dir = parent;
+        if (!parent.empty())
+            state.models_dir = parent;
     }
     if (!state.models_dir.empty()) {
         printf("Models directory: %s\n", state.models_dir.c_str());
@@ -88,14 +86,13 @@ int main(int argc, char** argv) {
             return httplib::Server::HandlerResponse::Unhandled;
 
         // Rate limiting (per-IP, inference endpoints only)
-        if (state.rate_limit > 0 &&
-            (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
+        if (state.rate_limit > 0 && (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
             std::string ip = req.get_header_value("X-Forwarded-For");
-            if (ip.empty()) ip = req.remote_addr;
+            if (ip.empty())
+                ip = req.remote_addr;
             if (!state.check_rate_limit(ip)) {
                 res.status = 429;
-                json err = {{"error", {{"message", "Rate limit exceeded"},
-                                        {"type", "rate_limit_error"}}}};
+                json err = {{"error", {{"message", "Rate limit exceeded"}, {"type", "rate_limit_error"}}}};
                 res.set_content(err.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
@@ -107,12 +104,14 @@ int main(int argc, char** argv) {
             int queue = 0;
             {
                 std::lock_guard<std::timed_mutex> lock(state.mtx);
-                if (state.batching) queue = state.batching->queue_depth();
+                if (state.batching)
+                    queue = state.batching->queue_depth();
             }
             if (queue >= state.max_concurrent) {
                 res.status = 429;
-                json err = {{"error", {{"message", "Server overloaded, too many concurrent requests"},
-                                        {"type", "rate_limit_error"}}}};
+                json err = {{"error",
+                             {{"message", "Server overloaded, too many concurrent requests"},
+                              {"type", "rate_limit_error"}}}};
                 res.set_content(err.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
@@ -124,8 +123,7 @@ int main(int argc, char** argv) {
             std::string expected = "Bearer " + state.api_key;
             if (auth != expected) {
                 res.status = 401;
-                json err = {{"error", {{"message", "Invalid API key"},
-                                        {"type", "invalid_request_error"}}}};
+                json err = {{"error", {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
                 res.set_content(err.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
@@ -135,9 +133,7 @@ int main(int argc, char** argv) {
     });
 
     // CORS preflight
-    svr.Options(R"(.*)", [](const httplib::Request&, httplib::Response& res) {
-        res.status = 204;
-    });
+    svr.Options(R"(.*)", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
     svr.Get("/health", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_health(req, res, state);
@@ -147,46 +143,40 @@ int main(int argc, char** argv) {
         handle_models(req, res, state);
     });
 
-    svr.Post("/v1/chat/completions",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_chat_completions(req, res, state);
-        });
+    svr.Post("/v1/chat/completions", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_chat_completions(req, res, state);
+    });
 
-    svr.Post("/v1/completions",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_completions(req, res, state);
-        });
+    svr.Post("/v1/completions", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_completions(req, res, state);
+    });
 
     // Anthropic-compatible Messages API. Non-streaming only in Phase 1;
     // streaming requests are rejected with 501 until Phase 2 ships.
-    svr.Post("/v1/messages",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_messages(req, res, state);
-        });
+    svr.Post("/v1/messages", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_messages(req, res, state);
+    });
 
-    svr.Post("/v1/embeddings",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_embeddings(req, res, state);
-        });
+    svr.Post("/v1/embeddings", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_embeddings(req, res, state);
+    });
 
-    svr.Post("/tokenize",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_tokenize(req, res, state);
-        });
+    svr.Post("/tokenize", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_tokenize(req, res, state);
+    });
 
-    svr.Post("/detokenize",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_detokenize(req, res, state);
-        });
+    svr.Post("/detokenize", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_detokenize(req, res, state);
+    });
 
-    svr.Get("/metrics",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            handle_metrics(req, res, state);
-        });
+    svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_metrics(req, res, state);
+    });
 
     // Track failed requests via post-routing
     svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {
-        if (res.status >= 500) state.metrics.requests_failed++;
+        if (res.status >= 500)
+            state.metrics.requests_failed++;
     });
 
     // Graceful shutdown on SIGINT/SIGTERM
@@ -194,10 +184,14 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    if (!state.api_key.empty()) printf("API key: enabled\n");
-    if (state.max_concurrent > 0) printf("Max concurrent: %d\n", state.max_concurrent);
-    if (state.request_timeout > 0) printf("Request timeout: %ds\n", state.request_timeout);
-    if (state.rate_limit > 0) printf("Rate limit: %d req/min per IP\n", state.rate_limit);
+    if (!state.api_key.empty())
+        printf("API key: enabled\n");
+    if (state.max_concurrent > 0)
+        printf("Max concurrent: %d\n", state.max_concurrent);
+    if (state.request_timeout > 0)
+        printf("Request timeout: %ds\n", state.request_timeout);
+    if (state.rate_limit > 0)
+        printf("Rate limit: %d req/min per IP\n", state.rate_limit);
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
@@ -217,8 +211,7 @@ int main(int argc, char** argv) {
         if (!g_server.load(std::memory_order_relaxed)) {
             // Server was nulled by signal — clean shutdown
         } else {
-            fprintf(stderr, "Failed to start server on %s:%d\n",
-                    args.host.c_str(), args.port);
+            fprintf(stderr, "Failed to start server on %s:%d\n", args.host.c_str(), args.port);
         }
     }
 

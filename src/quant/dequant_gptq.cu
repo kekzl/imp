@@ -22,19 +22,18 @@ namespace imp {
 //   weight = scale * (qval - zero)
 // ---------------------------------------------------------------------------
 
-__global__ void dequant_gptq4_kernel(
-        half* __restrict__ out,               // [N, K]
-        const int32_t* __restrict__ qweight,  // [K/8, N]
-        const int32_t* __restrict__ qzeros,   // [num_groups/8, N]
-        const half* __restrict__ scales,       // [num_groups, N]
-        const int32_t* __restrict__ g_idx,     // [K] or nullptr
-        int N, int K, int group_size) {
-
+__global__ void dequant_gptq4_kernel(half* __restrict__ out,               // [N, K]
+                                     const int32_t* __restrict__ qweight,  // [K/8, N]
+                                     const int32_t* __restrict__ qzeros,   // [num_groups/8, N]
+                                     const half* __restrict__ scales,      // [num_groups, N]
+                                     const int32_t* __restrict__ g_idx,    // [K] or nullptr
+                                     int N, int K, int group_size) {
     // Each thread handles one element in the [N, K] output
     int row = blockIdx.x * blockDim.x + threadIdx.x;  // N dimension
     int col = blockIdx.y * blockDim.y + threadIdx.y;  // K dimension
 
-    if (row >= N || col >= K) return;
+    if (row >= N || col >= K)
+        return;
 
     // Determine group for this column
     int group = g_idx ? g_idx[col] : col / group_size;
@@ -60,14 +59,11 @@ __global__ void dequant_gptq4_kernel(
     out[row * K + col] = __float2half(w);
 }
 
-void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros,
-                   const half* scales, const int32_t* g_idx,
-                   int N, int K, int group_size,
-                   cudaStream_t stream) {
+void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales,
+                   const int32_t* g_idx, int N, int K, int group_size, cudaStream_t stream) {
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (K + block.y - 1) / block.y);
-    dequant_gptq4_kernel<<<grid, block, 0, stream>>>(
-        out, qweight, qzeros, scales, g_idx, N, K, group_size);
+    dequant_gptq4_kernel<<<grid, block, 0, stream>>>(out, qweight, qzeros, scales, g_idx, N, K, group_size);
 }
 
-} // namespace imp
+}  // namespace imp

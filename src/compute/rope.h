@@ -16,13 +16,9 @@ namespace imp {
 //   attn_factor: mscale for attention (pre-compensated)
 //   corr_dims:   [2] float, dimension boundaries for YaRN ramp
 //                (precomputed by rope_yarn_corr_dims())
-void rope_forward(Tensor& Q, Tensor& K,
-                  const int* positions, int head_dim,
-                  float theta = 10000.0f, float scaling = 1.0f,
-                  int rope_dim = 0, bool neox = false,
-                  float ext_factor = 0.0f, float attn_factor = 1.0f,
-                  const float* corr_dims = nullptr,
-                  cudaStream_t stream = nullptr,
+void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta = 10000.0f,
+                  float scaling = 1.0f, int rope_dim = 0, bool neox = false, float ext_factor = 0.0f,
+                  float attn_factor = 1.0f, const float* corr_dims = nullptr, cudaStream_t stream = nullptr,
                   const float* longrope_inv_freqs = nullptr);
 
 // Fused QK-norm + RoPE for decode (n=1, FP16).
@@ -30,26 +26,21 @@ void rope_forward(Tensor& Q, Tensor& K,
 // Q: [n_heads * head_dim], K: [n_kv_heads * head_dim].
 // q_norm_weight, k_norm_weight: [head_dim] RMSNorm weights.
 // positions: device pointer to [1] int (decode only, n=1).
-void qknorm_rope_fused(half* Q, half* K,
-                        const half* q_norm_weight, const half* k_norm_weight,
-                        int n_heads, int n_kv_heads, int head_dim,
-                        float eps, const int* positions,
-                        float theta = 10000.0f, float scaling = 1.0f,
-                        int rope_dim = 0, bool neox = false,
-                        cudaStream_t stream = nullptr,
-                        float weight_offset = 0.0f,
-                        float ext_factor = 0.0f, float attn_factor = 1.0f,
-                        const float* corr_dims = nullptr,
-                        const float* longrope_inv_freqs = nullptr);
+void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight, int n_heads,
+                       int n_kv_heads, int head_dim, float eps, const int* positions, float theta = 10000.0f,
+                       float scaling = 1.0f, int rope_dim = 0, bool neox = false,
+                       cudaStream_t stream = nullptr, float weight_offset = 0.0f, float ext_factor = 0.0f,
+                       float attn_factor = 1.0f, const float* corr_dims = nullptr,
+                       const float* longrope_inv_freqs = nullptr);
 
 // Precompute YaRN correction dimension boundaries.
 // dims[0] = start (below: full NTK interpolation)
 // dims[1] = end (above: full extrapolation)
 // Between: linear ramp blend.
-void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base,
-                         float beta_fast, float beta_slow, float dims[2]);
+void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base, float beta_fast, float beta_slow,
+                         float dims[2]);
 
 // Register RoPE kernels for PDL tail/head overlap.
 void rope_pdl_register();
 
-} // namespace imp
+}  // namespace imp

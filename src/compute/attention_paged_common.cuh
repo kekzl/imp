@@ -15,26 +15,26 @@ static constexpr int NUM_WARPS = BLOCK_THREADS / WARP_SIZE;  // 8
 // cp.async helpers for pipelined Split-K attention
 __device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(s), "l"(glob));
 }
 
 // 16-byte async copy: loads 8 halves (128 bits) in one instruction.
 // 2× bandwidth per instruction vs 8-byte variant. Requires 16-byte aligned addresses.
 __device__ __forceinline__ void cp_async_ca_16(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(glob));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(glob));
 }
 
 // Streaming variant: cache at global level only (skip L1), evict-first from L2.
 // Used for KV cache loads that have no intra-step reuse across kernels.
 __device__ __forceinline__ void cp_async_cg_8(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 8;\n" ::"r"(s), "l"(glob));
 }
 
 __device__ __forceinline__ void cp_async_cg_16(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(glob));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(glob));
 }
 
 // ---------------------------------------------------------------------------
@@ -49,20 +49,20 @@ __device__ __forceinline__ half ldcs_half(const half* p) {
 
 __device__ __forceinline__ half2 ldcs_half2(const half2* p) {
     unsigned int v = __ldcs(reinterpret_cast<const unsigned int*>(p));
-    half2 r; memcpy(&r, &v, 4); return r;
+    half2 r;
+    memcpy(&r, &v, 4);
+    return r;
 }
 
 __device__ __forceinline__ void stcs_half(half* p, half v) {
     __stcs(reinterpret_cast<unsigned short*>(p), __half_as_ushort(v));
 }
 
-__device__ __forceinline__ void cp_async_commit() {
-    asm volatile("cp.async.commit_group;\n");
-}
+__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n"); }
 
-template<int N>
+template <int N>
 __device__ __forceinline__ void cp_async_wait_group() {
-    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
 // ---------------------------------------------------------------------------
@@ -76,19 +76,19 @@ __device__ __forceinline__ void cp_async_wait_group() {
 // attended tokens and must be skipped by the decode loop.
 // ---------------------------------------------------------------------------
 struct ContextRange {
-    int effective_start;      // legacy: start of contiguous range when streaming disabled
-    int first_block;          // first block to iterate
-    int num_ctx_blocks;       // end (exclusive) of block iteration
+    int effective_start;  // legacy: start of contiguous range when streaming disabled
+    int first_block;      // first block to iterate
+    int num_ctx_blocks;   // end (exclusive) of block iteration
 
     // StreamingLLM fields (all zero when streaming not active).
-    int sink_end;             // exclusive token boundary: tokens [0, sink_end) are sinks
-    int sink_end_block;       // exclusive block boundary for sinks
-    int window_start;         // inclusive first token of sliding window
-    int window_start_block;   // block containing window_start
+    int sink_end;            // exclusive token boundary: tokens [0, sink_end) are sinks
+    int sink_end_block;      // exclusive block boundary for sinks
+    int window_start;        // inclusive first token of sliding window
+    int window_start_block;  // block containing window_start
 };
 
-__device__ __forceinline__ ContextRange compute_context_range(
-    int ctx_len, int block_size, int sliding_window, int n_sinks = 0) {
+__device__ __forceinline__ ContextRange compute_context_range(int ctx_len, int block_size, int sliding_window,
+                                                              int n_sinks = 0) {
     ContextRange r{};
     r.num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
 
@@ -118,9 +118,7 @@ __device__ __forceinline__ ContextRange compute_context_range(
 }
 
 // Return true if streaming is active (sinks + window with a gap).
-__device__ __host__ __forceinline__ bool streaming_active(const ContextRange& r) {
-    return r.sink_end > 0;
-}
+__device__ __host__ __forceinline__ bool streaming_active(const ContextRange& r) { return r.sink_end > 0; }
 
 // Advance to the next block that actually contains attended tokens. When
 // streaming is active, this jumps across the [sink_end_block, window_start_block)
@@ -139,12 +137,12 @@ __device__ __forceinline__ int next_valid_block(const ContextRange& r, int cur_b
 //
 // Returns false if the entire block is outside the attention range (caller
 // should `continue` past it).
-__device__ __forceinline__ bool block_token_range(
-    const ContextRange& r, int blk, int block_size, int ctx_len,
-    int& first_tok, int& last_tok) {
+__device__ __forceinline__ bool block_token_range(const ContextRange& r, int blk, int block_size, int ctx_len,
+                                                  int& first_tok, int& last_tok) {
     int tok_start = blk * block_size;
-    int tok_end   = tok_start + block_size;
-    if (tok_end > ctx_len) tok_end = ctx_len;
+    int tok_end = tok_start + block_size;
+    if (tok_end > ctx_len)
+        tok_end = ctx_len;
     last_tok = tok_end - tok_start;
     first_tok = 0;
 
@@ -156,11 +154,13 @@ __device__ __forceinline__ bool block_token_range(
         if (blk < r.sink_end_block) {
             // Sink region: clamp to [0, sink_end).
             int rel_end = r.sink_end - tok_start;
-            if (rel_end < last_tok) last_tok = rel_end;
+            if (rel_end < last_tok)
+                last_tok = rel_end;
         } else {
             // Window region: clamp to [window_start, ctx_len).
             int rel_start = r.window_start - tok_start;
-            if (rel_start > first_tok) first_tok = rel_start;
+            if (rel_start > first_tok)
+                first_tok = rel_start;
         }
     } else if (tok_start < r.effective_start) {
         first_tok = r.effective_start - tok_start;
@@ -184,8 +184,8 @@ static inline int kpar_n_sms() {
 // compute rescale factor for accumulated output and new attention weight.
 // Used by all paged attention kernel variants (FP16, FP8, INT8, INT4).
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ void online_softmax_step(
-    float dot, float& m_w, float& l_w, float& rescale, float& w_new) {
+__device__ __forceinline__ void online_softmax_step(float dot, float& m_w, float& l_w, float& rescale,
+                                                    float& w_new) {
     float m_new = fmaxf(m_w, dot);
     float exp_diff = expf(m_w - m_new);
     float p = expf(dot - m_new);
@@ -208,10 +208,10 @@ __device__ __forceinline__ float apply_softcap(float dot, float softcap) {
 // O=0). Must be called with all threads in the block active; only
 // threadIdx.x==0 writes the scalar fields and the first warp zeroes O.
 // ---------------------------------------------------------------------------
-template<int HEAD_DIM>
-__device__ __forceinline__ void write_empty_split_sentinel(
-    float* partial_out, int batch_idx, int n_heads, int head_idx,
-    int num_splits, int split_idx, int lane_offset) {
+template <int HEAD_DIM>
+__device__ __forceinline__ void write_empty_split_sentinel(float* partial_out, int batch_idx, int n_heads,
+                                                           int head_idx, int num_splits, int split_idx,
+                                                           int lane_offset) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
     constexpr int partial_stride = 2 + HEAD_DIM;
@@ -221,7 +221,7 @@ __device__ __forceinline__ void write_empty_split_sentinel(
         out[1] = 0.0f;
     }
     if (threadIdx.x < WARP_SIZE) {
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS; i++) {
             out[2 + lane_offset + i] = 0.0f;
         }
@@ -237,10 +237,8 @@ __device__ __forceinline__ void write_empty_split_sentinel(
 // ---------------------------------------------------------------------------
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 
-static inline int compute_splitk_splits(
-    int batch_size, int n_heads, int head_dim,
-    int max_context_len, int block_size,
-    void** out_scratch_ptr) {
+static inline int compute_splitk_splits(int batch_size, int n_heads, int head_dim, int max_context_len,
+                                        int block_size, void** out_scratch_ptr) {
     int total_blocks_nosplit = batch_size * n_heads;
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
 
@@ -264,7 +262,8 @@ static inline int compute_splitk_splits(
         }
     }
 
-    if (out_scratch_ptr) *out_scratch_ptr = scratch_ptr;
+    if (out_scratch_ptr)
+        *out_scratch_ptr = scratch_ptr;
     return num_splits;
 }
 
@@ -282,17 +281,18 @@ static constexpr int kWmmaTileK = 16;
 // On entry:  first_kv_tile = 0, num_kv_tiles = ceil(seq_kv / Bc).
 // On return: both are narrowed to the range that can produce non-masked scores.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ void compute_kv_tile_bounds(
-    int q_start, int Br, int Bc, int seq_q, int seq_kv,
-    bool causal, int sliding_window,
-    int& first_kv_tile, int& num_kv_tiles) {
+__device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int Bc, int seq_q, int seq_kv,
+                                                       bool causal, int sliding_window, int& first_kv_tile,
+                                                       int& num_kv_tiles) {
     num_kv_tiles = (seq_kv + Bc - 1) / Bc;
     first_kv_tile = 0;
     if (causal) {
         int max_q = q_start + Br - 1;
-        if (max_q >= seq_q) max_q = seq_q - 1;
+        if (max_q >= seq_q)
+            max_q = seq_q - 1;
         int furthest_kv_tile = (max_q + Bc) / Bc;
-        if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
+        if (furthest_kv_tile < num_kv_tiles)
+            num_kv_tiles = furthest_kv_tile;
     }
     if (sliding_window > 0) {
         int earliest_kv = q_start - sliding_window + 1;
@@ -307,23 +307,25 @@ __device__ __forceinline__ void compute_kv_tile_bounds(
 // S_tile is [Br x Bc] row-major.  Called by all threads in the block with a
 // strided loop.  Used by both Hopper and Blackwell WMMA prefill kernels.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ void apply_score_masks(
-    float* S_tile, int Br, int Bc, int block_threads,
-    int tid, int q_start, int kv_start,
-    int seq_q, int seq_kv, float scale,
-    float softcap, bool causal, int sliding_window) {
+__device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc, int block_threads, int tid,
+                                                  int q_start, int kv_start, int seq_q, int seq_kv,
+                                                  float scale, float softcap, bool causal,
+                                                  int sliding_window) {
     const int total = Br * Bc;
     for (int i = tid; i < total; i += block_threads) {
         int r = i / Bc;
         int c = i % Bc;
-        int gq = q_start  + r;
+        int gq = q_start + r;
         int gk = kv_start + c;
 
         if (gq < seq_q && gk < seq_kv) {
             float val = S_tile[i] * scale;
-            if (softcap > 0.0f) val = apply_softcap(val, softcap);
-            if (causal && gq < gk) val = -FLT_MAX;
-            if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
+            if (softcap > 0.0f)
+                val = apply_softcap(val, softcap);
+            if (causal && gq < gk)
+                val = -FLT_MAX;
+            if (sliding_window > 0 && (gq - gk) >= sliding_window)
+                val = -FLT_MAX;
             S_tile[i] = val;
         } else {
             S_tile[i] = -FLT_MAX;
@@ -339,24 +341,22 @@ __device__ __forceinline__ void apply_score_masks(
 // Requires shared memory: float[NUM_WARPS + NUM_WARPS + NUM_WARPS * HEAD_DIM].
 // Only the first warp (warp_id==0) writes to global memory.
 // ---------------------------------------------------------------------------
-template<int HEAD_DIM>
+template <int HEAD_DIM>
 __device__ __forceinline__ void crosswarp_reduce_and_write(
     float* smem_base,      // shared memory region (warp_max | warp_l | warp_o)
     float m_w, float l_w,  // per-warp softmax state
     const float* o_reg,    // per-thread O accumulator [ELEMS]
-    int warp_id, int lane_id, int lane_offset,
-    half* O, int batch_idx, int n_heads, int head_idx) {
-
+    int warp_id, int lane_id, int lane_offset, half* O, int batch_idx, int n_heads, int head_idx) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     float* warp_max = smem_base;
-    float* warp_l   = warp_max + NUM_WARPS;
-    float* warp_o   = warp_l   + NUM_WARPS;
+    float* warp_l = warp_max + NUM_WARPS;
+    float* warp_o = warp_l + NUM_WARPS;
 
     if (lane_id == 0) {
         warp_max[warp_id] = m_w;
-        warp_l[warp_id]   = l_w;
+        warp_l[warp_id] = l_w;
     }
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < ELEMS; i++)
         warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
     __syncthreads();
@@ -370,7 +370,7 @@ __device__ __forceinline__ void crosswarp_reduce_and_write(
         for (int w = 0; w < NUM_WARPS; w++)
             global_l += expf(warp_max[w] - global_max) * warp_l[w];
 
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS; i++) {
             int d = lane_offset + i;
             float o_val = 0.0f;
@@ -378,10 +378,10 @@ __device__ __forceinline__ void crosswarp_reduce_and_write(
                 float weight = expf(warp_max[w] - global_max) * warp_l[w];
                 o_val += weight * warp_o[w * HEAD_DIM + d];
             }
-            if (global_l > 0.0f) o_val /= global_l;
+            if (global_l > 0.0f)
+                o_val /= global_l;
 
-            int out_idx = batch_idx * n_heads * HEAD_DIM
-                        + head_idx * HEAD_DIM + d;
+            int out_idx = batch_idx * n_heads * HEAD_DIM + head_idx * HEAD_DIM + d;
             stcs_half(&O[out_idx], __float2half(o_val));
         }
     }
@@ -392,25 +392,22 @@ __device__ __forceinline__ void crosswarp_reduce_and_write(
 // (global_max, global_l, O_unnormalized) to partial_out buffer.
 // The split-K reduction kernel merges partials into final output.
 // ---------------------------------------------------------------------------
-template<int HEAD_DIM>
-__device__ __forceinline__ void crosswarp_reduce_splitk(
-    float* smem_base,
-    float m_w, float l_w,
-    const float* o_reg,
-    int warp_id, int lane_id, int lane_offset,
-    float* partial_out, int batch_idx, int n_heads, int head_idx,
-    int num_splits, int split_idx) {
-
+template <int HEAD_DIM>
+__device__ __forceinline__ void crosswarp_reduce_splitk(float* smem_base, float m_w, float l_w,
+                                                        const float* o_reg, int warp_id, int lane_id,
+                                                        int lane_offset, float* partial_out, int batch_idx,
+                                                        int n_heads, int head_idx, int num_splits,
+                                                        int split_idx) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     float* warp_max = smem_base;
-    float* warp_l   = warp_max + NUM_WARPS;
-    float* warp_o   = warp_l   + NUM_WARPS;
+    float* warp_l = warp_max + NUM_WARPS;
+    float* warp_o = warp_l + NUM_WARPS;
 
     if (lane_id == 0) {
         warp_max[warp_id] = m_w;
-        warp_l[warp_id]   = l_w;
+        warp_l[warp_id] = l_w;
     }
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < ELEMS; i++)
         warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
     __syncthreads();
@@ -433,7 +430,7 @@ __device__ __forceinline__ void crosswarp_reduce_splitk(
             out[1] = global_l;
         }
 
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS; i++) {
             int d = lane_offset + i;
             float o_val = 0.0f;
@@ -446,4 +443,4 @@ __device__ __forceinline__ void crosswarp_reduce_splitk(
     }
 }
 
-} // namespace imp
+}  // namespace imp

@@ -12,23 +12,27 @@
 namespace imp {
 
 // =====================================================================
-// CUDA Graph decode helpers
-// (Filename is historical; the speculative-decode variants that originally
-// lived here were removed when proven broken/unused. The async-graph and
-// conditional-graph helpers below are the production decode path.)
+// CUDA Graph decode helpers — async and conditional-graph variants
+// for the production decode path.
 // =====================================================================
 
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
-    if (remaining <= 0) return 0;
+    if (remaining <= 0)
+        return 0;
 
     constexpr int kMaxLayersForConditionalGraph = 128;
-    if (model_->config().n_layers > kMaxLayersForConditionalGraph) return 0;
+    if (model_->config().n_layers > kMaxLayersForConditionalGraph)
+        return 0;
 
-    { size_t f = 0, t = 0; cudaMemGetInfo(&f, &t);
-      if (f < 256ULL * 1024 * 1024) return 0; }
+    {
+        size_t f = 0, t = 0;
+        cudaMemGetInfo(&f, &t);
+        if (f < 256ULL * 1024 * 1024)
+            return 0;
+    }
 
     // Pre-allocate KV blocks
     int ctx_len = req->context_len();
@@ -37,17 +41,18 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
     for (int b = blocks_have; b < blocks_needed; b++) {
-        if (kv_manager_->append_block(req->id) < 0) break;
+        if (kv_manager_->append_block(req->id) < 0)
+            break;
     }
 
     int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
     int capped = blocks_got * kv_bs - ctx_len;
-    if (capped <= 0) return 0;
+    if (capped <= 0)
+        return 0;
     return std::min(capped, remaining);
 }
 
-CudaGraphConditionalRunner::Config Engine::build_graph_config(
-        const Request& req, int remaining) const {
+CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req, int remaining) const {
     Tokenizer* tok = model_->tokenizer();
     CudaGraphConditionalRunner::Config gcfg;
     gcfg.max_steps = remaining;
@@ -73,8 +78,7 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     gcfg.presence_penalty = req.presence_penalty;
     gcfg.repeat_last_n = req.repeat_last_n;
     // Seed penalty history from existing output tokens
-    if (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
-        req.presence_penalty != 0.0f) {
+    if (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f || req.presence_penalty != 0.0f) {
         if (!req.output_tokens.empty()) {
             gcfg.penalty_history = req.output_tokens;
         }
@@ -89,10 +93,11 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     return gcfg;
 }
 
-std::vector<int32_t> Engine::try_graph_loop_decode(
-        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
+std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
+                                                   cudaStream_t stream) {
     int remaining = prepare_graph_loop(req);
-    if (remaining <= 0) return {};
+    if (remaining <= 0)
+        return {};
 
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
@@ -100,8 +105,8 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     int* d_block_tables = nullptr;
     if (cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream) != cudaSuccess)
         return {};
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, full_bt.data(), max_blocks_per_seq * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
 
     (void)executor_->resize_workspace(1, stream);
 
@@ -121,8 +126,8 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     if (!banned_token_ids_.empty()) {
         if (cudaMallocAsync(&d_banned, banned_token_ids_.size() * sizeof(int32_t), stream) == cudaSuccess) {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                            banned_token_ids_.size() * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, stream));
+                                               banned_token_ids_.size() * sizeof(int32_t),
+                                               cudaMemcpyHostToDevice, stream));
             state_template.d_banned_tokens = d_banned;
             state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
         }
@@ -132,28 +137,32 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
 
     CudaGraphConditionalRunner runner;
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+        if (d_banned)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
         return {};
     }
     if (!runner.launch(stream)) {
-        if (d_banned) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+        if (d_banned)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
         return {};
     }
 
     auto tokens = runner.wait_and_get_tokens(stream);
-    if (d_banned) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+    if (d_banned)
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
     IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
     runner.cleanup();
     return tokens;
 }
 
-bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
-                                          int32_t first_token, cudaStream_t stream) {
+bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
+                                         cudaStream_t stream) {
     int remaining = prepare_graph_loop(req);
-    if (remaining <= 0) return false;
+    if (remaining <= 0)
+        return false;
 
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
@@ -161,8 +170,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     int* d_bt = nullptr;
     if (cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
         return false;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(), max_blocks_per_seq * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
 
     (void)executor_->resize_workspace(1, stream);
 
@@ -182,8 +191,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     if (!banned_token_ids_.empty()) {
         if (cudaMalloc(&d_banned, banned_token_ids_.size() * sizeof(int32_t)) == cudaSuccess) {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                            banned_token_ids_.size() * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, stream));
+                                               banned_token_ids_.size() * sizeof(int32_t),
+                                               cudaMemcpyHostToDevice, stream));
             state_template.d_banned_tokens = d_banned;
             state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
         }
@@ -192,13 +201,15 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     auto gcfg = build_graph_config(*req, remaining);
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned) IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
+        if (d_banned)
+            IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
         return false;
     }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
-        if (d_banned) IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
+        if (d_banned)
+            IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
         return false;
     }
@@ -206,12 +217,11 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_banned_tokens_ = d_banned;
-    IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens",
-                  state_template.n_d_banned_tokens);
+    IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
     IMP_LOG_INFO("AsyncGraphLoop: launched for %d remaining tokens", remaining);
     return true;
 }
 
-} // namespace imp
+}  // namespace imp

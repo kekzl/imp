@@ -20,8 +20,7 @@ int main(int argc, char** argv) {
     // Load imp.conf (if present) + apply --set overrides; install as the
     // process-wide RuntimeConfig so all downstream code reads through
     // RuntimeConfig::current() instead of getenv("IMP_*").
-    imp::RuntimeConfig::install(
-        imp::RuntimeConfig::load(args.config_path, args.config_overrides));
+    imp::RuntimeConfig::install(imp::RuntimeConfig::load(args.config_path, args.config_overrides));
 
     if (args.model_path.empty()) {
         print_usage(argv[0]);
@@ -78,33 +77,49 @@ int main(int argc, char** argv) {
     // signalled by sentinel >= 0; sentinel <0 falls through to the family preset.
     imp::SamplingDefaults sampling = imp::get_sampling_defaults(model->model->config().arch);
     const auto& gen = model->model->generation_config();
-    if (gen.temperature        >= 0.0f) sampling.temperature = gen.temperature;
-    if (gen.top_p              >= 0.0f) sampling.top_p       = gen.top_p;
-    if (gen.top_k              >= 0)    sampling.top_k       = gen.top_k;
+    if (gen.temperature >= 0.0f)
+        sampling.temperature = gen.temperature;
+    if (gen.top_p >= 0.0f)
+        sampling.top_p = gen.top_p;
+    if (gen.top_k >= 0)
+        sampling.top_k = gen.top_k;
 
     // CLI flags override auto-detection (only when explicitly set)
     config.device_id = args.device;
     // CLI is single-request — always cap batch size to 1
     config.max_batch_size = 1;
     // max_seq_len: 0 = auto-detect in engine (from model metadata + VRAM)
-    if (args.max_seq_len > 0) config.max_seq_len = args.max_seq_len;
-    if (args.min_kv_tokens > 0) config.min_kv_tokens = args.min_kv_tokens;
+    if (args.max_seq_len > 0)
+        config.max_seq_len = args.max_seq_len;
+    if (args.min_kv_tokens > 0)
+        config.min_kv_tokens = args.min_kv_tokens;
     config.gpu_layers = args.gpu_layers;
-    if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
-    if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
-    if (args.kv_int4) config.kv_cache_dtype = IMP_DTYPE_INT4;
-    if (args.kv_turboquant) config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
+    if (args.kv_fp8)
+        config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    if (args.kv_int8)
+        config.kv_cache_dtype = IMP_DTYPE_INT8;
+    if (args.kv_int4)
+        config.kv_cache_dtype = IMP_DTYPE_INT4;
+    if (args.kv_turboquant)
+        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
     if (args.kv_turboquant_lite) {
         config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT_LITE;
         config.turboquant_sketch_multiplier = args.turboquant_sketch_mult;
     }
-    if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
-    if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
-    if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
-    if (args.prefill_fp8) config.use_fp8_prefill = 1;
-    if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
-    if (args.dual_path_quant) config.dual_path_quant = 1;
-    if (args.prefix_caching) config.use_prefix_caching = 1;
+    if (args.ssm_fp16)
+        config.ssm_state_dtype = IMP_DTYPE_FP16;
+    if (args.no_cuda_graphs)
+        config.enable_cuda_graphs = 0;
+    if (args.prefill_chunk_size > 0)
+        config.prefill_chunk_size = args.prefill_chunk_size;
+    if (args.prefill_fp8)
+        config.use_fp8_prefill = 1;
+    if (args.mxfp4_prefill)
+        config.use_mxfp4_prefill = 1;
+    if (args.dual_path_quant)
+        config.dual_path_quant = 1;
+    if (args.prefix_caching)
+        config.use_prefix_caching = 1;
     if (args.streaming_kv) {
         config.streaming_kv_enabled = 1;
         config.streaming_kv_n_sinks = args.streaming_sinks;
@@ -147,9 +162,9 @@ int main(int argc, char** argv) {
     params.min_p = args.min_p;
     params.typical_p = args.typical_p;
     params.repetition_penalty = args.repetition_penalty_set
-        ? args.repetition_penalty
-        : (gen.repetition_penalty >= 0.0f ? gen.repetition_penalty
-                                          : args.repetition_penalty);
+                                    ? args.repetition_penalty
+                                    : (gen.repetition_penalty >= 0.0f ? gen.repetition_penalty
+                                                                      : args.repetition_penalty);
     params.frequency_penalty = args.frequency_penalty;
     params.presence_penalty = args.presence_penalty;
     params.repeat_last_n = args.repeat_last_n;
@@ -221,7 +236,8 @@ int main(int argc, char** argv) {
             for (int s = 0; s < tg_tokens; s++) {
                 int32_t tok = 0;
                 err = imp_decode_step(ctx, &bench_params, &tok);
-                if (err != IMP_SUCCESS) break;
+                if (err != IMP_SUCCESS)
+                    break;
             }
             auto t1 = std::chrono::high_resolution_clock::now();
             if (err != IMP_SUCCESS) {
@@ -236,10 +252,10 @@ int main(int argc, char** argv) {
         double pp_toks = (pp_avg_ms > 0) ? (args.bench_pp / (pp_avg_ms / 1000.0)) : 0;
         double tg_toks = (tg_avg_ms > 0) ? (tg_tokens / (tg_avg_ms / 1000.0)) : 0;
 
-        fprintf(stderr, "pp %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n",
-                args.bench_pp, pp_avg_ms, pp_toks, args.bench_reps);
-        fprintf(stderr, "tg %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n",
-                tg_tokens, tg_avg_ms, tg_toks, args.bench_reps);
+        fprintf(stderr, "pp %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n", args.bench_pp, pp_avg_ms,
+                pp_toks, args.bench_reps);
+        fprintf(stderr, "tg %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n", tg_tokens, tg_avg_ms,
+                tg_toks, args.bench_reps);
     } else if (args.interactive) {
         // Interactive/agentic defaults to 16384 max tokens (needs headroom for
         // long reasoning chains, code generation, and multi-step tool use)
@@ -287,14 +303,17 @@ int main(int argc, char** argv) {
         while (true) {
             printf("\n> ");
             fflush(stdout);
-            if (!fgets(line, sizeof(line), stdin)) break;
+            if (!fgets(line, sizeof(line), stdin))
+                break;
 
             // Trim trailing newline
             size_t len = std::strlen(line);
-            if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+            if (len > 0 && line[len - 1] == '\n')
+                line[len - 1] = '\0';
 
             std::string input(line);
-            if (input.empty() || input == "quit" || input == "exit") break;
+            if (input.empty() || input == "quit" || input == "exit")
+                break;
 
             // Handle /image command
             if (input.rfind("/image ", 0) == 0) {
@@ -336,12 +355,11 @@ int main(int argc, char** argv) {
                 std::string interactive_text;
                 // Think-block styling: buffer output to suppress <think></think>
                 // tags and render thinking content in dim grey.
-                std::string print_buf;       // pending text not yet flushed
+                std::string print_buf;  // pending text not yet flushed
 
                 // Capture the first token produced during prefill
                 // (engine->step() generates it as part of the prefill pass)
-                if (ctx->active_request &&
-                    !ctx->active_request->output_tokens.empty()) {
+                if (ctx->active_request && !ctx->active_request->output_tokens.empty()) {
                     int32_t first_tok = ctx->active_request->output_tokens.back();
                     output_ids.push_back(first_tok);
                     std::string piece = tok->decode_token(first_tok);
@@ -351,16 +369,18 @@ int main(int argc, char** argv) {
 
                 // Decode token by token
                 bool in_think = false;
-                static const char* kThinkOn  = "\033[2;90m";  // dim + bright black
+                static const char* kThinkOn = "\033[2;90m";  // dim + bright black
                 static const char* kThinkOff = "\033[0m";
 
                 // Flush confirmed text from print_buf up to a safe point
                 auto flush_buf = [&]() {
-                    if (print_buf.empty()) return;
+                    if (print_buf.empty())
+                        return;
                     // Don't flush text that could be a partial tag
                     // Max partial: "</think>" (8 chars) or "<think>" (7 chars)
                     const size_t hold = 8;
-                    if (print_buf.size() <= hold) return;
+                    if (print_buf.size() <= hold)
+                        return;
                     size_t safe = print_buf.size() - hold;
                     printf("%.*s", (int)safe, print_buf.c_str());
                     fflush(stdout);
@@ -370,15 +390,21 @@ int main(int argc, char** argv) {
                 for (int step = 0; step < params.max_tokens; step++) {
                     int32_t token = 0;
                     err = imp_decode_step(ctx, &params, &token);
-                    if (err != IMP_SUCCESS) break;
+                    if (err != IMP_SUCCESS)
+                        break;
 
                     // Check stop tokens
-                    if (token == tok->eos_id()) break;
+                    if (token == tok->eos_id())
+                        break;
                     bool is_stop = false;
                     for (int32_t stop_id : chat_tpl.stop_token_ids()) {
-                        if (token == stop_id) { is_stop = true; break; }
+                        if (token == stop_id) {
+                            is_stop = true;
+                            break;
+                        }
                     }
-                    if (is_stop) break;
+                    if (is_stop)
+                        break;
 
                     output_ids.push_back(token);
                     std::string piece = tok->decode_token(token);
@@ -431,14 +457,16 @@ int main(int argc, char** argv) {
                                 break;
                             }
                         }
-                        if (text_stop) break;
+                        if (text_stop)
+                            break;
                     }
                 }
                 // Flush remaining buffer
                 if (!print_buf.empty()) {
                     printf("%s", print_buf.c_str());
                 }
-                if (in_think) printf("%s", kThinkOff);
+                if (in_think)
+                    printf("%s", kThinkOff);
                 printf("\n");
 
                 response = tok->decode(output_ids);
@@ -503,7 +531,8 @@ int main(int argc, char** argv) {
                 tokens = tok->encode(args.prompt);
                 // Prepend BOS when the tokenizer requires it (e.g. Gemma)
                 bool add_bos = tok->add_bos();
-                if (imp::RuntimeConfig::current().generation.force_bos) add_bos = true;
+                if (imp::RuntimeConfig::current().generation.force_bos)
+                    add_bos = true;
                 if (add_bos) {
                     tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
                 }
@@ -529,20 +558,23 @@ int main(int argc, char** argv) {
 
             // Compute max stop length for buffering
             size_t max_stop_len = 0;
-            for (const auto& s : args.stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
+            for (const auto& s : args.stop_sequences)
+                max_stop_len = std::max(max_stop_len, s.size());
 
             // Capture the first token produced during prefill
             auto t_decode_start = std::chrono::high_resolution_clock::now();
             std::vector<int32_t> output_ids;
             std::string output_text;
-            if (ctx->active_request &&
-                !ctx->active_request->output_tokens.empty()) {
+            if (ctx->active_request && !ctx->active_request->output_tokens.empty()) {
                 int32_t first_tok = ctx->active_request->output_tokens.back();
                 // Check stop conditions on first token
                 bool first_is_stop = (first_tok == tok->eos_id());
                 if (!first_is_stop && have_template) {
                     for (int32_t stop_id : chat_tpl.stop_token_ids()) {
-                        if (first_tok == stop_id) { first_is_stop = true; break; }
+                        if (first_tok == stop_id) {
+                            first_is_stop = true;
+                            break;
+                        }
                     }
                 }
                 if (!first_is_stop) {
@@ -551,7 +583,8 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "[tok=%d '%s'] ", first_tok, piece.c_str());
                     printf("%s", piece.c_str());
                     fflush(stdout);
-                    if (!args.stop_sequences.empty()) output_text += piece;
+                    if (!args.stop_sequences.empty())
+                        output_text += piece;
                 }
             }
 
@@ -559,7 +592,8 @@ int main(int argc, char** argv) {
             for (int step = 0; step < params.max_tokens; step++) {
                 int32_t token = 0;
                 err = imp_decode_step(ctx, &params, &token);
-                if (err != IMP_SUCCESS) break;
+                if (err != IMP_SUCCESS)
+                    break;
 
                 // Hide stop tokens from the user but DON'T break the loop —
                 // the engine has the authoritative stop logic (think-state
@@ -574,13 +608,17 @@ int main(int argc, char** argv) {
                 bool hide_token = (token == tok->eos_id());
                 if (have_template && !hide_token) {
                     for (int32_t stop_id : chat_tpl.stop_token_ids()) {
-                        if (token == stop_id) { hide_token = true; break; }
+                        if (token == stop_id) {
+                            hide_token = true;
+                            break;
+                        }
                     }
                 }
 
                 output_ids.push_back(token);
                 std::string piece = tok->decode_token(token);
-                if (step < 10) fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
+                if (step < 10)
+                    fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
                 if (!hide_token) {
                     printf("%s", piece.c_str());
                     fflush(stdout);
@@ -596,24 +634,31 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
-                    if (stop_found) break;
+                    if (stop_found)
+                        break;
                 }
             }
             auto t_decode_end = std::chrono::high_resolution_clock::now();
             printf("\n");
 
             int n_output_tokens = static_cast<int>(output_ids.size());
-            double prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
-            double decode_ms = std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
-            double total_ms = std::chrono::duration<double, std::milli>(t_decode_end - t_prefill_start).count();
+            double prefill_ms =
+                std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+            double decode_ms =
+                std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+            double total_ms =
+                std::chrono::duration<double, std::milli>(t_decode_end - t_prefill_start).count();
 
             double pp_toks = (prefill_ms > 0) ? (n_prompt_tokens / (prefill_ms / 1000.0)) : 0;
             double tg_toks = (decode_ms > 0 && n_output_tokens > 1)
-                ? ((n_output_tokens - 1) / (decode_ms / 1000.0)) : 0;
+                                 ? ((n_output_tokens - 1) / (decode_ms / 1000.0))
+                                 : 0;
 
             fprintf(stderr, "\n");
-            fprintf(stderr, "pp %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_prompt_tokens, prefill_ms, pp_toks);
-            fprintf(stderr, "tg %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_output_tokens, decode_ms, tg_toks);
+            fprintf(stderr, "pp %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_prompt_tokens, prefill_ms,
+                    pp_toks);
+            fprintf(stderr, "tg %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_output_tokens, decode_ms,
+                    tg_toks);
             fprintf(stderr, "total   %8.2f ms\n", total_ms);
 
             // Benchmark using Engine::generate() (conditional graph loop) for comparison.
@@ -625,22 +670,21 @@ int main(int argc, char** argv) {
                 // Use Engine::generate() directly for accurate timing
                 imp::Engine* engine = ctx->engine.get();
                 auto t_gen_start = std::chrono::high_resolution_clock::now();
-                std::string gen_result = engine->generate(
-                    args.prompt, params.max_tokens,
-                    params.temperature, params.top_p, params.top_k, params.seed,
-                    have_template);
+                std::string gen_result = engine->generate(args.prompt, params.max_tokens, params.temperature,
+                                                          params.top_p, params.top_k, params.seed,
+                                                          have_template);
                 auto t_gen_end = std::chrono::high_resolution_clock::now();
 
                 // Count output tokens by encoding the result
                 auto gen_toks = tok->encode(gen_result);
                 int gen_n = static_cast<int>(gen_toks.size());
-                double gen_total_ms = std::chrono::duration<double, std::milli>(t_gen_end - t_gen_start).count();
+                double gen_total_ms =
+                    std::chrono::duration<double, std::milli>(t_gen_end - t_gen_start).count();
                 // Estimate decode time: total - prefill (reuse prefill timing from above)
                 double gen_decode_ms = gen_total_ms - prefill_ms;
-                double gen_toks_s = (gen_decode_ms > 0 && gen_n > 0)
-                    ? (gen_n / (gen_decode_ms / 1000.0)) : 0;
-                fprintf(stderr, "graph-loop: %d tg tokens in %.2f ms (%.2f tok/s, %.2f ms total)\n",
-                        gen_n, gen_decode_ms, gen_toks_s, gen_total_ms);
+                double gen_toks_s = (gen_decode_ms > 0 && gen_n > 0) ? (gen_n / (gen_decode_ms / 1000.0)) : 0;
+                fprintf(stderr, "graph-loop: %d tg tokens in %.2f ms (%.2f tok/s, %.2f ms total)\n", gen_n,
+                        gen_decode_ms, gen_toks_s, gen_total_ms);
             }
         }
     }

@@ -45,7 +45,7 @@ struct RoPEParams {
 };
 
 struct AttentionParams {
-    float scale = 0.0f;        // 1/sqrt(head_dim), computed at build time
+    float scale = 0.0f;  // 1/sqrt(head_dim), computed at build time
     bool causal = true;
     int n_heads = 0;
     int n_kv_heads = 0;
@@ -87,10 +87,10 @@ struct OpParams {
 struct OpNode {
     int id = 0;
     OpType type = OpType::EMBEDDING;
-    std::vector<int> inputs;   // indices into graph node list
+    std::vector<int> inputs;  // indices into graph node list
     std::vector<int> outputs;
-    int layer = -1;            // transformer layer index (-1 for non-layer ops)
+    int layer = -1;  // transformer layer index (-1 for non-layer ops)
     OpParams params;
 };
 
-} // namespace imp
+}  // namespace imp

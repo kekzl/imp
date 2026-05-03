@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
-project(imp LANGUAGES C CXX CUDA VERSION 0.7.0)
+project(imp LANGUAGES C CXX CUDA VERSION 0.8.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -185,7 +185,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
-    src/runtime/engine_speculative.cpp
+    src/runtime/engine_graph_decode.cpp
     src/runtime/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -452,28 +452,14 @@ if(IMP_BUILD_TESTS)
         test-quant test-kv test-moe-gdn test-e2e
     )
 
-    # Backwards-compat wrapper. Used by Makefile, CI artifacts, smoke_test.sh.
-    set(_wrapper ${CMAKE_BINARY_DIR}/imp-tests)
-    file(WRITE ${_wrapper}
-"#!/bin/sh
-DIR=$(cd \"$(dirname \"$0\")\" && pwd)
-status=0
-for bin in test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e; do
-    if [ -x \"$DIR/$bin\" ]; then
-        \"$DIR/$bin\" \"$@\" || status=$?
-    fi
-done
-exit $status
-")
-    file(CHMOD ${_wrapper}
-        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-                    GROUP_READ GROUP_EXECUTE
-                    WORLD_READ WORLD_EXECUTE)
-
     # --- CTest label aggregates ---
     # ctest -L unit  — CPU-only tests (no GPU required)
     # ctest -L gpu   — GPU tests (require NVIDIA GPU)
     # ctest -L perf  — Performance regression tests
+    #
+    # Source of truth for the unit/gpu split. The gtest filter only applies to
+    # test-e2e (which contains both stub-only unit tests and CUDA-backed E2E
+    # tests in the same binary). All other binaries are clean unit-or-GPU.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     add_test(NAME unit_core       COMMAND test-core)
@@ -497,6 +483,44 @@ exit $status
     add_test(NAME perf_e2e       COMMAND test-e2e       "--gtest_filter=${_perf_filter}")
     set_tests_properties(perf_compute perf_attention perf_quant perf_e2e
         PROPERTIES LABELS "perf")
+
+    # --- Convenience wrappers for environments without the build tree ---
+    # The Docker runtime image only carries the test binaries (no
+    # CTestTestfile.cmake), so `ctest -L unit` cannot be used there. These
+    # shell wrappers run the same partitions inside the runtime container.
+    # On a host build, prefer `ctest -L unit|gpu|perf` over the wrappers.
+
+    # imp-tests: run all GTest binaries sequentially. Matches `ctest` (no label).
+    file(WRITE ${CMAKE_BINARY_DIR}/imp-tests
+"#!/bin/sh
+DIR=$(cd \"$(dirname \"$0\")\" && pwd)
+status=0
+for bin in test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e; do
+    if [ -x \"$DIR/$bin\" ]; then
+        \"$DIR/$bin\" \"$@\" || status=$?
+    fi
+done
+exit $status
+")
+
+    # imp-tests-unit: CPU-only subset. Matches `ctest -L unit`. Sourced from the
+    # same _unit_e2e_filter as the unit_e2e_subset ctest entry above.
+    file(WRITE ${CMAKE_BINARY_DIR}/imp-tests-unit
+"#!/bin/sh
+DIR=$(cd \"$(dirname \"$0\")\" && pwd)
+status=0
+if [ -x \"$DIR/test-core\" ]; then \"$DIR/test-core\" \"$@\" || status=$?; fi
+if [ -x \"$DIR/test-text\" ]; then \"$DIR/test-text\" \"$@\" || status=$?; fi
+if [ -x \"$DIR/test-e2e\" ];  then \"$DIR/test-e2e\" '--gtest_filter=${_unit_e2e_filter}' \"$@\" || status=$?; fi
+exit $status
+")
+
+    foreach(_w imp-tests imp-tests-unit)
+        file(CHMOD ${CMAKE_BINARY_DIR}/${_w}
+            PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                        GROUP_READ GROUP_EXECUTE
+                        WORLD_READ WORLD_EXECUTE)
+    endforeach()
 endif()
 
 # --- Install ---

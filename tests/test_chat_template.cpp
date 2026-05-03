@@ -15,9 +15,12 @@ static Tokenizer make_chat_tokenizer() {
     std::vector<float> scores;
 
     // 0: <unk>, 1: <s> (BOS), 2: </s> (EOS)
-    tokens.push_back("<unk>"); scores.push_back(0.0f);
-    tokens.push_back("<s>");   scores.push_back(0.0f);
-    tokens.push_back("</s>"); scores.push_back(0.0f);
+    tokens.push_back("<unk>");
+    scores.push_back(0.0f);
+    tokens.push_back("<s>");
+    scores.push_back(0.0f);
+    tokens.push_back("</s>");
+    scores.push_back(0.0f);
 
     // 3-258: SPM byte fallback <0x00>..<0xFF>
     for (int b = 0; b < 256; b++) {
@@ -28,30 +31,55 @@ static Tokenizer make_chat_tokenizer() {
     }
 
     // 259+: Special tokens for all chat template families
-    tokens.push_back("<|im_start|>"); scores.push_back(0.0f);           // 259
-    tokens.push_back("<|im_end|>");   scores.push_back(0.0f);           // 260
-    tokens.push_back("<|start_header_id|>"); scores.push_back(0.0f);    // 261
-    tokens.push_back("<|end_header_id|>");   scores.push_back(0.0f);    // 262
-    tokens.push_back("<|eot_id|>");          scores.push_back(0.0f);    // 263
-    tokens.push_back("[INST]");  scores.push_back(0.0f);                // 264
-    tokens.push_back("[/INST]"); scores.push_back(0.0f);                // 265
-    tokens.push_back("<extra_id_0>"); scores.push_back(0.0f);           // 266
-    tokens.push_back("<extra_id_1>"); scores.push_back(0.0f);           // 267
-    tokens.push_back("<start_of_turn>"); scores.push_back(0.0f);        // 268
-    tokens.push_back("<end_of_turn>");   scores.push_back(0.0f);        // 269
+    tokens.push_back("<|im_start|>");
+    scores.push_back(0.0f);  // 259
+    tokens.push_back("<|im_end|>");
+    scores.push_back(0.0f);  // 260
+    tokens.push_back("<|start_header_id|>");
+    scores.push_back(0.0f);  // 261
+    tokens.push_back("<|end_header_id|>");
+    scores.push_back(0.0f);  // 262
+    tokens.push_back("<|eot_id|>");
+    scores.push_back(0.0f);  // 263
+    tokens.push_back("[INST]");
+    scores.push_back(0.0f);  // 264
+    tokens.push_back("[/INST]");
+    scores.push_back(0.0f);  // 265
+    tokens.push_back("<extra_id_0>");
+    scores.push_back(0.0f);  // 266
+    tokens.push_back("<extra_id_1>");
+    scores.push_back(0.0f);  // 267
+    tokens.push_back("<start_of_turn>");
+    scores.push_back(0.0f);  // 268
+    tokens.push_back("<end_of_turn>");
+    scores.push_back(0.0f);  // 269
     // DeepSeek R1 (fullwidth vertical bars U+FF5C)
-    tokens.push_back("<\xef\xbd\x9c" "User\xef\xbd\x9c>");             // 270
+    tokens.push_back(
+        "<\xef\xbd\x9c"
+        "User\xef\xbd\x9c>");  // 270
     scores.push_back(0.0f);
-    tokens.push_back("<\xef\xbd\x9c" "Assistant\xef\xbd\x9c>");        // 271
+    tokens.push_back(
+        "<\xef\xbd\x9c"
+        "Assistant\xef\xbd\x9c>");  // 271
     scores.push_back(0.0f);
-    tokens.push_back("<\xef\xbd\x9c" "end\xe2\x96\x81" "of\xe2\x96\x81" "sentence\xef\xbd\x9c>"); // 272
+    tokens.push_back(
+        "<\xef\xbd\x9c"
+        "end\xe2\x96\x81"
+        "of\xe2\x96\x81"
+        "sentence\xef\xbd\x9c>");  // 272
     scores.push_back(0.0f);
-    tokens.push_back("<|user|>");      scores.push_back(0.0f);          // 273
-    tokens.push_back("<|assistant|>"); scores.push_back(0.0f);          // 274
-    tokens.push_back("<|end|>");       scores.push_back(0.0f);          // 275
-    tokens.push_back("<start_of_image>"); scores.push_back(0.0f);       // 276
-    tokens.push_back("<end_of_image>");   scores.push_back(0.0f);       // 277
-    tokens.push_back("<image_soft_token>"); scores.push_back(0.0f);     // 278
+    tokens.push_back("<|user|>");
+    scores.push_back(0.0f);  // 273
+    tokens.push_back("<|assistant|>");
+    scores.push_back(0.0f);  // 274
+    tokens.push_back("<|end|>");
+    scores.push_back(0.0f);  // 275
+    tokens.push_back("<start_of_image>");
+    scores.push_back(0.0f);  // 276
+    tokens.push_back("<end_of_image>");
+    scores.push_back(0.0f);  // 277
+    tokens.push_back("<image_soft_token>");
+    scores.push_back(0.0f);  // 278
 
     Tokenizer tok;
     tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
@@ -93,7 +121,8 @@ static bool contains(const std::vector<int32_t>& v, int32_t id) {
 // Helper: find first occurrence of id in vector, returns -1 if not found
 static int find_pos(const std::vector<int32_t>& v, int32_t id) {
     auto it = std::find(v.begin(), v.end(), id);
-    if (it == v.end()) return -1;
+    if (it == v.end())
+        return -1;
     return static_cast<int>(it - v.begin());
 }
 
@@ -114,8 +143,7 @@ TEST(ChatTemplateDetectTest, Llama3) {
 }
 
 TEST(ChatTemplateDetectTest, Gemma) {
-    EXPECT_EQ(ChatTemplate::detect_family("<start_of_turn>user\n"),
-              ChatTemplateFamily::GEMMA);
+    EXPECT_EQ(ChatTemplate::detect_family("<start_of_turn>user\n"), ChatTemplateFamily::GEMMA);
 }
 
 TEST(ChatTemplateDetectTest, Llama2) {
@@ -127,60 +155,51 @@ TEST(ChatTemplateDetectTest, Llama2) {
 // of Llama2 with [TOOL_CALLS] / [AVAILABLE_TOOLS]. Must be detected as V3
 // before falling through to the LLAMA2 [INST] check.
 TEST(ChatTemplateDetectTest, MistralV3_ToolCalls) {
-    EXPECT_EQ(ChatTemplate::detect_family(
-                  "[INST] {{ message.content }} [/INST]"
-                  "{% if tool_calls %}[TOOL_CALLS]{% endif %}"),
+    EXPECT_EQ(ChatTemplate::detect_family("[INST] {{ message.content }} [/INST]"
+                                          "{% if tool_calls %}[TOOL_CALLS]{% endif %}"),
               ChatTemplateFamily::MISTRAL_V3);
 }
 
 TEST(ChatTemplateDetectTest, MistralV3_AvailableTools) {
-    EXPECT_EQ(ChatTemplate::detect_family(
-                  "{% if available_tools %}[AVAILABLE_TOOLS]{{ available_tools }}"
-                  "[/AVAILABLE_TOOLS]{% endif %}[INST] {{ content }} [/INST]"),
+    EXPECT_EQ(ChatTemplate::detect_family("{% if available_tools %}[AVAILABLE_TOOLS]{{ available_tools }}"
+                                          "[/AVAILABLE_TOOLS]{% endif %}[INST] {{ content }} [/INST]"),
               ChatTemplateFamily::MISTRAL_V3);
 }
 
 // Plain Mistral V1/V2 (no tool markers) still detects as LLAMA2 — preserves
 // behavior for older Mistral and Llama-2 GGUFs.
 TEST(ChatTemplateDetectTest, OldMistralStillLlama2) {
-    EXPECT_EQ(ChatTemplate::detect_family("[INST] hi [/INST] hello"),
-              ChatTemplateFamily::LLAMA2);
+    EXPECT_EQ(ChatTemplate::detect_family("[INST] hi [/INST] hello"), ChatTemplateFamily::LLAMA2);
 }
 
 TEST(ChatTemplateDetectTest, ParseFamilyMistralV3) {
-    EXPECT_EQ(ChatTemplate::parse_family("mistral_v3"),
-              ChatTemplateFamily::MISTRAL_V3);
-    EXPECT_EQ(ChatTemplate::parse_family("mistral-v3"),
-              ChatTemplateFamily::MISTRAL_V3);
-    EXPECT_STREQ(chat_template_family_name(ChatTemplateFamily::MISTRAL_V3),
-                 "mistral_v3");
+    EXPECT_EQ(ChatTemplate::parse_family("mistral_v3"), ChatTemplateFamily::MISTRAL_V3);
+    EXPECT_EQ(ChatTemplate::parse_family("mistral-v3"), ChatTemplateFamily::MISTRAL_V3);
+    EXPECT_STREQ(chat_template_family_name(ChatTemplateFamily::MISTRAL_V3), "mistral_v3");
 }
 
 TEST(ChatTemplateDetectTest, Nemotron) {
-    EXPECT_EQ(ChatTemplate::detect_family("<extra_id_0>System\n"),
-              ChatTemplateFamily::NEMOTRON);
+    EXPECT_EQ(ChatTemplate::detect_family("<extra_id_0>System\n"), ChatTemplateFamily::NEMOTRON);
 }
 
 TEST(ChatTemplateDetectTest, DeepSeekR1) {
     // Fullwidth vertical bars U+FF5C = \xef\xbd\x9c
-    EXPECT_EQ(ChatTemplate::detect_family("<\xef\xbd\x9c" "User\xef\xbd\x9c>"),
+    EXPECT_EQ(ChatTemplate::detect_family("<\xef\xbd\x9c"
+                                          "User\xef\xbd\x9c>"),
               ChatTemplateFamily::DEEPSEEK_R1);
 }
 
 TEST(ChatTemplateDetectTest, Phi) {
-    EXPECT_EQ(ChatTemplate::detect_family("<|user|>\n{{ content }}<|end|>\n"),
-              ChatTemplateFamily::PHI);
+    EXPECT_EQ(ChatTemplate::detect_family("<|user|>\n{{ content }}<|end|>\n"), ChatTemplateFamily::PHI);
 }
 
 TEST(ChatTemplateDetectTest, UnknownReturnsRaw) {
-    EXPECT_EQ(ChatTemplate::detect_family("some random template {{ message }}"),
-              ChatTemplateFamily::RAW);
+    EXPECT_EQ(ChatTemplate::detect_family("some random template {{ message }}"), ChatTemplateFamily::RAW);
 }
 
 TEST(ChatTemplateDetectTest, ChatMLTakesPriorityOverPhi) {
     // Both <|im_start|> and <|end|> present -> ChatML wins (checked first)
-    EXPECT_EQ(ChatTemplate::detect_family("<|im_start|>role<|im_end|><|end|>"),
-              ChatTemplateFamily::CHATML);
+    EXPECT_EQ(ChatTemplate::detect_family("<|im_start|>role<|im_end|><|end|>"), ChatTemplateFamily::CHATML);
 }
 
 // ---- parse_family ----
@@ -335,7 +354,10 @@ TEST(ChatTemplateApplyTest, ChatMLBasicStructure) {
     // Should end with encoded "assistant\n" tokens (after final im_start)
     int last_im_start = -1;
     for (int i = static_cast<int>(ids.size()) - 1; i >= 0; i--) {
-        if (ids[i] == IM_START) { last_im_start = i; break; }
+        if (ids[i] == IM_START) {
+            last_im_start = i;
+            break;
+        }
     }
     EXPECT_GT(last_im_start, 0);
 }
@@ -597,8 +619,7 @@ TEST(ChatTemplateDefaultSysTest, ExtractFromJinja) {
         "{% for m in messages %}"
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         "<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
-        "{% endfor %}"
-    );
+        "{% endfor %}");
 
     ChatTemplate tpl;
     tpl.init(ChatTemplateFamily::CHATML, tok);
@@ -608,9 +629,7 @@ TEST(ChatTemplateDefaultSysTest, ExtractFromJinja) {
 TEST(ChatTemplateDefaultSysTest, SkipsJinjaVariables) {
     Tokenizer tok = make_chat_tokenizer();
     // Template with dynamic system content (has "messages" reference) — should be skipped
-    tok.set_chat_template_str(
-        "<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n"
-    );
+    tok.set_chat_template_str("<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n");
 
     ChatTemplate tpl;
     tpl.init(ChatTemplateFamily::CHATML, tok);
@@ -628,9 +647,7 @@ TEST(ChatTemplateDefaultSysTest, NoTemplateNoDefault) {
 
 TEST(ChatTemplateDefaultSysTest, InjectDefaultWhenNoUserSystem) {
     Tokenizer tok = make_chat_tokenizer();
-    tok.set_chat_template_str(
-        "<|im_start|>system\nDefault system.<|im_end|>\n"
-    );
+    tok.set_chat_template_str("<|im_start|>system\nDefault system.<|im_end|>\n");
 
     ChatTemplate tpl;
     tpl.init(ChatTemplateFamily::CHATML, tok);
@@ -647,9 +664,7 @@ TEST(ChatTemplateDefaultSysTest, InjectDefaultWhenNoUserSystem) {
 
 TEST(ChatTemplateDefaultSysTest, NoInjectionWhenUserProvidesSystem) {
     Tokenizer tok = make_chat_tokenizer();
-    tok.set_chat_template_str(
-        "<|im_start|>system\nDefault system.<|im_end|>\n"
-    );
+    tok.set_chat_template_str("<|im_start|>system\nDefault system.<|im_end|>\n");
 
     ChatTemplate tpl;
     tpl.init(ChatTemplateFamily::CHATML, tok);
@@ -711,7 +726,7 @@ TEST(ChatTemplateApplyTest, ChatMLSuppressThinking) {
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids_suppress = tpl.apply(tok, msgs, /*suppress_thinking=*/true);
-    auto ids_normal   = tpl.apply(tok, msgs, /*suppress_thinking=*/false);
+    auto ids_normal = tpl.apply(tok, msgs, /*suppress_thinking=*/false);
 
     ASSERT_FALSE(ids_suppress.empty());
     // suppress_thinking injects "/no_think" as a system message, producing more tokens
@@ -798,14 +813,11 @@ protected:
     std::filesystem::path tmp_dir_;
 
     void SetUp() override {
-        tmp_dir_ = std::filesystem::temp_directory_path() /
-                   ("imp_test_ct_" + std::to_string(::getpid()));
+        tmp_dir_ = std::filesystem::temp_directory_path() / ("imp_test_ct_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmp_dir_);
     }
 
-    void TearDown() override {
-        std::filesystem::remove_all(tmp_dir_);
-    }
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
 
     void write_tokenizer_config(const std::string& json) {
         std::ofstream f(tmp_dir_ / "tokenizer_config.json");
@@ -852,5 +864,5 @@ TEST_F(HFChatTemplateTest, MissingField) {
     EXPECT_TRUE(result.empty());
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

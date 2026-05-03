@@ -28,25 +28,31 @@ struct MockPagedCache {
     half* d_cache = nullptr;
 
     MockPagedCache(int nkv, int hd, int nblocks, int bs = kBlockSize)
-        : n_kv_heads(nkv), head_dim(hd), n_blocks(nblocks), block_size(bs)
-        , row_elems(nkv * hd), block_stride(bs * nkv * hd) {
+        : n_kv_heads(nkv),
+          head_dim(hd),
+          n_blocks(nblocks),
+          block_size(bs),
+          row_elems(nkv * hd),
+          block_stride(bs * nkv * hd) {
         size_t total = static_cast<size_t>(n_blocks) * block_stride * sizeof(half);
         cudaMalloc(&d_cache, total);
         cudaMemset(d_cache, 0, total);
     }
 
     ~MockPagedCache() {
-        if (d_cache) cudaFree(d_cache);
+        if (d_cache)
+            cudaFree(d_cache);
     }
 
     // Read one slot from the cache (block_id, slot_in_block) → host vector
     std::vector<float> read_slot(int block_id, int slot) {
         std::vector<half> h(row_elems);
-        half* src = d_cache + static_cast<int64_t>(block_id) * block_stride
-                            + static_cast<int64_t>(slot) * row_elems;
+        half* src = d_cache + static_cast<int64_t>(block_id) * block_stride +
+                    static_cast<int64_t>(slot) * row_elems;
         cudaMemcpy(h.data(), src, row_elems * sizeof(half), cudaMemcpyDeviceToHost);
         std::vector<float> result(row_elems);
-        for (int i = 0; i < row_elems; i++) result[i] = __half2float(h[i]);
+        for (int i = 0; i < row_elems; i++)
+            result[i] = __half2float(h[i]);
         return result;
     }
 };
@@ -89,10 +95,10 @@ TEST(KVCacheWriteTest, BasicPagedWrite) {
     MockPagedCache cache(n_kv_heads, head_dim, 8);
 
     // Launch kernel
-    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(
-        d_data, d_positions, d_bt, cache.d_cache,
-        cache.block_stride, row_elems, kBlockSize, n_tokens,
-        0 /* max_blocks_per_seq=0 → flat */, 1 /* n_sequences */);
+    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(d_data, d_positions, d_bt, cache.d_cache,
+                                                         cache.block_stride, row_elems, kBlockSize, n_tokens,
+                                                         0 /* max_blocks_per_seq=0 → flat */,
+                                                         1 /* n_sequences */);
     cudaDeviceSynchronize();
 
     // Verify: block 5, slot 3 should have all 1.0
@@ -154,11 +160,9 @@ TEST(KVCacheWriteTest, FusedKVWrite) {
     MockPagedCache v_cache(n_kv_heads, head_dim, 4);
 
     dim3 grid(n_tokens, 2);  // blockIdx.y: 0=K, 1=V
-    write_kv_cache_fused_kernel<<<grid, 256, 0, nullptr>>>(
-        d_k, d_v, d_pos, d_bt,
-        k_cache.d_cache, v_cache.d_cache,
-        k_cache.block_stride, row_elems, kBlockSize, n_tokens,
-        0, 1);
+    write_kv_cache_fused_kernel<<<grid, 256, 0, nullptr>>>(d_k, d_v, d_pos, d_bt, k_cache.d_cache,
+                                                           v_cache.d_cache, k_cache.block_stride, row_elems,
+                                                           kBlockSize, n_tokens, 0, 1);
     cudaDeviceSynchronize();
 
     // K cache: block 0, slot 5 = 3.0
@@ -220,10 +224,9 @@ TEST(KVCacheWriteTest, BatchedBlockTable) {
 
     MockPagedCache cache(n_kv_heads, head_dim, 10);
 
-    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(
-        d_data, d_pos, d_bt, cache.d_cache,
-        cache.block_stride, row_elems, kBlockSize, n_tokens,
-        max_blocks_per_seq, 2 /* n_sequences */);
+    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(d_data, d_pos, d_bt, cache.d_cache,
+                                                         cache.block_stride, row_elems, kBlockSize, n_tokens,
+                                                         max_blocks_per_seq, 2 /* n_sequences */);
     cudaDeviceSynchronize();
 
     // seq0: pos 8 → block_idx 0, slot 8. bt[0*3+0]=1 → physical block 1
@@ -255,8 +258,8 @@ TEST(KVCacheWriteTest, Int8PerHeadScale) {
     // Head 0: values in [-1, 1], Head 1: values in [-10, 10]
     std::vector<half> h_data(row_elems);
     for (int d = 0; d < head_dim; d++) {
-        float v0 = static_cast<float>(d) / head_dim * 2.0f - 1.0f;  // [-1, 1]
-        float v1 = static_cast<float>(d) / head_dim * 20.0f - 10.0f; // [-10, 10]
+        float v0 = static_cast<float>(d) / head_dim * 2.0f - 1.0f;    // [-1, 1]
+        float v1 = static_cast<float>(d) / head_dim * 20.0f - 10.0f;  // [-10, 10]
         h_data[0 * head_dim + d] = __float2half(v0);
         h_data[1 * head_dim + d] = __float2half(v1);
     }
@@ -294,12 +297,10 @@ TEST(KVCacheWriteTest, Int8PerHeadScale) {
 
     // Launch: blockIdx.y=0 writes K
     dim3 grid(n_tokens, 2);
-    write_kv_cache_int8_kernel<<<grid, 256, 0, nullptr>>>(
-        d_data, d_data,  // K and V same data for simplicity
-        d_pos, d_bt,
-        d_k_cache, d_v_cache, d_k_scale, d_v_scale,
-        block_stride, scale_block_stride,
-        n_kv_heads, head_dim, kBlockSize, n_tokens, 0, 1);
+    write_kv_cache_int8_kernel<<<grid, 256, 0, nullptr>>>(d_data, d_data,  // K and V same data for simplicity
+                                                          d_pos, d_bt, d_k_cache, d_v_cache, d_k_scale,
+                                                          d_v_scale, block_stride, scale_block_stride,
+                                                          n_kv_heads, head_dim, kBlockSize, n_tokens, 0, 1);
     cudaDeviceSynchronize();
 
     // Read K scales for slot 0
@@ -337,5 +338,5 @@ TEST(KVCacheWriteTest, Int8PerHeadScale) {
     cudaFree(d_v_scale);
 }
 
-} // anonymous namespace
-} // namespace imp
+}  // anonymous namespace
+}  // namespace imp

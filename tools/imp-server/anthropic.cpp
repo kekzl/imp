@@ -17,8 +17,10 @@ namespace {
 // Turn an Anthropic message `content` field (string | [content_block]) into
 // the OpenAI content field (string | [OpenAI_part]).
 json convert_message_content(const json& anth_content) {
-    if (anth_content.is_string()) return anth_content;
-    if (!anth_content.is_array()) return "";
+    if (anth_content.is_string())
+        return anth_content;
+    if (!anth_content.is_array())
+        return "";
 
     // Special case: a single text block collapses to a plain string, which
     // is what the OpenAI code path prefers.
@@ -41,15 +43,10 @@ json convert_message_content(const json& anth_content) {
             if (src_type == "base64") {
                 std::string mime = src.value("media_type", "image/png");
                 std::string data = src.value("data", "");
-                oai_parts.push_back({
-                    {"type", "image_url"},
-                    {"image_url", {{"url", "data:" + mime + ";base64," + data}}}
-                });
+                oai_parts.push_back(
+                    {{"type", "image_url"}, {"image_url", {{"url", "data:" + mime + ";base64," + data}}}});
             } else if (src_type == "url") {
-                oai_parts.push_back({
-                    {"type", "image_url"},
-                    {"image_url", {{"url", src.value("url", "")}}}
-                });
+                oai_parts.push_back({{"type", "image_url"}, {"image_url", {{"url", src.value("url", "")}}}});
             }
         } else if (type == "tool_use") {
             // Assistant message previously produced a tool_use block. The
@@ -85,7 +82,8 @@ void push_assistant_turn(json& out, const json& anth_msg) {
     for (const auto& block : content) {
         std::string type = block.value("type", "");
         if (type == "text") {
-            if (!text_accum.empty()) text_accum += "\n";
+            if (!text_accum.empty())
+                text_accum += "\n";
             text_accum += block.value("text", "");
         } else if (type == "tool_use") {
             std::string id = block.value("id", "");
@@ -94,17 +92,19 @@ void push_assistant_turn(json& out, const json& anth_msg) {
             tool_calls.push_back({
                 {"id", id},
                 {"type", "function"},
-                {"function", {
-                    {"name", name},
-                    {"arguments", input.dump()},
-                }},
+                {"function",
+                 {
+                     {"name", name},
+                     {"arguments", input.dump()},
+                 }},
             });
         }
         // thinking blocks: drop for OpenAI (no equivalent, imp side
         // exposes them through reasoning_content independently).
     }
     oai_msg["content"] = text_accum.empty() ? json(nullptr) : json(text_accum);
-    if (!tool_calls.empty()) oai_msg["tool_calls"] = std::move(tool_calls);
+    if (!tool_calls.empty())
+        oai_msg["tool_calls"] = std::move(tool_calls);
     out.push_back(std::move(oai_msg));
 }
 
@@ -134,11 +134,13 @@ void push_user_turn(json& out, const json& anth_msg) {
             std::string body;
             if (block.contains("content")) {
                 const auto& c = block["content"];
-                if (c.is_string()) body = c.get<std::string>();
+                if (c.is_string())
+                    body = c.get<std::string>();
                 else if (c.is_array()) {
                     for (const auto& p : c) {
                         if (p.is_object() && p.value("type", "") == "text") {
-                            if (!body.empty()) body += "\n";
+                            if (!body.empty())
+                                body += "\n";
                             body += p.value("text", "");
                         }
                     }
@@ -156,14 +158,16 @@ void push_user_turn(json& out, const json& anth_msg) {
             json tmp = json::array({block});
             auto converted = convert_message_content(tmp);
             if (converted.is_array()) {
-                for (const auto& p : converted) other_parts.push_back(p);
+                for (const auto& p : converted)
+                    other_parts.push_back(p);
             }
         }
     }
 
     // Tool-result messages come first (they refer back to the preceding
     // assistant turn); then any leftover user content.
-    for (auto& tr : tool_results) out.push_back(std::move(tr));
+    for (auto& tr : tool_results)
+        out.push_back(std::move(tr));
     if (!other_parts.empty()) {
         // Collapse a single text part to a bare string for readability
         if (other_parts.size() == 1 && other_parts[0].value("type", "") == "text") {
@@ -178,16 +182,19 @@ void push_user_turn(json& out, const json& anth_msg) {
 // them into OpenAI tools[] entries.
 json convert_tools(const json& anth_tools) {
     json out = json::array();
-    if (!anth_tools.is_array()) return out;
+    if (!anth_tools.is_array())
+        return out;
     for (const auto& t : anth_tools) {
-        if (!t.is_object()) continue;
+        if (!t.is_object())
+            continue;
         out.push_back({
             {"type", "function"},
-            {"function", {
-                {"name", t.value("name", "")},
-                {"description", t.value("description", "")},
-                {"parameters", t.value("input_schema", json::object())},
-            }},
+            {"function",
+             {
+                 {"name", t.value("name", "")},
+                 {"description", t.value("description", "")},
+                 {"parameters", t.value("input_schema", json::object())},
+             }},
         });
     }
     return out;
@@ -195,14 +202,20 @@ json convert_tools(const json& anth_tools) {
 
 // Convert Anthropic tool_choice -> OpenAI tool_choice. Defaults to "auto".
 json convert_tool_choice(const json& anth_choice) {
-    if (anth_choice.is_null()) return "auto";
-    if (anth_choice.is_string()) return anth_choice;  // user supplied OpenAI-style
-    if (!anth_choice.is_object()) return "auto";
+    if (anth_choice.is_null())
+        return "auto";
+    if (anth_choice.is_string())
+        return anth_choice;  // user supplied OpenAI-style
+    if (!anth_choice.is_object())
+        return "auto";
 
     std::string type = anth_choice.value("type", "auto");
-    if (type == "auto") return "auto";
-    if (type == "none") return "none";
-    if (type == "any") return "required";  // "must call some tool"
+    if (type == "auto")
+        return "auto";
+    if (type == "none")
+        return "none";
+    if (type == "any")
+        return "required";  // "must call some tool"
     if (type == "tool") {
         return json{
             {"type", "function"},
@@ -214,20 +227,24 @@ json convert_tool_choice(const json& anth_choice) {
 
 // Anthropic allows `system` as string OR [content_block]; collapse to text.
 std::string flatten_system(const json& system_field) {
-    if (system_field.is_null()) return "";
-    if (system_field.is_string()) return system_field.get<std::string>();
-    if (!system_field.is_array()) return "";
+    if (system_field.is_null())
+        return "";
+    if (system_field.is_string())
+        return system_field.get<std::string>();
+    if (!system_field.is_array())
+        return "";
     std::string out;
     for (const auto& block : system_field) {
         if (block.is_object() && block.value("type", "") == "text") {
-            if (!out.empty()) out += "\n";
+            if (!out.empty())
+                out += "\n";
             out += block.value("text", "");
         }
     }
     return out;
 }
 
-}  // anon namespace
+}  // namespace
 
 json anthropic_to_openai_body(const json& anth) {
     json oai = json::object();
@@ -236,16 +253,21 @@ json anthropic_to_openai_body(const json& anth) {
     oai["model"] = anth.value("model", "");
     // Anthropic requires max_tokens; OpenAI's default is unbounded, but we
     // prefer to pass the user's intent through.
-    if (anth.contains("max_tokens")) oai["max_tokens"] = anth["max_tokens"];
-    if (anth.contains("temperature")) oai["temperature"] = anth["temperature"];
-    if (anth.contains("top_p"))       oai["top_p"]       = anth["top_p"];
-    if (anth.contains("top_k"))       oai["top_k"]       = anth["top_k"];
-    if (anth.contains("stream"))      oai["stream"]      = anth["stream"];
-    if (anth.contains("metadata") && anth["metadata"].is_object() &&
-        anth["metadata"].contains("user_id")) {
+    if (anth.contains("max_tokens"))
+        oai["max_tokens"] = anth["max_tokens"];
+    if (anth.contains("temperature"))
+        oai["temperature"] = anth["temperature"];
+    if (anth.contains("top_p"))
+        oai["top_p"] = anth["top_p"];
+    if (anth.contains("top_k"))
+        oai["top_k"] = anth["top_k"];
+    if (anth.contains("stream"))
+        oai["stream"] = anth["stream"];
+    if (anth.contains("metadata") && anth["metadata"].is_object() && anth["metadata"].contains("user_id")) {
         oai["user"] = anth["metadata"]["user_id"];
     }
-    if (anth.contains("stop_sequences")) oai["stop"] = anth["stop_sequences"];
+    if (anth.contains("stop_sequences"))
+        oai["stop"] = anth["stop_sequences"];
 
     // Messages -------------------------------------------------------------
     json oai_messages = json::array();
@@ -272,8 +294,7 @@ json anthropic_to_openai_body(const json& anth) {
     oai["messages"] = std::move(oai_messages);
 
     // Tools ----------------------------------------------------------------
-    if (anth.contains("tools") && anth["tools"].is_array() &&
-        !anth["tools"].empty()) {
+    if (anth.contains("tools") && anth["tools"].is_array() && !anth["tools"].empty()) {
         oai["tools"] = convert_tools(anth["tools"]);
     }
     if (anth.contains("tool_choice")) {
@@ -289,8 +310,7 @@ json anthropic_to_openai_body(const json& anth) {
 
 std::string make_message_id(uint64_t counter) {
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "msg_imp_%016llx",
-                  static_cast<unsigned long long>(counter));
+    std::snprintf(buf, sizeof(buf), "msg_imp_%016llx", static_cast<unsigned long long>(counter));
     return std::string(buf);
 }
 
@@ -298,7 +318,8 @@ std::string tool_call_id_to_anthropic(const std::string& openai_id) {
     // OpenAI-style id from imp: "call_imp_<counter>". Rewrite to Anthropic's
     // "toolu_..." prefix so well-behaved Anthropic clients accept it.
     constexpr const char* kSrcPrefix = "call_imp_";
-    if (openai_id.rfind("toolu_", 0) == 0) return openai_id;  // already OK
+    if (openai_id.rfind("toolu_", 0) == 0)
+        return openai_id;  // already OK
     if (openai_id.rfind(kSrcPrefix, 0) == 0) {
         return std::string("toolu_") + openai_id.substr(std::char_traits<char>::length(kSrcPrefix));
     }
@@ -316,8 +337,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
 
     // Dig into the first choice (we reject n>1 for /v1/messages upstream).
     json choice = json::object();
-    if (oai.contains("choices") && oai["choices"].is_array() &&
-        !oai["choices"].empty()) {
+    if (oai.contains("choices") && oai["choices"].is_array() && !oai["choices"].empty()) {
         choice = oai["choices"][0];
     }
     const json& msg = choice.contains("message") ? choice["message"] : json::object();
@@ -362,18 +382,23 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     // Map finish_reason -> stop_reason.
     std::string finish = choice.value("finish_reason", "stop");
     std::string stop_reason;
-    if (finish == "stop")             stop_reason = "end_turn";
-    else if (finish == "length")      stop_reason = "max_tokens";
-    else if (finish == "tool_calls")  stop_reason = "tool_use";
-    else if (finish == "cancelled")   stop_reason = "end_turn";
-    else                               stop_reason = finish;  // pass through
+    if (finish == "stop")
+        stop_reason = "end_turn";
+    else if (finish == "length")
+        stop_reason = "max_tokens";
+    else if (finish == "tool_calls")
+        stop_reason = "tool_use";
+    else if (finish == "cancelled")
+        stop_reason = "end_turn";
+    else
+        stop_reason = finish;  // pass through
 
     json usage_out = {
-        {"input_tokens",  0},
+        {"input_tokens", 0},
         {"output_tokens", 0},
     };
     if (oai.contains("usage") && oai["usage"].is_object()) {
-        usage_out["input_tokens"]  = oai["usage"].value("prompt_tokens",     0);
+        usage_out["input_tokens"] = oai["usage"].value("prompt_tokens", 0);
         usage_out["output_tokens"] = oai["usage"].value("completion_tokens", 0);
     }
 
@@ -386,14 +411,14 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     }
 
     return {
-        {"id",            id},
-        {"type",          "message"},
-        {"role",          "assistant"},
-        {"content",       std::move(content)},
-        {"model",         anth_model},
-        {"stop_reason",   std::move(stop_reason)},
+        {"id", id},
+        {"type", "message"},
+        {"role", "assistant"},
+        {"content", std::move(content)},
+        {"model", anth_model},
+        {"stop_reason", std::move(stop_reason)},
         {"stop_sequence", nullptr},
-        {"usage",         std::move(usage_out)},
+        {"usage", std::move(usage_out)},
     };
 }
 

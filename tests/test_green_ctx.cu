@@ -19,11 +19,11 @@ static bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!HasCudaDevice()) {                                                \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!HasCudaDevice()) {                         \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
 // Simple kernel for testing graph capture
@@ -274,9 +274,7 @@ TEST(CudaGraphRunnerTest, FullLifecycle) {
     CudaGraphRunner runner;
     runner.set_warmup_steps(1);
 
-    runner.set_decode_fn([d_data, N](cudaStream_t s) {
-        add_one_kernel<<<1, N, 0, s>>>(d_data, N);
-    });
+    runner.set_decode_fn([d_data, N](cudaStream_t s) { add_one_kernel<<<1, N, 0, s>>>(d_data, N); });
 
     // Step 1: warmup (direct execution)
     ASSERT_TRUE(runner.execute(stream));
@@ -305,7 +303,8 @@ TEST(CudaGraphRunnerTest, FullLifecycle) {
     // then capture also replays once, plus 3 more replays = 1 + 0 + 4 = 5 runs
     // Actually let me re-check the CudaGraphRunner implementation:
     // - warmup: decode_fn_(stream) -> data += 1 (value = 1)
-    // - capture: begin_capture, decode_fn_(stream) [recorded, not executed], end_capture, replay -> data += 1 (value = 2)
+    // - capture: begin_capture, decode_fn_(stream) [recorded, not executed], end_capture, replay -> data += 1
+    // (value = 2)
     // - replay x3 -> data += 3 (value = 5)
     std::vector<float> result(N);
     cudaMemcpy(result.data(), d_data, N * sizeof(float), cudaMemcpyDeviceToHost);
@@ -328,9 +327,7 @@ TEST(CudaGraphRunnerTest, Invalidate) {
 
     CudaGraphRunner runner;
     runner.set_warmup_steps(1);
-    runner.set_decode_fn([d_data](cudaStream_t s) {
-        add_one_kernel<<<1, 1, 0, s>>>(d_data, 1);
-    });
+    runner.set_decode_fn([d_data](cudaStream_t s) { add_one_kernel<<<1, 1, 0, s>>>(d_data, 1); });
 
     // Warmup + capture
     runner.execute(stream);
@@ -432,5 +429,5 @@ TEST(PDLTest, ScopedPDL) {
     EXPECT_TRUE(true);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

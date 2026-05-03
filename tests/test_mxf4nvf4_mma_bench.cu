@@ -23,10 +23,9 @@ TEST(Mxf4nvf4MmaBenchTest, BlockScaleBeatsLegacy) {
     cudaStreamDestroy(stream);
 
     std::printf("\n=== MMA instruction throughput (170 warps × 1M iters) ===\n");
-    std::printf("  kind::f8f6f4.m16n8k32               %7.2f ms  %7.2f TOPS\n",
-                r.legacy_ms, r.legacy_tops);
-    std::printf("  kind::mxf4nvf4.block_scale.m16n8k64 %7.2f ms  %7.2f TOPS\n",
-                r.blockscale_ms, r.blockscale_tops);
+    std::printf("  kind::f8f6f4.m16n8k32               %7.2f ms  %7.2f TOPS\n", r.legacy_ms, r.legacy_tops);
+    std::printf("  kind::mxf4nvf4.block_scale.m16n8k64 %7.2f ms  %7.2f TOPS\n", r.blockscale_ms,
+                r.blockscale_tops);
     std::printf("  Speedup (blockscale / legacy):      %5.2fx\n\n", r.speedup);
 
     // Numerical guards
@@ -41,5 +40,5 @@ TEST(Mxf4nvf4MmaBenchTest, BlockScaleBeatsLegacy) {
         << "committing to the integration.";
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

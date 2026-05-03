@@ -16,9 +16,8 @@ VisionPipeline::~VisionPipeline() {
     }
 }
 
-bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model,
-                           Model* text_model, VRAMAllocator& alloc,
-                           cudaStream_t stream) {
+bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model* text_model,
+                          VRAMAllocator& alloc, cudaStream_t stream) {
     alloc_ = &alloc;
 
     model_ = load_vision_gguf(mmproj_path);
@@ -73,17 +72,14 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model,
         eoi_id_ = tok->find_token("<end_of_image>");
         if (eoi_id_ < 0 && mcfg.vocab_size > 256000)
             eoi_id_ = 256000;
-        IMP_LOG_INFO("Vision tokens: soft=%d, boi=%d, eoi=%d",
-                     soft_token_id_, boi_id_, eoi_id_);
+        IMP_LOG_INFO("Vision tokens: soft=%d, boi=%d, eoi=%d", soft_token_id_, boi_id_, eoi_id_);
     }
 
-    IMP_LOG_INFO("Vision encoder ready: %d image tokens -> %d-dim embeddings",
-                 n_img_tokens, lm_d);
+    IMP_LOG_INFO("Vision encoder ready: %d image tokens -> %d-dim embeddings", n_img_tokens, lm_d);
     return true;
 }
 
-bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels,
-                                   cudaStream_t stream) {
+bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream) {
     size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
     half* d_px = d_pixels_;
     bool need_free = false;
@@ -94,17 +90,16 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels,
         }
         need_free = true;
     }
-    cudaMemcpyAsync(d_px, h_pixels, pixel_bytes,
-                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_px, h_pixels, pixel_bytes, cudaMemcpyHostToDevice, stream);
 
     bool ok = encoder_->encode(d_px, d_embeddings_, stream);
     cudaStreamSynchronize(stream);
-    if (need_free) cudaFree(d_px);
+    if (need_free)
+        cudaFree(d_px);
 
     if (ok) {
         has_input_ = true;
-        IMP_LOG_INFO("Vision: encoded image -> %d tokens",
-                     model_->config.num_image_tokens);
+        IMP_LOG_INFO("Vision: encoded image -> %d tokens", model_->config.num_image_tokens);
     }
     return ok;
 }
@@ -116,9 +111,8 @@ bool VisionPipeline::set_image(const std::string& path, cudaStream_t stream) {
     }
 
     ImageData img;
-    if (!load_and_preprocess_image(path, model_->config.image_size,
-                                    model_->config.image_mean,
-                                    model_->config.image_std, img)) {
+    if (!load_and_preprocess_image(path, model_->config.image_size, model_->config.image_mean,
+                                   model_->config.image_std, img)) {
         return false;
     }
 
@@ -126,18 +120,15 @@ bool VisionPipeline::set_image(const std::string& path, cudaStream_t stream) {
     return encode_image(img.pixels.data(), n_pixels, stream);
 }
 
-bool VisionPipeline::set_image_from_memory(const uint8_t* data, size_t len,
-                                            cudaStream_t stream) {
+bool VisionPipeline::set_image_from_memory(const uint8_t* data, size_t len, cudaStream_t stream) {
     if (!encoder_) {
         IMP_LOG_ERROR("set_image_from_memory: no vision model loaded");
         return false;
     }
 
     ImageData img;
-    if (!load_and_preprocess_image_from_memory(data, len,
-                                                model_->config.image_size,
-                                                model_->config.image_mean,
-                                                model_->config.image_std, img)) {
+    if (!load_and_preprocess_image_from_memory(data, len, model_->config.image_size,
+                                               model_->config.image_mean, model_->config.image_std, img)) {
         return false;
     }
 
@@ -145,4 +136,4 @@ bool VisionPipeline::set_image_from_memory(const uint8_t* data, size_t len,
     return encode_image(img.pixels.data(), n_pixels, stream);
 }
 
-} // namespace imp
+}  // namespace imp

@@ -23,9 +23,12 @@ static uint16_t float_to_fp16(float val) {
     uint32_t f_sign = (fbits >> 31) & 1;
     int f_exp = static_cast<int>((fbits >> 23) & 0xFF) - 127;
     uint32_t f_man = fbits & 0x7FFFFF;
-    if ((fbits & 0x7FFFFFFF) == 0) return static_cast<uint16_t>(f_sign << 15);
-    if (f_exp > 15) return static_cast<uint16_t>((f_sign << 15) | 0x7C00);
-    if (f_exp < -24) return static_cast<uint16_t>(f_sign << 15);
+    if ((fbits & 0x7FFFFFFF) == 0)
+        return static_cast<uint16_t>(f_sign << 15);
+    if (f_exp > 15)
+        return static_cast<uint16_t>((f_sign << 15) | 0x7C00);
+    if (f_exp < -24)
+        return static_cast<uint16_t>(f_sign << 15);
     if (f_exp < -14) {
         int shift = -14 - f_exp;
         uint32_t subnormal_man = (0x800000 | f_man) >> (shift + 13);
@@ -40,10 +43,8 @@ static uint16_t float_to_fp16(float val) {
 // Build a synthetic FP16 model for benchmarking
 // ---------------------------------------------------------------------------
 
-static std::unique_ptr<Model> make_bench_model(
-    int d_model, int d_ff, int n_heads, int n_kv_heads, int n_layers,
-    int vocab_size, int max_seq_len)
-{
+static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_heads, int n_kv_heads,
+                                               int n_layers, int vocab_size, int max_seq_len) {
     auto model = std::make_unique<Model>();
     auto& cfg = model->config_;
     cfg.arch = ModelArch::LLAMA;
@@ -75,7 +76,8 @@ static std::unique_ptr<Model> make_bench_model(
     auto make_norm_weight = [](int dim) -> Tensor {
         auto* buf = new uint16_t[dim];
         uint16_t one = float_to_fp16(1.0f);
-        for (int i = 0; i < dim; ++i) buf[i] = one;
+        for (int i = 0; i < dim; ++i)
+            buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
         return Tensor(buf, QType::F16, 1, shape, false);
     };
@@ -142,29 +144,28 @@ void bench_e2e() {
     }
 
     // Model dimensions (small for benchmarking the full pipeline)
-    const int d_model    = 256;
-    const int d_ff       = 512;
-    const int n_heads    = 8;
+    const int d_model = 256;
+    const int d_ff = 512;
+    const int n_heads = 8;
     const int n_kv_heads = 8;
-    const int n_layers   = 4;
+    const int n_layers = 4;
     const int vocab_size = 1000;
     const int max_seq_len = 1024;
 
     const int warmup_iters = 3;
-    const int timed_iters  = 10;
+    const int timed_iters = 10;
 
     const std::vector<int> seq_lens = {32, 128, 512};
 
     printf("=== End-to-End Benchmark ===\n");
-    printf("Model: d=%d, ff=%d, heads=%d, layers=%d, vocab=%d\n\n",
-           d_model, d_ff, n_heads, n_layers, vocab_size);
+    printf("Model: d=%d, ff=%d, heads=%d, layers=%d, vocab=%d\n\n", d_model, d_ff, n_heads, n_layers,
+           vocab_size);
 
     // Initialize cuBLAS workspace (must be called before any GEMM)
     gemm_init();
 
     // Build and upload model
-    auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads,
-                                  n_layers, vocab_size, max_seq_len);
+    auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads, n_layers, vocab_size, max_seq_len);
     if (!model->upload_weights_gpu(QType::F16, nullptr)) {
         printf("bench_e2e: failed to upload weights to GPU\n");
         return;
@@ -200,10 +201,8 @@ void bench_e2e() {
         int* d_positions = nullptr;
         cudaMalloc(&d_tokens, seq_len * sizeof(int32_t));
         cudaMalloc(&d_positions, seq_len * sizeof(int));
-        cudaMemcpy(d_tokens, h_tokens.data(), seq_len * sizeof(int32_t),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(d_positions, h_positions.data(), seq_len * sizeof(int),
-                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_tokens, h_tokens.data(), seq_len * sizeof(int32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_positions, h_positions.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
 
         InferenceState state;
         state.token_ids = d_tokens;
@@ -252,10 +251,8 @@ void bench_e2e() {
         int* d_position = nullptr;
         cudaMalloc(&d_token, sizeof(int32_t));
         cudaMalloc(&d_position, sizeof(int));
-        cudaMemcpy(d_token, h_token.data(), sizeof(int32_t),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(d_position, h_position.data(), sizeof(int),
-                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_token, h_token.data(), sizeof(int32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_position, h_position.data(), sizeof(int), cudaMemcpyHostToDevice);
 
         InferenceState state;
         state.token_ids = d_token;
@@ -294,4 +291,4 @@ void bench_e2e() {
     printf("\n");
 }
 
-} // namespace imp
+}  // namespace imp

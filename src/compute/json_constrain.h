@@ -28,27 +28,26 @@ enum class JsonState : uint8_t {
 // Token category bitfield — each token gets a bitmask of which JSON categories
 // it belongs to. At decode time, the FSM produces an allowed_mask of categories.
 enum JsonTokenCat : uint16_t {
-    CAT_OPEN_BRACE   = 1 << 0,   // {
-    CAT_CLOSE_BRACE  = 1 << 1,   // }
+    CAT_OPEN_BRACE = 1 << 0,     // {
+    CAT_CLOSE_BRACE = 1 << 1,    // }
     CAT_OPEN_BRACKET = 1 << 2,   // [
-    CAT_CLOSE_BRACKET= 1 << 3,   // ]
-    CAT_COLON        = 1 << 4,   // :
-    CAT_COMMA        = 1 << 5,   // ,
-    CAT_QUOTE        = 1 << 6,   // " (starts/ends string)
-    CAT_STRING_CHAR  = 1 << 7,   // any char valid inside a string (including escaped)
+    CAT_CLOSE_BRACKET = 1 << 3,  // ]
+    CAT_COLON = 1 << 4,          // :
+    CAT_COMMA = 1 << 5,          // ,
+    CAT_QUOTE = 1 << 6,          // " (starts/ends string)
+    CAT_STRING_CHAR = 1 << 7,    // any char valid inside a string (including escaped)
     CAT_NUMBER_START = 1 << 8,   // 0-9, -
-    CAT_TRUE_START   = 1 << 9,   // t (starts "true")
-    CAT_FALSE_START  = 1 << 10,  // f (starts "false")
-    CAT_NULL_START   = 1 << 11,  // n (starts "null")
-    CAT_WHITESPACE   = 1 << 12,  // space, tab, newline
+    CAT_TRUE_START = 1 << 9,     // t (starts "true")
+    CAT_FALSE_START = 1 << 10,   // f (starts "false")
+    CAT_NULL_START = 1 << 11,    // n (starts "null")
+    CAT_WHITESPACE = 1 << 12,    // space, tab, newline
     CAT_LITERAL_CONT = 1 << 13,  // continuation of a partial literal (r, u, e, a, l, s)
-    CAT_NUMBER_CONT  = 1 << 14,  // 0-9, ., e, E, +, - (continuation of number)
+    CAT_NUMBER_CONT = 1 << 14,   // 0-9, ., e, E, +, - (continuation of number)
 };
 
 // Mask for tokens that can start a JSON value
-static constexpr uint16_t CAT_VALUE_START =
-    CAT_OPEN_BRACE | CAT_OPEN_BRACKET | CAT_QUOTE |
-    CAT_NUMBER_START | CAT_TRUE_START | CAT_FALSE_START | CAT_NULL_START;
+static constexpr uint16_t CAT_VALUE_START = CAT_OPEN_BRACE | CAT_OPEN_BRACKET | CAT_QUOTE | CAT_NUMBER_START |
+                                            CAT_TRUE_START | CAT_FALSE_START | CAT_NULL_START;
 
 class JsonConstrainer {
 public:
@@ -89,8 +88,8 @@ private:
     // FSM state
     std::vector<JsonState> state_stack_;
     JsonState current_state_ = JsonState::START;
-    std::string partial_literal_;   // for tracking partial "true"/"false"/"null"
-    std::string target_literal_;    // full expected literal
+    std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
+    std::string target_literal_;   // full expected literal
 
     // Device buffer for allowed mask (1 uint16_t, stable address)
     uint16_t* d_allowed_mask_ = nullptr;
@@ -102,4 +101,4 @@ private:
     void advance_char(char c);
 };
 
-} // namespace imp
+}  // namespace imp

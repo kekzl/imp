@@ -14,18 +14,12 @@ struct TokenLogprob {
 };
 
 struct TokenLogprobInfo {
-    float logprob;                       // logprob of the sampled token
-    std::string text;                    // decoded text of the sampled token
-    std::vector<TokenLogprob> top;       // top_logprobs alternatives
+    float logprob;                  // logprob of the sampled token
+    std::string text;               // decoded text of the sampled token
+    std::vector<TokenLogprob> top;  // top_logprobs alternatives
 };
 
-enum class RequestStatus {
-    PENDING,
-    PREFILLING,
-    DECODING,
-    FINISHED,
-    CANCELLED
-};
+enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
 const char* request_status_name(RequestStatus status);
 
@@ -43,20 +37,20 @@ struct Request {
     int seed = -1;
     float min_p = 0.0f;               // Min probability threshold (0 = disabled)
     float typical_p = 1.0f;           // Locally typical sampling (1.0 = disabled)
-    float repetition_penalty = 1.0f;   // >1 penalizes repeats (multiplicative)
-    float frequency_penalty = 0.0f;    // Subtractive per-occurrence
-    float presence_penalty = 0.0f;     // Subtractive binary (appeared or not)
+    float repetition_penalty = 1.0f;  // >1 penalizes repeats (multiplicative)
+    float frequency_penalty = 0.0f;   // Subtractive per-occurrence
+    float presence_penalty = 0.0f;    // Subtractive binary (appeared or not)
     int repeat_last_n = 0;            // How many recent tokens to scan for penalties (0 = all)
     float dry_multiplier = 0.0f;      // DRY penalty scale (0 = disabled)
     float dry_base = 1.75f;           // DRY exponential base
     int dry_allowed_length = 2;       // N-grams at or below this not penalized
     int dry_penalty_last_n = 0;       // How far back to scan (0 = all)
-    int mirostat = 0;                  // 0=off, 2=Mirostat v2
+    int mirostat = 0;                 // 0=off, 2=Mirostat v2
     float mirostat_tau = 5.0f;        // Target entropy
     float mirostat_eta = 0.1f;        // Learning rate
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
-    bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
-    bool in_think_block = false; // Currently inside <think>...</think> (suppress stop tokens)
+    bool ignore_eos = false;          // Don't stop on EOS (benchmark mode)
+    bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
     // Sliding-window decoded-text buffer for multi-token </think> detection.
     // Required for tokenizers that ship <think>/</think> as added_tokens with
     // special=False (Qwen3.6, Qwen3-Coder NVFP4 SafeTensors): the model emits
@@ -71,8 +65,8 @@ struct Request {
     // a 0-content completion.
     int think_exit_idx = -1;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
-    int prefill_offset = 0;    // Chunked prefill: tokens processed so far
-    int cached_tokens = 0;     // Tokens served from prefix cache (skipped in prefill)
+    int prefill_offset = 0;     // Chunked prefill: tokens processed so far
+    int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
 
     // Logprobs
     bool logprobs = false;                          // Return logprobs for sampled tokens
@@ -80,15 +74,13 @@ struct Request {
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
 
     // JSON mode
-    bool json_mode = false;                         // Constrain output to valid JSON
-    std::string json_schema;                        // JSON Schema string (empty = disabled)
+    bool json_mode = false;   // Constrain output to valid JSON
+    std::string json_schema;  // JSON Schema string (empty = disabled)
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;
 
-    int context_len() const {
-        return static_cast<int>(input_tokens.size() + output_tokens.size());
-    }
+    int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
 };
 
-} // namespace imp
+}  // namespace imp

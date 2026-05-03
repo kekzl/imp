@@ -12,9 +12,7 @@ namespace imp {
 // scales:  [num_groups, N] FP16 per-group scales
 // g_idx:   [K] INT32 group index (optional, nullptr for sequential groups)
 // out:     [N, K] FP16 output
-void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros,
-                   const half* scales, const int32_t* g_idx,
-                   int N, int K, int group_size,
-                   cudaStream_t stream = nullptr);
+void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales,
+                   const int32_t* g_idx, int N, int K, int group_size, cudaStream_t stream = nullptr);
 
-} // namespace imp
+}  // namespace imp

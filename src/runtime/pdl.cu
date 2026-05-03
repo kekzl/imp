@@ -18,8 +18,7 @@ static bool s_pdl_checked = false;
 
 void enable(const void* kernel_func) {
     enabled_kernels().insert(kernel_func);
-    IMP_LOG_DEBUG("PDL: enabled for kernel %p (registry size: %zu)",
-                  kernel_func, enabled_kernels().size());
+    IMP_LOG_DEBUG("PDL: enabled for kernel %p (registry size: %zu)", kernel_func, enabled_kernels().size());
 }
 
 void disable(const void* kernel_func) {
@@ -29,12 +28,14 @@ void disable(const void* kernel_func) {
 
 bool is_enabled(const void* kernel_func) {
     // Disable PDL globally via [runtime] no_pdl = true in imp.conf.
-    if (RuntimeConfig::current().runtime.no_pdl) return false;
+    if (RuntimeConfig::current().runtime.no_pdl)
+        return false;
     return enabled_kernels().count(kernel_func) > 0;
 }
 
 bool is_available() {
-    if (s_pdl_checked) return s_pdl_available;
+    if (s_pdl_checked)
+        return s_pdl_available;
     s_pdl_checked = true;
 
     int device;
@@ -54,5 +55,5 @@ bool is_available() {
     return s_pdl_available;
 }
 
-} // namespace pdl
-} // namespace imp
+}  // namespace pdl
+}  // namespace imp

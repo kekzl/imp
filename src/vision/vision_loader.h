@@ -10,4 +10,4 @@ namespace imp {
 // Weights are uploaded to GPU as FP16.
 std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path);
 
-} // namespace imp
+}  // namespace imp

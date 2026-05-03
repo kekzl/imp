@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/qtype.h"
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 #include <cstdint>
 #include <cstddef>
 #include <cassert>
@@ -16,13 +16,13 @@ inline const char* dtype_name(QType q) { return qtype_name(q); }
 static constexpr int kMaxDims = 4;
 
 struct Tensor {
-    void*   data         = nullptr;
-    QType   qtype        = QType::NONE;
-    int     ndim         = 0;
-    int64_t shape[kMaxDims]  = {};
+    void* data = nullptr;
+    QType qtype = QType::NONE;
+    int ndim = 0;
+    int64_t shape[kMaxDims] = {};
     int64_t stride[kMaxDims] = {};
-    bool    on_device    = false;
-    TensorKind kind      = TensorKind::UNKNOWN;
+    bool on_device = false;
+    TensorKind kind = TensorKind::UNKNOWN;
 
     // Sidecar metadata for block-quantised tensors:
     //   scales       — borrowed device pointer to per-block scales
@@ -33,8 +33,8 @@ struct Tensor {
     //                  (multiplicative identity). For llm-compressor
     //                  NVFP4 the loader pre-applies the 1/x reciprocal
     //                  so the runtime can always multiply.
-    void* scales        = nullptr;
-    float tensor_scale  = 1.0f;
+    void* scales = nullptr;
+    float tensor_scale = 1.0f;
 
     Tensor() = default;
 
@@ -42,13 +42,12 @@ struct Tensor {
     Tensor(void* data, QType qtype, int ndim, const int64_t* shape, bool on_device);
 
     // Create with explicit strides
-    Tensor(void* data, QType qtype, int ndim, const int64_t* shape,
-           const int64_t* stride, bool on_device);
+    Tensor(void* data, QType qtype, int ndim, const int64_t* shape, const int64_t* stride, bool on_device);
 
     int64_t numel() const;
-    size_t  nbytes() const;
-    bool    is_contiguous() const;
-    void    compute_strides();
+    size_t nbytes() const;
+    bool is_contiguous() const;
+    void compute_strides();
 
     Tensor reshape(int new_ndim, const int64_t* new_shape) const;
     Tensor slice(int64_t start, int64_t end) const;
@@ -56,4 +55,4 @@ struct Tensor {
     std::string to_string() const;
 };
 
-} // namespace imp
+}  // namespace imp

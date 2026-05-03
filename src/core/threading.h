@@ -24,12 +24,10 @@ public:
 
     // Submit a task and get a future for the result.
     template <typename F, typename... Args>
-    auto submit(F&& f, Args&&... args)
-        -> std::future<std::invoke_result_t<F, Args...>> {
+    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
         using R = std::invoke_result_t<F, Args...>;
         auto task = std::make_shared<std::packaged_task<R()>>(
-            [func = std::forward<F>(f),
-             ...args_captured = std::forward<Args>(args)]() mutable {
+            [func = std::forward<F>(f), ... args_captured = std::forward<Args>(args)]() mutable {
                 return std::invoke(std::move(func), std::move(args_captured)...);
             });
         auto future = task->get_future();
@@ -50,4 +48,4 @@ private:
     std::condition_variable cv_;
 };
 
-} // namespace imp
+}  // namespace imp

@@ -27,14 +27,12 @@ namespace imp {
 //
 // Requirements: sm_120+, head_dim ∈ {64, 128, 256} (HD=96 falls through
 // internally to legacy kind::f8f6f4 because 96 % 64 != 0).
-bool fmha_sm120_mxf4nvf4_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream);
+bool fmha_sm120_mxf4nvf4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                                 bool causal, int sliding_window, float softcap, cudaStream_t stream);
 
 // Reports whether the blockscale path is active (default ON; false only
 // when IMP_FMHA_BLOCKSCALE=0 explicitly disables it).
 bool mxf4nvf4_blockscale_enabled();
 bool mxf4nvf4_blockscale_disabled();
 
-} // namespace imp
+}  // namespace imp

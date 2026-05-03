@@ -46,61 +46,49 @@ using namespace cute;
 // Based on Example 79a but with half_t output instead of bfloat16_t.
 // ---------------------------------------------------------------------------
 
-using ElementA    = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-using LayoutATag  = cutlass::layout::RowMajor;
+using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+using LayoutATag = cutlass::layout::RowMajor;
 constexpr int AlignmentA = 32;
 
-using ElementB    = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-using LayoutBTag  = cutlass::layout::ColumnMajor;
+using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+using LayoutBTag = cutlass::layout::ColumnMajor;
 constexpr int AlignmentB = 32;
 
-using ElementD    = cutlass::half_t;           // FP16 output
-using ElementC    = cutlass::half_t;           // C matrix type (unused, beta=0)
-using LayoutCTag  = cutlass::layout::RowMajor;
-using LayoutDTag  = cutlass::layout::RowMajor;
-constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;   // 8
-constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;   // 8
+using ElementD = cutlass::half_t;  // FP16 output
+using ElementC = cutlass::half_t;  // C matrix type (unused, beta=0)
+using LayoutCTag = cutlass::layout::RowMajor;
+using LayoutDTag = cutlass::layout::RowMajor;
+constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;  // 8
+constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;  // 8
 
 using ElementAccumulator = float;
-using ArchTag       = cutlass::arch::Sm120;
+using ArchTag = cutlass::arch::Sm120;
 using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
 using ThreadBlockShape = Shape<_128, _128, _128>;
-using ClusterShape     = Shape<_1, _1, _1>;     // GeForce = no multicast
+using ClusterShape = Shape<_1, _1, _1>;  // GeForce = no multicast
 
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    ArchTag, OperatorClass,
-    ThreadBlockShape, ClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementAccumulator,
-    ElementC, LayoutCTag, AlignmentC,
-    ElementD, LayoutDTag, AlignmentD,
-    cutlass::epilogue::collective::EpilogueScheduleAuto
-  >::CollectiveOp;
+    ArchTag, OperatorClass, ThreadBlockShape, ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD, LayoutDTag,
+    AlignmentD, cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
 
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag, OperatorClass,
-    ElementA, LayoutATag, AlignmentA,
-    ElementB, LayoutBTag, AlignmentB,
-    ElementAccumulator,
-    ThreadBlockShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::collective::KernelScheduleAuto
-  >::CollectiveOp;
+    ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB, LayoutBTag, AlignmentB,
+    ElementAccumulator, ThreadBlockShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 
-using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,
-    CollectiveMainloop,
-    CollectiveEpilogue,
-    void>;
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>, CollectiveMainloop,
+                                                        CollectiveEpilogue, void>;
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-using StrideA   = typename Gemm::GemmKernel::StrideA;
-using StrideB   = typename Gemm::GemmKernel::StrideB;
-using StrideC   = typename Gemm::GemmKernel::StrideC;
-using StrideD   = typename Gemm::GemmKernel::StrideD;
+using StrideA = typename Gemm::GemmKernel::StrideA;
+using StrideB = typename Gemm::GemmKernel::StrideB;
+using StrideC = typename Gemm::GemmKernel::StrideC;
+using StrideD = typename Gemm::GemmKernel::StrideD;
 using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
 using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
 using Sm1xxBlkScaledConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
@@ -108,7 +96,6 @@ using Sm1xxBlkScaledConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm1x
 // Verify SFVecSize matches our constant (kSFVecSize = 16)
 static_assert(Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
               "CUTLASS SFVecSize mismatch — expected 16 for nv_float4_t");
-
 
 namespace imp {
 
@@ -126,30 +113,29 @@ namespace imp {
 //   K dimension tiles are inner (faster-changing), row tiles are outer.
 
 static constexpr int kSFVecSize = 16;
-static constexpr int kAtomRows = 128;     // 32 * 4
-static constexpr int kAtomKGroups = 4;    // 4 scale groups per atom
+static constexpr int kAtomRows = 128;                          // 32 * 4
+static constexpr int kAtomKGroups = 4;                         // 4 scale groups per atom
 static constexpr int kAtomKElems = kSFVecSize * kAtomKGroups;  // 64
 static constexpr int kAtomSize = kAtomRows * kAtomKGroups;     // 512
 
 // Compute SfAtom offset for logical scale factor at (row, k_group).
-__device__ __host__ __forceinline__
-int sfatom_offset(int row, int k_group, int n_k_tiles) {
+__device__ __host__ __forceinline__ int sfatom_offset(int row, int k_group, int n_k_tiles) {
     int tile_row = row / kAtomRows;
-    int tile_k   = k_group / kAtomKGroups;
+    int tile_k = k_group / kAtomKGroups;
     int row_local = row % kAtomRows;
-    int k_local   = k_group % kAtomKGroups;
+    int k_local = k_group % kAtomKGroups;
 
     int n0 = row_local % 32;  // within 32-row sub-block
     int n1 = row_local / 32;  // which of 4 sub-blocks
 
     int atom_offset = n0 * 16 + n1 * 4 + k_local;
-    int tile_base   = (tile_row * n_k_tiles + tile_k) * kAtomSize;
+    int tile_base = (tile_row * n_k_tiles + tile_k) * kAtomSize;
     return tile_base + atom_offset;
 }
 
 size_t cutlass_nvfp4_sf_size(int rows, int K) {
     int n_row_tiles = (rows + kAtomRows - 1) / kAtomRows;
-    int n_k_tiles   = (K + kAtomKElems - 1) / kAtomKElems;
+    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kAtomSize;
 }
 
@@ -161,15 +147,14 @@ size_t cutlass_nvfp4_sf_size(int rows, int K) {
 // tensor_scale is deferred to the GEMM epilogue alpha parameter for precision.
 // Source: [N, K/16] FP8 E4M3 (signed, but always positive for scale factors)
 // Dest:   SfAtom layout UE4M3 (unsigned, just micro_scale — NOT combined)
-__global__ void convert_scales_sfatom_kernel(
-    const uint8_t* __restrict__ src_ms,    // [N, K/16] linear
-    uint8_t*       __restrict__ dst_sf,    // SfAtom layout
-    int N, int K, int n_k_tiles)
-{
+__global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,  // [N, K/16] linear
+                                             uint8_t* __restrict__ dst_sf,        // SfAtom layout
+                                             int N, int K, int n_k_tiles) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int K_groups = K / kSFVecSize;
     int total = N * K_groups;
-    if (idx >= total) return;
+    if (idx >= total)
+        return;
 
     int n = idx / K_groups;
     int k_group = idx % K_groups;
@@ -188,9 +173,8 @@ __global__ void convert_scales_sfatom_kernel(
 
 __device__ __forceinline__ uint8_t quantize_abs_to_fp4(float abs_val) {
     // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
-    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
-                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
-                 + (abs_val >= 5.0f);
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f) + (abs_val >= 1.75f) +
+                   (abs_val >= 2.5f) + (abs_val >= 3.5f) + (abs_val >= 5.0f);
     return code;  // 0..7
 }
 
@@ -219,13 +203,10 @@ __device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
 // pack FP4 bytes. The caller supplies the values (so this helper is reusable
 // for fused paths like SwiGLU+quantize where values come from a computation
 // rather than a direct FP16 load).
-__device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(
-    const float vals[kSFVecSize],
-    float local_absmax,
-    uint8_t* packed_out_row,
-    int k_group,
-    uint8_t* sfa_target)
-{
+__device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float vals[kSFVecSize],
+                                                                     float local_absmax,
+                                                                     uint8_t* packed_out_row, int k_group,
+                                                                     uint8_t* sfa_target) {
     // Encode UE4M3 scale (positive — `float_to_fp8_e4m3` handles clamp + rounding
     // and returns sign=0 for non-negative input, which is a valid UE4M3 byte).
     float scale_f = local_absmax / 6.0f;
@@ -235,62 +216,56 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(
     // scale rounds to zero, fall back to the smallest denorm (2^-9) to avoid
     // division by zero — matches the >=2^-9 clamp used elsewhere in imp.
     float actual_scale = fp8_e4m3_to_float_fast(ue4m3);
-    if (actual_scale == 0.0f) actual_scale = 1.0f / 512.0f;
+    if (actual_scale == 0.0f)
+        actual_scale = 1.0f / 512.0f;
     float inv_scale = 1.0f / actual_scale;
 
     *sfa_target = ue4m3;
 
     uint8_t* packed_at = packed_out_row + k_group * (kSFVecSize / 2);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kSFVecSize; i += 2) {
-        float s0 = vals[i]     * inv_scale;
+        float s0 = vals[i] * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
         packed_at[i / 2] = pack_fp4_pair_hw(s0, s1);
     }
 }
 
 // Direct FP16 quantize: load 16 FP16 values, pass to the above helper.
-__device__ __forceinline__ void quantize_micro_block_nvfp4(
-    const half* input_row_base,
-    int k_group,
-    uint8_t* packed_out_row,
-    uint8_t* sfa_target)
-{
+__device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row_base, int k_group,
+                                                           uint8_t* packed_out_row, uint8_t* sfa_target) {
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base + k_group * kSFVecSize);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
         local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
     quantize_micro_block_nvfp4_from_vals(vals, local_absmax, packed_out_row, k_group, sfa_target);
 }
 
-
 // Single-tensor quantize: row numbering is direct, SFA is a single linear buffer
 // with SfAtom layout over (row, k_group).
 __global__ void quantize_fp16_nvfp4_cutlass_kernel(
-    const half* __restrict__ input,        // [M, K] FP16
-    uint8_t*    __restrict__ packed_out,    // [M, K/2] packed nibbles
-    uint8_t*    __restrict__ sf_out,        // SfAtom layout UE4M3
-    int M, int K, int n_k_tiles)
-{
+    const half* __restrict__ input,    // [M, K] FP16
+    uint8_t* __restrict__ packed_out,  // [M, K/2] packed nibbles
+    uint8_t* __restrict__ sf_out,      // SfAtom layout UE4M3
+    int M, int K, int n_k_tiles) {
     int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;
-    if (mb_idx >= total_mb) return;
+    if (mb_idx >= total_mb)
+        return;
 
-    int row    = mb_idx / K_groups;
+    int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
 
-    quantize_micro_block_nvfp4(
-        input + static_cast<int64_t>(row) * K,
-        k_group,
-        packed_out + static_cast<int64_t>(row) * (K / 2),
-        sf_out + sfatom_offset(row, k_group, n_k_tiles));
+    quantize_micro_block_nvfp4(input + static_cast<int64_t>(row) * K, k_group,
+                               packed_out + static_cast<int64_t>(row) * (K / 2),
+                               sf_out + sfatom_offset(row, k_group, n_k_tiles));
 }
 
 // Device helper: binary-search `offsets` for the expert owning `row`.
@@ -299,8 +274,10 @@ __device__ __forceinline__ int moe_find_expert(const int* offsets, int ne, int r
     int lo = 0, hi = ne;
     while (lo + 1 < hi) {
         int mid = (lo + hi) >> 1;
-        if (offsets[mid] <= row) lo = mid;
-        else hi = mid;
+        if (offsets[mid] <= row)
+            lo = mid;
+        else
+            hi = mid;
     }
     local_row = row - offsets[lo];
     return lo;
@@ -309,39 +286,34 @@ __device__ __forceinline__ int moe_find_expert(const int* offsets, int ne, int r
 // MoE variant: one kernel quantizes all [expanded, K] rows into contiguous
 // packed output + per-expert SFA slabs (one per expert).
 __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
-    const half* __restrict__ input,           // [expanded, K] FP16
-    uint8_t*    __restrict__ packed_out,       // [expanded, K/2] contiguous
-    uint8_t* const* __restrict__ sfa_bases,    // [ne] per-expert SFA base (may be null)
-    const int*    __restrict__ offsets,        // [ne+1] cumulative row offsets
-    int expanded, int K, int ne, int n_k_tiles)
-{
+    const half* __restrict__ input,          // [expanded, K] FP16
+    uint8_t* __restrict__ packed_out,        // [expanded, K/2] contiguous
+    uint8_t* const* __restrict__ sfa_bases,  // [ne] per-expert SFA base (may be null)
+    const int* __restrict__ offsets,         // [ne+1] cumulative row offsets
+    int expanded, int K, int ne, int n_k_tiles) {
     int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int K_groups = K / kSFVecSize;
-    if (mb_idx >= expanded * K_groups) return;
+    if (mb_idx >= expanded * K_groups)
+        return;
 
-    int row     = mb_idx / K_groups;
+    int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
     int local_row;
     int expert = moe_find_expert(offsets, ne, row, local_row);
     uint8_t* sfa = sfa_bases[expert];
-    if (!sfa) return;
+    if (!sfa)
+        return;
 
-    quantize_micro_block_nvfp4(
-        input + static_cast<int64_t>(row) * K,
-        k_group,
-        packed_out + static_cast<int64_t>(row) * (K / 2),
-        sfa + sfatom_offset(local_row, k_group, n_k_tiles));
+    quantize_micro_block_nvfp4(input + static_cast<int64_t>(row) * K, k_group,
+                               packed_out + static_cast<int64_t>(row) * (K / 2),
+                               sfa + sfatom_offset(local_row, k_group, n_k_tiles));
 }
-
 
 // ---------------------------------------------------------------------------
 // Host-callable functions
 // ---------------------------------------------------------------------------
 
-void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
-                               CutlassNvFP4Weight& dst,
-                               cudaStream_t stream)
-{
+void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, cudaStream_t stream) {
     assert(src.packed_data && "source must be quantized");
     int64_t N = src.N;
     int64_t K = src.K;
@@ -363,8 +335,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
         int threads = 256;
         int blocks = (total + threads - 1) / threads;
         convert_scales_sfatom_kernel<<<blocks, threads, 0, stream>>>(
-            reinterpret_cast<const uint8_t*>(src.micro_scales),
-            reinterpret_cast<uint8_t*>(d_sf),
+            reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(d_sf),
             static_cast<int>(N), static_cast<int>(K), n_k_tiles);
     }
 
@@ -375,23 +346,23 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
     dst.K = K;
     dst.sf_bytes = sf_bytes;
 
-    IMP_LOG_DEBUG("convert_nvfp4_to_cutlass: N=%lld K=%lld sf=%.2f MiB (data borrowed)",
-                  (long long)N, (long long)K,
-                  sf_bytes / (1024.0 * 1024.0));
+    IMP_LOG_DEBUG("convert_nvfp4_to_cutlass: N=%lld K=%lld sf=%.2f MiB (data borrowed)", (long long)N,
+                  (long long)K, sf_bytes / (1024.0 * 1024.0));
 }
 
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;
-    if (w.scale_factors) { IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors)); w.scale_factors = nullptr; }
+    if (w.scale_factors) {
+        IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors));
+        w.scale_factors = nullptr;
+    }
     w.N = w.K = 0;
     w.sf_bytes = 0;
 }
 
-void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
-                                     void* dst_sf, int M, int K,
-                                     cudaStream_t stream)
-{
+void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                    cudaStream_t stream) {
     assert(K % kSFVecSize == 0 && "K must be multiple of 16");
 
     // Zero the SF buffer for padding safety
@@ -405,21 +376,16 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
     quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16),
-        reinterpret_cast<uint8_t*>(dst_data),
-        reinterpret_cast<uint8_t*>(dst_sf),
-        M, K, n_k_tiles);
+        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
+        reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
 }
 
-void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16,
-                                        void* dst_packed,
-                                        uint8_t* const* d_sfa_bases,
-                                        const int* d_offsets,
-                                        int expanded, int K, int ne,
-                                        cudaStream_t stream)
-{
+void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
+                                        const int* d_offsets, int expanded, int K, int ne,
+                                        cudaStream_t stream) {
     assert(K % kSFVecSize == 0 && "K must be multiple of 16");
-    if (expanded == 0) return;
+    if (expanded == 0)
+        return;
 
     int K_groups = K / kSFVecSize;
     int total_mb = expanded * K_groups;
@@ -428,12 +394,9 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16,
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
     quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16),
-        reinterpret_cast<uint8_t*>(dst_packed),
-        d_sfa_bases, d_offsets,
-        expanded, K, ne, n_k_tiles);
+        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
+        d_offsets, expanded, K, ne, n_k_tiles);
 }
-
 
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM execution
@@ -449,27 +412,21 @@ size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
     auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
     auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
 
-    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(
-        cute::make_shape(M, N, K, 1));
-    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(
-        cute::make_shape(M, N, K, 1));
+    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
+    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
 
-    typename Gemm::Arguments args{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        {M, N, K, 1},
-        {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr, layout_SFB},
-        {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}
-    };
+    typename Gemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                  {M, N, K, 1},
+                                  {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr,
+                                   layout_SFB},
+                                  {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}};
 
     return Gemm::get_workspace_size(args);
 }
 
-bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
-                               const CutlassNvFP4Weight& b,
-                               void* d_fp16, int M, int N, int K,
-                               void* workspace, size_t workspace_size,
-                               cudaStream_t stream)
-{
+bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b, void* d_fp16,
+                              int M, int N, int K, void* workspace, size_t workspace_size,
+                              cudaStream_t stream) {
     // Flush any prior async errors — a sticky CUDA error will make
     // cuTensorMapEncodeTiled return 719 (LAUNCH_FAILED) instead of the real code.
     {
@@ -485,10 +442,8 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
     auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
 
-    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(
-        cute::make_shape(M, N, K, 1));
-    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(
-        cute::make_shape(M, N, K, 1));
+    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
+    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
 
     auto* a_ptr = reinterpret_cast<const ElementA::DataType*>(a_data);
     auto* b_ptr = reinterpret_cast<const ElementB::DataType*>(b.data);
@@ -504,20 +459,21 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     // D = tensor_scale * (A_fp4 * SFA * B_fp4 * micro_scale_only) = correct result.
     float alpha = b.tensor_scale;
 
-    typename Gemm::Arguments args{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        {M, N, K, 1},
-        {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr, layout_SFB},
-        {{alpha, 0.0f},
-         d_ptr, stride_C,  // C = D buffer (beta=0, never read)
-         d_ptr, stride_D}
-    };
+    typename Gemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                  {M, N, K, 1},
+                                  {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr,
+                                   layout_SFB},
+                                  {{alpha, 0.0f},
+                                   d_ptr,
+                                   stride_C,  // C = D buffer (beta=0, never read)
+                                   d_ptr,
+                                   stride_D}};
 
     Gemm gemm;
     cutlass::Status st = gemm.can_implement(args);
     if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_WARN("CUTLASS sm120 NVFP4 GEMM: can_implement failed (%d) for M=%d N=%d K=%d",
-                     (int)st, M, N, K);
+        IMP_LOG_WARN("CUTLASS sm120 NVFP4 GEMM: can_implement failed (%d) for M=%d N=%d K=%d", (int)st, M, N,
+                     K);
         return false;
     }
 
@@ -526,7 +482,8 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     void* ws = workspace;
     if (needed > workspace_size) {
         if (needed > s_cutlass_workspace_size) {
-            if (s_cutlass_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_cutlass_workspace));
+            if (s_cutlass_workspace)
+                IMP_CUDA_CHECK_LOG(cudaFree(s_cutlass_workspace));
             IMP_CUDA_CHECK_LOG(cudaMalloc(&s_cutlass_workspace, needed));
             s_cutlass_workspace_size = needed;
         }
@@ -535,8 +492,7 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
 
     st = gemm.initialize(args, ws, stream);
     if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS sm120 NVFP4 GEMM: initialize failed (%d) M=%d N=%d K=%d",
-                      (int)st, M, N, K);
+        IMP_LOG_ERROR("CUTLASS sm120 NVFP4 GEMM: initialize failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
         return false;
     }
 
@@ -549,9 +505,6 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     return true;
 }
 
-bool cutlass_sm120_nvfp4_available() {
-    return true;
-}
+bool cutlass_sm120_nvfp4_available() { return true; }
 
-
-} // namespace imp
+}  // namespace imp

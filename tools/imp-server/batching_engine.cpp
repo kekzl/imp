@@ -7,9 +7,7 @@
 #include <exception>
 #include <stdexcept>
 
-BatchingEngine::~BatchingEngine() {
-    stop();
-}
+BatchingEngine::~BatchingEngine() { stop(); }
 
 void BatchingEngine::start(ImpContext ctx) {
     if (running_.load()) {
@@ -22,7 +20,8 @@ void BatchingEngine::start(ImpContext ctx) {
 }
 
 void BatchingEngine::stop() {
-    if (!running_.load()) return;
+    if (!running_.load())
+        return;
     stop_requested_.store(true);
     queue_cv_.notify_all();
     if (worker_thread_.joinable()) {
@@ -56,8 +55,7 @@ void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
 
 int BatchingEngine::queue_depth() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    return static_cast<int>(pending_queue_.size()) +
-           static_cast<int>(active_requests_.size());
+    return static_cast<int>(pending_queue_.size()) + static_cast<int>(active_requests_.size());
 }
 
 void BatchingEngine::worker_loop() {
@@ -71,12 +69,11 @@ void BatchingEngine::worker_loop() {
 
             // If no active work, wait for new requests (with timeout to check stop)
             if (active_requests_.empty() && pending_queue_.empty()) {
-                queue_cv_.wait_for(lock, std::chrono::milliseconds(10),
-                    [this] {
-                        return !pending_queue_.empty() ||
-                               stop_requested_.load(std::memory_order_relaxed);
-                    });
-                if (stop_requested_.load(std::memory_order_relaxed)) break;
+                queue_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                    return !pending_queue_.empty() || stop_requested_.load(std::memory_order_relaxed);
+                });
+                if (stop_requested_.load(std::memory_order_relaxed))
+                    break;
             }
 
             // Move all pending requests to active
@@ -113,12 +110,12 @@ void BatchingEngine::worker_loop() {
             }
         }
 
-        if (active_requests_.empty()) continue;
+        if (active_requests_.empty())
+            continue;
 
         // 2. Check for cancelled requests before stepping
         for (auto& sr : active_requests_) {
-            if (sr->is_cancelled() &&
-                sr->request->status != imp::RequestStatus::FINISHED &&
+            if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
                 sr->request->status != imp::RequestStatus::CANCELLED) {
                 sr->request->status = imp::RequestStatus::CANCELLED;
                 kv_mgr->free_sequence(sr->request->id);
@@ -151,8 +148,9 @@ void BatchingEngine::worker_loop() {
             active_requests_.clear();
             continue;
         } catch (...) {
-            IMP_LOG_ERROR("BatchingEngine: engine->step() threw non-std exception — cancelling %zu active request(s)",
-                          active_requests_.size());
+            IMP_LOG_ERROR(
+                "BatchingEngine: engine->step() threw non-std exception — cancelling %zu active request(s)",
+                active_requests_.size());
             for (auto& sr : active_requests_) {
                 if (sr->request->status != imp::RequestStatus::FINISHED &&
                     sr->request->status != imp::RequestStatus::CANCELLED) {
@@ -232,13 +230,17 @@ void BatchingEngine::worker_loop() {
                 // If we didn't push a finish event via the token loop
                 // (request ended with no new tokens this step), push one now.
                 if (!had_new_tokens) {
-                    const char* reason = (req->status == imp::RequestStatus::CANCELLED)
-                                         ? "cancelled" : "length";
+                    const char* reason = (req->status == imp::RequestStatus::CANCELLED) ? "cancelled"
+                                                                                        : "length";
                     if (!req->output_tokens.empty()) {
                         int32_t last = req->output_tokens.back();
-                        if (last == tok->eos_id()) reason = "stop";
+                        if (last == tok->eos_id())
+                            reason = "stop";
                         for (int32_t sid : stop_ids) {
-                            if (last == sid) { reason = "stop"; break; }
+                            if (last == sid) {
+                                reason = "stop";
+                                break;
+                            }
                         }
                     }
                     sr->push_finish(reason);

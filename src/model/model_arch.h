@@ -37,4 +37,4 @@ ModelArch parse_model_arch(const std::string& arch_str);
 struct ModelConfig;
 void apply_arch_defaults(ModelConfig& cfg);
 
-} // namespace imp
+}  // namespace imp

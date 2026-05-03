@@ -2,8 +2,7 @@
 
 namespace imp {
 
-void ConstraintManager::prepare(bool json_mode, const std::string& json_schema,
-                                 Tokenizer* tokenizer) {
+void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer) {
     active_json_ = false;
     active_schema_ = false;
 
@@ -65,4 +64,4 @@ void ConstraintManager::reset() {
     active_schema_ = false;
 }
 
-} // namespace imp
+}  // namespace imp

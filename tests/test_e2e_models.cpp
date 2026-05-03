@@ -13,21 +13,16 @@ namespace {
 // Environment helpers
 // ---------------------------------------------------------------------------
 
-static const char* primary_model() {
-    return std::getenv("IMP_TEST_MODEL");
-}
+static const char* primary_model() { return std::getenv("IMP_TEST_MODEL"); }
 
-static const char* gdn_model() {
-    return std::getenv("IMP_TEST_MODEL_GDN");
-}
+static const char* gdn_model() { return std::getenv("IMP_TEST_MODEL_GDN"); }
 
-static const char* gemma4_model() {
-    return std::getenv("IMP_TEST_MODEL_GEMMA4");
-}
+static const char* gemma4_model() { return std::getenv("IMP_TEST_MODEL_GEMMA4"); }
 
-#define REQUIRE_MODEL(var) \
+#define REQUIRE_MODEL(var)    \
     const char* path = var(); \
-    if (!path) GTEST_SKIP() << "Set " #var " env var to run this test"
+    if (!path)                \
+    GTEST_SKIP() << "Set " #var " env var to run this test"
 
 // ---------------------------------------------------------------------------
 // Primary model tests (Qwen3-4B Q8_0 or similar dense transformer)
@@ -37,7 +32,8 @@ class PrimaryModelTest : public ::testing::Test {
 protected:
     void SetUp() override {
         path_ = primary_model();
-        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
+        if (!path_)
+            GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -50,8 +46,10 @@ protected:
     }
 
     void TearDown() override {
-        if (ctx_) imp_context_free(ctx_);
-        if (model_) imp_model_free(model_);
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
     }
 
     const char* path_ = nullptr;
@@ -67,14 +65,13 @@ TEST_F(PrimaryModelTest, GenerateCoherentOutput) {
 
     char output[4096];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     // Greedy output should contain "Paris" for any reasonable model
     std::string text(output, len);
-    EXPECT_NE(text.find("Paris"), std::string::npos)
-        << "Expected 'Paris' in output: " << text;
+    EXPECT_NE(text.find("Paris"), std::string::npos) << "Expected 'Paris' in output: " << text;
 }
 
 TEST_F(PrimaryModelTest, MultiTurnConversation) {
@@ -86,8 +83,7 @@ TEST_F(PrimaryModelTest, MultiTurnConversation) {
     // Turn 1
     char out1[4096];
     size_t len1 = 0;
-    ASSERT_EQ(imp_generate(ctx_, "Say hello.", &params,
-                           out1, sizeof(out1), &len1), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "Say hello.", &params, out1, sizeof(out1), &len1), IMP_SUCCESS);
     EXPECT_GT(len1, 0u);
 
     // Reset for turn 2
@@ -96,13 +92,13 @@ TEST_F(PrimaryModelTest, MultiTurnConversation) {
     // Turn 2 — different prompt, verify context is clean
     char out2[4096];
     size_t len2 = 0;
-    ASSERT_EQ(imp_generate(ctx_, "What is 2+2? Answer with just the number.", &params,
-                           out2, sizeof(out2), &len2), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "What is 2+2? Answer with just the number.", &params, out2, sizeof(out2),
+                           &len2),
+              IMP_SUCCESS);
     EXPECT_GT(len2, 0u);
 
     std::string text2(out2, len2);
-    EXPECT_NE(text2.find("4"), std::string::npos)
-        << "Expected '4' in output: " << text2;
+    EXPECT_NE(text2.find("4"), std::string::npos) << "Expected '4' in output: " << text2;
 }
 
 TEST_F(PrimaryModelTest, TokenizeRoundtrip) {
@@ -121,8 +117,7 @@ TEST_F(PrimaryModelTest, TokenizeRoundtrip) {
 TEST_F(PrimaryModelTest, PrefillThenDecodeMultipleTokens) {
     int32_t tokens[128];
     int n_tokens = 0;
-    ASSERT_EQ(imp_tokenize(model_, "The meaning of life is", tokens, &n_tokens, 128),
-              IMP_SUCCESS);
+    ASSERT_EQ(imp_tokenize(model_, "The meaning of life is", tokens, &n_tokens, 128), IMP_SUCCESS);
     ASSERT_GT(n_tokens, 0);
 
     ASSERT_EQ(imp_prefill(ctx_, tokens, n_tokens), IMP_SUCCESS);
@@ -135,7 +130,8 @@ TEST_F(PrimaryModelTest, PrefillThenDecodeMultipleTokens) {
     for (int i = 0; i < 16; i++) {
         int32_t tok = 0;
         ImpError err = imp_decode_step(ctx_, &params, &tok);
-        if (err != IMP_SUCCESS) break;
+        if (err != IMP_SUCCESS)
+            break;
         generated.push_back(tok);
     }
     EXPECT_GE(generated.size(), 4u) << "Should generate at least a few tokens";
@@ -149,7 +145,8 @@ class GDNModelTest : public ::testing::Test {
 protected:
     void SetUp() override {
         path_ = gdn_model();
-        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL_GDN to run";
+        if (!path_)
+            GTEST_SKIP() << "Set IMP_TEST_MODEL_GDN to run";
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -162,8 +159,10 @@ protected:
     }
 
     void TearDown() override {
-        if (ctx_) imp_context_free(ctx_);
-        if (model_) imp_model_free(model_);
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
     }
 
     const char* path_ = nullptr;
@@ -173,7 +172,7 @@ protected:
 
 TEST_F(GDNModelTest, GenerateCoherentOutput) {
     ImpGenerateParams params = imp_generate_params_default();
-    params.max_tokens = 64;   // need ≥10 words to exercise the unique-ratio check
+    params.max_tokens = 64;  // need ≥10 words to exercise the unique-ratio check
     params.temperature = 0.0f;
     params.apply_chat_template = 1;
 
@@ -181,9 +180,9 @@ TEST_F(GDNModelTest, GenerateCoherentOutput) {
     size_t len = 0;
     // A prompt that forces a longer natural answer — "one word" prompts exit
     // after 2-3 tokens and never stress the recurrent scan past token 3.
-    ASSERT_EQ(imp_generate(ctx_,
-                           "Write a short paragraph about the planet Jupiter.", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "Write a short paragraph about the planet Jupiter.", &params, output,
+                           sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     std::string text(output, len);
@@ -198,12 +197,16 @@ TEST_F(GDNModelTest, GenerateCoherentOutput) {
         std::string cur;
         for (char c : text) {
             if (c == ' ' || c == '\n' || c == '\t') {
-                if (!cur.empty()) { words.push_back(cur); cur.clear(); }
+                if (!cur.empty()) {
+                    words.push_back(cur);
+                    cur.clear();
+                }
             } else {
                 cur.push_back(c);
             }
         }
-        if (!cur.empty()) words.push_back(cur);
+        if (!cur.empty())
+            words.push_back(cur);
     }
     if (words.size() >= 10) {
         std::set<std::string> unique(words.begin(), words.end());
@@ -211,8 +214,7 @@ TEST_F(GDNModelTest, GenerateCoherentOutput) {
         // Degenerate " my my my my..." × 30 = 30 words, 1 unique = 3 %.
         const double unique_ratio = static_cast<double>(unique.size()) / words.size();
         EXPECT_GE(unique_ratio, 0.30)
-            << "Recurrent-state collapse detected: "
-            << unique.size() << " unique / " << words.size()
+            << "Recurrent-state collapse detected: " << unique.size() << " unique / " << words.size()
             << " total words (" << (unique_ratio * 100.0) << "%)\n"
             << "Full output: " << text;
     }
@@ -229,8 +231,7 @@ TEST_F(GDNModelTest, MultiTurnGDNState) {
     // Turn 1
     char out1[4096];
     size_t len1 = 0;
-    ASSERT_EQ(imp_generate(ctx_, "Say hello.", &params,
-                           out1, sizeof(out1), &len1), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "Say hello.", &params, out1, sizeof(out1), &len1), IMP_SUCCESS);
     EXPECT_GT(len1, 0u);
 
     // Reset
@@ -239,8 +240,9 @@ TEST_F(GDNModelTest, MultiTurnGDNState) {
     // Turn 2 — independent prompt (GDN state should be clean after reset)
     char out2[4096];
     size_t len2 = 0;
-    ASSERT_EQ(imp_generate(ctx_, "What is 1+1? Answer with just the number.", &params,
-                           out2, sizeof(out2), &len2), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "What is 1+1? Answer with just the number.", &params, out2, sizeof(out2),
+                           &len2),
+              IMP_SUCCESS);
     EXPECT_GT(len2, 0u);
 
     // Verify generation works after reset (GDN state properly cleared).
@@ -262,7 +264,8 @@ class Gemma4ModelTest : public ::testing::Test {
 protected:
     void SetUp() override {
         path_ = gemma4_model();
-        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+        if (!path_)
+            GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -275,8 +278,10 @@ protected:
     }
 
     void TearDown() override {
-        if (ctx_) imp_context_free(ctx_);
-        if (model_) imp_model_free(model_);
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
     }
 
     const char* path_ = nullptr;
@@ -294,13 +299,12 @@ TEST_F(Gemma4ModelTest, AnswersCapitalOfFrance) {
 
     char output[4096];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     std::string text(output, len);
-    EXPECT_NE(text.find("Paris"), std::string::npos)
-        << "Expected 'Paris' in Gemma-4 output: " << text;
+    EXPECT_NE(text.find("Paris"), std::string::npos) << "Expected 'Paris' in Gemma-4 output: " << text;
 }
 
 TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
@@ -317,8 +321,8 @@ TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
 
     char output[4096];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 }
 
@@ -333,8 +337,8 @@ TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
 
     char output[8192];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     std::string text(output, len);
@@ -343,15 +347,15 @@ TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
     // tops out around 5-10% of the text. If any single run of the same
     // character occupies >30% of the output, it's a degeneration loop.
     size_t max_run = 0;
-    for (size_t i = 0; i < text.size(); ) {
+    for (size_t i = 0; i < text.size();) {
         size_t j = i;
-        while (j < text.size() && text[j] == text[i]) ++j;
+        while (j < text.size() && text[j] == text[i])
+            ++j;
         max_run = std::max(max_run, j - i);
         i = j;
     }
-    EXPECT_LT(max_run * 2, text.size())
-        << "Detected degeneration (run of " << max_run
-        << " chars in output of " << text.size() << "): " << text;
+    EXPECT_LT(max_run * 2, text.size()) << "Detected degeneration (run of " << max_run
+                                        << " chars in output of " << text.size() << "): " << text;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +374,8 @@ class Gemma4GraphsTest : public ::testing::Test {
 protected:
     void SetUp() override {
         path_ = gemma4_model();
-        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+        if (!path_)
+            GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -383,8 +388,10 @@ protected:
     }
 
     void TearDown() override {
-        if (ctx_) imp_context_free(ctx_);
-        if (model_) imp_model_free(model_);
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
     }
 
     const char* path_ = nullptr;
@@ -403,13 +410,12 @@ TEST_F(Gemma4GraphsTest, AnswersCapitalOfFranceWithGraphs) {
 
     char output[4096];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     std::string text(output, len);
-    EXPECT_NE(text.find("Paris"), std::string::npos)
-        << "Expected 'Paris' in Gemma-4 graph output: " << text;
+    EXPECT_NE(text.find("Paris"), std::string::npos) << "Expected 'Paris' in Gemma-4 graph output: " << text;
 }
 
 TEST_F(Gemma4GraphsTest, LongDecodeStaysCoherent) {
@@ -423,22 +429,22 @@ TEST_F(Gemma4GraphsTest, LongDecodeStaysCoherent) {
 
     char output[16384];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
     // Same degeneration heuristic as the no-graph variant.
     std::string text(output, len);
     size_t max_run = 0;
-    for (size_t i = 0; i < text.size(); ) {
+    for (size_t i = 0; i < text.size();) {
         size_t j = i;
-        while (j < text.size() && text[j] == text[i]) ++j;
+        while (j < text.size() && text[j] == text[i])
+            ++j;
         max_run = std::max(max_run, j - i);
         i = j;
     }
-    EXPECT_LT(max_run * 2, text.size())
-        << "Graph-path degeneration (run of " << max_run
-        << " chars in output of " << text.size() << "): " << text;
+    EXPECT_LT(max_run * 2, text.size()) << "Graph-path degeneration (run of " << max_run
+                                        << " chars in output of " << text.size() << "): " << text;
 }
 
-} // anonymous namespace
+}  // anonymous namespace

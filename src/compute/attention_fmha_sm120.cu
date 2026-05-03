@@ -48,10 +48,10 @@ namespace imp {
 // Constants
 // =============================================================================
 
-static constexpr int SM120_WARP_SIZE     = 32;
-static constexpr int SM120_NUM_WARPS     = 8;
-static constexpr int SM120_BLOCK_THREADS = SM120_WARP_SIZE * SM120_NUM_WARPS; // 256
-static constexpr int SM120_Bkv           = 64;   // KV tile size (columns)
+static constexpr int SM120_WARP_SIZE = 32;
+static constexpr int SM120_NUM_WARPS = 8;
+static constexpr int SM120_BLOCK_THREADS = SM120_WARP_SIZE * SM120_NUM_WARPS;  // 256
+static constexpr int SM120_Bkv = 64;                                           // KV tile size (columns)
 
 // WMMA tile dimensions -- we use WMMA m16n16k16 as the building block.
 // While WGMMA can issue larger tiles, WMMA is more portable and the
@@ -66,22 +66,10 @@ static constexpr int SM120_WMMA_K = 16;
 // =============================================================================
 
 template <int Bq, int HD>
-__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1)
-fmha_sm120_kernel(
-    const half* __restrict__ Q,
-    const half* __restrict__ K,
-    const half* __restrict__ V,
-    half*       __restrict__ O,
-    int   batch_size,
-    int   seq_q,
-    int   seq_kv,
-    int   n_heads,
-    int   n_kv_heads,
-    float scale,
-    bool  causal,
-    int   sliding_window,
-    float softcap)
-{
+__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_kernel(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
+    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
+    int sliding_window, float softcap) {
     constexpr int Bkv = SM120_Bkv;
     constexpr int head_dim = HD;
 
@@ -90,46 +78,42 @@ fmha_sm120_kernel(
     static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
 
     // ---- index computation --------------------------------------------------
-    const int tile_q     = blockIdx.x;
+    const int tile_q = blockIdx.x;
     const int batch_head = blockIdx.y;
-    const int batch_idx  = batch_head / n_heads;
-    const int head_idx   = batch_head % n_heads;
-    const int kv_head    = head_idx / (n_heads / n_kv_heads);
+    const int batch_idx = batch_head / n_heads;
+    const int head_idx = batch_head % n_heads;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid     = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
     const int warp_id = tid / SM120_WARP_SIZE;
     const int q_start = tile_q * Bq;
 
     // Parallel softmax: which row and lane within row
-    const int sm_row  = tid / TPR;
+    const int sm_row = tid / TPR;
     const int sm_lane = tid % TPR;
 
     // Global memory strides (row-major [batch, seq, heads, head_dim])
-    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    half* O_ptr       = O + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
+    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                        (int64_t)head_idx * head_dim;
+    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                  (int64_t)head_idx * head_dim;
 
     // ---- shared memory layout -----------------------------------------------
     // K and V share the same buffer (KV_tile): K is loaded first, consumed
     // by QK^T WMMA, then V is loaded into the same region for PV WMMA.
     extern __shared__ char smem[];
 
-    half*  Q_tile   = reinterpret_cast<half*>(smem);
-    half*  KV_tile  = Q_tile + Bq * head_dim;       // shared K/V buffer
-    float* S_tile   = reinterpret_cast<float*>(KV_tile + Bkv * head_dim);
-    float* O_acc    = S_tile + Bq * Bkv;
-    float* row_m    = O_acc + Bq * head_dim;
-    float* row_l    = row_m + Bq;
+    half* Q_tile = reinterpret_cast<half*>(smem);
+    half* KV_tile = Q_tile + Bq * head_dim;  // shared K/V buffer
+    float* S_tile = reinterpret_cast<float*>(KV_tile + Bkv * head_dim);
+    float* O_acc = S_tile + Bq * Bkv;
+    float* row_m = O_acc + Bq * head_dim;
+    float* row_l = row_m + Bq;
 
     // ---- load Q tile (vectorized float4 = 8 halves per iter) ---------------
     {
@@ -140,8 +124,7 @@ fmha_sm120_kernel(
             int d = i % head_dim;
             float4* dst = reinterpret_cast<float4*>(&Q_tile[i]);
             if (q_start + r < seq_q) {
-                const float4* src = reinterpret_cast<const float4*>(
-                    &Q_ptr[(int64_t)r * q_row_stride + d]);
+                const float4* src = reinterpret_cast<const float4*>(&Q_ptr[(int64_t)r * q_row_stride + d]);
                 *dst = *src;
             } else {
                 *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -167,18 +150,18 @@ fmha_sm120_kernel(
 
     // ---- KV tile loop bounds ----
     int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv,
-                           causal, sliding_window, first_kv_tile, num_kv_tiles);
+    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
+                           num_kv_tiles);
 
     // Derived WMMA tiling constants
-    const int hd_chunks     = head_dim / SM120_WMMA_K;
-    const int s_row_tiles   = Bq / SM120_WMMA_M;
-    const int s_col_tiles   = Bkv / SM120_WMMA_N;
+    const int hd_chunks = head_dim / SM120_WMMA_K;
+    const int s_row_tiles = Bq / SM120_WMMA_M;
+    const int s_col_tiles = Bkv / SM120_WMMA_N;
     const int s_total_tiles = s_row_tiles * s_col_tiles;
-    const int o_row_tiles   = Bq / SM120_WMMA_M;
-    const int o_col_tiles   = head_dim / SM120_WMMA_N;
+    const int o_row_tiles = Bq / SM120_WMMA_M;
+    const int o_col_tiles = head_dim / SM120_WMMA_N;
     const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks     = Bkv / SM120_WMMA_K;
+    const int pv_chunks = Bkv / SM120_WMMA_K;
 
     // ================================================================
     // Main loop over KV tiles
@@ -216,31 +199,29 @@ fmha_sm120_kernel(
             wmma::fill_fragment(acc, 0.0f);
 
             for (int k = 0; k < hd_chunks; k++) {
-                wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                               half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag,
-                    Q_tile + ri * SM120_WMMA_M * head_dim + k * SM120_WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                               wmma::row_major>
+                    a_frag;
+                wmma::load_matrix_sync(a_frag, Q_tile + ri * SM120_WMMA_M * head_dim + k * SM120_WMMA_K,
+                                       head_dim);
 
-                wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                               half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag,
-                    KV_tile + ci * SM120_WMMA_N * head_dim + k * SM120_WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                               wmma::col_major>
+                    b_frag;
+                wmma::load_matrix_sync(b_frag, KV_tile + ci * SM120_WMMA_N * head_dim + k * SM120_WMMA_K,
+                                       head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            wmma::store_matrix_sync(
-                S_tile + ri * SM120_WMMA_M * Bkv + ci * SM120_WMMA_N,
-                acc, Bkv, wmma::mem_row_major);
+            wmma::store_matrix_sync(S_tile + ri * SM120_WMMA_M * Bkv + ci * SM120_WMMA_N, acc, Bkv,
+                                    wmma::mem_row_major);
         }
         __syncthreads();
 
         // ---- Apply scale, softcap, and causal/sliding_window mask ----
-        apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS,
-                          tid, q_start, kv_start, seq_q, seq_kv,
-                          scale, softcap, causal, sliding_window);
+        apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
+                          softcap, causal, sliding_window);
         __syncthreads();
 
         // ============================================================
@@ -264,7 +245,7 @@ fmha_sm120_kernel(
                     partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
                 }
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
                 partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
             }
@@ -287,13 +268,12 @@ fmha_sm120_kernel(
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
                     float s_val = S_tile[r * Bkv + c];
-                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
-                                                         : __expf(s_val - m_new);
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
                     S_tile[r * Bkv + c] = p;
                 }
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
                 partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
             }
@@ -359,29 +339,26 @@ fmha_sm120_kernel(
                 int di = tile_idx % o_col_tiles;
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag,
-                    O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
-                    head_dim, wmma::mem_row_major);
+                wmma::load_matrix_sync(o_frag, O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
+                                       head_dim, wmma::mem_row_major);
 
                 for (int k = 0; k < pv_chunks; k++) {
-                    wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                                   half, wmma::row_major> p_frag;
-                    wmma::load_matrix_sync(p_frag,
-                        P_half + ri * SM120_WMMA_M * Bkv + k * SM120_WMMA_K,
-                        Bkv);
+                    wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                                   wmma::row_major>
+                        p_frag;
+                    wmma::load_matrix_sync(p_frag, P_half + ri * SM120_WMMA_M * Bkv + k * SM120_WMMA_K, Bkv);
 
-                    wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                                   half, wmma::row_major> v_frag;
-                    wmma::load_matrix_sync(v_frag,
-                        KV_tile + k * SM120_WMMA_N * head_dim + di * SM120_WMMA_N,
-                        head_dim);
+                    wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                                   wmma::row_major>
+                        v_frag;
+                    wmma::load_matrix_sync(v_frag, KV_tile + k * SM120_WMMA_N * head_dim + di * SM120_WMMA_N,
+                                           head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(
-                    O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
-                    o_frag, head_dim, wmma::mem_row_major);
+                wmma::store_matrix_sync(O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N, o_frag,
+                                        head_dim, wmma::mem_row_major);
             }
         }
         __syncthreads();
@@ -393,7 +370,8 @@ fmha_sm120_kernel(
         for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
             int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r >= seq_q) continue;
+            if (q_start + r >= seq_q)
+                continue;
             // 4 FP32 → 2 half2 via __float22half2_rn → store as float (= 4 halves packed)
             float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
             half2 lo = __float22half2_rn(make_float2(v.x, v.y));
@@ -401,8 +379,7 @@ fmha_sm120_kernel(
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(
-                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
@@ -412,34 +389,35 @@ fmha_sm120_kernel(
 // =============================================================================
 
 static size_t compute_smem_sm120(int Bq, int Bkv, int head_dim) {
-    return (size_t)Bq * head_dim * sizeof(half)           // Q_tile
-         + (size_t)Bkv * head_dim * sizeof(half)          // KV_tile (shared K/V buffer)
-         + (size_t)Bq * Bkv * sizeof(float)               // S_tile (float scores / half P overlay)
-         + (size_t)Bq * head_dim * sizeof(float)          // O_acc
-         + 2 * (size_t)Bq * sizeof(float);                // row_m + row_l
+    return (size_t)Bq * head_dim * sizeof(half)     // Q_tile
+           + (size_t)Bkv * head_dim * sizeof(half)  // KV_tile (shared K/V buffer)
+           + (size_t)Bq * Bkv * sizeof(float)       // S_tile (float scores / half P overlay)
+           + (size_t)Bq * head_dim * sizeof(float)  // O_acc
+           + 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
 }
 
 // =============================================================================
 // Host launcher
 // =============================================================================
 
-bool fmha_sm120_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream)
-{
-    if (Q.qtype != QType::F16) return false;
+bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                        bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+    if (Q.qtype != QType::F16)
+        return false;
 
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q      = static_cast<int>(Q.shape[1]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int seq_kv     = static_cast<int>(K.shape[1]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
-    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
-    if (seq_q == 0 || seq_kv == 0) return false;
-    if (head_dim % SM120_WMMA_K != 0) return false;
+    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0)
+        return false;
+    if (seq_q == 0 || seq_kv == 0)
+        return false;
+    if (head_dim % SM120_WMMA_K != 0)
+        return false;
 
     // Query device shared memory limit
     int device = 0;
@@ -455,8 +433,8 @@ bool fmha_sm120_prefill(
     int Bq;
     {
         size_t smem_128 = compute_smem_sm120(128, SM120_Bkv, head_dim);
-        size_t smem_64  = compute_smem_sm120(64,  SM120_Bkv, head_dim);
-        size_t smem_32  = compute_smem_sm120(32,  SM120_Bkv, head_dim);
+        size_t smem_64 = compute_smem_sm120(64, SM120_Bkv, head_dim);
+        size_t smem_32 = compute_smem_sm120(32, SM120_Bkv, head_dim);
         if (smem_128 <= (size_t)max_smem) {
             Bq = 128;
         } else if (smem_64 <= (size_t)max_smem) {
@@ -464,8 +442,8 @@ bool fmha_sm120_prefill(
         } else if (smem_32 <= (size_t)max_smem) {
             Bq = 32;
         } else {
-            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)",
-                          head_dim, smem_32, max_smem);
+            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)", head_dim, smem_32,
+                          max_smem);
             return false;
         }
     }
@@ -481,62 +459,87 @@ bool fmha_sm120_prefill(
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(SM120_WARP_SIZE, SM120_NUM_WARPS);
 
-    IMP_LOG_DEBUG("FMHA sm120: B=%d Sq=%d Skv=%d nh=%d nkv=%d hd=%d Bq=%d Bkv=%d smem=%zu "
-                  "causal=%d sw=%d softcap=%.1f",
-                  batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-                  Bq, Bkv, smem, causal, sliding_window, softcap);
+    IMP_LOG_DEBUG(
+        "FMHA sm120: B=%d Sq=%d Skv=%d nh=%d nkv=%d hd=%d Bq=%d Bkv=%d smem=%zu "
+        "causal=%d sw=%d softcap=%.1f",
+        batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, Bq, Bkv, smem, causal, sliding_window,
+        softcap);
 
-    #define LAUNCH_FMHA_SM120(BQ, HD) do { \
-        cudaError_t attr_err = cudaFuncSetAttribute( \
-            fmha_sm120_kernel<BQ, HD>, \
-            cudaFuncAttributeMaxDynamicSharedMemorySize, \
-            static_cast<int>(smem)); \
-        if (attr_err != cudaSuccess) { \
-            IMP_LOG_WARN("FMHA sm120: cudaFuncSetAttribute failed for Bq=%d HD=%d smem=%zu: %s", \
-                         BQ, HD, smem, cudaGetErrorString(attr_err)); \
-            return false; \
-        } \
-        cudaFuncSetAttribute(fmha_sm120_kernel<BQ, HD>, \
-            cudaFuncAttributePreferredSharedMemoryCarveout, \
-            cudaSharedmemCarveoutMaxShared); \
-        fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
-            reinterpret_cast<const half*>(Q.data), \
-            reinterpret_cast<const half*>(K.data), \
-            reinterpret_cast<const half*>(V.data), \
-            reinterpret_cast<half*>(O.data), \
-            batch_size, seq_q, seq_kv, \
-            n_heads, n_kv_heads, \
-            scale, causal, sliding_window, softcap); \
+#define LAUNCH_FMHA_SM120(BQ, HD)                                                                         \
+    do {                                                                                                  \
+        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_kernel<BQ, HD>,                            \
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,          \
+                                                    static_cast<int>(smem));                              \
+        if (attr_err != cudaSuccess) {                                                                    \
+            IMP_LOG_WARN("FMHA sm120: cudaFuncSetAttribute failed for Bq=%d HD=%d smem=%zu: %s", BQ, HD,  \
+                         smem, cudaGetErrorString(attr_err));                                             \
+            return false;                                                                                 \
+        }                                                                                                 \
+        cudaFuncSetAttribute(fmha_sm120_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout,   \
+                             cudaSharedmemCarveoutMaxShared);                                             \
+        fmha_sm120_kernel<BQ, HD>                                                                         \
+            <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                        \
+                                            reinterpret_cast<const half*>(K.data),                        \
+                                            reinterpret_cast<const half*>(V.data),                        \
+                                            reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap); \
     } while (0)
 
     if (Bq == 128) {
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_SM120(128, 64);  return true;
-            case 96:  LAUNCH_FMHA_SM120(128, 96);  return true;
-            case 128: LAUNCH_FMHA_SM120(128, 128); return true;
-            case 256: LAUNCH_FMHA_SM120(128, 256); return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_SM120(128, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_SM120(128, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_SM120(128, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_SM120(128, 256);
+                return true;
+            default:
+                break;
         }
     } else if (Bq == 64) {
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_SM120(64, 64);   return true;
-            case 96:  LAUNCH_FMHA_SM120(64, 96);   return true;
-            case 128: LAUNCH_FMHA_SM120(64, 128);  return true;
-            case 256: LAUNCH_FMHA_SM120(64, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_SM120(64, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_SM120(64, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_SM120(64, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_SM120(64, 256);
+                return true;
+            default:
+                break;
         }
     } else {
         // Bq=32: for large head_dim (256) where Bq=64 exceeds smem
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_SM120(32, 64);   return true;
-            case 96:  LAUNCH_FMHA_SM120(32, 96);   return true;
-            case 128: LAUNCH_FMHA_SM120(32, 128);  return true;
-            case 256: LAUNCH_FMHA_SM120(32, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_SM120(32, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_SM120(32, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_SM120(32, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_SM120(32, 256);
+                return true;
+            default:
+                break;
         }
     }
 
-    #undef LAUNCH_FMHA_SM120
+#undef LAUNCH_FMHA_SM120
 
     return false;
 }
@@ -575,54 +578,38 @@ __device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3(const half* src) {
 }
 
 template <int Bq, int HD>
-__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1)
-fmha_sm120_fp8_kernel(
-    const half* __restrict__ Q,
-    const half* __restrict__ K,
-    const half* __restrict__ V,
-    half*       __restrict__ O,
-    int   batch_size,
-    int   seq_q,
-    int   seq_kv,
-    int   n_heads,
-    int   n_kv_heads,
-    float scale,
-    bool  causal,
-    int   sliding_window,
-    float softcap)
-{
+__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
+    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
+    int sliding_window, float softcap) {
     constexpr int Bkv = SM120_Bkv;
     constexpr int head_dim = HD;
     constexpr int TPR = SM120_BLOCK_THREADS / Bq;
     static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
 
-    const int tile_q     = blockIdx.x;
+    const int tile_q = blockIdx.x;
     const int batch_head = blockIdx.y;
-    const int batch_idx  = batch_head / n_heads;
-    const int head_idx   = batch_head % n_heads;
-    const int kv_head    = head_idx / (n_heads / n_kv_heads);
+    const int batch_idx = batch_head / n_heads;
+    const int head_idx = batch_head % n_heads;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid     = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
     const int warp_id = tid / SM120_WARP_SIZE;
     const int lane_id = tid % SM120_WARP_SIZE;
     const int q_start = tile_q * Bq;
 
-    const int sm_row  = tid / TPR;
+    const int sm_row = tid / TPR;
     const int sm_lane = tid % TPR;
 
-    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    half* O_ptr       = O + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
+    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                        (int64_t)head_idx * head_dim;
+    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                  (int64_t)head_idx * head_dim;
 
     // Shared memory layout:
     //   Q_fp8:  uint8[Bq x HD]      — Q converted to FP8 E4M3
@@ -633,18 +620,18 @@ fmha_sm120_fp8_kernel(
     //   row_m/l: float[Bq] × 2      — softmax state
     extern __shared__ char smem[];
 
-    uint8_t* Q_fp8   = reinterpret_cast<uint8_t*>(smem);
-    uint8_t* KV_fp8  = Q_fp8 + Bq * head_dim;          // K as FP8 (first half of KV region)
-    half*    KV_fp16 = reinterpret_cast<half*>(KV_fp8); // V as FP16 (reuses full KV region)
+    uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);
+    uint8_t* KV_fp8 = Q_fp8 + Bq * head_dim;          // K as FP8 (first half of KV region)
+    half* KV_fp16 = reinterpret_cast<half*>(KV_fp8);  // V as FP16 (reuses full KV region)
     // S_tile must live AFTER the full V-as-half region, not after just the
     // FP8 K region. V writes Bkv * head_dim halves = 2 * Bkv * head_dim bytes,
     // so advancing only Bkv * head_dim bytes (as the code originally did)
     // places S_tile inside the V area — V row Bkv/2+ overwrites P values
     // and poisons the PV MMA output with garbage/NaN.
-    float*   S_tile  = reinterpret_cast<float*>(KV_fp8 + Bkv * head_dim * sizeof(half));
-    float*   O_acc   = S_tile + Bq * Bkv;
-    float*   row_m   = O_acc + Bq * head_dim;
-    float*   row_l   = row_m + Bq;
+    float* S_tile = reinterpret_cast<float*>(KV_fp8 + Bkv * head_dim * sizeof(half));
+    float* O_acc = S_tile + Bq * Bkv;
+    float* row_m = O_acc + Bq * head_dim;
+    float* row_l = row_m + Bq;
 
     // Load Q tile and convert to FP8 E4M3 (vectorized: 4 halves → 4 FP8 bytes per cvt pair).
     // HW cvt.rn.satfinite.e4m3x2.f16x2 already clamps to ±448 — no manual saturate.
@@ -675,13 +662,16 @@ fmha_sm120_fp8_kernel(
             reinterpret_cast<float4*>(O_acc)[vi] = zero;
         }
     }
-    if (tid < Bq) { row_m[tid] = -FLT_MAX; row_l[tid] = 0.0f; }
+    if (tid < Bq) {
+        row_m[tid] = -FLT_MAX;
+        row_l[tid] = 0.0f;
+    }
     __syncthreads();
 
     // KV tile bounds
     int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv,
-                           causal, sliding_window, first_kv_tile, num_kv_tiles);
+    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
+                           num_kv_tiles);
 
     // FP8 MMA tiling: m16n8k32 → output is 16×8, need 2 calls for 16×16 score tile
     constexpr int S_M = 16;
@@ -693,10 +683,10 @@ fmha_sm120_fp8_kernel(
     const int s_total_tiles = s_row_tiles * s_col_tiles_half;
 
     // FP16 WMMA tiling for PV (unchanged)
-    const int o_row_tiles   = Bq / SM120_WMMA_M;
-    const int o_col_tiles   = head_dim / SM120_WMMA_N;
+    const int o_row_tiles = Bq / SM120_WMMA_M;
+    const int o_col_tiles = head_dim / SM120_WMMA_N;
     const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks     = Bkv / SM120_WMMA_K;
+    const int pv_chunks = Bkv / SM120_WMMA_K;
 
     // Main KV tile loop
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
@@ -737,8 +727,10 @@ fmha_sm120_fp8_kernel(
                     int row_in_tile = lane_id / 4;
                     int col_base = (lane_id % 4) * 4;
                     // Each register holds 4 FP8 values from the same row
-                    const uint32_t* q_row0 = reinterpret_cast<const uint32_t*>(q_base + row_in_tile * head_dim + col_base);
-                    const uint32_t* q_row8 = reinterpret_cast<const uint32_t*>(q_base + (row_in_tile + 8) * head_dim + col_base);
+                    const uint32_t* q_row0 = reinterpret_cast<const uint32_t*>(
+                        q_base + row_in_tile * head_dim + col_base);
+                    const uint32_t* q_row8 = reinterpret_cast<const uint32_t*>(
+                        q_base + (row_in_tile + 8) * head_dim + col_base);
                     a0 = q_row0[0];
                     a1 = q_row0[4];  // +16 bytes offset
                     a2 = q_row8[0];
@@ -754,7 +746,8 @@ fmha_sm120_fp8_kernel(
                     const uint8_t* k_base = KV_fp8 + ci * S_N * head_dim + k * S_K;
                     int col_in_tile = lane_id / 4;
                     int k_base_offset = (lane_id % 4) * 4;
-                    const uint32_t* k_ptr0 = reinterpret_cast<const uint32_t*>(k_base + col_in_tile * head_dim + k_base_offset);
+                    const uint32_t* k_ptr0 = reinterpret_cast<const uint32_t*>(
+                        k_base + col_in_tile * head_dim + k_base_offset);
                     b0 = k_ptr0[0];
                     b1 = k_ptr0[4];  // +16 bytes
                 }
@@ -768,9 +761,8 @@ fmha_sm120_fp8_kernel(
                     "{%8, %9},"
                     "{%10, %11, %12, %13};\n"
                     : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                      "r"(b0), "r"(b1),
-                      "f"(d0), "f"(d1), "f"(d2), "f"(d3));
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2),
+                      "f"(d3));
 #endif
             }
 
@@ -784,18 +776,17 @@ fmha_sm120_fp8_kernel(
                 int base_col = ci * S_N;
                 int r0 = (lane_id / 4) % 8;
                 int c0 = (lane_id % 4) * 2;
-                S_tile[(base_row + r0) * Bkv + base_col + c0]     = d0;
+                S_tile[(base_row + r0) * Bkv + base_col + c0] = d0;
                 S_tile[(base_row + r0) * Bkv + base_col + c0 + 1] = d1;
-                S_tile[(base_row + r0 + 8) * Bkv + base_col + c0]     = d2;
+                S_tile[(base_row + r0 + 8) * Bkv + base_col + c0] = d2;
                 S_tile[(base_row + r0 + 8) * Bkv + base_col + c0 + 1] = d3;
             }
         }
         __syncthreads();
 
         // Apply scale, softcap, masks (same as FP16 path)
-        apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS,
-                          tid, q_start, kv_start, seq_q, seq_kv,
-                          scale, softcap, causal, sliding_window);
+        apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
+                          softcap, causal, sliding_window);
         __syncthreads();
 
         // Phase 2+3: Parallel online softmax + convert to FP16 P (same as FP16 kernel)
@@ -809,7 +800,7 @@ fmha_sm120_fp8_kernel(
                 for (int c = sm_lane; c < Bkv; c += TPR)
                     partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
             float m_ij = partial_max;
@@ -825,19 +816,21 @@ fmha_sm120_fp8_kernel(
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
                     float s_val = S_tile[r * Bkv + c];
-                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
-                                                         : __expf(s_val - m_new);
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
                     S_tile[r * Bkv + c] = p;
                 }
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
 
             float l_old = row_valid ? row_l[r] : 0.0f;
             float l_new = alpha * l_old + partial_sum;
-            if (sm_lane == 0 && row_valid) { row_m[r] = m_new; row_l[r] = l_new; }
+            if (sm_lane == 0 && row_valid) {
+                row_m[r] = m_new;
+                row_l[r] = l_new;
+            }
 
             float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
             if (row_valid) {
@@ -883,27 +876,26 @@ fmha_sm120_fp8_kernel(
                 int di = tile_idx % o_col_tiles;
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag,
-                    O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
-                    head_dim, wmma::mem_row_major);
+                wmma::load_matrix_sync(o_frag, O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
+                                       head_dim, wmma::mem_row_major);
 
                 for (int k = 0; k < pv_chunks; k++) {
-                    wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                                   half, wmma::row_major> p_frag;
-                    wmma::load_matrix_sync(p_frag,
-                        P_half + ri * SM120_WMMA_M * Bkv + k * SM120_WMMA_K, Bkv);
+                    wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                                   wmma::row_major>
+                        p_frag;
+                    wmma::load_matrix_sync(p_frag, P_half + ri * SM120_WMMA_M * Bkv + k * SM120_WMMA_K, Bkv);
 
-                    wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K,
-                                   half, wmma::row_major> v_frag;
-                    wmma::load_matrix_sync(v_frag,
-                        KV_fp16 + k * SM120_WMMA_N * head_dim + di * SM120_WMMA_N, head_dim);
+                    wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
+                                   wmma::row_major>
+                        v_frag;
+                    wmma::load_matrix_sync(v_frag, KV_fp16 + k * SM120_WMMA_N * head_dim + di * SM120_WMMA_N,
+                                           head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(
-                    O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N,
-                    o_frag, head_dim, wmma::mem_row_major);
+                wmma::store_matrix_sync(O_acc + ri * SM120_WMMA_M * head_dim + di * SM120_WMMA_N, o_frag,
+                                        head_dim, wmma::mem_row_major);
             }
         }
         __syncthreads();
@@ -915,45 +907,46 @@ fmha_sm120_fp8_kernel(
         for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
             int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r >= seq_q) continue;
+            if (q_start + r >= seq_q)
+                continue;
             float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
             half2 lo = __float22half2_rn(make_float2(v.x, v.y));
             half2 hi = __float22half2_rn(make_float2(v.z, v.w));
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(
-                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
 
 // Shared memory for FP8 variant: Q_fp8 uses bytes not halves for Q
 static size_t compute_smem_fp8(int Bq, int Bkv, int head_dim) {
-    return (size_t)Bq * head_dim * sizeof(uint8_t)          // Q_fp8
-         + (size_t)Bkv * head_dim * sizeof(half)            // KV buffer (FP8 K or FP16 V, half is larger)
-         + (size_t)Bq * Bkv * sizeof(float)                 // S_tile
-         + (size_t)Bq * head_dim * sizeof(float)            // O_acc
-         + 2 * (size_t)Bq * sizeof(float);                  // row_m + row_l
+    return (size_t)Bq * head_dim * sizeof(uint8_t)  // Q_fp8
+           + (size_t)Bkv * head_dim * sizeof(half)  // KV buffer (FP8 K or FP16 V, half is larger)
+           + (size_t)Bq * Bkv * sizeof(float)       // S_tile
+           + (size_t)Bq * head_dim * sizeof(float)  // O_acc
+           + 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
 }
 
-bool fmha_sm120_fp8_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream)
-{
-    if (Q.qtype != QType::F16) return false;
+bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                            bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+    if (Q.qtype != QType::F16)
+        return false;
 
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q      = static_cast<int>(Q.shape[1]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int seq_kv     = static_cast<int>(K.shape[1]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
-    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
-    if (seq_q == 0 || seq_kv == 0) return false;
-    if (head_dim % 32 != 0) return false;  // FP8 MMA needs k%32==0
+    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0)
+        return false;
+    if (seq_q == 0 || seq_kv == 0)
+        return false;
+    if (head_dim % 32 != 0)
+        return false;  // FP8 MMA needs k%32==0
 
     int device = 0;
     cudaGetDevice(&device);
@@ -963,12 +956,16 @@ bool fmha_sm120_fp8_prefill(
     int Bq;
     {
         size_t smem_128 = compute_smem_fp8(128, SM120_Bkv, head_dim);
-        size_t smem_64  = compute_smem_fp8(64,  SM120_Bkv, head_dim);
-        size_t smem_32  = compute_smem_fp8(32,  SM120_Bkv, head_dim);
-        if (smem_128 <= (size_t)max_smem) Bq = 128;
-        else if (smem_64 <= (size_t)max_smem) Bq = 64;
-        else if (smem_32 <= (size_t)max_smem) Bq = 32;
-        else return false;
+        size_t smem_64 = compute_smem_fp8(64, SM120_Bkv, head_dim);
+        size_t smem_32 = compute_smem_fp8(32, SM120_Bkv, head_dim);
+        if (smem_128 <= (size_t)max_smem)
+            Bq = 128;
+        else if (smem_64 <= (size_t)max_smem)
+            Bq = 64;
+        else if (smem_32 <= (size_t)max_smem)
+            Bq = 32;
+        else
+            return false;
     }
     const int Bkv = SM120_Bkv;
     const size_t smem = compute_smem_fp8(Bq, Bkv, head_dim);
@@ -977,50 +974,66 @@ bool fmha_sm120_fp8_prefill(
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(SM120_WARP_SIZE, SM120_NUM_WARPS);
 
-    #define LAUNCH_FP8_FMHA(BQ, HD) do { \
-        cudaError_t attr_err = cudaFuncSetAttribute( \
-            fmha_sm120_fp8_kernel<BQ, HD>, \
-            cudaFuncAttributeMaxDynamicSharedMemorySize, \
-            static_cast<int>(smem)); \
-        if (attr_err != cudaSuccess) return false; \
-        cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, \
-            cudaFuncAttributePreferredSharedMemoryCarveout, \
-            cudaSharedmemCarveoutMaxShared); \
-        fmha_sm120_fp8_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
-            reinterpret_cast<const half*>(Q.data), \
-            reinterpret_cast<const half*>(K.data), \
-            reinterpret_cast<const half*>(V.data), \
-            reinterpret_cast<half*>(O.data), \
-            batch_size, seq_q, seq_kv, \
-            n_heads, n_kv_heads, \
-            scale, causal, sliding_window, softcap); \
+#define LAUNCH_FP8_FMHA(BQ, HD)                                                                             \
+    do {                                                                                                    \
+        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,                          \
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,            \
+                                                    static_cast<int>(smem));                                \
+        if (attr_err != cudaSuccess)                                                                        \
+            return false;                                                                                   \
+        cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout, \
+                             cudaSharedmemCarveoutMaxShared);                                               \
+        fmha_sm120_fp8_kernel<BQ, HD>                                                                       \
+            <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                          \
+                                            reinterpret_cast<const half*>(K.data),                          \
+                                            reinterpret_cast<const half*>(V.data),                          \
+                                            reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,     \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap);   \
     } while (0)
 
     if (Bq == 128) {
         switch (head_dim) {
-            case 128: LAUNCH_FP8_FMHA(128, 128); return true;
-            case 256: LAUNCH_FP8_FMHA(128, 256); return true;
-            default: break;
+            case 128:
+                LAUNCH_FP8_FMHA(128, 128);
+                return true;
+            case 256:
+                LAUNCH_FP8_FMHA(128, 256);
+                return true;
+            default:
+                break;
         }
     } else if (Bq == 64) {
         switch (head_dim) {
-            case 64:  LAUNCH_FP8_FMHA(64, 64);   return true;
-            case 128: LAUNCH_FP8_FMHA(64, 128);  return true;
-            case 256: LAUNCH_FP8_FMHA(64, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FP8_FMHA(64, 64);
+                return true;
+            case 128:
+                LAUNCH_FP8_FMHA(64, 128);
+                return true;
+            case 256:
+                LAUNCH_FP8_FMHA(64, 256);
+                return true;
+            default:
+                break;
         }
     } else {
         switch (head_dim) {
-            case 64:  LAUNCH_FP8_FMHA(32, 64);   return true;
-            case 128: LAUNCH_FP8_FMHA(32, 128);  return true;
-            case 256: LAUNCH_FP8_FMHA(32, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FP8_FMHA(32, 64);
+                return true;
+            case 128:
+                LAUNCH_FP8_FMHA(32, 128);
+                return true;
+            case 256:
+                LAUNCH_FP8_FMHA(32, 256);
+                return true;
+            default:
+                break;
         }
     }
 
-    #undef LAUNCH_FP8_FMHA
+#undef LAUNCH_FP8_FMHA
     return false;
 }
 
-
-} // namespace imp
+}  // namespace imp

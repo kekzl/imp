@@ -32,13 +32,9 @@ protected:
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
         sm_ = major * 10 + minor;
     }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void TearDown() override { cudaStreamDestroy(stream_); }
 
-    bool can_run() const {
-        return sm_ >= 120 && cutlass_sm120_mxfp4_available();
-    }
+    bool can_run() const { return sm_ >= 120 && cutlass_sm120_mxfp4_available(); }
 
     cudaStream_t stream_ = nullptr;
     int sm_ = 0;
@@ -57,15 +53,15 @@ static void fill_random_fp16(void* d_ptr, size_t n, float amp, unsigned seed) {
 }
 
 // Helper: compute max absolute error and mean absolute error
-static void compute_errors(const half* ref, const half* test, size_t n,
-                           float& max_err, float& mean_err) {
+static void compute_errors(const half* ref, const half* test, size_t n, float& max_err, float& mean_err) {
     max_err = 0.0f;
     double sum_err = 0.0;
     for (size_t i = 0; i < n; i++) {
         float r = __half2float(ref[i]);
         float t = __half2float(test[i]);
         float err = std::abs(r - t);
-        if (err > max_err) max_err = err;
+        if (err > max_err)
+            max_err = err;
         sum_err += err;
     }
     mean_err = static_cast<float>(sum_err / n);
@@ -111,7 +107,7 @@ TEST_F(AttentionMxFP4Test, BasicPrefill) {
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
     bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, /*causal=*/true,
-                                       /*softcap=*/0.0f, stream_);
+                                      /*softcap=*/0.0f, stream_);
     cudaStreamSynchronize(stream_);
 
     ASSERT_TRUE(ok) << "MXFP4 attention returned false";
@@ -127,11 +123,15 @@ TEST_F(AttentionMxFP4Test, BasicPrefill) {
     for (auto& v : h_o) {
         float fv = __half2float(v);
         EXPECT_TRUE(std::isfinite(fv)) << "Non-finite value in output";
-        if (fv != 0.0f) finite_nonzero++;
+        if (fv != 0.0f)
+            finite_nonzero++;
     }
     EXPECT_GT(finite_nonzero, 0) << "All-zero output";
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
@@ -201,11 +201,13 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     EXPECT_LT(mean_err, 0.1f) << "Mean absolute error too large";
     EXPECT_LT(max_err, 0.5f) << "Max absolute error too large";
 
-    printf("  MXFP4 vs FP16 attention: max_err=%.4f mean_err=%.6f\n",
-           max_err, mean_err);
+    printf("  MXFP4 vs FP16 attention: max_err=%.4f mean_err=%.6f\n", max_err, mean_err);
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v);
-    cudaFree(d_o_mxfp4); cudaFree(d_o_ref);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o_mxfp4);
+    cudaFree(d_o_ref);
 }
 
 TEST_F(AttentionMxFP4Test, GQASupport) {
@@ -250,7 +252,10 @@ TEST_F(AttentionMxFP4Test, GQASupport) {
         EXPECT_TRUE(std::isfinite(__half2float(v)));
     }
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 TEST_F(AttentionMxFP4Test, HeadDim128) {
@@ -287,7 +292,10 @@ TEST_F(AttentionMxFP4Test, HeadDim128) {
     ASSERT_TRUE(ok) << "head_dim=128 MXFP4 attention failed";
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 TEST_F(AttentionMxFP4Test, RejectsInvalidHeadDim) {
@@ -318,7 +326,10 @@ TEST_F(AttentionMxFP4Test, RejectsInvalidHeadDim) {
     bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, true, 0.0f, stream_);
     EXPECT_FALSE(ok) << "Should reject head_dim not multiple of 32";
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 TEST_F(AttentionMxFP4Test, SoftcapSupport) {
@@ -364,8 +375,11 @@ TEST_F(AttentionMxFP4Test, SoftcapSupport) {
         EXPECT_TRUE(std::isfinite(__half2float(v)));
     }
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

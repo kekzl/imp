@@ -21,9 +21,7 @@ public:
     // Sampling/EOS defaults shipped by the model author in
     // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
     // values (<0) mean the field was not present.
-    const HFConfigLoader::GenerationConfig& generation_config() const {
-        return generation_config_;
-    }
+    const HFConfigLoader::GenerationConfig& generation_config() const { return generation_config_; }
     const TransformerLayer& layer(int i) const { return layers_[i]; }
     TransformerLayer& layer(int i) { return layers_[i]; }
     const Tensor& token_embedding() const { return tok_emb_; }
@@ -56,7 +54,7 @@ public:
     Tensor tok_emb_, out_norm_, out_proj_;
     // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
-    TensorID tok_emb_id  = kInvalidTensorID;  // registry handle for token embedding
+    TensorID tok_emb_id = kInvalidTensorID;   // registry handle for token embedding
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
@@ -78,11 +76,11 @@ public:
 
     bool gpu_weights_ready_ = false;
     std::vector<void*> gpu_allocations_;
-    std::vector<void*> host_pinned_;        // mmap regions pinned via cudaHostRegister
-    std::vector<void*> host_pinned_allocs_; // cudaHostAlloc'd expert buffers (WSL2 DMA path)
+    std::vector<void*> host_pinned_;         // mmap regions pinned via cudaHostRegister
+    std::vector<void*> host_pinned_allocs_;  // cudaHostAlloc'd expert buffers (WSL2 DMA path)
     // Heap-allocated buffers used to hold permuted weight copies (e.g. Qwen3.5/3.6
     // GDN head reordering grouped→tiled). Freed with std::free() in destructor.
     std::vector<void*> host_owned_buffers_;
 };
 
-} // namespace imp
+}  // namespace imp

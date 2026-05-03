@@ -15,7 +15,8 @@ namespace imp {
 static int cached_sm_version = -1;
 
 int get_device_sm_version() {
-    if (cached_sm_version >= 0) return cached_sm_version;
+    if (cached_sm_version >= 0)
+        return cached_sm_version;
     int device = 0;
     cudaGetDevice(&device);
     int major = 0, minor = 0;
@@ -26,10 +27,8 @@ int get_device_sm_version() {
     return cached_sm_version;
 }
 
-void attention_prefill_dispatch(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
-
+void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                                bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
     // Enabled with IMP_MXFP4_ATTENTION=1.
@@ -41,13 +40,11 @@ void attention_prefill_dispatch(
     if (attention_mxfp4_available()) {
         static const bool use_blockscale = !mxf4nvf4_blockscale_disabled();
         if (use_blockscale) {
-            if (fmha_sm120_mxf4nvf4_prefill(Q, K, V, O, scale, causal,
-                                             sliding_window, softcap, stream)) {
+            if (fmha_sm120_mxf4nvf4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
                 return;
             }
         } else {
-            if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
-                                          sliding_window, softcap, stream)) {
+            if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
                 return;
             }
         }
@@ -80,4 +77,4 @@ void attention_prefill_dispatch(
     flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
 }
 
-} // namespace imp
+}  // namespace imp

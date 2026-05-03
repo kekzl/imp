@@ -22,19 +22,11 @@ namespace imp {
 // NOT used for MMA consumption — the hardware MMA requires a specific
 // scale interleaving (see sageattention3_blackwell). This is only for
 // round-trip correctness validation of the quant math.
-void nvfp4_quant_linear_fp16(
-    const half* d_input,
-    uint8_t* d_nvfp4,
-    uint8_t* d_sf,
-    int n_elements,
-    cudaStream_t stream);
+void nvfp4_quant_linear_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int n_elements,
+                             cudaStream_t stream);
 
 // Inverse: NVFP4 + FP8 UE4M3 scale → FP16. Linear layout reverse.
-void nvfp4_dequant_linear_fp16(
-    const uint8_t* d_nvfp4,
-    const uint8_t* d_sf,
-    half* d_output,
-    int n_elements,
-    cudaStream_t stream);
+void nvfp4_dequant_linear_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int n_elements,
+                               cudaStream_t stream);
 
-} // namespace imp
+}  // namespace imp

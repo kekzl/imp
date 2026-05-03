@@ -21,96 +21,143 @@ namespace imp::jinja {
 // ============================================================================
 
 bool Value::truthy() const {
-    return std::visit([](auto&& v) -> bool {
-        using T = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<T, std::monostate>) return false;
-        else if constexpr (std::is_same_v<T, bool>) return v;
-        else if constexpr (std::is_same_v<T, int64_t>) return v != 0;
-        else if constexpr (std::is_same_v<T, double>) return v != 0.0;
-        else if constexpr (std::is_same_v<T, std::string>) return !v.empty();
-        else if constexpr (std::is_same_v<T, Array>) return !v.empty();
-        else if constexpr (std::is_same_v<T, Object>) return v && !v->empty();
-        else return false;
-    }, data_);
+    return std::visit(
+        [](auto&& v) -> bool {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, std::monostate>)
+                return false;
+            else if constexpr (std::is_same_v<T, bool>)
+                return v;
+            else if constexpr (std::is_same_v<T, int64_t>)
+                return v != 0;
+            else if constexpr (std::is_same_v<T, double>)
+                return v != 0.0;
+            else if constexpr (std::is_same_v<T, std::string>)
+                return !v.empty();
+            else if constexpr (std::is_same_v<T, Array>)
+                return !v.empty();
+            else if constexpr (std::is_same_v<T, Object>)
+                return v && !v->empty();
+            else
+                return false;
+        },
+        data_);
 }
 
 std::string Value::to_string() const {
-    return std::visit([](auto&& v) -> std::string {
-        using T = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<T, std::monostate>) return "None";
-        else if constexpr (std::is_same_v<T, bool>) return v ? "True" : "False";
-        else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(v);
-        else if constexpr (std::is_same_v<T, double>) {
-            // Format like Python: no trailing zeros, but keep .0 for integers
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%g", v);
-            return buf;
-        }
-        else if constexpr (std::is_same_v<T, std::string>) return v;
-        else if constexpr (std::is_same_v<T, Array>) {
-            std::string r = "[";
-            for (size_t i = 0; i < v.size(); i++) {
-                if (i > 0) r += ", ";
-                if (v[i].is_string()) { r += "'"; r += v[i].as_string(); r += "'"; }
-                else r += v[i].to_string();
-            }
-            r += "]";
-            return r;
-        }
-        else if constexpr (std::is_same_v<T, Object>) {
-            if (!v) return "{}";
-            std::string r = "{";
-            bool first = true;
-            for (auto& [k, val] : *v) {
-                if (!first) r += ", ";
-                r += "'"; r += k; r += "': ";
-                if (val.is_string()) { r += "'"; r += val.as_string(); r += "'"; }
-                else r += val.to_string();
-                first = false;
-            }
-            r += "}";
-            return r;
-        }
-        else return "";
-    }, data_);
+    return std::visit(
+        [](auto&& v) -> std::string {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, std::monostate>)
+                return "None";
+            else if constexpr (std::is_same_v<T, bool>)
+                return v ? "True" : "False";
+            else if constexpr (std::is_same_v<T, int64_t>)
+                return std::to_string(v);
+            else if constexpr (std::is_same_v<T, double>) {
+                // Format like Python: no trailing zeros, but keep .0 for integers
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%g", v);
+                return buf;
+            } else if constexpr (std::is_same_v<T, std::string>)
+                return v;
+            else if constexpr (std::is_same_v<T, Array>) {
+                std::string r = "[";
+                for (size_t i = 0; i < v.size(); i++) {
+                    if (i > 0)
+                        r += ", ";
+                    if (v[i].is_string()) {
+                        r += "'";
+                        r += v[i].as_string();
+                        r += "'";
+                    } else
+                        r += v[i].to_string();
+                }
+                r += "]";
+                return r;
+            } else if constexpr (std::is_same_v<T, Object>) {
+                if (!v)
+                    return "{}";
+                std::string r = "{";
+                bool first = true;
+                for (auto& [k, val] : *v) {
+                    if (!first)
+                        r += ", ";
+                    r += "'";
+                    r += k;
+                    r += "': ";
+                    if (val.is_string()) {
+                        r += "'";
+                        r += val.as_string();
+                        r += "'";
+                    } else
+                        r += val.to_string();
+                    first = false;
+                }
+                r += "}";
+                return r;
+            } else
+                return "";
+        },
+        data_);
 }
 
 double Value::to_number() const {
-    if (is_int()) return static_cast<double>(as_int());
-    if (is_double()) return as_double();
-    if (is_bool()) return as_bool() ? 1.0 : 0.0;
+    if (is_int())
+        return static_cast<double>(as_int());
+    if (is_double())
+        return as_double();
+    if (is_bool())
+        return as_bool() ? 1.0 : 0.0;
     return 0.0;
 }
 
 bool Value::operator==(const Value& o) const {
-    if (is_none() && o.is_none()) return true;
-    if (is_bool() && o.is_bool()) return as_bool() == o.as_bool();
-    if (is_number() && o.is_number()) return to_number() == o.to_number();
-    if (is_string() && o.is_string()) return as_string() == o.as_string();
+    if (is_none() && o.is_none())
+        return true;
+    if (is_bool() && o.is_bool())
+        return as_bool() == o.as_bool();
+    if (is_number() && o.is_number())
+        return to_number() == o.to_number();
+    if (is_string() && o.is_string())
+        return as_string() == o.as_string();
     if (is_array() && o.is_array()) {
-        auto& a = as_array(); auto& b = o.as_array();
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) if (a[i] != b[i]) return false;
+        auto& a = as_array();
+        auto& b = o.as_array();
+        if (a.size() != b.size())
+            return false;
+        for (size_t i = 0; i < a.size(); i++)
+            if (a[i] != b[i])
+                return false;
         return true;
     }
     // none == false, 0 == false, etc.
-    if (is_none() && o.is_bool()) return !o.as_bool();
-    if (is_bool() && o.is_none()) return !as_bool();
+    if (is_none() && o.is_bool())
+        return !o.as_bool();
+    if (is_bool() && o.is_none())
+        return !as_bool();
     return false;
 }
 
 bool Value::operator<(const Value& o) const {
-    if (is_number() && o.is_number()) return to_number() < o.to_number();
-    if (is_string() && o.is_string()) return as_string() < o.as_string();
+    if (is_number() && o.is_number())
+        return to_number() < o.to_number();
+    if (is_string() && o.is_string())
+        return as_string() < o.as_string();
     return false;
 }
 
 Value Value::operator+(const Value& o) const {
-    if (is_int() && o.is_int()) return Value(as_int() + o.as_int());
-    if (is_number() && o.is_number()) return Value(to_number() + o.to_number());
-    if (is_string() && o.is_string()) return Value(as_string() + o.as_string());
-    if (is_string()) return Value(as_string() + o.to_string());
-    if (o.is_string()) return Value(to_string() + o.as_string());
+    if (is_int() && o.is_int())
+        return Value(as_int() + o.as_int());
+    if (is_number() && o.is_number())
+        return Value(to_number() + o.to_number());
+    if (is_string() && o.is_string())
+        return Value(as_string() + o.as_string());
+    if (is_string())
+        return Value(as_string() + o.to_string());
+    if (o.is_string())
+        return Value(to_string() + o.as_string());
     if (is_array() && o.is_array()) {
         Array r = as_array();
         auto& b = o.as_array();
@@ -121,9 +168,12 @@ Value Value::operator+(const Value& o) const {
 }
 
 int64_t Value::length() const {
-    if (is_string()) return static_cast<int64_t>(as_string().size());
-    if (is_array()) return static_cast<int64_t>(as_array().size());
-    if (is_object() && as_object()) return static_cast<int64_t>(as_object()->size());
+    if (is_string())
+        return static_cast<int64_t>(as_string().size());
+    if (is_array())
+        return static_cast<int64_t>(as_array().size());
+    if (is_object() && as_object())
+        return static_cast<int64_t>(as_object()->size());
     return 0;
 }
 
@@ -132,7 +182,8 @@ Value Value::get(const Value& key) const {
         if (key.is_int()) {
             auto& arr = as_array();
             int64_t idx = key.as_int();
-            if (idx < 0) idx += static_cast<int64_t>(arr.size());
+            if (idx < 0)
+                idx += static_cast<int64_t>(arr.size());
             if (idx >= 0 && idx < static_cast<int64_t>(arr.size()))
                 return arr[static_cast<size_t>(idx)];
         }
@@ -146,23 +197,23 @@ Value Value::get(const Value& key) const {
     if (is_object() && as_object()) {
         if (key.is_string()) {
             auto it = as_object()->find(key.as_string());
-            if (it != as_object()->end()) return it->second;
+            if (it != as_object()->end())
+                return it->second;
         }
         return Value();
     }
     if (is_string() && key.is_int()) {
         auto& s = as_string();
         int64_t idx = key.as_int();
-        if (idx < 0) idx += static_cast<int64_t>(s.size());
+        if (idx < 0)
+            idx += static_cast<int64_t>(s.size());
         if (idx >= 0 && idx < static_cast<int64_t>(s.size()))
             return Value(std::string(1, s[static_cast<size_t>(idx)]));
     }
     return Value();
 }
 
-Value Value::get(const std::string& name) const {
-    return get(Value(name));
-}
+Value Value::get(const std::string& name) const { return get(Value(name)); }
 
 void Value::set(const std::string& name, Value val) {
     if (is_object() && as_object()) {
@@ -172,7 +223,9 @@ void Value::set(const std::string& name, Value val) {
 
 bool Value::contains(const Value& item) const {
     if (is_array()) {
-        for (auto& v : as_array()) if (v == item) return true;
+        for (auto& v : as_array())
+            if (v == item)
+                return true;
         return false;
     }
     if (is_string() && item.is_string()) {
@@ -184,9 +237,7 @@ bool Value::contains(const Value& item) const {
     return false;
 }
 
-Value Value::make_object() {
-    return Value(std::make_shared<std::map<std::string, Value>>());
-}
+Value Value::make_object() { return Value(std::make_shared<std::map<std::string, Value>>()); }
 
 // ============================================================================
 // Lexer
@@ -236,25 +287,28 @@ public:
                 // Find closing #}
                 bool trim_l = (pos + 2 < src_.size() && src_[pos + 2] == '-');
                 size_t end = src_.find("#}", pos + 2);
-                if (end == std::string::npos) end = src_.size();
+                if (end == std::string::npos)
+                    end = src_.size();
                 bool trim_r = (end > 0 && src_[end - 1] == '-');
-                if (trim_r) end--;  // skip the -
-                end = src_.find("#}", end); // re-find past the -
-                if (end == std::string::npos) end = src_.size() - 2;
+                if (trim_r)
+                    end--;                   // skip the -
+                end = src_.find("#}", end);  // re-find past the -
+                if (end == std::string::npos)
+                    end = src_.size() - 2;
                 pos = end + 2;
                 // Apply trim: strip trailing whitespace from last TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
                 // Skip leading whitespace after comment
                 if (trim_r)
-                    while (pos < src_.size() && (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
+                    while (pos < src_.size() &&
+                           (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
                         pos++;
                 continue;
             }
 
             // Check for {{ or {%
-            if (pos + 1 < src_.size() && src_[pos] == '{' &&
-                (src_[pos + 1] == '{' || src_[pos + 1] == '%')) {
+            if (pos + 1 < src_.size() && src_[pos] == '{' && (src_[pos + 1] == '{' || src_[pos + 1] == '%')) {
                 bool is_expr = (src_[pos + 1] == '{');
                 pos += 2;
 
@@ -338,20 +392,36 @@ private:
                     if (src_[pos] == '\\' && pos + 1 < src_.size()) {
                         pos++;
                         switch (src_[pos]) {
-                            case 'n': s += '\n'; break;
-                            case 't': s += '\t'; break;
-                            case 'r': s += '\r'; break;
-                            case '\\': s += '\\'; break;
-                            case '\'': s += '\''; break;
-                            case '"': s += '"'; break;
-                            default: s += '\\'; s += src_[pos]; break;
+                            case 'n':
+                                s += '\n';
+                                break;
+                            case 't':
+                                s += '\t';
+                                break;
+                            case 'r':
+                                s += '\r';
+                                break;
+                            case '\\':
+                                s += '\\';
+                                break;
+                            case '\'':
+                                s += '\'';
+                                break;
+                            case '"':
+                                s += '"';
+                                break;
+                            default:
+                                s += '\\';
+                                s += src_[pos];
+                                break;
                         }
                     } else {
                         s += src_[pos];
                     }
                     pos++;
                 }
-                if (pos < src_.size()) pos++; // skip closing quote
+                if (pos < src_.size())
+                    pos++;  // skip closing quote
                 tokens.push_back({TokenType::STRING, std::move(s)});
                 skip_ws(pos);
                 continue;
@@ -363,20 +433,19 @@ private:
                  std::isdigit(static_cast<unsigned char>(src_[pos + 1])) &&
                  // Only treat as negative number if not after an ident/number/string/rparen/rbracket
                  (tokens.empty() || tokens.back().type == TokenType::STMT_OPEN ||
-                  tokens.back().type == TokenType::EXPR_OPEN ||
-                  tokens.back().type == TokenType::COMMA ||
-                  tokens.back().type == TokenType::LPAREN ||
-                  tokens.back().type == TokenType::LBRACKET ||
-                  tokens.back().type == TokenType::COLON ||
-                  tokens.back().type == TokenType::ASSIGN ||
-                  (tokens.back().type == TokenType::OP) ||
-                  (tokens.back().type == TokenType::PIPE)))) {
+                  tokens.back().type == TokenType::EXPR_OPEN || tokens.back().type == TokenType::COMMA ||
+                  tokens.back().type == TokenType::LPAREN || tokens.back().type == TokenType::LBRACKET ||
+                  tokens.back().type == TokenType::COLON || tokens.back().type == TokenType::ASSIGN ||
+                  (tokens.back().type == TokenType::OP) || (tokens.back().type == TokenType::PIPE)))) {
                 size_t start = pos;
-                if (src_[pos] == '-') pos++;
-                while (pos < src_.size() && std::isdigit(static_cast<unsigned char>(src_[pos]))) pos++;
+                if (src_[pos] == '-')
+                    pos++;
+                while (pos < src_.size() && std::isdigit(static_cast<unsigned char>(src_[pos])))
+                    pos++;
                 if (pos < src_.size() && src_[pos] == '.') {
                     pos++;
-                    while (pos < src_.size() && std::isdigit(static_cast<unsigned char>(src_[pos]))) pos++;
+                    while (pos < src_.size() && std::isdigit(static_cast<unsigned char>(src_[pos])))
+                        pos++;
                 }
                 tokens.push_back({TokenType::NUMBER, src_.substr(start, pos - start)});
                 skip_ws(pos);
@@ -386,19 +455,20 @@ private:
             // Identifier or keyword
             if (std::isalpha(static_cast<unsigned char>(src_[pos])) || src_[pos] == '_') {
                 size_t start = pos;
-                while (pos < src_.size() && (std::isalnum(static_cast<unsigned char>(src_[pos])) || src_[pos] == '_'))
+                while (pos < src_.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src_[pos])) || src_[pos] == '_'))
                     pos++;
                 std::string word = src_.substr(start, pos - start);
 
                 // Operators that look like identifiers
-                if (word == "not" || word == "and" || word == "or" ||
-                    word == "in" || word == "is") {
+                if (word == "not" || word == "and" || word == "or" || word == "in" || word == "is") {
                     // "not in" is a single operator
                     if (word == "not") {
                         size_t saved = pos;
                         skip_ws(pos);
                         if (pos + 2 <= src_.size() && src_.substr(pos, 2) == "in" &&
-                            (pos + 2 >= src_.size() || !std::isalnum(static_cast<unsigned char>(src_[pos + 2])))) {
+                            (pos + 2 >= src_.size() ||
+                             !std::isalnum(static_cast<unsigned char>(src_[pos + 2])))) {
                             pos += 2;
                             tokens.push_back({TokenType::OP, "not in"});
                             skip_ws(pos);
@@ -411,7 +481,8 @@ private:
                         size_t saved = pos;
                         skip_ws(pos);
                         if (pos + 3 <= src_.size() && src_.substr(pos, 3) == "not" &&
-                            (pos + 3 >= src_.size() || !std::isalnum(static_cast<unsigned char>(src_[pos + 3])))) {
+                            (pos + 3 >= src_.size() ||
+                             !std::isalnum(static_cast<unsigned char>(src_[pos + 3])))) {
                             pos += 3;
                             tokens.push_back({TokenType::OP, "is not"});
                             skip_ws(pos);
@@ -430,19 +501,58 @@ private:
             // Operators and punctuation
             char c = src_[pos];
             switch (c) {
-                case ',': tokens.push_back({TokenType::COMMA, ","}); pos++; break;
-                case '.': tokens.push_back({TokenType::DOT, "."}); pos++; break;
-                case '[': tokens.push_back({TokenType::LBRACKET, "["}); pos++; break;
-                case ']': tokens.push_back({TokenType::RBRACKET, "]"}); pos++; break;
-                case '(': tokens.push_back({TokenType::LPAREN, "("}); pos++; break;
-                case ')': tokens.push_back({TokenType::RPAREN, ")"}); pos++; break;
-                case '|': tokens.push_back({TokenType::PIPE, "|"}); pos++; break;
-                case ':': tokens.push_back({TokenType::COLON, ":"}); pos++; break;
-                case '~': tokens.push_back({TokenType::OP, "~"}); pos++; break;
-                case '+': tokens.push_back({TokenType::OP, "+"}); pos++; break;
-                case '-': tokens.push_back({TokenType::OP, "-"}); pos++; break;
-                case '*': tokens.push_back({TokenType::OP, "*"}); pos++; break;
-                case '/': tokens.push_back({TokenType::OP, "/"}); pos++; break;
+                case ',':
+                    tokens.push_back({TokenType::COMMA, ","});
+                    pos++;
+                    break;
+                case '.':
+                    tokens.push_back({TokenType::DOT, "."});
+                    pos++;
+                    break;
+                case '[':
+                    tokens.push_back({TokenType::LBRACKET, "["});
+                    pos++;
+                    break;
+                case ']':
+                    tokens.push_back({TokenType::RBRACKET, "]"});
+                    pos++;
+                    break;
+                case '(':
+                    tokens.push_back({TokenType::LPAREN, "("});
+                    pos++;
+                    break;
+                case ')':
+                    tokens.push_back({TokenType::RPAREN, ")"});
+                    pos++;
+                    break;
+                case '|':
+                    tokens.push_back({TokenType::PIPE, "|"});
+                    pos++;
+                    break;
+                case ':':
+                    tokens.push_back({TokenType::COLON, ":"});
+                    pos++;
+                    break;
+                case '~':
+                    tokens.push_back({TokenType::OP, "~"});
+                    pos++;
+                    break;
+                case '+':
+                    tokens.push_back({TokenType::OP, "+"});
+                    pos++;
+                    break;
+                case '-':
+                    tokens.push_back({TokenType::OP, "-"});
+                    pos++;
+                    break;
+                case '*':
+                    tokens.push_back({TokenType::OP, "*"});
+                    pos++;
+                    break;
+                case '/':
+                    tokens.push_back({TokenType::OP, "/"});
+                    pos++;
+                    break;
                 case '%':
                     // Could be close tag %}
                     if (pos + 1 < src_.size() && src_[pos + 1] == '}') {
@@ -488,7 +598,7 @@ private:
                     }
                     break;
                 default:
-                    pos++; // skip unknown char
+                    pos++;  // skip unknown char
                     break;
             }
             skip_ws(pos);
@@ -496,21 +606,20 @@ private:
     }
 
     void skip_ws(size_t& pos) const {
-        while (pos < src_.size() && (src_[pos] == ' ' || src_[pos] == '\t' ||
-               src_[pos] == '\n' || src_[pos] == '\r'))
+        while (pos < src_.size() &&
+               (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
             pos++;
     }
 
     void skip_ws_text(size_t& pos) const {
         // After trim-right close tag: strip whitespace including one newline
-        while (pos < src_.size() && (src_[pos] == ' ' || src_[pos] == '\t' ||
-               src_[pos] == '\n' || src_[pos] == '\r'))
+        while (pos < src_.size() &&
+               (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
             pos++;
     }
 
     static void rtrim(std::string& s) {
-        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' ||
-               s.back() == '\n' || s.back() == '\r'))
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r'))
             s.pop_back();
     }
 
@@ -557,9 +666,9 @@ struct GetItemExpr : Expr {
 
 struct SliceExpr : Expr {
     std::unique_ptr<Expr> object;
-    std::unique_ptr<Expr> start; // nullptr = beginning
-    std::unique_ptr<Expr> stop;  // nullptr = end
-    std::unique_ptr<Expr> step;  // nullptr = 1
+    std::unique_ptr<Expr> start;  // nullptr = beginning
+    std::unique_ptr<Expr> stop;   // nullptr = end
+    std::unique_ptr<Expr> step;   // nullptr = 1
 };
 
 struct FilterExpr : Expr {
@@ -612,7 +721,7 @@ struct ExprNode : Node {
 
 struct ForNode : Node {
     std::string var_name;
-    std::string var_name2; // for "key, value in dict"
+    std::string var_name2;  // for "key, value in dict"
     std::unique_ptr<Expr> iterable;
     std::vector<std::unique_ptr<Node>> body;
     std::vector<std::unique_ptr<Node>> else_body;
@@ -622,15 +731,15 @@ struct ForNode : Node {
 struct IfNode : Node {
     // Chain of (condition, body) pairs. Last may have null condition (else).
     struct Branch {
-        std::unique_ptr<Expr> condition; // nullptr for else
+        std::unique_ptr<Expr> condition;  // nullptr for else
         std::vector<std::unique_ptr<Node>> body;
     };
     std::vector<Branch> branches;
 };
 
 struct SetNode : Node {
-    std::string var_name;      // "x" or "ns" for ns.x
-    std::string attr_name;     // "x" when doing ns.x = ...
+    std::string var_name;   // "x" or "ns" for ns.x
+    std::string attr_name;  // "x" when doing ns.x = ...
     std::unique_ptr<Expr> value;
 };
 
@@ -638,7 +747,7 @@ struct MacroNode : Node {
     std::string name;
     struct Param {
         std::string name;
-        std::unique_ptr<Expr> default_value; // nullptr if no default
+        std::unique_ptr<Expr> default_value;  // nullptr if no default
     };
     std::vector<Param> params;
     std::vector<std::unique_ptr<Node>> body;
@@ -657,7 +766,8 @@ public:
             auto node = parse_node();
             if (!node) {
                 // Skip problematic token and continue
-                if (!at_end()) pos_++;
+                if (!at_end())
+                    pos_++;
                 continue;
             }
             out.push_back(std::move(node));
@@ -666,37 +776,40 @@ public:
     }
 
 private:
-    const Token& peek() const {
-        return pos_ < tokens_.size() ? tokens_[pos_] : tokens_.back();
-    }
+    const Token& peek() const { return pos_ < tokens_.size() ? tokens_[pos_] : tokens_.back(); }
 
     const Token& advance() {
         auto& t = tokens_[pos_];
-        if (pos_ < tokens_.size() - 1) pos_++;
+        if (pos_ < tokens_.size() - 1)
+            pos_++;
         return t;
     }
 
-    bool at_end() const {
-        return pos_ >= tokens_.size() || tokens_[pos_].type == TokenType::END;
-    }
+    bool at_end() const { return pos_ >= tokens_.size() || tokens_[pos_].type == TokenType::END; }
 
     bool check(TokenType t) const { return peek().type == t; }
     bool check(TokenType t, const std::string& v) const { return peek().type == t && peek().value == v; }
 
     bool match(TokenType t) {
-        if (check(t)) { advance(); return true; }
+        if (check(t)) {
+            advance();
+            return true;
+        }
         return false;
     }
 
     bool match(TokenType t, const std::string& v) {
-        if (check(t, v)) { advance(); return true; }
+        if (check(t, v)) {
+            advance();
+            return true;
+        }
         return false;
     }
 
     void expect(TokenType t) {
         if (!check(t)) {
-            IMP_LOG_WARN("jinja: expected token type %d, got %d ('%s')",
-                         static_cast<int>(t), static_cast<int>(peek().type), peek().value.c_str());
+            IMP_LOG_WARN("jinja: expected token type %d, got %d ('%s')", static_cast<int>(t),
+                         static_cast<int>(peek().type), peek().value.c_str());
         }
         advance();
     }
@@ -708,9 +821,10 @@ private:
             return std::make_unique<TextNode>(std::move(text));
         }
         if (check(TokenType::EXPR_OPEN)) {
-            advance(); // {{
+            advance();  // {{
             auto expr = parse_expr();
-            if (check(TokenType::EXPR_CLOSE)) advance();
+            if (check(TokenType::EXPR_CLOSE))
+                advance();
             return std::make_unique<ExprNode>(std::move(expr));
         }
         if (check(TokenType::STMT_OPEN)) {
@@ -720,24 +834,30 @@ private:
     }
 
     std::unique_ptr<Node> parse_statement() {
-        advance(); // {%
+        advance();  // {%
 
-        if (check(TokenType::IDENT, "for")) return parse_for();
-        if (check(TokenType::IDENT, "if")) return parse_if();
-        if (check(TokenType::IDENT, "set")) return parse_set();
-        if (check(TokenType::IDENT, "macro")) return parse_macro();
+        if (check(TokenType::IDENT, "for"))
+            return parse_for();
+        if (check(TokenType::IDENT, "if"))
+            return parse_if();
+        if (check(TokenType::IDENT, "set"))
+            return parse_set();
+        if (check(TokenType::IDENT, "macro"))
+            return parse_macro();
         // Unknown statement — skip to %}
-        while (!at_end() && !check(TokenType::STMT_CLOSE)) advance();
-        if (check(TokenType::STMT_CLOSE)) advance();
+        while (!at_end() && !check(TokenType::STMT_CLOSE))
+            advance();
+        if (check(TokenType::STMT_CLOSE))
+            advance();
         return nullptr;
     }
 
     std::unique_ptr<Node> parse_for() {
-        advance(); // 'for'
+        advance();  // 'for'
         auto node = std::make_unique<ForNode>();
 
         node->var_name = peek().value;
-        advance(); // var name
+        advance();  // var name
 
         // Check for "key, value" unpacking
         if (check(TokenType::COMMA)) {
@@ -747,7 +867,8 @@ private:
         }
 
         // 'in'
-        if (check(TokenType::OP, "in")) advance();
+        if (check(TokenType::OP, "in"))
+            advance();
 
         node->iterable = parse_expr();
 
@@ -758,7 +879,8 @@ private:
         }
 
         // Close %}
-        if (check(TokenType::STMT_CLOSE)) advance();
+        if (check(TokenType::STMT_CLOSE))
+            advance();
 
         // Parse body until endfor or else
         parse_body(node->body, {"endfor", "else"});
@@ -767,22 +889,26 @@ private:
         if (check(TokenType::STMT_OPEN)) {
             // Peek ahead to see if it's {% else %} or {% endfor %}
             size_t saved = pos_;
-            advance(); // {%
+            advance();  // {%
             if (check(TokenType::IDENT, "else")) {
-                advance(); // else
-                if (check(TokenType::STMT_CLOSE)) advance();
+                advance();  // else
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
                 parse_body(node->else_body, {"endfor"});
                 // Consume endfor
                 if (check(TokenType::STMT_OPEN)) {
                     advance();
-                    if (check(TokenType::IDENT, "endfor")) advance();
-                    if (check(TokenType::STMT_CLOSE)) advance();
+                    if (check(TokenType::IDENT, "endfor"))
+                        advance();
+                    if (check(TokenType::STMT_CLOSE))
+                        advance();
                 }
             } else if (check(TokenType::IDENT, "endfor")) {
                 advance();
-                if (check(TokenType::STMT_CLOSE)) advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
             } else {
-                pos_ = saved; // restore
+                pos_ = saved;  // restore
             }
         }
 
@@ -790,7 +916,7 @@ private:
     }
 
     std::unique_ptr<Node> parse_macro() {
-        advance(); // 'macro'
+        advance();  // 'macro'
         auto node = std::make_unique<MacroNode>();
 
         // macro name
@@ -799,7 +925,7 @@ private:
 
         // (param1, param2=default, ...)
         if (check(TokenType::LPAREN)) {
-            advance(); // '('
+            advance();  // '('
             while (!check(TokenType::RPAREN) && !at_end()) {
                 MacroNode::Param param;
                 param.name = peek().value;
@@ -810,12 +936,15 @@ private:
                     param.default_value = parse_expr();
                 }
                 node->params.push_back(std::move(param));
-                if (check(TokenType::COMMA)) advance();
+                if (check(TokenType::COMMA))
+                    advance();
             }
-            if (check(TokenType::RPAREN)) advance(); // ')'
+            if (check(TokenType::RPAREN))
+                advance();  // ')'
         }
 
-        if (check(TokenType::STMT_CLOSE)) advance();
+        if (check(TokenType::STMT_CLOSE))
+            advance();
 
         // Parse body until endmacro
         parse_body(node->body, {"endmacro"});
@@ -823,53 +952,61 @@ private:
         // Consume {% endmacro %}
         if (check(TokenType::STMT_OPEN)) {
             advance();
-            if (check(TokenType::IDENT, "endmacro")) advance();
-            if (check(TokenType::STMT_CLOSE)) advance();
+            if (check(TokenType::IDENT, "endmacro"))
+                advance();
+            if (check(TokenType::STMT_CLOSE))
+                advance();
         }
 
         return node;
     }
 
     std::unique_ptr<Node> parse_if() {
-        advance(); // 'if'
+        advance();  // 'if'
         auto node = std::make_unique<IfNode>();
 
         // First branch
         IfNode::Branch branch;
         branch.condition = parse_expr();
-        if (check(TokenType::STMT_CLOSE)) advance();
+        if (check(TokenType::STMT_CLOSE))
+            advance();
         parse_body(branch.body, {"endif", "elif", "else"});
         node->branches.push_back(std::move(branch));
 
         // elif / else branches
         while (check(TokenType::STMT_OPEN)) {
             size_t saved = pos_;
-            advance(); // {%
+            advance();  // {%
 
             if (check(TokenType::IDENT, "elif")) {
                 advance();
                 IfNode::Branch b;
                 b.condition = parse_expr();
-                if (check(TokenType::STMT_CLOSE)) advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
                 parse_body(b.body, {"endif", "elif", "else"});
                 node->branches.push_back(std::move(b));
             } else if (check(TokenType::IDENT, "else")) {
                 advance();
-                if (check(TokenType::STMT_CLOSE)) advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
                 IfNode::Branch b;
-                b.condition = nullptr; // else
+                b.condition = nullptr;  // else
                 parse_body(b.body, {"endif"});
                 node->branches.push_back(std::move(b));
                 // Consume endif
                 if (check(TokenType::STMT_OPEN)) {
                     advance();
-                    if (check(TokenType::IDENT, "endif")) advance();
-                    if (check(TokenType::STMT_CLOSE)) advance();
+                    if (check(TokenType::IDENT, "endif"))
+                        advance();
+                    if (check(TokenType::STMT_CLOSE))
+                        advance();
                 }
                 break;
             } else if (check(TokenType::IDENT, "endif")) {
                 advance();
-                if (check(TokenType::STMT_CLOSE)) advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
                 break;
             } else {
                 pos_ = saved;
@@ -881,7 +1018,7 @@ private:
     }
 
     std::unique_ptr<Node> parse_set() {
-        advance(); // 'set'
+        advance();  // 'set'
         auto node = std::make_unique<SetNode>();
 
         node->var_name = peek().value;
@@ -894,16 +1031,17 @@ private:
             advance();
         }
 
-        if (check(TokenType::ASSIGN)) advance();
+        if (check(TokenType::ASSIGN))
+            advance();
 
         node->value = parse_expr();
-        if (check(TokenType::STMT_CLOSE)) advance();
+        if (check(TokenType::STMT_CLOSE))
+            advance();
 
         return node;
     }
 
-    void parse_body(std::vector<std::unique_ptr<Node>>& body,
-                    const std::vector<std::string>& end_keywords) {
+    void parse_body(std::vector<std::unique_ptr<Node>>& body, const std::vector<std::string>& end_keywords) {
         while (!at_end()) {
             // Check if next is a closing statement keyword
             if (check(TokenType::STMT_OPEN)) {
@@ -917,12 +1055,15 @@ private:
                     }
                 }
                 pos_ = saved;
-                if (is_end) return;
+                if (is_end)
+                    return;
             }
 
             auto node = parse_node();
-            if (node) body.push_back(std::move(node));
-            else if (!at_end()) pos_++; // skip to avoid infinite loop
+            if (node)
+                body.push_back(std::move(node));
+            else if (!at_end())
+                pos_++;  // skip to avoid infinite loop
         }
     }
 
@@ -1000,9 +1141,8 @@ private:
         auto left = parse_addition();
         while (true) {
             std::string op;
-            if (check(TokenType::OP, "==") || check(TokenType::OP, "!=") ||
-                check(TokenType::OP, "<") || check(TokenType::OP, ">") ||
-                check(TokenType::OP, "<=") || check(TokenType::OP, ">=") ||
+            if (check(TokenType::OP, "==") || check(TokenType::OP, "!=") || check(TokenType::OP, "<") ||
+                check(TokenType::OP, ">") || check(TokenType::OP, "<=") || check(TokenType::OP, ">=") ||
                 check(TokenType::OP, "in") || check(TokenType::OP, "not in")) {
                 op = peek().value;
                 advance();
@@ -1011,11 +1151,10 @@ private:
                 // "is defined", "is none", "is string", "is iterable", "is mapping", "is number"
                 if (check(TokenType::IDENT)) {
                     std::string test_name = peek().value;
-                    if (test_name == "defined" || test_name == "none" ||
-                        test_name == "string" || test_name == "iterable" ||
-                        test_name == "mapping" || test_name == "number" ||
-                        test_name == "integer" || test_name == "float" ||
-                        test_name == "boolean" || test_name == "sequence") {
+                    if (test_name == "defined" || test_name == "none" || test_name == "string" ||
+                        test_name == "iterable" || test_name == "mapping" || test_name == "number" ||
+                        test_name == "integer" || test_name == "float" || test_name == "boolean" ||
+                        test_name == "sequence") {
                         advance();
                         auto bin = std::make_unique<BinOpExpr>();
                         bin->op = "is " + test_name;
@@ -1037,11 +1176,10 @@ private:
                 advance();
                 if (check(TokenType::IDENT)) {
                     std::string test_name = peek().value;
-                    if (test_name == "defined" || test_name == "none" ||
-                        test_name == "string" || test_name == "iterable" ||
-                        test_name == "mapping" || test_name == "number" ||
-                        test_name == "integer" || test_name == "float" ||
-                        test_name == "boolean" || test_name == "sequence") {
+                    if (test_name == "defined" || test_name == "none" || test_name == "string" ||
+                        test_name == "iterable" || test_name == "mapping" || test_name == "number" ||
+                        test_name == "integer" || test_name == "float" || test_name == "boolean" ||
+                        test_name == "sequence") {
                         advance();
                         auto bin = std::make_unique<BinOpExpr>();
                         bin->op = "is not " + test_name;
@@ -1118,7 +1256,8 @@ private:
         while (true) {
             if (check(TokenType::DOT)) {
                 advance();
-                if (!check(TokenType::IDENT)) break;
+                if (!check(TokenType::IDENT))
+                    break;
                 std::string attr = peek().value;
                 advance();
 
@@ -1135,7 +1274,8 @@ private:
                             method->args.push_back(parse_expr());
                         }
                     }
-                    if (check(TokenType::RPAREN)) advance();
+                    if (check(TokenType::RPAREN))
+                        advance();
                     expr = std::move(method);
                 } else {
                     auto ga = std::make_unique<GetAttrExpr>();
@@ -1172,10 +1312,11 @@ private:
                 if (is_slice) {
                     auto sl = std::make_unique<SliceExpr>();
                     sl->object = std::move(expr);
-                    sl->start = std::move(first); // may be nullptr
+                    sl->start = std::move(first);  // may be nullptr
 
                     // Consume first ':'
-                    if (check(TokenType::COLON)) advance();
+                    if (check(TokenType::COLON))
+                        advance();
 
                     // Parse stop (optional)
                     if (!check(TokenType::COLON) && !check(TokenType::RBRACKET)) {
@@ -1190,11 +1331,13 @@ private:
                         }
                     }
 
-                    if (check(TokenType::RBRACKET)) advance();
+                    if (check(TokenType::RBRACKET))
+                        advance();
                     expr = std::move(sl);
                 } else {
                     // Regular subscript
-                    if (check(TokenType::RBRACKET)) advance();
+                    if (check(TokenType::RBRACKET))
+                        advance();
                     auto gi = std::make_unique<GetItemExpr>();
                     gi->object = std::move(expr);
                     gi->key = std::move(first);
@@ -1208,11 +1351,13 @@ private:
                 if (!check(TokenType::RPAREN)) {
                     parse_call_args(call->args, call->kwargs);
                 }
-                if (check(TokenType::RPAREN)) advance();
+                if (check(TokenType::RPAREN))
+                    advance();
                 expr = std::move(call);
             } else if (check(TokenType::PIPE)) {
                 advance();
-                if (!check(TokenType::IDENT)) break;
+                if (!check(TokenType::IDENT))
+                    break;
                 std::string filter_name = peek().value;
                 advance();
 
@@ -1229,7 +1374,8 @@ private:
                             filter->args.push_back(parse_expr());
                         }
                     }
-                    if (check(TokenType::RPAREN)) advance();
+                    if (check(TokenType::RPAREN))
+                        advance();
                 }
                 expr = std::move(filter);
             } else {
@@ -1251,13 +1397,19 @@ private:
                     advance();
                     auto val = parse_expr();
                     kwargs.push_back({std::move(name), std::move(val)});
-                    if (check(TokenType::COMMA)) { advance(); continue; }
+                    if (check(TokenType::COMMA)) {
+                        advance();
+                        continue;
+                    }
                     break;
                 }
                 pos_ = saved;
             }
             args.push_back(parse_expr());
-            if (check(TokenType::COMMA)) { advance(); continue; }
+            if (check(TokenType::COMMA)) {
+                advance();
+                continue;
+            }
             break;
         }
     }
@@ -1303,7 +1455,8 @@ private:
         if (check(TokenType::LPAREN)) {
             advance();
             auto expr = parse_expr();
-            if (check(TokenType::RPAREN)) advance();
+            if (check(TokenType::RPAREN))
+                advance();
             return expr;
         }
 
@@ -1315,11 +1468,13 @@ private:
                 arr->elements.push_back(parse_expr());
                 while (check(TokenType::COMMA)) {
                     advance();
-                    if (check(TokenType::RBRACKET)) break; // trailing comma
+                    if (check(TokenType::RBRACKET))
+                        break;  // trailing comma
                     arr->elements.push_back(parse_expr());
                 }
             }
-            if (check(TokenType::RBRACKET)) advance();
+            if (check(TokenType::RBRACKET))
+                advance();
             return arr;
         }
 
@@ -1363,26 +1518,29 @@ private:
     using Scope = std::map<std::string, Value>;
 
     void push_scope() { scopes_.emplace_back(); }
-    void pop_scope() { if (scopes_.size() > 1) scopes_.pop_back(); }
+    void pop_scope() {
+        if (scopes_.size() > 1)
+            scopes_.pop_back();
+    }
 
     Value lookup(const std::string& name) const {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
             auto found = it->find(name);
-            if (found != it->end()) return found->second;
+            if (found != it->end())
+                return found->second;
         }
-        return Value(); // undefined = none
+        return Value();  // undefined = none
     }
 
     bool is_defined(const std::string& name) const {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-            if (it->count(name)) return true;
+            if (it->count(name))
+                return true;
         }
         return false;
     }
 
-    void set_var(const std::string& name, Value val) {
-        scopes_.back()[name] = std::move(val);
-    }
+    void set_var(const std::string& name, Value val) { scopes_.back()[name] = std::move(val); }
 
     // Set in nearest scope where name exists, or current scope
     void set_var_update(const std::string& name, Value val) {
@@ -1401,7 +1559,8 @@ private:
             out += text->text;
         } else if (auto* expr = dynamic_cast<const ExprNode*>(&node)) {
             Value val = eval(*expr->expr);
-            if (!val.is_none()) out += val.to_string();
+            if (!val.is_none())
+                out += val.to_string();
         } else if (auto* for_node = dynamic_cast<const ForNode*>(&node)) {
             render_for(*for_node, out);
         } else if (auto* if_node = dynamic_cast<const IfNode*>(&node)) {
@@ -1422,7 +1581,8 @@ private:
             auto& obj = *iterable.as_object();
             if (obj.empty() && !node.else_body.empty()) {
                 push_scope();
-                for (auto& n : node.else_body) render_node(*n, out);
+                for (auto& n : node.else_body)
+                    render_node(*n, out);
                 pop_scope();
                 return;
             }
@@ -1447,7 +1607,8 @@ private:
                     set_var(node.var_name, Value(key));
                 }
 
-                for (auto& n : node.body) render_node(*n, out);
+                for (auto& n : node.body)
+                    render_node(*n, out);
                 idx++;
             }
             pop_scope();
@@ -1457,7 +1618,8 @@ private:
         if (!iterable.is_array()) {
             if (!node.else_body.empty()) {
                 push_scope();
-                for (auto& n : node.else_body) render_node(*n, out);
+                for (auto& n : node.else_body)
+                    render_node(*n, out);
                 pop_scope();
             }
             return;
@@ -1466,7 +1628,8 @@ private:
         auto& arr = iterable.as_array();
         if (arr.empty() && !node.else_body.empty()) {
             push_scope();
-            for (auto& n : node.else_body) render_node(*n, out);
+            for (auto& n : node.else_body)
+                render_node(*n, out);
             pop_scope();
             return;
         }
@@ -1496,7 +1659,8 @@ private:
                 set_var(node.var_name, arr[static_cast<size_t>(i)]);
             }
 
-            for (auto& n : node.body) render_node(*n, out);
+            for (auto& n : node.body)
+                render_node(*n, out);
         }
         pop_scope();
     }
@@ -1505,12 +1669,14 @@ private:
         for (auto& branch : node.branches) {
             if (!branch.condition) {
                 // else branch
-                for (auto& n : branch.body) render_node(*n, out);
+                for (auto& n : branch.body)
+                    render_node(*n, out);
                 return;
             }
             Value cond = eval(*branch.condition);
             if (cond.truthy()) {
-                for (auto& n : branch.body) render_node(*n, out);
+                for (auto& n : branch.body)
+                    render_node(*n, out);
                 return;
             }
         }
@@ -1567,7 +1733,8 @@ private:
         }
         if (auto* arr = dynamic_cast<const ArrayExpr*>(&expr)) {
             Value::Array result;
-            for (auto& e : arr->elements) result.push_back(eval(*e));
+            for (auto& e : arr->elements)
+                result.push_back(eval(*e));
             return Value(std::move(result));
         }
         if (auto* dict = dynamic_cast<const DictExpr*>(&expr)) {
@@ -1589,12 +1756,14 @@ private:
         // Short-circuit for and/or
         if (bin.op == "and") {
             Value left = eval(*bin.left);
-            if (!left.truthy()) return left;
+            if (!left.truthy())
+                return left;
             return eval(*bin.right);
         }
         if (bin.op == "or") {
             Value left = eval(*bin.left);
-            if (left.truthy()) return left;
+            if (left.truthy())
+                return left;
             return eval(*bin.right);
         }
 
@@ -1623,16 +1792,26 @@ private:
 
         // Type tests: is string, is iterable, is mapping, is number, etc.
         auto eval_type_test = [&](const std::string& test_name, const Value& v) -> bool {
-            if (test_name == "string")   return v.is_string();
-            if (test_name == "iterable") return v.is_array() || v.is_string() || (v.is_object() && v.as_object());
-            if (test_name == "mapping")  return v.is_object() && v.as_object();
-            if (test_name == "number")   return v.is_number();
-            if (test_name == "integer")  return v.is_int();
-            if (test_name == "float")    return v.is_double();
-            if (test_name == "boolean")  return v.is_bool();
-            if (test_name == "sequence") return v.is_array() || v.is_string();
-            if (test_name == "defined")  return !v.is_none();
-            if (test_name == "none")     return v.is_none();
+            if (test_name == "string")
+                return v.is_string();
+            if (test_name == "iterable")
+                return v.is_array() || v.is_string() || (v.is_object() && v.as_object());
+            if (test_name == "mapping")
+                return v.is_object() && v.as_object();
+            if (test_name == "number")
+                return v.is_number();
+            if (test_name == "integer")
+                return v.is_int();
+            if (test_name == "float")
+                return v.is_double();
+            if (test_name == "boolean")
+                return v.is_bool();
+            if (test_name == "sequence")
+                return v.is_array() || v.is_string();
+            if (test_name == "defined")
+                return !v.is_none();
+            if (test_name == "none")
+                return v.is_none();
             return false;
         };
 
@@ -1663,48 +1842,65 @@ private:
         Value left = eval(*bin.left);
         Value right = eval(*bin.right);
 
-        if (bin.op == "+") return left + right;
-        if (bin.op == "~") return Value(left.to_string() + right.to_string());
+        if (bin.op == "+")
+            return left + right;
+        if (bin.op == "~")
+            return Value(left.to_string() + right.to_string());
         if (bin.op == "-") {
-            if (left.is_int() && right.is_int()) return Value(left.as_int() - right.as_int());
+            if (left.is_int() && right.is_int())
+                return Value(left.as_int() - right.as_int());
             return Value(left.to_number() - right.to_number());
         }
         if (bin.op == "*") {
-            if (left.is_int() && right.is_int()) return Value(left.as_int() * right.as_int());
+            if (left.is_int() && right.is_int())
+                return Value(left.as_int() * right.as_int());
             return Value(left.to_number() * right.to_number());
         }
         if (bin.op == "/") {
             double d = right.to_number();
-            if (d == 0.0) return Value(0.0);
+            if (d == 0.0)
+                return Value(0.0);
             return Value(left.to_number() / d);
         }
         if (bin.op == "%") {
             if (left.is_int() && right.is_int()) {
                 int64_t r = right.as_int();
-                if (r == 0) return Value(int64_t(0));
+                if (r == 0)
+                    return Value(int64_t(0));
                 return Value(left.as_int() % r);
             }
             double d = right.to_number();
-            if (d == 0.0) return Value(0.0);
+            if (d == 0.0)
+                return Value(0.0);
             return Value(std::fmod(left.to_number(), d));
         }
-        if (bin.op == "==") return Value(left == right);
-        if (bin.op == "!=") return Value(left != right);
-        if (bin.op == "<")  return Value(left < right);
-        if (bin.op == ">")  return Value(left > right);
-        if (bin.op == "<=") return Value(left <= right);
-        if (bin.op == ">=") return Value(left >= right);
-        if (bin.op == "in") return Value(right.contains(left));
-        if (bin.op == "not in") return Value(!right.contains(left));
+        if (bin.op == "==")
+            return Value(left == right);
+        if (bin.op == "!=")
+            return Value(left != right);
+        if (bin.op == "<")
+            return Value(left < right);
+        if (bin.op == ">")
+            return Value(left > right);
+        if (bin.op == "<=")
+            return Value(left <= right);
+        if (bin.op == ">=")
+            return Value(left >= right);
+        if (bin.op == "in")
+            return Value(right.contains(left));
+        if (bin.op == "not in")
+            return Value(!right.contains(left));
 
         return Value();
     }
 
     Value eval_unary(const UnaryExpr& u) {
         Value val = eval(*u.operand);
-        if (u.op == "not") return Value(!val.truthy());
+        if (u.op == "not")
+            return Value(!val.truthy());
         if (u.op == "-") {
-            if (val.is_int()) return Value(-val.as_int());
+            if (val.is_int())
+                return Value(-val.as_int());
             return Value(-val.to_number());
         }
         return val;
@@ -1714,14 +1910,17 @@ private:
         Value val = eval(*f.value);
 
         if (f.name == "trim") {
-            if (!val.is_string()) return val;
+            if (!val.is_string())
+                return val;
             std::string s = val.as_string();
             // Strip leading whitespace
             size_t start = 0;
-            while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+            while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
+                start++;
             // Strip trailing whitespace
             size_t end = s.size();
-            while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+            while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1])))
+                end--;
             return Value(s.substr(start, end - start));
         }
         if (f.name == "length") {
@@ -1731,35 +1930,45 @@ private:
             if (val.is_none() || (!val.truthy() && !f.args.empty())) {
                 // default(val, boolean=false): if boolean=true, use default for falsy values too
                 // Simple version: return default if none
-                if (val.is_none() && !f.args.empty()) return eval(*f.args[0]);
-                if (!val.is_none()) return val;
-                if (!f.args.empty()) return eval(*f.args[0]);
+                if (val.is_none() && !f.args.empty())
+                    return eval(*f.args[0]);
+                if (!val.is_none())
+                    return val;
+                if (!f.args.empty())
+                    return eval(*f.args[0]);
                 return Value("");
             }
             return val;
         }
         if (f.name == "first") {
-            if (val.is_array() && !val.as_array().empty()) return val.as_array().front();
+            if (val.is_array() && !val.as_array().empty())
+                return val.as_array().front();
             return Value();
         }
         if (f.name == "last") {
-            if (val.is_array() && !val.as_array().empty()) return val.as_array().back();
+            if (val.is_array() && !val.as_array().empty())
+                return val.as_array().back();
             return Value();
         }
         if (f.name == "upper") {
-            if (!val.is_string()) return val;
+            if (!val.is_string())
+                return val;
             std::string s = val.as_string();
-            for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            for (auto& c : s)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
             return Value(std::move(s));
         }
         if (f.name == "lower") {
-            if (!val.is_string()) return val;
+            if (!val.is_string())
+                return val;
             std::string s = val.as_string();
-            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (auto& c : s)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             return Value(std::move(s));
         }
         if (f.name == "join") {
-            if (!val.is_array()) return val;
+            if (!val.is_array())
+                return val;
             std::string sep;
             if (!f.args.empty()) {
                 Value s = eval(*f.args[0]);
@@ -1768,7 +1977,8 @@ private:
             std::string result;
             auto& arr = val.as_array();
             for (size_t i = 0; i < arr.size(); i++) {
-                if (i > 0) result += sep;
+                if (i > 0)
+                    result += sep;
                 result += arr[i].to_string();
             }
             return Value(std::move(result));
@@ -1783,10 +1993,12 @@ private:
             return Value(val.to_number());
         }
         if (f.name == "list") {
-            if (val.is_array()) return val;
+            if (val.is_array())
+                return val;
             if (val.is_string()) {
                 Value::Array arr;
-                for (char c : val.as_string()) arr.push_back(Value(std::string(1, c)));
+                for (char c : val.as_string())
+                    arr.push_back(Value(std::string(1, c)));
                 return Value(std::move(arr));
             }
             return Value(Value::Array{});
@@ -1806,11 +2018,13 @@ private:
             return Value(Value::Array{});
         }
         if (f.name == "replace") {
-            if (!val.is_string() || f.args.size() < 2) return val;
+            if (!val.is_string() || f.args.size() < 2)
+                return val;
             std::string s = val.as_string();
             std::string old_str = eval(*f.args[0]).to_string();
             std::string new_str = eval(*f.args[1]).to_string();
-            if (old_str.empty()) return val;
+            if (old_str.empty())
+                return val;
             size_t pos = 0;
             while ((pos = s.find(old_str, pos)) != std::string::npos) {
                 s.replace(pos, old_str.size(), new_str);
@@ -1819,19 +2033,26 @@ private:
             return Value(std::move(s));
         }
         if (f.name == "title") {
-            if (!val.is_string()) return val;
+            if (!val.is_string())
+                return val;
             std::string s = val.as_string();
             bool cap_next = true;
             for (auto& c : s) {
-                if (std::isspace(static_cast<unsigned char>(c))) { cap_next = true; }
-                else if (cap_next) { c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); cap_next = false; }
+                if (std::isspace(static_cast<unsigned char>(c))) {
+                    cap_next = true;
+                } else if (cap_next) {
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                    cap_next = false;
+                }
             }
             return Value(std::move(s));
         }
         if (f.name == "capitalize") {
-            if (!val.is_string()) return val;
+            if (!val.is_string())
+                return val;
             std::string s = val.as_string();
-            if (!s.empty()) s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
+            if (!s.empty())
+                s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
             return Value(std::move(s));
         }
         if (f.name == "count") {
@@ -1853,9 +2074,8 @@ private:
         if (f.name == "tojson") {
             return Value(value_to_json(val));
         }
-        if (f.name == "selectattr" || f.name == "rejectattr" ||
-            f.name == "map" || f.name == "select" || f.name == "reject" ||
-            f.name == "batch" || f.name == "slice" || f.name == "sort" ||
+        if (f.name == "selectattr" || f.name == "rejectattr" || f.name == "map" || f.name == "select" ||
+            f.name == "reject" || f.name == "batch" || f.name == "slice" || f.name == "sort" ||
             f.name == "unique" || f.name == "groupby") {
             // Unsupported filters — return value as-is
             IMP_LOG_WARN("jinja: unsupported filter '%s'", f.name.c_str());
@@ -1866,9 +2086,7 @@ private:
         return val;
     }
 
-    void register_macro(const MacroNode& node) {
-        macros_[node.name] = &node;
-    }
+    void register_macro(const MacroNode& node) { macros_[node.name] = &node; }
 
     Value call_macro(const MacroNode& macro, const CallExpr& call) {
         push_scope();
@@ -1922,22 +2140,26 @@ private:
                 Value::Array arr;
                 if (call.args.size() == 1) {
                     int64_t n = eval(*call.args[0]).as_int();
-                    for (int64_t i = 0; i < n; i++) arr.push_back(Value(i));
+                    for (int64_t i = 0; i < n; i++)
+                        arr.push_back(Value(i));
                 } else if (call.args.size() >= 2) {
                     int64_t start = eval(*call.args[0]).as_int();
                     int64_t end = eval(*call.args[1]).as_int();
                     int64_t step = (call.args.size() >= 3) ? eval(*call.args[2]).as_int() : 1;
                     if (step > 0) {
-                        for (int64_t i = start; i < end; i += step) arr.push_back(Value(i));
+                        for (int64_t i = start; i < end; i += step)
+                            arr.push_back(Value(i));
                     } else if (step < 0) {
-                        for (int64_t i = start; i > end; i += step) arr.push_back(Value(i));
+                        for (int64_t i = start; i > end; i += step)
+                            arr.push_back(Value(i));
                     }
                 }
                 return Value(std::move(arr));
             }
             if (var->name == "raise_exception") {
                 std::string msg = "Template error";
-                if (!call.args.empty()) msg = eval(*call.args[0]).to_string();
+                if (!call.args.empty())
+                    msg = eval(*call.args[0]).to_string();
                 IMP_LOG_WARN("jinja: raise_exception: %s", msg.c_str());
                 return Value();
             }
@@ -1950,13 +2172,15 @@ private:
             }
             if (var->name == "cycler") {
                 // Minimal cycler — return first arg
-                if (!call.args.empty()) return eval(*call.args[0]);
+                if (!call.args.empty())
+                    return eval(*call.args[0]);
                 return Value();
             }
             if (var->name == "joiner") {
                 // Returns a callable that returns "" first call, then sep
                 std::string sep = ", ";
-                if (!call.args.empty()) sep = eval(*call.args[0]).to_string();
+                if (!call.args.empty())
+                    sep = eval(*call.args[0]).to_string();
                 // Can't truly implement callable — return empty
                 return Value(sep);
             }
@@ -1964,7 +2188,8 @@ private:
                 // strftime_now(format_string) — returns current time formatted
                 // Used by some chat templates to inject current date/time
                 std::string fmt = "%Y-%m-%d %H:%M:%S";
-                if (!call.args.empty()) fmt = eval(*call.args[0]).to_string();
+                if (!call.args.empty())
+                    fmt = eval(*call.args[0]).to_string();
                 std::time_t now = std::time(nullptr);
                 std::tm* tm = std::localtime(&now);
                 char buf[256];
@@ -1988,69 +2213,86 @@ private:
 
             if (m.method == "strip") {
                 std::string chars;
-                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
+                if (!m.args.empty())
+                    chars = eval(*m.args[0]).to_string();
                 size_t start = 0;
                 if (chars.empty()) {
-                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
+                        start++;
                 } else {
-                    while (start < s.size() && chars.find(s[start]) != std::string::npos) start++;
+                    while (start < s.size() && chars.find(s[start]) != std::string::npos)
+                        start++;
                 }
                 size_t end = s.size();
                 if (chars.empty()) {
-                    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1])))
+                        end--;
                 } else {
-                    while (end > start && chars.find(s[end - 1]) != std::string::npos) end--;
+                    while (end > start && chars.find(s[end - 1]) != std::string::npos)
+                        end--;
                 }
                 return Value(s.substr(start, end - start));
             }
             if (m.method == "lstrip") {
                 std::string chars;
-                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
+                if (!m.args.empty())
+                    chars = eval(*m.args[0]).to_string();
                 size_t start = 0;
                 if (chars.empty()) {
-                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
+                        start++;
                 } else {
-                    while (start < s.size() && chars.find(s[start]) != std::string::npos) start++;
+                    while (start < s.size() && chars.find(s[start]) != std::string::npos)
+                        start++;
                 }
                 return Value(s.substr(start));
             }
             if (m.method == "rstrip") {
                 std::string chars;
-                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
+                if (!m.args.empty())
+                    chars = eval(*m.args[0]).to_string();
                 size_t end = s.size();
                 if (chars.empty()) {
-                    while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                    while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1])))
+                        end--;
                 } else {
-                    while (end > 0 && chars.find(s[end - 1]) != std::string::npos) end--;
+                    while (end > 0 && chars.find(s[end - 1]) != std::string::npos)
+                        end--;
                 }
                 return Value(s.substr(0, end));
             }
             if (m.method == "startswith") {
-                if (m.args.empty()) return Value(false);
+                if (m.args.empty())
+                    return Value(false);
                 std::string prefix = eval(*m.args[0]).to_string();
                 return Value(s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0);
             }
             if (m.method == "endswith") {
-                if (m.args.empty()) return Value(false);
+                if (m.args.empty())
+                    return Value(false);
                 std::string suffix = eval(*m.args[0]).to_string();
                 return Value(s.size() >= suffix.size() &&
                              s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0);
             }
             if (m.method == "upper") {
                 std::string r = s;
-                for (auto& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                for (auto& c : r)
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                 return Value(std::move(r));
             }
             if (m.method == "lower") {
                 std::string r = s;
-                for (auto& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                for (auto& c : r)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 return Value(std::move(r));
             }
             if (m.method == "replace") {
-                if (m.args.size() < 2) return obj;
+                if (m.args.size() < 2)
+                    return obj;
                 std::string old_str = eval(*m.args[0]).to_string();
                 std::string new_str = eval(*m.args[1]).to_string();
-                if (old_str.empty()) return obj;
+                if (old_str.empty())
+                    return obj;
                 std::string r = s;
                 size_t pos = 0;
                 while ((pos = r.find(old_str, pos)) != std::string::npos) {
@@ -2065,7 +2307,8 @@ private:
                     // Split on whitespace
                     std::istringstream iss(s);
                     std::string word;
-                    while (iss >> word) arr.push_back(Value(std::move(word)));
+                    while (iss >> word)
+                        arr.push_back(Value(std::move(word)));
                 } else {
                     std::string sep = eval(*m.args[0]).to_string();
                     if (sep.empty()) {
@@ -2086,15 +2329,18 @@ private:
                 return Value(std::move(arr));
             }
             if (m.method == "find") {
-                if (m.args.empty()) return Value(int64_t(-1));
+                if (m.args.empty())
+                    return Value(int64_t(-1));
                 std::string sub = eval(*m.args[0]).to_string();
                 size_t pos = s.find(sub);
                 return Value(pos != std::string::npos ? static_cast<int64_t>(pos) : int64_t(-1));
             }
             if (m.method == "count") {
-                if (m.args.empty()) return Value(int64_t(0));
+                if (m.args.empty())
+                    return Value(int64_t(0));
                 std::string sub = eval(*m.args[0]).to_string();
-                if (sub.empty()) return Value(int64_t(0));
+                if (sub.empty())
+                    return Value(int64_t(0));
                 int64_t count = 0;
                 size_t pos = 0;
                 while ((pos = s.find(sub, pos)) != std::string::npos) {
@@ -2114,15 +2360,18 @@ private:
             if (m.method == "append") {
                 // Arrays are immutable in our model — return new array
                 Value::Array arr = obj.as_array();
-                if (!m.args.empty()) arr.push_back(eval(*m.args[0]));
+                if (!m.args.empty())
+                    arr.push_back(eval(*m.args[0]));
                 return Value(std::move(arr));
             }
             if (m.method == "insert") {
                 Value::Array arr = obj.as_array();
                 if (m.args.size() >= 2) {
                     int64_t idx = eval(*m.args[0]).as_int();
-                    if (idx < 0) idx = 0;
-                    if (idx > static_cast<int64_t>(arr.size())) idx = static_cast<int64_t>(arr.size());
+                    if (idx < 0)
+                        idx = 0;
+                    if (idx > static_cast<int64_t>(arr.size()))
+                        idx = static_cast<int64_t>(arr.size());
                     arr.insert(arr.begin() + idx, eval(*m.args[1]));
                 }
                 return Value(std::move(arr));
@@ -2158,11 +2407,14 @@ private:
                 return Value(std::move(arr));
             }
             if (m.method == "get") {
-                if (m.args.empty()) return Value();
+                if (m.args.empty())
+                    return Value();
                 std::string key = eval(*m.args[0]).to_string();
                 auto it = obj.as_object()->find(key);
-                if (it != obj.as_object()->end()) return it->second;
-                if (m.args.size() >= 2) return eval(*m.args[1]);
+                if (it != obj.as_object()->end())
+                    return it->second;
+                if (m.args.size() >= 2)
+                    return eval(*m.args[1]);
                 return Value();
             }
             if (m.method == "update") {
@@ -2189,32 +2441,43 @@ private:
 
         // Resolve start/stop/step with Python-style defaults
         int64_t step = sl.step ? static_cast<int64_t>(eval(*sl.step).to_number()) : 1;
-        if (step == 0) step = 1; // avoid infinite loop
+        if (step == 0)
+            step = 1;  // avoid infinite loop
 
         int64_t start, stop;
         if (step > 0) {
             start = sl.start ? static_cast<int64_t>(eval(*sl.start).to_number()) : 0;
-            stop  = sl.stop  ? static_cast<int64_t>(eval(*sl.stop).to_number())  : len;
+            stop = sl.stop ? static_cast<int64_t>(eval(*sl.stop).to_number()) : len;
         } else {
             start = sl.start ? static_cast<int64_t>(eval(*sl.start).to_number()) : len - 1;
-            stop  = sl.stop  ? static_cast<int64_t>(eval(*sl.stop).to_number())  : -(len + 1);
+            stop = sl.stop ? static_cast<int64_t>(eval(*sl.stop).to_number()) : -(len + 1);
         }
 
         // Normalize negative indices
-        if (start < 0) start += len;
-        if (stop < 0)  stop += len;
+        if (start < 0)
+            start += len;
+        if (stop < 0)
+            stop += len;
 
         // Clamp
         if (step > 0) {
-            if (start < 0) start = 0;
-            if (start > len) start = len;
-            if (stop < 0) stop = 0;
-            if (stop > len) stop = len;
+            if (start < 0)
+                start = 0;
+            if (start > len)
+                start = len;
+            if (stop < 0)
+                stop = 0;
+            if (stop > len)
+                stop = len;
         } else {
-            if (start < -1) start = -1;
-            if (start >= len) start = len - 1;
-            if (stop < -1) stop = -1;
-            if (stop >= len) stop = len - 1;
+            if (start < -1)
+                start = -1;
+            if (start >= len)
+                start = len - 1;
+            if (stop < -1)
+                stop = -1;
+            if (stop >= len)
+                stop = len - 1;
         }
 
         if (obj.is_array()) {
@@ -2245,15 +2508,19 @@ private:
     }
 
     static std::string value_to_json(const Value& val) {
-        if (val.is_none()) return "null";
-        if (val.is_bool()) return val.as_bool() ? "true" : "false";
-        if (val.is_int()) return std::to_string(val.as_int());
+        if (val.is_none())
+            return "null";
+        if (val.is_bool())
+            return val.as_bool() ? "true" : "false";
+        if (val.is_int())
+            return std::to_string(val.as_int());
         if (val.is_double()) {
             char buf[64];
             std::snprintf(buf, sizeof(buf), "%g", val.as_double());
             // Ensure it looks like a number (has decimal or exponent)
             std::string s(buf);
-            if (s.find('.') == std::string::npos && s.find('e') == std::string::npos && s.find('E') == std::string::npos)
+            if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+                s.find('E') == std::string::npos)
                 s += ".0";
             return s;
         }
@@ -2261,11 +2528,21 @@ private:
             std::string r = "\"";
             for (char c : val.as_string()) {
                 switch (c) {
-                    case '"':  r += "\\\""; break;
-                    case '\\': r += "\\\\"; break;
-                    case '\n': r += "\\n"; break;
-                    case '\r': r += "\\r"; break;
-                    case '\t': r += "\\t"; break;
+                    case '"':
+                        r += "\\\"";
+                        break;
+                    case '\\':
+                        r += "\\\\";
+                        break;
+                    case '\n':
+                        r += "\\n";
+                        break;
+                    case '\r':
+                        r += "\\r";
+                        break;
+                    case '\t':
+                        r += "\\t";
+                        break;
                     default:
                         if (static_cast<unsigned char>(c) < 0x20) {
                             char hex[8];
@@ -2283,7 +2560,8 @@ private:
             std::string r = "[";
             auto& arr = val.as_array();
             for (size_t i = 0; i < arr.size(); i++) {
-                if (i > 0) r += ", ";
+                if (i > 0)
+                    r += ", ";
                 r += value_to_json(arr[i]);
             }
             r += "]";
@@ -2293,7 +2571,8 @@ private:
             std::string r = "{";
             bool first = true;
             for (auto& [k, v] : *val.as_object()) {
-                if (!first) r += ", ";
+                if (!first)
+                    r += ", ";
                 r += "\"" + k + "\": " + value_to_json(v);
                 first = false;
             }
@@ -2307,7 +2586,7 @@ private:
     std::map<std::string, const MacroNode*> macros_;
 };
 
-} // namespace detail
+}  // namespace detail
 
 // ============================================================================
 // Template implementation
@@ -2347,4 +2626,4 @@ std::string Template::render_string(const std::string& source, const Context& ct
     return tmpl.render(ctx);
 }
 
-} // namespace imp::jinja
+}  // namespace imp::jinja

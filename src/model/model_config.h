@@ -19,7 +19,7 @@ struct ModelConfig {
     int d_model = 0, d_ff = 0, vocab_size = 0, max_seq_len = 0;
     int head_dim = 0;  // 0 = infer as d_model / n_heads
     float rope_theta = 10000.0f, rms_norm_eps = 1e-5f, rope_freq_scale = 1.0f;
-    float embed_scale = 0.0f;   // >0 = multiply embeddings by this (e.g. sqrt(d_model) for Gemma)
+    float embed_scale = 0.0f;         // >0 = multiply embeddings by this (e.g. sqrt(d_model) for Gemma)
     float norm_weight_offset = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
     int n_experts = 0, n_experts_active = 0, expert_d_ff = 0;
 
@@ -32,11 +32,11 @@ struct ModelConfig {
     float rope_theta_swa = 0.0f;            // Gemma 4: RoPE theta for SWA layers (default: rope_local_theta)
 
     // Mamba2 SSM config
-    int ssm_conv_kernel = 0;    // 4
-    int ssm_state_size = 0;     // 128
-    int ssm_group_count = 0;    // 8
-    int ssm_inner_size = 0;     // 4096
-    int ssm_dt_rank = 0;        // 64
+    int ssm_conv_kernel = 0;  // 4
+    int ssm_state_size = 0;   // 128
+    int ssm_group_count = 0;  // 8
+    int ssm_inner_size = 0;   // 4096
+    int ssm_dt_rank = 0;      // 64
     // Asymmetric-head GDN (n_v_heads > n_k_heads) head storage layout.
     // false (default): heads in tiled order (h % n_groups gives group_id).
     //                  GGUF Qwen3.5/3.6 converters use this layout.
@@ -44,29 +44,29 @@ struct ModelConfig {
     //                  HF SafeTensors Qwen3.5/3.6 use this. Set by the
     //                  SafeTensors loader; GGUF loader leaves it false.
     bool gdn_grouped_head_layout = false;
-    int rope_dim = 0;           // 0 = full head_dim, 84 = partial
-    bool rope_neox = true;      // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
+    int rope_dim = 0;       // 0 = full head_dim, 84 = partial
+    bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
     // YaRN / Dynamic NTK RoPE scaling
     float yarn_ext_factor = 0.0f;   // 0 = linear/none, 1.0 = YaRN blending
     float yarn_attn_factor = 1.0f;  // mscale: attention factor (pre-compensated)
     float yarn_beta_fast = 32.0f;   // wavelength threshold for fast-rotating dims
     float yarn_beta_slow = 1.0f;    // wavelength threshold for slow-rotating dims
-    int   rope_n_ctx_orig = 0;      // original training context length (0 = use max_seq_len)
+    int rope_n_ctx_orig = 0;        // original training context length (0 = use max_seq_len)
 
     // LongRoPE per-dimension frequency scaling (Phi-4)
-    std::vector<float> rope_short_factor;   // [rope_pairs] short-context factors
-    std::vector<float> rope_long_factor;    // [rope_pairs] long-context factors
-    int rope_scaling_orig_max_pos = 0;      // threshold: short if seqlen <= this, else long
-    int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
-    int sliding_window_pattern = 0;  // Gemma-3: 6 = every 6th layer is global (no window)
-    float rope_local_theta = 0.0f;   // Gemma-3: RoPE theta for local/sliding layers (10000)
+    std::vector<float> rope_short_factor;  // [rope_pairs] short-context factors
+    std::vector<float> rope_long_factor;   // [rope_pairs] long-context factors
+    int rope_scaling_orig_max_pos = 0;     // threshold: short if seqlen <= this, else long
+    int sliding_window = 0;                // 0 = disabled, >0 = window size (Qwen3, Mistral)
+    int sliding_window_pattern = 0;        // Gemma-3: 6 = every 6th layer is global (no window)
+    float rope_local_theta = 0.0f;         // Gemma-3: RoPE theta for local/sliding layers (10000)
     FFNActivation ffn_activation = FFNActivation::SWIGLU;
     NormPlacement norm_placement = NormPlacement::PRE_NORM;
 
     // Extended MoE config
-    int n_experts_shared = 0;       // 1
-    int expert_shared_d_ff = 0;     // 3712
+    int n_experts_shared = 0;           // 1
+    int expert_shared_d_ff = 0;         // 3712
     float expert_weights_scale = 1.0f;  // 2.5
     bool expert_weights_norm = false;
     bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
@@ -111,8 +111,8 @@ struct NvFP4PreQuantWeight {
 
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
-    Tensor q_bias, k_bias, v_bias;    // Attention biases (Qwen2)
-    Tensor attn_q_norm, attn_k_norm;  // QK-norm (Qwen3-style per-head RMSNorm)
+    Tensor q_bias, k_bias, v_bias;         // Attention biases (Qwen2)
+    Tensor attn_q_norm, attn_k_norm;       // QK-norm (Qwen3-style per-head RMSNorm)
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Gemma 4 extras
     Tensor ffn_pre_norm_2;      // pre-norm for expert branch (operates on attn_out)
@@ -148,25 +148,25 @@ struct TransformerLayer {
     // WeightRegistry indices (populated by pre_dequant_weights, Phase 2+).
     // kInvalidTensorID means the corresponding Tensor is absent on this layer
     // (e.g. ssm_in_id is kInvalidTensorID on attention-only layers).
-    TensorID wq_id       = kInvalidTensorID;
-    TensorID wk_id       = kInvalidTensorID;
-    TensorID wv_id       = kInvalidTensorID;
-    TensorID wo_id       = kInvalidTensorID;
-    TensorID w_gate_id   = kInvalidTensorID;
-    TensorID w_up_id     = kInvalidTensorID;
-    TensorID w_down_id   = kInvalidTensorID;
+    TensorID wq_id = kInvalidTensorID;
+    TensorID wk_id = kInvalidTensorID;
+    TensorID wv_id = kInvalidTensorID;
+    TensorID wo_id = kInvalidTensorID;
+    TensorID w_gate_id = kInvalidTensorID;
+    TensorID w_up_id = kInvalidTensorID;
+    TensorID w_down_id = kInvalidTensorID;
     // Shared-expert FFN (Nemotron / DeepSeek / Qwen3.5-MoE). kInvalidTensorID
     // when the layer has no shared expert branch.
     TensorID w_gate_shared_id = kInvalidTensorID;
-    TensorID w_up_shared_id   = kInvalidTensorID;
+    TensorID w_up_shared_id = kInvalidTensorID;
     TensorID w_down_shared_id = kInvalidTensorID;
-    TensorID ssm_in_id   = kInvalidTensorID;
-    TensorID ssm_out_id  = kInvalidTensorID;
+    TensorID ssm_in_id = kInvalidTensorID;
+    TensorID ssm_out_id = kInvalidTensorID;
     TensorID gdn_gate_id = kInvalidTensorID;
     // Fused KV / gate+up handles. Populated when the runtime decides to build
     // a fused weight pair for strided batched prefill GEMM. kInvalidTensorID
     // means no fused weight was built for this layer (per-layer dispatch path).
-    TensorID fused_kv_id      = kInvalidTensorID;
+    TensorID fused_kv_id = kInvalidTensorID;
     TensorID fused_gate_up_id = kInvalidTensorID;
 
     // Per-expert WeightRegistry indices (populated by pre_dequant_weights, Task 3.4).
@@ -175,34 +175,34 @@ struct TransformerLayer {
     std::vector<TensorID> expert_up_ids;
     std::vector<TensorID> expert_down_ids;
     // Router and shared-expert gate projections
-    TensorID moe_gate_id            = kInvalidTensorID;
-    TensorID shared_expert_gate_id  = kInvalidTensorID;
+    TensorID moe_gate_id = kInvalidTensorID;
+    TensorID shared_expert_gate_id = kInvalidTensorID;
 
     // Borrowed pointers into wcache_.nvfp4_moe (packed 3D expert NVFP4 cache).
     // Set by pre_dequant_weights when the packed expert tensors are NVFP4-cached.
     // Null means the nvfp4_moe path is unavailable for this layer.
     const NvFP4MoEQuantResult* nvfp4_moe_gate_ptr = nullptr;
-    const NvFP4MoEQuantResult* nvfp4_moe_up_ptr   = nullptr;
+    const NvFP4MoEQuantResult* nvfp4_moe_up_ptr = nullptr;
     const NvFP4MoEQuantResult* nvfp4_moe_down_ptr = nullptr;
 
     // Borrowed pointers into wcache_.fp16 for packed expert tensors.
     // Set by pre_dequant_weights when the entire packed expert tensor has a
     // pre-dequantised FP16 entry (contiguous [n_experts*rows, cols] layout).
     const Tensor* fp16_packed_gate_cache = nullptr;
-    const Tensor* fp16_packed_up_cache   = nullptr;
+    const Tensor* fp16_packed_up_cache = nullptr;
     const Tensor* fp16_packed_down_cache = nullptr;
 
     // Mamba2 SSM weights
-    Tensor ssm_in, ssm_out;              // Projections
-    Tensor ssm_conv1d_w, ssm_conv1d_b;   // Conv1d weight + bias
-    Tensor ssm_dt_b;                      // dt bias
-    Tensor ssm_a, ssm_d;                  // A (log) and D (skip connection)
-    Tensor ssm_norm_w;                    // Group RMSNorm weight
+    Tensor ssm_in, ssm_out;             // Projections
+    Tensor ssm_conv1d_w, ssm_conv1d_b;  // Conv1d weight + bias
+    Tensor ssm_dt_b;                    // dt bias
+    Tensor ssm_a, ssm_d;                // A (log) and D (skip connection)
+    Tensor ssm_norm_w;                  // Group RMSNorm weight
 
     // Gated DeltaNet (GDN) weights (Qwen3.5 hybrid)
-    Tensor gdn_gate;     // [d_model, inner_size] output gating projection
-    Tensor gdn_alpha;    // [d_model, n_gdn_heads] delta rule decay
-    Tensor gdn_beta;     // [d_model, n_gdn_heads] delta rule learning rate
+    Tensor gdn_gate;   // [d_model, inner_size] output gating projection
+    Tensor gdn_alpha;  // [d_model, n_gdn_heads] delta rule decay
+    Tensor gdn_beta;   // [d_model, n_gdn_heads] delta rule learning rate
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
@@ -214,10 +214,10 @@ struct TransformerLayer {
 
     // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
     struct GPTQWeight {
-        Tensor qweight;   // packed INT32
-        Tensor qzeros;    // zero points
-        Tensor scales;    // per-group scales (FP16)
-        Tensor g_idx;     // group index (optional, for desc_act)
+        Tensor qweight;  // packed INT32
+        Tensor qzeros;   // zero points
+        Tensor scales;   // per-group scales (FP16)
+        Tensor g_idx;    // group index (optional, for desc_act)
         int bits = 0;
         int group_size = 128;
     };
@@ -225,4 +225,4 @@ struct TransformerLayer {
     GPTQWeight gptq_gate, gptq_up, gptq_down;
 };
 
-} // namespace imp
+}  // namespace imp

@@ -27,7 +27,10 @@ Tensor make_logits(const float* data, int64_t vocab_size) {
 }
 
 void free_gpu_tensor(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // =========================================================================
@@ -115,7 +118,7 @@ TEST(SamplingTest, TopKDeterministic) {
 
     for (unsigned int seed = 0; seed < 10; seed++) {
         int32_t token = sample_topk_topp(d_logits, /*top_k=*/1, /*top_p=*/1.0f,
-                                          /*temperature=*/1.0f, seed);
+                                         /*temperature=*/1.0f, seed);
         EXPECT_EQ(token, 1) << "top_k=1 should always pick argmax, seed=" << seed;
     }
 
@@ -133,7 +136,7 @@ TEST(SamplingTest, TopKRespectsK) {
 
     for (unsigned int seed = 0; seed < 20; seed++) {
         int32_t token = sample_topk_topp(d_logits, /*top_k=*/3, /*top_p=*/1.0f,
-                                          /*temperature=*/1.0f, seed);
+                                         /*temperature=*/1.0f, seed);
         EXPECT_EQ(token, 0) << "Dominant logit should always be picked, seed=" << seed;
     }
 
@@ -147,7 +150,7 @@ TEST(SamplingTest, TemperatureZeroIsGreedy) {
 
     for (unsigned int seed = 0; seed < 10; seed++) {
         int32_t token = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
-                                          /*temperature=*/0.01f, seed);
+                                         /*temperature=*/0.01f, seed);
         EXPECT_EQ(token, 3) << "Very low temperature should pick argmax, seed=" << seed;
     }
 
@@ -166,7 +169,7 @@ TEST(SamplingTest, TopPFiltering) {
     // With many seeds, we should only ever see tokens 2 or 7
     for (unsigned int seed = 0; seed < 50; seed++) {
         int32_t token = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/0.99f,
-                                          /*temperature=*/1.0f, seed);
+                                         /*temperature=*/1.0f, seed);
         EXPECT_TRUE(token == 2 || token == 7)
             << "Should only sample from top-2 tokens, got " << token << " seed=" << seed;
     }
@@ -185,16 +188,14 @@ TEST(SamplingTest, SamplingDistribution) {
     constexpr int N = 1000;
     for (unsigned int seed = 0; seed < N; seed++) {
         int32_t token = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
-                                          /*temperature=*/1.0f, seed);
+                                         /*temperature=*/1.0f, seed);
         counts[token]++;
     }
 
     // Token 0 should be most frequent (>40% of samples)
-    EXPECT_GT(counts[0], N * 4 / 10)
-        << "Token 0 (highest logit) should appear >40% of the time";
+    EXPECT_GT(counts[0], N * 4 / 10) << "Token 0 (highest logit) should appear >40% of the time";
     // Token 2 should be least frequent (<30% of samples)
-    EXPECT_LT(counts[2], N * 3 / 10)
-        << "Token 2 (lowest logit) should appear <30% of the time";
+    EXPECT_LT(counts[2], N * 3 / 10) << "Token 2 (lowest logit) should appear <30% of the time";
 
     free_gpu_tensor(d_logits);
 }
@@ -230,7 +231,7 @@ TEST(SamplingTest, AllIdenticalLogits) {
     // Stochastic: should produce valid tokens across seeds
     for (unsigned int seed = 0; seed < 20; seed++) {
         int32_t t = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
-                                      /*temperature=*/1.0f, seed);
+                                     /*temperature=*/1.0f, seed);
         EXPECT_GE(t, 0);
         EXPECT_LT(t, V);
     }
@@ -252,12 +253,12 @@ TEST(SamplingTest, SingleNonNegInf) {
     // Stochastic with various seeds
     for (unsigned int seed = 0; seed < 20; seed++) {
         int32_t t = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
-                                      /*temperature=*/1.0f, seed);
+                                     /*temperature=*/1.0f, seed);
         EXPECT_EQ(t, 17) << "Only non-(-inf) token should be sampled, seed=" << seed;
     }
 
     free_gpu_tensor(d_logits);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

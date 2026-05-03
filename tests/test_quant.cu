@@ -22,13 +22,13 @@ namespace {
 // ===========================================================================
 
 // Create a GPU tensor from host float data, with optional FP16 conversion.
-Tensor make_gpu_tensor(const float* host_data, QType dtype,
-                       std::initializer_list<int64_t> shape_list) {
+Tensor make_gpu_tensor(const float* host_data, QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -48,9 +48,10 @@ Tensor make_gpu_tensor(const float* host_data, QType dtype,
 Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -83,12 +84,10 @@ void free_gpu_tensor(Tensor& t) {
 // ---------------------------------------------------------------------------
 // CPU reference: INT4 dequantization
 // ---------------------------------------------------------------------------
-void cpu_dequant_int4(const uint8_t* packed, float* output,
-                      const float* scales, int n, int group_size) {
+void cpu_dequant_int4(const uint8_t* packed, float* output, const float* scales, int n, int group_size) {
     for (int i = 0; i < n; i++) {
         int byte_idx = i / 2;
-        int nibble = (i % 2 == 0) ? (packed[byte_idx] & 0x0F)
-                                   : ((packed[byte_idx] >> 4) & 0x0F);
+        int nibble = (i % 2 == 0) ? (packed[byte_idx] & 0x0F) : ((packed[byte_idx] >> 4) & 0x0F);
         int group = i / group_size;
         output[i] = (float)(nibble - 8) * scales[group];
     }
@@ -97,8 +96,7 @@ void cpu_dequant_int4(const uint8_t* packed, float* output,
 // ---------------------------------------------------------------------------
 // CPU reference: INT8 dequantization (per-element scales)
 // ---------------------------------------------------------------------------
-void cpu_dequant_int8(const int8_t* input, float* output,
-                      const float* scales, int n) {
+void cpu_dequant_int8(const int8_t* input, float* output, const float* scales, int n) {
     for (int i = 0; i < n; i++) {
         output[i] = (float)input[i] * scales[i];
     }
@@ -108,8 +106,7 @@ void cpu_dequant_int8(const int8_t* input, float* output,
 // CPU reference: matmul  C[M,N] = A[M,K] @ B_T[N,K]^T
 // (B_T is stored in [N,K] layout, so C[m,n] = sum_k A[m,k] * B_T[n,k])
 // ---------------------------------------------------------------------------
-void cpu_matmul(const float* A, const float* B_T, float* C,
-                int M, int N, int K) {
+void cpu_matmul(const float* A, const float* B_T, float* C, int M, int N, int K) {
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
             float sum = 0.0f;
@@ -172,8 +169,7 @@ TEST(QuantTest, DequantINT4Basic) {
     std::vector<half> h_scales_fp16(n_groups);
     for (int i = 0; i < n_groups; i++)
         h_scales_fp16[i] = __float2half(h_scales[i]);
-    cudaMemcpy(d_scales, h_scales_fp16.data(), n_groups * sizeof(half),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scales, h_scales_fp16.data(), n_groups * sizeof(half), cudaMemcpyHostToDevice);
 
     // Run kernel
     dequant_int4_fp16(d_packed, d_output, d_scales, n, group_size, nullptr);
@@ -181,14 +177,12 @@ TEST(QuantTest, DequantINT4Basic) {
 
     // Read back output (FP16 -> float)
     std::vector<half> h_out_fp16(n);
-    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half), cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < n; i++) {
         float got = __half2float(h_out_fp16[i]);
         EXPECT_NEAR(got, h_ref[i], 1e-3f)
-            << "DequantINT4Basic mismatch at index " << i
-            << ": got " << got << ", expected " << h_ref[i];
+            << "DequantINT4Basic mismatch at index " << i << ": got " << got << ", expected " << h_ref[i];
     }
 
     cudaFree(d_packed);
@@ -202,7 +196,7 @@ TEST(QuantTest, DequantINT4Basic) {
 TEST(QuantTest, DequantINT4GroupSize) {
     constexpr int n = 32;
     constexpr int group_size = 8;
-    constexpr int n_bytes = n / 2;           // 16 packed bytes
+    constexpr int n_bytes = n / 2;            // 16 packed bytes
     constexpr int n_groups = n / group_size;  // 4 groups
 
     // Pack known nibble values: use constant nibble=5 for easy verification.
@@ -243,21 +237,18 @@ TEST(QuantTest, DequantINT4GroupSize) {
     std::vector<half> h_scales_fp16(n_groups);
     for (int i = 0; i < n_groups; i++)
         h_scales_fp16[i] = __float2half(h_scales[i]);
-    cudaMemcpy(d_scales, h_scales_fp16.data(), n_groups * sizeof(half),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scales, h_scales_fp16.data(), n_groups * sizeof(half), cudaMemcpyHostToDevice);
 
     dequant_int4_fp16(d_packed, d_output, d_scales, n, group_size, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<half> h_out_fp16(n);
-    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half), cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < n; i++) {
         float got = __half2float(h_out_fp16[i]);
         EXPECT_NEAR(got, h_ref[i], 1e-3f)
-            << "DequantINT4GroupSize mismatch at index " << i
-            << " (group " << (i / group_size) << ")"
+            << "DequantINT4GroupSize mismatch at index " << i << " (group " << (i / group_size) << ")"
             << ": got " << got << ", expected " << h_ref[i];
     }
 
@@ -297,21 +288,18 @@ TEST(QuantTest, DequantINT8Basic) {
     cudaMalloc(&d_scales, n * sizeof(half));
     cudaMalloc(&d_output, n * sizeof(half));
 
-    cudaMemcpy(d_input, h_input.data(), n * sizeof(int8_t),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input, h_input.data(), n * sizeof(int8_t), cudaMemcpyHostToDevice);
 
     std::vector<half> h_scales_fp16(n);
     for (int i = 0; i < n; i++)
         h_scales_fp16[i] = __float2half(h_scales[i]);
-    cudaMemcpy(d_scales, h_scales_fp16.data(), n * sizeof(half),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scales, h_scales_fp16.data(), n * sizeof(half), cudaMemcpyHostToDevice);
 
     dequant_int8_fp16(d_input, d_output, d_scales, n, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<half> h_out_fp16(n);
-    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_fp16.data(), d_output, n * sizeof(half), cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < n; i++) {
         float got = __half2float(h_out_fp16[i]);
@@ -319,8 +307,7 @@ TEST(QuantTest, DequantINT8Basic) {
         float scale_fp16 = __half2float(__float2half(h_scales[i]));
         float expected = (float)h_input[i] * scale_fp16;
         EXPECT_NEAR(got, expected, 5e-3f)
-            << "DequantINT8Basic mismatch at index " << i
-            << ": got " << got << ", expected " << expected
+            << "DequantINT8Basic mismatch at index " << i << ": got " << got << ", expected " << expected
             << " (input=" << (int)h_input[i] << ", scale=" << scale_fp16 << ")";
     }
 
@@ -338,11 +325,9 @@ TEST(QuantTest, FP8RoundTrip) {
     // E4M3 min subnormal: 2^-9 = ~0.00195.
     // Note: e=15 encodes NaN in NVIDIA's E4M3 spec, so max safe normal = 240.
     // Values above 240 may saturate to 240 or become NaN depending on impl.
-    std::vector<float> test_values = {
-        0.0f, 1.0f, -1.0f, 0.5f, 2.0f, 0.001953125f,
-        -0.5f, -2.0f, 4.0f, 8.0f, 16.0f, 64.0f, 128.0f,
-        0.25f, 0.125f, 0.0625f, 240.0f, -240.0f, 32.0f, -32.0f
-    };
+    std::vector<float> test_values = {0.0f,   1.0f,    -1.0f,  0.5f,    2.0f,  0.001953125f, -0.5f,
+                                      -2.0f,  4.0f,    8.0f,   16.0f,   64.0f, 128.0f,       0.25f,
+                                      0.125f, 0.0625f, 240.0f, -240.0f, 32.0f, -32.0f};
     const int n = static_cast<int>(test_values.size());
 
     // Upload as FP16
@@ -357,8 +342,7 @@ TEST(QuantTest, FP8RoundTrip) {
     cudaMalloc(&d_fp8, n * sizeof(uint8_t));
     cudaMalloc(&d_fp16_out, n * sizeof(half));
 
-    cudaMemcpy(d_fp16_in, h_input_fp16.data(), n * sizeof(half),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_fp16_in, h_input_fp16.data(), n * sizeof(half), cudaMemcpyHostToDevice);
 
     // FP16 -> FP8
     cast_fp16_to_fp8(d_fp16_in, d_fp8, n, nullptr);
@@ -370,8 +354,7 @@ TEST(QuantTest, FP8RoundTrip) {
 
     // Read back
     std::vector<half> h_out_fp16(n);
-    cudaMemcpy(h_out_fp16.data(), d_fp16_out, n * sizeof(half),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_fp16.data(), d_fp16_out, n * sizeof(half), cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < n; i++) {
         float original = __half2float(h_input_fp16[i]);
@@ -380,26 +363,20 @@ TEST(QuantTest, FP8RoundTrip) {
 
         if (abs_original == 0.0f) {
             // Zero must round-trip exactly.
-            EXPECT_EQ(roundtrip, 0.0f)
-                << "FP8RoundTrip: zero did not round-trip at index " << i;
+            EXPECT_EQ(roundtrip, 0.0f) << "FP8RoundTrip: zero did not round-trip at index " << i;
         } else {
             // FP8 E4M3 has 3 mantissa bits, so relative error up to 12.5%.
             // Use relative tolerance for larger values.
             float tol = std::max(0.5f, abs_original * 0.125f);
             EXPECT_NEAR(roundtrip, original, tol)
-                << "FP8RoundTrip mismatch at index " << i
-                << " (value=" << original << ")"
+                << "FP8RoundTrip mismatch at index " << i << " (value=" << original << ")"
                 << ": got " << roundtrip;
 
             // Also check sign is preserved.
             if (original > 0.0f) {
-                EXPECT_GT(roundtrip, 0.0f)
-                    << "FP8RoundTrip: sign flipped for positive value at index "
-                    << i;
+                EXPECT_GT(roundtrip, 0.0f) << "FP8RoundTrip: sign flipped for positive value at index " << i;
             } else if (original < 0.0f) {
-                EXPECT_LT(roundtrip, 0.0f)
-                    << "FP8RoundTrip: sign flipped for negative value at index "
-                    << i;
+                EXPECT_LT(roundtrip, 0.0f) << "FP8RoundTrip: sign flipped for negative value at index " << i;
             }
         }
     }
@@ -421,8 +398,8 @@ TEST(QuantTest, FP8Saturation) {
 
     // Flush-to-zero test values
     std::vector<float> small_values = {
-        1e-4f, 5e-5f, 1e-5f,     // very small -> flush to 0
-        -1e-4f, -5e-5f,           // small negative -> flush to 0
+        1e-4f,  5e-5f,  1e-5f,  // very small -> flush to 0
+        -1e-4f, -5e-5f,         // small negative -> flush to 0
     };
     const int n_small = static_cast<int>(small_values.size());
 
@@ -437,8 +414,7 @@ TEST(QuantTest, FP8Saturation) {
     cudaMalloc(&d_fp8, n_small * sizeof(uint8_t));
     cudaMalloc(&d_fp16_out, n_small * sizeof(half));
 
-    cudaMemcpy(d_fp16_in, h_input_fp16.data(), n_small * sizeof(half),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_fp16_in, h_input_fp16.data(), n_small * sizeof(half), cudaMemcpyHostToDevice);
 
     cast_fp16_to_fp8(d_fp16_in, d_fp8, n_small, nullptr);
     cudaDeviceSynchronize();
@@ -447,25 +423,20 @@ TEST(QuantTest, FP8Saturation) {
     cudaDeviceSynchronize();
 
     std::vector<half> h_out_fp16(n_small);
-    cudaMemcpy(h_out_fp16.data(), d_fp16_out, n_small * sizeof(half),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_fp16.data(), d_fp16_out, n_small * sizeof(half), cudaMemcpyDeviceToHost);
 
     // Check flush-to-zero: very small positive values -> 0
     for (int i = 0; i < 3; i++) {
         float got = __half2float(h_out_fp16[i]);
-        EXPECT_NEAR(got, 0.0f, 0.002f)
-            << "FP8Saturation: small positive value " << small_values[i]
-            << " should flush to 0, got " << got
-            << " (index " << i << ")";
+        EXPECT_NEAR(got, 0.0f, 0.002f) << "FP8Saturation: small positive value " << small_values[i]
+                                       << " should flush to 0, got " << got << " (index " << i << ")";
     }
 
     // Check flush-to-zero: very small negative values -> 0 (or -0)
     for (int i = 3; i < 5; i++) {
         float got = __half2float(h_out_fp16[i]);
-        EXPECT_NEAR(got, 0.0f, 0.002f)
-            << "FP8Saturation: small negative value " << small_values[i]
-            << " should flush to 0, got " << got
-            << " (index " << i << ")";
+        EXPECT_NEAR(got, 0.0f, 0.002f) << "FP8Saturation: small negative value " << small_values[i]
+                                       << " should flush to 0, got " << got << " (index " << i << ")";
     }
 
     cudaFree(d_fp16_in);
@@ -512,13 +483,17 @@ TEST(QuantTest, QuantGemmINT4Basic) {
     std::vector<uint8_t> h_B_quant(N * half_K);
 
     // Channel 0: nibble=10 (0xA), byte = 0xAA
-    for (int j = 0; j < half_K; j++) h_B_quant[0 * half_K + j] = 0xAA;
+    for (int j = 0; j < half_K; j++)
+        h_B_quant[0 * half_K + j] = 0xAA;
     // Channel 1: nibble=6 (0x6), byte = 0x66
-    for (int j = 0; j < half_K; j++) h_B_quant[1 * half_K + j] = 0x66;
+    for (int j = 0; j < half_K; j++)
+        h_B_quant[1 * half_K + j] = 0x66;
     // Channel 2: nibble=12 (0xC), byte = 0xCC
-    for (int j = 0; j < half_K; j++) h_B_quant[2 * half_K + j] = 0xCC;
+    for (int j = 0; j < half_K; j++)
+        h_B_quant[2 * half_K + j] = 0xCC;
     // Channel 3: nibble=8 (0x8), byte = 0x88
-    for (int j = 0; j < half_K; j++) h_B_quant[3 * half_K + j] = 0x88;
+    for (int j = 0; j < half_K; j++)
+        h_B_quant[3 * half_K + j] = 0x88;
 
     // --- Prepare scales[N, num_groups] = [4, 1] ---
     std::vector<float> h_scales = {1.0f, 2.0f, 0.5f, 3.0f};
@@ -557,12 +532,10 @@ TEST(QuantTest, QuantGemmINT4Basic) {
     d_B.compute_strides();
     d_B.on_device = true;
     cudaMalloc(&d_B.data, N * half_K);
-    cudaMemcpy(d_B.data, h_B_quant.data(), N * half_K,
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B.data, h_B_quant.data(), N * half_K, cudaMemcpyHostToDevice);
 
     // Scales: FP16 [N, num_groups]
-    Tensor d_scales = make_gpu_tensor(h_scales.data(), QType::F16,
-                                       {N, num_groups});
+    Tensor d_scales = make_gpu_tensor(h_scales.data(), QType::F16, {N, num_groups});
 
     // Output: C [M, N]
     Tensor d_C = alloc_gpu_tensor(QType::F16, {M, N});
@@ -588,5 +561,5 @@ TEST(QuantTest, QuantGemmINT4Basic) {
     free_gpu_tensor(d_C);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

@@ -19,19 +19,19 @@ namespace imp {
 // + per-token allow mask for property names and enum values.
 
 enum class SchemaPhase : uint8_t {
-    VALUE_START,           // Expecting value matching current schema node
-    OBJECT_OPEN,           // After {, expecting first key or }
-    OBJECT_KEY,            // Inside a key string (constraining property names)
-    OBJECT_AFTER_KEY,      // After closing " of key, expecting :
-    OBJECT_COLON,          // After :, expecting value
-    OBJECT_AFTER_VALUE,    // After value, expecting , or }
-    ARRAY_OPEN,            // After [, expecting first item or ]
-    ARRAY_AFTER_ITEM,      // After item, expecting , or ]
-    STRING_VALUE,          // Inside a free string value
-    STRING_ESCAPE,         // After \ inside string
-    NUMBER_VALUE,          // Inside a number
-    LITERAL_VALUE,         // Generating true/false/null
-    ENUM_VALUE,            // Inside an enum string (constrained to exact matches)
+    VALUE_START,         // Expecting value matching current schema node
+    OBJECT_OPEN,         // After {, expecting first key or }
+    OBJECT_KEY,          // Inside a key string (constraining property names)
+    OBJECT_AFTER_KEY,    // After closing " of key, expecting :
+    OBJECT_COLON,        // After :, expecting value
+    OBJECT_AFTER_VALUE,  // After value, expecting , or }
+    ARRAY_OPEN,          // After [, expecting first item or ]
+    ARRAY_AFTER_ITEM,    // After item, expecting , or ]
+    STRING_VALUE,        // Inside a free string value
+    STRING_ESCAPE,       // After \ inside string
+    NUMBER_VALUE,        // Inside a number
+    LITERAL_VALUE,       // Generating true/false/null
+    ENUM_VALUE,          // Inside an enum string (constrained to exact matches)
     DONE
 };
 
@@ -42,13 +42,13 @@ struct SchemaFrame {
     // Object tracking
     std::set<std::string> emitted_keys;
     std::string current_key;
-    std::string key_buffer;         // accumulated key characters
+    std::string key_buffer;  // accumulated key characters
 
     // Enum tracking
-    std::string enum_buffer;        // accumulated enum value characters
+    std::string enum_buffer;  // accumulated enum value characters
 
     // Literal tracking
-    std::string literal_target;     // "true", "false", "null"
+    std::string literal_target;  // "true", "false", "null"
     int literal_pos = 0;
 
     // Array item count
@@ -114,8 +114,7 @@ private:
                              const std::set<std::string>& emitted) const;
 
     // Check if prefix matches any enum value
-    bool is_valid_enum_prefix(const std::vector<std::string>& values,
-                              const std::string& prefix) const;
+    bool is_valid_enum_prefix(const std::vector<std::string>& values, const std::string& prefix) const;
 };
 
-} // namespace imp
+}  // namespace imp

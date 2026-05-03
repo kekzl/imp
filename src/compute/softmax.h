@@ -5,7 +5,6 @@
 
 namespace imp {
 
-void softmax(const Tensor& input, Tensor& output,
-             cudaStream_t stream = nullptr);
+void softmax(const Tensor& input, Tensor& output, cudaStream_t stream = nullptr);
 
-} // namespace imp
+}  // namespace imp

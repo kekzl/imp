@@ -14,14 +14,11 @@ struct ImageData {
 };
 
 // Load image from file, resize to target_size x target_size, normalize, convert to FP16 CHW.
-bool load_and_preprocess_image(const std::string& path, int target_size,
-                                const float mean[3], const float std[3],
-                                ImageData& out);
+bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
+                               const float std[3], ImageData& out);
 
 // Load image from memory buffer, resize + normalize + FP16 CHW.
-bool load_and_preprocess_image_from_memory(const uint8_t* data, size_t len,
-                                            int target_size,
-                                            const float mean[3], const float std[3],
-                                            ImageData& out);
+bool load_and_preprocess_image_from_memory(const uint8_t* data, size_t len, int target_size,
+                                           const float mean[3], const float std[3], ImageData& out);
 
-} // namespace imp
+}  // namespace imp

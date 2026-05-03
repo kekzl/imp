@@ -15,14 +15,11 @@ protected:
     std::filesystem::path tmp_dir_;
 
     void SetUp() override {
-        tmp_dir_ = std::filesystem::temp_directory_path() /
-                   ("imp_test_gencfg_" + std::to_string(::getpid()));
+        tmp_dir_ = std::filesystem::temp_directory_path() / ("imp_test_gencfg_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmp_dir_);
     }
 
-    void TearDown() override {
-        std::filesystem::remove_all(tmp_dir_);
-    }
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
 
     void write_gen_config(const std::string& json) {
         std::ofstream f(tmp_dir_ / "generation_config.json");
@@ -108,14 +105,11 @@ protected:
     std::filesystem::path tmp_dir_;
 
     void SetUp() override {
-        tmp_dir_ = std::filesystem::temp_directory_path() /
-                   ("imp_test_stm_" + std::to_string(::getpid()));
+        tmp_dir_ = std::filesystem::temp_directory_path() / ("imp_test_stm_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmp_dir_);
     }
 
-    void TearDown() override {
-        std::filesystem::remove_all(tmp_dir_);
-    }
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
 
     void write_stm(const std::string& json) {
         std::ofstream f(tmp_dir_ / "special_tokens_map.json");
@@ -185,14 +179,11 @@ protected:
     std::filesystem::path tmp_dir_;
 
     void SetUp() override {
-        tmp_dir_ = std::filesystem::temp_directory_path() /
-                   ("imp_test_tflags_" + std::to_string(::getpid()));
+        tmp_dir_ = std::filesystem::temp_directory_path() / ("imp_test_tflags_" + std::to_string(::getpid()));
         std::filesystem::create_directories(tmp_dir_);
     }
 
-    void TearDown() override {
-        std::filesystem::remove_all(tmp_dir_);
-    }
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
 
     void write_config(const std::string& json) {
         std::ofstream f(tmp_dir_ / "tokenizer_config.json");
@@ -272,4 +263,4 @@ TEST_F(TokenizerFlagsTest, MissingFileReturnsFalse) {
     EXPECT_LT(flags.add_bos_token, 0);
 }
 
-} // namespace
+}  // namespace

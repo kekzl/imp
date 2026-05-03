@@ -13,13 +13,13 @@ typedef struct {
     int device_id;
 
     // Memory
-    size_t gpu_memory_pool_size;   // Pre-allocated GPU pool (bytes), 0 = auto
-    size_t kv_cache_max_blocks;    // Max KV cache blocks, 0 = auto
+    size_t gpu_memory_pool_size;  // Pre-allocated GPU pool (bytes), 0 = auto
+    size_t kv_cache_max_blocks;   // Max KV cache blocks, 0 = auto
 
     // Inference
     int max_batch_size;
     int max_seq_len;
-    ImpDType compute_dtype;        // FP16, BF16, or FP8_E4M3
+    ImpDType compute_dtype;  // FP16, BF16, or FP8_E4M3
 
     // Sampling defaults
     float temperature;
@@ -28,67 +28,67 @@ typedef struct {
     int max_tokens;
 
     // CUDA 13.1 features
-    int enable_green_contexts;     // 0 = off, 1 = on
-    float green_ctx_prefill_ratio; // SM ratio for prefill (default 0.8)
-    int enable_pdl;                // Programmatic Dependent Launch
-    int enable_cuda_graphs;        // CUDA Graph capture for decode
+    int enable_green_contexts;      // 0 = off, 1 = on
+    float green_ctx_prefill_ratio;  // SM ratio for prefill (default 0.8)
+    int enable_pdl;                 // Programmatic Dependent Launch
+    int enable_cuda_graphs;         // CUDA Graph capture for decode
 
     // Layer offloading
-    int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
+    int gpu_layers;  // Layers to keep on GPU (-1 = all, 0 = all offloaded)
 
     // KV cache precision
-    ImpDType kv_cache_dtype;       // FP16 (default), FP8_E4M3, INT8, INT4, TURBOQUANT, or TURBOQUANT_LITE
+    ImpDType kv_cache_dtype;  // FP16 (default), FP8_E4M3, INT8, INT4, TURBOQUANT, or TURBOQUANT_LITE
 
     // TurboQuant Lite: QJL sketch dimension = sketch_multiplier * head_dim.
     // Higher = better quality but more memory. 2 = ~3.1 bits/elem avg, 3 = ~3.6 bits/elem avg.
-    int turboquant_sketch_multiplier; // default 2 (sketch_dim = 2 * head_dim)
+    int turboquant_sketch_multiplier;  // default 2 (sketch_dim = 2 * head_dim)
 
     // SSM state precision
-    ImpDType ssm_state_dtype;      // FP32 (default) or FP16 for SSM h_state
+    ImpDType ssm_state_dtype;  // FP32 (default) or FP16 for SSM h_state
 
     // VRAM budget
-    size_t vram_budget_mb;         // Max GPU memory to use (MiB), 0 = use all available
+    size_t vram_budget_mb;  // Max GPU memory to use (MiB), 0 = use all available
 
     // Chunked prefill
-    int prefill_chunk_size;        // Max tokens per prefill chunk (0 = no chunking)
+    int prefill_chunk_size;  // Max tokens per prefill chunk (0 = no chunking)
 
     // Prefill weight cache precision
-    int use_fp8_prefill;           // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
+    int use_fp8_prefill;  // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
 
     // NVFP4 decode weight cache
-    int use_nvfp4_decode;          // -1 = auto (sm_120→mode2, sm_90→mode1), 0 = off, 1 = additive, 2 = NVFP4 only
+    int use_nvfp4_decode;  // -1 = auto (sm_120→mode2, sm_90→mode1), 0 = off, 1 = additive, 2 = NVFP4 only
 
     // MXFP4 prefill: use CUTLASS MXFP4 GEMM for prefill (converts NVFP4 cache to MXFP4 format)
-    int use_mxfp4_prefill;         // 0 = off (default), 1 = on (requires sm_120 + NVFP4 cache)
+    int use_mxfp4_prefill;  // 0 = off (default), 1 = on (requires sm_120 + NVFP4 cache)
 
     // Dual-path quantization: FP8 for attention weights (WQ/WK/WV/WO), NVFP4 for FFN weights
-    int dual_path_quant;           // 0 = off (default), 1 = on (attention stays FP8, FFN gets NVFP4)
+    int dual_path_quant;  // 0 = off (default), 1 = on (attention stays FP8, FFN gets NVFP4)
 
     // KV cache minimum context budget
-    int min_kv_tokens;             // Minimum KV cache capacity in tokens (0 = auto).
-                                   // Budget planner guarantees at least this many tokens
-                                   // before allocating weight caches. Default auto picks
-                                   // a reasonable minimum based on model size.
+    int min_kv_tokens;  // Minimum KV cache capacity in tokens (0 = auto).
+                        // Budget planner guarantees at least this many tokens
+                        // before allocating weight caches. Default auto picks
+                        // a reasonable minimum based on model size.
 
     // Prefix caching
-    int use_prefix_caching;        // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
-    char prefix_cache_path[512];   // path to save/load prefix cache (empty = disabled)
+    int use_prefix_caching;       // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
+    char prefix_cache_path[512];  // path to save/load prefix cache (empty = disabled)
 
     // StreamingLLM smart KV cache (Xiao et al., 2023):
     // attention sinks + sliding window. Reduces decode KV bandwidth and frees
     // middle KV blocks for long generations. Currently active only for the FP16
     // GQA decode path; other quantized variants ignore these settings.
-    int streaming_kv_enabled;      // 0 = off (default), 1 = on
-    int streaming_kv_n_sinks;      // # of initial tokens to always keep (default 4)
-    int streaming_kv_window;       // sliding window size (0 = use ModelConfig::sliding_window)
-    int streaming_kv_threshold;    // ctx_len at which streaming activates
-                                   // (0 = auto: n_sinks + window + 2*kKVBlockSize)
+    int streaming_kv_enabled;    // 0 = off (default), 1 = on
+    int streaming_kv_n_sinks;    // # of initial tokens to always keep (default 4)
+    int streaming_kv_window;     // sliding window size (0 = use ModelConfig::sliding_window)
+    int streaming_kv_threshold;  // ctx_len at which streaming activates
+                                 // (0 = auto: n_sinks + window + 2*kKVBlockSize)
 
     // Threading
-    int num_cpu_threads;           // 0 = auto (hardware_concurrency)
+    int num_cpu_threads;  // 0 = auto (hardware_concurrency)
 
     // Vision (multimodal)
-    const char* mmproj_path;       // Path to mmproj GGUF file (NULL = text-only)
+    const char* mmproj_path;  // Path to mmproj GGUF file (NULL = text-only)
 } ImpConfig;
 
 // Returns a config with sensible defaults

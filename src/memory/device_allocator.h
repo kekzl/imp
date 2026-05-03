@@ -60,4 +60,4 @@ private:
     std::unordered_map<void*, size_t> alloc_map_;
 };
 
-} // namespace imp
+}  // namespace imp

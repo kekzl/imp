@@ -22,8 +22,7 @@ public:
     // json_mode: enforce valid JSON syntax
     // json_schema: enforce JSON matching this schema string (empty = disabled)
     // tokenizer: needed for lazy init
-    void prepare(bool json_mode, const std::string& json_schema,
-                 Tokenizer* tokenizer);
+    void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer);
 
     // Get current constrainer pointers (nullptr if not active).
     JsonConstrainer* json_constrainer() const noexcept {
@@ -52,4 +51,4 @@ private:
     bool active_schema_ = false;
 };
 
-} // namespace imp
+}  // namespace imp

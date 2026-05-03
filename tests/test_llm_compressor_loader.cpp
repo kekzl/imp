@@ -47,8 +47,7 @@ TEST(LlmCompressorTranslate, UnknownPassesThrough) {
 
 TEST(LlmCompressorTranslate, StripsMultimodalPrefix) {
     TranslationCounters c{};
-    auto t = translate_name(
-        "model.language_model.layers.0.self_attn.q_proj.weight_packed", c);
+    auto t = translate_name("model.language_model.layers.0.self_attn.q_proj.weight_packed", c);
     EXPECT_EQ(t.action, NameTranslation::EMIT);
     EXPECT_EQ(t.out_name, "model.layers.0.self_attn.q_proj.weight");
     EXPECT_EQ(c.suffix_renames, 1);
@@ -57,8 +56,7 @@ TEST(LlmCompressorTranslate, StripsMultimodalPrefix) {
 
 TEST(LlmCompressorTranslate, SkipsVisionTower) {
     TranslationCounters c{};
-    auto t = translate_name(
-        "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight", c);
+    auto t = translate_name("model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight", c);
     EXPECT_EQ(t.action, NameTranslation::SKIP);
     EXPECT_EQ(c.vision_skipped, 1);
 }
@@ -119,8 +117,7 @@ TEST(LlmCompressorTranslate, ProjScaleIsNotGemma4Extra) {
 // canonical `model.layers.*` naming.
 TEST(LlmCompressorTranslate, StripsMistral3LanguageModelPrefix) {
     TranslationCounters c{};
-    auto t = translate_name(
-        "language_model.model.layers.0.self_attn.q_proj.weight_packed", c);
+    auto t = translate_name("language_model.model.layers.0.self_attn.q_proj.weight_packed", c);
     EXPECT_EQ(t.action, NameTranslation::EMIT);
     EXPECT_EQ(t.out_name, "model.layers.0.self_attn.q_proj.weight");
     EXPECT_EQ(c.suffix_renames, 1);
@@ -144,8 +141,7 @@ TEST(LlmCompressorTranslate, StripsMistral3LmHead) {
 // `language_model.`, so order matters).
 TEST(LlmCompressorTranslate, Gemma4PrefixStillWinsOverMistral3) {
     TranslationCounters c{};
-    auto t = translate_name(
-        "model.language_model.layers.0.self_attn.q_proj.weight_packed", c);
+    auto t = translate_name("model.language_model.layers.0.self_attn.q_proj.weight_packed", c);
     EXPECT_EQ(t.action, NameTranslation::EMIT);
     EXPECT_EQ(t.out_name, "model.layers.0.self_attn.q_proj.weight");
     EXPECT_EQ(c.prefix_strips, 1);
@@ -175,8 +171,8 @@ TEST(LlmCompressorTranslate, SkipsMultiModalProjector) {
 namespace {
 
 std::string write_temp_recipe(const std::string& content) {
-    std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp")
-                       + "/recipe_" + std::to_string(::getpid()) + ".yaml";
+    std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/recipe_" +
+                       std::to_string(::getpid()) + ".yaml";
     // Create a temp dir and place recipe.yaml inside it.
     std::string dir = path + ".d";
     std::string mkdir_cmd = "mkdir -p '" + dir + "'";
@@ -192,7 +188,7 @@ void cleanup_temp_recipe(const std::string& dir) {
     std::system(rm.c_str());
 }
 
-} // namespace
+}  // namespace
 
 TEST(LlmCompressorRecipe, ParsesGemma4Recipe) {
     std::string dir = write_temp_recipe(R"(default_stage:
@@ -312,11 +308,12 @@ TEST(LlmCompressorRecipe, RejectsConfigGroupsW8A8) {
 }
 
 TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
-                      + "/fmt_both_" + std::to_string(::getpid());
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_both_" +
+                      std::to_string(::getpid());
     std::system(("mkdir -p '" + dir + "'").c_str());
     std::ofstream(dir + "/hf_quant_config.json") << R"({"quantization":{"quant_algo":"NVFP4"}})";
-    std::ofstream(dir + "/recipe.yaml") << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n      scheme: NVFP4\n";
+    std::ofstream(dir + "/recipe.yaml")
+        << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n      scheme: NVFP4\n";
 
     imp::HFConfigLoader::NvFP4Config cfg;
     bool ok = imp::HFConfigLoader::load_nvfp4_config(dir, cfg);
@@ -327,8 +324,7 @@ TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
 }
 
 TEST(LlmCompressorFormatDetect, DetectsLlmCompressorByRecipeYaml) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
-                      + "/fmt_lc_" + std::to_string(::getpid());
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_lc_" + std::to_string(::getpid());
     std::system(("mkdir -p '" + dir + "'").c_str());
     std::ofstream(dir + "/recipe.yaml") << R"(default_stage:
   default_modifiers:
@@ -346,8 +342,8 @@ TEST(LlmCompressorFormatDetect, DetectsLlmCompressorByRecipeYaml) {
 }
 
 TEST(LlmCompressorFormatDetect, ReturnsFalseWhenNoConfigPresent) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
-                      + "/fmt_none_" + std::to_string(::getpid());
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_none_" +
+                      std::to_string(::getpid());
     std::system(("mkdir -p '" + dir + "'").c_str());
     // Empty dir, no config files.
     imp::HFConfigLoader::NvFP4Config cfg;

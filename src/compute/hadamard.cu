@@ -29,8 +29,7 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 // Warp-level butterfly using shuffle.
-__device__ __forceinline__
-float warp_butterfly(float val, int stage) {
+__device__ __forceinline__ float warp_butterfly(float val, int stage) {
     int stride = 1 << stage;
     float partner = __shfl_xor_sync(0xFFFFFFFF, val, stride);
     int lane = threadIdx.x & 31;
@@ -43,11 +42,8 @@ float warp_butterfly(float val, int stage) {
 // Each warp handles one block. Threads beyond block_size are masked.
 // ---------------------------------------------------------------------------
 template <int BLOCK_SIZE>
-__global__ void hadamard_warp_kernel(
-    const half* __restrict__ input,
-    half*       __restrict__ output,
-    int M, int K)
-{
+__global__ void hadamard_warp_kernel(const half* __restrict__ input, half* __restrict__ output, int M,
+                                     int K) {
     static_assert(BLOCK_SIZE <= 32, "Use shared memory kernel for block_size > 32");
 
     // Each warp processes one block of BLOCK_SIZE elements.
@@ -56,8 +52,10 @@ __global__ void hadamard_warp_kernel(
     int tid_in_warp = threadIdx.x & 31;
 
     int total_blocks = M * (K / BLOCK_SIZE);
-    if (warp_id >= total_blocks) return;
-    if (tid_in_warp >= BLOCK_SIZE) return;
+    if (warp_id >= total_blocks)
+        return;
+    if (tid_in_warp >= BLOCK_SIZE)
+        return;
 
     int row = warp_id / (K / BLOCK_SIZE);
     int blk = warp_id % (K / BLOCK_SIZE);
@@ -67,14 +65,15 @@ __global__ void hadamard_warp_kernel(
 
     // log2(BLOCK_SIZE) butterfly stages
     constexpr int N_STAGES = (BLOCK_SIZE == 16) ? 4 : 5;
-    #pragma unroll
+#pragma unroll
     for (int s = 0; s < N_STAGES; s++) {
         val = warp_butterfly(val, s);
     }
 
     // Normalize: 1/sqrt(BLOCK_SIZE)
-    constexpr float norm = (BLOCK_SIZE == 16) ? 0.25f : // 1/sqrt(16) = 0.25
-                           (BLOCK_SIZE == 32) ? 0.176776695f : 0.0f; // 1/sqrt(32)
+    constexpr float norm = (BLOCK_SIZE == 16) ? 0.25f :  // 1/sqrt(16) = 0.25
+                               (BLOCK_SIZE == 32) ? 0.176776695f
+                                                  : 0.0f;  // 1/sqrt(32)
     val *= norm;
 
     output[base + tid_in_warp] = __float2half(val);
@@ -85,11 +84,7 @@ __global__ void hadamard_warp_kernel(
 // Each CTA (2 warps = 64 threads) handles one block of 64 elements.
 // Stages 0-4: warp shuffle. Stage 5: shared memory cross-warp.
 // ---------------------------------------------------------------------------
-__global__ void hadamard_64_kernel(
-    const half* __restrict__ input,
-    half*       __restrict__ output,
-    int M, int K)
-{
+__global__ void hadamard_64_kernel(const half* __restrict__ input, half* __restrict__ output, int M, int K) {
     constexpr int BLOCK_SIZE = 64;
 
     // Each CTA = 64 threads = 2 warps. One CTA per block of 64 elements.
@@ -97,7 +92,8 @@ __global__ void hadamard_64_kernel(
     int tid = threadIdx.x;  // 0..63
 
     int total_blocks = M * (K / BLOCK_SIZE);
-    if (block_id >= total_blocks) return;
+    if (block_id >= total_blocks)
+        return;
 
     int row = block_id / (K / BLOCK_SIZE);
     int blk = block_id % (K / BLOCK_SIZE);
@@ -105,8 +101,8 @@ __global__ void hadamard_64_kernel(
 
     float val = __half2float(input[base + tid]);
 
-    // Stages 0-4: intra-warp butterfly via shuffle
-    #pragma unroll
+// Stages 0-4: intra-warp butterfly via shuffle
+#pragma unroll
     for (int s = 0; s < 5; s++) {
         val = warp_butterfly(val, s);
     }
@@ -130,18 +126,15 @@ __global__ void hadamard_64_kernel(
 // Kernel for block_size 128: 4 warps cooperate via shared memory.
 // Each CTA = 128 threads. Stages 0-4: warp shuffle. Stages 5-6: shared memory.
 // ---------------------------------------------------------------------------
-__global__ void hadamard_128_kernel(
-    const half* __restrict__ input,
-    half*       __restrict__ output,
-    int M, int K)
-{
+__global__ void hadamard_128_kernel(const half* __restrict__ input, half* __restrict__ output, int M, int K) {
     constexpr int BLOCK_SIZE = 128;
 
     int block_id = blockIdx.x;
     int tid = threadIdx.x;  // 0..127
 
     int total_blocks = M * (K / BLOCK_SIZE);
-    if (block_id >= total_blocks) return;
+    if (block_id >= total_blocks)
+        return;
 
     int row = block_id / (K / BLOCK_SIZE);
     int blk = block_id % (K / BLOCK_SIZE);
@@ -149,8 +142,8 @@ __global__ void hadamard_128_kernel(
 
     float val = __half2float(input[base + tid]);
 
-    // Stages 0-4: intra-warp butterfly via shuffle
-    #pragma unroll
+// Stages 0-4: intra-warp butterfly via shuffle
+#pragma unroll
     for (int s = 0; s < 5; s++) {
         val = warp_butterfly(val, s);
     }
@@ -186,10 +179,8 @@ __global__ void hadamard_128_kernel(
 // Host dispatch
 // ---------------------------------------------------------------------------
 
-void hadamard_transform_fp16(const half* input, half* output,
-                              int M, int K, int block_size,
-                              cudaStream_t stream)
-{
+void hadamard_transform_fp16(const half* input, half* output, int M, int K, int block_size,
+                             cudaStream_t stream) {
     if (K % block_size != 0) {
         IMP_LOG_ERROR("hadamard: K=%d not divisible by block_size=%d", K, block_size);
         return;
@@ -198,40 +189,35 @@ void hadamard_transform_fp16(const half* input, half* output,
     int total_blocks = M * (K / block_size);
 
     switch (block_size) {
-    case 16: {
-        // 2 warps per CTA, each warp handles one block.
-        int warps_per_cta = 8;  // 256 threads
-        int blocks_per_cta = warps_per_cta;
-        int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
-        hadamard_warp_kernel<16><<<grid, warps_per_cta * 32, 0, stream>>>(
-            input, output, M, K);
-        break;
-    }
-    case 32: {
-        int warps_per_cta = 8;
-        int blocks_per_cta = warps_per_cta;
-        int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
-        hadamard_warp_kernel<32><<<grid, warps_per_cta * 32, 0, stream>>>(
-            input, output, M, K);
-        break;
-    }
-    case 64: {
-        // One CTA (64 threads) per block.
-        hadamard_64_kernel<<<total_blocks, 64, 0, stream>>>(
-            input, output, M, K);
-        break;
-    }
-    case 128: {
-        // One CTA (128 threads) per block.
-        hadamard_128_kernel<<<total_blocks, 128, 0, stream>>>(
-            input, output, M, K);
-        break;
-    }
-    default:
-        IMP_LOG_ERROR("hadamard: unsupported block_size=%d (must be 16/32/64/128)",
-                      block_size);
-        break;
+        case 16: {
+            // 2 warps per CTA, each warp handles one block.
+            int warps_per_cta = 8;  // 256 threads
+            int blocks_per_cta = warps_per_cta;
+            int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
+            hadamard_warp_kernel<16><<<grid, warps_per_cta * 32, 0, stream>>>(input, output, M, K);
+            break;
+        }
+        case 32: {
+            int warps_per_cta = 8;
+            int blocks_per_cta = warps_per_cta;
+            int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
+            hadamard_warp_kernel<32><<<grid, warps_per_cta * 32, 0, stream>>>(input, output, M, K);
+            break;
+        }
+        case 64: {
+            // One CTA (64 threads) per block.
+            hadamard_64_kernel<<<total_blocks, 64, 0, stream>>>(input, output, M, K);
+            break;
+        }
+        case 128: {
+            // One CTA (128 threads) per block.
+            hadamard_128_kernel<<<total_blocks, 128, 0, stream>>>(input, output, M, K);
+            break;
+        }
+        default:
+            IMP_LOG_ERROR("hadamard: unsupported block_size=%d (must be 16/32/64/128)", block_size);
+            break;
     }
 }
 
-} // namespace imp
+}  // namespace imp

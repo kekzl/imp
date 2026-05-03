@@ -48,43 +48,28 @@ SERVER_PORT = int(os.environ.get("IMP_VALIDATION_PORT", "8765"))
 SEED = 42
 MAX_PROMPTS_SMOKE = 4
 
+# Override with IMP_MODELS_DIR env var; defaults to ./models under the repo.
+MODELS_DIR = Path(os.environ.get("IMP_MODELS_DIR", REPO_ROOT / "models")).expanduser()
+
+
+def _model_entry(name: str, *, extra_args: list[str] | None = None,
+                 skip_repeat_penalty_lc_check: bool = False) -> dict:
+    return {
+        "name": name,
+        "host_path": str(MODELS_DIR / name),
+        "container_path": f"/models_ext/{name}",
+        "extra_server_args": extra_args or [],
+        "chat_template": "auto",
+        "skip_repeat_penalty_lc_check": skip_repeat_penalty_lc_check,
+    }
+
+
 MODELS = [
-    {
-        "name": "Mistral-Small-3.2-24B-Instruct-2506-NVFP4",
-        "host_path": "/home/kekz/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4",
-        "container_path": "/models_ext/Mistral-Small-3.2-24B-Instruct-2506-NVFP4",
-        "extra_server_args": [],
-        "chat_template": "auto",
-        "skip_repeat_penalty_lc_check": False,
-    },
-    {
-        "name": "Gemma-4-26B-A4B-it-NVFP4",
-        "host_path": "/home/kekz/models/Gemma-4-26B-A4B-it-NVFP4",
-        "container_path": "/models_ext/Gemma-4-26B-A4B-it-NVFP4",
-        "extra_server_args": [],
-        "chat_template": "auto",
-    },
-    {
-        "name": "Qwen3.6-35B-A3B-NVFP4",
-        "host_path": "/home/kekz/models/Qwen3.6-35B-A3B-NVFP4",
-        "container_path": "/models_ext/Qwen3.6-35B-A3B-NVFP4",
-        "extra_server_args": [],
-        "chat_template": "auto",
-    },
-    {
-        "name": "Qwen3-Coder-30B-A3B-Instruct-FP4",
-        "host_path": "/home/kekz/models/Qwen3-Coder-30B-A3B-Instruct-FP4",
-        "container_path": "/models_ext/Qwen3-Coder-30B-A3B-Instruct-FP4",
-        "extra_server_args": [],
-        "chat_template": "auto",
-    },
-    {
-        "name": "Qwen3-30B-A3B-NVFP4-Modelopt",
-        "host_path": "/home/kekz/models/Qwen3-30B-A3B-NVFP4-Modelopt",
-        "container_path": "/models_ext/Qwen3-30B-A3B-NVFP4-Modelopt",
-        "extra_server_args": [],
-        "chat_template": "auto",
-    },
+    _model_entry("Mistral-Small-3.2-24B-Instruct-2506-NVFP4"),
+    _model_entry("Gemma-4-26B-A4B-it-NVFP4"),
+    _model_entry("Qwen3.6-35B-A3B-NVFP4"),
+    _model_entry("Qwen3-Coder-30B-A3B-Instruct-FP4"),
+    _model_entry("Qwen3-30B-A3B-NVFP4-Modelopt"),
 ]
 
 

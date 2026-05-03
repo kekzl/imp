@@ -48,4 +48,4 @@ private:
     cudaDevResourceDesc_t decode_resource_desc_ = nullptr;
 };
 
-} // namespace imp
+}  // namespace imp

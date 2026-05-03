@@ -21,7 +21,8 @@ class CutlassGrouped3xNvfp4Test : public ::testing::Test {
 protected:
     void SetUp() override {
         cudaStreamCreate(&stream_);
-        int dev = 0; cudaGetDevice(&dev);
+        int dev = 0;
+        cudaGetDevice(&dev);
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
@@ -38,23 +39,22 @@ protected:
 // Build synthetic per-expert NVFP4 weight via NvFP4QuantResult → CUTLASS conversion.
 // Returns owning CutlassNvFP4Weight + backing NVFP4 result (for lifetime).
 struct SyntheticExpert {
-    std::vector<half> weight_fp16;     // [N, K] reference weights
+    std::vector<half> weight_fp16;  // [N, K] reference weights
     NvFP4QuantResult nvfp4{};
     CutlassNvFP4Weight cutlass_w{};
 };
 
-static void make_expert(SyntheticExpert& e, int N, int K, float wscale,
-                         uint64_t seed, cudaStream_t stream) {
+static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t seed, cudaStream_t stream) {
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dist(-wscale, wscale);
     e.weight_fp16.resize(static_cast<size_t>(N) * K);
-    for (auto& v : e.weight_fp16) v = __float2half(dist(gen));
+    for (auto& v : e.weight_fp16)
+        v = __float2half(dist(gen));
 
     // Upload FP16 weight to device, NVFP4-quantize it.
     void* d_w_fp16 = nullptr;
     cudaMalloc(&d_w_fp16, e.weight_fp16.size() * sizeof(half));
-    cudaMemcpy(d_w_fp16, e.weight_fp16.data(),
-               e.weight_fp16.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w_fp16, e.weight_fp16.data(), e.weight_fp16.size() * sizeof(half), cudaMemcpyHostToDevice);
     int64_t w_shape[2] = {N, K};
     Tensor w_input(d_w_fp16, QType::F16, 2, w_shape, true);
     quantize_fp16_to_nvfp4(w_input, e.nvfp4, stream);
@@ -70,16 +70,23 @@ static void free_expert(SyntheticExpert& e) {
 }
 
 TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
-    if (sm_ < 120) { GTEST_SKIP() << "SM120 required"; }
-    if (!cutlass_sm120_nvfp4_available()) { GTEST_SKIP() << "CUTLASS NVFP4 disabled"; }
-    if (!cutlass_grouped_3x_nvfp4_available()) { GTEST_SKIP() << "CUTLASS 3x grouped NVFP4 disabled"; }
+    if (sm_ < 120) {
+        GTEST_SKIP() << "SM120 required";
+    }
+    if (!cutlass_sm120_nvfp4_available()) {
+        GTEST_SKIP() << "CUTLASS NVFP4 disabled";
+    }
+    if (!cutlass_grouped_3x_nvfp4_available()) {
+        GTEST_SKIP() << "CUTLASS 3x grouped NVFP4 disabled";
+    }
 
     const int ne = 4;
     const int N = 256;
     const int K = 256;
     const std::vector<int> M_per = {32, 16, 48, 64};
     int M_total = 0;
-    for (int m : M_per) M_total += m;
+    for (int m : M_per)
+        M_total += m;
 
     // ----- 4 synthetic experts -----
     std::vector<SyntheticExpert> experts(ne);
@@ -91,7 +98,8 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
     std::mt19937 agen(42);
     std::uniform_real_distribution<float> adist(-1.0f, 1.0f);
     std::vector<half> h_A(static_cast<size_t>(M_total) * K);
-    for (auto& v : h_A) v = __float2half(adist(agen));
+    for (auto& v : h_A)
+        v = __float2half(adist(agen));
     void* d_A_fp16 = nullptr;
     cudaMalloc(&d_A_fp16, h_A.size() * sizeof(half));
     cudaMemcpy(d_A_fp16, h_A.data(), h_A.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -106,7 +114,7 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
         size_t packed_bytes = static_cast<size_t>(M_i) * K / 2;
         sfa_sizes[i] = cutlass_nvfp4_sf_size(M_i, K);
         cudaMalloc(&dA_packed[i], packed_bytes);
-        cudaMalloc(&dA_sf[i],     sfa_sizes[i]);
+        cudaMalloc(&dA_sf[i], sfa_sizes[i]);
         const half* a_src = reinterpret_cast<const half*>(d_A_fp16) + row_offset * K;
         quantize_fp16_to_nvfp4_cutlass(a_src, dA_packed[i], dA_sf[i], M_i, K, stream_);
         row_offset += M_i;
@@ -121,11 +129,8 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
     for (int i = 0; i < ne; ++i) {
         int M_i = M_per[i];
         half* d_out_i = reinterpret_cast<half*>(d_ref_out) + ref_row_off * N;
-        bool ok = gemm_nvfp4_cutlass_sm120(
-            dA_packed[i], dA_sf[i],
-            experts[i].cutlass_w,
-            d_out_i, M_i, N, K,
-            nullptr, 0, stream_);
+        bool ok = gemm_nvfp4_cutlass_sm120(dA_packed[i], dA_sf[i], experts[i].cutlass_w, d_out_i, M_i, N, K,
+                                           nullptr, 0, stream_);
         ASSERT_TRUE(ok) << "per-expert reference GEMM failed on expert " << i;
         ref_row_off += M_i;
     }
@@ -142,22 +147,17 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
     std::vector<float> hAlpha(ne);
     size_t grp_row_off = 0;
     for (int i = 0; i < ne; ++i) {
-        hA[i]    = dA_packed[i];
-        hSFA[i]  = dA_sf[i];
-        hB[i]    = experts[i].cutlass_w.data;
-        hSFB[i]  = experts[i].cutlass_w.scale_factors;
-        hD[i]    = reinterpret_cast<half*>(d_grp_out) + grp_row_off * N;
+        hA[i] = dA_packed[i];
+        hSFA[i] = dA_sf[i];
+        hB[i] = experts[i].cutlass_w.data;
+        hSFB[i] = experts[i].cutlass_w.scale_factors;
+        hD[i] = reinterpret_cast<half*>(d_grp_out) + grp_row_off * N;
         hAlpha[i] = experts[i].cutlass_w.tensor_scale;
         grp_row_off += M_per[i];
     }
 
-    bool ok = gemm_grouped_cutlass_3x_nvfp4(
-        ne, M_per.data(), N, K,
-        hA.data(), hSFA.data(),
-        hB.data(), hSFB.data(),
-        hD.data(),
-        hAlpha.data(),
-        stream_);
+    bool ok = gemm_grouped_cutlass_3x_nvfp4(ne, M_per.data(), N, K, hA.data(), hSFA.data(), hB.data(),
+                                            hSFB.data(), hD.data(), hAlpha.data(), stream_);
     ASSERT_TRUE(ok) << "grouped dispatch failed";
     cudaStreamSynchronize(stream_);
 
@@ -172,14 +172,15 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
         float a = __half2float(ref_out[i]);
         float b = __half2float(grp_out[i]);
         float err = std::fabs(a - b);
-        if (err > 1e-2f * (1.0f + std::fabs(a))) mismatches++;
+        if (err > 1e-2f * (1.0f + std::fabs(a)))
+            mismatches++;
         max_abs_err = std::max<double>(max_abs_err, err);
         sum_abs_err += err;
     }
     double mean_abs_err = sum_abs_err / static_cast<double>(ref_out.size());
     EXPECT_LT(mismatches, static_cast<int>(ref_out.size()) / 100)
-        << "too many mismatches: " << mismatches << " / " << ref_out.size()
-        << " max_err=" << max_abs_err << " mean_err=" << mean_abs_err;
+        << "too many mismatches: " << mismatches << " / " << ref_out.size() << " max_err=" << max_abs_err
+        << " mean_err=" << mean_abs_err;
 
     // ----- Cleanup -----
     for (int i = 0; i < ne; ++i) {
@@ -192,5 +193,5 @@ TEST_F(CutlassGrouped3xNvfp4Test, GroupedMatchesPerExpertSingle) {
     cudaFree(d_grp_out);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

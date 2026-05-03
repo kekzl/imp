@@ -162,8 +162,6 @@ Performance:
   --no-nvfp4                Disable NVFP4 auto-detection
   --ssm-fp16                FP16 SSM state
   --no-cuda-graphs          Disable CUDA Graphs
-  --ngram-spec              N-gram speculative decoding (draft from history)
-  --ngram-spec-k <n>        Max draft tokens per step (default: 5)
   --mxfp4-prefill           CUTLASS MXFP4 GEMM for prefill
 
 Benchmark:
@@ -189,10 +187,11 @@ Benchmark:
 ./build/imp-server --model gemma-3-12b-it.gguf --mmproj mmproj.gguf
 ```
 
-Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`,
-`/v1/messages` (Anthropic-compatible, streaming + non-streaming),
-`/tokenize`, `/detokenize`, `/health`. Tool/function calling, streaming
-usage stats, logprobs, and API-key auth (`--api-key`) supported.
+Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/models`, `/v1/messages` (Anthropic-compatible, streaming +
+non-streaming), `/tokenize`, `/detokenize`, `/health`. Tool/function
+calling, streaming usage stats, logprobs, and API-key auth
+(`--api-key`) supported.
 `/v1/models` lists available GGUF and SafeTensors models in the models
 directory.
 
@@ -245,8 +244,8 @@ imp_context_free(ctx);
 imp_model_free(model);
 ```
 
-Token-level control via `imp_prefill` / `imp_decode_step`, speculative
-decoding via `imp_set_draft_model`, vision via `imp_set_image`.
+Token-level control via `imp_prefill` / `imp_decode_step`, vision
+via `imp_set_image`.
 
 ## Project Structure
 
@@ -261,7 +260,7 @@ imp/
 │   ├── quant/            FP8, NVFP4, INT4/INT8 dequant, quantised GEMM
 │   ├── graph/            GraphExecutor (hardcoded transformer forward pass)
 │   ├── runtime/          Engine, Scheduler, CUDA Graphs, PDL, Green Contexts,
-│   │                     Speculative Decoding, RuntimeConfig (imp.conf parser)
+│   │                     RuntimeConfig (imp.conf parser)
 │   ├── vision/           SigLIP encoder, image preprocessing, mmproj loader
 │   └── api/              C API implementation
 ├── tools/
@@ -284,8 +283,8 @@ make bench                 # full benchmark suite across baseline models
 Covers: tensor ops, GGUF + SafeTensors parsing, KV cache, attention
 (paged FP16/FP8/INT4 + FMHA FP16/FP8/MXFP4), RoPE, LayerNorm, MoE
 (legacy + CUTLASS 3.x grouped), quantisation, FP8/NVFP4, Green Contexts,
-continuous batching, n-gram speculative decoding, end-to-end generation
-including NVFP4 prequant from both Model Optimizer and llm-compressor.
+continuous batching, end-to-end generation including NVFP4 prequant
+from both Model Optimizer and llm-compressor.
 
 ## Architecture
 

@@ -9,8 +9,6 @@ namespace imp {
 // W: [rows, K/256*144] raw Q4_K bytes on GPU
 // x: [K] FP16 input vector
 // y: [rows] FP16 output vector
-void gemv_q4k_ggml_compat(
-    const uint8_t* W, const half* x, half* y,
-    int rows, int K, cudaStream_t stream);
+void gemv_q4k_ggml_compat(const uint8_t* W, const half* x, half* y, int rows, int K, cudaStream_t stream);
 
-} // namespace imp
+}  // namespace imp

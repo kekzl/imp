@@ -8,4 +8,4 @@ SamplingDefaults get_sampling_defaults(ModelArch arch) {
     return d;
 }
 
-} // namespace imp
+}  // namespace imp

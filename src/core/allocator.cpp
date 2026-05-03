@@ -9,8 +9,7 @@ namespace imp {
 
 static void check_cuda(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(msg) + ": " + cudaGetErrorString(err));
+        throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(err));
     }
 }
 
@@ -20,19 +19,21 @@ static size_t align_up(size_t offset, size_t alignment) {
 
 // --- ArenaAllocator ---
 
-ArenaAllocator::ArenaAllocator(size_t capacity, bool on_device)
-    : capacity_(capacity), on_device_(on_device) {
-    if (capacity == 0) return;
+ArenaAllocator::ArenaAllocator(size_t capacity, bool on_device) : capacity_(capacity), on_device_(on_device) {
+    if (capacity == 0)
+        return;
     if (on_device) {
         check_cuda(cudaMalloc(&base_, capacity), "ArenaAllocator cudaMalloc");
     } else {
         base_ = std::malloc(capacity);
-        if (!base_) throw std::bad_alloc();
+        if (!base_)
+            throw std::bad_alloc();
     }
 }
 
 ArenaAllocator::~ArenaAllocator() {
-    if (!base_) return;
+    if (!base_)
+        return;
     if (on_device_) {
         IMP_CUDA_CHECK_LOG(cudaFree(base_));
     } else {
@@ -60,13 +61,15 @@ void ArenaAllocator::reset() {
 
 PoolAllocator::PoolAllocator(size_t block_size, size_t num_blocks, bool on_device)
     : block_size_(block_size), num_blocks_(num_blocks), on_device_(on_device) {
-    if (num_blocks == 0) return;
+    if (num_blocks == 0)
+        return;
     size_t total = block_size * num_blocks;
     if (on_device) {
         check_cuda(cudaMalloc(&base_, total), "PoolAllocator cudaMalloc");
     } else {
         base_ = std::malloc(total);
-        if (!base_) throw std::bad_alloc();
+        if (!base_)
+            throw std::bad_alloc();
     }
     free_list_.reserve(num_blocks);
     for (size_t i = 0; i < num_blocks; ++i) {
@@ -75,7 +78,8 @@ PoolAllocator::PoolAllocator(size_t block_size, size_t num_blocks, bool on_devic
 }
 
 PoolAllocator::~PoolAllocator() {
-    if (!base_) return;
+    if (!base_)
+        return;
     if (on_device_) {
         IMP_CUDA_CHECK_LOG(cudaFree(base_));
     } else {
@@ -85,7 +89,8 @@ PoolAllocator::~PoolAllocator() {
 
 void* PoolAllocator::allocate() {
     std::lock_guard<std::mutex> lock(mu_);
-    if (free_list_.empty()) return nullptr;
+    if (free_list_.empty())
+        return nullptr;
     void* ptr = free_list_.back();
     free_list_.pop_back();
     return ptr;
@@ -101,4 +106,4 @@ size_t PoolAllocator::free_count() const {
     return free_list_.size();
 }
 
-} // namespace imp
+}  // namespace imp

@@ -17,24 +17,23 @@ static constexpr int QK4_K = 256;
 static constexpr int QK8_1 = 32;
 
 // Warp reduction
-template<int warp_sz = 32>
+template <int warp_sz = 32>
 static __device__ __forceinline__ float warp_reduce_sum_f(float val) {
-    #pragma unroll
+#pragma unroll
     for (int mask = warp_sz / 2; mask > 0; mask >>= 1)
         val += __shfl_xor_sync(0xffffffff, val, mask);
     return val;
 }
 
 // Extract scale/min from Q4_K scales array (matching ggml get_scale_min_k4)
-static __device__ __forceinline__ void get_scale_min(
-    const uint8_t* sc, int j, uint8_t& sc_val, uint8_t& min_val)
-{
+static __device__ __forceinline__ void get_scale_min(const uint8_t* sc, int j, uint8_t& sc_val,
+                                                     uint8_t& min_val) {
     if (j < 4) {
-        sc_val  = sc[j] & 63;
+        sc_val = sc[j] & 63;
         min_val = sc[j + 4] & 63;
     } else {
-        sc_val  = (sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4);
-        min_val = (sc[j + 4] >> 4)   | ((sc[j]     >> 6) << 4);
+        sc_val = (sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4);
+        min_val = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
     }
 }
 
@@ -54,33 +53,31 @@ static __device__ __forceinline__ float ggml_vec_dot_q4k_q8_1_sub(
     int32_t q8_sum = 0;
     const int ones = 0x01010101;
 
-    #pragma unroll
+#pragma unroll
     for (int j = 0; j < 8; j++) {
         uint32_t qs4;
         memcpy(&qs4, qs_base + j * 4, 4);
-        uint32_t nibbles = use_high ? ((qs4 >> 4) & 0x0F0F0F0Fu)
-                                    : (qs4 & 0x0F0F0F0Fu);
+        uint32_t nibbles = use_high ? ((qs4 >> 4) & 0x0F0F0F0Fu) : (qs4 & 0x0F0F0F0Fu);
         int ni;
         memcpy(&ni, &nibbles, 4);
         sumi = __dp4a(ni, q8_qs[j], sumi);
         q8_sum = __dp4a(q8_qs[j], ones, q8_sum);
     }
 
-    return q8_d * (d_super * (float)sc_val * (float)sumi
-                 - dmin_super * (float)min_val * (float)q8_sum);
+    return q8_d * (d_super * (float)sc_val * (float)sumi - dmin_super * (float)min_val * (float)q8_sum);
 }
 
 // MoE GEMV: y[rows] = x[K] @ W[rows, K]^T for ONE expert
 // Each warp computes one output row. Each thread processes K/warp_size
 // super-blocks and accumulates via warp reduction.
 __global__ void gemv_q4k_ggml_compat_kernel(
-    const uint8_t* __restrict__ W,     // Q4_K packed weights [rows, K/256*144]
-    const half* __restrict__ x,        // FP16 input [K]
-    half* __restrict__ y,              // FP16 output [rows]
-    int rows, int K)
-{
+    const uint8_t* __restrict__ W,  // Q4_K packed weights [rows, K/256*144]
+    const half* __restrict__ x,     // FP16 input [K]
+    half* __restrict__ y,           // FP16 output [rows]
+    int rows, int K) {
     const int row = blockIdx.x;
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     const int tid = threadIdx.x;
     const int blocks_per_row = K / QK4_K;
@@ -93,7 +90,10 @@ __global__ void gemv_q4k_ggml_compat_kernel(
     int q8_blocks = K / QK8_1;
 
     // Simple per-thread quantization of x to Q8_1 in shared memory
-    struct Q8Block { float d; int8_t qs[32]; };
+    struct Q8Block {
+        float d;
+        int8_t qs[32];
+    };
     Q8Block* q8 = reinterpret_cast<Q8Block*>(smem);
 
     for (int b = tid; b < q8_blocks; b += blockDim.x) {
@@ -136,10 +136,8 @@ __global__ void gemv_q4k_ggml_compat_kernel(
             const int qs_byte_offset = (sub / 2) * 32;
             const bool use_high = (sub & 1);
 
-            sum += ggml_vec_dot_q4k_q8_1_sub(
-                qs + qs_byte_offset, use_high,
-                q8_qs, q8[q8_idx].d,
-                d_super, dmin_super, sc_val, min_val);
+            sum += ggml_vec_dot_q4k_q8_1_sub(qs + qs_byte_offset, use_high, q8_qs, q8[q8_idx].d, d_super,
+                                             dmin_super, sc_val, min_val);
         }
     }
 
@@ -151,14 +149,11 @@ __global__ void gemv_q4k_ggml_compat_kernel(
     }
 }
 
-void gemv_q4k_ggml_compat(
-    const uint8_t* W, const half* x, half* y,
-    int rows, int K, cudaStream_t stream)
-{
+void gemv_q4k_ggml_compat(const uint8_t* W, const half* x, half* y, int rows, int K, cudaStream_t stream) {
     int q8_blocks = K / QK8_1;
     size_t smem = q8_blocks * (sizeof(float) + 32);  // Q8Block per block
-    int threads = 32;  // one warp per row
+    int threads = 32;                                // one warp per row
     gemv_q4k_ggml_compat_kernel<<<rows, threads, smem, stream>>>(W, x, y, rows, K);
 }
 
-} // namespace imp
+}  // namespace imp

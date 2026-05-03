@@ -6,17 +6,18 @@
 
 namespace imp {
 
-bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes,
-                          VRAMAllocator* alloc) {
-    if (max_expert_raw == 0 || budget_bytes == 0) return false;
+bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc) {
+    if (max_expert_raw == 0 || budget_bytes == 0)
+        return false;
 
     alloc_ = alloc;
     slot_size_ = max_expert_raw;
     n_slots_ = static_cast<int>(budget_bytes / slot_size_);
     if (n_slots_ < 2) {
-        IMP_LOG_WARN("Expert LRU cache: budget too small for even 2 slots "
-                     "(need %zu bytes/slot, budget %zu bytes)",
-                     slot_size_, budget_bytes);
+        IMP_LOG_WARN(
+            "Expert LRU cache: budget too small for even 2 slots "
+            "(need %zu bytes/slot, budget %zu bytes)",
+            slot_size_, budget_bytes);
         return false;
     }
 
@@ -25,11 +26,11 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes,
         pool_ = alloc_->allocate(total, "expert_cache");
     } else {
         cudaError_t err = cudaMalloc(&pool_, total);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
-        IMP_LOG_WARN("Expert LRU cache: allocation failed for %zu bytes (%d slots)",
-                     total, n_slots_);
+        IMP_LOG_WARN("Expert LRU cache: allocation failed for %zu bytes (%d slots)", total, n_slots_);
         n_slots_ = 0;
         return false;
     }
@@ -43,15 +44,15 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes,
     hits_ = 0;
     misses_ = 0;
 
-    IMP_LOG_INFO("Expert LRU cache: %d slots x %.2f MiB = %.2f MiB GPU memory",
-                 n_slots_, slot_size_ / (1024.0 * 1024.0),
-                 total / (1024.0 * 1024.0));
+    IMP_LOG_INFO("Expert LRU cache: %d slots x %.2f MiB = %.2f MiB GPU memory", n_slots_,
+                 slot_size_ / (1024.0 * 1024.0), total / (1024.0 * 1024.0));
     return true;
 }
 
 void* ExpertLRUCache::find(ExpertCacheKey key) {
     auto it = lookup_.find(key);
-    if (it == lookup_.end()) return nullptr;
+    if (it == lookup_.end())
+        return nullptr;
 
     // Move to front (most recently used)
     auto& [slot_idx, lru_it] = it->second;
@@ -62,11 +63,12 @@ void* ExpertLRUCache::find(ExpertCacheKey key) {
     return slots_[slot_idx].gpu_ptr;
 }
 
-void* ExpertLRUCache::get_or_load(ExpertCacheKey key, const void* src_host,
-                                   size_t expert_bytes, cudaStream_t stream) {
+void* ExpertLRUCache::get_or_load(ExpertCacheKey key, const void* src_host, size_t expert_bytes,
+                                  cudaStream_t stream) {
     // Check cache hit
     void* cached = find(key);
-    if (cached) return cached;
+    if (cached)
+        return cached;
 
     misses_++;
 
@@ -94,8 +96,7 @@ void* ExpertLRUCache::get_or_load(ExpertCacheKey key, const void* src_host,
 
     // Load expert from host to GPU slot
     Slot& slot = slots_[slot_idx];
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes,
-                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes, cudaMemcpyHostToDevice, stream));
 
     // Register in LRU
     slot.key = key;
@@ -110,11 +111,13 @@ void ExpertLRUCache::destroy() {
     if (pool_) {
         int64_t total = hits_ + misses_;
         if (total > 0) {
-            IMP_LOG_INFO("Expert LRU cache stats: %ld hits, %ld misses (%.1f%% hit rate)",
-                         (long)hits_, (long)misses_, hit_rate() * 100.0f);
+            IMP_LOG_INFO("Expert LRU cache stats: %ld hits, %ld misses (%.1f%% hit rate)", (long)hits_,
+                         (long)misses_, hit_rate() * 100.0f);
         }
-        if (alloc_) alloc_->free(pool_);
-        else cudaFree(pool_);
+        if (alloc_)
+            alloc_->free(pool_);
+        else
+            cudaFree(pool_);
         pool_ = nullptr;
     }
     slots_.clear();
@@ -125,4 +128,4 @@ void ExpertLRUCache::destroy() {
     misses_ = 0;
 }
 
-} // namespace imp
+}  // namespace imp

@@ -32,12 +32,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         size_t max_weight_elems = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
-                                   &L.w_gate, &L.w_up, &L.w_down,
-                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
-                                   &L.ssm_in, &L.ssm_out}) {
-                if (w->data) max_weight_elems = std::max(max_weight_elems,
-                                                          static_cast<size_t>(w->numel()));
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
+                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
+                if (w->data)
+                    max_weight_elems = std::max(max_weight_elems, static_cast<size_t>(w->numel()));
             }
         }
         if (max_weight_elems > 0) {
@@ -48,8 +46,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                               qscratch_.dequant_size / (1024.0 * 1024.0));
                 qscratch_.dequant_size = 0;
             } else {
-                IMP_LOG_INFO("Dequant scratch buffer: %.2f MiB",
-                             qscratch_.dequant_size / (1024.0 * 1024.0));
+                IMP_LOG_INFO("Dequant scratch buffer: %.2f MiB", qscratch_.dequant_size / (1024.0 * 1024.0));
             }
         }
     }
@@ -59,8 +56,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         cudaError_t err = cudaMalloc(&d_sample_result_, ARGMAX_SCRATCH_BYTES);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s", cudaGetErrorString(err));
             d_sample_result_ = nullptr;
         }
     }
@@ -69,8 +65,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     if (!h_sample_pinned_ && d_sample_result_) {
         cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("cudaHostAlloc for sample pinned buffer failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_WARN("cudaHostAlloc for sample pinned buffer failed: %s", cudaGetErrorString(err));
             h_sample_pinned_ = nullptr;
         }
     }
@@ -84,10 +79,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int max_moe_down_blocks = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
-                                   &L.w_gate, &L.w_up, &L.w_down,
-                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
-                                   &L.ssm_in, &L.ssm_out}) {
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
+                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
                 if (w->data && w->ndim >= 2) {
                     max_k = std::max(max_k, static_cast<int>(w->shape[1]));
                 }
@@ -100,8 +93,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 int down_k = static_cast<int>(L.expert_down_packed.shape[2]);
                 max_k = std::max(max_k, down_k);
                 // MoE down projection quantizes top_k expert activations contiguously
-                max_moe_down_blocks = std::max(max_moe_down_blocks,
-                    cfg.n_experts_active * (down_k / 32));
+                max_moe_down_blocks = std::max(max_moe_down_blocks, cfg.n_experts_active * (down_k / 32));
             }
             if (L.expert_gate_packed.data && L.expert_gate_packed.ndim >= 3) {
                 max_k = std::max(max_k, static_cast<int>(L.expert_gate_packed.shape[2]));
@@ -116,12 +108,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             cudaError_t err2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_buf), d8_sz);
             if (err1 != cudaSuccess || err2 != cudaSuccess) {
                 IMP_LOG_WARN("Failed to allocate MMVQ scratch buffers, dp4a path disabled");
-                if (qscratch_.q8_1_buf) { cudaFree(qscratch_.q8_1_buf); qscratch_.q8_1_buf = nullptr; }
-                if (qscratch_.d8_buf) { cudaFree(qscratch_.d8_buf); qscratch_.d8_buf = nullptr; }
+                if (qscratch_.q8_1_buf) {
+                    cudaFree(qscratch_.q8_1_buf);
+                    qscratch_.q8_1_buf = nullptr;
+                }
+                if (qscratch_.d8_buf) {
+                    cudaFree(qscratch_.d8_buf);
+                    qscratch_.d8_buf = nullptr;
+                }
                 qscratch_.q8_1_max_blocks = 0;
             } else {
-                IMP_LOG_INFO("MMVQ scratch buffers: %.2f KiB (q8_1) + %.2f KiB (d8), max_blocks=%d (max_k=%d, moe_down=%d)",
-                             q8_1_sz / 1024.0, d8_sz / 1024.0, max_blocks, max_k, max_moe_down_blocks);
+                IMP_LOG_INFO(
+                    "MMVQ scratch buffers: %.2f KiB (q8_1) + %.2f KiB (d8), max_blocks=%d (max_k=%d, "
+                    "moe_down=%d)",
+                    q8_1_sz / 1024.0, d8_sz / 1024.0, max_blocks, max_k, max_moe_down_blocks);
             }
         }
     }
@@ -161,24 +161,24 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int attn_seq = max_tokens_;
         size_t s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
         if (s_sz > max_s_sz) {
-            attn_seq = static_cast<int>(std::sqrt(
-                static_cast<double>(max_s_sz) / (nh * sizeof(half))));
+            attn_seq = static_cast<int>(std::sqrt(static_cast<double>(max_s_sz) / (nh * sizeof(half))));
             attn_seq = (attn_seq / 16) * 16;  // round down to multiple of 16
-            if (attn_seq < 32) attn_seq = 0;  // too small to be useful
+            if (attn_seq < 32)
+                attn_seq = 0;  // too small to be useful
             s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
         }
         if (attn_seq > 0) {
             attn_scores_buf_ = vram_alloc(vram_alloc_, s_sz, "attn_scores");
             if (!attn_scores_buf_) {
                 cudaError_t e = cudaGetLastError();
-                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%.1f MiB): %s — "
-                             "will fall back to WMMA attention for prefill",
-                             s_sz / (1024.0 * 1024.0), cudaGetErrorString(e));
+                IMP_LOG_WARN(
+                    "Failed to allocate cuBLAS attention S-matrix (%.1f MiB): %s — "
+                    "will fall back to WMMA attention for prefill",
+                    s_sz / (1024.0 * 1024.0), cudaGetErrorString(e));
                 attn_scores_buf_size_ = 0;
             } else {
                 attn_scores_buf_size_ = s_sz;
-                int64_t s_shape[3] = {static_cast<int64_t>(nh),
-                                      static_cast<int64_t>(attn_seq),
+                int64_t s_shape[3] = {static_cast<int64_t>(nh), static_cast<int64_t>(attn_seq),
                                       static_cast<int64_t>(attn_seq)};
                 attn_scores_ = Tensor(attn_scores_buf_, QType::F16, 3, s_shape, true);
                 IMP_LOG_INFO("cuBLAS attention S-matrix: %.2f MiB (%d heads x %d x %d)",
@@ -191,7 +191,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // MoE dequant and staging buffers
     if (has_moe_) {
-        int d   = cfg.d_model;
+        int d = cfg.d_model;
         int eff = max_expert_eff_;
 
         // Dequant buffer: 1 expert slot
@@ -204,8 +204,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.dequant_buf_size = 0;
             } else {
                 moe_.dequant_buf_size = dequant_sz;
-                IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)",
-                             dequant_sz / (1024.0 * 1024.0));
+                IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)", dequant_sz / (1024.0 * 1024.0));
             }
         }
 
@@ -215,7 +214,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             for (int li = 0; li < model_->n_layers(); li++) {
                 const auto& L = model_->layer(li);
                 auto check = [&](const Tensor& p, QType qt) {
-                    if (!p.data || p.ndim < 3) return;
+                    if (!p.data || p.ndim < 3)
+                        return;
                     size_t rb = qtype_row_bytes(qt, p.shape[2]);
                     size_t expert_raw = static_cast<size_t>(p.shape[1]) * rb;
                     max_expert_raw = std::max(max_expert_raw, expert_raw);
@@ -279,7 +279,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
             bool allocated = false;
             for (int ne_try : targets) {
-                if (ne_try <= 0) continue;
+                if (ne_try <= 0)
+                    continue;
                 ne_try = std::min(ne_try, cfg.n_experts);
                 size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
                 moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
@@ -289,8 +290,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 }
                 moe_.batch_dequant_buf_size = sz;
                 allocated = true;
-                IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)",
-                             sz / (1024.0 * 1024.0), ne_try);
+                IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)", sz / (1024.0 * 1024.0),
+                             ne_try);
                 break;
             }
             if (!allocated) {
@@ -333,14 +334,18 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     moe_.cutlass3x_sfa_ptrs = nullptr;
                 }
                 IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
-                             (packed_sz + sf_sz) / (1024.0 * 1024.0),
-                             packed_sz / (1024.0 * 1024.0),
-                             sf_sz / (1024.0 * 1024.0),
-                             max_expanded);
+                             (packed_sz + sf_sz) / (1024.0 * 1024.0), packed_sz / (1024.0 * 1024.0),
+                             sf_sz / (1024.0 * 1024.0), max_expanded);
             } else {
                 IMP_LOG_WARN("CUTLASS 3.x MoE staging: allocation failed, path disabled");
-                if (moe_.cutlass3x_packed) { vram_free(vram_alloc_, moe_.cutlass3x_packed); moe_.cutlass3x_packed = nullptr; }
-                if (moe_.cutlass3x_sf) { vram_free(vram_alloc_, moe_.cutlass3x_sf); moe_.cutlass3x_sf = nullptr; }
+                if (moe_.cutlass3x_packed) {
+                    vram_free(vram_alloc_, moe_.cutlass3x_packed);
+                    moe_.cutlass3x_packed = nullptr;
+                }
+                if (moe_.cutlass3x_sf) {
+                    vram_free(vram_alloc_, moe_.cutlass3x_sf);
+                    moe_.cutlass3x_sf = nullptr;
+                }
             }
         }
 
@@ -382,8 +387,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
     if (wcache_.use_fp8) {
         int max_dim = cfg.d_model;
-        if (cfg.d_ff > 0) max_dim = std::max(max_dim, cfg.d_ff);
-        max_dim = std::max(max_dim, cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
+        if (cfg.d_ff > 0)
+            max_dim = std::max(max_dim, cfg.d_ff);
+        max_dim = std::max(max_dim,
+                           cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
         // SSM dimensions
         if (cfg.ssm_inner_size > 0) {
             int conv_ch = cfg.ssm_inner_size + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
@@ -408,19 +415,28 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // Pre-allocate reduction buffers for async FP8 activation quantization.
         // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
         if (qscratch_.fp8_act && qscratch_.d_act_scale) {
-            int max_n = static_cast<int>(qscratch_.fp8_act_size);  // max elements
-            int threads_needed = (max_n + 3) / 4;  // kElemsPerThread=4
+            int max_n = static_cast<int>(qscratch_.fp8_act_size);   // max elements
+            int threads_needed = (max_n + 3) / 4;                   // kElemsPerThread=4
             qscratch_.fp8_max_grid = (threads_needed + 255) / 256;  // kBlockSize=256
-            cudaError_t e1 = cudaMalloc(&qscratch_.d_fp8_block_maxes, static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
+            cudaError_t e1 = cudaMalloc(&qscratch_.d_fp8_block_maxes,
+                                        static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
             cudaError_t e2 = cudaMalloc(&qscratch_.d_fp8_absmax, sizeof(float));
-            if (e1 != cudaSuccess || e2 != cudaSuccess || !qscratch_.d_fp8_block_maxes || !qscratch_.d_fp8_absmax) {
+            if (e1 != cudaSuccess || e2 != cudaSuccess || !qscratch_.d_fp8_block_maxes ||
+                !qscratch_.d_fp8_absmax) {
                 IMP_LOG_WARN("Failed to allocate FP8 reduction buffers — will use sync path");
-                if (qscratch_.d_fp8_block_maxes) { cudaFree(qscratch_.d_fp8_block_maxes); qscratch_.d_fp8_block_maxes = nullptr; }
-                if (qscratch_.d_fp8_absmax) { cudaFree(qscratch_.d_fp8_absmax); qscratch_.d_fp8_absmax = nullptr; }
+                if (qscratch_.d_fp8_block_maxes) {
+                    cudaFree(qscratch_.d_fp8_block_maxes);
+                    qscratch_.d_fp8_block_maxes = nullptr;
+                }
+                if (qscratch_.d_fp8_absmax) {
+                    cudaFree(qscratch_.d_fp8_absmax);
+                    qscratch_.d_fp8_absmax = nullptr;
+                }
                 qscratch_.fp8_max_grid = 0;
             }
-            IMP_LOG_INFO("FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
-                         qscratch_.fp8_act_size / (1024.0 * 1024.0), max_tokens_, max_dim, qscratch_.fp8_max_grid);
+            IMP_LOG_INFO(
+                "FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
+                qscratch_.fp8_act_size / (1024.0 * 1024.0), max_tokens_, max_dim, qscratch_.fp8_max_grid);
         }
     }
 
@@ -451,10 +467,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         };
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
-                                   &L.w_gate, &L.w_up, &L.w_down,
-                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
-                                   &L.ssm_in, &L.ssm_out}) {
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
+                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
                 track_2d(*w);
             }
             // MoE expert weights: per-expert tensors are [N, K] 2D. The 3D
@@ -467,20 +481,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // (sf_bytes=1.6 MiB > scratch=1 MiB), cudaMemsetAsync returns
             // invalid argument, and the stream poisons every downstream
             // kernel — output collapses to <strong><strong>... loops.
-            for (const auto* expert_vec : {&L.expert_w_gate, &L.expert_w_up,
-                                            &L.expert_w_down}) {
-                if (!expert_vec->empty()) track_2d((*expert_vec)[0]);
+            for (const auto* expert_vec : {&L.expert_w_gate, &L.expert_w_up, &L.expert_w_down}) {
+                if (!expert_vec->empty())
+                    track_2d((*expert_vec)[0]);
             }
             // 3D packed expert buffers: [n_experts, N, K] (or [n_experts, N, K_packed]
             // for NVFP4 prequant where shape[2] is K_packed = K_logical/2).
-            for (const auto* w : {&L.expert_gate_packed, &L.expert_up_packed,
-                                   &L.expert_down_packed}) {
+            for (const auto* w : {&L.expert_gate_packed, &L.expert_up_packed, &L.expert_down_packed}) {
                 if (w->data && w->ndim >= 3) {
                     max_n = std::max(max_n, static_cast<int>(w->shape[1]));
                     int K_dim = static_cast<int>(w->shape[2]);
                     // NVFP4 prequant packs two FP4 nibbles per byte, so the
                     // logical K (and thus the GEMM activation K) is 2× shape[2].
-                    if (w->qtype == QType::NVFP4) K_dim *= 2;
+                    if (w->qtype == QType::NVFP4)
+                        K_dim *= 2;
                     max_k = std::max(max_k, K_dim);
                 }
             }
@@ -493,23 +507,38 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // CUTLASS GEMM workspace
             qscratch_.cutlass_workspace_size = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
 
-            qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size, "cutlass_act_data");
-            qscratch_.cutlass_act_sf = vram_alloc(vram_alloc_, qscratch_.cutlass_act_sf_size, "cutlass_act_sf");
+            qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size,
+                                                    "cutlass_act_data");
+            qscratch_.cutlass_act_sf = vram_alloc(vram_alloc_, qscratch_.cutlass_act_sf_size,
+                                                  "cutlass_act_sf");
             qscratch_.cutlass_workspace = (qscratch_.cutlass_workspace_size > 0)
-                               ? vram_alloc(vram_alloc_, qscratch_.cutlass_workspace_size, "cutlass_workspace")
-                               : nullptr;
+                                              ? vram_alloc(vram_alloc_, qscratch_.cutlass_workspace_size,
+                                                           "cutlass_workspace")
+                                              : nullptr;
             if (!qscratch_.cutlass_act_data || !qscratch_.cutlass_act_sf ||
                 (qscratch_.cutlass_workspace_size > 0 && !qscratch_.cutlass_workspace)) {
-                IMP_LOG_WARN("Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
-                if (qscratch_.cutlass_act_data) { vram_free(vram_alloc_, qscratch_.cutlass_act_data); qscratch_.cutlass_act_data = nullptr; }
-                if (qscratch_.cutlass_act_sf) { vram_free(vram_alloc_, qscratch_.cutlass_act_sf); qscratch_.cutlass_act_sf = nullptr; }
-                if (qscratch_.cutlass_workspace) { vram_free(vram_alloc_, qscratch_.cutlass_workspace); qscratch_.cutlass_workspace = nullptr; }
+                IMP_LOG_WARN(
+                    "Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
+                if (qscratch_.cutlass_act_data) {
+                    vram_free(vram_alloc_, qscratch_.cutlass_act_data);
+                    qscratch_.cutlass_act_data = nullptr;
+                }
+                if (qscratch_.cutlass_act_sf) {
+                    vram_free(vram_alloc_, qscratch_.cutlass_act_sf);
+                    qscratch_.cutlass_act_sf = nullptr;
+                }
+                if (qscratch_.cutlass_workspace) {
+                    vram_free(vram_alloc_, qscratch_.cutlass_workspace);
+                    qscratch_.cutlass_workspace = nullptr;
+                }
                 qscratch_.cutlass_act_data_size = 0;
                 qscratch_.cutlass_act_sf_size = 0;
                 qscratch_.cutlass_workspace_size = 0;
             } else {
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
-                             (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size + qscratch_.cutlass_workspace_size) / (1024.0 * 1024.0),
+                             (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size +
+                              qscratch_.cutlass_workspace_size) /
+                                 (1024.0 * 1024.0),
                              qscratch_.cutlass_act_data_size / (1024.0 * 1024.0),
                              qscratch_.cutlass_act_sf_size / (1024.0 * 1024.0),
                              qscratch_.cutlass_workspace_size / (1024.0 * 1024.0));
@@ -524,12 +553,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 bool has_mxfp4_weights = false;
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4_weights; i++) {
                     const auto& L = model_->layer(i);
-                    if (L.wq.qtype == QType::MXFP4 ||
-                        L.w_gate.qtype == QType::MXFP4 ||
-                        L.w_up.qtype == QType::MXFP4 ||
-                        L.w_down.qtype == QType::MXFP4 ||
-                        L.ssm_in.qtype == QType::MXFP4 ||
-                        L.ssm_out.qtype == QType::MXFP4 ||
+                    if (L.wq.qtype == QType::MXFP4 || L.w_gate.qtype == QType::MXFP4 ||
+                        L.w_up.qtype == QType::MXFP4 || L.w_down.qtype == QType::MXFP4 ||
+                        L.ssm_in.qtype == QType::MXFP4 || L.ssm_out.qtype == QType::MXFP4 ||
                         L.expert_gate_packed.qtype == QType::MXFP4 ||
                         L.expert_up_packed.qtype == QType::MXFP4 ||
                         L.expert_down_packed.qtype == QType::MXFP4) {
@@ -539,16 +565,25 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 if (cutlass_sm120_mxfp4_available() &&
                     (has_mxfp4_weights || RuntimeConfig::current().attention.mxfp4 == "always")) {
                     qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-                    qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
-                    qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size, "mxfp4_act_sf");
+                    qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n,
+                                                                                        max_k);
+                    qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size,
+                                                        "mxfp4_act_sf");
                     qscratch_.mxfp4_workspace = (qscratch_.mxfp4_workspace_size > 0)
-                                     ? vram_alloc(vram_alloc_, qscratch_.mxfp4_workspace_size, "mxfp4_workspace")
-                                     : nullptr;
+                                                    ? vram_alloc(vram_alloc_, qscratch_.mxfp4_workspace_size,
+                                                                 "mxfp4_workspace")
+                                                    : nullptr;
                     if (!qscratch_.mxfp4_act_sf ||
                         (qscratch_.mxfp4_workspace_size > 0 && !qscratch_.mxfp4_workspace)) {
                         IMP_LOG_WARN("Failed to allocate MXFP4 activation buffers, MXFP4 prefill disabled");
-                        if (qscratch_.mxfp4_act_sf) { vram_free(vram_alloc_, qscratch_.mxfp4_act_sf); qscratch_.mxfp4_act_sf = nullptr; }
-                        if (qscratch_.mxfp4_workspace) { vram_free(vram_alloc_, qscratch_.mxfp4_workspace); qscratch_.mxfp4_workspace = nullptr; }
+                        if (qscratch_.mxfp4_act_sf) {
+                            vram_free(vram_alloc_, qscratch_.mxfp4_act_sf);
+                            qscratch_.mxfp4_act_sf = nullptr;
+                        }
+                        if (qscratch_.mxfp4_workspace) {
+                            vram_free(vram_alloc_, qscratch_.mxfp4_workspace);
+                            qscratch_.mxfp4_workspace = nullptr;
+                        }
                         qscratch_.mxfp4_act_sf_size = 0;
                         qscratch_.mxfp4_workspace_size = 0;
                     } else {
@@ -576,15 +611,24 @@ void GraphExecutor::release_moe_batch_buf() {
 void GraphExecutor::free_buffers() {
     // Helper: free through VRAMAllocator if pointer was tracked, else cudaFree.
     auto vfree = [this](void*& p) {
-        if (p) { vram_free(vram_alloc_, p); p = nullptr; }
+        if (p) {
+            vram_free(vram_alloc_, p);
+            p = nullptr;
+        }
     };
 
     // Free TurboQuant QJL projection
     qjl_destroy(qjl_proj_);
 
     // Free LongRoPE frequency tables
-    if (longrope_short_freqs_) { IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_)); longrope_short_freqs_ = nullptr; }
-    if (longrope_long_freqs_)  { IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));  longrope_long_freqs_  = nullptr; }
+    if (longrope_short_freqs_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
+        longrope_short_freqs_ = nullptr;
+    }
+    if (longrope_long_freqs_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
+        longrope_long_freqs_ = nullptr;
+    }
     longrope_n_pairs_ = 0;
     longrope_orig_max_pos_ = 0;
 
@@ -599,10 +643,12 @@ void GraphExecutor::free_buffers() {
         // fallback in case a code path writes to them without going through
         // the Phase-4 registration helper.
         for (auto& [idx, tensor] : wcache_.fused_kv)
-            if (tensor.data) vram_free(vram_alloc_, tensor.data);
+            if (tensor.data)
+                vram_free(vram_alloc_, tensor.data);
         wcache_.fused_kv.clear();
         for (auto& [idx, tensor] : wcache_.fused_gate_up)
-            if (tensor.data) vram_free(vram_alloc_, tensor.data);
+            if (tensor.data)
+                vram_free(vram_alloc_, tensor.data);
         wcache_.fused_gate_up.clear();
         // FP16 cache
         for (auto& [ptr, tensor] : wcache_.fp16)
@@ -610,40 +656,52 @@ void GraphExecutor::free_buffers() {
         wcache_.fp16.clear();
         wcache_.fp16_bytes = 0;
         // NVFP4 decode cache
-        for (auto& [ptr, result] : wcache_.nvfp4) free_nvfp4_result(result);
+        for (auto& [ptr, result] : wcache_.nvfp4)
+            free_nvfp4_result(result);
         wcache_.nvfp4.clear();
         wcache_.nvfp4_bytes = 0;
         // NVFP4 MoE expert cache
-        for (auto& [ptr, result] : wcache_.nvfp4_moe) free_nvfp4_moe_result(result);
+        for (auto& [ptr, result] : wcache_.nvfp4_moe)
+            free_nvfp4_moe_result(result);
         wcache_.nvfp4_moe.clear();
         wcache_.nvfp4_moe_bytes = 0;
         // CUTLASS NVFP4 cache
-        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4) free_cutlass_nvfp4_weight(cw);
+        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4)
+            free_cutlass_nvfp4_weight(cw);
         wcache_.cutlass_nvfp4.clear();
         wcache_.cutlass_nvfp4_bytes = 0;
         // CUTLASS MXFP4 cache
-        for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) free_cutlass_mxfp4_weight(mw);
+        for (auto& [ptr, mw] : wcache_.cutlass_mxfp4)
+            free_cutlass_mxfp4_weight(mw);
         wcache_.cutlass_mxfp4.clear();
         wcache_.cutlass_mxfp4_bytes = 0;
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data) {
                 bool in_migrated = wcache_.fp8_migrated_data &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) + wcache_.fp8_migrated_data_size;
+                                   reinterpret_cast<uintptr_t>(entry.weight.data) >=
+                                       reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) &&
+                                   reinterpret_cast<uintptr_t>(entry.weight.data) <
+                                       reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) +
+                                           wcache_.fp8_migrated_data_size;
                 bool in_overflow = wcache_.fp8_overflow_data &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) + wcache_.fp8_overflow_data_size;
-                if (!in_migrated && !in_overflow) cudaFree(entry.weight.data);
+                                   reinterpret_cast<uintptr_t>(entry.weight.data) >=
+                                       reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) &&
+                                   reinterpret_cast<uintptr_t>(entry.weight.data) <
+                                       reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) +
+                                           wcache_.fp8_overflow_data_size;
+                if (!in_migrated && !in_overflow)
+                    cudaFree(entry.weight.data);
             }
             if (entry.d_scale) {
                 bool in_migrated = wcache_.fp8_migrated_scales &&
-                    entry.d_scale >= wcache_.fp8_migrated_scales &&
-                    entry.d_scale < wcache_.fp8_migrated_scales + wcache_.fp8_migrated_count;
+                                   entry.d_scale >= wcache_.fp8_migrated_scales &&
+                                   entry.d_scale < wcache_.fp8_migrated_scales + wcache_.fp8_migrated_count;
                 bool in_overflow = wcache_.fp8_overflow_scales &&
-                    entry.d_scale >= wcache_.fp8_overflow_scales &&
-                    entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
-                if (!in_migrated && !in_overflow) cudaFree(entry.d_scale);
+                                   entry.d_scale >= wcache_.fp8_overflow_scales &&
+                                   entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
+                if (!in_migrated && !in_overflow)
+                    cudaFree(entry.d_scale);
             }
         }
         wcache_.fp8.clear();
@@ -704,4 +762,4 @@ void GraphExecutor::free_buffers() {
 // use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
 // are in executor_workspace_config.cu
 
-} // namespace imp
+}  // namespace imp

@@ -39,18 +39,16 @@ static constexpr int THREAD_TILE_M = 4;  // each thread computes 4 rows
 static constexpr int THREAD_TILE_N = 4;  // each thread computes 4 cols
 
 __global__ void quant_gemm_int4_kernel(
-    const half*    __restrict__ A,         // [M, K]
-    const uint8_t* __restrict__ B_quant,   // [N, K/2]
-    const half*    __restrict__ scales,    // [N, num_groups] where num_groups = K / group_size
-    half*          __restrict__ C,         // [M, N]
-    int M, int N, int K,
-    int group_size)
-{
+    const half* __restrict__ A,           // [M, K]
+    const uint8_t* __restrict__ B_quant,  // [N, K/2]
+    const half* __restrict__ scales,      // [N, num_groups] where num_groups = K / group_size
+    half* __restrict__ C,                 // [M, N]
+    int M, int N, int K, int group_size) {
     // Block indices: each block covers a TILE_M x TILE_N tile of C.
     const int bm = blockIdx.x * TILE_M;
     const int bn = blockIdx.y * TILE_N;
-    const int tx = threadIdx.x;  // 0..15
-    const int ty = threadIdx.y;  // 0..15
+    const int tx = threadIdx.x;             // 0..15
+    const int ty = threadIdx.y;             // 0..15
     const int tid = ty * BLOCK_DIM_X + tx;  // flat thread id 0..255
 
     const int num_groups = (K + group_size - 1) / group_size;
@@ -61,9 +59,9 @@ __global__ void quant_gemm_int4_kernel(
 
     // Accumulator in registers: each thread owns a THREAD_TILE_M x THREAD_TILE_N block.
     float acc[THREAD_TILE_M][THREAD_TILE_N];
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < THREAD_TILE_M; ++i)
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < THREAD_TILE_N; ++j)
             acc[i][j] = 0.0f;
 
@@ -73,9 +71,9 @@ __global__ void quant_gemm_int4_kernel(
     for (int kt = 0; kt < num_k_tiles; ++kt) {
         const int k_offset = kt * TILE_K;
 
-        // --- Load A tile [TILE_M][TILE_K] into shared memory ----------------
-        // 256 threads, TILE_M * TILE_K = 64 * 32 = 2048 elements -> 8 per thread.
-        #pragma unroll
+// --- Load A tile [TILE_M][TILE_K] into shared memory ----------------
+// 256 threads, TILE_M * TILE_K = 64 * 32 = 2048 elements -> 8 per thread.
+#pragma unroll
         for (int i = 0; i < (TILE_M * TILE_K) / (BLOCK_DIM_X * BLOCK_DIM_Y); ++i) {
             int flat = tid + i * (BLOCK_DIM_X * BLOCK_DIM_Y);
             int row = flat / TILE_K;
@@ -97,7 +95,7 @@ __global__ void quant_gemm_int4_kernel(
         // handled individually (2048 elements / 256 threads = 8 per thread).
         const int half_K = K / 2;
 
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < (TILE_N * TILE_K) / (BLOCK_DIM_X * BLOCK_DIM_Y); ++i) {
             int flat = tid + i * (BLOCK_DIM_X * BLOCK_DIM_Y);
             int n_local = flat / TILE_K;
@@ -110,7 +108,7 @@ __global__ void quant_gemm_int4_kernel(
                 uint8_t packed = B_quant[byte_idx];
                 int nibble;
                 if (global_k % 2 == 0) {
-                    nibble = packed & 0x0F;         // low nibble
+                    nibble = packed & 0x0F;  // low nibble
                 } else {
                     nibble = (packed >> 4) & 0x0F;  // high nibble
                 }
@@ -124,28 +122,28 @@ __global__ void quant_gemm_int4_kernel(
 
         __syncthreads();
 
-        // --- Compute: accumulate TILE_K products ----------------------------
-        // Thread (tx, ty) owns sub-tile:
-        //   rows: ty * THREAD_TILE_M  ..  ty * THREAD_TILE_M + 3
-        //   cols: tx * THREAD_TILE_N  ..  tx * THREAD_TILE_N + 3
-        #pragma unroll
+// --- Compute: accumulate TILE_K products ----------------------------
+// Thread (tx, ty) owns sub-tile:
+//   rows: ty * THREAD_TILE_M  ..  ty * THREAD_TILE_M + 3
+//   cols: tx * THREAD_TILE_N  ..  tx * THREAD_TILE_N + 3
+#pragma unroll
         for (int tk = 0; tk < TILE_K; ++tk) {
             // Load A values for this thread's rows.
             float a_val[THREAD_TILE_M];
-            #pragma unroll
+#pragma unroll
             for (int i = 0; i < THREAD_TILE_M; ++i) {
                 a_val[i] = __half2float(As[ty * THREAD_TILE_M + i][tk]);
             }
             // Load B values for this thread's cols.
             float b_val[THREAD_TILE_N];
-            #pragma unroll
+#pragma unroll
             for (int j = 0; j < THREAD_TILE_N; ++j) {
                 b_val[j] = __half2float(Bs[tx * THREAD_TILE_N + j][tk]);
             }
-            // Outer product accumulation.
-            #pragma unroll
+// Outer product accumulation.
+#pragma unroll
             for (int i = 0; i < THREAD_TILE_M; ++i)
-                #pragma unroll
+#pragma unroll
                 for (int j = 0; j < THREAD_TILE_N; ++j)
                     acc[i][j] += a_val[i] * b_val[j];
         }
@@ -153,12 +151,13 @@ __global__ void quant_gemm_int4_kernel(
         __syncthreads();
     }
 
-    // --- Write C tile back to global memory ---------------------------------
-    #pragma unroll
+// --- Write C tile back to global memory ---------------------------------
+#pragma unroll
     for (int i = 0; i < THREAD_TILE_M; ++i) {
         int global_m = bm + ty * THREAD_TILE_M + i;
-        if (global_m >= M) continue;
-        #pragma unroll
+        if (global_m >= M)
+            continue;
+#pragma unroll
         for (int j = 0; j < THREAD_TILE_N; ++j) {
             int global_n = bn + tx * THREAD_TILE_N + j;
             if (global_n < N) {
@@ -168,10 +167,8 @@ __global__ void quant_gemm_int4_kernel(
     }
 }
 
-void quant_gemm_int4(const Tensor& A, const Tensor& B_quant,
-                     const Tensor& scales, Tensor& C,
-                     cudaStream_t stream)
-{
+void quant_gemm_int4(const Tensor& A, const Tensor& B_quant, const Tensor& scales, Tensor& C,
+                     cudaStream_t stream) {
     // --- Validate dimensions ------------------------------------------------
     assert(A.ndim == 2 && "A must be 2D [M, K]");
     assert(B_quant.ndim == 2 && "B_quant must be 2D [N, K/2]");
@@ -189,23 +186,18 @@ void quant_gemm_int4(const Tensor& A, const Tensor& B_quant,
     const int group_size = (K + num_groups - 1) / num_groups;
 
     // --- Launch kernel ------------------------------------------------------
-    dim3 grid((M + TILE_M - 1) / TILE_M,
-              (N + TILE_N - 1) / TILE_N);
+    dim3 grid((M + TILE_M - 1) / TILE_M, (N + TILE_N - 1) / TILE_N);
     dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
 
-    quant_gemm_int4_kernel<<<grid, block, 0, stream>>>(
-        static_cast<const half*>(A.data),
-        static_cast<const uint8_t*>(B_quant.data),
-        static_cast<const half*>(scales.data),
-        static_cast<half*>(C.data),
-        M, N, K,
-        group_size);
+    quant_gemm_int4_kernel<<<grid, block, 0, stream>>>(static_cast<const half*>(A.data),
+                                                       static_cast<const uint8_t*>(B_quant.data),
+                                                       static_cast<const half*>(scales.data),
+                                                       static_cast<half*>(C.data), M, N, K, group_size);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "quant_gemm_int4 launch failed: %s\n",
-                cudaGetErrorString(err));
+        fprintf(stderr, "quant_gemm_int4 launch failed: %s\n", cudaGetErrorString(err));
     }
 }
 
-} // namespace imp
+}  // namespace imp

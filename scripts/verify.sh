@@ -1,7 +1,7 @@
 #!/bin/bash
 # verify.sh — pre-commit/pre-push verification for imp.
 #
-# Runs the three-step gate from CLAUDE.md:
+# Four-step gate:
 #   1. Build (incremental)
 #   2. Tests (gtest filter or full suite)
 #   3. Perf vs. tests/perf_baseline.json (decode regression > 3% = fail)
@@ -68,11 +68,11 @@ pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 skip()    { echo "${YLW}SKIP${RST} $*"; }
 
-# Docker-only host (e.g. WSL2 with the "clean host" policy from CLAUDE.md):
-# host has neither cmake nor a build/ directory. Run the canonical Docker
-# build, then exit early — the test / perf / smoke gates below need the
-# host build artefacts and there's no clean way to reach them from here.
-# Override with IMP_VERIFY_SKIP_BUILD=1 if cmake-on-host is preferred.
+# Docker-only host (host has neither cmake nor a build/ directory): run
+# the canonical Docker build, then exit early — the test / perf / smoke
+# gates below need the host build artefacts and there's no clean way to
+# reach them from here. Override with IMP_VERIFY_SKIP_BUILD=1 if
+# cmake-on-host is preferred.
 if [ "${IMP_VERIFY_SKIP_BUILD:-0}" != "1" ] && ! command -v cmake >/dev/null 2>&1; then
     section "build (docker — host has no cmake)"
     if make build >/tmp/imp_verify_build.log 2>&1; then

@@ -8,18 +8,20 @@ namespace imp {
 
 std::atomic<LogLevel> g_log_level{LogLevel::INFO};
 
-void log_set_level(LogLevel level) {
-    g_log_level.store(level, std::memory_order_relaxed);
-}
-
+void log_set_level(LogLevel level) { g_log_level.store(level, std::memory_order_relaxed); }
 
 static const char* level_str(LogLevel level) {
     switch (level) {
-        case LogLevel::DEBUG: return "DEBUG";
-        case LogLevel::INFO:  return "INFO";
-        case LogLevel::WARN:  return "WARN";
-        case LogLevel::ERROR: return "ERROR";
-        case LogLevel::FATAL: return "FATAL";
+        case LogLevel::DEBUG:
+            return "DEBUG";
+        case LogLevel::INFO:
+            return "INFO";
+        case LogLevel::WARN:
+            return "WARN";
+        case LogLevel::ERROR:
+            return "ERROR";
+        case LogLevel::FATAL:
+            return "FATAL";
     }
     return "?";
 }
@@ -39,7 +41,8 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
     // Extract filename from path
     const char* basename = file;
     for (const char* p = file; *p; ++p) {
-        if (*p == '/') basename = p + 1;
+        if (*p == '/')
+            basename = p + 1;
     }
 
     FILE* out = (level >= LogLevel::WARN) ? stderr : stdout;
@@ -55,4 +58,4 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
     fflush(out);
 }
 
-} // namespace imp
+}  // namespace imp

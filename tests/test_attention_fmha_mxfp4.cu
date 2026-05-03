@@ -44,25 +44,23 @@ static void fill_random_fp16(void* d_ptr, size_t n, float amp, unsigned seed) {
     cudaMemcpy(d_ptr, h.data(), n * sizeof(half), cudaMemcpyHostToDevice);
 }
 
-static void compute_errors(const half* ref, const half* test, size_t n,
-                           float& max_err, float& mean_err) {
+static void compute_errors(const half* ref, const half* test, size_t n, float& max_err, float& mean_err) {
     max_err = 0.0f;
     double sum_err = 0.0;
     for (size_t i = 0; i < n; i++) {
         float r = __half2float(ref[i]);
         float t = __half2float(test[i]);
         float err = std::abs(r - t);
-        if (err > max_err) max_err = err;
+        if (err > max_err)
+            max_err = err;
         sum_err += err;
     }
     mean_err = static_cast<float>(sum_err / n);
 }
 
 // Helper to run test with given dimensions
-void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD,
-                      bool causal, int sliding_window, float softcap,
-                      float max_err_limit, float mean_err_limit,
-                      cudaStream_t stream, int sm) {
+void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool causal, int sliding_window,
+                      float softcap, float max_err_limit, float mean_err_limit, cudaStream_t stream, int sm) {
     size_t qo_elems = (size_t)B * SQ * NH * HD;
     size_t kv_elems = (size_t)B * SKV * NKV * HD;
 
@@ -88,8 +86,7 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD,
         Tensor K(d_k, QType::F16, 4, kv_shape, true);
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_mxfp4, QType::F16, 4, qo_shape, true);
-        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
-                                            sliding_window, softcap, stream);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
         ASSERT_TRUE(ok) << "MXFP4 FMHA returned false for HD=" << HD;
     }
 
@@ -116,99 +113,102 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD,
     float max_err, mean_err;
     compute_errors(h_ref.data(), h_mxfp4.data(), qo_elems, max_err, mean_err);
 
-    printf("  HD=%d SQ=%d SKV=%d causal=%d sw=%d softcap=%.1f: max_err=%.4f mean_err=%.6f\n",
-           HD, SQ, SKV, causal, sliding_window, softcap, max_err, mean_err);
+    printf("  HD=%d SQ=%d SKV=%d causal=%d sw=%d softcap=%.1f: max_err=%.4f mean_err=%.6f\n", HD, SQ, SKV,
+           causal, sliding_window, softcap, max_err, mean_err);
 
     EXPECT_LT(mean_err, mean_err_limit) << "Mean error too large";
     EXPECT_LT(max_err, max_err_limit) << "Max error too large";
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v);
-    cudaFree(d_o_mxfp4); cudaFree(d_o_ref);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o_mxfp4);
+    cudaFree(d_o_ref);
 }
 
 TEST_F(FhmaMxFP4Test, BasicHD64) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 128, 128, 4, 2, 64, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 128, 128, 4, 2, 64, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, BasicHD128) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 128, 128, 4, 2, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 128, 128, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, DISABLED_BasicHD256) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // HD=256 requires large shared memory; disabled pending smem optimization
-    run_compare_test(1, 64, 64, 2, 2, 256, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 64, 64, 2, 2, 256, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, NonCausal) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 128, 128, 4, 2, 128, false, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 128, 128, 4, 2, 128, false, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, SlidingWindow) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 256, 256, 4, 2, 128, true, 64, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 64, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, Softcap) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 128, 128, 4, 2, 128, true, 0, 50.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 128, 128, 4, 2, 128, true, 0, 50.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, LongSequence) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // pp512 — multiple KV tiles
-    run_compare_test(1, 512, 512, 4, 2, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 512, 512, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, AsymmetricSeqLens) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // Q shorter than KV (common in generation with KV cache)
-    run_compare_test(1, 32, 256, 4, 2, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 32, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, BasicHD96) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // HD=96 is a multiple of 32, should work with FP4 m16n8k32
-    run_compare_test(1, 128, 128, 4, 2, 96, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 128, 128, 4, 2, 96, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, LongSequence2K) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // pp2048 — stress test with many KV tiles
-    run_compare_test(1, 2048, 2048, 4, 2, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 2048, 2048, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, MHA_1to1) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // Multi-head attention (no GQA), 1:1 Q:KV ratio
-    run_compare_test(1, 256, 256, 8, 8, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 256, 256, 8, 8, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, GQA_8x) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // High GQA ratio (8:1)
-    run_compare_test(1, 256, 256, 32, 4, 128, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    run_compare_test(1, 256, 256, 32, 4, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, HD64_LongSeq) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_compare_test(1, 1024, 1024, 4, 2, 64, true, 0, 0.0f,
-                     0.5f, 0.1f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_compare_test(1, 1024, 1024, 4, 2, 64, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
 // Compare legacy vs blockscale paths. Both paths share the same Q/K quant
@@ -219,11 +219,9 @@ TEST_F(FhmaMxFP4Test, HD64_LongSeq) {
 // ULP × sqrt(K) level are expected. After the softmax+PV pipeline, those
 // tiny score deltas can propagate into a few-percent output outliers
 // (max_err ~0.1), while mean_err stays at noise level (~1e-3).
-static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
-                                    int HD, bool causal, int sliding_window,
-                                    float softcap, float max_err_limit,
-                                    float mean_err_limit,
-                                    cudaStream_t stream, int sm) {
+static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool causal,
+                                   int sliding_window, float softcap, float max_err_limit,
+                                   float mean_err_limit, cudaStream_t stream, int sm) {
     ASSERT_EQ(HD % 64, 0) << "Blockscale requires HD % 64 == 0";
     size_t qo_elems = (size_t)B * SQ * NH * HD;
     size_t kv_elems = (size_t)B * SKV * NKV * HD;
@@ -250,17 +248,15 @@ static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
     {
         cudaMemset(d_o_leg, 0, qo_elems * sizeof(half));
         Tensor O(d_o_leg, QType::F16, 4, qo_shape, true);
-        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
-                                             sliding_window, softcap, stream,
-                                             /*use_blockscale=*/false);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                           /*use_blockscale=*/false);
         ASSERT_TRUE(ok);
     }
     {
         cudaMemset(d_o_bs, 0, qo_elems * sizeof(half));
         Tensor O(d_o_bs, QType::F16, 4, qo_shape, true);
-        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
-                                             sliding_window, softcap, stream,
-                                             /*use_blockscale=*/true);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                           /*use_blockscale=*/true);
         ASSERT_TRUE(ok);
     }
 
@@ -274,49 +270,54 @@ static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
     float max_err, mean_err;
     compute_errors(h_leg.data(), h_bs.data(), qo_elems, max_err, mean_err);
 
-    std::printf("  [AB] HD=%d SQ=%d SKV=%d causal=%d sw=%d softcap=%.1f: "
-                "max_err=%.4f mean_err=%.6f\n",
-                HD, SQ, SKV, causal, sliding_window, softcap, max_err, mean_err);
+    std::printf(
+        "  [AB] HD=%d SQ=%d SKV=%d causal=%d sw=%d softcap=%.1f: "
+        "max_err=%.4f mean_err=%.6f\n",
+        HD, SQ, SKV, causal, sliding_window, softcap, max_err, mean_err);
 
     EXPECT_LT(mean_err, mean_err_limit);
     EXPECT_LT(max_err, max_err_limit);
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v);
-    cudaFree(d_o_leg); cudaFree(d_o_bs);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o_leg);
+    cudaFree(d_o_bs);
 }
 
 TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD64) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_blockscale_ab_test(1, 256, 256, 4, 2, 64, true, 0, 0.0f,
-                           0.25f, 0.01f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 64, true, 0, 0.0f, 0.25f, 0.01f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD128) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f,
-                           0.25f, 0.01f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.25f, 0.01f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD128_LongSeq) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_blockscale_ab_test(1, 1024, 1024, 4, 2, 128, true, 0, 0.0f,
-                           0.25f, 0.01f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 1024, 1024, 4, 2, 128, true, 0, 0.0f, 0.25f, 0.01f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_Softcap) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 50.0f,
-                           0.25f, 0.01f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 50.0f, 0.25f, 0.01f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_SlidingWindow) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
-    run_blockscale_ab_test(1, 512, 512, 4, 2, 128, true, 64, 0.0f,
-                           0.25f, 0.01f, stream_, sm_);
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 512, 512, 4, 2, 128, true, 64, 0.0f, 0.25f, 0.01f, stream_, sm_);
 }
 
 TEST_F(FhmaMxFP4Test, RejectsHD48) {
-    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
     // HD=48 is not a multiple of 32
     const int B = 1, SQ = 64, SKV = 64, NH = 2, NKV = 2, HD = 48;
     size_t elems = (size_t)B * SQ * NH * HD;
@@ -341,8 +342,11 @@ TEST_F(FhmaMxFP4Test, RejectsHD48) {
     bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, true, 0, 0.0f, stream_);
     EXPECT_FALSE(ok) << "Should reject HD=48 (not multiple of 32)";
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

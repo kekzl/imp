@@ -17,7 +17,6 @@ namespace imp {
 // Use to compare against an FP32 reference matmul of the same Q, K
 // inputs. Agreement validates that our CUTLASS (T32,V32)→(M16,K64)
 // operand layout interpretation matches HW expectations.
-bool qkt_mxf4nvf4_validate(const half* d_Q, const half* d_K, float* d_D,
-                           cudaStream_t stream);
+bool qkt_mxf4nvf4_validate(const half* d_Q, const half* d_K, float* d_D, cudaStream_t stream);
 
-} // namespace imp
+}  // namespace imp

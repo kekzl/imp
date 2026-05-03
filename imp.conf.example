@@ -19,9 +19,9 @@ deterministic_gemm   = false
 # "always" forces capture (fails for MoE with D2H routing); "never" disables.
 cuda_graphs          = "auto"
 # Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
-# Off by default — opt in for prod rollouts where the first request's TTFT
+# Off by default — opt in for prod rollouts where first-request TTFT
 # matters. In dev / CI / one-shot runs the warmup is pure overhead and can
-# also mask first-request bugs (see Mistral-NVFP4 illumin11111 finding).
+# also mask first-request calibration bugs.
 warmup               = false
 # Override the model's max_seq_len (0 = use the model default).
 max_seq_len          = 0

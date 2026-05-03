@@ -17,16 +17,26 @@
 
 const char* imp_error_string(ImpError err) {
     switch (err) {
-        case IMP_SUCCESS:              return "success";
-        case IMP_ERROR_INVALID_ARG:    return "invalid argument";
-        case IMP_ERROR_OUT_OF_MEMORY:  return "out of memory";
-        case IMP_ERROR_CUDA:           return "CUDA error";
-        case IMP_ERROR_FILE_NOT_FOUND: return "file not found";
-        case IMP_ERROR_INVALID_MODEL:  return "invalid model";
-        case IMP_ERROR_UNSUPPORTED:    return "unsupported operation";
-        case IMP_ERROR_INTERNAL:       return "internal error";
-        case IMP_ERROR_CANCELLED:      return "cancelled";
-        default:                       return "unknown error";
+        case IMP_SUCCESS:
+            return "success";
+        case IMP_ERROR_INVALID_ARG:
+            return "invalid argument";
+        case IMP_ERROR_OUT_OF_MEMORY:
+            return "out of memory";
+        case IMP_ERROR_CUDA:
+            return "CUDA error";
+        case IMP_ERROR_FILE_NOT_FOUND:
+            return "file not found";
+        case IMP_ERROR_INVALID_MODEL:
+            return "invalid model";
+        case IMP_ERROR_UNSUPPORTED:
+            return "unsupported operation";
+        case IMP_ERROR_INTERNAL:
+            return "internal error";
+        case IMP_ERROR_CANCELLED:
+            return "cancelled";
+        default:
+            return "unknown error";
     }
 }
 
@@ -35,10 +45,10 @@ const char* imp_error_string(ImpError err) {
 ImpConfig imp_config_default(void) {
     ImpConfig config;
     config.device_id = 0;
-    config.gpu_memory_pool_size = 0;    // auto
-    config.kv_cache_max_blocks = 0;     // auto
-    config.max_batch_size = 0;          // auto (engine detects from model size)
-    config.max_seq_len = 0;             // auto (engine detects from model metadata + VRAM)
+    config.gpu_memory_pool_size = 0;  // auto
+    config.kv_cache_max_blocks = 0;   // auto
+    config.max_batch_size = 0;        // auto (engine detects from model size)
+    config.max_seq_len = 0;           // auto (engine detects from model metadata + VRAM)
     config.compute_dtype = IMP_DTYPE_FP16;
     config.temperature = 0.6f;
     config.top_p = 0.95f;
@@ -48,21 +58,21 @@ ImpConfig imp_config_default(void) {
     config.green_ctx_prefill_ratio = 0.8f;
     config.enable_pdl = 1;
     config.enable_cuda_graphs = 1;
-    config.gpu_layers = -1;             // all on GPU
+    config.gpu_layers = -1;  // all on GPU
     config.kv_cache_dtype = IMP_DTYPE_FP16;
     config.ssm_state_dtype = IMP_DTYPE_FP32;
-    config.vram_budget_mb = 0;          // use all available
-    config.prefill_chunk_size = 0;      // no chunking
-    config.use_fp8_prefill = 0;         // FP16 weight cache by default
-    config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
-    config.use_mxfp4_prefill = 0;       // off by default
-    config.dual_path_quant = 0;         // off by default
-    config.min_kv_tokens = 0;           // auto (pick reasonable minimum based on model)
-    config.use_prefix_caching = 0;      // off by default
-    config.prefix_cache_path[0] = '\0'; // no persistence by default
-    config.num_cpu_threads = 0;         // auto
-    config.mmproj_path = NULL;          // no vision model
-    config.turboquant_sketch_multiplier = 2; // sketch_dim = 2 * head_dim
+    config.vram_budget_mb = 0;                // use all available
+    config.prefill_chunk_size = 0;            // no chunking
+    config.use_fp8_prefill = 0;               // FP16 weight cache by default
+    config.use_nvfp4_decode = -1;             // auto (sm_120→mode2, sm_90→mode1)
+    config.use_mxfp4_prefill = 0;             // off by default
+    config.dual_path_quant = 0;               // off by default
+    config.min_kv_tokens = 0;                 // auto (pick reasonable minimum based on model)
+    config.use_prefix_caching = 0;            // off by default
+    config.prefix_cache_path[0] = '\0';       // no persistence by default
+    config.num_cpu_threads = 0;               // auto
+    config.mmproj_path = NULL;                // no vision model
+    config.turboquant_sketch_multiplier = 2;  // sketch_dim = 2 * head_dim
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
     config.streaming_kv_n_sinks = 4;          // StreamingLLM paper default
     config.streaming_kv_window = 0;           // 0 = derive from ModelConfig::sliding_window
@@ -102,33 +112,42 @@ ImpGenerateParams imp_generate_params_default(void) {
 
 // --- Version ---
 
-const char* imp_version(void) {
-    return "0.7.0";
-}
+const char* imp_version(void) { return "0.8.0"; }
 
 // --- Helper: map ImpDType to imp::QType ---
 
 static imp::QType map_dtype(ImpDType dt) {
     switch (dt) {
-        case IMP_DTYPE_FP32:     return imp::QType::F32;
-        case IMP_DTYPE_FP16:     return imp::QType::F16;
-        case IMP_DTYPE_BF16:     return imp::QType::BF16;
-        case IMP_DTYPE_FP8_E4M3: return imp::QType::FP8_E4M3;
-        case IMP_DTYPE_FP8_E5M2: return imp::QType::FP8_E5M2;
-        case IMP_DTYPE_INT8:     return imp::QType::INT8;
-        case IMP_DTYPE_INT4:     return imp::QType::INT4;
-        case IMP_DTYPE_INT32:    return imp::QType::INT32;
-        case IMP_DTYPE_FP4_E2M1: return imp::QType::FP4_E2M1;
-        case IMP_DTYPE_TURBOQUANT: return imp::QType::TURBOQUANT;
-        case IMP_DTYPE_TURBOQUANT_LITE: return imp::QType::TURBOQUANT_LITE;
-        default:                 return imp::QType::F16;
+        case IMP_DTYPE_FP32:
+            return imp::QType::F32;
+        case IMP_DTYPE_FP16:
+            return imp::QType::F16;
+        case IMP_DTYPE_BF16:
+            return imp::QType::BF16;
+        case IMP_DTYPE_FP8_E4M3:
+            return imp::QType::FP8_E4M3;
+        case IMP_DTYPE_FP8_E5M2:
+            return imp::QType::FP8_E5M2;
+        case IMP_DTYPE_INT8:
+            return imp::QType::INT8;
+        case IMP_DTYPE_INT4:
+            return imp::QType::INT4;
+        case IMP_DTYPE_INT32:
+            return imp::QType::INT32;
+        case IMP_DTYPE_FP4_E2M1:
+            return imp::QType::FP4_E2M1;
+        case IMP_DTYPE_TURBOQUANT:
+            return imp::QType::TURBOQUANT;
+        case IMP_DTYPE_TURBOQUANT_LITE:
+            return imp::QType::TURBOQUANT_LITE;
+        default:
+            return imp::QType::F16;
     }
 }
 
 // --- Model Loading ---
 
-ImpError imp_model_load(const char* path, ImpModelFormat format,
-                        ImpModel* out_model) {
+ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_model) {
     if (!path || !out_model) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -170,9 +189,7 @@ ImpError imp_model_load(const char* path, ImpModelFormat format,
     }
 }
 
-void imp_model_free(ImpModel model) {
-    delete model;
-}
+void imp_model_free(ImpModel model) { delete model; }
 
 ImpModelArch imp_model_arch(ImpModel model) {
     if (!model || !model->model) {
@@ -211,8 +228,7 @@ int imp_model_max_seq_len(ImpModel model) {
 
 // --- Context / Runtime ---
 
-ImpError imp_context_create(ImpModel model, const ImpConfig* config,
-                            ImpContext* out_ctx) {
+ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx) {
     if (!model || !config || !out_ctx) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -286,21 +302,17 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
     }
 }
 
-void imp_context_free(ImpContext ctx) {
-    delete ctx;
-}
+void imp_context_free(ImpContext ctx) { delete ctx; }
 
 // --- Helper: tokenize a prompt using chat template or raw encoding ---
 
 namespace {
 
-static std::vector<int32_t> tokenize_prompt(ImpContext ctx,
-                                             const char* prompt,
-                                             const ImpGenerateParams* params) {
+static std::vector<int32_t> tokenize_prompt(ImpContext ctx, const char* prompt,
+                                            const ImpGenerateParams* params) {
     auto* tok = ctx->model_handle->model->tokenizer();
     const auto& tmpl = ctx->engine->chat_template();
-    bool has_img = ctx->engine->has_vision() &&
-                   ctx->engine->has_vision_input();
+    bool has_img = ctx->engine->has_vision() && ctx->engine->has_vision_input();
 
     // Tokenize the prompt, injecting image tokens if a vision image is set.
     if (params->apply_chat_template && !tmpl.is_raw()) {
@@ -321,8 +333,7 @@ static std::vector<int32_t> tokenize_prompt(ImpContext ctx,
 
 // --- Helper: apply sampling params from ImpGenerateParams to a Request ---
 
-static void apply_sampling_params(imp::Request& req,
-                                   const ImpGenerateParams* params) {
+static void apply_sampling_params(imp::Request& req, const ImpGenerateParams* params) {
     req.max_tokens = params->max_tokens;
     req.temperature = params->temperature;
     req.top_p = params->top_p;
@@ -345,12 +356,11 @@ static void apply_sampling_params(imp::Request& req,
         req.mirostat_mu = 2.0f * params->mirostat_tau;
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
 // --- Generation ---
 
-ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
-                                const ImpGenerateParams* params,
+ImpError imp_generate_streaming(ImpContext ctx, const char* prompt, const ImpGenerateParams* params,
                                 ImpTokenCallback cb, void* user_data) {
     if (!ctx || !prompt || !params || !cb) {
         return IMP_ERROR_INVALID_ARG;
@@ -361,7 +371,8 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
 
     try {
         auto* tok = ctx->model_handle->model->tokenizer();
-        if (!tok) return IMP_ERROR_INVALID_MODEL;
+        if (!tok)
+            return IMP_ERROR_INVALID_MODEL;
 
         auto tokens = tokenize_prompt(ctx, prompt, params);
 
@@ -374,18 +385,18 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         ctx->engine->add_request(req);
 
         // Prefill
-        while (req->status == imp::RequestStatus::PENDING ||
-               req->status == imp::RequestStatus::PREFILLING) {
+        while (req->status == imp::RequestStatus::PENDING || req->status == imp::RequestStatus::PREFILLING) {
             bool has_work = ctx->engine->step();
-            if (!has_work) break;
+            if (!has_work)
+                break;
         }
 
         // Decode with streaming callback
         size_t prev_output_size = req->output_tokens.size();
-        while (req->status != imp::RequestStatus::FINISHED &&
-               req->status != imp::RequestStatus::CANCELLED) {
+        while (req->status != imp::RequestStatus::FINISHED && req->status != imp::RequestStatus::CANCELLED) {
             bool has_work = ctx->engine->step();
-            if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
+            if (!has_work && req->status != imp::RequestStatus::FINISHED)
+                break;
 
             // Deliver new tokens via callback
             while (prev_output_size < req->output_tokens.size()) {
@@ -413,10 +424,8 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
     }
 }
 
-ImpError imp_generate(ImpContext ctx, const char* prompt,
-                      const ImpGenerateParams* params,
-                      char* output_buf, size_t output_buf_size,
-                      size_t* output_len) {
+ImpError imp_generate(ImpContext ctx, const char* prompt, const ImpGenerateParams* params, char* output_buf,
+                      size_t output_buf_size, size_t* output_len) {
     if (!ctx || !prompt || !params || !output_buf || output_buf_size == 0) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -427,7 +436,8 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
 
     try {
         auto* tok = ctx->model_handle->model->tokenizer();
-        if (!tok) return IMP_ERROR_INVALID_MODEL;
+        if (!tok)
+            return IMP_ERROR_INVALID_MODEL;
 
         auto tokens = tokenize_prompt(ctx, prompt, params);
 
@@ -444,17 +454,17 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
         ctx->engine->add_request(req);
 
         // Prefill
-        while (req->status == imp::RequestStatus::PENDING ||
-               req->status == imp::RequestStatus::PREFILLING) {
+        while (req->status == imp::RequestStatus::PENDING || req->status == imp::RequestStatus::PREFILLING) {
             bool has_work = ctx->engine->step();
-            if (!has_work) break;
+            if (!has_work)
+                break;
         }
 
         // Decode
-        while (req->status != imp::RequestStatus::FINISHED &&
-               req->status != imp::RequestStatus::CANCELLED) {
+        while (req->status != imp::RequestStatus::FINISHED && req->status != imp::RequestStatus::CANCELLED) {
             bool has_work = ctx->engine->step();
-            if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
+            if (!has_work && req->status != imp::RequestStatus::FINISHED)
+                break;
         }
 
         // Collect output
@@ -486,8 +496,7 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
     }
 }
 
-ImpError imp_tokenize(ImpModel model, const char* text,
-                      int32_t* tokens, int* n_tokens, int max_tokens) {
+ImpError imp_tokenize(ImpModel model, const char* text, int32_t* tokens, int* n_tokens, int max_tokens) {
     if (!model || !text || !tokens || !n_tokens || max_tokens <= 0) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -501,7 +510,8 @@ ImpError imp_tokenize(ImpModel model, const char* text,
     try {
         auto ids = tok->encode(text);
         int count = static_cast<int>(ids.size());
-        if (count > max_tokens) count = max_tokens;
+        if (count > max_tokens)
+            count = max_tokens;
 
         for (int i = 0; i < count; i++) {
             tokens[i] = ids[i];
@@ -518,8 +528,7 @@ ImpError imp_tokenize(ImpModel model, const char* text,
     }
 }
 
-ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
-                        int n_tokens, char* output_buf,
+ImpError imp_detokenize(ImpModel model, const int32_t* tokens, int n_tokens, char* output_buf,
                         size_t output_buf_size) {
     if (!model || !tokens || !output_buf || output_buf_size == 0 || n_tokens < 0) {
         return IMP_ERROR_INVALID_ARG;
@@ -536,7 +545,8 @@ ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
         std::string text = tok->decode(ids);
 
         size_t copy_len = text.size();
-        if (copy_len >= output_buf_size) copy_len = output_buf_size - 1;
+        if (copy_len >= output_buf_size)
+            copy_len = output_buf_size - 1;
         std::memcpy(output_buf, text.data(), copy_len);
         output_buf[copy_len] = '\0';
         return IMP_SUCCESS;
@@ -551,7 +561,7 @@ ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
 }
 
 ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
-                                  const ImpGenerateParams* params) {
+                                 const ImpGenerateParams* params) {
     if (!ctx || !tokens || n_tokens <= 0) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -646,8 +656,7 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     return imp_prefill_with_params(ctx, tokens, n_tokens, nullptr);
 }
 
-ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
-                         int32_t* out_token) {
+ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token) {
     if (!ctx || !params || !out_token) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -671,8 +680,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         }
 
         // Check if already finished
-        if (req->status == imp::RequestStatus::FINISHED ||
-            req->status == imp::RequestStatus::CANCELLED) {
+        if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED) {
             return IMP_ERROR_INTERNAL;
         }
 
@@ -762,8 +770,10 @@ ImpError imp_context_reset(ImpContext ctx) {
 // --- Vision (Multimodal) ---
 
 ImpError imp_set_image(ImpContext ctx, const char* image_path) {
-    if (!ctx) return IMP_ERROR_INVALID_ARG;
-    if (!ctx->engine) return IMP_ERROR_INTERNAL;
+    if (!ctx)
+        return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine)
+        return IMP_ERROR_INTERNAL;
 
     if (!image_path) {
         ctx->engine->clear_image();
@@ -787,8 +797,10 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path) {
 }
 
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len) {
-    if (!ctx) return IMP_ERROR_INVALID_ARG;
-    if (!ctx->engine) return IMP_ERROR_INTERNAL;
+    if (!ctx)
+        return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine)
+        return IMP_ERROR_INTERNAL;
 
     if (!data || len == 0) {
         ctx->engine->clear_image();

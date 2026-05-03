@@ -1,112 +1,109 @@
-# Quantization Formats in imp
+# Quantization
 
-imp targets Blackwell `sm_120f` and uses two complementary quantization
-families: **NVFP4 / MXFP4** (FP4 + microscale, primary path on Blackwell)
-and **GGUF K-quants** (Q4_K_M, Q5_K, Q6_K, Q8_0, supported as legacy).
-This page covers where to get models for each path and what imp does
-with them at runtime; for the kernel-level dispatch see CLAUDE.md and
-`docs/SM120_OPTIMIZATION_STATUS.md`.
+imp supports both GGUF quantization (loaded directly from llama.cpp-compatible files) and SafeTensors NVFP4 prequant (produced by external calibration tools). This page explains what each format is, where it is used inside the engine, and what the trade-offs are.
 
-## Primary path: NVFP4 prequant SafeTensors
+For per-model picks see [`supported-models.md`](supported-models.md). For benchmark numbers see [`performance.md`](performance.md).
 
-NVFP4 (FP4 E2M1 + per-block UE4M3 scales + per-tensor FP32 scale) feeds
-directly into Blackwell's 5th-gen Tensor Cores at 3354 TOPS — 2× FP8
-and 4× FP16 throughput. imp consumes pre-calibrated NVFP4 SafeTensors
-from two upstream toolchains:
+## Formats and where they show up
 
-| Format | Producer | Layout |
-|---|---|---|
-| **Modelopt NVFP4** | [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) | per-block scale interleaved with weight bytes, per-tensor `weight_scale_2` |
-| **llm-compressor NVFP4** | [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor) | per-channel `weight_scale` + per-tensor `weight_scale_2`, optional `input_scale` |
+| Format | Bits / weight | Source | Used for |
+|---|---:|---|---|
+| Q8_0 | 8.0 | GGUF | dp4a GEMV decode + cuBLAS prefill |
+| Q6_K | 6.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
+| Q5_K_M | 5.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
+| Q4_K_M | 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
+| Q4_0 | 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
+| FP8 E4M3 | 8.0 | runtime | KV cache (opt-in), prefill weight cache |
+| INT8 | 8.0 | runtime | KV cache (opt-in) |
+| INT4 | 4.0 | runtime | KV cache (long-ctx, opt-in) |
+| NVFP4 | 4.0 | SafeTensors | weights (decode + prefill), KV cache |
+| MXFP4 | 4.5 | GGUF | weights (decode + prefill attention) |
 
-imp's `safetensors_loader.cpp` autodetects which layout a checkpoint
-uses and dispatches accordingly. Both produce coherent output post
-PR #88 (CUTLASS NVFP4×NVFP4 prefill cache). On Blackwell:
+GGUF formats are mmap'd from disk and uploaded as-is to GPU; the `*.K` quants store block scales in the format the dp4a kernels expect. NVFP4 prequant arrives in two-byte-per-element packed form with FP8 E4M3 micro-scales (per-16) and an FP32 tensor scale; imp registers these directly into the NVFP4 decode cache and CUTLASS NVFP4 GEMM path with no re-quantization.
 
-- **Decode**: 200+ tok/s on most NVFP4 prequant MoE models
-  (Qwen3-Coder-30B 272, Qwen3.6-35B 217, Gemma-4-26B 213,
-  Mistral-3.2-24B 101) via the `cache_moe_native_nvfp4`
-  contiguous-expert fast-path. CUDA Graphs capture end-to-end; no
-  per-layer D2H expert-routing sync.
-- **Prefill**: CUTLASS SM120 NVFP4 GEMM directly on packed weights,
-  no dequantization round-trip.
+## NVFP4 prequant (SafeTensors)
 
-### Where to get NVFP4 models
+Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produce compatible files:
 
-```bash
-# NVIDIA — broad coverage of Qwen3 / Llama / Gemma family
-huggingface-cli download nvidia/Qwen3-Coder-30B-A3B-Instruct-FP4 \
-  --local-dir ./models/Qwen3-Coder-30B-NVFP4
+| Tool | Status |
+|---|---|
+| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache). |
+| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads, but several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt where available. |
 
-# RedHatAI — llm-compressor NVFP4 catalog (Mistral, Gemma, Qwen)
-huggingface-cli download RedHatAI/Qwen3.6-35B-A3B-NVFP4 \
-  --local-dir ./models/Qwen3.6-35B-A3B-NVFP4
-```
-
-Or quantize one yourself:
+Workflow with Modelopt:
 
 ```bash
 pip install nvidia-modelopt
+
 python -m modelopt.llm.ptq \
   --model Qwen/Qwen3-8B \
   --quant nvfp4 \
-  --output ./Qwen3-8B-NVFP4/
+  --output ./Qwen3-8B-nvfp4/
+
+imp-cli --model ./Qwen3-8B-nvfp4/ --prompt "Hello"
 ```
 
-### Quality
+Modelopt quantization modes:
 
-NVFP4 with proper calibration (AWQ / SmoothQuant per Modelopt, or
-llm-compressor's GPTQ) lands within 1% of FP8 perplexity on the
-models we've tested. Naive absmax FP4 (no calibration) is 2-3% worse
-than Q4_K_M and is not supported — imp expects the calibrated
-SafeTensors shipped by the toolchains above.
+| Mode | What's quantized |
+|---|---|
+| `nvfp4` | all linear layers |
+| `nvfp4_mlp_only` | MLP / FFN layers only |
+| `nvfp4_experts_only` | MoE expert layers only |
+| `nvfp4_omlp_only` | MLP + output projection |
 
-Known caveats:
+### NVFP4 internal pipeline
 
-- **Mistral-Small-3.2 long-prose** above ~250 tokens: model-level
-  SmoothQuant calibration issue, partial workaround in PR #88, see
-  TODO.md.
-- **Gemma-4 NVFP4 native tool calling**: FP4 quantization depresses
-  the `<|tool_call>` (token id 48) emit logit. Tool calling works,
-  but for Gemma-4 NVFP4 use Open WebUI's prompt-based "Default"
-  function-calling mode rather than "Native". Q4_K_M / Q8_0 GGUF
-  Gemma-4 emits the native format reliably.
+Dense layers:
 
-## MXFP4 (CUTLASS native, attention only)
+```
+SafeTensors NVFP4 packed weights + scales
+  → loader (BF16 norms / router → FP16, packed FP4 stays packed)
+  → Phase 0: register in NVFP4 decode cache (no re-quant)
+  → Phase 3b: CUTLASS scale-factor layout (SfAtom) for prefill
+  → prefill: CUTLASS NVFP4 GEMM via gemm_dispatch() (sm_120 tensor cores)
+  → decode:  NVFP4 GEMV (prmt register LUT, K-parallel)
+```
 
-MXFP4 (FP4 E2M1 + UE8M0 32-element microscales) is the CUTLASS-native
-block-scale format used in `attention_fmha_mxfp4_sm120.cu` for prefill
-attention. imp converts NVFP4 weights to MXFP4 layout at load time
-when the FMHA path requests it. There is no SafeTensors MXFP4 source
-format — MXFP4 is an internal kernel format, not a user-facing
-checkpoint format.
+MoE layers (Modelopt SafeTensors, per-expert):
 
-The `mxf4nvf4.block_scale.scale_vec::4X.m16n8k64` MMA integration is
-an open work item (TODO.md) for 2-4× MXFP4 prefill attention.
+```
+SafeTensors per-expert weights
+  → cache_moe_native_nvfp4 builds one contiguous [ne, N, K_packed]
+    buffer per layer per projection (D2D-memcpy from per-expert tensors)
+  → per-expert tensors freed inline (32 GiB VRAM ceiling on 35B-A3B)
+  → CUDA Graphs capture cleanly via the decode fast-path
+```
 
-## Legacy path: GGUF K-quants
+Without `cache_moe_native_nvfp4` the legacy FP16 dequant + cuBLAS sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs and dropping decode 5–17×.
 
-GGUF (Q2_K / Q3_K / Q4_0 / Q4_K_M / Q5_K / Q6_K / Q8_0) is fully
-supported. imp parses GGUF natively, matches llama.cpp's tensor name
-mapping, and runs decode via `dp4a` GEMV kernels (K-parallel for small
-matrices, row-parallel with shared-memory cached activations for
-large matrices). Use cases:
+## MXFP4 (GGUF)
 
-- Models where no NVFP4 checkpoint exists yet
-- Compatibility comparisons with llama.cpp
-- Cases where Q5_K_M / Q8_0 quality > NVFP4 quality (Gemma-4 complex
-  code-gen is the documented example — Q4_K_M can degenerate on
-  Fibonacci-style prompts, Q8_0 stays clean)
+MXFP4 uses the same FP4 E2M1 nibble layout as NVFP4 but with UE8M0 micro-scales (per 32 elements) and no separate tensor scale. This matches the format the Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS at full FP4 throughput.
 
-There is also an experimental imp-proprietary MXFP4 GGUF tensor-type
-31 (legacy from earlier MXFP4 calibration work). New work should
-target NVFP4 SafeTensors instead.
+imp ships MXFP4 inside GGUF using a proprietary tensor-type code (31). llama.cpp reads this as the removed `Q4_0_4_4` format, so cross-tool perplexity comparison is not possible without a standard MXFP4 export.
 
-## Other quantizations
+Round-to-nearest MXFP4 is +5–15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B wikitext-2). MR-GPTQ calibration would close this gap; it is on the [roadmap](roadmap.md).
 
-| Format | Use | Status |
-|---|---|---|
-| FP8 E4M3 | KV cache (`kv_cache.dtype="fp8"`), prefill weight cache | Default-FP16 KV since PR #51; FP8 opt-in per model after testing — TODO.md has the per-arch table |
-| INT8 | KV cache (`kv_cache.dtype="int8"`) | Opt-in |
-| INT4 | KV cache (`kv_cache.dtype="int4"`) | Coherent at all ctx lengths but -22% decode at 20K ctx — VRAM-pressure use only |
-| TurboQuant | KV cache (`kv_cache.dtype="turboquant"`) | PolarQuant INT4 K + QJL sketch + INT4 V; ~3 bits/elem average |
+## KV cache element type
+
+Set via `--kv-fp8` / `--kv-int8` / `--kv-int4` / `--kv-turboquant`, or in `imp.conf`:
+
+```toml
+[kv_cache]
+dtype = "fp16"  # fp16 (default) | fp8 | int8 | int4 | nvfp4
+```
+
+The default flipped to FP16 in PR #51 — FP8 had been silently breaking Llama, Mistral, and DeepSeek at first decode. FP8 is now opt-in; it is verified coherent on Qwen3 dense, Qwen3.5 / 3.6 GDN, and Llama-3.2 (the FP8 KV warmup-calibration bug was fixed in PR #89). Gemma-4 keeps a force-FP16 carve-out — its dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV write/read kernel's single-stride assumption.
+
+INT4 KV is for VRAM-pressure cases only — coherent but ~22% decode regression at 20K context. TurboQuant (PolarQuant + QJL) goes lower still but loses ~23% vs FP8 at short context.
+
+## Choosing a quant
+
+Quick guidance, not a benchmark:
+
+- **Q8_0** is the cleanest baseline. Use it when output quality matters and VRAM allows.
+- **Q4_K_M** is the most VRAM-efficient GGUF. Sufficient for most chat; can degenerate on long code-gen on Gemma-4 — use Q5_K_M or Q8_0 there.
+- **Q6_K** sits in between. Good MoE pick on Qwen3-Coder-30B (234 tok/s).
+- **NVFP4** (SafeTensors prequant) gives the highest decode throughput on prequant-aware models — Qwen3-Coder-30B at 272 tok/s, Qwen3.6-35B at 217 tok/s, Gemma-4-26B at 213 tok/s. Requires AWQ/SmoothQuant calibration; only Modelopt is fully tested.
+- **MXFP4** is GGUF-native FP4. Smallest footprint (Qwen3-4B at 2.8 GB), but quality lags Q4_K_M without MR-GPTQ calibration.

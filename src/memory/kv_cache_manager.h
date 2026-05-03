@@ -82,8 +82,7 @@ public:
     // number of blocks whose KV data is already computed). The caller
     // should skip prefill for the first `result * kKVBlockSize` tokens.
     // Returns -1 on allocation failure.
-    [[nodiscard]] int allocate_blocks_with_prefix(int seq_id,
-                                                   std::span<const int32_t> tokens);
+    [[nodiscard]] int allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens);
 
     // Register the block hashes for a sequence after prefill completes.
     // This must be called so that future sequences can match against
@@ -167,8 +166,7 @@ public:
     // Compute the hash for a block of tokens. `parent_hash` is the hash
     // of the preceding block (0 for the first block). If the block has
     // fewer than kKVBlockSize tokens, it is NOT cacheable (partial block).
-    static size_t compute_block_hash(std::span<const int32_t> tokens,
-                                     size_t parent_hash);
+    static size_t compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash);
 
 private:
     // Underlying block-level cache (owns the memory pool).
@@ -221,4 +219,4 @@ private:
     int allocate_block_with_eviction();
 };
 
-} // namespace imp
+}  // namespace imp

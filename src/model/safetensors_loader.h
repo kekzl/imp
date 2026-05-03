@@ -12,4 +12,4 @@ namespace imp {
 //   - A directory containing .safetensors files (+ config.json, etc.)
 std::unique_ptr<Model> load_safetensors(const std::string& path);
 
-} // namespace imp
+}  // namespace imp

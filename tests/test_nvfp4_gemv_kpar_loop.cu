@@ -67,7 +67,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     half *d_y_loop = nullptr, *d_y_single = nullptr;
     cudaMalloc(&d_w, h_w.size() * sizeof(half));
     cudaMalloc(&d_a, h_a.size() * sizeof(half));
-    cudaMalloc(&d_y_loop,   static_cast<size_t>(M) * N * sizeof(half));
+    cudaMalloc(&d_y_loop, static_cast<size_t>(M) * N * sizeof(half));
     cudaMalloc(&d_y_single, static_cast<size_t>(M) * N * sizeof(half));
     cudaMemcpy(d_w, h_w.data(), h_w.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -99,10 +99,8 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
 
     std::vector<half> h_y_loop(static_cast<size_t>(M) * N);
     std::vector<half> h_y_single(static_cast<size_t>(M) * N);
-    cudaMemcpy(h_y_loop.data(),   d_y_loop,
-               h_y_loop.size() * sizeof(half),   cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_y_single.data(), d_y_single,
-               h_y_single.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y_loop.data(), d_y_loop, h_y_loop.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y_single.data(), d_y_single, h_y_single.size() * sizeof(half), cudaMemcpyDeviceToHost);
 
     int n_nan_loop = 0, n_nan_single = 0;
     int n_inf_loop = 0, n_inf_single = 0;
@@ -112,30 +110,35 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     for (size_t i = 0; i < h_y_loop.size(); ++i) {
         float a = __half2float(h_y_loop[i]);
         float b = __half2float(h_y_single[i]);
-        if (std::isnan(a)) ++n_nan_loop;
-        if (std::isnan(b)) ++n_nan_single;
-        if (std::isinf(a)) ++n_inf_loop;
-        if (std::isinf(b)) ++n_inf_single;
+        if (std::isnan(a))
+            ++n_nan_loop;
+        if (std::isnan(b))
+            ++n_nan_single;
+        if (std::isinf(a))
+            ++n_inf_loop;
+        if (std::isinf(b))
+            ++n_inf_single;
         if (!std::isnan(a) && !std::isnan(b)) {
             float d = std::fabs(a - b);
-            if (d > 0.5f) ++n_large_diff;
-            if (d > max_abs_diff) max_abs_diff = d;
-            sum_sq_loop   += a * a;
+            if (d > 0.5f)
+                ++n_large_diff;
+            if (d > max_abs_diff)
+                max_abs_diff = d;
+            sum_sq_loop += a * a;
             sum_sq_single += b * b;
         }
     }
 
-    EXPECT_EQ(n_nan_loop, 0)   << "gemv_kpar loop produced NaNs";
-    EXPECT_EQ(n_inf_loop, 0)   << "gemv_kpar loop produced Infs";
+    EXPECT_EQ(n_nan_loop, 0) << "gemv_kpar loop produced NaNs";
+    EXPECT_EQ(n_inf_loop, 0) << "gemv_kpar loop produced Infs";
     EXPECT_EQ(n_nan_single, 0) << "gemm_nvfp4 single-call produced NaNs";
     EXPECT_EQ(n_inf_single, 0) << "gemm_nvfp4 single-call produced Infs";
-    EXPECT_LT(max_abs_diff, 0.5f)
-        << "Per-row gemv_kpar loop diverges from gemm_nvfp4 single-call at "
-        << "Gemma-4 gate/up dims (N=" << N << " K=" << K << " M=" << M << ").\n"
-        << "  n_large_diff=" << n_large_diff << " / " << (M * N) << "\n"
-        << "  max_abs_diff=" << max_abs_diff << "\n"
-        << "  ||y_loop||^2="   << sum_sq_loop   << "\n"
-        << "  ||y_single||^2=" << sum_sq_single;
+    EXPECT_LT(max_abs_diff, 0.5f) << "Per-row gemv_kpar loop diverges from gemm_nvfp4 single-call at "
+                                  << "Gemma-4 gate/up dims (N=" << N << " K=" << K << " M=" << M << ").\n"
+                                  << "  n_large_diff=" << n_large_diff << " / " << (M * N) << "\n"
+                                  << "  max_abs_diff=" << max_abs_diff << "\n"
+                                  << "  ||y_loop||^2=" << sum_sq_loop << "\n"
+                                  << "  ||y_single||^2=" << sum_sq_single;
 
     free_nvfp4_result(qr);
     cudaFree(d_w);
@@ -164,7 +167,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
     half *d_y_loop = nullptr, *d_y_single = nullptr;
     cudaMalloc(&d_w, h_w.size() * sizeof(half));
     cudaMalloc(&d_a, h_a.size() * sizeof(half));
-    cudaMalloc(&d_y_loop,   static_cast<size_t>(M) * N * sizeof(half));
+    cudaMalloc(&d_y_loop, static_cast<size_t>(M) * N * sizeof(half));
     cudaMalloc(&d_y_single, static_cast<size_t>(M) * N * sizeof(half));
     cudaMemcpy(d_w, h_w.data(), h_w.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -176,7 +179,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
-    cudaMemsetAsync(d_y_loop,   0, static_cast<size_t>(M) * N * sizeof(half), stream_);
+    cudaMemsetAsync(d_y_loop, 0, static_cast<size_t>(M) * N * sizeof(half), stream_);
     cudaMemsetAsync(d_y_single, 0, static_cast<size_t>(M) * N * sizeof(half), stream_);
 
     for (int r = 0; r < M; ++r) {
@@ -195,27 +198,27 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
 
     std::vector<half> h_y_loop(static_cast<size_t>(M) * N);
     std::vector<half> h_y_single(static_cast<size_t>(M) * N);
-    cudaMemcpy(h_y_loop.data(),   d_y_loop,
-               h_y_loop.size() * sizeof(half),   cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_y_single.data(), d_y_single,
-               h_y_single.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y_loop.data(), d_y_loop, h_y_loop.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y_single.data(), d_y_single, h_y_single.size() * sizeof(half), cudaMemcpyDeviceToHost);
 
     float max_abs_diff = 0.0f;
     int n_large_diff = 0;
     for (size_t i = 0; i < h_y_loop.size(); ++i) {
         float a = __half2float(h_y_loop[i]);
         float b = __half2float(h_y_single[i]);
-        if (std::isnan(a) || std::isnan(b)) continue;
+        if (std::isnan(a) || std::isnan(b))
+            continue;
         float d = std::fabs(a - b);
-        if (d > 0.5f) ++n_large_diff;
-        if (d > max_abs_diff) max_abs_diff = d;
+        if (d > 0.5f)
+            ++n_large_diff;
+        if (d > max_abs_diff)
+            max_abs_diff = d;
     }
 
-    EXPECT_LT(max_abs_diff, 0.5f)
-        << "Per-row gemv_kpar loop diverges from gemm_nvfp4 single-call at "
-        << "Gemma-4 down dims (N=" << N << " K=" << K << " M=" << M << ").\n"
-        << "  n_large_diff=" << n_large_diff << " / " << (M * N) << "\n"
-        << "  max_abs_diff=" << max_abs_diff;
+    EXPECT_LT(max_abs_diff, 0.5f) << "Per-row gemv_kpar loop diverges from gemm_nvfp4 single-call at "
+                                  << "Gemma-4 down dims (N=" << N << " K=" << K << " M=" << M << ").\n"
+                                  << "  n_large_diff=" << n_large_diff << " / " << (M * N) << "\n"
+                                  << "  max_abs_diff=" << max_abs_diff;
 
     free_nvfp4_result(qr);
     cudaFree(d_w);

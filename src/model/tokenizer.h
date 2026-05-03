@@ -17,9 +17,8 @@ public:
     bool load(const std::string& path);
 
     // Load vocabulary extracted from GGUF metadata
-    bool load_vocab(const std::vector<std::string>& tokens,
-                    const std::vector<float>& scores,
-                    int bos_id, int eos_id);
+    bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
+                    int eos_id);
 
     // Load BPE merge rules (for GPT2-style tokenizers)
     void load_merges(const std::vector<std::string>& merges);
@@ -66,11 +65,15 @@ public:
     int eos_id() const { return eos_ids_.empty() ? 2 : eos_ids_[0]; }
     const std::vector<int32_t>& eos_ids() const { return eos_ids_; }
     void add_eos_id(int32_t id) {
-        for (int32_t eid : eos_ids_) if (eid == id) return;
+        for (int32_t eid : eos_ids_)
+            if (eid == id)
+                return;
         eos_ids_.push_back(id);
     }
     bool is_eos(int32_t id) const {
-        for (int32_t eid : eos_ids_) if (eid == id) return true;
+        for (int32_t eid : eos_ids_)
+            if (eid == id)
+                return true;
         return false;
     }
 
@@ -85,7 +88,10 @@ public:
 
     // Token type metadata from GGUF (tokenizer.ggml.token_type).
     // Types: NORMAL=1, UNKNOWN=2, CONTROL=3, USER_DEFINED=4, UNUSED=5, BYTE=6
-    void load_token_types(const std::vector<int32_t>& types) { token_types_ = types; build_special_pieces(); }
+    void load_token_types(const std::vector<int32_t>& types) {
+        token_types_ = types;
+        build_special_pieces();
+    }
     bool has_token_types() const { return !token_types_.empty(); }
     bool is_control_token(int id) const {
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] == 3;
@@ -99,7 +105,8 @@ public:
     // against tokenizer.json's special-flag column for HF model directories.
     // No-op when id is invalid; allocates the type vector lazily if empty.
     void mark_as_control(int32_t id) {
-        if (id < 0 || id >= static_cast<int32_t>(vocab_.size())) return;
+        if (id < 0 || id >= static_cast<int32_t>(vocab_.size()))
+            return;
         if (token_types_.empty()) {
             token_types_.assign(vocab_.size(), 1);  // default NORMAL=1
         }
@@ -134,12 +141,12 @@ private:
     int bos_id_ = 1;
     std::vector<int32_t> eos_ids_ = {2};
 
-    std::string type_ = "spm";  // "spm" or "gpt2"
-    std::string pre_tokenizer_;     // Pre-tokenizer type from GGUF tokenizer.ggml.pre
+    std::string type_ = "spm";   // "spm" or "gpt2"
+    std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
     bool add_bos_ = true;
-    bool add_space_prefix_ = true;  // SentencePiece ▁ prefix (false for Gemma)
+    bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
-    std::string chat_template_str_;  // Raw Jinja2 template from GGUF
+    std::string chat_template_str_;          // Raw Jinja2 template from GGUF
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;
@@ -155,4 +162,4 @@ private:
     void build_special_pieces();
 };
 
-} // namespace imp
+}  // namespace imp

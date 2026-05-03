@@ -43,4 +43,4 @@ struct SchemaNode {
 // Returns nullptr on parse failure.
 std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json);
 
-} // namespace imp
+}  // namespace imp

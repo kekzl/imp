@@ -16,17 +16,13 @@ namespace imp {
 // O: [batch, seq_q, n_heads, head_dim]
 //
 // Returns true on success, false if config unsupported (caller falls back).
-bool fmha_sm120_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream);
+bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                        bool causal, int sliding_window, float softcap, cudaStream_t stream);
 
 // FP8 variant: QK^T computed in FP8 E4M3 (m16n8k32) for 2x score throughput.
 // Q,K converted to FP8 on-the-fly in shared memory. PV stays FP16.
 // Requires SM120+ with CUTE_ARCH_F8F6F4_MMA_ENABLED.
-bool fmha_sm120_fp8_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream);
+bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                            bool causal, int sliding_window, float softcap, cudaStream_t stream);
 
-} // namespace imp
+}  // namespace imp

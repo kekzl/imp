@@ -13,14 +13,11 @@ namespace imp {
 // The signs are packed as bits: bit j in byte j/8 = sign of R[row][j].
 // ---------------------------------------------------------------------------
 
-__global__ void qjl_generate_matrix_kernel(
-    uint8_t* __restrict__ matrix,   // [sketch_dim, head_dim/8]
-    int sketch_dim,
-    int head_dim,
-    uint64_t seed)
-{
+__global__ void qjl_generate_matrix_kernel(uint8_t* __restrict__ matrix,  // [sketch_dim, head_dim/8]
+                                           int sketch_dim, int head_dim, uint64_t seed) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= sketch_dim) return;
+    if (row >= sketch_dim)
+        return;
 
     int bytes_per_row = head_dim / 8;
     uint8_t* row_ptr = matrix + row * bytes_per_row;
@@ -50,8 +47,7 @@ __global__ void qjl_generate_matrix_kernel(
     }
 }
 
-bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
-              cudaStream_t stream) {
+bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed, cudaStream_t stream) {
     if (head_dim <= 0 || sketch_dim <= 0) {
         IMP_LOG_ERROR("QJL: invalid dimensions head_dim=%d sketch_dim=%d", head_dim, sketch_dim);
         return false;
@@ -78,8 +74,8 @@ bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
     // Launch generation: one thread per row
     int threads = 256;
     int blocks = (sketch_dim + threads - 1) / threads;
-    qjl_generate_matrix_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<uint8_t*>(proj.matrix), sketch_dim, head_dim, seed);
+    qjl_generate_matrix_kernel<<<blocks, threads, 0, stream>>>(static_cast<uint8_t*>(proj.matrix), sketch_dim,
+                                                               head_dim, seed);
 
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -89,9 +85,8 @@ bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
         return false;
     }
 
-    IMP_LOG_INFO("QJL: initialized %dx%d Rademacher projection matrix (%.1f KiB, seed=%llu)",
-                 sketch_dim, head_dim, static_cast<double>(total_bytes) / 1024.0,
-                 static_cast<unsigned long long>(seed));
+    IMP_LOG_INFO("QJL: initialized %dx%d Rademacher projection matrix (%.1f KiB, seed=%llu)", sketch_dim,
+                 head_dim, static_cast<double>(total_bytes) / 1024.0, static_cast<unsigned long long>(seed));
     return true;
 }
 
@@ -104,4 +99,4 @@ void qjl_destroy(QJLProjection& proj) {
     proj.head_dim = 0;
 }
 
-} // namespace imp
+}  // namespace imp

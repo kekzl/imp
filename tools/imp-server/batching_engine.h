@@ -16,7 +16,7 @@
 // Token delivered from the worker thread to the HTTP handler.
 struct TokenEvent {
     int32_t token_id;
-    bool is_last;           // true if this is the final delivery (request done)
+    bool is_last;               // true if this is the final delivery (request done)
     const char* finish_reason;  // non-null on last token: "stop", "length", "cancelled"
 };
 
@@ -63,13 +63,9 @@ struct ServerRequest {
     }
 
     // Cancel the request (called from HTTP handler if client disconnects)
-    void cancel() {
-        cancelled.store(true, std::memory_order_release);
-    }
+    void cancel() { cancelled.store(true, std::memory_order_release); }
 
-    bool is_cancelled() const {
-        return cancelled.load(std::memory_order_acquire);
-    }
+    bool is_cancelled() const { return cancelled.load(std::memory_order_acquire); }
 };
 
 // Continuous batching engine that runs inference in a background thread.

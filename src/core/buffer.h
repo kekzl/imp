@@ -30,7 +30,9 @@ public:
     explicit operator bool() const { return data_ != nullptr; }
 
     template <typename T>
-    T* as() const { return static_cast<T*>(data_); }
+    T* as() const {
+        return static_cast<T*>(data_);
+    }
 
     // Copy operations (synchronous)
     void copy_from_host(const void* src, size_t nbytes);
@@ -49,10 +51,10 @@ public:
     void reset();
 
 private:
-    void* data_    = nullptr;
-    size_t size_   = 0;
+    void* data_ = nullptr;
+    size_t size_ = 0;
     bool on_device_ = false;
-    bool pinned_    = false;
+    bool pinned_ = false;
 };
 
-} // namespace imp
+}  // namespace imp

@@ -40,7 +40,7 @@ RUN cmake -B build -G Ninja \
     && cmake --build build -j$(nproc) \
     && cp build/imp-server build/imp-cli /tmp/ \
     && if [ -f build/imp-tests ]; then \
-           cp build/imp-tests /tmp/ \
+           cp build/imp-tests build/imp-tests-unit /tmp/ \
            && for b in test-core test-text test-compute test-attention \
                        test-quant test-kv test-moe-gdn test-e2e; do \
                   [ -f "build/$b" ] && cp "build/$b" /tmp/; \
@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
 COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
+COPY --from=builder /tmp/imp-tests-uni[t] /usr/local/bin/
 COPY --from=builder /tmp/test-cor[e] /usr/local/bin/
 COPY --from=builder /tmp/test-tex[t] /usr/local/bin/
 COPY --from=builder /tmp/test-comput[e] /usr/local/bin/

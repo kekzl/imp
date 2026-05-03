@@ -32,23 +32,20 @@ std::string make_completion_id(ServerState& state) {
 
 int64_t unix_timestamp() {
     return std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
-void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
-                   ServerState& state) {
+void handle_health(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     bool loaded;
     int queue = 0;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         loaded = state.model_loaded();
-        if (state.batching) queue = state.batching->queue_depth();
+        if (state.batching)
+            queue = state.batching->queue_depth();
     }
-    json body = {
-        {"status", "ok"},
-        {"model_loaded", loaded},
-        {"queue_depth", queue}
-    };
+    json body = {{"status", "ok"}, {"model_loaded", loaded}, {"queue_depth", queue}};
     res.set_content(body.dump(), "application/json");
 }
 
@@ -57,23 +54,26 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
 // Resolves symlinks and rejects any path that escapes the base directory (path traversal).
 std::vector<std::pair<std::string, std::string>> scan_model_files(const std::string& dir) {
     std::vector<std::pair<std::string, std::string>> results;
-    if (dir.empty()) return results;
+    if (dir.empty())
+        return results;
     std::error_code ec;
     auto base = std::filesystem::canonical(dir, ec);
-    if (ec) return results;
+    if (ec)
+        return results;
     std::string base_prefix = base.string() + "/";
 
     for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
         auto path = entry.path();
         // GGUF files
-        if ((entry.is_regular_file() || entry.is_symlink()) &&
-            path.extension() == ".gguf" &&
+        if ((entry.is_regular_file() || entry.is_symlink()) && path.extension() == ".gguf" &&
             path.string().find(".no_exist") == std::string::npos) {
             std::error_code ec2;
             auto real = std::filesystem::canonical(path, ec2);
-            if (ec2) continue;
+            if (ec2)
+                continue;
             std::string real_str = real.string();
-            if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
+            if (real_str.compare(0, base_prefix.size(), base_prefix) != 0)
+                continue;
             results.emplace_back(path.filename().string(), real_str);
         }
         // SafeTensors directories (check for index or single file)
@@ -82,9 +82,11 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
             if (imp::is_safetensors_dir(dpath)) {
                 std::error_code ec2;
                 auto real = std::filesystem::canonical(path, ec2);
-                if (ec2) continue;
+                if (ec2)
+                    continue;
                 std::string real_str = real.string();
-                if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
+                if (real_str.compare(0, base_prefix.size(), base_prefix) != 0)
+                    continue;
                 results.emplace_back(path.filename().string(), real_str);
             }
         }
@@ -93,8 +95,7 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
     return results;
 }
 
-void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
-                   ServerState& state) {
+void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     json data = json::array();
 
     // Snapshot state fields under lock
@@ -112,26 +113,14 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
     auto available = scan_model_files(models_dir);
     if (!available.empty()) {
         for (const auto& [name, path] : available) {
-            data.push_back({
-                {"id", name},
-                {"object", "model"},
-                {"owned_by", "imp"},
-                {"path", path}
-            });
+            data.push_back({{"id", name}, {"object", "model"}, {"owned_by", "imp"}, {"path", path}});
         }
     } else if (loaded) {
         // Fallback: only show loaded model if no models_dir configured
-        data.push_back({
-            {"id", model_name},
-            {"object", "model"},
-            {"owned_by", "imp"}
-        });
+        data.push_back({{"id", model_name}, {"object", "model"}, {"owned_by", "imp"}});
     }
 
-    json body = {
-        {"object", "list"},
-        {"data", data}
-    };
+    json body = {{"object", "list"}, {"data", data}};
     res.set_content(body.dump(), "application/json");
 }
 
@@ -142,14 +131,16 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
     // First try local models directory
     auto available = scan_model_files(state.models_dir);
     for (const auto& [fname, fpath] : available) {
-        if (fname == name) return fpath;
+        if (fname == name)
+            return fpath;
     }
 
     // If it looks like a HuggingFace repo ID (contains '/'), try resolving
     if (name.find('/') != std::string::npos) {
         ImpModelFormat fmt;
         std::string resolved = imp::resolve_model_auto(name, fmt);
-        if (!resolved.empty()) return resolved;
+        if (!resolved.empty())
+            return resolved;
     }
 
     return "";
@@ -159,15 +150,16 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
 // Returns true if the model is now loaded (either already loaded or swapped).
 // Returns false if the model couldn't be found or loaded (caller should 404).
 // Must be called with state.mtx held.
-bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
-                          httplib::Response& res) {
+bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
     if (!state.model_loaded()) {
         // No model loaded — try to load the requested one
         std::string path = find_model_path(state, requested_model);
         if (path.empty()) {
             res.status = 503;
-            json err = {{"error", {{"message", "No model loaded and '" + requested_model + "' not found in models directory"},
-                                    {"type", "server_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "No model loaded and '" + requested_model + "' not found in models directory"},
+                  {"type", "server_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -176,8 +168,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         std::string error = load_model_into_state(state, path, json::object());
         if (!error.empty()) {
             res.status = 500;
-            json err = {{"error", {{"message", "Auto-load failed: " + error},
-                                    {"type", "server_error"}}}};
+            json err = {{"error", {{"message", "Auto-load failed: " + error}, {"type", "server_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -205,10 +196,10 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         // Swap failed — try to keep serving with whatever is loaded
         printf("[auto-swap] Swap failed: %s\n", error.c_str());
         fflush(stdout);
-        if (state.model_loaded()) return true;  // Old model still works
+        if (state.model_loaded())
+            return true;  // Old model still works
         res.status = 500;
-        json err = {{"error", {{"message", "Model swap failed: " + error},
-                                {"type", "server_error"}}}};
+        json err = {{"error", {{"message", "Model swap failed: " + error}, {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return false;
     }
@@ -219,8 +210,8 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
 
 // Build ImpConfig from default args + optional JSON overrides.
 // Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
-ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
-                       const json& overrides, ImpModel model = nullptr) {
+ImpConfig build_config(const ServerArgs& args, const std::string& model_path, const json& overrides,
+                       ImpModel model = nullptr) {
     (void)model_path;
     (void)model;
     ImpConfig config = imp_config_default();
@@ -235,8 +226,10 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
         config.max_batch_size = overrides.value("max_batch_size", 0);
 
     config.gpu_layers = args.gpu_layers;
-    if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
-    if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
+    if (args.ssm_fp16)
+        config.ssm_state_dtype = IMP_DTYPE_FP16;
+    if (args.no_cuda_graphs)
+        config.enable_cuda_graphs = 0;
 
     // KV cache dtype: explicit overrides only (engine auto-detects FP8 on sm_90+)
     bool kv_fp8 = overrides.value("kv_fp8", args.kv_fp8);
@@ -244,10 +237,14 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
     bool kv_turboquant = overrides.value("kv_turboquant", args.kv_turboquant);
     bool kv_turboquant_lite = overrides.value("kv_turboquant_lite", args.kv_turboquant_lite);
-    if (kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
-    if (kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
-    if (kv_int4) config.kv_cache_dtype = IMP_DTYPE_INT4;
-    if (kv_turboquant) config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
+    if (kv_fp8)
+        config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    if (kv_int8)
+        config.kv_cache_dtype = IMP_DTYPE_INT8;
+    if (kv_int4)
+        config.kv_cache_dtype = IMP_DTYPE_INT4;
+    if (kv_turboquant)
+        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
     if (kv_turboquant_lite) {
         config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT_LITE;
         config.turboquant_sketch_multiplier = overrides.value("tq_sketch_mult", args.turboquant_sketch_mult);
@@ -255,16 +252,20 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
 
     int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
     // Default to 512-token chunks in server mode so prefill doesn't block decode
-    if (chunk <= 0) chunk = 512;
+    if (chunk <= 0)
+        chunk = 512;
     config.prefill_chunk_size = chunk;
 
     int nvfp4 = overrides.value("decode_nvfp4", args.decode_nvfp4);
     config.use_nvfp4_decode = nvfp4;
 
-    if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
-    if (args.dual_path_quant) config.dual_path_quant = 1;
+    if (args.mxfp4_prefill)
+        config.use_mxfp4_prefill = 1;
+    if (args.dual_path_quant)
+        config.dual_path_quant = 1;
     int min_kv = overrides.value("min_kv_tokens", args.min_kv_tokens);
-    if (min_kv > 0) config.min_kv_tokens = min_kv;
+    if (min_kv > 0)
+        config.min_kv_tokens = min_kv;
 
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
@@ -278,8 +279,8 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
     config.enable_green_contexts = 1;
     if (!args.prefix_cache_path.empty()) {
-        snprintf(config.prefix_cache_path, sizeof(config.prefix_cache_path),
-                 "%s", args.prefix_cache_path.c_str());
+        snprintf(config.prefix_cache_path, sizeof(config.prefix_cache_path), "%s",
+                 args.prefix_cache_path.c_str());
     }
 
     return config;
@@ -287,8 +288,7 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
 
 // Load a model into ServerState. Caller must hold state.mtx.
 // Returns error message on failure, empty string on success.
-std::string load_model_into_state(ServerState& state, const std::string& path,
-                                  const json& config_overrides) {
+std::string load_model_into_state(ServerState& state, const std::string& path, const json& config_overrides) {
     // Stop batching engine before freeing context
     if (state.batching) {
         state.batching->stop();
@@ -296,15 +296,20 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     }
 
     // Free existing model/context
-    if (state.ctx) { imp_context_free(state.ctx); state.ctx = nullptr; }
-    if (state.model) { imp_model_free(state.model); state.model = nullptr; }
+    if (state.ctx) {
+        imp_context_free(state.ctx);
+        state.ctx = nullptr;
+    }
+    if (state.model) {
+        imp_model_free(state.model);
+        state.model = nullptr;
+    }
     state.tok = nullptr;
     state.have_template = false;
     state.model_name.clear();
 
     // Auto-detect format from path
-    ImpModelFormat format = imp::is_safetensors_dir(path)
-                            ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
+    ImpModelFormat format = imp::is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
 
     // Load model
     ImpError err = imp_model_load(path.c_str(), format, &state.model);
@@ -332,8 +337,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     state.tok = state.model->model->tokenizer();
     const imp::ChatTemplate& engine_tpl = state.ctx->engine->chat_template();
 
-    std::string chat_tpl_name = config_overrides.value("chat_template",
-                                                        state.default_args.chat_template);
+    std::string chat_tpl_name = config_overrides.value("chat_template", state.default_args.chat_template);
     if (chat_tpl_name == "none") {
         // No template
     } else if (chat_tpl_name != "auto") {
@@ -350,7 +354,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
 
     // Store max sequence length for token clamping
     state.max_seq_len = imp_model_max_seq_len(state.model);
-    if (state.max_seq_len <= 0) state.max_seq_len = static_cast<int>(config.max_seq_len);
+    if (state.max_seq_len <= 0)
+        state.max_seq_len = static_cast<int>(config.max_seq_len);
 
     // Detect thinking model (DeepSeek R1, Qwen3 etc.) by checking for <think> token.
     // Only treat as think model if <think> is a special/added token (high vocab ID),
@@ -364,8 +369,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
         state.think_end_id = is_special ? te : -1;
         state.is_think_model = is_special;
         if (state.is_think_model) {
-            printf("Reasoning model: <think>=%d, </think>=%d\n",
-                   state.think_start_id, state.think_end_id);
+            printf("Reasoning model: <think>=%d, </think>=%d\n", state.think_start_id, state.think_end_id);
         }
     }
 
@@ -385,8 +389,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     }
 
     if (state.have_template) {
-        printf("Chat template: %s\n",
-               imp::chat_template_family_name(state.chat_tpl.family()));
+        printf("Chat template: %s\n", imp::chat_template_family_name(state.chat_tpl.family()));
     } else {
         printf("No chat template (raw mode)\n");
     }
@@ -405,8 +408,8 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
     // messages must be an array (for chat completions)
     if (body.contains("messages") && !body["messages"].is_null() && !body["messages"].is_array()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"messages\" must be an array"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error", {{"message", "\"messages\" must be an array"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return false;
     }
@@ -415,8 +418,9 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         float t = body["temperature"].get<float>();
         if (t < 0.0f || t > 2.0f) {
             res.status = 400;
-            json err = {{"error", {{"message", "\"temperature\" must be between 0 and 2"},
-                                    {"type", "invalid_request_error"}}}};
+            json err = {{"error",
+                         {{"message", "\"temperature\" must be between 0 and 2"},
+                          {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -426,8 +430,9 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         float p = body["top_p"].get<float>();
         if (p < 0.0f || p > 1.0f) {
             res.status = 400;
-            json err = {{"error", {{"message", "\"top_p\" must be between 0 and 1"},
-                                    {"type", "invalid_request_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "\"top_p\" must be between 0 and 1"}, {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -437,8 +442,9 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         int mt = body["max_tokens"].get<int>();
         if (mt < 1) {
             res.status = 400;
-            json err = {{"error", {{"message", "\"max_tokens\" must be at least 1"},
-                                    {"type", "invalid_request_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "\"max_tokens\" must be at least 1"}, {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -448,8 +454,8 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         int n = body["n"].get<int>();
         if (n < 1 || n > 4) {
             res.status = 400;
-            json err = {{"error", {{"message", "\"n\" must be between 1 and 4."},
-                                    {"type", "invalid_request_error"}}}};
+            json err = {{"error",
+                         {{"message", "\"n\" must be between 1 and 4."}, {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
         }
@@ -458,29 +464,31 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
     return true;
 }
 
-void handle_chat_completions(const httplib::Request& req, httplib::Response& res,
-                             ServerState& state) {
+void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     // Parse request body
     json body;
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
         res.status = 400;
-        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     // Validate sampling parameters
-    if (!validate_sampling_params(body, res)) return;
+    if (!validate_sampling_params(body, res))
+        return;
 
     // Extract parameters
     auto messages = body.value("messages", json::array());
     if (messages.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "messages array is required and must not be empty"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error",
+                     {{"message", "messages array is required and must not be empty"},
+                      {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -501,13 +509,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     int seed = body.value("seed", -1);
     bool stream = body.value("stream", false);
     int n_completions = body.value("n", 1);
-    if (n_completions < 1) n_completions = 1;
+    if (n_completions < 1)
+        n_completions = 1;
 
     // Streaming with n > 1 is not supported
     if (stream && n_completions > 1) {
         res.status = 400;
-        json err = {{"error", {{"message", "streaming with n > 1 is not supported"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", "streaming with n > 1 is not supported"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -536,19 +546,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             for (const auto& s : body["stop"]) {
                 if (s.is_string()) {
                     stop_sequences.push_back(s.get<std::string>());
-                    if (stop_sequences.size() >= 4) break;
+                    if (stop_sequences.size() >= 4)
+                        break;
                 }
             }
         }
     }
     size_t max_stop_len = 0;
-    for (const auto& s : stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
+    for (const auto& s : stop_sequences)
+        max_stop_len = std::max(max_stop_len, s.size());
 
     // Parse logprobs parameters
     bool req_logprobs = body.value("logprobs", false);
     int top_logprobs = body.value("top_logprobs", 0);
-    if (top_logprobs < 0) top_logprobs = 0;
-    if (top_logprobs > 20) top_logprobs = 20;
+    if (top_logprobs < 0)
+        top_logprobs = 0;
+    if (top_logprobs > 20)
+        top_logprobs = 20;
 
     // Parse response_format for JSON mode / JSON Schema
     bool json_mode = false;
@@ -592,8 +606,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Parse tool calling parameters
     json tools = body.value("tools", json::array());
     json tool_choice = body.value("tool_choice", json("auto"));
-    bool has_tools = !tools.empty() &&
-        !(tool_choice.is_string() && tool_choice.get<std::string>() == "none");
+    bool has_tools = !tools.empty() && !(tool_choice.is_string() && tool_choice.get<std::string>() == "none");
 
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     std::vector<imp::ChatMessage> chat_msgs;
@@ -603,8 +616,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     imp::ChatTemplateFamily tpl_family;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        tpl_family = state.have_template
-            ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        tpl_family = state.have_template ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
     }
 
     for (const auto& msg : messages) {
@@ -618,8 +630,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             // message that produced the call. Append to previous assistant
             // entry instead of pushing a fresh ChatMessage; ChatML/Llama3
             // templates render standalone tool messages so keep the push.
-            if (tpl_family == imp::ChatTemplateFamily::GEMMA &&
-                !chat_msgs.empty() && chat_msgs.back().role == "assistant") {
+            if (tpl_family == imp::ChatTemplateFamily::GEMMA && !chat_msgs.empty() &&
+                chat_msgs.back().role == "assistant") {
                 chat_msgs.back().content += content;
             } else {
                 chat_msgs.push_back({"tool", content});
@@ -630,8 +642,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             if (msg.contains("content") && !msg["content"].is_null()) {
                 content_str = msg["content"].get<std::string>();
             }
-            std::string reconstructed = reconstruct_tool_call_output(
-                tpl_family, msg["tool_calls"], content_str);
+            std::string reconstructed = reconstruct_tool_call_output(tpl_family, msg["tool_calls"],
+                                                                     content_str);
             chat_msgs.push_back({"assistant", reconstructed});
         } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts
@@ -639,7 +651,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             for (const auto& part : msg["content"]) {
                 std::string type = part.value("type", "");
                 if (type == "text") {
-                    if (!text_parts.empty()) text_parts += "\n";
+                    if (!text_parts.empty())
+                        text_parts += "\n";
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
                     std::string url = part["image_url"].value("url", "");
@@ -698,8 +711,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     std::string requested_model = body.value("model", "");
     if (requested_model.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"model\" is required"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error", {{"message", "\"model\" is required"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -721,7 +733,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     std::vector<int32_t> snap_stop_token_ids;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!ensure_model_loaded(state, requested_model, res)) return;
+        if (!ensure_model_loaded(state, requested_model, res))
+            return;
         snap_tok = state.tok;
         snap_chat_tpl = state.chat_tpl;
         snap_have_template = state.have_template;
@@ -733,8 +746,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         snap_channel_close_id = state.channel_close_id;
         snap_channel_newline_id = state.channel_newline_id;
         snap_max_seq_len = state.max_seq_len;
-        tpl_family = snap_have_template
-            ? snap_chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        tpl_family = snap_have_template ? snap_chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
         if (snap_have_template)
             snap_stop_token_ids = snap_chat_tpl.stop_token_ids();
         snap_has_vision = !image_data.empty() && state.ctx && state.ctx->engine->has_vision();
@@ -746,9 +758,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // to suppress the tail of the distribution. Qwen3 / DeepSeek / non-channel
     // models retain the 0.95 / 40 / 1.0 defaults.
     if (snap_channel_open_id >= 0) {
-        if (!top_p_explicit) top_p = 0.9f;
-        if (!top_k_explicit) top_k = 20;
-        if (!rep_pen_explicit) repetition_penalty = 1.05f;
+        if (!top_p_explicit)
+            top_p = 0.9f;
+        if (!top_k_explicit)
+            top_k = 20;
+        if (!rep_pen_explicit)
+            repetition_penalty = 1.05f;
     }
 
     // Build tool definitions for Jinja2-native tool calling
@@ -775,20 +790,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
         if (!lock.owns_lock()) {
             res.status = 503;
-            json err = {{"error", {{"message", "Server is busy. Please retry."},
-                                    {"type", "server_error"}}}};
+            json err = {{"error", {{"message", "Server is busy. Please retry."}, {"type", "server_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }
         // Stop batching engine for exclusive vision access
-        if (state.batching) state.batching->stop();
+        if (state.batching)
+            state.batching->stop();
 
         state.ctx->engine->clear_image();
         if (!state.ctx->engine->set_image_from_memory(image_data.data(), image_data.size())) {
-            if (state.batching) state.batching->start(state.ctx);
+            if (state.batching)
+                state.batching->start(state.ctx);
             res.status = 400;
-            json error = {{"error", {{"message", "Failed to process image"},
-                                      {"type", "invalid_request_error"}}}};
+            json error = {
+                {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -799,8 +815,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // forcing <think> into the prompt breaks structured output (JSON) because the
     // model enters reasoning mode instead of generating the requested format.
     bool enable_thinking = false;
-    if (snap_is_think_model && snap_think_start_id >= 0 &&
-        body.contains("enable_thinking")) {
+    if (snap_is_think_model && snap_think_start_id >= 0 && body.contains("enable_thinking")) {
         enable_thinking = body.value("enable_thinking", false);
     }
     bool suppress_thinking = snap_is_think_model && !enable_thinking && think_budget <= 0.0f;
@@ -811,8 +826,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         tokens = snap_chat_tpl.apply_with_image(*snap_tok, chat_msgs, 256, suppress_thinking);
     } else if (snap_have_template && tools_via_jinja) {
         std::string tc_str = tool_choice.is_string() ? tool_choice.get<std::string>() : "auto";
-        tokens = snap_chat_tpl.apply_with_tools(*snap_tok, chat_msgs, tool_defs, tc_str,
-                                                 suppress_thinking);
+        tokens = snap_chat_tpl.apply_with_tools(*snap_tok, chat_msgs, tool_defs, tc_str, suppress_thinking);
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
@@ -828,7 +842,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
                 if (!found_system) {
                     std::string sys = snap_chat_tpl.default_system_message();
-                    if (sys.empty()) sys = "You are a helpful assistant.";
+                    if (sys.empty())
+                        sys = "You are a helpful assistant.";
                     sys += tool_prompt;
                     chat_msgs.insert(chat_msgs.begin(), {"system", sys});
                 }
@@ -850,7 +865,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
                 if (!found_system) {
                     std::string sys = snap_chat_tpl.default_system_message();
-                    if (sys.empty()) sys = "You are a helpful assistant.";
+                    if (sys.empty())
+                        sys = "You are a helpful assistant.";
                     sys += tool_prompt;
                     chat_msgs.insert(chat_msgs.begin(), {"system", sys});
                 }
@@ -860,7 +876,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     } else {
         // Concatenate all message content as raw text
         std::string raw;
-        for (const auto& m : chat_msgs) raw += m.content + "\n";
+        for (const auto& m : chat_msgs)
+            raw += m.content + "\n";
         tokens = snap_tok->encode(raw);
     }
 
@@ -911,20 +928,22 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     if (n_prompt_tokens >= snap_max_seq_len) {
         if (has_vision_request) {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
-            if (state.batching) state.batching->start(state.ctx);
+            if (state.batching)
+                state.batching->start(state.ctx);
         }
         res.status = 400;
-        json error = {{"error", {{"message", "Prompt exceeds context window (" +
-                                              std::to_string(n_prompt_tokens) + " tokens >= " +
-                                              std::to_string(snap_max_seq_len) + " max)"},
-                                  {"type", "invalid_request_error"}}}};
+        json error = {{"error",
+                       {{"message", "Prompt exceeds context window (" + std::to_string(n_prompt_tokens) +
+                                        " tokens >= " + std::to_string(snap_max_seq_len) + " max)"},
+                        {"type", "invalid_request_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
 
     // Clamp max_tokens to remaining context window
     int remaining = snap_max_seq_len - n_prompt_tokens;
-    if (max_tokens > remaining) max_tokens = remaining;
+    if (max_tokens > remaining)
+        max_tokens = remaining;
 
     // Start timing
     auto t_start = std::chrono::high_resolution_clock::now();
@@ -980,8 +999,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             state.ctx->engine->clear_image();
             state.batching->start(state.ctx);
             res.status = 500;
-            json error = {{"error", {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
-                                      {"type", "server_error"}}}};
+            json error = {{"error",
+                           {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
+                            {"type", "server_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -992,14 +1012,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         prefill_params.top_p = top_p;
         prefill_params.top_k = top_k;
         prefill_params.seed = seed;
-        err = imp_prefill_with_params(state.ctx, imp_req->input_tokens.data(),
-                                      n_prompt_tokens, &prefill_params);
+        err = imp_prefill_with_params(state.ctx, imp_req->input_tokens.data(), n_prompt_tokens,
+                                      &prefill_params);
         if (err != IMP_SUCCESS) {
             state.ctx->engine->clear_image();
             state.batching->start(state.ctx);
             res.status = 500;
-            json error = {{"error", {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
-                                      {"type", "server_error"}}}};
+            json error = {{"error",
+                           {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
+                            {"type", "server_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -1042,19 +1063,26 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         for (int step = -1; step < max_tokens; step++) {
             int32_t token = 0;
             if (step == -1) {
-                if (prefill_token < 0) continue;
+                if (prefill_token < 0)
+                    continue;
                 token = prefill_token;
             } else {
                 err = imp_decode_step(state.ctx, &params, &token);
-                if (err != IMP_SUCCESS) break;
+                if (err != IMP_SUCCESS)
+                    break;
             }
-            if (token == snap_tok->eos_id()) break;
+            if (token == snap_tok->eos_id())
+                break;
             if (snap_have_template) {
                 bool is_stop = false;
                 for (int32_t stop_id : snap_stop_token_ids) {
-                    if (token == stop_id) { is_stop = true; break; }
+                    if (token == stop_id) {
+                        is_stop = true;
+                        break;
+                    }
                 }
-                if (is_stop) break;
+                if (is_stop)
+                    break;
             }
             output_ids.push_back(token);
         }
@@ -1068,29 +1096,24 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         int n_output_tokens = static_cast<int>(output_ids.size());
         std::string content = snap_tok->decode(output_ids);
 
-        fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n",
-                req_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+        fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n", req_id.c_str(),
+                n_prompt_tokens, n_output_tokens, ms);
         state.metrics.requests_total++;
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += n_output_tokens;
         state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
-        json response = {
-            {"id", req_id},
-            {"object", "chat.completion"},
-            {"created", unix_timestamp()},
-            {"model", snap_model_name},
-            {"choices", json::array({{
-                {"index", 0},
-                {"message", {{"role", "assistant"}, {"content", content}}},
-                {"finish_reason", "stop"}
-            }})},
-            {"usage", {
-                {"prompt_tokens", n_prompt_tokens},
-                {"completion_tokens", n_output_tokens},
-                {"total_tokens", n_prompt_tokens + n_output_tokens}
-            }}
-        };
+        json response = {{"id", req_id},
+                         {"object", "chat.completion"},
+                         {"created", unix_timestamp()},
+                         {"model", snap_model_name},
+                         {"choices", json::array({{{"index", 0},
+                                                   {"message", {{"role", "assistant"}, {"content", content}}},
+                                                   {"finish_reason", "stop"}}})},
+                         {"usage",
+                          {{"prompt_tokens", n_prompt_tokens},
+                           {"completion_tokens", n_output_tokens},
+                           {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
         res.set_content(response.dump(), "application/json");
         return;
     }
@@ -1100,8 +1123,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!state.batching || !state.batching->is_running()) {
             res.status = 503;
-            json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
-                                    {"type", "server_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }
@@ -1118,14 +1142,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, req_logprobs, include_usage,
-             enable_thinking, has_tools, tpl_family, think_budget,
-             snap_tok, snap_have_template, snap_model_name, snap_is_think_model,
-             snap_think_start_id, snap_think_end_id, snap_channel_open_id,
-             snap_channel_close_id, snap_channel_newline_id, snap_stop_token_ids](
-                size_t /*offset*/, httplib::DataSink& sink) -> bool {
-
+            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start, stop_sequences,
+             max_stop_len, req_logprobs, include_usage, enable_thinking, has_tools, tpl_family, think_budget,
+             snap_tok, snap_have_template, snap_model_name, snap_is_think_model, snap_think_start_id,
+             snap_think_end_id, snap_channel_open_id, snap_channel_close_id, snap_channel_newline_id,
+             snap_stop_token_ids](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 // Active request ref for logprobs access
                 auto active_req = server_req->request;
 
@@ -1134,8 +1155,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 // Send initial chunk with role
                 json role_delta = {{"role", "assistant"}};
-                std::string chunk = sse_chunk(comp_id, created, snap_model_name,
-                                              role_delta, nullptr);
+                std::string chunk = sse_chunk(comp_id, created, snap_model_name, role_delta, nullptr);
                 sink.write(chunk.data(), chunk.size());
 
                 int n_output_tokens = 0;
@@ -1153,10 +1173,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 // Tool call detection state machine for streaming
                 enum class ToolPhase { CONTENT, TAG_SCANNING, TOOL_CALL_BODY };
                 ToolPhase tool_phase = ToolPhase::CONTENT;
-                std::string tool_tag_buf;           // buffer for partial tag match
-                std::string tool_body_buf;           // buffer for tool call body
-                std::string tool_close_tag;          // expected closing tag
-                std::string tool_fn_name;            // Llama3: extracted function name from open tag
+                std::string tool_tag_buf;    // buffer for partial tag match
+                std::string tool_body_buf;   // buffer for tool call body
+                std::string tool_close_tag;  // expected closing tag
+                std::string tool_fn_name;    // Llama3: extracted function name from open tag
                 std::vector<ParsedToolCall> stream_tool_calls;
                 bool tool_calls_emitted = false;
                 // The full accumulated output (only used when has_tools, for fallback)
@@ -1164,15 +1184,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 // Reasoning content extraction (DeepSeek format)
                 enum class ThinkPhase { SCAN, REASONING, CONTENT };
-                bool use_reasoning = (state.default_args.reasoning_format == "deepseek"
-                                      && snap_is_think_model);
+                bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
+                                      snap_is_think_model);
                 ThinkPhase think_phase;
                 if (enable_thinking) {
                     think_phase = ThinkPhase::REASONING;  // <think> in prefill -> start reasoning
                 } else if (use_reasoning && think_budget > 0.0f) {
-                    think_phase = ThinkPhase::SCAN;       // model decides whether to think
+                    think_phase = ThinkPhase::SCAN;  // model decides whether to think
                 } else {
-                    think_phase = ThinkPhase::CONTENT;    // no reasoning extraction
+                    think_phase = ThinkPhase::CONTENT;  // no reasoning extraction
                 }
                 std::string reasoning_utf8_buf;
                 std::string think_scan_buf;
@@ -1189,15 +1209,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 // Helper: emit reasoning_content SSE chunk
                 auto emit_reasoning = [&](const std::string& text) -> bool {
-                    if (text.empty()) return true;
+                    if (text.empty())
+                        return true;
                     return sse_writer.write_reasoning(text, sink);
                 };
 
                 // Helper: flush confirmed text up to a byte position
                 auto flush_text = [&](size_t up_to) {
-                    if (up_to == 0) return true;
-                    bool ok = sse_writer.write_content(
-                        pending_text.data(), up_to, sink);
+                    if (up_to == 0)
+                        return true;
+                    bool ok = sse_writer.write_content(pending_text.data(), up_to, sink);
                     pending_text.erase(0, up_to);
                     return ok;
                 };
@@ -1244,10 +1265,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         bool is_structural_stop = (token == snap_tok->eos_id());
                         if (!is_structural_stop && snap_have_template) {
                             for (int32_t stop_id : snap_stop_token_ids) {
-                                if (token == stop_id) { is_structural_stop = true; break; }
+                                if (token == stop_id) {
+                                    is_structural_stop = true;
+                                    break;
+                                }
                             }
                         }
-                        if (is_structural_stop) continue;
+                        if (is_structural_stop)
+                            continue;
                     }
 
                     // Check stop conditions (EOS/stop tokens already detected by engine)
@@ -1261,7 +1286,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         bool is_stop = false;
                         if (snap_have_template) {
                             for (int32_t stop_id : snap_stop_token_ids) {
-                                if (token == stop_id) { is_stop = true; break; }
+                                if (token == stop_id) {
+                                    is_stop = true;
+                                    break;
+                                }
                             }
                         }
                         if (is_stop) {
@@ -1318,7 +1346,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             auto pos = think_scan_buf.find("<think>");
                             std::string after = think_scan_buf.substr(pos + 7);
                             think_scan_buf.clear();
-                            if (!after.empty()) reasoning_utf8_buf += after;
+                            if (!after.empty())
+                                reasoning_utf8_buf += after;
                             continue;
                         }
                         if (think_scan_count == 1 && piece.empty()) {
@@ -1343,24 +1372,28 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         // the original token, not </think>, so it keeps reasoning
                         // while imp treats subsequent tokens as content.
                         if (token == snap_think_end_id) {
-                            if (!emit_reasoning(reasoning_utf8_buf)) return false;
+                            if (!emit_reasoning(reasoning_utf8_buf))
+                                return false;
                             reasoning_utf8_buf.clear();
                             think_phase = ThinkPhase::CONTENT;
                             continue;
                         }
                         // Skip duplicate <think> tokens while already reasoning
-                        if (token == snap_think_start_id) continue;
+                        if (token == snap_think_start_id)
+                            continue;
                         reasoning_utf8_buf += piece;
                         // Strip <think> text that appears via multi-token encoding
                         for (;;) {
                             auto tp = reasoning_utf8_buf.find("<think>");
-                            if (tp == std::string::npos) break;
+                            if (tp == std::string::npos)
+                                break;
                             reasoning_utf8_buf.erase(tp, 7);
                         }
                         auto end_pos = reasoning_utf8_buf.find("</think>");
                         if (end_pos != std::string::npos) {
                             std::string before = reasoning_utf8_buf.substr(0, end_pos);
-                            if (!emit_reasoning(before)) return false;
+                            if (!emit_reasoning(before))
+                                return false;
                             think_phase = ThinkPhase::CONTENT;
                             std::string after = reasoning_utf8_buf.substr(end_pos + 8);
                             reasoning_utf8_buf.clear();
@@ -1387,13 +1420,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 // continuation byte into a U+FFFD on the next flush
                                 // — visible to the user as "f��r" instead of "für".
                                 while (emit_end > 0 &&
-                                       (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) == 0x80) {
+                                       (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) ==
+                                           0x80) {
                                     --emit_end;
                                 }
                                 if (emit_end > 0) {
                                     std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
                                     reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
-                                    if (!emit_reasoning(to_emit)) return false;
+                                    if (!emit_reasoning(to_emit))
+                                        return false;
                                 }
                             }
                             continue;
@@ -1404,7 +1439,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     // (matches extract_reasoning behavior in non-streaming path)
                     if (!content_started && think_phase == ThinkPhase::CONTENT) {
                         auto ns = piece.find_first_not_of("\n\r\t ");
-                        if (ns == std::string::npos) continue;  // all whitespace
+                        if (ns == std::string::npos)
+                            continue;  // all whitespace
                         piece = piece.substr(ns);
                         content_started = true;
                     }
@@ -1426,16 +1462,24 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         // Strip text-level think tags from content piece
                         for (;;) {
                             auto p = piece.find("<think>");
-                            if (p != std::string::npos) { piece.erase(p, 7); continue; }
+                            if (p != std::string::npos) {
+                                piece.erase(p, 7);
+                                continue;
+                            }
                             p = piece.find("</think>");
-                            if (p != std::string::npos) { piece.erase(p, 8); continue; }
+                            if (p != std::string::npos) {
+                                piece.erase(p, 8);
+                                continue;
+                            }
                             break;
                         }
-                        if (piece.empty()) continue;
+                        if (piece.empty())
+                            continue;
                     }
 
                     // CONTENT phase — with tool call tag detection
-                    if (has_tools) full_output += piece;
+                    if (has_tools)
+                        full_output += piece;
 
                     // Tool call state machine (only active when tools are present)
                     if (has_tools && tool_phase == ToolPhase::TOOL_CALL_BODY) {
@@ -1453,8 +1497,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             try {
                                 json j = json::parse(body);
                                 ParsedToolCall tc;
-                                tc.id = "call_imp_" + std::to_string(
-                                    state.next_tool_call_id.fetch_add(1));
+                                tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
                                 if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
                                     tc.name = tool_fn_name;
                                     tc.arguments = j.dump();
@@ -1471,22 +1514,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 if (!tc.name.empty()) {
                                     int idx = static_cast<int>(stream_tool_calls.size());
                                     // Emit name chunk
-                                    json name_delta = {{"tool_calls", json::array({
-                                        {{"index", idx}, {"id", tc.id},
-                                         {"type", "function"},
-                                         {"function", {{"name", tc.name}, {"arguments", ""}}}}
-                                    })}};
-                                    std::string sse = sse_chunk(comp_id, created,
-                                        snap_model_name, name_delta, nullptr);
+                                    json name_delta = {
+                                        {"tool_calls",
+                                         json::array(
+                                             {{{"index", idx},
+                                               {"id", tc.id},
+                                               {"type", "function"},
+                                               {"function", {{"name", tc.name}, {"arguments", ""}}}}})}};
+                                    std::string sse = sse_chunk(comp_id, created, snap_model_name, name_delta,
+                                                                nullptr);
                                     sink.write(sse.data(), sse.size());
 
                                     // Emit arguments chunk
-                                    json args_delta = {{"tool_calls", json::array({
-                                        {{"index", idx},
-                                         {"function", {{"arguments", tc.arguments}}}}
-                                    })}};
-                                    sse = sse_chunk(comp_id, created,
-                                        snap_model_name, args_delta, nullptr);
+                                    json args_delta = {
+                                        {"tool_calls",
+                                         json::array({{{"index", idx},
+                                                       {"function", {{"arguments", tc.arguments}}}}})}};
+                                    sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
                                     sink.write(sse.data(), sse.size());
 
                                     stream_tool_calls.push_back(std::move(tc));
@@ -1497,8 +1541,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             }
 
                             // Check for more content after close tag
-                            std::string after = tool_body_buf.substr(
-                                close_pos + tool_close_tag.size());
+                            std::string after = tool_body_buf.substr(close_pos + tool_close_tag.size());
                             tool_body_buf.clear();
                             tool_phase = ToolPhase::CONTENT;
                             // If there's remaining text, it might contain more tool calls
@@ -1514,7 +1557,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 continue;
                             }
                         } else {
-                            continue; // Still collecting body
+                            continue;  // Still collecting body
                         }
                     }
 
@@ -1522,15 +1565,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         tool_tag_buf += piece;
                         // ChatML: check for <tool_call>
                         if (tpl_family != imp::ChatTemplateFamily::LLAMA3) {
-                            if (tool_tag_buf.size() >= 11) { // len("<tool_call>")
+                            if (tool_tag_buf.size() >= 11) {  // len("<tool_call>")
                                 if (tool_tag_buf.find("<tool_call>") != std::string::npos) {
                                     auto pos = tool_tag_buf.find("<tool_call>");
                                     // Flush content before the tag
                                     std::string before = tool_tag_buf.substr(0, pos);
                                     if (!before.empty()) {
                                         json cd = {{"content", before}};
-                                        std::string sse = sse_chunk(comp_id, created,
-                                            snap_model_name, cd, nullptr);
+                                        std::string sse = sse_chunk(comp_id, created, snap_model_name, cd,
+                                                                    nullptr);
                                         sink.write(sse.data(), sse.size());
                                     }
                                     tool_body_buf = tool_tag_buf.substr(pos + 11);
@@ -1553,7 +1596,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                     tool_phase = ToolPhase::CONTENT;
                                     // Fall through to content emission
                                 } else {
-                                    continue; // Still scanning
+                                    continue;  // Still scanning
                                 }
                             } else {
                                 // Check partial match
@@ -1570,12 +1613,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                     tool_tag_buf.clear();
                                     tool_phase = ToolPhase::CONTENT;
                                 } else {
-                                    continue; // Still matching prefix
+                                    continue;  // Still matching prefix
                                 }
                             }
                         } else {
                             // Llama3: check for <function=
-                            if (tool_tag_buf.size() >= 10) { // len("<function=")
+                            if (tool_tag_buf.size() >= 10) {  // len("<function=")
                                 auto fn_pos = tool_tag_buf.find("<function=");
                                 if (fn_pos != std::string::npos) {
                                     auto gt = tool_tag_buf.find('>', fn_pos + 10);
@@ -1583,19 +1626,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                         std::string before = tool_tag_buf.substr(0, fn_pos);
                                         if (!before.empty()) {
                                             json cd = {{"content", before}};
-                                            std::string sse = sse_chunk(comp_id, created,
-                                                snap_model_name, cd, nullptr);
+                                            std::string sse = sse_chunk(comp_id, created, snap_model_name, cd,
+                                                                        nullptr);
                                             sink.write(sse.data(), sse.size());
                                         }
-                                        tool_fn_name = tool_tag_buf.substr(fn_pos + 10,
-                                            gt - (fn_pos + 10));
+                                        tool_fn_name = tool_tag_buf.substr(fn_pos + 10, gt - (fn_pos + 10));
                                         tool_body_buf = tool_tag_buf.substr(gt + 1);
                                         tool_close_tag = "</function>";
                                         tool_tag_buf.clear();
                                         tool_phase = ToolPhase::TOOL_CALL_BODY;
                                         continue;
                                     } else {
-                                        continue; // Still scanning for >
+                                        continue;  // Still scanning for >
                                     }
                                 }
                                 // Check prefix match
@@ -1655,8 +1697,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             if (stop_sequences.empty() && !utf8_buf.empty()) {
                                 size_t complete = utf8_complete_len(utf8_buf);
                                 if (complete > 0) {
-                                    if (!sse_writer.write_content(
-                                            utf8_buf.data(), complete, sink))
+                                    if (!sse_writer.write_content(utf8_buf.data(), complete, sink))
                                         return false;
                                     utf8_buf.erase(0, complete);
                                 }
@@ -1665,7 +1706,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 for (const auto& stop : stop_sequences) {
                                     auto pos = pending_text.find(stop);
                                     if (pos != std::string::npos) {
-                                        if (!flush_text(pos)) return false;
+                                        if (!flush_text(pos))
+                                            return false;
                                         stop_found = true;
                                         break;
                                     }
@@ -1677,7 +1719,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 }
                                 if (pending_text.size() > max_stop_len) {
                                     size_t safe = pending_text.size() - max_stop_len + 1;
-                                    if (!flush_text(safe)) return false;
+                                    if (!flush_text(safe))
+                                        return false;
                                 }
                             }
                             continue;
@@ -1701,27 +1744,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                     const auto& lp = active_req->output_logprobs[lp_idx];
                                     json top_arr = json::array();
                                     for (const auto& t : lp.top) {
-                                        top_arr.push_back({
-                                            {"token", safe_token_json(t.text)},
-                                            {"logprob", t.logprob},
-                                            {"bytes", token_bytes_json(t.text)}
-                                        });
+                                        top_arr.push_back({{"token", safe_token_json(t.text)},
+                                                           {"logprob", t.logprob},
+                                                           {"bytes", token_bytes_json(t.text)}});
                                     }
-                                    lp_chunk = {{"content", json::array({
-                                        {{"token", safe_token_json(lp.text)},
-                                         {"logprob", lp.logprob},
-                                         {"bytes", token_bytes_json(lp.text)},
-                                         {"top_logprobs", top_arr}}
-                                    })}};
+                                    lp_chunk = {
+                                        {"content", json::array({{{"token", safe_token_json(lp.text)},
+                                                                  {"logprob", lp.logprob},
+                                                                  {"bytes", token_bytes_json(lp.text)},
+                                                                  {"top_logprobs", top_arr}}})}};
                                 }
-                                std::string chunk = sse_chunk(comp_id, created,
-                                    snap_model_name, content_delta, nullptr, lp_chunk);
+                                std::string chunk = sse_chunk(comp_id, created, snap_model_name,
+                                                              content_delta, nullptr, lp_chunk);
                                 if (!sink.write(chunk.data(), chunk.size()))
                                     return false;
                             } else {
                                 // Fast path: pre-formatted template
-                                if (!sse_writer.write_content(
-                                        utf8_buf.data(), complete, sink))
+                                if (!sse_writer.write_content(utf8_buf.data(), complete, sink))
                                     return false;
                                 utf8_buf.erase(0, complete);
                             }
@@ -1736,7 +1775,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             auto pos = pending_text.find(stop);
                             if (pos != std::string::npos) {
                                 // Flush text before the stop string
-                                if (!flush_text(pos)) return false;
+                                if (!flush_text(pos))
+                                    return false;
                                 stop_found = true;
                                 break;
                             }
@@ -1751,12 +1791,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         // Keep only the last (max_stop_len - 1) chars as potential prefix.
                         if (pending_text.size() > max_stop_len) {
                             size_t safe = pending_text.size() - max_stop_len + 1;
-                            if (!flush_text(safe)) return false;
+                            if (!flush_text(safe))
+                                return false;
                         }
                     }
 
                     // Break after processing the last non-EOS token from batching engine
-                    if (finish) break;
+                    if (finish)
+                        break;
                 }
 
                 // Flush scan buffer if we never left SCAN phase (model didn't think)
@@ -1779,11 +1821,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 // reasoning_content delivered, and the notice would be
                 // misleading ("increase max_tokens" doesn't help when the model
                 // chose to stop).
-                if (think_phase == ThinkPhase::REASONING
-                    && utf8_buf.empty() && pending_text.empty()
-                    && finish && std::strcmp(finish, "length") == 0) {
-                    std::string notice =
-                        "[Reasoning truncated — increase max_tokens for a complete answer]";
+                if (think_phase == ThinkPhase::REASONING && utf8_buf.empty() && pending_text.empty() &&
+                    finish && std::strcmp(finish, "length") == 0) {
+                    std::string notice = "[Reasoning truncated — increase max_tokens for a complete answer]";
                     sse_writer.write_content(notice, sink);
                 }
 
@@ -1791,8 +1831,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
                     // Partial tool call — emit as content, finish_reason stays "length"
                     std::string leftover;
-                    if (!tool_tag_buf.empty()) leftover += tool_tag_buf;
-                    if (!tool_body_buf.empty()) leftover += tool_body_buf;
+                    if (!tool_tag_buf.empty())
+                        leftover += tool_tag_buf;
+                    if (!tool_body_buf.empty())
+                        leftover += tool_body_buf;
                     if (!leftover.empty()) {
                         utf8_buf += leftover;
                     }
@@ -1816,36 +1858,27 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 // Send final chunk with finish_reason
                 json empty_delta = json::object();
-                std::string final_chunk = sse_chunk(comp_id, created, snap_model_name,
-                                                    empty_delta, finish);
+                std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta, finish);
                 sink.write(final_chunk.data(), final_chunk.size());
 
                 // Send usage chunk if requested
                 if (include_usage) {
-                    json usage = {
-                        {"prompt_tokens", n_prompt_tokens},
-                        {"completion_tokens", n_output_tokens},
-                        {"total_tokens", n_prompt_tokens + n_output_tokens}
-                    };
+                    json usage = {{"prompt_tokens", n_prompt_tokens},
+                                  {"completion_tokens", n_output_tokens},
+                                  {"total_tokens", n_prompt_tokens + n_output_tokens}};
                     // Report prefix cache hit (OpenAI-compatible prompt_tokens_details)
                     if (active_req && active_req->cached_tokens > 0) {
-                        usage["prompt_tokens_details"] = {
-                            {"cached_tokens", active_req->cached_tokens}
-                        };
+                        usage["prompt_tokens_details"] = {{"cached_tokens", active_req->cached_tokens}};
                     }
                     if (n_reasoning_tokens > 0) {
-                        usage["completion_tokens_details"] = {
-                            {"reasoning_tokens", n_reasoning_tokens}
-                        };
+                        usage["completion_tokens_details"] = {{"reasoning_tokens", n_reasoning_tokens}};
                     }
-                    json usage_obj = {
-                        {"id", comp_id},
-                        {"object", "chat.completion.chunk"},
-                        {"created", created},
-                        {"model", snap_model_name},
-                        {"choices", json::array()},
-                        {"usage", usage}
-                    };
+                    json usage_obj = {{"id", comp_id},
+                                      {"object", "chat.completion.chunk"},
+                                      {"created", created},
+                                      {"model", snap_model_name},
+                                      {"choices", json::array()},
+                                      {"usage", usage}};
                     std::string usage_chunk = "data: " + usage_obj.dump() + "\n\n";
                     sink.write(usage_chunk.data(), usage_chunk.size());
                 }
@@ -1869,8 +1902,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
 
                 return true;
-            }
-        );
+            });
     } else {
         // Non-streaming: decode all tokens, return complete response
         // For n > 1, run multiple independent generations sequentially
@@ -1895,8 +1927,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             auto active_req = server_req->request;
             std::vector<int32_t> output_ids;
             const char* finish = nullptr;
-            std::string output_text;  // accumulated output for stop matching
-            bool ns_in_think = false;   // non-streaming think budget tracking
+            std::string output_text;   // accumulated output for stop matching
+            bool ns_in_think = false;  // non-streaming think budget tracking
             int ns_think_tokens = 0;
 
             auto ns_request_start = std::chrono::steady_clock::now();
@@ -1932,10 +1964,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     bool is_structural_stop = (token == snap_tok->eos_id());
                     if (!is_structural_stop && snap_have_template) {
                         for (int32_t stop_id : snap_stop_token_ids) {
-                            if (token == stop_id) { is_structural_stop = true; break; }
+                            if (token == stop_id) {
+                                is_structural_stop = true;
+                                break;
+                            }
                         }
                     }
-                    if (is_structural_stop) continue;
+                    if (is_structural_stop)
+                        continue;
                 }
 
                 // Check stop conditions
@@ -1947,7 +1983,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     bool is_stop = false;
                     if (snap_have_template) {
                         for (int32_t stop_id : snap_stop_token_ids) {
-                            if (token == stop_id) { is_stop = true; break; }
+                            if (token == stop_id) {
+                                is_stop = true;
+                                break;
+                            }
                         }
                     }
                     if (is_stop) {
@@ -1991,25 +2030,24 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 // Break after processing the last non-EOS token
-                if (finish) break;
+                if (finish)
+                    break;
             }
 
-            if (!finish) finish = "length";
+            if (!finish)
+                finish = "length";
 
             int n_output_tokens = static_cast<int>(output_ids.size());
             total_output_tokens += n_output_tokens;
-            std::string content = !stop_sequences.empty()
-                ? output_text : snap_tok->decode(output_ids);
+            std::string content = !stop_sequences.empty() ? output_text : snap_tok->decode(output_ids);
 
             // Extract reasoning content (DeepSeek format) or strip think blocks
             std::string reasoning_content;
-            if (snap_is_think_model &&
-                state.default_args.reasoning_format == "deepseek") {
+            if (snap_is_think_model && state.default_args.reasoning_format == "deepseek") {
                 auto [reasoning, cleaned] = extract_reasoning(content);
                 reasoning_content = reasoning;
                 content = cleaned;
-            } else if (snap_is_think_model &&
-                       state.default_args.reasoning_format != "none") {
+            } else if (snap_is_think_model && state.default_args.reasoning_format != "none") {
                 strip_think_block(content);
             }
 
@@ -2039,18 +2077,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     const auto& lp = lp_data[idx];
                     json top_arr = json::array();
                     for (const auto& t : lp.top) {
-                        top_arr.push_back({
-                            {"token", safe_token_json(t.text)},
-                            {"logprob", t.logprob},
-                            {"bytes", token_bytes_json(t.text)}
-                        });
+                        top_arr.push_back({{"token", safe_token_json(t.text)},
+                                           {"logprob", t.logprob},
+                                           {"bytes", token_bytes_json(t.text)}});
                     }
-                    content_logprobs.push_back({
-                        {"token", safe_token_json(lp.text)},
-                        {"logprob", lp.logprob},
-                        {"bytes", token_bytes_json(lp.text)},
-                        {"top_logprobs", top_arr}
-                    });
+                    content_logprobs.push_back({{"token", safe_token_json(lp.text)},
+                                                {"logprob", lp.logprob},
+                                                {"bytes", token_bytes_json(lp.text)},
+                                                {"top_logprobs", top_arr}});
                 }
                 logprobs_obj = {{"content", content_logprobs}};
             }
@@ -2062,7 +2096,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             // tolerant of trailing garbage after the closing marker.
             std::vector<ParsedToolCall> tool_calls;
             if (has_tools) {
-                auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state.next_tool_call_id);
+                auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content,
+                                                                    state.next_tool_call_id);
                 if (!parsed_calls.empty()) {
                     tool_calls = std::move(parsed_calls);
                     content = pre_content;
@@ -2076,11 +2111,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 msg["content"] = content.empty() ? json(nullptr) : json(content);
                 json tc_array = json::array();
                 for (const auto& tc : tool_calls) {
-                    tc_array.push_back({
-                        {"id", tc.id},
-                        {"type", "function"},
-                        {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
-                    });
+                    tc_array.push_back({{"id", tc.id},
+                                        {"type", "function"},
+                                        {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}});
                 }
                 msg["tool_calls"] = tc_array;
             } else {
@@ -2090,11 +2123,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 msg["reasoning_content"] = reasoning_content;
             }
 
-            json choice = {
-                {"index", ci},
-                {"message", msg},
-                {"finish_reason", finish}
-            };
+            json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
             if (!logprobs_obj.is_null()) {
                 choice["logprobs"] = logprobs_obj;
             }
@@ -2102,62 +2131,57 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             choices.push_back(choice);
 
             // Log each completion
-            fprintf(stderr, "[%s] completion %d/%d: %d tokens\n",
-                    comp_id.c_str(), ci + 1, n_completions, n_output_tokens);
+            fprintf(stderr, "[%s] completion %d/%d: %d tokens\n", comp_id.c_str(), ci + 1, n_completions,
+                    n_output_tokens);
         }
 
         // Log aggregate request
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n",
-                comp_id.c_str(), n_prompt_tokens, total_output_tokens, n_completions, ms);
+        fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n", comp_id.c_str(),
+                n_prompt_tokens, total_output_tokens, n_completions, ms);
         state.metrics.requests_total++;
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += total_output_tokens;
         state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
-        json usage = {
-            {"prompt_tokens", n_prompt_tokens},
-            {"completion_tokens", total_output_tokens},
-            {"total_tokens", n_prompt_tokens + total_output_tokens}
-        };
+        json usage = {{"prompt_tokens", n_prompt_tokens},
+                      {"completion_tokens", total_output_tokens},
+                      {"total_tokens", n_prompt_tokens + total_output_tokens}};
 
-        json response = {
-            {"id", comp_id},
-            {"object", "chat.completion"},
-            {"created", created},
-            {"model", snap_model_name},
-            {"choices", choices},
-            {"usage", usage}
-        };
+        json response = {{"id", comp_id},      {"object", "chat.completion"},
+                         {"created", created}, {"model", snap_model_name},
+                         {"choices", choices}, {"usage", usage}};
 
         res.set_content(response.dump(), "application/json");
     }
 }
 
-void handle_completions(const httplib::Request& req, httplib::Response& res,
-                        ServerState& state) {
+void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     // Parse request body
     json body;
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
         res.status = 400;
-        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     // Validate sampling parameters
-    if (!validate_sampling_params(body, res)) return;
+    if (!validate_sampling_params(body, res))
+        return;
 
     // Extract prompt
     std::string prompt = body.value("prompt", "");
     if (prompt.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"prompt\" is required and must not be empty"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error",
+                     {{"message", "\"prompt\" is required and must not be empty"},
+                      {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2186,8 +2210,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
     bool req_logprobs = body.value("logprobs", false);
     int top_logprobs = body.value("top_logprobs", 0);
-    if (top_logprobs < 0) top_logprobs = 0;
-    if (top_logprobs > 20) top_logprobs = 20;
+    if (top_logprobs < 0)
+        top_logprobs = 0;
+    if (top_logprobs > 20)
+        top_logprobs = 20;
 
     // Parse stop sequences
     std::vector<std::string> stop_sequences;
@@ -2198,13 +2224,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
             for (const auto& s : body["stop"]) {
                 if (s.is_string()) {
                     stop_sequences.push_back(s.get<std::string>());
-                    if (stop_sequences.size() >= 4) break;
+                    if (stop_sequences.size() >= 4)
+                        break;
                 }
             }
         }
     }
     size_t max_stop_len = 0;
-    for (const auto& s : stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
+    for (const auto& s : stop_sequences)
+        max_stop_len = std::max(max_stop_len, s.size());
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     std::vector<std::pair<int32_t, float>> logit_bias;
@@ -2228,15 +2256,14 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
     // Log request received
     std::string req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n",
-            req_id.c_str(), prompt.size(), stream ? "true" : "false", max_tokens, temperature);
+    fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n", req_id.c_str(),
+            prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
     // Validate model field (required per OpenAI spec)
     std::string requested_model = body.value("model", "");
     if (requested_model.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"model\" is required"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error", {{"message", "\"model\" is required"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2249,7 +2276,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     int snap_max_seq_len;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!ensure_model_loaded(state, requested_model, res)) return;
+        if (!ensure_model_loaded(state, requested_model, res))
+            return;
         snap_tok = state.tok;
         snap_model_name = state.model_name;
         snap_is_think_model = state.is_think_model;
@@ -2263,16 +2291,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
     if (n_prompt_tokens >= snap_max_seq_len) {
         res.status = 400;
-        json error = {{"error", {{"message", "Prompt exceeds context window (" +
-                                              std::to_string(n_prompt_tokens) + " tokens >= " +
-                                              std::to_string(snap_max_seq_len) + " max)"},
-                                  {"type", "invalid_request_error"}}}};
+        json error = {{"error",
+                       {{"message", "Prompt exceeds context window (" + std::to_string(n_prompt_tokens) +
+                                        " tokens >= " + std::to_string(snap_max_seq_len) + " max)"},
+                        {"type", "invalid_request_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
 
     int remaining = snap_max_seq_len - n_prompt_tokens;
-    if (max_tokens > remaining) max_tokens = remaining;
+    if (max_tokens > remaining)
+        max_tokens = remaining;
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
@@ -2310,8 +2339,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!state.batching || !state.batching->is_running()) {
             res.status = 503;
-            json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
-                                    {"type", "server_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }
@@ -2327,18 +2357,16 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, echo, prompt, include_usage,
-             snap_tok, snap_model_name, snap_is_think_model](
-                size_t /*offset*/, httplib::DataSink& sink) -> bool {
-
+            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start, stop_sequences,
+             max_stop_len, echo, prompt, include_usage, snap_tok, snap_model_name,
+             snap_is_think_model](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 int n_output_tokens = 0;
                 const char* finish = nullptr;
 
                 // Echo prompt as first chunk if requested
                 if (echo && !prompt.empty()) {
-                    std::string chunk = sse_completion_chunk(comp_id, created,
-                                                             snap_model_name, prompt, nullptr);
+                    std::string chunk = sse_completion_chunk(comp_id, created, snap_model_name, prompt,
+                                                             nullptr);
                     sink.write(chunk.data(), chunk.size());
                 }
 
@@ -2347,19 +2375,19 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 bool text_stop_matched = false;
 
                 // Strip <think> blocks for completions (no reasoning_content field)
-                bool think_strip = (snap_is_think_model &&
-                                    state.default_args.reasoning_format != "none");
+                bool think_strip = (snap_is_think_model && state.default_args.reasoning_format != "none");
                 bool think_confirmed = think_strip;
                 std::string think_buf;
                 int think_tokens = 0;
                 const int kThinkScanLimit = 8;
 
                 auto flush_text = [&](size_t up_to) {
-                    if (up_to == 0) return true;
+                    if (up_to == 0)
+                        return true;
                     std::string to_send = pending_text.substr(0, up_to);
                     pending_text = pending_text.substr(up_to);
-                    std::string sse = sse_completion_chunk(comp_id, created,
-                                                           snap_model_name, to_send, nullptr);
+                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, to_send,
+                                                           nullptr);
                     return sink.write(sse.data(), sse.size());
                 };
 
@@ -2424,7 +2452,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                             think_buf.clear();
                             auto start = after.find_first_not_of("\n\r\t ");
                             piece = (start != std::string::npos) ? after.substr(start) : "";
-                            if (piece.empty()) continue;
+                            if (piece.empty())
+                                continue;
                         } else if (think_confirmed) {
                             continue;
                         } else if (think_tokens < kThinkScanLimit) {
@@ -2442,10 +2471,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                         if (complete > 0) {
                             std::string to_emit = utf8_buf.substr(0, complete);
                             utf8_buf = utf8_buf.substr(complete);
-                            std::string chunk = sse_completion_chunk(comp_id, created,
-                                                                      snap_model_name,
-                                                                      to_emit, nullptr);
-                            if (!sink.write(chunk.data(), chunk.size())) return false;
+                            std::string chunk = sse_completion_chunk(comp_id, created, snap_model_name,
+                                                                     to_emit, nullptr);
+                            if (!sink.write(chunk.data(), chunk.size()))
+                                return false;
                         }
                     } else {
                         pending_text += piece;
@@ -2453,7 +2482,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                         for (const auto& stop : stop_sequences) {
                             auto pos = pending_text.find(stop);
                             if (pos != std::string::npos) {
-                                if (!flush_text(pos)) return false;
+                                if (!flush_text(pos))
+                                    return false;
                                 stop_found = true;
                                 break;
                             }
@@ -2465,11 +2495,13 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                         }
                         if (pending_text.size() > max_stop_len) {
                             size_t safe = pending_text.size() - max_stop_len + 1;
-                            if (!flush_text(safe)) return false;
+                            if (!flush_text(safe))
+                                return false;
                         }
                     }
 
-                    if (finish) break;
+                    if (finish)
+                        break;
                 }
 
                 // Flush think buffer: strip think blocks and emit remaining content
@@ -2483,37 +2515,34 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
                 // Flush remaining buffers
                 if (!utf8_buf.empty() && !text_stop_matched) {
-                    std::string sse = sse_completion_chunk(comp_id, created,
-                                                           snap_model_name, utf8_buf, nullptr);
+                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, utf8_buf,
+                                                           nullptr);
                     sink.write(sse.data(), sse.size());
                 }
                 if (!pending_text.empty() && !text_stop_matched) {
-                    std::string sse = sse_completion_chunk(comp_id, created,
-                                                           snap_model_name, pending_text, nullptr);
+                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, pending_text,
+                                                           nullptr);
                     sink.write(sse.data(), sse.size());
                 }
 
-                if (!finish) finish = "length";
+                if (!finish)
+                    finish = "length";
 
                 // Final chunk with finish_reason
-                std::string final_chunk = sse_completion_chunk(comp_id, created,
-                                                                snap_model_name, "", finish);
+                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "", finish);
                 sink.write(final_chunk.data(), final_chunk.size());
 
                 // Usage chunk if requested
                 if (include_usage) {
-                    json usage_obj = {
-                        {"id", comp_id},
-                        {"object", "text_completion"},
-                        {"created", created},
-                        {"model", snap_model_name},
-                        {"choices", json::array()},
-                        {"usage", {
-                            {"prompt_tokens", n_prompt_tokens},
-                            {"completion_tokens", n_output_tokens},
-                            {"total_tokens", n_prompt_tokens + n_output_tokens}
-                        }}
-                    };
+                    json usage_obj = {{"id", comp_id},
+                                      {"object", "text_completion"},
+                                      {"created", created},
+                                      {"model", snap_model_name},
+                                      {"choices", json::array()},
+                                      {"usage",
+                                       {{"prompt_tokens", n_prompt_tokens},
+                                        {"completion_tokens", n_output_tokens},
+                                        {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
                     std::string usage_chunk = "data: " + usage_obj.dump() + "\n\n";
                     sink.write(usage_chunk.data(), usage_chunk.size());
                 }
@@ -2524,16 +2553,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
                 auto t_end = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
-                        comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(),
+                        n_prompt_tokens, n_output_tokens, ms);
                 state.metrics.requests_total++;
                 state.metrics.tokens_prompt_total += n_prompt_tokens;
                 state.metrics.tokens_completion_total += n_output_tokens;
                 state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
                 return true;
-            }
-        );
+            });
     } else {
         // Non-streaming
         auto active_req = server_req->request;
@@ -2591,14 +2619,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 }
             }
 
-            if (finish) break;
+            if (finish)
+                break;
         }
 
-        if (!finish) finish = "length";
+        if (!finish)
+            finish = "length";
 
         int n_output_tokens = static_cast<int>(output_ids.size());
-        std::string text = !stop_sequences.empty()
-            ? output_text : snap_tok->decode(output_ids);
+        std::string text = !stop_sequences.empty() ? output_text : snap_tok->decode(output_ids);
 
         // Strip <think>...</think> for text completions (no reasoning_content field)
         if (snap_is_think_model && state.default_args.reasoning_format != "none") {
@@ -2609,12 +2638,13 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         }
 
         // Prepend prompt if echo requested
-        if (echo) text = prompt + text;
+        if (echo)
+            text = prompt + text;
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
-                comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+        fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(), n_prompt_tokens,
+                n_output_tokens, ms);
         state.metrics.requests_total++;
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += n_output_tokens;
@@ -2629,57 +2659,46 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 const auto& lp = lp_data[idx];
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {
-                    top_arr.push_back({
-                        {"token", safe_token_json(t.text)},
-                        {"logprob", t.logprob},
-                        {"bytes", token_bytes_json(t.text)}
-                    });
+                    top_arr.push_back({{"token", safe_token_json(t.text)},
+                                       {"logprob", t.logprob},
+                                       {"bytes", token_bytes_json(t.text)}});
                 }
-                content_logprobs.push_back({
-                    {"token", safe_token_json(lp.text)},
-                    {"logprob", lp.logprob},
-                    {"bytes", token_bytes_json(lp.text)},
-                    {"top_logprobs", top_arr}
-                });
+                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
+                                            {"logprob", lp.logprob},
+                                            {"bytes", token_bytes_json(lp.text)},
+                                            {"top_logprobs", top_arr}});
             }
             logprobs_obj = {{"content", content_logprobs}};
         }
 
-        json choice = {
-            {"index", 0},
-            {"text", text},
-            {"finish_reason", finish}
-        };
+        json choice = {{"index", 0}, {"text", text}, {"finish_reason", finish}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
 
-        json response = {
-            {"id", comp_id},
-            {"object", "text_completion"},
-            {"created", created},
-            {"model", snap_model_name},
-            {"choices", json::array({choice})},
-            {"usage", {
-                {"prompt_tokens", n_prompt_tokens},
-                {"completion_tokens", n_output_tokens},
-                {"total_tokens", n_prompt_tokens + n_output_tokens}
-            }}
-        };
+        json response = {{"id", comp_id},
+                         {"object", "text_completion"},
+                         {"created", created},
+                         {"model", snap_model_name},
+                         {"choices", json::array({choice})},
+                         {"usage",
+                          {{"prompt_tokens", n_prompt_tokens},
+                           {"completion_tokens", n_output_tokens},
+                           {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
 
         res.set_content(response.dump(), "application/json");
     }
 }
 
-void handle_tokenize(const httplib::Request& req, httplib::Response& res,
-                     ServerState& state) {
+void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     json body;
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
         res.status = 400;
-        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2687,8 +2706,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
     std::string content = body.value("content", "");
     if (content.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"content\" is required"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error", {{"message", "\"content\" is required"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2701,8 +2719,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
     }
     if (!snap_model) {
         res.status = 503;
-        json err = {{"error", {{"message", "No model loaded"},
-                                {"type", "server_error"}}}};
+        json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2712,8 +2729,9 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
     ImpError err = imp_tokenize(snap_model, content.c_str(), tokens.data(), &n_tokens, 32768);
     if (err != IMP_SUCCESS) {
         res.status = 500;
-        json error = {{"error", {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
+        json error = {{"error",
+                       {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
+                        {"type", "server_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
@@ -2723,23 +2741,23 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
     res.set_content(response.dump(), "application/json");
 }
 
-void handle_detokenize(const httplib::Request& req, httplib::Response& res,
-                       ServerState& state) {
+void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     json body;
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
         res.status = 400;
-        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     if (!body.contains("tokens") || !body["tokens"].is_array()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"tokens\" array is required"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error", {{"message", "\"tokens\" array is required"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2752,20 +2770,20 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res,
     }
     if (!snap_model) {
         res.status = 503;
-        json err = {{"error", {{"message", "No model loaded"},
-                                {"type", "server_error"}}}};
+        json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     std::vector<int32_t> tokens = body["tokens"].get<std::vector<int32_t>>();
     std::vector<char> buf(tokens.size() * 32 + 256);
-    ImpError err = imp_detokenize(snap_model, tokens.data(), static_cast<int>(tokens.size()),
-                                   buf.data(), buf.size());
+    ImpError err = imp_detokenize(snap_model, tokens.data(), static_cast<int>(tokens.size()), buf.data(),
+                                  buf.size());
     if (err != IMP_SUCCESS) {
         res.status = 500;
-        json error = {{"error", {{"message", std::string("Detokenize failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
+        json error = {{"error",
+                       {{"message", std::string("Detokenize failed: ") + imp_error_string(err)},
+                        {"type", "server_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
@@ -2774,11 +2792,11 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res,
     res.set_content(response.dump(), "application/json");
 }
 
-void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
-                    ServerState& state) {
+void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     auto& m = state.metrics;
-    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - m.start_time).count();
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
+                                                                   m.start_time)
+                      .count();
 
     std::string out;
     out.reserve(1024);
@@ -2816,7 +2834,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         loaded = state.model_loaded();
-        if (state.batching) queue = state.batching->queue_depth();
+        if (state.batching)
+            queue = state.batching->queue_depth();
     }
     out += "imp_model_loaded " + std::string(loaded ? "1" : "0") + "\n";
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
@@ -2829,7 +2848,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
 // Convert IEEE 754 FP16 (uint16_t) to FP32 on host
 static float fp16_to_fp32(uint16_t h) {
     uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1f;
+    uint32_t exp = (h >> 10) & 0x1f;
     uint32_t mant = h & 0x3ff;
 
     uint32_t f;
@@ -2839,7 +2858,10 @@ static float fp16_to_fp32(uint16_t h) {
         } else {
             // Subnormal: normalize
             exp = 1;
-            while (!(mant & 0x400)) { mant <<= 1; exp--; }
+            while (!(mant & 0x400)) {
+                mant <<= 1;
+                exp--;
+            }
             mant &= 0x3ff;
             f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
         }
@@ -2853,16 +2875,16 @@ static float fp16_to_fp32(uint16_t h) {
     return result;
 }
 
-void handle_embeddings(const httplib::Request& req, httplib::Response& res,
-                       ServerState& state) {
+void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     // Parse request body
     json body;
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
         res.status = 400;
-        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error",
+             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2878,31 +2900,32 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
                     inputs.push_back(item.get<std::string>());
                 } else {
                     res.status = 400;
-                    json err = {{"error", {{"message", "Each input must be a string"},
-                                            {"type", "invalid_request_error"}}}};
+                    json err = {
+                        {"error",
+                         {{"message", "Each input must be a string"}, {"type", "invalid_request_error"}}}};
                     res.set_content(err.dump(), "application/json");
                     return;
                 }
             }
         } else {
             res.status = 400;
-            json err = {{"error", {{"message", "\"input\" must be a string or array of strings"},
-                                    {"type", "invalid_request_error"}}}};
+            json err = {{"error",
+                         {{"message", "\"input\" must be a string or array of strings"},
+                          {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }
     } else {
         res.status = 400;
-        json err = {{"error", {{"message", "\"input\" is required"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {{"error", {{"message", "\"input\" is required"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     if (inputs.empty()) {
         res.status = 400;
-        json err = {{"error", {{"message", "\"input\" must not be empty"},
-                                {"type", "invalid_request_error"}}}};
+        json err = {
+            {"error", {{"message", "\"input\" must not be empty"}, {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -2911,23 +2934,24 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
     std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
     if (!lock.owns_lock()) {
         res.status = 503;
-        json err = {{"error", {{"message", "Server is busy processing another request. Please retry."},
-                                {"type", "server_error"}}}};
+        json err = {{"error",
+                     {{"message", "Server is busy processing another request. Please retry."},
+                      {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     if (!state.model_loaded()) {
         res.status = 503;
-        json err = {{"error", {{"message", "No model loaded"},
-                                {"type", "server_error"}}}};
+        json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
 
     // Pause batching engine for exclusive C API access, restart on scope exit
     bool had_batching = (state.batching && state.batching->is_running());
-    if (had_batching) state.batching->stop();
+    if (had_batching)
+        state.batching->stop();
     auto restart_batching = [&] {
         if (had_batching && state.batching && state.ctx)
             state.batching->start(state.ctx);
@@ -2953,13 +2977,12 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
         // Tokenize
         std::vector<int32_t> tokens(32768);
         int n_tokens = 0;
-        ImpError err = imp_tokenize(state.model, text.c_str(),
-                                     tokens.data(), &n_tokens, 32768);
+        ImpError err = imp_tokenize(state.model, text.c_str(), tokens.data(), &n_tokens, 32768);
         if (err != IMP_SUCCESS) {
             res.status = 500;
-            json error = {{"error", {{"message",
-                std::string("Tokenize failed: ") + imp_error_string(err)},
-                {"type", "server_error"}}}};
+            json error = {{"error",
+                           {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
+                            {"type", "server_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -2967,8 +2990,9 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
 
         if (n_tokens == 0) {
             res.status = 400;
-            json error = {{"error", {{"message", "Input tokenizes to zero tokens"},
-                                      {"type", "invalid_request_error"}}}};
+            json error = {
+                {"error",
+                 {{"message", "Input tokenizes to zero tokens"}, {"type", "invalid_request_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -2980,9 +3004,9 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
         if (err != IMP_SUCCESS) {
             imp_context_reset(state.ctx);
             res.status = 500;
-            json error = {{"error", {{"message",
-                std::string("Prefill failed: ") + imp_error_string(err)},
-                {"type", "server_error"}}}};
+            json error = {{"error",
+                           {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
+                            {"type", "server_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -2996,15 +3020,14 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
         // Copy FP16 hidden states from GPU to host as uint16_t
         size_t n_elements = static_cast<size_t>(n_tokens) * d_model;
         std::vector<uint16_t> h_hidden(n_elements);
-        cudaError_t cuda_err = cudaMemcpy(h_hidden.data(), hidden_view.data,
-                                           n_elements * sizeof(uint16_t),
-                                           cudaMemcpyDeviceToHost);
+        cudaError_t cuda_err = cudaMemcpy(h_hidden.data(), hidden_view.data, n_elements * sizeof(uint16_t),
+                                          cudaMemcpyDeviceToHost);
         if (cuda_err != cudaSuccess) {
             imp_context_reset(state.ctx);
             res.status = 500;
-            json error = {{"error", {{"message",
-                std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err)},
-                {"type", "server_error"}}}};
+            json error = {{"error",
+                           {{"message", std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err)},
+                            {"type", "server_error"}}}};
             res.set_content(error.dump(), "application/json");
             return;
         }
@@ -3031,11 +3054,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
             embedding[d] *= inv_norm;
         }
 
-        data.push_back({
-            {"object", "embedding"},
-            {"embedding", embedding},
-            {"index", input_idx}
-        });
+        data.push_back({{"object", "embedding"}, {"embedding", embedding}, {"index", input_idx}});
 
         // Reset context for next input
         imp_context_reset(state.ctx);
@@ -3048,15 +3067,11 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
 
     // batching_guard restarts the batching engine automatically on scope exit
 
-    json response = {
-        {"object", "list"},
-        {"data", data},
-        {"model", body.value("model", state.model_name)},
-        {"usage", {
-            {"prompt_tokens", total_prompt_tokens},
-            {"total_tokens", total_prompt_tokens}
-        }}
-    };
+    json response = {{"object", "list"},
+                     {"data", data},
+                     {"model", body.value("model", state.model_name)},
+                     {"usage",
+                      {{"prompt_tokens", total_prompt_tokens}, {"total_tokens", total_prompt_tokens}}}};
     res.set_content(response.dump(), "application/json");
 }
 
@@ -3081,8 +3096,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     } catch (const std::exception& e) {
         res.status = 400;
         json err = {{"type", "error"},
-                    {"error", {{"type", "invalid_request_error"},
-                               {"message", std::string("Invalid JSON: ") + e.what()}}}};
+                    {"error",
+                     {{"type", "invalid_request_error"},
+                      {"message", std::string("Invalid JSON: ") + e.what()}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -3090,8 +3106,8 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     if (!anth_body.is_object()) {
         res.status = 400;
         json err = {{"type", "error"},
-                    {"error", {{"type", "invalid_request_error"},
-                               {"message", "Request body must be a JSON object"}}}};
+                    {"error",
+                     {{"type", "invalid_request_error"}, {"message", "Request body must be a JSON object"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -3108,8 +3124,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     } catch (const std::exception& e) {
         res.status = 400;
         json err = {{"type", "error"},
-                    {"error", {{"type", "invalid_request_error"},
-                               {"message", std::string("Failed to transform Anthropic body: ") + e.what()}}}};
+                    {"error",
+                     {{"type", "invalid_request_error"},
+                      {"message", std::string("Failed to transform Anthropic body: ") + e.what()}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -3143,8 +3160,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
             parsed = {{"error", {{"message", shim_res.body}, {"type", "server_error"}}}};
         }
         json out = {{"type", "error"},
-                    {"error", parsed.value("error",
-                                           json{{"type", "server_error"}, {"message", "unknown"}})}};
+                    {"error", parsed.value("error", json{{"type", "server_error"}, {"message", "unknown"}})}};
         res.set_content(out.dump(), "application/json");
         return;
     }
@@ -3155,8 +3171,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     } catch (const std::exception& e) {
         res.status = 500;
         json err = {{"type", "error"},
-                    {"error", {{"type", "server_error"},
-                               {"message", std::string("Upstream returned non-JSON: ") + e.what()}}}};
+                    {"error",
+                     {{"type", "server_error"},
+                      {"message", std::string("Upstream returned non-JSON: ") + e.what()}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }
@@ -3181,8 +3198,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // Capture everything needed by value (lambda outlives this function).
     auto stream_data = std::make_shared<json>(std::move(anth_response));
     res.set_chunked_content_provider(
-        "text/event-stream",
-        [stream_data](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+        "text/event-stream", [stream_data](size_t /*offset*/, httplib::DataSink& sink) -> bool {
             auto emit = [&](const char* event_name, const json& payload) -> bool {
                 std::string buf = "event: ";
                 buf += event_name;
@@ -3207,7 +3223,10 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                     {"type", "message_start"},
                     {"message", std::move(msg_start_msg)},
                 };
-                if (!emit("message_start", ev)) { sink.done(); return true; }
+                if (!emit("message_start", ev)) {
+                    sink.done();
+                    return true;
+                }
             }
 
             // 2) Content blocks — one pair of content_block_start/stop per
@@ -3225,7 +3244,10 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                             {"index", block_index},
                             {"content_block", {{"type", "text"}, {"text", ""}}},
                         };
-                        if (!emit("content_block_start", cb)) { sink.done(); return true; }
+                        if (!emit("content_block_start", cb)) {
+                            sink.done();
+                            return true;
+                        }
 
                         const std::string text = block.value("text", "");
                         // Split into ~32-char deltas — arbitrary but gives
@@ -3236,37 +3258,49 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                             json d = {
                                 {"type", "content_block_delta"},
                                 {"index", block_index},
-                                {"delta", {
-                                    {"type", "text_delta"},
-                                    {"text", text.substr(off, n)},
-                                }},
+                                {"delta",
+                                 {
+                                     {"type", "text_delta"},
+                                     {"text", text.substr(off, n)},
+                                 }},
                             };
-                            if (!emit("content_block_delta", d)) { sink.done(); return true; }
+                            if (!emit("content_block_delta", d)) {
+                                sink.done();
+                                return true;
+                            }
                         }
                     } else if (type == "tool_use") {
                         json cb_start = {
                             {"type", "content_block_start"},
                             {"index", block_index},
-                            {"content_block", {
-                                {"type", "tool_use"},
-                                {"id", block.value("id", "")},
-                                {"name", block.value("name", "")},
-                                {"input", json::object()},
-                            }},
+                            {"content_block",
+                             {
+                                 {"type", "tool_use"},
+                                 {"id", block.value("id", "")},
+                                 {"name", block.value("name", "")},
+                                 {"input", json::object()},
+                             }},
                         };
-                        if (!emit("content_block_start", cb_start)) { sink.done(); return true; }
+                        if (!emit("content_block_start", cb_start)) {
+                            sink.done();
+                            return true;
+                        }
 
                         // Emit the full input JSON as a single input_json_delta.
                         std::string partial = block.value("input", json::object()).dump();
                         json d = {
                             {"type", "content_block_delta"},
                             {"index", block_index},
-                            {"delta", {
-                                {"type", "input_json_delta"},
-                                {"partial_json", std::move(partial)},
-                            }},
+                            {"delta",
+                             {
+                                 {"type", "input_json_delta"},
+                                 {"partial_json", std::move(partial)},
+                             }},
                         };
-                        if (!emit("content_block_delta", d)) { sink.done(); return true; }
+                        if (!emit("content_block_delta", d)) {
+                            sink.done();
+                            return true;
+                        }
                     } else {
                         // Unknown block type — start+stop with no deltas.
                         json cb = {
@@ -3274,14 +3308,20 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                             {"index", block_index},
                             {"content_block", block},
                         };
-                        if (!emit("content_block_start", cb)) { sink.done(); return true; }
+                        if (!emit("content_block_start", cb)) {
+                            sink.done();
+                            return true;
+                        }
                     }
 
                     json cb_stop = {
                         {"type", "content_block_stop"},
                         {"index", block_index},
                     };
-                    if (!emit("content_block_stop", cb_stop)) { sink.done(); return true; }
+                    if (!emit("content_block_stop", cb_stop)) {
+                        sink.done();
+                        return true;
+                    }
                     ++block_index;
                 }
             }
@@ -3299,7 +3339,10 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                     {"delta", std::move(delta)},
                     {"usage", {{"output_tokens", output_tokens}}},
                 };
-                if (!emit("message_delta", ev)) { sink.done(); return true; }
+                if (!emit("message_delta", ev)) {
+                    sink.done();
+                    return true;
+                }
             }
 
             // 4) message_stop — terminator.
@@ -3308,4 +3351,3 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
             return true;
         });
 }
-

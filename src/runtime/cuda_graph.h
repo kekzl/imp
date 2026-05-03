@@ -96,7 +96,7 @@ private:
     CudaGraphCapture graph_;
 
     int step_count_ = 0;
-    int warmup_steps_ = 1;    // Number of warmup steps before capture
+    int warmup_steps_ = 1;  // Number of warmup steps before capture
     int replay_count_ = 0;
     int capture_count_ = 0;
     bool capture_failed_ = false;  // Set when capture fails; prevents infinite retry
@@ -123,27 +123,27 @@ public:
     ~CudaGraphConditionalRunner();
 
     struct Config {
-        int max_steps = 0;               // max tokens to generate
-        int initial_context_len = 0;     // context length after prefill
-        int initial_position = 0;        // position of last prefill token
-        int eos_id = -1;                 // EOS token ID
-        std::vector<int32_t> stop_ids;   // additional stop token IDs (chat template)
+        int max_steps = 0;              // max tokens to generate
+        int initial_context_len = 0;    // context length after prefill
+        int initial_position = 0;       // position of last prefill token
+        int eos_id = -1;                // EOS token ID
+        std::vector<int32_t> stop_ids;  // additional stop token IDs (chat template)
         float temperature = 1.0f;
         float top_p = 1.0f;
         int top_k = 0;
         int seed = -1;
         // Think budget: break loop when reasoning tokens exceed limit.
         // CPU then takes over with force_token for </think> injection.
-        int think_budget_limit = 0;      // 0 = no limit
-        int32_t think_start_id = -1;     // <think> token ID
-        int32_t think_end_id = -1;       // </think> token ID
-        bool initial_in_think = false;   // true if already inside <think> block
-        bool ignore_eos = false;         // don't stop on EOS/stop tokens (benchmark mode)
+        int think_budget_limit = 0;     // 0 = no limit
+        int32_t think_start_id = -1;    // <think> token ID
+        int32_t think_end_id = -1;      // </think> token ID
+        bool initial_in_think = false;  // true if already inside <think> block
+        bool ignore_eos = false;        // don't stop on EOS/stop tokens (benchmark mode)
         // Penalty parameters (applied to logits before sampling each iteration)
         float repetition_penalty = 1.0f;
         float frequency_penalty = 0.0f;
         float presence_penalty = 0.0f;
-        int repeat_last_n = 0;           // 0 = all generated tokens
+        int repeat_last_n = 0;  // 0 = all generated tokens
         // Pre-existing output tokens to seed the penalty history (copied to ring buffer prefix)
         std::vector<int32_t> penalty_history;
     };
@@ -154,8 +154,8 @@ public:
     //   - d_position[0] and d_context_len[0] will be set by setup.
     //   - block_tables must cover the full generation (pre-allocated).
     //   - max_context_len should be set to initial_ctx + max_steps.
-    bool setup(GraphExecutor* executor, const InferenceState& state_template,
-               int32_t first_token, Config config, cudaStream_t stream);
+    bool setup(GraphExecutor* executor, const InferenceState& state_template, int32_t first_token,
+               Config config, cudaStream_t stream);
 
     // Launch the graph. Returns immediately.
     bool launch(cudaStream_t stream);
@@ -180,32 +180,32 @@ private:
     cudaGraphConditionalHandle handle_{};
 
     // Device-side state (allocated by setup, freed by cleanup)
-    int32_t* d_token_id_ = nullptr;       // [1] current token on device
-    int* d_position_ = nullptr;            // [1] current position on device
-    int* d_context_len_ = nullptr;         // [1] current context length on device
-    int* d_step_counter_ = nullptr;        // [1] step counter on device
-    int32_t* d_stop_ids_ = nullptr;        // [n_stop_ids] stop token IDs on device
+    int32_t* d_token_id_ = nullptr;  // [1] current token on device
+    int* d_position_ = nullptr;      // [1] current position on device
+    int* d_context_len_ = nullptr;   // [1] current context length on device
+    int* d_step_counter_ = nullptr;  // [1] step counter on device
+    int32_t* d_stop_ids_ = nullptr;  // [n_stop_ids] stop token IDs on device
 
     // Think budget tracking (device-side)
-    int* d_think_count_ = nullptr;          // [1] reasoning token counter
-    int* d_in_think_ = nullptr;             // [1] currently inside <think> block
+    int* d_think_count_ = nullptr;  // [1] reasoning token counter
+    int* d_in_think_ = nullptr;     // [1] currently inside <think> block
 
     // Penalty token history: [prefix_len + max_steps] ring buffer for penalty computation.
     // prefix_len tokens are pre-populated from prior output; subsequent slots filled by
     // post_decode_step_kernel each iteration.
-    int32_t* d_penalty_ring_ = nullptr;     // device penalty ring buffer
-    int* d_penalty_count_ = nullptr;        // [1] device-side total penalty token count
-    int penalty_prefix_len_ = 0;            // number of pre-populated history tokens
+    int32_t* d_penalty_ring_ = nullptr;  // device penalty ring buffer
+    int* d_penalty_count_ = nullptr;     // [1] device-side total penalty token count
+    int penalty_prefix_len_ = 0;         // number of pre-populated history tokens
 
     // Mapped pinned memory for zero-copy host readback
-    int32_t* h_ring_buffer_ = nullptr;     // host pointer to ring buffer
-    int32_t* d_ring_buffer_ = nullptr;     // device pointer to same ring buffer
-    int* h_step_counter_ = nullptr;        // host pointer to step counter mirror
-    int* d_step_counter_mapped_ = nullptr; // device pointer to mapped step counter
+    int32_t* h_ring_buffer_ = nullptr;      // host pointer to ring buffer
+    int32_t* d_ring_buffer_ = nullptr;      // device pointer to same ring buffer
+    int* h_step_counter_ = nullptr;         // host pointer to step counter mirror
+    int* d_step_counter_mapped_ = nullptr;  // device pointer to mapped step counter
 
     Config config_;
     int last_read_step_ = 0;
     bool launched_ = false;
 };
 
-} // namespace imp
+}  // namespace imp

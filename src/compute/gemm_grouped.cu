@@ -1,7 +1,6 @@
 #include "compute/gemm_grouped.h"
 #include "core/logging.h"
 
-
 #include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
@@ -38,13 +37,20 @@ static cublasHandle_t get_cublas_handle() {
 // ---------------------------------------------------------------------------
 static cudaDataType_t dtype_to_cuda(QType dt) {
     switch (dt) {
-        case QType::F32:     return CUDA_R_32F;
-        case QType::F16:     return CUDA_R_16F;
-        case QType::BF16:     return CUDA_R_16BF;
-        case QType::FP8_E4M3: return CUDA_R_8F_E4M3;
-        case QType::FP8_E5M2: return CUDA_R_8F_E5M2;
-        case QType::INT8:     return CUDA_R_8I;
-        case QType::INT32:    return CUDA_R_32I;
+        case QType::F32:
+            return CUDA_R_32F;
+        case QType::F16:
+            return CUDA_R_16F;
+        case QType::BF16:
+            return CUDA_R_16BF;
+        case QType::FP8_E4M3:
+            return CUDA_R_8F_E4M3;
+        case QType::FP8_E5M2:
+            return CUDA_R_8F_E5M2;
+        case QType::INT8:
+            return CUDA_R_8I;
+        case QType::INT32:
+            return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm_grouped: unsupported dtype %d\n", (int)dt);
             abort();
@@ -56,13 +62,20 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
 // ---------------------------------------------------------------------------
 static cublasComputeType_t dtype_to_compute(QType dt) {
     switch (dt) {
-        case QType::F32:     return CUBLAS_COMPUTE_32F;
-        case QType::F16:     return CUBLAS_COMPUTE_32F;
-        case QType::BF16:     return CUBLAS_COMPUTE_32F;
-        case QType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
-        case QType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
-        case QType::INT8:     return CUBLAS_COMPUTE_32I;
-        default:              return CUBLAS_COMPUTE_32F;
+        case QType::F32:
+            return CUBLAS_COMPUTE_32F;
+        case QType::F16:
+            return CUBLAS_COMPUTE_32F;
+        case QType::BF16:
+            return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E4M3:
+            return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E5M2:
+            return CUBLAS_COMPUTE_32F;
+        case QType::INT8:
+            return CUBLAS_COMPUTE_32I;
+        default:
+            return CUBLAS_COMPUTE_32F;
     }
 }
 
@@ -76,14 +89,14 @@ static cublasComputeType_t dtype_to_compute(QType dt) {
 //   A row-major [Mi,K] = col-major [K,Mi,ld=K]; CUBLAS_OP_N
 //   Result: [N,Mi] col-major = [Mi,N] row-major
 // ---------------------------------------------------------------------------
-static void run_expert_matmul(cublasHandle_t handle,
-                              const Tensor& Ai, const Tensor& Bi, Tensor& Ci,
+static void run_expert_matmul(cublasHandle_t handle, const Tensor& Ai, const Tensor& Bi, Tensor& Ci,
                               cudaStream_t stream) {
-    const int64_t Mi = Ai.shape[0];   // tokens routed to this expert
-    const int64_t K  = Ai.shape[1];
-    const int64_t N  = Bi.shape[0];   // B is [N, K], we compute A @ B^T
+    const int64_t Mi = Ai.shape[0];  // tokens routed to this expert
+    const int64_t K = Ai.shape[1];
+    const int64_t N = Bi.shape[0];  // B is [N, K], we compute A @ B^T
 
-    if (Mi == 0) return;
+    if (Mi == 0)
+        return;
 
     cudaDataType_t cuda_dt_A = dtype_to_cuda(Ai.qtype);
     cudaDataType_t cuda_dt_B = dtype_to_cuda(Bi.qtype);
@@ -94,38 +107,26 @@ static void run_expert_matmul(cublasHandle_t handle,
 
     if (compute_type == CUBLAS_COMPUTE_32I) {
         int32_t alpha = 1;
-        int32_t beta  = 0;
-        cublasStatus_t st = cublasGemmEx(
-            handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)Mi, (int)K,
-            &alpha,
-            Bi.data, cuda_dt_B, (int)K,
-            Ai.data, cuda_dt_A, (int)K,
-            &beta,
-            Ci.data, cuda_dt_C, (int)N,
-            compute_type, kGemmAlgo);
+        int32_t beta = 0;
+        cublasStatus_t st = cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)Mi, (int)K, &alpha,
+                                         Bi.data, cuda_dt_B, (int)K, Ai.data, cuda_dt_A, (int)K, &beta,
+                                         Ci.data, cuda_dt_C, (int)N, compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm_grouped: cublasGemmEx failed for expert "
-                            "(M=%lld, K=%lld, N=%lld, status %d)\n",
+            fprintf(stderr,
+                    "imp::gemm_grouped: cublasGemmEx failed for expert "
+                    "(M=%lld, K=%lld, N=%lld, status %d)\n",
                     (long long)Mi, (long long)K, (long long)N, (int)st);
         }
     } else {
         float alpha = 1.0f;
-        float beta  = 0.0f;
-        cublasStatus_t st = cublasGemmEx(
-            handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)Mi, (int)K,
-            &alpha,
-            Bi.data, cuda_dt_B, (int)K,
-            Ai.data, cuda_dt_A, (int)K,
-            &beta,
-            Ci.data, cuda_dt_C, (int)N,
-            compute_type, kGemmAlgo);
+        float beta = 0.0f;
+        cublasStatus_t st = cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)Mi, (int)K, &alpha,
+                                         Bi.data, cuda_dt_B, (int)K, Ai.data, cuda_dt_A, (int)K, &beta,
+                                         Ci.data, cuda_dt_C, (int)N, compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm_grouped: cublasGemmEx failed for expert "
-                            "(M=%lld, K=%lld, N=%lld, status %d)\n",
+            fprintf(stderr,
+                    "imp::gemm_grouped: cublasGemmEx failed for expert "
+                    "(M=%lld, K=%lld, N=%lld, status %d)\n",
                     (long long)Mi, (long long)K, (long long)N, (int)st);
         }
     }
@@ -147,15 +148,16 @@ static void run_expert_matmul(cublasHandle_t handle,
 // API.  For now we fall back to a loop of individual cublasLtMatmul calls
 // which is the safe portable path.
 // ---------------------------------------------------------------------------
-void gemm_grouped(const std::vector<Tensor>& A,
-                  const std::vector<Tensor>& B,
-                  std::vector<Tensor>& C,
+void gemm_grouped(const std::vector<Tensor>& A, const std::vector<Tensor>& B, std::vector<Tensor>& C,
                   cudaStream_t stream) {
     const size_t num_experts = A.size();
-    if (num_experts == 0) return;
+    if (num_experts == 0)
+        return;
     if (B.size() != num_experts || C.size() != num_experts) {
-        fprintf(stderr, "imp::gemm_grouped: A/B/C vector sizes must match "
-                        "(got %zu, %zu, %zu)\n", A.size(), B.size(), C.size());
+        fprintf(stderr,
+                "imp::gemm_grouped: A/B/C vector sizes must match "
+                "(got %zu, %zu, %zu)\n",
+                A.size(), B.size(), C.size());
         return;
     }
 
@@ -179,22 +181,15 @@ void gemm_grouped(const std::vector<Tensor>& A,
 // In practice during prefill, most experts have similar M (tokens are spread
 // roughly evenly), so this is typically 2-5 calls instead of 128.
 // ---------------------------------------------------------------------------
-void gemm_moe_batched(const void* a_base, void* c_base,
-                      const int32_t* offsets,
-                      const void* const* b_ptrs,
-                      int K, int N, QType dtype,
-                      int n_experts,
-                      cudaStream_t stream,
-                      void** d_work_ptrs,
-                      QType output_dtype,
-                      const float* a_scales,
-                      const float* b_scales)
-{
+void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs,
+                      int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs,
+                      QType output_dtype, const float* a_scales, const float* b_scales) {
     // a_scales/b_scales: optional host arrays [n_experts] for per-expert FP8 scaling.
     // When provided, alpha for expert e = a_scales[e] * b_scales[e] (or just a_scales[e]
     // if b_scales is null). This gives per-expert de-scaling for FP8 GEMMs.
     (void)b_scales;  // reserved for future cuBLASLt per-expert B scale support
-    if (n_experts == 0) return;
+    if (n_experts == 0)
+        return;
 
     // -----------------------------------------------------------------------
     // CUTLASS grouped GEMM: single persistent kernel for all experts.
@@ -218,7 +213,7 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     cudaDataType_t cuda_dt_c = dtype_to_cuda(out_dt);
     size_t out_elem_sz = dtype_size(out_dt);
 
-    float beta  = 0.0f;
+    float beta = 0.0f;
 
     const char* a_bytes = static_cast<const char*>(a_base);
     char* c_bytes = static_cast<char*>(c_base);
@@ -231,16 +226,23 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     // Count active experts and group by M (token count).
     // Build flat host pointer arrays sorted by group for efficient upload.
     int n_active = 0;
-    struct GroupInfo { int M; int start; int count; float alpha; };
+    struct GroupInfo {
+        int M;
+        int start;
+        int count;
+        float alpha;
+    };
     std::vector<GroupInfo> groups;
     // Per-expert alpha values (only used when has_per_expert_scales)
     std::vector<float> expert_alphas;
-    if (has_per_expert_scales) expert_alphas.reserve(n_experts);
+    if (has_per_expert_scales)
+        expert_alphas.reserve(n_experts);
 
     // First pass: count active experts and identify groups
     for (int e = 0; e < n_experts; e++) {
         int count = offsets[e + 1] - offsets[e];
-        if (count == 0) continue;
+        if (count == 0)
+            continue;
         n_active++;
 
         if (has_per_expert_scales) {
@@ -251,13 +253,19 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         } else {
             bool found = false;
             for (auto& g : groups) {
-                if (g.M == count) { g.count++; found = true; break; }
+                if (g.M == count) {
+                    g.count++;
+                    found = true;
+                    break;
+                }
             }
-            if (!found) groups.push_back({count, 0, 1, 1.0f});
+            if (!found)
+                groups.push_back({count, 0, 1, 1.0f});
         }
     }
 
-    if (n_active == 0) return;
+    if (n_active == 0)
+        return;
 
     // Compute group start offsets (prefix sum)
     int offset_acc = 0;
@@ -277,7 +285,8 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         int active_idx = 0;
         for (int e = 0; e < n_experts; e++) {
             int count = offsets[e + 1] - offsets[e];
-            if (count == 0) continue;
+            if (count == 0)
+                continue;
             int start = offsets[e];
             h_A[active_idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
             h_B[active_idx] = b_ptrs[e];
@@ -288,7 +297,8 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     } else {
         for (int e = 0; e < n_experts; e++) {
             int count = offsets[e + 1] - offsets[e];
-            if (count == 0) continue;
+            if (count == 0)
+                continue;
 
             // Find this expert's group
             for (auto& g : groups) {
@@ -339,8 +349,8 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         // Per-group descriptor arrays (host)
         std::vector<cublasOperation_t> transa_arr(group_count, CUBLAS_OP_T);
         std::vector<cublasOperation_t> transb_arr(group_count, CUBLAS_OP_N);
-        std::vector<int> m_arr(group_count);    // cuBLAS m = N (col-major trick: result cols)
-        std::vector<int> n_arr(group_count);    // cuBLAS n = M (result rows)
+        std::vector<int> m_arr(group_count);  // cuBLAS m = N (col-major trick: result cols)
+        std::vector<int> n_arr(group_count);  // cuBLAS n = M (result rows)
         std::vector<int> k_arr(group_count);
         std::vector<int> lda_arr(group_count);  // B leading dim
         std::vector<int> ldb_arr(group_count);  // A leading dim
@@ -350,44 +360,35 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         std::vector<float> beta_arr(group_count, 0.0f);
 
         for (int gi = 0; gi < group_count; gi++) {
-            m_arr[gi] = N;              // output columns (row-major N)
-            n_arr[gi] = groups[gi].M;   // output rows (token count for this group)
+            m_arr[gi] = N;             // output columns (row-major N)
+            n_arr[gi] = groups[gi].M;  // output rows (token count for this group)
             k_arr[gi] = K;
-            lda_arr[gi] = K;            // B stride (weight matrix [N,K], col-major [K,N])
-            ldb_arr[gi] = K;            // A stride (activation [M,K], col-major [K,M])
-            ldc_arr[gi] = N;            // C stride (output [M,N], col-major [N,M])
+            lda_arr[gi] = K;  // B stride (weight matrix [N,K], col-major [K,N])
+            ldb_arr[gi] = K;  // A stride (activation [M,K], col-major [K,M])
+            ldc_arr[gi] = N;  // C stride (output [M,N], col-major [N,M])
             group_size_arr[gi] = groups[gi].count;
             alpha_arr[gi] = groups[gi].alpha;
         }
 
         cublasStatus_t st = cublasGemmGroupedBatchedEx(
-            handle,
-            transa_arr.data(), transb_arr.data(),
-            m_arr.data(), n_arr.data(), k_arr.data(),
-            alpha_arr.data(),
-            (const void* const*)d_B_ptrs, cuda_dt_ab, lda_arr.data(),
-            (const void* const*)d_A_ptrs, cuda_dt_ab, ldb_arr.data(),
-            beta_arr.data(),
-            (void* const*)d_C_ptrs, cuda_dt_c, ldc_arr.data(),
-            group_count,
-            group_size_arr.data(),
-            compute_type);
+            handle, transa_arr.data(), transb_arr.data(), m_arr.data(), n_arr.data(), k_arr.data(),
+            alpha_arr.data(), (const void* const*)d_B_ptrs, cuda_dt_ab, lda_arr.data(),
+            (const void* const*)d_A_ptrs, cuda_dt_ab, ldb_arr.data(), beta_arr.data(), (void* const*)d_C_ptrs,
+            cuda_dt_c, ldc_arr.data(), group_count, group_size_arr.data(), compute_type);
 
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
-                            "(groups=%d, active=%d, K=%d, N=%d, status %d)\n",
+            fprintf(stderr,
+                    "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
+                    "(groups=%d, active=%d, K=%d, N=%d, status %d)\n",
                     group_count, n_active, K, N, (int)st);
             // Fallback: per-group cublasGemmBatchedEx
             for (const auto& g : groups) {
                 float g_alpha = g.alpha;
-                cublasGemmBatchedEx(
-                    handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                    N, g.M, K, &g_alpha,
-                    (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
-                    (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K,
-                    &beta,
-                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N,
-                    g.count, compute_type, kGemmAlgo);
+                cublasGemmBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha,
+                                    (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
+                                    (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K, &beta,
+                                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N, g.count, compute_type,
+                                    kGemmAlgo);
             }
         }
     }
@@ -402,4 +403,4 @@ void gemm_moe_batched(const void* a_base, void* c_base,
 // gemm_grouped_cleanup: no-op retained for API compatibility. Called from engine shutdown.
 void gemm_grouped_cleanup() {}
 
-} // namespace imp
+}  // namespace imp

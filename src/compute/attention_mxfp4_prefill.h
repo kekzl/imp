@@ -29,9 +29,8 @@ namespace imp {
 //   - IMP_MXFP4_ATTENTION=1 environment variable at runtime
 //
 // Returns false if the configuration is unsupported or GEMM fails.
-bool attention_mxfp4_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, float softcap, cudaStream_t stream);
+bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                             bool causal, float softcap, cudaStream_t stream);
 
 // Check if MXFP4 attention is available and enabled.
 bool attention_mxfp4_available();
@@ -39,4 +38,4 @@ bool attention_mxfp4_available();
 // Workspace estimate for VRAM budget planning.
 size_t attention_mxfp4_workspace_estimate(int seq_q, int seq_kv, int head_dim);
 
-} // namespace imp
+}  // namespace imp

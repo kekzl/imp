@@ -23,11 +23,11 @@ static bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!HasCudaDevice()) {                                                \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!HasCudaDevice()) {                         \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
 // ============================================================================
@@ -40,8 +40,7 @@ TEST(BatchBuilderTest, SingleDecodeSequence) {
     builder.reset();
 
     int block_table[] = {0, 1, 2};
-    builder.add_decode_sequence(/*token=*/42, /*position=*/15,
-                                block_table, /*n_blocks=*/3,
+    builder.add_decode_sequence(/*token=*/42, /*position=*/15, block_table, /*n_blocks=*/3,
                                 /*context_len=*/16);
 
     Batch batch = builder.build();
@@ -221,29 +220,25 @@ TEST(GPUBatchTest, UploadAndFree) {
 
     // Read back token_ids from GPU
     std::vector<int32_t> token_ids(2);
-    cudaMemcpy(token_ids.data(), gpu_batch.d_token_ids,
-               2 * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(token_ids.data(), gpu_batch.d_token_ids, 2 * sizeof(int32_t), cudaMemcpyDeviceToHost);
     EXPECT_EQ(token_ids[0], 100);
     EXPECT_EQ(token_ids[1], 200);
 
     // Read back positions
     std::vector<int> positions(2);
-    cudaMemcpy(positions.data(), gpu_batch.d_positions,
-               2 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(positions.data(), gpu_batch.d_positions, 2 * sizeof(int), cudaMemcpyDeviceToHost);
     EXPECT_EQ(positions[0], 10);
     EXPECT_EQ(positions[1], 20);
 
     // Read back context_lens
     std::vector<int> ctx_lens(2);
-    cudaMemcpy(ctx_lens.data(), gpu_batch.d_context_lens,
-               2 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx_lens.data(), gpu_batch.d_context_lens, 2 * sizeof(int), cudaMemcpyDeviceToHost);
     EXPECT_EQ(ctx_lens[0], 11);
     EXPECT_EQ(ctx_lens[1], 21);
 
     // Read back padded block_tables [2, 3]
     std::vector<int> block_tables(6);
-    cudaMemcpy(block_tables.data(), gpu_batch.d_block_tables,
-               6 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(block_tables.data(), gpu_batch.d_block_tables, 6 * sizeof(int), cudaMemcpyDeviceToHost);
     // Row 0: [0, 1, 0]
     EXPECT_EQ(block_tables[0], 0);
     EXPECT_EQ(block_tables[1], 1);
@@ -364,8 +359,7 @@ TEST(SchedulerTest, MemoryAwareScheduling) {
 
     // Create a small KV cache with limited blocks
     auto cache = std::make_unique<KVCache>(
-        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64,
-        QType::F16, /*max_blocks=*/4);
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
 
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
@@ -460,10 +454,8 @@ TEST(BatchBuilderTest, SixteenDecodeSequences) {
         int position = ctx_len - 1;
         int32_t token = 1000 + i;
 
-        builder.add_decode_sequence(token, position,
-                                    block_tables[i].data(),
-                                    static_cast<int>(block_tables[i].size()),
-                                    ctx_len);
+        builder.add_decode_sequence(token, position, block_tables[i].data(),
+                                    static_cast<int>(block_tables[i].size()), ctx_len);
     }
 
     Batch batch = builder.build();
@@ -479,13 +471,11 @@ TEST(BatchBuilderTest, SixteenDecodeSequences) {
     for (int i = 0; i < 16; i++) {
         int n_blocks = (i % 4) + 1;
         for (int b = 0; b < n_blocks; b++) {
-            EXPECT_EQ(batch.block_tables[i * 4 + b], i * 10 + b)
-                << "seq=" << i << " block=" << b;
+            EXPECT_EQ(batch.block_tables[i * 4 + b], i * 10 + b) << "seq=" << i << " block=" << b;
         }
         // Padding should be 0
         for (int b = n_blocks; b < 4; b++) {
-            EXPECT_EQ(batch.block_tables[i * 4 + b], 0)
-                << "seq=" << i << " padding block=" << b;
+            EXPECT_EQ(batch.block_tables[i * 4 + b], 0) << "seq=" << i << " padding block=" << b;
         }
     }
 }
@@ -499,8 +489,7 @@ TEST(GPUBatchTest, SixteenSequenceUpload) {
 
     for (int i = 0; i < 16; i++) {
         int bt[] = {i, i + 100};
-        builder.add_decode_sequence(/*token=*/i + 500, /*position=*/i * 10,
-                                    bt, 2, (i + 1) * 10);
+        builder.add_decode_sequence(/*token=*/i + 500, /*position=*/i * 10, bt, 2, (i + 1) * 10);
     }
 
     Batch batch = builder.build();
@@ -513,24 +502,21 @@ TEST(GPUBatchTest, SixteenSequenceUpload) {
 
     // Read back all token IDs
     std::vector<int32_t> tokens(16);
-    cudaMemcpy(tokens.data(), gpu_batch.d_token_ids,
-               16 * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tokens.data(), gpu_batch.d_token_ids, 16 * sizeof(int32_t), cudaMemcpyDeviceToHost);
     for (int i = 0; i < 16; i++) {
         EXPECT_EQ(tokens[i], i + 500);
     }
 
     // Read back all positions
     std::vector<int> positions(16);
-    cudaMemcpy(positions.data(), gpu_batch.d_positions,
-               16 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(positions.data(), gpu_batch.d_positions, 16 * sizeof(int), cudaMemcpyDeviceToHost);
     for (int i = 0; i < 16; i++) {
         EXPECT_EQ(positions[i], i * 10);
     }
 
     // Read back context lens
     std::vector<int> ctx(16);
-    cudaMemcpy(ctx.data(), gpu_batch.d_context_lens,
-               16 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx.data(), gpu_batch.d_context_lens, 16 * sizeof(int), cudaMemcpyDeviceToHost);
     for (int i = 0; i < 16; i++) {
         EXPECT_EQ(ctx[i], (i + 1) * 10);
     }
@@ -593,7 +579,8 @@ TEST(SchedulerTest, FullLifecycle) {
     EXPECT_FALSE(sched.has_pending());
 
     // Simulate: all transition to DECODING
-    for (auto& r : reqs) r->status = RequestStatus::DECODING;
+    for (auto& r : reqs)
+        r->status = RequestStatus::DECODING;
 
     // Step 2: All 4 in decode batch
     sched.schedule(prefill, decode);
@@ -625,7 +612,8 @@ TEST(SchedulerTest, FullLifecycle) {
     EXPECT_EQ(sched.active_count(), 4);
 
     // Simulate: all finish
-    for (auto& r : reqs) r->status = RequestStatus::FINISHED;
+    for (auto& r : reqs)
+        r->status = RequestStatus::FINISHED;
     new1->status = RequestStatus::FINISHED;
     new2->status = RequestStatus::FINISHED;
 
@@ -713,7 +701,8 @@ TEST(SchedulerTest, BatchedDecodeWithMidBatchCompletion) {
     EXPECT_EQ(decode.size(), 0u);
 
     // All transition to DECODING
-    for (auto& r : reqs) r->status = RequestStatus::DECODING;
+    for (auto& r : reqs)
+        r->status = RequestStatus::DECODING;
 
     // Step 1: All 6 in batched decode
     sched.schedule(prefill, decode);
@@ -750,12 +739,17 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
     builder.reset();
 
     // Simulate 4 concurrent decode sequences with different progress
-    struct SeqInfo { int32_t token; int position; int n_blocks; int ctx_len; };
+    struct SeqInfo {
+        int32_t token;
+        int position;
+        int n_blocks;
+        int ctx_len;
+    };
     SeqInfo seqs[] = {
-        {100, 63,  4, 64},   // long context
-        {200, 15,  1, 16},   // short context
+        {100, 63, 4, 64},    // long context
+        {200, 15, 1, 16},    // short context
         {300, 127, 8, 128},  // very long context
-        {400, 31,  2, 32},   // medium context
+        {400, 31, 2, 32},    // medium context
     };
 
     std::vector<std::vector<int>> block_tables(4);
@@ -764,8 +758,7 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
         for (int b = 0; b < seqs[i].n_blocks; b++) {
             block_tables[i][b] = i * 100 + b;
         }
-        builder.add_decode_sequence(seqs[i].token, seqs[i].position,
-                                    block_tables[i].data(), seqs[i].n_blocks,
+        builder.add_decode_sequence(seqs[i].token, seqs[i].position, block_tables[i].data(), seqs[i].n_blocks,
                                     seqs[i].ctx_len);
     }
 
@@ -784,8 +777,7 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
 
     // Verify context lengths readback (crucial for paged attention dispatch)
     std::vector<int> ctx(4);
-    cudaMemcpy(ctx.data(), gpu_batch.d_context_lens,
-               4 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx.data(), gpu_batch.d_context_lens, 4 * sizeof(int), cudaMemcpyDeviceToHost);
     EXPECT_EQ(ctx[0], 64);
     EXPECT_EQ(ctx[1], 16);
     EXPECT_EQ(ctx[2], 128);
@@ -793,8 +785,7 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
 
     // Verify block tables are correctly padded to max_blocks_per_seq=8
     std::vector<int> bt(4 * 8);
-    cudaMemcpy(bt.data(), gpu_batch.d_block_tables,
-               4 * 8 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(bt.data(), gpu_batch.d_block_tables, 4 * 8 * sizeof(int), cudaMemcpyDeviceToHost);
     // Row 2 (longest): blocks 200..207
     for (int b = 0; b < 8; b++) {
         EXPECT_EQ(bt[2 * 8 + b], 200 + b);
@@ -808,8 +799,7 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
     // Verify seq_offsets for multi-sequence decode
     EXPECT_NE(gpu_batch.d_seq_offsets, nullptr);
     std::vector<int> offsets(5);
-    cudaMemcpy(offsets.data(), gpu_batch.d_seq_offsets,
-               5 * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(offsets.data(), gpu_batch.d_seq_offsets, 5 * sizeof(int), cudaMemcpyDeviceToHost);
     for (int i = 0; i <= 4; i++) {
         EXPECT_EQ(offsets[i], i);
     }
@@ -835,7 +825,8 @@ TEST(SchedulerTest, DecodeBatchSizeLimit) {
     EXPECT_TRUE(sched.has_pending());
 
     // Transition first 4 to DECODING
-    for (int i = 0; i < 4; i++) reqs[i]->status = RequestStatus::DECODING;
+    for (int i = 0; i < 4; i++)
+        reqs[i]->status = RequestStatus::DECODING;
 
     // Schedule: 4 decoding, 2 pending — pending cannot enter because batch is full
     sched.schedule(prefill, decode);
@@ -850,8 +841,8 @@ TEST(SchedulerTest, DecodeBatchSizeLimit) {
 
     // Now pending requests should be admitted
     sched.schedule(prefill, decode);
-    EXPECT_EQ(decode.size(), 2u);  // reqs[2] + reqs[3]
-    EXPECT_GE(prefill.size(), 1u); // at least 1 pending admitted
+    EXPECT_EQ(decode.size(), 2u);   // reqs[2] + reqs[3]
+    EXPECT_GE(prefill.size(), 1u);  // at least 1 pending admitted
     EXPECT_LE(sched.active_count(), 4);
 }
 
@@ -885,8 +876,8 @@ TEST(SchedulerTest, ShortestInputFirst) {
 
     // SIF: shortest two should be admitted first
     ASSERT_EQ(prefill.size(), 2u);
-    EXPECT_EQ(prefill[0]->id, 3);  // 10 tokens (shortest)
-    EXPECT_EQ(prefill[1]->id, 2);  // 50 tokens (second shortest)
+    EXPECT_EQ(prefill[0]->id, 3);      // 10 tokens (shortest)
+    EXPECT_EQ(prefill[1]->id, 2);      // 50 tokens (second shortest)
     EXPECT_TRUE(sched.has_pending());  // 100-token request still pending
 }
 
@@ -956,8 +947,7 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
 
     // 4 blocks total, block_size=16
     auto cache = std::make_unique<KVCache>(
-        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
-        QType::F16, /*max_blocks=*/4);
+        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
     Scheduler sched(16);
@@ -989,8 +979,7 @@ TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
     SKIP_IF_NO_CUDA();
 
     auto cache = std::make_unique<KVCache>(
-        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
-        QType::F16, /*max_blocks=*/2);
+        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/2);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
     Scheduler sched(16);
@@ -1026,7 +1015,8 @@ TEST(SchedulerTest, NewPrefillWhileDecoding) {
 
     std::vector<std::shared_ptr<Request>> prefill, decode;
     sched.schedule(prefill, decode);
-    for (auto& r : existing) r->status = RequestStatus::DECODING;
+    for (auto& r : existing)
+        r->status = RequestStatus::DECODING;
 
     // Add 2 new requests while 3 are decoding
     auto new1 = std::make_shared<Request>();
@@ -1092,8 +1082,8 @@ TEST(SchedulerTest, AddRemoveRapidly) {
 
     // Schedule: cancelled removed, new ones prefill, survivors decode
     sched.schedule(prefill, decode);
-    EXPECT_EQ(decode.size(), 5u);       // reqs[5..9] decoding
-    EXPECT_EQ(prefill.size(), 5u);      // new_reqs[0..4] prefilling
+    EXPECT_EQ(decode.size(), 5u);   // reqs[5..9] decoding
+    EXPECT_EQ(prefill.size(), 5u);  // new_reqs[0..4] prefilling
     EXPECT_EQ(sched.active_count(), 10);
     EXPECT_FALSE(sched.has_pending());
 }
@@ -1136,13 +1126,15 @@ TEST(SchedulerTest, MaxBatchSize) {
 
     // Drain remaining: finish current, schedule again repeatedly
     int total_admitted = 3;
-    for (auto& r : prefill) r->status = RequestStatus::FINISHED;
+    for (auto& r : prefill)
+        r->status = RequestStatus::FINISHED;
 
     while (sched.has_pending()) {
         sched.schedule(prefill, decode);
         EXPECT_LE(static_cast<int>(prefill.size()), 3);
         total_admitted += static_cast<int>(prefill.size());
-        for (auto& r : prefill) r->status = RequestStatus::FINISHED;
+        for (auto& r : prefill)
+            r->status = RequestStatus::FINISHED;
     }
 
     EXPECT_EQ(total_admitted, 20);
@@ -1193,5 +1185,5 @@ TEST(RequestTest, DefaultState) {
     EXPECT_EQ(req.context_len(), 0);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

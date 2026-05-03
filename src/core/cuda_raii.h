@@ -13,13 +13,20 @@ public:
 
     // Create a stream with the given flags. Returns false from create() on failure.
     [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) {
-        if (stream_) cudaStreamDestroy(stream_);
+        if (stream_)
+            cudaStreamDestroy(stream_);
         cudaError_t err = cudaStreamCreateWithFlags(&stream_, flags);
-        if (err != cudaSuccess) { stream_ = nullptr; return false; }
+        if (err != cudaSuccess) {
+            stream_ = nullptr;
+            return false;
+        }
         return true;
     }
 
-    ~CudaStream() { if (stream_) cudaStreamDestroy(stream_); }
+    ~CudaStream() {
+        if (stream_)
+            cudaStreamDestroy(stream_);
+    }
 
     CudaStream(const CudaStream&) = delete;
     CudaStream& operator=(const CudaStream&) = delete;
@@ -27,7 +34,8 @@ public:
     CudaStream(CudaStream&& o) noexcept : stream_(std::exchange(o.stream_, nullptr)) {}
     CudaStream& operator=(CudaStream&& o) noexcept {
         if (this != &o) {
-            if (stream_) cudaStreamDestroy(stream_);
+            if (stream_)
+                cudaStreamDestroy(stream_);
             stream_ = std::exchange(o.stream_, nullptr);
         }
         return *this;
@@ -51,13 +59,20 @@ public:
     CudaEvent() = default;
 
     [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) {
-        if (event_) cudaEventDestroy(event_);
+        if (event_)
+            cudaEventDestroy(event_);
         cudaError_t err = cudaEventCreateWithFlags(&event_, flags);
-        if (err != cudaSuccess) { event_ = nullptr; return false; }
+        if (err != cudaSuccess) {
+            event_ = nullptr;
+            return false;
+        }
         return true;
     }
 
-    ~CudaEvent() { if (event_) cudaEventDestroy(event_); }
+    ~CudaEvent() {
+        if (event_)
+            cudaEventDestroy(event_);
+    }
 
     CudaEvent(const CudaEvent&) = delete;
     CudaEvent& operator=(const CudaEvent&) = delete;
@@ -65,7 +80,8 @@ public:
     CudaEvent(CudaEvent&& o) noexcept : event_(std::exchange(o.event_, nullptr)) {}
     CudaEvent& operator=(CudaEvent&& o) noexcept {
         if (this != &o) {
-            if (event_) cudaEventDestroy(event_);
+            if (event_)
+                cudaEventDestroy(event_);
             event_ = std::exchange(o.event_, nullptr);
         }
         return *this;
@@ -77,7 +93,8 @@ public:
 
     // Convenience: ensure created, then record on stream.
     bool record(cudaStream_t stream) {
-        if (!event_ && !create()) return false;
+        if (!event_ && !create())
+            return false;
         return cudaEventRecord(event_, stream) == cudaSuccess;
     }
 
@@ -88,4 +105,4 @@ private:
     cudaEvent_t event_ = nullptr;
 };
 
-} // namespace imp
+}  // namespace imp

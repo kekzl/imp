@@ -122,5 +122,5 @@ TEST(RuntimeConfigTest, MissingFileFallsBackToDefaults) {
     EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

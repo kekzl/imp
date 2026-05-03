@@ -15,9 +15,9 @@ namespace {
 // CUDA helpers
 // ---------------------------------------------------------------------------
 
-#define CUDA_CHECK(call)                                                      \
-    do {                                                                       \
-        cudaError_t err = (call);                                              \
+#define CUDA_CHECK(call)                                                          \
+    do {                                                                          \
+        cudaError_t err = (call);                                                 \
         ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err); \
     } while (0)
 
@@ -39,8 +39,7 @@ std::vector<T> to_host(const T* dev, size_t count) {
 }
 
 // Build a contiguous 4-D Tensor descriptor on the device.
-Tensor make_device_tensor(void* dev_ptr, QType dtype,
-                          int64_t d0, int64_t d1, int64_t d2, int64_t d3) {
+Tensor make_device_tensor(void* dev_ptr, QType dtype, int64_t d0, int64_t d1, int64_t d2, int64_t d3) {
     int64_t shape[4] = {d0, d1, d2, d3};
     return Tensor(dev_ptr, dtype, 4, shape, /*on_device=*/true);
 }
@@ -48,12 +47,8 @@ Tensor make_device_tensor(void* dev_ptr, QType dtype,
 // ---------------------------------------------------------------------------
 // CPU reference for RoPE (operates on FP32 arrays)
 // ---------------------------------------------------------------------------
-void cpu_rope(float* q, float* k,
-              const int* positions,
-              int batch, int seq_len,
-              int n_heads, int n_kv_heads,
-              int head_dim,
-              float theta, float scaling) {
+void cpu_rope(float* q, float* k, const int* positions, int batch, int seq_len, int n_heads, int n_kv_heads,
+              int head_dim, float theta, float scaling) {
     for (int b = 0; b < batch; b++) {
         for (int s = 0; s < seq_len; s++) {
             int pos = positions[b * seq_len + s];
@@ -67,7 +62,7 @@ void cpu_rope(float* q, float* k,
                     float sin_a = sinf(angle);
                     float q0 = qh[2 * i];
                     float q1 = qh[2 * i + 1];
-                    qh[2 * i]     = q0 * cos_a - q1 * sin_a;
+                    qh[2 * i] = q0 * cos_a - q1 * sin_a;
                     qh[2 * i + 1] = q0 * sin_a + q1 * cos_a;
                 }
             }
@@ -81,7 +76,7 @@ void cpu_rope(float* q, float* k,
                     float sin_a = sinf(angle);
                     float k0 = kh[2 * i];
                     float k1 = kh[2 * i + 1];
-                    kh[2 * i]     = k0 * cos_a - k1 * sin_a;
+                    kh[2 * i] = k0 * cos_a - k1 * sin_a;
                     kh[2 * i + 1] = k0 * sin_a + k1 * cos_a;
                 }
             }
@@ -105,12 +100,12 @@ void fill_linear(std::vector<float>& v) {
 //   Verify GPU output matches CPU reference within FP32 tolerance.
 // =========================================================================
 TEST(RoPETest, RopeBasicFP32) {
-    const int batch    = 1;
-    const int seq_len  = 2;
-    const int n_heads  = 2;
+    const int batch = 1;
+    const int seq_len = 2;
+    const int n_heads = 2;
     const int n_kv_heads = 2;
     const int head_dim = 4;
-    const float theta  = 10000.0f;
+    const float theta = 10000.0f;
     const float scaling = 1.0f;
 
     const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
@@ -126,13 +121,13 @@ TEST(RoPETest, RopeBasicFP32) {
 
     // CPU reference
     std::vector<float> q_ref(q_host), k_ref(k_host);
-    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(),
-             batch, seq_len, n_heads, n_kv_heads, head_dim, theta, scaling);
+    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(), batch, seq_len, n_heads, n_kv_heads, head_dim,
+             theta, scaling);
 
     // Upload to GPU
     float* q_dev = to_device(q_host.data(), q_count);
     float* k_dev = to_device(k_host.data(), k_count);
-    int*  pos_dev = to_device(pos_host.data(), pos_host.size());
+    int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
@@ -147,12 +142,10 @@ TEST(RoPETest, RopeBasicFP32) {
     // Compare
     const float tol = 1e-4f;
     for (int64_t i = 0; i < q_count; i++) {
-        EXPECT_NEAR(q_out[i], q_ref[i], tol)
-            << "Q mismatch at index " << i;
+        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q mismatch at index " << i;
     }
     for (int64_t i = 0; i < k_count; i++) {
-        EXPECT_NEAR(k_out[i], k_ref[i], tol)
-            << "K mismatch at index " << i;
+        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K mismatch at index " << i;
     }
 
     cudaFree(q_dev);
@@ -165,12 +158,12 @@ TEST(RoPETest, RopeBasicFP32) {
 //   Same small shape but FP16.  Tolerance 1e-2.
 // =========================================================================
 TEST(RoPETest, RopeBasicFP16) {
-    const int batch    = 1;
-    const int seq_len  = 2;
-    const int n_heads  = 2;
+    const int batch = 1;
+    const int seq_len = 2;
+    const int n_heads = 2;
     const int n_kv_heads = 2;
     const int head_dim = 4;
-    const float theta  = 10000.0f;
+    const float theta = 10000.0f;
     const float scaling = 1.0f;
 
     const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
@@ -183,22 +176,26 @@ TEST(RoPETest, RopeBasicFP16) {
 
     // Convert to half on host
     std::vector<__half> q_half(q_count), k_half(k_count);
-    for (int64_t i = 0; i < q_count; i++) q_half[i] = __float2half(q_fp32[i]);
-    for (int64_t i = 0; i < k_count; i++) k_half[i] = __float2half(k_fp32[i]);
+    for (int64_t i = 0; i < q_count; i++)
+        q_half[i] = __float2half(q_fp32[i]);
+    for (int64_t i = 0; i < k_count; i++)
+        k_half[i] = __float2half(k_fp32[i]);
 
     // For the CPU reference, use the FP16-rounded values so we compare apples to apples
     std::vector<float> q_ref(q_count), k_ref(k_count);
-    for (int64_t i = 0; i < q_count; i++) q_ref[i] = __half2float(q_half[i]);
-    for (int64_t i = 0; i < k_count; i++) k_ref[i] = __half2float(k_half[i]);
+    for (int64_t i = 0; i < q_count; i++)
+        q_ref[i] = __half2float(q_half[i]);
+    for (int64_t i = 0; i < k_count; i++)
+        k_ref[i] = __half2float(k_half[i]);
 
     std::vector<int> pos_host = {0, 5};
-    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(),
-             batch, seq_len, n_heads, n_kv_heads, head_dim, theta, scaling);
+    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(), batch, seq_len, n_heads, n_kv_heads, head_dim,
+             theta, scaling);
 
     // Upload FP16 data to GPU
     __half* q_dev = to_device(q_half.data(), q_count);
     __half* k_dev = to_device(k_half.data(), k_count);
-    int*  pos_dev = to_device(pos_host.data(), pos_host.size());
+    int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
     Tensor Q = make_device_tensor(q_dev, QType::F16, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F16, batch, seq_len, n_kv_heads, head_dim);
@@ -213,13 +210,11 @@ TEST(RoPETest, RopeBasicFP16) {
     const float tol = 1e-2f;
     for (int64_t i = 0; i < q_count; i++) {
         float val = __half2float(q_half_out[i]);
-        EXPECT_NEAR(val, q_ref[i], tol)
-            << "Q FP16 mismatch at index " << i;
+        EXPECT_NEAR(val, q_ref[i], tol) << "Q FP16 mismatch at index " << i;
     }
     for (int64_t i = 0; i < k_count; i++) {
         float val = __half2float(k_half_out[i]);
-        EXPECT_NEAR(val, k_ref[i], tol)
-            << "K FP16 mismatch at index " << i;
+        EXPECT_NEAR(val, k_ref[i], tol) << "K FP16 mismatch at index " << i;
     }
 
     cudaFree(q_dev);
@@ -234,9 +229,9 @@ TEST(RoPETest, RopeBasicFP16) {
 //   Verify that the output equals the input exactly.
 // =========================================================================
 TEST(RoPETest, RopePositionInvariance) {
-    const int batch    = 2;
-    const int seq_len  = 3;
-    const int n_heads  = 4;
+    const int batch = 2;
+    const int seq_len = 3;
+    const int n_heads = 4;
     const int n_kv_heads = 4;
     const int head_dim = 8;
 
@@ -270,12 +265,10 @@ TEST(RoPETest, RopePositionInvariance) {
     // With position 0, output must equal input (identity rotation)
     const float tol = 1e-5f;
     for (int64_t i = 0; i < q_count; i++) {
-        EXPECT_NEAR(q_out[i], q_orig[i], tol)
-            << "Q position-0 invariance broken at index " << i;
+        EXPECT_NEAR(q_out[i], q_orig[i], tol) << "Q position-0 invariance broken at index " << i;
     }
     for (int64_t i = 0; i < k_count; i++) {
-        EXPECT_NEAR(k_out[i], k_orig[i], tol)
-            << "K position-0 invariance broken at index " << i;
+        EXPECT_NEAR(k_out[i], k_orig[i], tol) << "K position-0 invariance broken at index " << i;
     }
 
     cudaFree(q_dev);
@@ -290,9 +283,9 @@ TEST(RoPETest, RopePositionInvariance) {
 //   the outputs differ.
 // =========================================================================
 TEST(RoPETest, RopeThetaScaling) {
-    const int batch    = 1;
-    const int seq_len  = 2;
-    const int n_heads  = 2;
+    const int batch = 1;
+    const int seq_len = 2;
+    const int n_heads = 2;
     const int n_kv_heads = 2;
     const int head_dim = 8;
 
@@ -344,10 +337,8 @@ TEST(RoPETest, RopeThetaScaling) {
         max_k_diff = std::max(max_k_diff, std::fabs(k_out1[i] - k_out2[i]));
     }
 
-    EXPECT_GT(max_q_diff, 1e-4f)
-        << "Q outputs should differ for different theta values";
-    EXPECT_GT(max_k_diff, 1e-4f)
-        << "K outputs should differ for different theta values";
+    EXPECT_GT(max_q_diff, 1e-4f) << "Q outputs should differ for different theta values";
+    EXPECT_GT(max_k_diff, 1e-4f) << "K outputs should differ for different theta values";
 
     cudaFree(q_dev1);
     cudaFree(k_dev1);
@@ -362,12 +353,12 @@ TEST(RoPETest, RopeThetaScaling) {
 //   many rotation pairs (64 threads).  Verify against CPU reference.
 // =========================================================================
 TEST(RoPETest, RopeLargerDim) {
-    const int batch    = 2;
-    const int seq_len  = 4;
-    const int n_heads  = 8;
-    const int n_kv_heads = 2;   // GQA-style: fewer KV heads
+    const int batch = 2;
+    const int seq_len = 4;
+    const int n_heads = 8;
+    const int n_kv_heads = 2;  // GQA-style: fewer KV heads
     const int head_dim = 128;
-    const float theta  = 10000.0f;
+    const float theta = 10000.0f;
     const float scaling = 1.0f;
 
     const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
@@ -378,17 +369,17 @@ TEST(RoPETest, RopeLargerDim) {
     fill_linear(k_host);
 
     // Diverse positions across two batches of 4 tokens each
-    std::vector<int> pos_host = {0, 1, 2, 3,   10, 20, 30, 40};
+    std::vector<int> pos_host = {0, 1, 2, 3, 10, 20, 30, 40};
 
     // CPU reference
     std::vector<float> q_ref(q_host), k_ref(k_host);
-    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(),
-             batch, seq_len, n_heads, n_kv_heads, head_dim, theta, scaling);
+    cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(), batch, seq_len, n_heads, n_kv_heads, head_dim,
+             theta, scaling);
 
     // GPU
     float* q_dev = to_device(q_host.data(), q_count);
     float* k_dev = to_device(k_host.data(), k_count);
-    int*  pos_dev = to_device(pos_host.data(), pos_host.size());
+    int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
@@ -404,12 +395,10 @@ TEST(RoPETest, RopeLargerDim) {
     // slightly for larger positions and higher-frequency pairs.
     const float tol = 5e-4f;
     for (int64_t i = 0; i < q_count; i++) {
-        EXPECT_NEAR(q_out[i], q_ref[i], tol)
-            << "Q large-dim mismatch at index " << i;
+        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q large-dim mismatch at index " << i;
     }
     for (int64_t i = 0; i < k_count; i++) {
-        EXPECT_NEAR(k_out[i], k_ref[i], tol)
-            << "K large-dim mismatch at index " << i;
+        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K large-dim mismatch at index " << i;
     }
 
     cudaFree(q_dev);
@@ -423,14 +412,14 @@ TEST(RoPETest, RopeLargerDim) {
 //   The remaining (head_dim - rope_dim) dimensions must stay unchanged.
 // =========================================================================
 TEST(RoPETest, PartialRoPE) {
-    const int batch      = 1;
-    const int seq_len    = 2;
-    const int n_heads    = 2;
+    const int batch = 1;
+    const int seq_len = 2;
+    const int n_heads = 2;
     const int n_kv_heads = 2;
-    const int head_dim   = 256;
-    const int rope_dim   = 64;
-    const float theta    = 10000.0f;
-    const float scaling  = 1.0f;
+    const int head_dim = 256;
+    const int rope_dim = 64;
+    const float theta = 10000.0f;
+    const float scaling = 1.0f;
 
     const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
     const int64_t k_count = (int64_t)batch * seq_len * n_kv_heads * head_dim;
@@ -457,7 +446,7 @@ TEST(RoPETest, PartialRoPE) {
                     float angle = pos * freq;
                     float c = cosf(angle), sn = sinf(angle);
                     float q0 = qh[2 * i], q1 = qh[2 * i + 1];
-                    qh[2 * i]     = q0 * c - q1 * sn;
+                    qh[2 * i] = q0 * c - q1 * sn;
                     qh[2 * i + 1] = q0 * sn + q1 * c;
                 }
             }
@@ -468,7 +457,7 @@ TEST(RoPETest, PartialRoPE) {
                     float angle = pos * freq;
                     float c = cosf(angle), sn = sinf(angle);
                     float k0 = kh[2 * i], k1 = kh[2 * i + 1];
-                    kh[2 * i]     = k0 * c - k1 * sn;
+                    kh[2 * i] = k0 * c - k1 * sn;
                     kh[2 * i + 1] = k0 * sn + k1 * c;
                 }
             }
@@ -476,9 +465,9 @@ TEST(RoPETest, PartialRoPE) {
     }
 
     // Upload to GPU
-    float* q_dev  = to_device(q_host.data(), q_count);
-    float* k_dev  = to_device(k_host.data(), k_count);
-    int*  pos_dev = to_device(pos_host.data(), pos_host.size());
+    float* q_dev = to_device(q_host.data(), q_count);
+    float* k_dev = to_device(k_host.data(), k_count);
+    int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
     Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
     Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
@@ -493,12 +482,10 @@ TEST(RoPETest, PartialRoPE) {
 
     // Verify rotated portion matches CPU reference
     for (int64_t i = 0; i < q_count; i++) {
-        EXPECT_NEAR(q_out[i], q_ref[i], tol)
-            << "Q partial RoPE mismatch at index " << i;
+        EXPECT_NEAR(q_out[i], q_ref[i], tol) << "Q partial RoPE mismatch at index " << i;
     }
     for (int64_t i = 0; i < k_count; i++) {
-        EXPECT_NEAR(k_out[i], k_ref[i], tol)
-            << "K partial RoPE mismatch at index " << i;
+        EXPECT_NEAR(k_out[i], k_ref[i], tol) << "K partial RoPE mismatch at index " << i;
     }
 
     // Verify unrotated portion (dims >= rope_dim) is unchanged
@@ -526,5 +513,5 @@ TEST(RoPETest, PartialRoPE) {
     cudaFree(pos_dev);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

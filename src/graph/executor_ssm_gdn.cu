@@ -19,12 +19,8 @@ namespace imp {
 // Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
 // precision through the residual add so downstream RMSNorm sees bit-accurate
 // inputs (fixes Qwen 3.6 sign flips). Used when IMP_GDN_FP32_OUT=1.
-__global__ void fp32_plus_fp16_to_fp16(
-    const float* __restrict__ a_fp32,
-    const __half* __restrict__ b_fp16,
-    __half* __restrict__ out_fp16,
-    int64_t n)
-{
+__global__ void fp32_plus_fp16_to_fp16(const float* __restrict__ a_fp32, const __half* __restrict__ b_fp16,
+                                       __half* __restrict__ out_fp16, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         float v = a_fp32[idx] + __half2float(b_fp16[idx]);
@@ -41,13 +37,12 @@ static inline int get_ssm_layer(const std::vector<int>& ssm_layer_map, int layer
 // SSM (Mamba2) sub-pass for one layer
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::run_ssm(int layer, const InferenceState& state,
-                            cudaStream_t stream) {
+void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t stream) {
     // Configure shared workspace for SSM phase
     configure_ssm_workspace(shared_workspace_max_tokens_);
 
     const auto& cfg = model_->config();
-    const auto& ly  = model_->layer(layer);
+    const auto& ly = model_->layer(layer);
     int n = state.n_tokens;
     float eps = cfg.rms_norm_eps;
     int inner = cfg.ssm_inner_size;
@@ -58,13 +53,12 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = inner / n_heads;
 
-    Tensor h  = view_tokens(hidden_,   n);
-    Tensor r  = view_tokens(residual_, n);
+    Tensor h = view_tokens(hidden_, n);
+    Tensor r = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
 
     // 1. Save residual + RMSNorm
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(),
-                    cudaMemcpyDeviceToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
     // GemmContext for all weight GEMM dispatches in this function.
@@ -101,24 +95,21 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
         size_t src_pitch = static_cast<size_t>(total_dim) * es;
 
         z_buf = view_tokens(ssm_z_buf_, n);
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(z_buf.data, static_cast<size_t>(inner) * es,
-                          proj.data, src_pitch,
-                          static_cast<size_t>(inner) * es, n,
-                          cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(z_buf.data, static_cast<size_t>(inner) * es, proj.data,
+                                             src_pitch, static_cast<size_t>(inner) * es, n,
+                                             cudaMemcpyDeviceToDevice, stream));
 
         xBC_in = view_tokens(ssm_xBC_buf_, n);
         char* xBC_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner) * es;
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(xBC_in.data, static_cast<size_t>(conv_channels) * es,
-                          xBC_src, src_pitch,
-                          static_cast<size_t>(conv_channels) * es, n,
-                          cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(xBC_in.data, static_cast<size_t>(conv_channels) * es, xBC_src,
+                                             src_pitch, static_cast<size_t>(conv_channels) * es, n,
+                                             cudaMemcpyDeviceToDevice, stream));
 
         dt_buf = view_tokens(ssm_dt_buf_, n);
         char* dt_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner + conv_channels) * es;
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(dt_buf.data, static_cast<size_t>(n_heads) * es,
-                          dt_src, src_pitch,
-                          static_cast<size_t>(n_heads) * es, n,
-                          cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(dt_buf.data, static_cast<size_t>(n_heads) * es, dt_src,
+                                             src_pitch, static_cast<size_t>(n_heads) * es, n,
+                                             cudaMemcpyDeviceToDevice, stream));
     }
 
     // 4. Conv1d on xBC
@@ -129,17 +120,16 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     Tensor xBC_out(conv_out_ptr, compute_dtype_, 2, conv_out_shape, true);
 
     int ssm_idx = get_ssm_layer(ssm_layer_map_, layer);
-    void* conv_st = (state.ssm_state && ssm_idx >= 0)
-                    ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
-                    : nullptr;
+    void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
+                                                      : nullptr;
 
     if (conv_st) {
         if (state.is_prefill) {
-            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                               xBC_out, conv_kernel, stream);
+            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
+                               stream);
         } else {
-            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                              xBC_out, conv_kernel, stream);
+            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
+                              stream);
         }
     }
 
@@ -152,9 +142,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     int BC_size = n_groups * ssize;
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
-    void* h_st = (state.ssm_state && ssm_idx >= 0)
-                 ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
-                 : nullptr;
+    void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
+                                                   : nullptr;
 
     if (h_st) {
         // xBC_out layout: [n, conv_channels] where each row = [x(inner) | B(BC_size) | C(BC_size)]
@@ -186,10 +175,9 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
             int64_t y_shape[1] = {static_cast<int64_t>(inner)};
             Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
 
-            ssm_scan_decode(x_t, B_t, C_t, dt_t,
-                            ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
-                            y_t, static_cast<const half*>(z_buf.data),
-                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            ssm_scan_decode(x_t, B_t, C_t, dt_t, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_t,
+                            static_cast<const half*>(z_buf.data), n_heads, head_dim_ssm, ssize, n_groups,
+                            h_dtype, stream);
         } else {
             // Prefill: de-interleave x, B, C from xBC_out [n, conv_channels]
             // into contiguous buffers, then single fused kernel launch.
@@ -204,26 +192,26 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
             // x: extract [n, inner] from xBC_out with src_pitch=conv_channels*es
             char* x_contig = static_cast<char*>(y_buf.data);  // temp, overwritten by scan
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(x_contig, static_cast<size_t>(inner) * es,
-                              xBC_out.data, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(inner) * es, n,
-                              cudaMemcpyDeviceToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(x_contig, static_cast<size_t>(inner) * es, xBC_out.data,
+                                                 static_cast<size_t>(conv_channels) * es,
+                                                 static_cast<size_t>(inner) * es, n, cudaMemcpyDeviceToDevice,
+                                                 stream));
 
             // B: extract [n, BC_size] from offset inner in xBC_out
             char* B_contig = static_cast<char*>(xBC_in.data);  // conv1d done, safe to reuse
             char* B_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner) * es;
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(B_contig, static_cast<size_t>(BC_size) * es,
-                              B_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(B_contig, static_cast<size_t>(BC_size) * es, B_src,
+                                                 static_cast<size_t>(conv_channels) * es,
+                                                 static_cast<size_t>(BC_size) * es, n,
+                                                 cudaMemcpyDeviceToDevice, stream));
 
             // C: extract [n, BC_size] from offset inner+BC_size in xBC_out
             char* C_contig = B_contig + static_cast<size_t>(n) * BC_size * es;
             char* C_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner + BC_size) * es;
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(C_contig, static_cast<size_t>(BC_size) * es,
-                              C_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(C_contig, static_cast<size_t>(BC_size) * es, C_src,
+                                                 static_cast<size_t>(conv_channels) * es,
+                                                 static_cast<size_t>(BC_size) * es, n,
+                                                 cudaMemcpyDeviceToDevice, stream));
 
             // Build tensors for the fused scan
             int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
@@ -239,10 +227,9 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
             // Output goes into y_buf (overwrites x_contig which was temporary)
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
 
-            ssm_scan_prefill(x_all, B_all, C_all, dt_all,
-                             ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
-                             y_all, static_cast<const half*>(z_buf.data),
-                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
+                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
+                             h_dtype, stream);
         }
     }
 
@@ -257,9 +244,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
-                    cudaMemcpyDeviceToDevice, stream));
-
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
 }
 
 // ---------------------------------------------------------------------------
@@ -269,12 +254,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 //           → gate(SiLU) → group_norm → ssm_out → residual
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::run_gdn(int layer, const InferenceState& state,
-                            cudaStream_t stream) {
+void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(shared_workspace_max_tokens_);
 
     const auto& cfg = model_->config();
-    const auto& ly  = model_->layer(layer);
+    const auto& ly = model_->layer(layer);
     int n = cur_n_tokens_;
     float eps = cfg.rms_norm_eps;
     int inner = cfg.ssm_inner_size;
@@ -287,13 +271,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
 
-    Tensor h  = view_tokens(hidden_,   n);
-    Tensor r  = view_tokens(residual_, n);
+    Tensor h = view_tokens(hidden_, n);
+    Tensor r = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
 
     // 1. Save residual + RMSNorm
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(),
-                    cudaMemcpyDeviceToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
     // 2. ssm_in (attn_qkv) projection → [n, conv_channels]
@@ -310,9 +293,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     Tensor xBC_out(ssm_xBC_buf_.data, compute_dtype_, 2, conv_shape, true);
 
     int ssm_idx = get_ssm_layer(ssm_layer_map_, layer);
-    void* conv_st = (state.ssm_state && ssm_idx >= 0)
-                    ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
-                    : nullptr;
+    void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
+                                                      : nullptr;
 
     // conv_f32 destination for FP32 pipeline (conv+SiLU output)
     float* conv_f32 = static_cast<float*>(ssm_proj_buf_.data);
@@ -321,32 +303,35 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         if (state.is_prefill) {
             // Fused: conv1d + SiLU + FP32 output in one kernel (saves 2 launches).
             // Copy FP16 input to xBC_out first to avoid aliasing (conv_f32 = ssm_proj_buf_ = xBC_in).
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                            static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
-                            cudaMemcpyDeviceToDevice, stream));
-            ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                                         conv_f32, conv_kernel, stream);
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                                static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
+                                cudaMemcpyDeviceToDevice, stream));
+            ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
+                                        conv_kernel, stream);
         } else {
             // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
             // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
             // writes FP32 back into ssm_proj_buf_ which overlaps xBC_in.
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                            static_cast<size_t>(conv_channels) * dtype_size(compute_dtype_),
-                            cudaMemcpyDeviceToDevice, stream));
-            ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                                       conv_f32, conv_kernel, stream);
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                                static_cast<size_t>(conv_channels) * dtype_size(compute_dtype_),
+                                cudaMemcpyDeviceToDevice, stream));
+            ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
+                                       conv_kernel, stream);
         }
     } else {
         // Fallback: copy input to output + SiLU + FP32 conversion
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                        static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
-                        cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                            static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
+                            cudaMemcpyDeviceToDevice, stream));
         silu_inplace(xBC_out, stream);
         int64_t total = static_cast<int64_t>(n) * conv_channels;
         int threads = 256;
         int blocks = static_cast<int>((total + threads - 1) / threads);
-        fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<const half*>(xBC_out.data), conv_f32, total);
+        fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(xBC_out.data), conv_f32,
+                                                            total);
     }
 
     // Per-element dump: post-conv1d post-SiLU FP32 scan input.
@@ -366,36 +351,35 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     const bool vhead_reorder = RuntimeConfig::current().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
         const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
-        const int BC_size_vh = n_groups * ssize;      // Q/K per-group size = 16 * 128 = 2048
+        const int BC_size_vh = n_groups * ssize;     // Q/K per-group size = 16 * 128 = 2048
         // Scratch buffers at tail of ssm_proj_buf_ (FP32, max_tokens * ssm_in_dim floats).
         // ssm_proj_buf_ already contains conv_f32 (n * conv_channels floats) at the head;
         // reserve two scratch regions past that.
-        float* v_scratch_tiled   = conv_f32 + static_cast<size_t>(n) * conv_channels;
+        float* v_scratch_tiled = conv_f32 + static_cast<size_t>(n) * conv_channels;
         float* v_scratch_grouped = v_scratch_tiled + static_cast<size_t>(n) * inner_v;
 
         // Gather V slice from strided conv_f32 into contiguous [n, n_heads, head_dim_ssm].
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
-            v_scratch_tiled, static_cast<size_t>(inner_v) * sizeof(float),
-            conv_f32 + 2 * BC_size_vh, static_cast<size_t>(conv_channels) * sizeof(float),
-            static_cast<size_t>(inner_v) * sizeof(float), n,
-            cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(v_scratch_tiled, static_cast<size_t>(inner_v) * sizeof(float),
+                                             conv_f32 + 2 * BC_size_vh,
+                                             static_cast<size_t>(conv_channels) * sizeof(float),
+                                             static_cast<size_t>(inner_v) * sizeof(float), n,
+                                             cudaMemcpyDeviceToDevice, stream));
         // Tiled → grouped reorder.
-        vhead_tiled_to_grouped_f32(v_scratch_tiled, v_scratch_grouped,
-                                    n, n_heads, head_dim_ssm, n_groups, stream);
+        vhead_tiled_to_grouped_f32(v_scratch_tiled, v_scratch_grouped, n, n_heads, head_dim_ssm, n_groups,
+                                   stream);
         // Scatter reordered V back into conv_f32 V slice.
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
-            conv_f32 + 2 * BC_size_vh, static_cast<size_t>(conv_channels) * sizeof(float),
-            v_scratch_grouped, static_cast<size_t>(inner_v) * sizeof(float),
-            static_cast<size_t>(inner_v) * sizeof(float), n,
-            cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(conv_f32 + 2 * BC_size_vh,
+                                             static_cast<size_t>(conv_channels) * sizeof(float),
+                                             v_scratch_grouped, static_cast<size_t>(inner_v) * sizeof(float),
+                                             static_cast<size_t>(inner_v) * sizeof(float), n,
+                                             cudaMemcpyDeviceToDevice, stream));
     }
 
     // 5. Run delta rule scan
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
-    void* h_st = (state.ssm_state && ssm_idx >= 0)
-                 ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
-                 : nullptr;
+    void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
+                                                   : nullptr;
 
     // Gate projection — computed before scan, used after in RMSNormGated
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
@@ -424,7 +408,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
             dump_tensor_npy("gdn_alpha", alpha_proj_out, stream, layer, cur_decode_step_);
-            dump_tensor_npy("gdn_beta",  beta_proj_out,  stream, layer, cur_decode_step_);
+            dump_tensor_npy("gdn_beta", beta_proj_out, stream, layer, cur_decode_step_);
         }
 
         // 5b. Multi-token delta rule scan.
@@ -448,51 +432,44 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
             float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_fused_fp32out(conv_f32, conv_channels,
-                                static_cast<const half*>(alpha_proj_out.data),
-                                static_cast<const half*>(beta_proj_out.data),
-                                static_cast<const float*>(ly.ssm_a.data),
-                                static_cast<const float*>(ly.ssm_dt_b.data),
-                                static_cast<float*>(h_st),
-                                y_fp32,
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+            gdn_scan_fused_fp32out(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                                   static_cast<const half*>(beta_proj_out.data),
+                                   static_cast<const float*>(ly.ssm_a.data),
+                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                                   y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
             // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
             // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional
             // — the !use_fp32_out path of ssm_out reads y_buf as FP16 input. The
             // older code gated this on debug_forward_enabled() which left y_buf
             // uninitialized in production runs (= ssm_out fed zeros) and only
             // appeared coherent under IMP_DEBUG_FORWARD=1.
-            gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32,
-                                              static_cast<const half*>(gate_out.data),
-                                              static_cast<const half*>(ly.ssm_norm_w.data),
-                                              eps, n, n_heads, head_dim_ssm, stream);
+            gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32, static_cast<const half*>(gate_out.data),
+                                             static_cast<const half*>(ly.ssm_norm_w.data), eps, n, n_heads,
+                                             head_dim_ssm, stream);
             {
                 int64_t total = static_cast<int64_t>(n) * n_heads * head_dim_ssm;
                 int threads_ = 256;
                 int blocks_ = static_cast<int>((total + threads_ - 1) / threads_);
-                fp32_to_fp16_kernel<<<blocks_, threads_, 0, stream>>>(
-                    y_fp32_postnorm, static_cast<__half*>(y_buf.data), total);
+                fp32_to_fp16_kernel<<<blocks_, threads_, 0, stream>>>(y_fp32_postnorm,
+                                                                      static_cast<__half*>(y_buf.data),
+                                                                      total);
             }
         } else if (use_ref) {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_reference_f32(conv_f32, conv_channels,
-                                static_cast<const half*>(alpha_proj_out.data),
-                                static_cast<const half*>(beta_proj_out.data),
-                                static_cast<const float*>(ly.ssm_a.data),
-                                static_cast<const float*>(ly.ssm_dt_b.data),
-                                static_cast<float*>(h_st),
-                                static_cast<half*>(y_buf.data),
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+            gdn_scan_reference_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                                   static_cast<const half*>(beta_proj_out.data),
+                                   static_cast<const float*>(ly.ssm_a.data),
+                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                                   static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
+                                   stream, gl);
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_fused_f32(conv_f32, conv_channels,
-                                static_cast<const half*>(alpha_proj_out.data),
-                                static_cast<const half*>(beta_proj_out.data),
-                                static_cast<const float*>(ly.ssm_a.data),
-                                static_cast<const float*>(ly.ssm_dt_b.data),
-                                static_cast<float*>(h_st),
-                                static_cast<half*>(y_buf.data),
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+            gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                               static_cast<const half*>(beta_proj_out.data),
+                               static_cast<const float*>(ly.ssm_a.data),
+                               static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                               static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
+                               stream, gl);
         }
     }
 
@@ -517,10 +494,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         norm_eps = RuntimeConfig::current().gdn.norm_eps_override;
     }
     if (!use_fp32_scan) {
-        gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
-                                static_cast<const half*>(gate_out.data),
-                                static_cast<const half*>(ly.ssm_norm_w.data),
-                                norm_eps, n, n_heads, head_dim_ssm, stream);
+        gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data), static_cast<const half*>(gate_out.data),
+                               static_cast<const half*>(ly.ssm_norm_w.data), norm_eps, n, n_heads,
+                               head_dim_ssm, stream);
     }
 
     // Per-element dump: post-rmsnorm-gated scan output (FP16), pre-ssm_out GEMM.
@@ -553,10 +529,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
         int threads = 256;
         int blocks = static_cast<int>((total + threads - 1) / threads);
-        fp32_plus_fp16_to_fp16<<<blocks, threads, 0, stream>>>(
-            static_cast<const float*>(fp32_out),
-            static_cast<const __half*>(r.data),
-            static_cast<__half*>(h.data), total);
+        fp32_plus_fp16_to_fp16<<<blocks, threads, 0, stream>>>(static_cast<const float*>(fp32_out),
+                                                               static_cast<const __half*>(r.data),
+                                                               static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
         gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
@@ -564,10 +539,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
         dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);
         elementwise_add(out_buf, r, stream);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
-                        cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     }
-
 }
 
-} // namespace imp
+}  // namespace imp

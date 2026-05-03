@@ -23,8 +23,7 @@ void silu_inplace(Tensor& x, cudaStream_t stream) {
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (x.qtype == QType::F16) {
-        silu_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(x.data), n);
+        silu_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(x.data), n);
     }
 }
 
@@ -47,8 +46,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (x.qtype == QType::F16) {
-        relu_sqr_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(x.data), n);
+        relu_sqr_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(x.data), n);
     }
 }
 
@@ -57,10 +55,8 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
 // ---------------------------------------------------------------------------
 // Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
 // Used by Qwen3.5 attention output gate.
-__global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a,
-                                         const half* __restrict__ b,
-                                         half* __restrict__ out,
-                                         int64_t n) {
+__global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
+                                        half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val_a = __half2float(a[idx]);
@@ -70,40 +66,34 @@ __global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a,
     }
 }
 
-void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out,
-                 cudaStream_t stream) {
+void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream) {
     int64_t n = a.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (a.qtype == QType::F16) {
-        sigmoid_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<const half*>(a.data),
-            static_cast<const half*>(b.data),
-            static_cast<half*>(out.data), n);
+        sigmoid_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(a.data),
+                                                                static_cast<const half*>(b.data),
+                                                                static_cast<half*>(out.data), n);
     }
 }
 
 // ---------------------------------------------------------------------------
-__global__ void elementwise_mul_fp16_kernel(const half* __restrict__ a,
-                                             const half* __restrict__ b,
-                                             half* __restrict__ out,
-                                             int64_t n) {
+__global__ void elementwise_mul_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
+                                            half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         out[idx] = __float2half(__half2float(a[idx]) * __half2float(b[idx]));
     }
 }
 
-void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out,
-                     cudaStream_t stream) {
+void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream) {
     int64_t n = a.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (a.qtype == QType::F16) {
-        elementwise_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<const half*>(a.data),
-            static_cast<const half*>(b.data),
-            static_cast<half*>(out.data), n);
+        elementwise_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(a.data),
+                                                                    static_cast<const half*>(b.data),
+                                                                    static_cast<half*>(out.data), n);
     }
 }
 
@@ -114,15 +104,15 @@ void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out,
 // Each thread handles one channel.
 // Shift the conv_state window left by 1, insert new value, compute dot product.
 __global__ void ssm_conv1d_decode_kernel(
-    float* __restrict__ conv_state,       // [channels, kernel_size]
-    const half* __restrict__ x_in,        // [channels]
-    const half* __restrict__ weight,      // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
-    const half* __restrict__ bias,        // [channels] or nullptr
-    half* __restrict__ x_out,             // [channels]
-    int channels, int kernel_size)
-{
+    float* __restrict__ conv_state,   // [channels, kernel_size]
+    const half* __restrict__ x_in,    // [channels]
+    const half* __restrict__ weight,  // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
+    const half* __restrict__ bias,    // [channels] or nullptr
+    half* __restrict__ x_out,         // [channels]
+    int channels, int kernel_size) {
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ch >= channels) return;
+    if (ch >= channels)
+        return;
 
     float* state = conv_state + ch * kernel_size;
 
@@ -149,15 +139,15 @@ __global__ void ssm_conv1d_decode_kernel(
 // FP32-output conv1d decode: reads FP16 input, produces FP32 output with fused SiLU.
 // Used by GDN layers for full FP32 pipeline (matching llama.cpp precision).
 __global__ void ssm_conv1d_decode_f32_silu_kernel(
-    float* __restrict__ conv_state,       // [channels, kernel_size]
-    const half* __restrict__ x_in,        // [channels] FP16
-    const half* __restrict__ weight,      // [channels, kernel_size] FP16
-    const half* __restrict__ bias,        // [channels] or nullptr
-    float* __restrict__ x_out,            // [channels] FP32
-    int channels, int kernel_size)
-{
+    float* __restrict__ conv_state,   // [channels, kernel_size]
+    const half* __restrict__ x_in,    // [channels] FP16
+    const half* __restrict__ weight,  // [channels, kernel_size] FP16
+    const half* __restrict__ bias,    // [channels] or nullptr
+    float* __restrict__ x_out,        // [channels] FP32
+    int channels, int kernel_size) {
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ch >= channels) return;
+    if (ch >= channels)
+        return;
 
     float* state = conv_state + ch * kernel_size;
     for (int k = 0; k < kernel_size - 1; k++)
@@ -174,36 +164,27 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     x_out[ch] = sum / (1.0f + expf(-sum));
 }
 
-void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in,
-                                 const Tensor& weight, const Tensor& bias,
-                                 float* x_out_f32, int conv_kernel,
-                                 cudaStream_t stream) {
+void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
+                                const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream) {
     int channels = static_cast<int>(x_in.shape[x_in.ndim - 1]);
     int threads = 256;
     int blocks = (channels + threads - 1) / threads;
     ssm_conv1d_decode_f32_silu_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<float*>(conv_state),
-        static_cast<const half*>(x_in.data),
-        static_cast<const half*>(weight.data),
-        bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, channels, conv_kernel);
 }
 
-void ssm_conv1d_decode(void* conv_state, const Tensor& x_in,
-                       const Tensor& weight, const Tensor& bias,
-                       Tensor& x_out, int conv_kernel,
-                       cudaStream_t stream) {
+void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
+                       Tensor& x_out, int conv_kernel, cudaStream_t stream) {
     int channels = static_cast<int>(x_in.shape[x_in.ndim - 1]);
     int threads = 256;
     int blocks = (channels + threads - 1) / threads;
 
     ssm_conv1d_decode_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<float*>(conv_state),
-        static_cast<const half*>(x_in.data),
-        static_cast<const half*>(weight.data),
-        bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        static_cast<half*>(x_out.data),
-        channels, conv_kernel);
+        static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        static_cast<half*>(x_out.data), channels, conv_kernel);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,15 +194,15 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in,
 // Grid: (n_tokens), Block: 256
 // Each block handles all channels for one token using a loop.
 __global__ void ssm_conv1d_prefill_kernel(
-    float* __restrict__ conv_state,       // [channels, kernel_size] — updated with last K values
-    const half* __restrict__ x_in,        // [n_tokens, channels]
-    const half* __restrict__ weight,      // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
-    const half* __restrict__ bias,        // [channels] or nullptr
-    half* __restrict__ x_out,             // [n_tokens, channels]
-    int n_tokens, int channels, int kernel_size)
-{
+    float* __restrict__ conv_state,   // [channels, kernel_size] — updated with last K values
+    const half* __restrict__ x_in,    // [n_tokens, channels]
+    const half* __restrict__ weight,  // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
+    const half* __restrict__ bias,    // [channels] or nullptr
+    half* __restrict__ x_out,         // [n_tokens, channels]
+    int n_tokens, int channels, int kernel_size) {
     int token = blockIdx.x;
-    if (token >= n_tokens) return;
+    if (token >= n_tokens)
+        return;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -251,36 +232,30 @@ __global__ void ssm_conv1d_prefill_kernel(
     }
 }
 
-void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
-                        const Tensor& weight, const Tensor& bias,
-                        Tensor& x_out, int conv_kernel,
-                        cudaStream_t stream) {
+void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
+                        Tensor& x_out, int conv_kernel, cudaStream_t stream) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
 
     ssm_conv1d_prefill_kernel<<<n_tokens, 256, 0, stream>>>(
-        static_cast<float*>(conv_state),
-        static_cast<const half*>(x_in.data),
-        static_cast<const half*>(weight.data),
-        bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        static_cast<half*>(x_out.data),
-        n_tokens, channels, conv_kernel);
+        static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel);
 }
 
 // ---------------------------------------------------------------------------
 // Fused conv1d + SiLU + FP32 output for prefill.
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one.
 // ---------------------------------------------------------------------------
-__global__ void ssm_conv1d_prefill_f32_silu_kernel(
-    float* __restrict__ conv_state,
-    const half* __restrict__ x_in,
-    const half* __restrict__ weight,
-    const half* __restrict__ bias,
-    float* __restrict__ x_out_f32,
-    int n_tokens, int channels, int kernel_size)
-{
+__global__ void ssm_conv1d_prefill_f32_silu_kernel(float* __restrict__ conv_state,
+                                                   const half* __restrict__ x_in,
+                                                   const half* __restrict__ weight,
+                                                   const half* __restrict__ bias,
+                                                   float* __restrict__ x_out_f32, int n_tokens, int channels,
+                                                   int kernel_size) {
     int token = blockIdx.x;
-    if (token >= n_tokens) return;
+    if (token >= n_tokens)
+        return;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -294,14 +269,15 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
                 // conv_state instead of zero-padding.  conv_state[ch*K + s]
                 // holds the input at global position (chunk_offset - K + s).
                 int state_idx = src_t + kernel_size;  // maps to [1..K-1]
-                val = (state_idx >= 0 && state_idx < kernel_size)
-                    ? conv_state[ch * kernel_size + state_idx] : 0.0f;
+                val = (state_idx >= 0 && state_idx < kernel_size) ? conv_state[ch * kernel_size + state_idx]
+                                                                  : 0.0f;
             } else {
                 val = 0.0f;
             }
             sum += val * __half2float(weight[ch * kernel_size + k]);
         }
-        if (bias) sum += __half2float(bias[ch]);
+        if (bias)
+            sum += __half2float(bias[ch]);
 
         // Fused SiLU + FP32 output
         x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
@@ -317,17 +293,13 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     }
 }
 
-void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in,
-                                   const Tensor& weight, const Tensor& bias,
-                                   float* x_out_f32, int conv_kernel,
-                                   cudaStream_t stream) {
+void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
+                                 const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
     ssm_conv1d_prefill_f32_silu_kernel<<<n_tokens, 256, 0, stream>>>(
-        static_cast<float*>(conv_state),
-        static_cast<const half*>(x_in.data),
-        static_cast<const half*>(weight.data),
-        bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, n_tokens, channels, conv_kernel);
 }
 
@@ -360,21 +332,20 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in,
 //   FUSE_GATE: fuse y * SiLU(z) into output
 template <bool H_FP16, bool FUSE_GATE>
 __global__ void ssm_scan_kernel(
-    const half* __restrict__ x,          // [n_tokens, inner_size]
-    const half* __restrict__ B_in,       // [n_tokens, n_groups * state_size]
-    const half* __restrict__ C_in,       // [n_tokens, n_groups * state_size]
-    const half* __restrict__ dt_raw,     // [n_tokens, n_heads]
-    const float* __restrict__ A_log,     // [n_heads]
-    const float* __restrict__ D_skip,    // [n_heads]
-    const float* __restrict__ dt_bias,   // [n_heads]
-    void* __restrict__ h_state,          // [n_heads, state_size, head_dim_ssm] (transposed)
-    half* __restrict__ y,                // [n_tokens, inner_size]
-    const half* __restrict__ z,          // [n_tokens, inner_size] (gate, only if FUSE_GATE)
-    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-    int s_tiles)
-{
+    const half* __restrict__ x,         // [n_tokens, inner_size]
+    const half* __restrict__ B_in,      // [n_tokens, n_groups * state_size]
+    const half* __restrict__ C_in,      // [n_tokens, n_groups * state_size]
+    const half* __restrict__ dt_raw,    // [n_tokens, n_heads]
+    const float* __restrict__ A_log,    // [n_heads]
+    const float* __restrict__ D_skip,   // [n_heads]
+    const float* __restrict__ dt_bias,  // [n_heads]
+    void* __restrict__ h_state,         // [n_heads, state_size, head_dim_ssm] (transposed)
+    half* __restrict__ y,               // [n_tokens, inner_size]
+    const half* __restrict__ z,         // [n_tokens, inner_size] (gate, only if FUSE_GATE)
+    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles) {
     int h = blockIdx.x;
-    if (h >= n_heads) return;
+    if (h >= n_heads)
+        return;
 
     int heads_per_group = n_heads / n_groups;
     int g = h / heads_per_group;
@@ -390,7 +361,8 @@ __global__ void ssm_scan_kernel(
     int s_chunk = (state_size + s_tiles - 1) / s_tiles;
     int s_start = s_tid * s_chunk;
     int s_end = s_start + s_chunk;
-    if (s_end > state_size) s_end = state_size;
+    if (s_end > state_size)
+        s_end = state_size;
 
     // h_state transposed layout: [n_heads, state_size, head_dim_ssm]
     // For coalesced access: h_state[h, s, d] = base[h * S * hd + s * hd + d]
@@ -453,7 +425,8 @@ __global__ void ssm_scan_kernel(
                 y[t * inner_size + h * head_dim_ssm + d_tid] = __float2half(y_val);
             }
             // Barrier before next token iteration (all threads must finish writing smem)
-            if (n_tokens > 1) __syncthreads();
+            if (n_tokens > 1)
+                __syncthreads();
         } else {
             // s_tiles == 1: no reduction needed
             float y_val = y_partial + d_val * x_val;
@@ -467,18 +440,16 @@ __global__ void ssm_scan_kernel(
     }
 }
 
-static void ssm_scan_launch(const half* x, const half* B, const half* C,
-                             const half* dt, const float* A_log, const float* D,
-                             const float* dt_bias, void* h_state, half* y,
-                             const half* z,
-                             int n_tokens, int n_heads, int head_dim_ssm,
-                             int state_size, int n_groups, QType h_dtype,
-                             cudaStream_t stream) {
+static void ssm_scan_launch(const half* x, const half* B, const half* C, const half* dt, const float* A_log,
+                            const float* D, const float* dt_bias, void* h_state, half* y, const half* z,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            QType h_dtype, cudaStream_t stream) {
     // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
     int hd = std::max(head_dim_ssm, 1);
     int max_s_tiles = std::min(state_size, 1024 / hd);
     int s_tiles = 1;
-    while (s_tiles * 2 <= max_s_tiles) s_tiles *= 2;
+    while (s_tiles * 2 <= max_s_tiles)
+        s_tiles *= 2;
 
     int threads = hd * s_tiles;
     size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
@@ -486,60 +457,46 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C,
     bool fp16 = (h_dtype == QType::F16);
     bool fused = (z != nullptr);
 
-    #define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V) \
-        ssm_scan_kernel<H_FP16_V, FUSE_V><<<n_heads, threads, smem_bytes, stream>>>( \
-            x, B, C, dt, A_log, D, dt_bias, h_state, y, z, \
-            n_tokens, n_heads, head_dim_ssm, state_size, n_groups, s_tiles)
+#define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                                   \
+    ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                       \
+        <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z, n_tokens, \
+                                                   n_heads, head_dim_ssm, state_size, n_groups, s_tiles)
 
     if (fp16) {
-        if (fused) SSM_SCAN_LAUNCH(true, true);
-        else       SSM_SCAN_LAUNCH(true, false);
+        if (fused)
+            SSM_SCAN_LAUNCH(true, true);
+        else
+            SSM_SCAN_LAUNCH(true, false);
     } else {
-        if (fused) SSM_SCAN_LAUNCH(false, true);
-        else       SSM_SCAN_LAUNCH(false, false);
+        if (fused)
+            SSM_SCAN_LAUNCH(false, true);
+        else
+            SSM_SCAN_LAUNCH(false, false);
     }
-    #undef SSM_SCAN_LAUNCH
+#undef SSM_SCAN_LAUNCH
 }
 
-void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
-                     const Tensor& dt, const Tensor& A_log, const Tensor& D,
-                     const Tensor& dt_bias, void* h_state,
-                     Tensor& y, const void* z,
-                     int n_heads, int head_dim_ssm,
-                     int state_size, int n_groups,
-                     QType h_dtype,
+void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt, const Tensor& A_log,
+                     const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y, const void* z,
+                     int n_heads, int head_dim_ssm, int state_size, int n_groups, QType h_dtype,
                      cudaStream_t stream) {
-    ssm_scan_launch(static_cast<const half*>(x.data),
-                    static_cast<const half*>(B.data),
-                    static_cast<const half*>(C.data),
-                    static_cast<const half*>(dt.data),
-                    static_cast<const float*>(A_log.data),
-                    static_cast<const float*>(D.data),
-                    static_cast<const float*>(dt_bias.data),
-                    h_state, static_cast<half*>(y.data),
-                    static_cast<const half*>(z),
-                    1, n_heads, head_dim_ssm, state_size, n_groups,
-                    h_dtype, stream);
+    ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
+                    static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
+                    static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
+                    static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
+                    static_cast<const half*>(z), 1, n_heads, head_dim_ssm, state_size, n_groups, h_dtype,
+                    stream);
 }
 
-void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
-                      const Tensor& dt, const Tensor& A_log, const Tensor& D,
-                      const Tensor& dt_bias, void* h_state,
-                      Tensor& y, const void* z,
-                      int n_tokens, int n_heads, int head_dim_ssm,
-                      int state_size, int n_groups,
-                      QType h_dtype,
-                      cudaStream_t stream) {
-    ssm_scan_launch(static_cast<const half*>(x.data),
-                    static_cast<const half*>(B.data),
-                    static_cast<const half*>(C.data),
-                    static_cast<const half*>(dt.data),
-                    static_cast<const float*>(A_log.data),
-                    static_cast<const float*>(D.data),
-                    static_cast<const float*>(dt_bias.data),
-                    h_state, static_cast<half*>(y.data),
-                    static_cast<const half*>(z),
-                    n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
+void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
+                      const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
+                      const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
+                      int n_groups, QType h_dtype, cudaStream_t stream) {
+    ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
+                    static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
+                    static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
+                    static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
+                    static_cast<const half*>(z), n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
                     h_dtype, stream);
 }
 
@@ -548,12 +505,8 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
 // ---------------------------------------------------------------------------
 
 // One block per (token, group). Threads reduce over group_size.
-__global__ void group_rmsnorm_fp16_kernel(
-    const half* __restrict__ x,
-    const half* __restrict__ weight,
-    half* __restrict__ out,
-    int total_dim, int n_groups, float eps)
-{
+__global__ void group_rmsnorm_fp16_kernel(const half* __restrict__ x, const half* __restrict__ weight,
+                                          half* __restrict__ out, int total_dim, int n_groups, float eps) {
     int token = blockIdx.x;
     int group = blockIdx.y;
     int group_size = total_dim / n_groups;
@@ -572,7 +525,8 @@ __global__ void group_rmsnorm_fp16_kernel(
 
     // Tree reduction
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        if (threadIdx.x < s)
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
         __syncthreads();
     }
 
@@ -586,24 +540,24 @@ __global__ void group_rmsnorm_fp16_kernel(
     }
 }
 
-void group_rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
-                   int n_groups, float eps, cudaStream_t stream) {
+void group_rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, int n_groups, float eps,
+                   cudaStream_t stream) {
     int n_tokens = static_cast<int>(x.shape[0]);
     int total_dim = static_cast<int>(x.shape[1]);
     int group_size = total_dim / n_groups;
 
     // Power of 2 for reduction
     int threads = 1;
-    while (threads * 2 <= std::min(group_size, 256)) threads *= 2;
+    while (threads * 2 <= std::min(group_size, 256))
+        threads *= 2;
 
     dim3 grid(n_tokens, n_groups);
     size_t smem = threads * sizeof(float);
 
-    group_rmsnorm_fp16_kernel<<<grid, threads, smem, stream>>>(
-        static_cast<const half*>(x.data),
-        static_cast<const half*>(weight.data),
-        static_cast<half*>(out.data),
-        total_dim, n_groups, eps);
+    group_rmsnorm_fp16_kernel<<<grid, threads, smem, stream>>>(static_cast<const half*>(x.data),
+                                                               static_cast<const half*>(weight.data),
+                                                               static_cast<half*>(out.data), total_dim,
+                                                               n_groups, eps);
 }
 
-} // namespace imp
+}  // namespace imp

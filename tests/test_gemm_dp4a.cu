@@ -70,8 +70,10 @@ TEST(GemmDP4ATest, Q8_0_Q8_1_Basic) {
 
     // Generate float data, quantize to Q8_0
     std::vector<float> h_W(M * K), h_x(K);
-    for (auto& v : h_W) v = (rand() % 200 - 100) / 200.0f;
-    for (auto& v : h_x) v = (rand() % 200 - 100) / 200.0f;
+    for (auto& v : h_W)
+        v = (rand() % 200 - 100) / 200.0f;
+    for (auto& v : h_x)
+        v = (rand() % 200 - 100) / 200.0f;
 
     auto w_q8_0 = quantize_to_q8_0(h_W.data(), M, K);
 
@@ -98,7 +100,8 @@ TEST(GemmDP4ATest, Q8_0_Q8_1_Basic) {
 
     cudaMemcpy(d_W, w_q8_0.data(), w_q8_0.size(), cudaMemcpyHostToDevice);
     std::vector<half> hx(K);
-    for (int i = 0; i < K; i++) hx[i] = __float2half(h_x[i]);
+    for (int i = 0; i < K; i++)
+        hx[i] = __float2half(h_x[i]);
     cudaMemcpy(d_x, hx.data(), K * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, M * sizeof(half));
 
@@ -113,8 +116,11 @@ TEST(GemmDP4ATest, Q8_0_Q8_1_Basic) {
         max_err = fmaxf(max_err, fabsf(__half2float(hy[i]) - y_ref[i]));
     EXPECT_LT(max_err, 0.5f) << "Q8_0 x Q8_1 dp4a GEMV max error too large";
 
-    cudaFree(d_W); cudaFree(d_x); cudaFree(d_y);
-    cudaFree(d_q8_1); cudaFree(d_d8);
+    cudaFree(d_W);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_q8_1);
+    cudaFree(d_d8);
 }
 
 // =========================================================================
@@ -129,7 +135,8 @@ TEST(GemmDP4ATest, Q6K_Q8_1_Basic) {
 
     // Generate FP16 input
     std::vector<float> h_x(K);
-    for (auto& v : h_x) v = (rand() % 200 - 100) / 200.0f;
+    for (auto& v : h_x)
+        v = (rand() % 200 - 100) / 200.0f;
 
     // Build Q6_K weight manually: encode each 256-element row.
     // Q6_K layout per block: ql[128] + qh[64] + scales[16] + d(FP16)[2]
@@ -166,7 +173,8 @@ TEST(GemmDP4ATest, Q6K_Q8_1_Basic) {
 
     cudaMemcpy(d_W, w_q6k.data(), w_q6k.size(), cudaMemcpyHostToDevice);
     std::vector<half> hx(K);
-    for (int i = 0; i < K; i++) hx[i] = __float2half(h_x[i]);
+    for (int i = 0; i < K; i++)
+        hx[i] = __float2half(h_x[i]);
     cudaMemcpy(d_x, hx.data(), K * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, M * sizeof(half));
 
@@ -185,8 +193,11 @@ TEST(GemmDP4ATest, Q6K_Q8_1_Basic) {
         EXPECT_FALSE(std::isinf(v)) << "Inf in output at " << i;
     }
 
-    cudaFree(d_W); cudaFree(d_x); cudaFree(d_y);
-    cudaFree(d_q8_1); cudaFree(d_d8);
+    cudaFree(d_W);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_q8_1);
+    cudaFree(d_d8);
 }
 
 // =========================================================================
@@ -198,8 +209,10 @@ TEST(GemmDP4ATest, FusedSwiGLUQuantize) {
     srand(42);
 
     std::vector<float> h_gate(K), h_up(K);
-    for (auto& v : h_gate) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : h_up) v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_gate)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_up)
+        v = (rand() % 200 - 100) / 100.0f;
 
     // CPU reference: SwiGLU then manual Q8_1 check
     std::vector<float> act_ref(K);
@@ -245,9 +258,11 @@ TEST(GemmDP4ATest, FusedSwiGLUQuantize) {
     // Q8_1 quantization introduces ~1-2% error
     EXPECT_LT(max_err, 0.15f) << "SwiGLU+Q8_1 dequant max error too large";
 
-    cudaFree(d_gate); cudaFree(d_up);
-    cudaFree(d_q8_out); cudaFree(d_d8);
+    cudaFree(d_gate);
+    cudaFree(d_up);
+    cudaFree(d_q8_out);
+    cudaFree(d_d8);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

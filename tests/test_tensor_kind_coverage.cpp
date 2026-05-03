@@ -1,6 +1,6 @@
 #include "model/gguf_loader.h"
 #include "model/tensor_kind_matcher.h"
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 
 #include <gtest/gtest.h>
 #include <filesystem>
@@ -13,7 +13,7 @@ namespace {
 
 const char* kTestModelPath = std::getenv("IMP_TEST_GGUF");
 
-} // namespace
+}  // namespace
 
 TEST(TensorKindCoverage, NoUnknownKindsInSmallQwen) {
     if (!kTestModelPath) {
@@ -28,7 +28,8 @@ TEST(TensorKindCoverage, NoUnknownKindsInSmallQwen) {
 
     std::unordered_set<std::string> unknown_names;
     auto check = [&](const Tensor& t, const char* debug_name) {
-        if (t.data == nullptr) return;
+        if (t.data == nullptr)
+            return;
         if (t.kind == TensorKind::UNKNOWN) {
             unknown_names.insert(debug_name);
         }
@@ -41,15 +42,17 @@ TEST(TensorKindCoverage, NoUnknownKindsInSmallQwen) {
         check(L.wv, "wv");
         check(L.wo, "wo");
         check(L.w_gate, "w_gate");
-        check(L.w_up,   "w_up");
+        check(L.w_up, "w_up");
         check(L.w_down, "w_down");
         check(L.attn_norm, "attn_norm");
-        check(L.ffn_norm,  "ffn_norm");
+        check(L.ffn_norm, "ffn_norm");
     }
 
     if (!unknown_names.empty()) {
         std::string msg = "Tensors with UNKNOWN kind:";
-        for (const auto& n : unknown_names) { msg += " " + n; }
+        for (const auto& n : unknown_names) {
+            msg += " " + n;
+        }
         FAIL() << msg;
     }
 }

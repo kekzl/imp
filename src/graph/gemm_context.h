@@ -28,8 +28,8 @@ struct GemmContext {
     const QuantScratch* qscratch = nullptr;
 
     // Helper: create from executor state
-    static GemmContext make(cudaStream_t s, const WeightCaches& wc,
-                            const QuantScratch& qs, bool force_fp16 = false) {
+    static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
+                            bool force_fp16 = false) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;
@@ -46,4 +46,4 @@ struct GemmContext {
     }
 };
 
-} // namespace imp
+}  // namespace imp

@@ -18,8 +18,8 @@ public:
         }
     }
 
-    TensorView(const void* data, QType dtype, int ndim,
-               const int64_t* shape, const int64_t* stride, bool on_device)
+    TensorView(const void* data, QType dtype, int ndim, const int64_t* shape, const int64_t* stride,
+               bool on_device)
         : data_(data), dtype_(dtype), ndim_(ndim), on_device_(on_device) {
         for (int i = 0; i < ndim; ++i) {
             shape_[i] = shape[i];
@@ -35,23 +35,28 @@ public:
     int64_t stride(int i) const { return stride_[i]; }
 
     int64_t numel() const {
-        if (ndim_ == 0) return 0;
+        if (ndim_ == 0)
+            return 0;
         int64_t n = 1;
-        for (int i = 0; i < ndim_; ++i) n *= shape_[i];
+        for (int i = 0; i < ndim_; ++i)
+            n *= shape_[i];
         return n;
     }
 
     size_t nbytes() const {
         int64_t n = numel();
-        if (dtype_ == QType::INT4) return static_cast<size_t>((n + 1) / 2);
+        if (dtype_ == QType::INT4)
+            return static_cast<size_t>((n + 1) / 2);
         return static_cast<size_t>(n) * dtype_size(dtype_);
     }
 
     bool is_contiguous() const {
-        if (ndim_ == 0) return true;
+        if (ndim_ == 0)
+            return true;
         int64_t expected = 1;
         for (int i = ndim_ - 1; i >= 0; --i) {
-            if (stride_[i] != expected) return false;
+            if (stride_[i] != expected)
+                return false;
             expected *= shape_[i];
         }
         return true;
@@ -59,11 +64,11 @@ public:
 
 private:
     const void* data_ = nullptr;
-    QType dtype_       = QType::F32;
-    int ndim_          = 0;
-    int64_t shape_[kMaxDims]  = {};
+    QType dtype_ = QType::F32;
+    int ndim_ = 0;
+    int64_t shape_[kMaxDims] = {};
     int64_t stride_[kMaxDims] = {};
-    bool on_device_    = false;
+    bool on_device_ = false;
 };
 
-} // namespace imp
+}  // namespace imp

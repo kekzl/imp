@@ -1,14 +1,20 @@
-# Benchmarks
+# Performance
 
-All numbers below were measured on a single **NVIDIA RTX 5090** (32 GB GDDR7,
-Blackwell GB202, sm_120f). The same binary runs unchanged on **RTX PRO 5000
-Blackwell** (48 GB) and **RTX PRO 6000 Blackwell** (96 GB) — identical
-`sm_120f` architecture, identical kernels; the workstation cards just fit
-larger MoE models without expert offload. Models loaded from GGUF or
-SafeTensors (NVFP4 prequant). Each test runs 3 repetitions; averages reported.
+## Methodology
 
-- **imp v0.7+** — CUDA 13.2.1, CUTLASS v4.4.2, NVFP4 decode + FP8 prefill (default for non-GDN), FP16 prefill (GDN), FP8 FMHA long-context path post PR #33, NVFP4-prequant MoE decode fast-path post PR #85
-- **llama.cpp** b8445+ — flash attention enabled, full GPU offload (`-ngl 99`)
+All numbers come from one machine, one run series. Reproducing them on a different RTX 5090, driver, or `imp:test` build will give different numbers — sometimes meaningfully so. The CI gate in `tests/perf_baseline.json` is the authoritative regression check; everything below is descriptive.
+
+| | |
+|---|---|
+| Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, Blackwell `sm_120f`, custom water loop |
+| Toolchain | CUDA 13.2.1, CUTLASS v4.4.2, GCC 13, RelWithDebInfo or Release Docker build |
+| imp config | NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN), CUDA Graphs on (where the model supports it) |
+| llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
+| Sampling | Greedy (temp = 0) |
+| Repetitions | 3 (decode); pp512 numbers vary up to ±2.6× across container restarts due to cuBLAS algorithm selection |
+| Reported | Mean of repetitions; decode (`tg256`) is the reliable A/B signal |
+
+Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
 ## Decode Throughput (tg256)
 
@@ -48,7 +54,7 @@ Tokens processed per second during the prompt ingestion phase.
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **88** | — | — |
 | Mistral-Small-3.2 | 24B | NVFP4 | **12804** | — | post PR #88 (CUTLASS NVFP4×NVFP4) |
 
-**Gemma-4 notes**: CUDA Graphs are now enabled (PRs #11–#14 unified `forward_decode_async`, PR #20 rope_freqs fix, 2026-04-20 SWA long-context fix). Decode is now **1.21× llama.cpp** on Q4_K_M. The previous gap was two separate bugs: pipeline kernel split-K only issued one 16-byte `cp.async` per load (missing half the data at head_dim=512 on global layers) and cuBLAS dispatch gate forced global layers through a broken FMHA fallback above n=1024. Prefill remains dominated by CUTLASS grouped-GEMM advantage vs llama.cpp's serial expert processing. Q5_K_M recommended when output quality matters on complex prompts — Q4_K_M can degenerate on code-gen (see `docs/BENCHMARKS.md` footnote).
+**Gemma-4 notes**: CUDA Graphs are now enabled (PRs #11–#14 unified `forward_decode_async`, PR #20 rope_freqs fix, 2026-04-20 SWA long-context fix). Decode is now **1.21× llama.cpp** on Q4_K_M. The previous gap was two separate bugs: pipeline kernel split-K only issued one 16-byte `cp.async` per load (missing half the data at head_dim=512 on global layers) and cuBLAS dispatch gate forced global layers through a broken FMHA fallback above n=1024. Prefill remains dominated by CUTLASS grouped-GEMM advantage vs llama.cpp's serial expert processing. Q5_K_M recommended when output quality matters on complex prompts — Q4_K_M can degenerate on code-gen.
 
 **Note**: GDN models now use FP16 prefill weights (v0.5.1) instead of FP8 for numerical stability. This reduces prefill throughput by ~8% vs v0.5 FP8 numbers but fixes multi-turn chat degeneration.
 

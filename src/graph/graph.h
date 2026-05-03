@@ -25,8 +25,7 @@ public:
     // Build a single transformer layer subgraph (returns node IDs for input/output).
     // input_node: the node ID whose output feeds into this layer.
     // Returns the node ID of the final RESIDUAL_ADD in the FFN block.
-    int build_transformer_layer(int layer_idx, int input_node,
-                                const ModelConfig& config, bool is_prefill);
+    int build_transformer_layer(int layer_idx, int input_node, const ModelConfig& config, bool is_prefill);
 
     // Legacy single-layer builder for testing
     static Graph build_transformer_layer(bool is_moe = false);
@@ -38,4 +37,4 @@ private:
     std::vector<OpNode> nodes_;
 };
 
-} // namespace imp
+}  // namespace imp

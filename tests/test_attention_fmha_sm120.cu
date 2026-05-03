@@ -26,19 +26,13 @@ protected:
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
         sm_ = major * 10 + minor;
     }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void TearDown() override { cudaStreamDestroy(stream_); }
 
     // CPU reference: standard attention with optional causal, sliding_window, softcap
-    static void ref_attention(const std::vector<float>& Q_f,
-                              const std::vector<float>& K_f,
-                              const std::vector<float>& V_f,
-                              std::vector<float>& O_f,
-                              int B, int Sq, int Skv,
-                              int NH, int NKV, int HD,
-                              float scale, bool causal,
-                              int sliding_window, float softcap) {
+    static void ref_attention(const std::vector<float>& Q_f, const std::vector<float>& K_f,
+                              const std::vector<float>& V_f, std::vector<float>& O_f, int B, int Sq, int Skv,
+                              int NH, int NKV, int HD, float scale, bool causal, int sliding_window,
+                              float softcap) {
         for (int b = 0; b < B; b++) {
             for (int h = 0; h < NH; h++) {
                 int kvh = h / (NH / NKV);
@@ -53,9 +47,12 @@ protected:
                             dot += q_val * k_val;
                         }
                         dot *= scale;
-                        if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
-                        if (causal && qi < ki) dot = -FLT_MAX;
-                        if (sliding_window > 0 && (qi - ki) >= sliding_window) dot = -FLT_MAX;
+                        if (softcap > 0.0f)
+                            dot = softcap * tanhf(dot / softcap);
+                        if (causal && qi < ki)
+                            dot = -FLT_MAX;
+                        if (sliding_window > 0 && (qi - ki) >= sliding_window)
+                            dot = -FLT_MAX;
                         s[ki] = dot;
                         m = fmaxf(m, dot);
                     }
@@ -65,7 +62,8 @@ protected:
                         sum += s[ki];
                     }
                     if (sum > 0.0f) {
-                        for (int ki = 0; ki < Skv; ki++) s[ki] /= sum;
+                        for (int ki = 0; ki < Skv; ki++)
+                            s[ki] /= sum;
                     }
                     for (int d = 0; d < HD; d++) {
                         float acc = 0.0f;
@@ -80,16 +78,15 @@ protected:
         }
     }
 
-    void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD,
-                  bool causal, int sliding_window = 0, float softcap = 0.0f,
-                  float tol = 1e-2f) {
+    void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sliding_window = 0,
+                  float softcap = 0.0f, float tol = 1e-2f) {
         if (sm_ < 90) {
             GTEST_SKIP() << "FMHA sm120 requires sm_90+ (WMMA fallback)";
         }
 
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
-        size_t q_elems  = B * Sq  * NH  * HD;
+        size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
@@ -102,16 +99,18 @@ protected:
 
         // CPU reference
         std::vector<float> O_ref(q_elems, 0.0f);
-        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD,
-                      scale, causal, sliding_window, softcap);
+        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sliding_window, softcap);
 
         // Convert to half
         std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
-        for (size_t i = 0; i < q_elems; i++)  Q_h[i] = __float2half(Q_f[i]);
-        for (size_t i = 0; i < kv_elems; i++) K_h[i] = __float2half(K_f[i]);
-        for (size_t i = 0; i < kv_elems; i++) V_h[i] = __float2half(V_f[i]);
+        for (size_t i = 0; i < q_elems; i++)
+            Q_h[i] = __float2half(Q_f[i]);
+        for (size_t i = 0; i < kv_elems; i++)
+            K_h[i] = __float2half(K_f[i]);
+        for (size_t i = 0; i < kv_elems; i++)
+            V_h[i] = __float2half(V_f[i]);
 
-        size_t q_bytes  = q_elems  * sizeof(half);
+        size_t q_bytes = q_elems * sizeof(half);
         size_t kv_bytes = kv_elems * sizeof(half);
 
         void *d_q, *d_k, *d_v, *d_o;
@@ -120,20 +119,19 @@ protected:
         cudaMalloc(&d_v, kv_bytes);
         cudaMalloc(&d_o, q_bytes);
 
-        cudaMemcpy(d_q, Q_h.data(), q_bytes,  cudaMemcpyHostToDevice);
+        cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
         cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
         cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
         cudaMemset(d_o, 0, q_bytes);
 
-        int64_t q_shape[]  = {B, Sq, NH, HD};
+        int64_t q_shape[] = {B, Sq, NH, HD};
         int64_t kv_shape[] = {B, Skv, NKV, HD};
         Tensor Qt(d_q, QType::F16, 4, q_shape, true);
         Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
         Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-        bool ok = fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, causal,
-                                      sliding_window, softcap, stream_);
+        bool ok = fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, causal, sliding_window, softcap, stream_);
         if (!ok) {
             GTEST_SKIP() << "fmha_sm120_prefill returned false (config unsupported on this GPU)";
         }
@@ -154,14 +152,15 @@ protected:
             max_err = std::max(max_err, std::abs(got - ref) / denom);
         }
 
-        EXPECT_LT(max_err, tol)
-            << "Max relative error " << max_err << " exceeds threshold " << tol
-            << " (B=" << B << " Sq=" << Sq << " Skv=" << Skv
-            << " NH=" << NH << " NKV=" << NKV << " HD=" << HD
-            << " causal=" << causal << " sw=" << sliding_window
-            << " softcap=" << softcap << ")";
+        EXPECT_LT(max_err, tol) << "Max relative error " << max_err << " exceeds threshold " << tol
+                                << " (B=" << B << " Sq=" << Sq << " Skv=" << Skv << " NH=" << NH
+                                << " NKV=" << NKV << " HD=" << HD << " causal=" << causal
+                                << " sw=" << sliding_window << " softcap=" << softcap << ")";
 
-        cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_o);
     }
 
     cudaStream_t stream_ = nullptr;
@@ -170,13 +169,9 @@ protected:
 
 // --- Basic correctness ---
 
-TEST_F(FmhaSm120Test, NonCausalHD128) {
-    run_test(1, 128, 128, 2, 2, 128, false);
-}
+TEST_F(FmhaSm120Test, NonCausalHD128) { run_test(1, 128, 128, 2, 2, 128, false); }
 
-TEST_F(FmhaSm120Test, CausalHD128) {
-    run_test(1, 128, 128, 2, 2, 128, true);
-}
+TEST_F(FmhaSm120Test, CausalHD128) { run_test(1, 128, 128, 2, 2, 128, true); }
 
 TEST_F(FmhaSm120Test, CausalMultiTile) {
     // Multiple Q tiles (Sq=256 > Bq=128) and KV tiles (Skv=192 > Bkv=64)
@@ -190,39 +185,25 @@ TEST_F(FmhaSm120Test, GQA) {
 
 // --- All head dimensions ---
 
-TEST_F(FmhaSm120Test, HeadDim64) {
-    run_test(1, 128, 128, 4, 4, 64, true);
-}
+TEST_F(FmhaSm120Test, HeadDim64) { run_test(1, 128, 128, 4, 4, 64, true); }
 
-TEST_F(FmhaSm120Test, HeadDim96) {
-    run_test(1, 128, 128, 4, 4, 96, true);
-}
+TEST_F(FmhaSm120Test, HeadDim96) { run_test(1, 128, 128, 4, 4, 96, true); }
 
-TEST_F(FmhaSm120Test, HeadDim256) {
-    run_test(1, 64, 64, 2, 2, 256, true);
-}
+TEST_F(FmhaSm120Test, HeadDim256) { run_test(1, 64, 64, 2, 2, 256, true); }
 
 // --- Non-aligned sequence lengths ---
 
-TEST_F(FmhaSm120Test, NonAlignedSeqLen) {
-    run_test(1, 200, 150, 2, 2, 128, true);
-}
+TEST_F(FmhaSm120Test, NonAlignedSeqLen) { run_test(1, 200, 150, 2, 2, 128, true); }
 
 // --- Sliding window ---
 
-TEST_F(FmhaSm120Test, SlidingWindow) {
-    run_test(1, 128, 128, 2, 2, 128, true, /*sw=*/64);
-}
+TEST_F(FmhaSm120Test, SlidingWindow) { run_test(1, 128, 128, 2, 2, 128, true, /*sw=*/64); }
 
-TEST_F(FmhaSm120Test, SlidingWindowMultiTile) {
-    run_test(1, 256, 256, 2, 2, 128, true, /*sw=*/64);
-}
+TEST_F(FmhaSm120Test, SlidingWindowMultiTile) { run_test(1, 256, 256, 2, 2, 128, true, /*sw=*/64); }
 
 // --- Softcap ---
 
-TEST_F(FmhaSm120Test, Softcap) {
-    run_test(1, 128, 128, 2, 2, 128, true, 0, /*softcap=*/50.0f);
-}
+TEST_F(FmhaSm120Test, Softcap) { run_test(1, 128, 128, 2, 2, 128, true, 0, /*softcap=*/50.0f); }
 
 // --- Combined features ---
 
@@ -287,21 +268,27 @@ TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
     int finite_nonzero = 0;
     for (auto& v : h_o) {
         float fv = __half2float(v);
-        if (std::isfinite(fv) && fv != 0.0f) finite_nonzero++;
+        if (std::isfinite(fv) && fv != 0.0f)
+            finite_nonzero++;
     }
     // Debug: check Q input is non-zero too
     std::vector<half> h_q_check(B * S * NH * HD);
     cudaMemcpy(h_q_check.data(), d_q, bytes, cudaMemcpyDeviceToHost);
     int q_nonzero = 0;
-    for (auto& v : h_q_check) if (__half2float(v) != 0.0f) q_nonzero++;
-    fprintf(stderr, "DEBUG: Q nonzero=%d, O nonzero=%d (of %d)\n",
-            q_nonzero, finite_nonzero, B*S*NH*HD);
+    for (auto& v : h_q_check)
+        if (__half2float(v) != 0.0f)
+            q_nonzero++;
+    fprintf(stderr, "DEBUG: Q nonzero=%d, O nonzero=%d (of %d)\n", q_nonzero, finite_nonzero,
+            B * S * NH * HD);
 
     EXPECT_GT(finite_nonzero, 0)
         << "Dispatch produced all-zero output on sm_120 (expected sm120 FMHA to run)";
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

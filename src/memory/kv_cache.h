@@ -9,7 +9,7 @@ namespace imp {
 
 class VRAMAllocator;  // forward declaration
 
-static constexpr int kKVBlockSize = 16; // default tokens per block
+static constexpr int kKVBlockSize = 16;  // default tokens per block
 
 // MXFP4 micro-scale group size (matching CUTLASS MXFP4 SfVecSize)
 static constexpr int kTQMicroScaleGroup = 32;
@@ -21,19 +21,15 @@ public:
     //   TURBOQUANT_LITE: should be multiplier * head_dim for quality (e.g. 2*head_dim).
     // use_mxfp4: if true and dtype==TURBOQUANT, use FP4 E2M1 + UE8M0 micro-scales
     //   instead of uniform INT4 for K direction quantization (sm_120 path).
-    KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
-            int max_blocks, int block_size = kKVBlockSize,
-            VRAMAllocator* alloc = nullptr, int sketch_dim = 0,
+    KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
+            int block_size = kKVBlockSize, VRAMAllocator* alloc = nullptr, int sketch_dim = 0,
             bool use_mxfp4 = false);
 
     // Per-layer-shape constructor (Gemma 4 dual attention geometry).
     // n_kv_heads_per_layer[l] and head_dim_per_layer[l] define layer l's
     // KV shape. The scale/sketch pools are sized using max across layers.
-    KVCache(int n_layers,
-            const std::vector<int>& n_kv_heads_per_layer,
-            const std::vector<int>& head_dim_per_layer,
-            QType dtype,
-            int max_blocks, int block_size,
+    KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+            const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
             VRAMAllocator* alloc);
     ~KVCache();
 
@@ -86,17 +82,17 @@ private:
     int n_kv_heads_;
     int head_dim_;
     int max_blocks_;
-    int block_size_;                // tokens per block (default 16)
-    int sketch_dim_ = 0;           // QJL sketch dimension (0 if not TurboQuant)
-    bool use_mxfp4_ = false;       // FP4 E2M1 + UE8M0 micro-scales for K dirs (sm_120)
+    int block_size_;          // tokens per block (default 16)
+    int sketch_dim_ = 0;      // QJL sketch dimension (0 if not TurboQuant)
+    bool use_mxfp4_ = false;  // FP4 E2M1 + UE8M0 micro-scales for K dirs (sm_120)
     QType dtype_;
     VRAMAllocator* alloc_ = nullptr;
-    size_t block_bytes_;            // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
+    size_t block_bytes_;  // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 
-    std::vector<int> ref_counts_;   // per-block reference count
+    std::vector<int> ref_counts_;  // per-block reference count
     std::vector<int> free_list_;
-    void* pool_ = nullptr;          // single contiguous GPU allocation
-                                    // For TURBOQUANT_LITE: V-only (no K directions in pool)
+    void* pool_ = nullptr;  // single contiguous GPU allocation
+                            // For TURBOQUANT_LITE: V-only (no K directions in pool)
 
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.
@@ -124,4 +120,4 @@ private:
     size_t mscale_block_bytes_ = 0;  // block_size * n_kv_heads * (head_dim / kTQMicroScaleGroup)
 };
 
-} // namespace imp
+}  // namespace imp

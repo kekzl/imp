@@ -13,7 +13,8 @@ namespace {
 static std::string write_temp_gguf(const std::vector<uint8_t>& data) {
     char path[] = "/tmp/imp_test_XXXXXX.gguf";
     int fd = mkstemps(path, 5);
-    if (fd < 0) return "";
+    if (fd < 0)
+        return "";
     ssize_t written = write(fd, data.data(), data.size());
     (void)written;
     close(fd);
@@ -21,13 +22,13 @@ static std::string write_temp_gguf(const std::vector<uint8_t>& data) {
 }
 
 // Helper: build a minimal GGUF v3 header (24 bytes).
-static std::vector<uint8_t> make_gguf_header(uint32_t magic, uint32_t version,
-                                              uint64_t n_tensors, uint64_t n_kv) {
+static std::vector<uint8_t> make_gguf_header(uint32_t magic, uint32_t version, uint64_t n_tensors,
+                                             uint64_t n_kv) {
     std::vector<uint8_t> buf(24);
-    memcpy(buf.data() + 0,  &magic,     4);
-    memcpy(buf.data() + 4,  &version,   4);
-    memcpy(buf.data() + 8,  &n_tensors, 8);
-    memcpy(buf.data() + 16, &n_kv,      8);
+    memcpy(buf.data() + 0, &magic, 4);
+    memcpy(buf.data() + 4, &version, 4);
+    memcpy(buf.data() + 8, &n_tensors, 8);
+    memcpy(buf.data() + 16, &n_kv, 8);
     return buf;
 }
 
@@ -146,5 +147,5 @@ TEST(GgufLoaderTest, LargeMetadataCount) {
     unlink(path.c_str());
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

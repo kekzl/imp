@@ -89,5 +89,5 @@ TEST(TensorTest, ScalarTensor) {
     EXPECT_EQ(t.nbytes(), sizeof(float));
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

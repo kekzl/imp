@@ -24,8 +24,8 @@
 namespace imp {
 
 struct EngineConfig {
-    int max_batch_size = 0;   // 0 = auto (engine detects from model size vs VRAM)
-    int max_seq_len = 0;      // 0 = auto (engine detects from model metadata + VRAM)
+    int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
+    int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
@@ -91,9 +91,9 @@ struct EngineConfig {
     // Currently active only on the FP16 GQA decode path; quantized variants
     // ignore these settings.
     bool streaming_kv_enabled = false;
-    int streaming_kv_n_sinks = 4;        // # initial tokens to always attend
-    int streaming_kv_window = 0;         // 0 = derive from ModelConfig::sliding_window
-    int streaming_kv_threshold = 0;      // 0 = auto: n_sinks + window + 2*kKVBlockSize
+    int streaming_kv_n_sinks = 4;    // # initial tokens to always attend
+    int streaming_kv_window = 0;     // 0 = derive from ModelConfig::sliding_window
+    int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2*kKVBlockSize
 };
 
 class Engine {
@@ -107,13 +107,9 @@ public:
     [[nodiscard]] bool step();
 
     // High-level generate with sampling parameters
-    std::string generate(const std::string& prompt, int max_tokens,
-                         float temperature = 1.0f, float top_p = 1.0f,
-                         int top_k = 0, int seed = -1,
-                         bool apply_chat_template = true,
-                         float min_p = 0.0f,
-                         float repetition_penalty = 1.0f,
-                         float frequency_penalty = 0.0f,
+    std::string generate(const std::string& prompt, int max_tokens, float temperature = 1.0f,
+                         float top_p = 1.0f, int top_k = 0, int seed = -1, bool apply_chat_template = true,
+                         float min_p = 0.0f, float repetition_penalty = 1.0f, float frequency_penalty = 0.0f,
                          float presence_penalty = 0.0f);
 
     void add_request(std::shared_ptr<Request> req);
@@ -204,8 +200,8 @@ private:
     int* d_pf_positions_ = nullptr;
     int* d_pf_block_tables_ = nullptr;
     int* d_pf_context_lens_ = nullptr;
-    int* h_pf_positions_ = nullptr;       // pinned host staging
-    int32_t* h_pf_token_ids_ = nullptr;   // pinned host staging
+    int* h_pf_positions_ = nullptr;      // pinned host staging
+    int32_t* h_pf_token_ids_ = nullptr;  // pinned host staging
 
     // ── Penalty token buffer ─────────────────────────────────────────
     int32_t* d_penalty_tokens_ = nullptr;
@@ -236,11 +232,9 @@ private:
     // Think token IDs (cached from chat template init, -1 if not a think model)
     int32_t think_start_id_ = -1;
     int32_t think_end_id_ = -1;
-    void upload_penalties(const Request& req, InferenceState& state,
-                          cudaStream_t stream);
+    void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
     void fill_sampling_params(const Request& req, InferenceState& state) const;
-    void fill_recurrent_state(const Request& req, InferenceState& state,
-                               bool reset, cudaStream_t stream);
+    void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────
@@ -256,22 +250,19 @@ private:
     void step_prefill(cudaStream_t stream);
 
     // Process one prefill request (called from step_prefill).
-    void step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk,
-                          cudaStream_t stream);
+    void step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t stream);
 
     // Process all decode requests in sched_decode_batch_.
     void step_decode(cudaStream_t stream);
 
     // Build batched decode state, run forward pass, sample tokens.
-    void step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
-                             cudaStream_t stream);
+    void step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t stream);
 
     // Extract logprobs from decode logits and distribute tokens to requests.
     void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
-                                     const std::vector<int32_t>& tokens,
-                                     const Tensor& decode_logits_out,
-                                     bool needs_logprobs, bool needs_json_mode,
-                                     bool needs_schema_mode, cudaStream_t stream);
+                                     const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
+                                     bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
+                                     cudaStream_t stream);
 
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.
@@ -279,13 +270,11 @@ private:
     int prepare_graph_loop(std::shared_ptr<Request>& req);
 
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
-    CudaGraphConditionalRunner::Config build_graph_config(
-        const Request& req, int remaining) const;
+    CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;
 
-    std::vector<int32_t> try_graph_loop_decode(
-        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream);
-    bool try_launch_async_graph_loop(std::shared_ptr<Request> req,
-                                     int32_t first_token, cudaStream_t stream);
+    std::vector<int32_t> try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
+                                               cudaStream_t stream);
+    bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream);
 };
 
-} // namespace imp
+}  // namespace imp

@@ -24,15 +24,14 @@ inline bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!::imp::test::HasCudaDevice()) {                                   \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!::imp::test::HasCudaDevice()) {            \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
-inline Tensor make_random_weight(int64_t rows, int64_t cols,
-                                  std::mt19937& rng, float scale = 0.02f) {
+inline Tensor make_random_weight(int64_t rows, int64_t cols, std::mt19937& rng, float scale = 0.02f) {
     std::normal_distribution<float> dist(0.0f, scale);
     int64_t n = rows * cols;
     std::vector<half> h_data(n);
@@ -83,20 +82,22 @@ inline void free_tensor(Tensor& t) {
 inline void verify_logits_finite(const Tensor& logits, int vocab_size) {
     std::vector<float> h_logits(vocab_size);
     if (logits.qtype == QType::F32) {
-        cudaMemcpy(h_logits.data(), logits.data, vocab_size * sizeof(float),
-                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_logits.data(), logits.data, vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
     } else {
         std::vector<half> tmp(vocab_size);
-        cudaMemcpy(tmp.data(), logits.data, vocab_size * sizeof(half),
-                   cudaMemcpyDeviceToHost);
-        for (int i = 0; i < vocab_size; i++) h_logits[i] = __half2float(tmp[i]);
+        cudaMemcpy(tmp.data(), logits.data, vocab_size * sizeof(half), cudaMemcpyDeviceToHost);
+        for (int i = 0; i < vocab_size; i++)
+            h_logits[i] = __half2float(tmp[i]);
     }
 
     int nan_count = 0, inf_count = 0, zero_count = 0;
     for (int i = 0; i < vocab_size; i++) {
-        if (std::isnan(h_logits[i])) nan_count++;
-        if (std::isinf(h_logits[i])) inf_count++;
-        if (h_logits[i] == 0.0f) zero_count++;
+        if (std::isnan(h_logits[i]))
+            nan_count++;
+        if (std::isinf(h_logits[i]))
+            inf_count++;
+        if (h_logits[i] == 0.0f)
+            zero_count++;
     }
 
     EXPECT_EQ(nan_count, 0) << "Found " << nan_count << " NaN logits";
@@ -110,13 +111,12 @@ inline void verify_logits_finite(const Tensor& logits, int vocab_size) {
 inline std::vector<float> read_logits(const Tensor& logits, int count) {
     std::vector<float> h(count);
     if (logits.qtype == QType::F32) {
-        cudaMemcpy(h.data(), logits.data, count * sizeof(float),
-                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(h.data(), logits.data, count * sizeof(float), cudaMemcpyDeviceToHost);
     } else {
         std::vector<half> tmp(count);
-        cudaMemcpy(tmp.data(), logits.data, count * sizeof(half),
-                   cudaMemcpyDeviceToHost);
-        for (int i = 0; i < count; i++) h[i] = __half2float(tmp[i]);
+        cudaMemcpy(tmp.data(), logits.data, count * sizeof(half), cudaMemcpyDeviceToHost);
+        for (int i = 0; i < count; i++)
+            h[i] = __half2float(tmp[i]);
     }
     return h;
 }
@@ -128,10 +128,9 @@ struct DenseTestModel {
     std::shared_ptr<Model> model;
     std::vector<Tensor> all_tensors;
 
-    static DenseTestModel create(int d_model, int d_ff, int vocab_size,
-                                  int n_layers, int n_heads, int n_kv_heads,
-                                  int max_seq_len = 512, int seed = 42,
-                                  float weight_scale = 0.02f) {
+    static DenseTestModel create(int d_model, int d_ff, int vocab_size, int n_layers, int n_heads,
+                                 int n_kv_heads, int max_seq_len = 512, int seed = 42,
+                                 float weight_scale = 0.02f) {
         DenseTestModel result;
         result.model = std::make_shared<Model>();
         auto& cfg = result.model->config_;
@@ -190,7 +189,8 @@ struct DenseTestModel {
     }
 
     void cleanup() {
-        for (auto& t : all_tensors) free_tensor(t);
+        for (auto& t : all_tensors)
+            free_tensor(t);
         all_tensors.clear();
     }
 };
@@ -202,11 +202,9 @@ struct MoETestModel {
     std::shared_ptr<Model> model;
     std::vector<Tensor> all_tensors;
 
-    static MoETestModel create(int d_model, int d_ff, int vocab_size,
-                                int n_layers, int n_heads, int n_kv_heads,
-                                int n_experts, int n_experts_active,
-                                int expert_d_ff, int max_seq_len = 512,
-                                int seed = 42, float weight_scale = 0.02f) {
+    static MoETestModel create(int d_model, int d_ff, int vocab_size, int n_layers, int n_heads,
+                               int n_kv_heads, int n_experts, int n_experts_active, int expert_d_ff,
+                               int max_seq_len = 512, int seed = 42, float weight_scale = 0.02f) {
         MoETestModel result;
         result.model = std::make_shared<Model>();
         auto& cfg = result.model->config_;
@@ -279,7 +277,8 @@ struct MoETestModel {
     }
 
     void cleanup() {
-        for (auto& t : all_tensors) free_tensor(t);
+        for (auto& t : all_tensors)
+            free_tensor(t);
         all_tensors.clear();
     }
 };
@@ -289,8 +288,7 @@ struct MoETestModel {
 // Q8_0 format: 34 bytes per 32 elements = half(scale) + int8_t[32]
 // cols must be divisible by 32.
 // ---------------------------------------------------------------------------
-inline Tensor make_q8_0_weight(int64_t rows, int64_t cols,
-                                std::mt19937& rng, float scale = 0.5f) {
+inline Tensor make_q8_0_weight(int64_t rows, int64_t cols, std::mt19937& rng, float scale = 0.5f) {
     assert(cols % 32 == 0);
     std::normal_distribution<float> dist(0.0f, scale);
     int64_t n_blocks_per_row = cols / 32;
@@ -344,9 +342,8 @@ struct Q8DenseTestModel {
     std::shared_ptr<Model> model;
     std::vector<Tensor> all_tensors;
 
-    static Q8DenseTestModel create(int d_model, int d_ff, int vocab_size,
-                                    int n_layers, int n_heads, int n_kv_heads,
-                                    int max_seq_len = 512, int seed = 42) {
+    static Q8DenseTestModel create(int d_model, int d_ff, int vocab_size, int n_layers, int n_heads,
+                                   int n_kv_heads, int max_seq_len = 512, int seed = 42) {
         Q8DenseTestModel result;
         result.model = std::make_shared<Model>();
         auto& cfg = result.model->config_;
@@ -420,10 +417,11 @@ struct Q8DenseTestModel {
     }
 
     void cleanup() {
-        for (auto& t : all_tensors) free_tensor(t);
+        for (auto& t : all_tensors)
+            free_tensor(t);
         all_tensors.clear();
     }
 };
 
-} // namespace test
-} // namespace imp
+}  // namespace test
+}  // namespace imp

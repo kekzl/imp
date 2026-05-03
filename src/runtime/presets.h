@@ -16,4 +16,4 @@ struct SamplingDefaults {
 // Returns family-appropriate temperature/top_p/top_k values.
 SamplingDefaults get_sampling_defaults(ModelArch arch);
 
-} // namespace imp
+}  // namespace imp

@@ -30,14 +30,9 @@ namespace imp {
 // sorted_token_ids: optional [total_expanded] int32. When non-null, activations
 // are read via indirection (gather-free): activations[sorted_token_ids[i], :].
 // When null, reads activations[i, :] directly (requires pre-gathered input).
-void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights,
-                                    const void* activations,
-                                    void* output,
-                                    const int32_t* d_offsets,
-                                    int N, int K,
-                                    size_t expert_stride_bytes,
-                                    int n_experts,
-                                    cudaStream_t stream = nullptr,
-                                    const int32_t* sorted_token_ids = nullptr);
+void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activations, void* output,
+                                   const int32_t* d_offsets, int N, int K, size_t expert_stride_bytes,
+                                   int n_experts, cudaStream_t stream = nullptr,
+                                   const int32_t* sorted_token_ids = nullptr);
 
-} // namespace imp
+}  // namespace imp
