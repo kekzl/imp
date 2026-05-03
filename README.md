@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="imp" width="500">
+  <img src="docs/logo.svg" alt="imp" width="500">
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ Headline: **Qwen3-8B Q8_0 decode at 255 tok/s** on a single RTX 5090 (greedy, 25
 
 Long-context prefill (`pp=8192`) is where imp is consistently ahead of llama.cpp: ×1.13 to ×1.70 across the dense models tested. NVFP4 prequant decode (Qwen3.6, Gemma-4, Qwen3-Coder) ranges from 200–270 tok/s.
 
-Full numbers, methodology, and the `tests/perf_baseline.json` regression gate: [`BENCHMARKS.md`](BENCHMARKS.md).
+Full numbers, methodology, and the `tests/perf_baseline.json` regression gate: [`docs/performance.md`](docs/performance.md).
 
 > **Caveats.** Numbers are from one machine, one run series. Prefill (`pp512`) shows up to ±2.6× variance across container restarts due to cuBLAS algo selection — the docs use decode (`tg256`) for any A/B comparison. A different RTX 5090, different driver, different CUDA build, or different llama.cpp commit will produce different numbers.
 
@@ -105,7 +105,7 @@ Full build options, test commands, and verify-gate setup: [`docs/usage.md`](docs
 | [Usage & reference](docs/usage.md) | Build, server, CLI, C API |
 | [Supported models](docs/supported-models.md) | Tested model families with VRAM + tok/s |
 | [Quantization](docs/quantization.md) | GGUF Q*_K, NVFP4, MXFP4, FP8 KV — formats, pipelines, trade-offs |
-| [Benchmarks](BENCHMARKS.md) | Decode + prefill throughput, methodology |
+| [Performance](docs/performance.md) | Decode + prefill throughput, methodology |
 | [imp.conf reference](imp.conf.example) | All runtime configuration keys |
 | [sm_120 kernels](docs/sm120.md) | Kernel optimization notes |
 | [Roadmap](docs/roadmap.md) | Open bugs and in-flight performance work |

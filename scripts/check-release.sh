@@ -28,7 +28,7 @@ fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 section "doc links"
 LINKS=$(grep -rEho '\]\(([^)#]+\.(md|example|json|sh|cmake|h|cpp|cu))\)' \
         --include='*.md' \
-        README.md CONTRIBUTING.md CHANGELOG.md BENCHMARKS.md docs/ 2>/dev/null \
+        README.md CONTRIBUTING.md CHANGELOG.md docs/ 2>/dev/null \
         | sed -E 's/^\]\(//; s/\)$//' | sort -u || true)
 BROKEN=0
 while IFS= read -r link; do

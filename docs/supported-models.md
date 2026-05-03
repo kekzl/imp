@@ -1,6 +1,6 @@
 # Supported models
 
-This page lists model families with a known-working code path on `main`. Throughput numbers come from [`BENCHMARKS.md`](../BENCHMARKS.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only (default KV cache adds 1–4 GiB depending on context).
+This page lists model families with a known-working code path on `main`. Throughput numbers come from [`performance.md`](performance.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only (default KV cache adds 1–4 GiB depending on context).
 
 Anything not on this list may still load (the GGUF and SafeTensors paths cover most LLaMA-derived architectures), but it has not been verified end-to-end.
 
