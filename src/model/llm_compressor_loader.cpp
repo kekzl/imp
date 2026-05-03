@@ -12,8 +12,10 @@ namespace imp::llm_compressor {
 namespace {
 
 bool try_rename_suffix(std::string& name, std::string_view from, std::string_view to) {
-    if (name.size() < from.size()) return false;
-    if (name.compare(name.size() - from.size(), from.size(), from) != 0) return false;
+    if (name.size() < from.size())
+        return false;
+    if (name.compare(name.size() - from.size(), from.size(), from) != 0)
+        return false;
     name.replace(name.size() - from.size(), from.size(), to);
     return true;
 }
@@ -23,8 +25,7 @@ bool starts_with(std::string_view s, std::string_view prefix) {
 }
 
 bool ends_with(std::string_view s, std::string_view suffix) {
-    return s.size() >= suffix.size() &&
-           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 // Recognized projection names whose `.scale` is NOT a Gemma-4 extra.
@@ -33,21 +34,19 @@ bool ends_with(std::string_view s, std::string_view suffix) {
 bool is_proj_segment(std::string_view name_before_dot_scale) {
     // Last segment between dots — find last '.' in the substring.
     auto pos = name_before_dot_scale.rfind('.');
-    std::string_view last = (pos == std::string_view::npos)
-                                ? name_before_dot_scale
-                                : name_before_dot_scale.substr(pos + 1);
-    return last == "q_proj" || last == "k_proj" || last == "v_proj" ||
-           last == "o_proj" || last == "gate_proj" || last == "up_proj" ||
-           last == "down_proj";
+    std::string_view last = (pos == std::string_view::npos) ? name_before_dot_scale
+                                                            : name_before_dot_scale.substr(pos + 1);
+    return last == "q_proj" || last == "k_proj" || last == "v_proj" || last == "o_proj" ||
+           last == "gate_proj" || last == "up_proj" || last == "down_proj";
 }
 
 // Strip leading/trailing whitespace and optionally a matching pair of quotes.
 std::string trim_value(std::string_view sv) {
-    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
-    while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
-                           sv.back() == '\r' || sv.back() == '\n')) sv.remove_suffix(1);
-    if (sv.size() >= 2 && (sv.front() == '\'' || sv.front() == '"') &&
-        sv.front() == sv.back()) {
+    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t'))
+        sv.remove_prefix(1);
+    while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n'))
+        sv.remove_suffix(1);
+    if (sv.size() >= 2 && (sv.front() == '\'' || sv.front() == '"') && sv.front() == sv.back()) {
         sv.remove_prefix(1);
         sv.remove_suffix(1);
     }
@@ -59,7 +58,8 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
     std::vector<std::string> out;
     auto lb = body.find('[');
     auto rb = body.rfind(']');
-    if (lb == std::string_view::npos || rb == std::string_view::npos || rb <= lb) return out;
+    if (lb == std::string_view::npos || rb == std::string_view::npos || rb <= lb)
+        return out;
     std::string_view inner = body.substr(lb + 1, rb - lb - 1);
 
     size_t start = 0;
@@ -69,7 +69,8 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
         bool at_end = (i == inner.size());
         char c = at_end ? ',' : inner[i];
         if (!at_end && in_quote) {
-            if (c == quote_char) in_quote = false;
+            if (c == quote_char)
+                in_quote = false;
             continue;
         }
         if (!at_end && (c == '\'' || c == '"')) {
@@ -79,22 +80,20 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
         }
         if (c == ',') {
             std::string item = trim_value(inner.substr(start, i - start));
-            if (!item.empty()) out.push_back(std::move(item));
+            if (!item.empty())
+                out.push_back(std::move(item));
             start = i + 1;
         }
     }
     return out;
 }
 
-} // namespace
+}  // namespace
 
 bool name_is_skipped(const std::string& in) {
-    return starts_with(in, "model.vision_tower.") ||
-           starts_with(in, "model.visual.") ||
-           starts_with(in, "vision_tower.") ||
-           starts_with(in, "multi_modal_projector.") ||
-           starts_with(in, "mtp.") ||
-           starts_with(in, "model.mtp.");
+    return starts_with(in, "model.vision_tower.") || starts_with(in, "model.visual.") ||
+           starts_with(in, "vision_tower.") || starts_with(in, "multi_modal_projector.") ||
+           starts_with(in, "mtp.") || starts_with(in, "model.mtp.");
 }
 
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters) {
@@ -106,7 +105,6 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         return {NameTranslation::SKIP, ""};
     }
 
-
     // Step 2: count Gemma-4 extras (still emitted — weight_map routes them to
     // layer.{ffn_gate_inp_scale, expert_down_scale, layer_out_scale}, which the
     // forward path applies to make the model coherent). Phase 1 skipped these
@@ -114,7 +112,7 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
     if (ends_with(out, ".layer_scalar") || ends_with(out, ".per_expert_scale")) {
         counters.gemma4_extras++;
     } else if (ends_with(out, ".scale")) {
-        std::string_view before_scale(out.data(), out.size() - 6); // strip ".scale"
+        std::string_view before_scale(out.data(), out.size() - 6);  // strip ".scale"
         if (!is_proj_segment(before_scale)) {
             counters.gemma4_extras++;
         }
@@ -160,29 +158,31 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
 }
 
 void log_summary(const TranslationCounters& c) {
-    IMP_LOG_INFO("llm-compressor format: %d suffix renames, %d prefix strips, "
-                 "%d vision tensors skipped, %d Gemma-4 extras emitted, "
-                 "%d pass-through",
-                 c.suffix_renames, c.prefix_strips,
-                 c.vision_skipped, c.gemma4_extras,
-                 c.passed_through);
+    IMP_LOG_INFO(
+        "llm-compressor format: %d suffix renames, %d prefix strips, "
+        "%d vision tensors skipped, %d Gemma-4 extras emitted, "
+        "%d pass-through",
+        c.suffix_renames, c.prefix_strips, c.vision_skipped, c.gemma4_extras, c.passed_through);
 }
 
 // Count leading spaces (tabs counted as 4) to track YAML block scope.
 static int count_indent(const std::string& line) {
     int n = 0;
     for (char c : line) {
-        if (c == ' ') n++;
-        else if (c == '\t') n += 4;
-        else break;
+        if (c == ' ')
+            n++;
+        else if (c == '\t')
+            n += 4;
+        else
+            break;
     }
     return n;
 }
 
-bool parse_recipe_yaml(const std::string& model_dir,
-                       imp::HFConfigLoader::NvFP4Config& cfg) {
+bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg) {
     std::ifstream in(model_dir + "/recipe.yaml");
-    if (!in.good()) return false;
+    if (!in.good())
+        return false;
 
     std::string scheme;
     std::vector<std::string> ignore_list;
@@ -217,7 +217,8 @@ bool parse_recipe_yaml(const std::string& model_dir,
 
         int indent = count_indent(line);
         std::string_view sv(line);
-        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
+        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t'))
+            sv.remove_prefix(1);
 
         // Indent-based exits — only fire on non-empty content lines so blank
         // lines don't bogusly close a block.
@@ -238,7 +239,8 @@ bool parse_recipe_yaml(const std::string& model_dir,
             weights_indent = -1;
             continue;
         }
-        if (!seen_quant_mod) continue;
+        if (!seen_quant_mod)
+            continue;
 
         if (sv.find("config_groups:") == 0) {
             config_groups_indent = indent;
@@ -251,11 +253,15 @@ bool parse_recipe_yaml(const std::string& model_dir,
 
         if (weights_indent >= 0) {
             if (sv.find("num_bits:") == 0) {
-                try { weights_num_bits = std::stoi(trim_value(sv.substr(9))); } catch (...) {}
+                try {
+                    weights_num_bits = std::stoi(trim_value(sv.substr(9)));
+                } catch (...) {}
             } else if (sv.find("type:") == 0) {
                 weights_type = trim_value(sv.substr(5));
             } else if (sv.find("group_size:") == 0) {
-                try { weights_group_size = std::stoi(trim_value(sv.substr(11))); } catch (...) {}
+                try {
+                    weights_group_size = std::stoi(trim_value(sv.substr(11)));
+                } catch (...) {}
             }
             continue;
         }
@@ -264,16 +270,17 @@ bool parse_recipe_yaml(const std::string& model_dir,
             scheme = trim_value(sv.substr(7));
         } else if (sv.find("ignore:") == 0) {
             std::string body(sv.substr(7));
-            if (body.find('[') != std::string::npos &&
-                body.find(']') == std::string::npos) {
+            if (body.find('[') != std::string::npos && body.find(']') == std::string::npos) {
                 ignore_buf = std::move(body);
                 collecting_ignore = true;
             } else {
                 ignore_list = parse_bracket_array(body);
             }
         } else if (sv.find("group_size:") == 0) {
-            try { cfg.group_size = std::stoi(trim_value(sv.substr(11))); }
-            catch (...) { /* keep default */ }
+            try {
+                cfg.group_size = std::stoi(trim_value(sv.substr(11)));
+            } catch (...) { /* keep default */
+            }
         }
     }
 
@@ -286,12 +293,12 @@ bool parse_recipe_yaml(const std::string& model_dir,
     // `config_groups.group_0.weights.{num_bits: 4, type: float}` shape.
     if (scheme.empty() && weights_num_bits == 4 && weights_type == "float") {
         scheme = "NVFP4";
-        if (weights_group_size > 0) cfg.group_size = weights_group_size;
+        if (weights_group_size > 0)
+            cfg.group_size = weights_group_size;
     }
 
     if (scheme != "NVFP4" && scheme != "NVFP4_W4A16") {
-        IMP_LOG_ERROR("recipe.yaml scheme '%s' not supported (need NVFP4 or NVFP4_W4A16)",
-                      scheme.c_str());
+        IMP_LOG_ERROR("recipe.yaml scheme '%s' not supported (need NVFP4 or NVFP4_W4A16)", scheme.c_str());
         return false;
     }
 
@@ -302,4 +309,4 @@ bool parse_recipe_yaml(const std::string& model_dir,
     return true;
 }
 
-} // namespace imp::llm_compressor
+}  // namespace imp::llm_compressor

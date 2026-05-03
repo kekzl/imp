@@ -553,12 +553,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 bool has_mxfp4_weights = false;
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4_weights; i++) {
                     const auto& L = model_->layer(i);
-                    if (L.wq.qtype == QType::MXFP4 ||
-                        L.w_gate.qtype == QType::MXFP4 ||
-                        L.w_up.qtype == QType::MXFP4 ||
-                        L.w_down.qtype == QType::MXFP4 ||
-                        L.ssm_in.qtype == QType::MXFP4 ||
-                        L.ssm_out.qtype == QType::MXFP4 ||
+                    if (L.wq.qtype == QType::MXFP4 || L.w_gate.qtype == QType::MXFP4 ||
+                        L.w_up.qtype == QType::MXFP4 || L.w_down.qtype == QType::MXFP4 ||
+                        L.ssm_in.qtype == QType::MXFP4 || L.ssm_out.qtype == QType::MXFP4 ||
                         L.expert_gate_packed.qtype == QType::MXFP4 ||
                         L.expert_up_packed.qtype == QType::MXFP4 ||
                         L.expert_down_packed.qtype == QType::MXFP4) {

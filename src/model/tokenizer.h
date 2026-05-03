@@ -88,7 +88,10 @@ public:
 
     // Token type metadata from GGUF (tokenizer.ggml.token_type).
     // Types: NORMAL=1, UNKNOWN=2, CONTROL=3, USER_DEFINED=4, UNUSED=5, BYTE=6
-    void load_token_types(const std::vector<int32_t>& types) { token_types_ = types; build_special_pieces(); }
+    void load_token_types(const std::vector<int32_t>& types) {
+        token_types_ = types;
+        build_special_pieces();
+    }
     bool has_token_types() const { return !token_types_.empty(); }
     bool is_control_token(int id) const {
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] == 3;
