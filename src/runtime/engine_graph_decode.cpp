@@ -12,10 +12,8 @@
 namespace imp {
 
 // =====================================================================
-// CUDA Graph decode helpers
-// (Filename is historical; the speculative-decode variants that originally
-// lived here were removed when proven broken/unused. The async-graph and
-// conditional-graph helpers below are the production decode path.)
+// CUDA Graph decode helpers — async and conditional-graph variants
+// for the production decode path.
 // =====================================================================
 
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {

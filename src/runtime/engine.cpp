@@ -2408,10 +2408,8 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     return result;
 }
 
-// prepare_graph_loop: moved to engine_speculative.cpp
-// build_graph_config: moved to engine_speculative.cpp
-// try_graph_loop_decode: moved to engine_speculative.cpp
-// try_launch_async_graph_loop: moved to engine_speculative.cpp
+// prepare_graph_loop, build_graph_config, try_graph_loop_decode, and
+// try_launch_async_graph_loop live in engine_graph_decode.cpp.
 
 void Engine::add_request(std::shared_ptr<Request> req) {
     if (scheduler_) {

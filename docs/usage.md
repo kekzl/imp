@@ -259,7 +259,7 @@ imp/
 │   ├── quant/            FP8, NVFP4, INT4/INT8 dequant, quantised GEMM
 │   ├── graph/            GraphExecutor (hardcoded transformer forward pass)
 │   ├── runtime/          Engine, Scheduler, CUDA Graphs, PDL, Green Contexts,
-│   │                     Speculative Decoding, RuntimeConfig (imp.conf parser)
+│   │                     RuntimeConfig (imp.conf parser)
 │   ├── vision/           SigLIP encoder, image preprocessing, mmproj loader
 │   └── api/              C API implementation
 ├── tools/

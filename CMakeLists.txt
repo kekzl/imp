@@ -185,7 +185,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
-    src/runtime/engine_speculative.cpp
+    src/runtime/engine_graph_decode.cpp
     src/runtime/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
