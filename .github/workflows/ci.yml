@@ -32,8 +32,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DIMP_BUILD_TESTS=ON \
             -DIMP_BUILD_TOOLS=ON \
-            -DIMP_BUILD_BENCH=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="90a;100"
+            -DIMP_BUILD_BENCH=ON
+          # CMakeLists.txt pins arch=compute_120f,code=sm_120 directly via
+          # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. CI compiles PTX/SASS
+          # for sm_120 only; runtime tests need a self-hosted RTX 5090 runner.
 
       - name: Build
         run: cmake --build build -j$(nproc)

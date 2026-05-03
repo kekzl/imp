@@ -101,6 +101,7 @@ Body explains *why*, not *what* — the diff already says what changed.
 ## Pull requests
 
 - Run `make verify-fast` (or `make verify`) before pushing. CI is the source of truth, but failing local first wastes everyone's time.
+- For release-touching PRs, `scripts/check-release.sh` runs the same gate plus a doc-link / secret / personal-path scan.
 - For perf-sensitive changes, include before/after numbers in the PR description (model, quant, `tg256` and/or `pp512`, hardware).
 - Don't reintroduce SM 8.0 / 9.0 / 10.0 code paths. They were removed deliberately and the build pins `arch=compute_120f`.
 - Don't break the C API. If a public function in `include/imp/` needs to change, update every caller and call it out in the PR.
