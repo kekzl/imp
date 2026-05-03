@@ -252,7 +252,7 @@ Benchmark:
 | [Memory Management](docs/memory-management-comparison.md) | VRAM/RAM strategies: imp vs llama.cpp vs Ollama vs vLLM |
 | [Memory-traffic catalog](docs/memory-traffic-reduction-catalog.md) | Open KV / weight / activation traffic-reduction options, with status |
 | [SM120 status](docs/SM120_OPTIMIZATION_STATUS.md) | sm_120f-specific kernel optimisation notes |
-| [MXFP4](docs/MXFP4_QUANTIZATION.md) | MXFP4 background and tooling |
+| [Quantization](docs/quantization.md) | NVFP4 / MXFP4 / GGUF — formats, sources, what imp does with them |
 
 ## Acknowledgments
 

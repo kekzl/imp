@@ -9,8 +9,8 @@ A comparison of memory management strategies across four LLM inference engines.
 | | **imp** | **llama.cpp** | **Ollama** | **vLLM** |
 |---|---|---|---|---|
 | Language | C++20 / CUDA | C / C++ / CUDA | Go + llama.cpp (C++) | Python + PyTorch + CUDA |
-| GPU Support | CUDA only (Hopper, Blackwell) | CUDA, Metal, Vulkan, ROCm, SYCL | Inherits from llama.cpp | CUDA, ROCm, TPU |
-| Focus | Max single-GPU perf | Broad HW compatibility | Ease of use | Max serving throughput |
+| GPU Support | CUDA `sm_120f` only (Blackwell consumer + workstation: RTX 5090, RTX PRO 5000 / 6000) | CUDA, Metal, Vulkan, ROCm, SYCL | Inherits from llama.cpp | CUDA, ROCm, TPU |
+| Focus | Max single-GPU perf on Blackwell | Broad HW compatibility | Ease of use | Max serving throughput |
 | Multi-GPU | No | Layer/Row/Graph split | Layer split | Tensor/Pipeline/Expert parallelism |
 
 ---
@@ -21,8 +21,8 @@ A comparison of memory management strategies across four LLM inference engines.
 
 | | **imp** | **llama.cpp** | **Ollama** | **vLLM** |
 |---|---|---|---|---|
-| Method | `mmap()` read-only | `mmap()` + `MAP_SHARED` | Inherits from llama.cpp | `torch.load()` / Safetensors |
-| Hints | `MADV_SEQUENTIAL` | `mlock()` optional | — | — |
+| Method | `mmap()` read-only (GGUF + SafeTensors) | `mmap()` + `MAP_SHARED` | Inherits from llama.cpp | `torch.load()` / Safetensors |
+| Hints | `MAP_POPULATE` + `MADV_WILLNEED` + `MADV_SEQUENTIAL` (cold-cache prefault) | `mlock()` optional | — | — |
 | Disableable | No | `--no-mmap` | No | N/A (no mmap) |
 | Zero-copy | Yes (until upload) | Yes (CPU layers stay in mmap) | Yes | No (PyTorch copies) |
 
@@ -46,7 +46,7 @@ A comparison of memory management strategies across four LLM inference engines.
 
 | | **imp** | **llama.cpp** | **Ollama** | **vLLM** |
 |---|---|---|---|---|
-| Pool | 64 MiB `cudaMallocHost` pool | Output buffer only (~2 MB) | Inherits | PyTorch-managed, swap space pinned |
+| Pool | 4 × 128 MiB `cudaMallocHost` ring (weight upload pipeline) | Output buffer only (~2 MB) | Inherits | PyTorch-managed, swap space pinned |
 | Sub-allocation | Bump-pointer + size-class free lists (256B aligned) | None | — | None (PyTorch internal) |
 | Fallback | Direct `cudaMallocHost` when pool exhausted | — | — | — |
 
@@ -133,11 +133,11 @@ The paged block architecture of **imp** and **vLLM** is dramatically more effici
 
 | | **imp** | **llama.cpp** | **Ollama** | **vLLM** |
 |---|---|---|---|---|
-| Formats | FP16, FP8 E4M3 | FP16, Q8_0, Q4_0 | FP16, Q8_0, Q4_0 | FP16, BF16, FP8 E4M3, FP8 E5M2 |
+| Formats | FP16 (default), FP8 E4M3, INT8, INT4, NVFP4, TurboQuant | FP16, Q8_0, Q4_0 | FP16, Q8_0, Q4_0 | FP16, BF16, FP8 E4M3, FP8 E5M2 |
 | Prerequisite | — | Flash Attention | `OLLAMA_FLASH_ATTENTION=1` | — |
-| Calibration | — | — | — | Optional per-head scales via `llm-compressor` |
+| Calibration | Online per-layer absmax (FP8 KV; warmup-aware monotonic via PR #89) | — | — | Optional per-head scales via `llm-compressor` |
 | K/V separate | No (same dtype) | Yes (`-ctk`/`-ctv`) | No (global) | No (same dtype) |
-| Savings | 2x (FP8) | 2x (Q8_0), 3x (Q4_0) | Same as llama.cpp | 2x (FP8) |
+| Savings | 2× (FP8), 4× (INT4), ~3× (TurboQuant ~3 bits/elem average) | 2× (Q8_0), 3× (Q4_0) | Same as llama.cpp | 2× (FP8) |
 
 ### 4.6 KV Cache Sizing
 
@@ -173,7 +173,7 @@ The paged block architecture of **imp** and **vLLM** is dramatically more effici
 | Multi-node | No | No | No | Yes (Ray + NCCL) |
 | Config | — | `--tensor-split 0.6,0.4` | `OLLAMA_SCHED_SPREAD` | `-tp N -pp M` |
 
-**vLLM** is built for multi-GPU/multi-node serving. **llama.cpp** has caught up with `--split-mode graph` (NCCL), but only for CUDA. **imp** is intentionally optimized for single-GPU (Hopper/Blackwell).
+**vLLM** is built for multi-GPU/multi-node serving. **llama.cpp** has caught up with `--split-mode graph` (NCCL), but only for CUDA. **imp** is intentionally optimized for a single Blackwell GPU (RTX 5090 / RTX PRO 5000 / 6000).
 
 ---
 
@@ -194,22 +194,23 @@ The paged block architecture of **imp** and **vLLM** is dramatically more effici
 
 | Feature | **imp** | **llama.cpp** | **Ollama** | **vLLM** |
 |---|---|---|---|---|
-| CUDA Graphs | Decode captured | Delayed activation | Inherited | Decode captured (stable shapes) |
-| PDL | `cudaFuncAttributeProgrammaticStreamSerialization` | No | No | No |
-| Green Contexts | SM partitioning for prefill/decode | No | No | No |
+| CUDA Graphs | Decode captured (incl. NVFP4 prequant MoE end-to-end via `cache_moe_native_nvfp4`) | Delayed activation | Inherited | Decode captured (stable shapes) |
+| PDL | `cudaFuncAttributeProgrammaticStreamSerialization` (152+ edges in conditional runner) | No | No | No |
+| Green Contexts | SM partitioning for prefill/decode (CUDA 13.2 Green Contexts API) | No | No | No |
 | Chunked prefill | No | No | No | Yes (bounded by `max_num_batched_tokens`) |
 | Disaggregated prefill | No | No | No | Yes (separate prefill/decode instances) |
-| SSM state | FP32 persistent, per-seq GPU pool | `llama_memory_recurrent` | Inherited | Limited |
-| Speculative decoding | Draft+target with KV block rollback | Yes | No | Draft/Eagle/Medusa/MLPSpeculator |
+| SSM / GDN state | FP32 persistent, per-seq GPU pool (Mamba2, Gated DeltaNet) | `llama_memory_recurrent` | Inherited | Limited |
+| Speculative decoding | N-gram opt-in (EAGLE / self-spec / DFlash / TurboDraft all evaluated and dropped — single-5090 decode is bandwidth-bound) | Yes | No | Draft/Eagle/Medusa/MLPSpeculator |
+| Native function calling | ChatML / Llama3 / Gemma-4 (`<\|tool_call>`) / Qwen3.6 XML; longest-match special-token pre-split in tokenizer | Limited | Inherits | Yes |
 
 ---
 
 ## 9. Summary
 
-### imp — Maximum Single-GPU Performance
-- **Strengths**: Paged KV cache (near 0% waste), stream-ordered CUDA allocation, Blackwell-native features (PDL, Green Contexts, TCGEN05), dedicated pinned memory pool, speculative decoding with block rollback
-- **Weaknesses**: No CPU offload, no multi-GPU, no multi-model, no KV swapping
-- **Ideal for**: Dedicated single-GPU inference on Hopper/Blackwell with maximum latency optimization
+### imp — Maximum Single-GPU Performance on Blackwell
+- **Strengths**: NVFP4 prequant SafeTensors as primary path (200+ tok/s on most MoE), paged KV cache (near 0% waste), stream-ordered CUDA allocation, Blackwell-native features (PDL, Green Contexts, `mma.sync` block-scaled FP4 / FP8 / FP16 MMA on the 5th-gen tensor cores), 4×128 MiB pinned ring for weight upload, native function calling with longest-match special-token pre-split tokenizer.
+- **Weaknesses**: No CPU offload, no multi-GPU, no multi-model hot-swap (separate processes per model), no KV swapping. `sm_120f` only — no compatibility matrix.
+- **Ideal for**: Dedicated single-GPU inference on RTX 5090 / RTX PRO 5000 / 6000 Blackwell with maximum latency optimization.
 
 ### llama.cpp — Universal Compatibility
 - **Strengths**: Multi-backend (CUDA/Metal/Vulkan/CPU), CPU offloading, broad quant formats (GGML Q4/Q5/Q6/Q8), mmap zero-copy, graph-based tensor allocator, multi-GPU (layer/row/graph split)
@@ -232,10 +233,11 @@ The paged block architecture of **imp** and **vLLM** is dramatically more effici
 
 | Scenario | Recommendation |
 |---|---|
-| Single H100/B200, latency-critical, one model | **imp** |
-| Consumer GPU (RTX 4090), large model, partial CPU | **llama.cpp** |
+| Single Blackwell GPU (RTX 5090 / PRO 5000 / 6000), latency-critical, NVFP4 model | **imp** |
+| Datacenter Hopper / Blackwell B200/B300 | **vLLM** or **TensorRT-LLM** (imp doesn't target these) |
+| Older consumer GPU (RTX 4090, 3090), large model, partial CPU offload | **llama.cpp** |
 | Desktop, trying different models | **Ollama** |
 | Production API, 100+ concurrent users | **vLLM** |
 | Multi-node cluster, maximum throughput | **vLLM** |
 | Edge device, Apple Silicon | **llama.cpp** (Metal) |
-| Hybrid SSM+Attention models (Mamba2) | **imp** or **llama.cpp** |
+| Hybrid SSM+Attention or GDN+MoE models (Mamba2, Qwen3.5/3.6) | **imp** (Blackwell) or **llama.cpp** (other HW) |

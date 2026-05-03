@@ -1,6 +1,12 @@
 # Recommended Models for imp
 
-Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM.
+Models tested and verified on **RTX 5090** (32 GB GDDR7). The same binary
+runs on **RTX PRO 5000 Blackwell** (48 GB) and **RTX PRO 6000 Blackwell**
+(96 GB) — workstation cards just fit larger MoE models without expert
+offload, no tuning required.
+
+Sorted by quality-per-VRAM. NVFP4 prequant SafeTensors is the primary
+path (highest decode tok/s on Blackwell); GGUF supported as legacy.
 
 ## Dense Transformers (Attention-only)
 
@@ -48,18 +54,24 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 
 ## Mixture of Experts (MoE)
 
+NVFP4 prequant is the primary path on Blackwell — CUDA Graphs capture
+end-to-end via `cache_moe_native_nvfp4` (no per-layer D2H expert-routing
+sync), and decode runs at 200+ tok/s on most MoE models post PR #88.
+
 | Model | Quant | VRAM | Decode tok/s | Notes |
 |-------|-------|------|-------------|-------|
-| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | 234 | Code MoE post moe_expert_offload_fix (PR #54) |
-| **Qwen3-Coder-30B-A3B** | NVFP4 | 16 GB | 51 | `--no-cuda-graphs` for coherence; Model Optimizer SafeTensors |
-| **Qwen3.6-35B-A3B** | Q4_K_M | 22 GB | 143 | GDN + MoE, `moe.expert_overhead_pct=10` |
-| **Qwen3.6-35B-A3B** | NVFP4 | — | 117–142 | Decode fast-path post PR #85 (was 8.34) |
-| **Gemma-4-26B-A4B-it** | Q4_K_M | 14 GB | 183 | 1.21× llama.cpp; CUDA Graphs lit up |
-| **Gemma-4-26B-A4B-it** | Q5_K_M | 17 GB | 65 | Best quality/speed |
-| **Gemma-4-26B-A4B-it** | NVFP4 | — | 157–180 | Decode fast-path post PR #85 |
-| **Mistral-Small-3.2** | NVFP4 | — | 81 | llm-compressor Phase 2 Item 1 |
+| **Qwen3-Coder-30B-A3B** | NVFP4 | 16 GB | **272** | NVIDIA Modelopt SafeTensors; CUDA Graphs ON post #88 (was 51 with `--no-cuda-graphs`) |
+| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | 234 | Code MoE post `moe.expert_overhead_pct=10` auto-pick |
+| **Qwen3.6-35B-A3B** | NVFP4 | 22 GB | **217** | GDN+MoE, llm-compressor; native tool calling verified |
+| **Qwen3.6-35B-A3B** | Q4_K_M | 22 GB | 143 | GDN + MoE GGUF |
+| **Gemma-4-26B-A4B-it** | NVFP4 | 16 GB | **213** | llm-compressor; native tool calling verified on Q8_0/Q4_K_M, NVFP4 falls back to prompt-based |
+| **Gemma-4-26B-A4B-it** | Q4_K_M | 14 GB | 183 | 1.21× llama.cpp; CUDA Graphs ON |
+| **Gemma-4-26B-A4B-it** | Q5_K_M | 17 GB | 65 | Best quality/speed for complex code-gen |
+| **Gemma-4-26B-A4B-it** | Q8_0 | 26 GB | — | Native tool calling, cleanest output |
+| **Mistral-Small-3.2** | NVFP4 | — | 101 | llm-compressor; long-prose quality caveat above ~250 tokens (TODO.md) |
+| **Qwen3-30B-A3B** | NVFP4-Modelopt | — | — | Mistral-3.2 replacement when long-context coherence matters |
 | **DeepSeek-R1-Distill-Qwen-14B** | Q6_K | 12 GB | — | Reasoning-optimised (R1 distillation) |
-| **Nemotron-3-Nano-30B-A3B** | Q6_K | 32 GB | — | Mamba2+Attention+MoE hybrid, tight fit |
+| **Nemotron-3-Nano-30B-A3B** | Q6_K | 32 GB | — | Mamba2+Attention+MoE hybrid, tight fit on 32 GB |
 
 ## Quick Recommendations
 
@@ -70,9 +82,10 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 | **Best quality ≤16 GB** | Qwen3.5-27B Q4_K_M | GDN + large model |
 | **Best quality ≤32 GB** | Qwen3-32B Q4_K_M | Dense frontier |
 | **Long context** | Qwen3.6-35B-A3B Q4_K_M | GDN+MoE = O(1) per token + sparse compute |
-| **Coding (MoE)** | Qwen3-Coder-30B-A3B Q6_K | 234 tok/s post moe_expert_offload_fix |
+| **Coding (MoE NVFP4)** | Qwen3-Coder-30B-A3B NVFP4 | 272 tok/s post #88, CUDA Graphs |
+| **Coding (MoE GGUF)** | Qwen3-Coder-30B-A3B Q6_K | 234 tok/s post `moe.expert_overhead_pct=10` |
 | **Coding (dense)** | Devstral-Small Q4_K_M | Code-specialised |
-| **Big-MoE NVFP4** | Gemma-4-26B-A4B NVFP4 | 157–180 tok/s, decode fast-path |
+| **Big-MoE NVFP4** | Gemma-4-26B-A4B NVFP4 | 213 tok/s, decode fast-path, native tools |
 | **Vision** | Gemma-3-12B Q8_0 | Text + image (mmproj) |
 | **Reasoning** | DeepSeek-R1-Distill-14B Q6_K | Chain-of-thought |
 | **Smallest footprint** | Qwen3-4B MXFP4 | 2.8 GB, Blackwell FP4 |
