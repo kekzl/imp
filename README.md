@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Single-GPU LLM inference engine for NVIDIA Blackwell (RTX 5090).
+  Single-GPU LLM inference engine for NVIDIA Blackwell — RTX 5090, and (untested) RTX PRO 5000 / 6000 Blackwell (sm_120f).
 </p>
 
 <p align="center">
@@ -61,7 +61,9 @@ See [`docs/usage.md`](docs/usage.md) for the full CLI reference, server flags, a
 
 ## Supported hardware
 
-`sm_120f` only — NVIDIA RTX 5090 (GB202, Blackwell).
+`sm_120f` only — built and tested on **NVIDIA RTX 5090** (GB202, Blackwell, 32 GB).
+
+The same binary should also run on the workstation Blackwell line — **RTX PRO 5000 Blackwell** (48 GB) and **RTX PRO 6000 Blackwell** (96 GB) — since they share the `sm_120` compute capability. The larger VRAM would let MoE models that currently need expert offload on the 5090 (Qwen3.6-35B-A3B, Qwen3-Coder-30B-A3B) fit entirely in VRAM. **Untested — I don't own either card.** If you have one and try it, please open an issue with the result.
 
 There are no architecture fallbacks. The code will fail to compile or fail at startup on any other SM. No support for Hopper, Ada, Ampere, or earlier; no AMD/Apple/CPU paths.
 
