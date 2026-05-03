@@ -2,21 +2,39 @@
 build/
 build-*/
 build-docker/
+cmake-build-*/
+out/
 *.o
-*.so
+*.obj
 *.a
+*.lib
+*.so
+*.dylib
+*.dll
 *.d
 a.out
 compile_commands.json
 
+# CUDA artifacts
+*.fatbin
+*.cubin
+
 # Logs (debug runs, repro logs, smoke tests)
 *.log
 bringup_artifacts/
+core
+core.*
+*.dump
 
-# Model files
+# Model files / weights
 models/
+weights/
+checkpoints/
 *.gguf
 *.safetensors
+*.pt
+*.onnx
+*.bin
 
 # IDE / editor
 .cache/
@@ -26,14 +44,17 @@ models/
 *.swo
 *~
 .DS_Store
+Thumbs.db
 tags
 TAGS
 
 # Python
 __pycache__/
+.pytest_cache/
 
 # Credentials
 .env
+.env.local
 *.key
 *.pem
 
@@ -46,18 +67,22 @@ __pycache__/
 # Layer-diff hidden-state dumps (large binaries)
 dumps/
 
-# Benchmark results
+# Benchmark / validation outputs (regeneratable)
 benchmarks/results/
+bench/results/
 bench_results.txt
 bench_fp8_kv*.sh
 bench_int8_kv*.sh
+validation_artifacts/
 
 # Misc
 inspect_gguf.py
 test_detail.json
 .playwright-mcp/
 
-# Claude Code transient state (keep .claude/settings.json if ever added)
-.claude/*.lock
-.claude/worktrees/
-.claude/settings.local.json
+# Release-readiness audit (local-only triage notes)
+_audit/
+
+# Local AI-agent state (must never be published)
+CLAUDE.md
+.claude/
