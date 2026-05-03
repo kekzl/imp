@@ -58,6 +58,75 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family,
     return prompt;
 }
 
+// Parse Qwen3.6's XML-flavored tool-call body:
+//   <function=NAME>
+//   <parameter=KEY1>
+//   VALUE1
+//   </parameter>
+//   ...
+//   </function>
+// Strings round-trip as strings; bare numerics get coerced to JSON numbers.
+static bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
+    size_t fn = body.find("<function=");
+    if (fn == std::string::npos) return false;
+    fn += 10;
+    size_t fn_end = body.find('>', fn);
+    if (fn_end == std::string::npos) return false;
+    tc.name = body.substr(fn, fn_end - fn);
+    auto trim = [](std::string& s) {
+        auto a = s.find_first_not_of("\n\r\t ");
+        auto b = s.find_last_not_of("\n\r\t ");
+        if (a == std::string::npos) { s.clear(); return; }
+        s = s.substr(a, b - a + 1);
+    };
+    trim(tc.name);
+    if (tc.name.empty()) return false;
+
+    json args = json::object();
+    size_t pos = fn_end + 1;
+    size_t fn_close = body.find("</function>", pos);
+    size_t scan_end = (fn_close == std::string::npos) ? body.size() : fn_close;
+    while (pos < scan_end) {
+        size_t pk = body.find("<parameter=", pos);
+        if (pk == std::string::npos || pk >= scan_end) break;
+        pk += 11;
+        size_t pk_end = body.find('>', pk);
+        if (pk_end == std::string::npos || pk_end >= scan_end) break;
+        std::string key = body.substr(pk, pk_end - pk);
+        trim(key);
+        size_t val_start = pk_end + 1;
+        size_t pv_end = body.find("</parameter>", val_start);
+        if (pv_end == std::string::npos || pv_end > scan_end) break;
+        std::string val = body.substr(val_start, pv_end - val_start);
+        trim(val);
+        // Coerce bare numerics / true/false; otherwise keep as string.
+        json jv;
+        try {
+            if (val == "true")       jv = true;
+            else if (val == "false") jv = false;
+            else if (val == "null")  jv = nullptr;
+            else if (!val.empty() && (val[0] == '-' || val[0] == '.' ||
+                                      (val[0] >= '0' && val[0] <= '9'))) {
+                if (val.find('.') != std::string::npos ||
+                    val.find('e') != std::string::npos ||
+                    val.find('E') != std::string::npos) {
+                    jv = std::stod(val);
+                } else {
+                    jv = std::stoll(val);
+                }
+            } else {
+                jv = val;
+            }
+        } catch (...) {
+            jv = val;
+        }
+        args[key] = std::move(jv);
+        pos = pv_end + 12;
+    }
+    tc.arguments = args.dump();
+    return true;
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>>
 parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;
@@ -82,8 +151,19 @@ parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_cal
         if (start == std::string::npos) break;
         start += 11; // skip "<tool_call>"
 
-        size_t end = text.find("</tool_call>", start);
-        if (end == std::string::npos) break; // incomplete tag
+        // Locate the closing tag. Some models (Qwen3.6) drift and emit a second
+        // opening <tool_call> instead of </tool_call>; treat either as the
+        // body delimiter so we still parse the call rather than dropping it.
+        size_t end_proper = text.find("</tool_call>", start);
+        size_t end_drift  = text.find("<tool_call>",  start);
+        size_t end = end_proper;
+        size_t skip_len = 12; // "</tool_call>"
+        if (end_proper == std::string::npos ||
+            (end_drift != std::string::npos && end_drift < end_proper)) {
+            end = end_drift;
+            skip_len = 11;
+        }
+        if (end == std::string::npos) break;
 
         std::string body = text.substr(start, end - start);
         // Trim whitespace
@@ -92,28 +172,37 @@ parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_cal
         if (bs != std::string::npos && be != std::string::npos)
             body = body.substr(bs, be - bs + 1);
 
-        // Parse JSON
-        try {
-            json j = json::parse(body);
+        // Two flavours: classic ChatML JSON ({"name": ..., "arguments": ...})
+        // and Qwen3.6's XML-styled <function=...><parameter=...>... layout.
+        bool parsed = false;
+        if (!body.empty() && body[0] == '{') {
+            try {
+                json j = json::parse(body);
+                ParsedToolCall tc;
+                tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
+                tc.name = j.value("name", "");
+                if (j.contains("arguments")) {
+                    tc.arguments = j["arguments"].dump();
+                } else {
+                    json args = j;
+                    args.erase("name");
+                    tc.arguments = args.dump();
+                }
+                if (!tc.name.empty()) {
+                    calls.push_back(std::move(tc));
+                    parsed = true;
+                }
+            } catch (...) { /* fall through */ }
+        }
+        if (!parsed && body.find("<function=") != std::string::npos) {
             ParsedToolCall tc;
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
-            tc.name = j.value("name", "");
-            if (j.contains("arguments")) {
-                tc.arguments = j["arguments"].dump();
-            } else {
-                // Some models put params at top level minus "name"
-                json args = j;
-                args.erase("name");
-                tc.arguments = args.dump();
-            }
-            if (!tc.name.empty()) {
+            if (parse_qwen36_xml_call(body, tc)) {
                 calls.push_back(std::move(tc));
             }
-        } catch (...) {
-            // Malformed JSON — skip
         }
 
-        pos = end + 12; // skip "</tool_call>"
+        pos = end + skip_len;
     }
 
     return {content, calls};
