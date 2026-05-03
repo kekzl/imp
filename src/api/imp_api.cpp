@@ -103,7 +103,7 @@ ImpGenerateParams imp_generate_params_default(void) {
 // --- Version ---
 
 const char* imp_version(void) {
-    return "0.7.0";
+    return "0.8.0";
 }
 
 // --- Helper: map ImpDType to imp::QType ---

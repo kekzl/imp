@@ -2,9 +2,19 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — post-v0.7.0 (2026-04-24 → current)
+## [Unreleased]
 
-42+ PRs since v0.7.0. Highlights below; full list under each section.
+Public-release readiness pass: documentation rewrite, hygiene gate
+(`scripts/check-release.sh`), removal of dev-internal scratch files,
+filename / endpoint corrections.
+
+## [0.8.0] - 2026-05-03
+
+NVFP4-prequant SafeTensors hits production: Mistral-3.2 / Gemma-4 /
+Qwen3.6 / Qwen3-Coder all coherent on single-turn, sampling, multi-turn
+and short long-context. FP8 KV warmup calibration fixed for Llama and
+GDN families. CUDA Graphs lit up for prequant SafeTensors. Forty-plus
+PRs since v0.7.0.
 
 ### Fixed
 
