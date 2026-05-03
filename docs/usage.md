@@ -187,10 +187,11 @@ Benchmark:
 ./build/imp-server --model gemma-3-12b-it.gguf --mmproj mmproj.gguf
 ```
 
-Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`,
-`/v1/messages` (Anthropic-compatible, streaming + non-streaming),
-`/tokenize`, `/detokenize`, `/health`. Tool/function calling, streaming
-usage stats, logprobs, and API-key auth (`--api-key`) supported.
+Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/models`, `/v1/messages` (Anthropic-compatible, streaming +
+non-streaming), `/tokenize`, `/detokenize`, `/health`. Tool/function
+calling, streaming usage stats, logprobs, and API-key auth
+(`--api-key`) supported.
 `/v1/models` lists available GGUF and SafeTensors models in the models
 directory.
 
