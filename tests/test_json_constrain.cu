@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "compute/json_constrain.h"
 #include "compute/constrain_common.h"
+#include "compute/preamble_gate.h"
 
 #include <string>
 #include <cfloat>
@@ -143,6 +144,113 @@ TEST(JsonConstrainTest, MaskAllowsValidTokens) {
     cudaFree(d_cats);
     cudaFree(d_mask);
     cudaFree(d_logits);
+}
+
+// ===========================================================================
+// PreambleGate tests — reasoning-model thinking pass-through
+// ===========================================================================
+//
+// Token IDs used in these tests are fictitious — the gate only cares about
+// matching the configured close_token id and inspecting token text for a JSON
+// start char.
+
+constexpr int32_t TOK_THINK_OPEN = 100;
+constexpr int32_t TOK_THINK_CLOSE = 101;
+constexpr int32_t TOK_TEXT = 200;
+constexpr int32_t TOK_OPEN_BRACE = 300;
+
+TEST(PreambleGateTest, DisabledByDefault) {
+    PreambleGate g;
+    EXPECT_FALSE(g.active());
+    EXPECT_FALSE(g.absorb(TOK_TEXT, "hi"));  // gate inactive → don't absorb
+}
+
+TEST(PreambleGateTest, ConfigureNegativeCloseTokenStaysDisabled) {
+    PreambleGate g;
+    g.configure(-1, 8192);
+    EXPECT_FALSE(g.active());
+    EXPECT_FALSE(g.absorb(TOK_TEXT, "hi"));
+}
+
+TEST(PreambleGateTest, ActivatesAfterConfigure) {
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    EXPECT_TRUE(g.active());
+}
+
+TEST(PreambleGateTest, AbsorbsThinkingTokensThenTransitionsOnClose) {
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+
+    // Free-form thinking tokens are all absorbed.
+    EXPECT_TRUE(g.absorb(TOK_THINK_OPEN, "<think>"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "let me reason"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, " about this"));
+    EXPECT_TRUE(g.active());
+
+    // </think> is consumed by the gate (NOT forwarded to JSON FSM).
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_FALSE(g.active());
+
+    // After transition, tokens are no longer absorbed.
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));
+}
+
+TEST(PreambleGateTest, JsonStartCharForcesEarlyTransition) {
+    // Model that doesn't think — emits `{` directly. Gate must transition
+    // and forward the token so the FSM sees the open brace.
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    EXPECT_TRUE(g.active());
+
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));  // forwarded
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, BracketAlsoTriggersTransition) {
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "["));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, BudgetExhaustionForcesTransition) {
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 3);  // tiny budget
+    for (int i = 0; i < 2; i++) {
+        EXPECT_TRUE(g.absorb(TOK_TEXT, "blah"));
+        EXPECT_TRUE(g.active());
+    }
+    // Third token hits the budget — absorbed, then gate goes inactive.
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "blah"));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, ResetReactivatesGate) {
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    g.absorb(TOK_THINK_CLOSE, "</think>");
+    EXPECT_FALSE(g.active());
+
+    g.reset();
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "thinking again"));
+}
+
+TEST(PreambleGateTest, ResetWhenDisabledStaysDisabled) {
+    PreambleGate g;
+    EXPECT_FALSE(g.active());
+    g.reset();
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, MidStringJsonCharStillTriggers) {
+    // Some tokenizers merge punctuation: a token like "Sure!{" should
+    // also trigger the transition because { appears in the text.
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    EXPECT_FALSE(g.absorb(TOK_TEXT, "Sure!{"));
+    EXPECT_FALSE(g.active());
 }
 
 }  // namespace

@@ -66,6 +66,7 @@ void JsonConstrainer::reset() {
     current_state_ = JsonState::START;
     partial_literal_.clear();
     target_literal_.clear();
+    preamble_.reset();
 }
 
 uint16_t JsonConstrainer::compute_allowed_mask() const {
@@ -310,6 +311,8 @@ void JsonConstrainer::update(int32_t token) {
     if (token < 0 || token >= vocab_size_)
         return;
     const std::string& text = token_texts_[token];
+    if (preamble_.absorb(token, text))
+        return;
     for (char c : text) {
         advance_char(c);
     }
@@ -317,6 +320,9 @@ void JsonConstrainer::update(int32_t token) {
 
 void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
     if (!initialized_ || !d_token_categories_ || !d_allowed_mask_)
+        return;
+
+    if (preamble_.active())
         return;
 
     uint16_t mask = compute_allowed_mask();
