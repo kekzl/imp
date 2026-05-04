@@ -627,7 +627,15 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
 }
 
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {
-    std::string content = msg.value("content", "");
+    // Tool responses arrive either as a plain string (OpenAI canonical) or as
+    // a structured JSON object/array (some clients pass through tool output
+    // verbatim). `msg.value("content", "")` silently returns "" for the
+    // non-string case, dropping the entire payload — serialise it instead.
+    std::string content;
+    if (msg.contains("content") && !msg["content"].is_null()) {
+        const auto& c = msg["content"];
+        content = c.is_string() ? c.get<std::string>() : c.dump();
+    }
 
     if (family == imp::ChatTemplateFamily::LLAMA3) {
         return content;
@@ -643,6 +651,11 @@ std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg
         return "<|tool_response>response:" + name + "{value:" + std::string(kGemmaQuote) + content +
                kGemmaQuote + "}<tool_response|>";
     }
-    // ChatML: wrap in <tool_response> tags
-    return "<tool_response>\n" + content + "\n</tool_response>";
+    // ChatML (Qwen3, Qwen3.6): the chat template wraps role=tool messages
+    // with `<tool_response>` markers itself (see tool branch in
+    // chat_template.jinja). Returning a pre-wrapped string here would nest
+    // the markers (`<tool_response><tool_response>...</tool_response></tool_response>`)
+    // and the model fails to recognise the result — silently degenerates to
+    // its training prior (e.g. claiming the search target doesn't exist).
+    return content;
 }
