@@ -313,6 +313,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 return &L.w_up_shared;
             if (slot == "w_down_shared")
                 return &L.w_down_shared;
+            // Mamba2 SSM (Nemotron-H): in_proj/out_proj are NVFP4-quantized
+            // for layers not feeding into attention; their scales must promote
+            // to the tensor sidecars so the runtime dequant path finds them.
+            if (slot == "ssm_in")
+                return &L.ssm_in;
+            if (slot == "ssm_out")
+                return &L.ssm_out;
             return nullptr;
         };
 

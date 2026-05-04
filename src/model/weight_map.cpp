@@ -279,6 +279,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     int skipped = 0;
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+    const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
 
     for (auto& [orig_name, tensor] : tensors) {
         // Gemma 4 uses Gemma4ForConditionalGeneration wrapper with
@@ -302,6 +303,74 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 name = "model.embed_tokens.weight";
             }
         }
+
+        // Nemotron-H uses `backbone.embeddings/norm_f` for top-level and
+        // `backbone.layers.N.mixer.<sub>` for ALL per-layer weights (Mamba2,
+        // Attention, MoE all share the `mixer` namespace). Translate to the
+        // Qwen-style `model.layers.N.<self_attn|mamba|mlp>.<...>` so the
+        // existing matchers below pick up the weights. Without this, every
+        // tensor falls through to the "unrecognised layer weight" warning,
+        // tensors stay null on TransformerLayer fields, and the first forward
+        // hits an IMA accessing uninitialised memory.
+        if (is_nemotron_h) {
+            if (name == "backbone.embeddings.weight") {
+                name = "model.embed_tokens.weight";
+            } else if (name == "backbone.norm_f.weight") {
+                name = "model.norm.weight";
+            } else if (name.compare(0, 16, "backbone.layers.") == 0) {
+                std::vector<std::string> bp = split(name, '.');
+                // bp = [backbone, layers, N, ...]
+                if (bp.size() >= 4) {
+                    const std::string& layer_idx = bp[2];
+                    // backbone.layers.N.norm.weight → input layernorm
+                    if (bp.size() == 5 && bp[3] == "norm" && bp[4] == "weight") {
+                        name = "model.layers." + layer_idx + ".input_layernorm.weight";
+                    }
+                    // backbone.layers.N.mixer.<sub>.<...> → translated by sub-kind
+                    else if (bp.size() >= 5 && bp[3] == "mixer") {
+                        const std::string& sub = bp[4];
+                        std::string suffix;
+                        for (size_t i = 5; i < bp.size(); ++i) {
+                            suffix += '.';
+                            suffix += bp[i];
+                        }
+                        // Attention layer (the 6 starred layers in hybrid_pattern)
+                        if (sub == "q_proj" || sub == "k_proj" || sub == "v_proj" ||
+                            sub == "o_proj") {
+                            name = "model.layers." + layer_idx + ".self_attn." + sub + suffix;
+                        }
+                        // Mamba2 layer (in_proj/out_proj/conv1d/norm/A_log/D/dt_bias)
+                        else if (sub == "in_proj" || sub == "out_proj" || sub == "conv1d" ||
+                                 sub == "norm" || sub == "A_log" || sub == "D" ||
+                                 sub == "dt_bias") {
+                            name = "model.layers." + layer_idx + ".mamba." + sub + suffix;
+                        }
+                        // MoE router: mixer.gate.{weight,e_score_correction_bias}
+                        // We translate gate.weight→mlp.gate.weight (matches existing parser);
+                        // e_score_correction_bias becomes mlp.gate.bias so it routes to
+                        // moe_router_bias (DeepSeek-V2 style score correction).
+                        else if (sub == "gate") {
+                            if (suffix == ".e_score_correction_bias") {
+                                name = "model.layers." + layer_idx + ".mlp.gate.bias";
+                            } else {
+                                name = "model.layers." + layer_idx + ".mlp.gate" + suffix;
+                            }
+                        }
+                        // MoE experts: mixer.experts.E.<rest> → mlp.experts.E.<rest>
+                        else if (sub == "experts") {
+                            name = "model.layers." + layer_idx + ".mlp.experts" + suffix;
+                        }
+                        // Shared expert: mixer.shared_experts.<rest> → mlp.shared_expert.<rest>
+                        // (Nemotron uses plural; imp's matcher expects singular.)
+                        else if (sub == "shared_experts") {
+                            name = "model.layers." + layer_idx + ".mlp.shared_expert" + suffix;
+                        }
+                        // Unknown subkey: fall through; will warn below.
+                    }
+                }
+            }
+        }
+
         auto parts = split(name, '.');
 
         // Stamped copy of the tensor with its semantic kind filled in.
@@ -954,6 +1023,26 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             } else if (parts.size() >= 5 && parts[4] == "D") {
                 layer.ssm_d = t;
                 matched = true;
+            }
+            // Mamba2 NVFP4 prequant scales: mamba.{in_proj,out_proj}.{weight_scale,weight_scale_2,input_scale}
+            // Route to nvfp4_scratch_ under "L<i>.ssm_in/ssm_out" so the
+            // pre-dequant promote() in executor_pre_dequant.cu attaches them
+            // to the SSM tensor sidecars (needed for load-time dequant since
+            // SSM weights are excluded from the NVFP4 cache for accuracy).
+            else if (!matched && parts.size() >= 6 &&
+                     (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" ||
+                      parts[5] == "input_scale")) {
+                const std::string& proj = parts[4];
+                const std::string& kind = parts[5];
+                const char* slot = nullptr;
+                if (proj == "in_proj")
+                    slot = "ssm_in";
+                else if (proj == "out_proj")
+                    slot = "ssm_out";
+                if (slot) {
+                    route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
+                    matched = true;
+                }
             }
         }
 
