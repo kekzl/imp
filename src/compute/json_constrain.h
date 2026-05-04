@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/preamble_gate.h"
 #include "model/tokenizer.h"
 #include <cuda_runtime.h>
 #include <vector>
@@ -74,6 +75,12 @@ public:
     // Get max tokens to finish (force-close open structures near limit)
     int closing_tokens_needed() const { return static_cast<int>(state_stack_.size()); }
 
+    // Allow the model to emit a free-form preamble (e.g. <think>...</think>)
+    // before strict JSON enforcement starts. Pass close_token=-1 to disable.
+    void set_preamble(int32_t close_token, int max_tokens = 8192) {
+        preamble_.configure(close_token, max_tokens);
+    }
+
 private:
     bool initialized_ = false;
     int vocab_size_ = 0;
@@ -93,6 +100,9 @@ private:
 
     // Device buffer for allowed mask (1 uint16_t, stable address)
     uint16_t* d_allowed_mask_ = nullptr;
+
+    // Preamble pass-through (reasoning models emit <think>...</think> first)
+    PreambleGate preamble_;
 
     // Compute allowed category mask from current FSM state
     uint16_t compute_allowed_mask() const;

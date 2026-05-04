@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/json_schema.h"
+#include "compute/preamble_gate.h"
 #include "model/tokenizer.h"
 #include <cuda_runtime.h>
 #include <vector>
@@ -74,6 +75,12 @@ public:
 
     bool is_initialized() const { return initialized_; }
 
+    // Allow the model to emit a free-form preamble (e.g. <think>...</think>)
+    // before strict schema enforcement starts. Pass close_token=-1 to disable.
+    void set_preamble(int32_t close_token, int max_tokens = 8192) {
+        preamble_.configure(close_token, max_tokens);
+    }
+
 private:
     bool initialized_ = false;
     int vocab_size_ = 0;
@@ -94,6 +101,9 @@ private:
 
     // Schema FSM state
     std::vector<SchemaFrame> stack_;
+
+    // Preamble pass-through (reasoning models emit <think>...</think> first)
+    PreambleGate preamble_;
 
     // Helpers
     SchemaFrame& top() { return stack_.back(); }

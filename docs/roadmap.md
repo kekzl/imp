@@ -36,6 +36,12 @@ Q4_K_M decodes coherent for chat but degenerates on complex code-gen prompts (Fi
 
 Non-Gemma-4 / non-NVFP4-prequant MoE decode falls through the legacy expert-routing path with a D2H sync per layer per token, so CUDA Graphs are disabled for these models. Gemma-4 and NVFP4-prequant MoE (Qwen3.6, Gemma-4 llm-compressor) capture cleanly via the decode fast-path. Generalising the fast-path to GGUF MoE would restore Graphs.
 
+### Reasoning models + JSON schema — preamble pass-through
+
+Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4-thinking) emit `<think>...</think>` before every response. Strict JSON / JSON-Schema enforcement starting at token 0 masks the `<think>` opener, leaving the model with no valid token to sample. Auto-detected via the tokenizer (presence of `<think>` + `</think>` special tokens) and handled by `PreambleGate` (`src/compute/preamble_gate.h`): the gate lets all tokens pass until the close marker, an `{` / `[` is observed, or a budget cap is hit, then strict enforcement kicks in.
+
+Open follow-ups: tool-calling response-format combinations (`tools` + `response_format=json_schema`) aren't covered yet; lenient grammar prefixes for non-reasoning preambles like markdown fences (` ```json `) would generalise the same pattern.
+
 ## Performance work
 
 ### Native MXFP4 GGUF weight format

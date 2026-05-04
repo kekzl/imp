@@ -66,6 +66,7 @@ void SchemaConstrainer::reset() {
     push_value_frame(schema_.get());
     need_token_allow_ = false;
     std::fill(token_allow_.begin(), token_allow_.end(), (uint8_t)1);
+    preamble_.reset();
 }
 
 void SchemaConstrainer::push_value_frame(const SchemaNode* node) {
@@ -351,6 +352,9 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
     if (!initialized_ || stack_.empty())
         return;
 
+    if (preamble_.active())
+        return;
+
     // Compute masks
     uint16_t cat_mask = compute_category_mask();
     compute_token_allow_mask();
@@ -384,6 +388,8 @@ void SchemaConstrainer::update(int32_t token) {
         return;
 
     const auto& text = token_texts_[token];
+    if (preamble_.absorb(token, text))
+        return;
     SchemaPhase before = top().phase;
     for (char c : text) {
         advance_char(c);
