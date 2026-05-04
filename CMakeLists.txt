@@ -20,10 +20,10 @@ message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 # sm_120f (family feature set) enables FP8 MMA (.kind::f8f6f4) and
 # TMA warp-specialized grouped GEMM tactics.
 # CMake < 3.31 doesn't understand the 'f' suffix, so we pass gencode directly.
-set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120")
+set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
 set(CMAKE_CUDA_ARCHITECTURES OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-message(STATUS "CUDA architectures: sm_120f (RTX 5090)")
+message(STATUS "CUDA architectures: sm_120a (RTX 5090) — testing if ptxas C7600 still hits on CUDA 13.2.1")
 
 # --- Options ---
 option(IMP_BUILD_TESTS "Build tests" ON)

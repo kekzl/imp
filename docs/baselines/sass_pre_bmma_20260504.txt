@@ -1,0 +1,6 @@
+HMMA total:           1418
+UMMA (tcgen05):       0
+BMMA (block-scaled):  0
+TCGEN05.CP:           0
+MUFU.CLAMP:           5283
+CCTL:                 167

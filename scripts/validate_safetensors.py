@@ -70,6 +70,7 @@ MODELS = [
     _model_entry("Qwen3.6-35B-A3B-NVFP4"),
     _model_entry("Qwen3-Coder-30B-A3B-Instruct-FP4"),
     _model_entry("Qwen3-30B-A3B-NVFP4-Modelopt"),
+    _model_entry("Nemotron-3-Nano-30B-A3B-NVFP4"),
 ]
 
 
