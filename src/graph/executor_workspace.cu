@@ -262,16 +262,7 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     // the serial path (major perf regression; was a correctness regression
     // before the host gate_up split fix since serial path had undefined
     // behavior for Gemma-4 host experts).
-    //
-    // Exception: NVFP4-prequant MoE models (Modelopt SafeTensors) never feed
-    // through the L2-resident dequant path — experts are already NVFP4 and the
-    // forward path uses the contiguous nvfp4_moe cache built in
-    // pre_dequant_weights. Allocating moe_batch_dequant here (~1.2 GiB on
-    // Nemotron-H 30B-A3B) would unnecessarily eat the budget that
-    // pre_dequant_weights and init_kv_cache later compete for, collapsing the
-    // KV cache to its 16-block / 512-token floor and hanging long prompts.
-    const bool skip_dequant_buf = model_->config().is_nvfp4_prequant;
-    allocate_auxiliary_buffers(/*skip_batch_dequant=*/skip_dequant_buf);
+    allocate_auxiliary_buffers(/*skip_batch_dequant=*/false);
     (void)experts_on_host;
 
     return true;
