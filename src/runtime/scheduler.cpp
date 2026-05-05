@@ -1,6 +1,7 @@
 #include "runtime/scheduler.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/kv_cache.h"
+#include "core/logging.h"
 #include <algorithm>
 #include <ranges>
 
@@ -44,7 +45,24 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 const int bs = kv_manager_->kv_cache()->block_size();
                 int blocks_needed = (ctx_len + bs - 1) / bs;
                 if (!kv_manager_->can_allocate(blocks_needed)) {
-                    // Not enough memory -- skip, try smaller requests
+                    // If the request needs more blocks than the KV cache can
+                    // ever hold, no eviction will free enough — leaving the
+                    // request in pending_ would busy-loop the worker forever
+                    // (observed on Nemotron-H NVFP4 where the KV cache fell
+                    // back to the 16-block / 512-token floor and any longer
+                    // prompt looped here indefinitely). Cancel up front so
+                    // the caller gets a clear error instead of a 30s timeout.
+                    int cap = kv_manager_->kv_cache()->total_blocks();
+                    if (blocks_needed > cap) {
+                        IMP_LOG_ERROR(
+                            "Scheduler: request %d needs %d KV blocks but cache capacity is %d "
+                            "(ctx_len=%d, block_size=%d) — cancelling (KV cache too small for prompt)",
+                            req->id, blocks_needed, cap, ctx_len, bs);
+                        req->status = RequestStatus::CANCELLED;
+                        it = pending_.erase(it);
+                        continue;
+                    }
+                    // Otherwise: not enough memory right now, try smaller requests
                     ++it;
                     continue;
                 }

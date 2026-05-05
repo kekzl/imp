@@ -1564,7 +1564,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (wcache_.nvfp4_decode_mode == 2) {
             size_t free_mem = 0, total_mem = 0;
             IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
-            constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
+            // 1 GiB reserve so the KV cache (sized after this in init_kv_cache)
+            // can fit at least `min_kv_tokens` (default 16K) + workspaces. The
+            // previous 128 MiB reserve was too tight — on Nemotron-H NVFP4 (22
+            // GiB model on 32 GiB GPU) it left vram_budget with available=0,
+            // making the KV cache fall back to its 16-block / 512-token floor.
+            // Any prompt past 512 tokens then sat in pending_ forever (#102).
+            constexpr size_t kMoeReserve = 1024ULL * 1024 * 1024;
             moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
         } else {
             moe_budget = (remaining_budget > wcache_.nvfp4_bytes) ? (remaining_budget - wcache_.nvfp4_bytes)

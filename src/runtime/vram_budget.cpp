@@ -36,13 +36,20 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (config.use_fp8_prefill)
         budget.reserve_bytes += 128ULL * 1024 * 1024;
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
-    // At least 10% of total VRAM as headroom
+    // At least 10% of total VRAM as headroom — but skipped for second-pass
+    // NVFP4 (mode 2). In that mode the NVFP4 MoE caching path already enforced
+    // its own ~1 GiB reserve before this runs; piling another 10% on top here
+    // pushed `available` to 0 on Nemotron-H NVFP4 (32 GiB GPU → 3.2 GiB extra
+    // reserve > what the MoE pass left free), which collapsed the KV cache to
+    // the 16-block floor and left long-prompt requests stuck in pending_.
     size_t total_vram = 0;
     {
         size_t f;
         cudaMemGetInfo(&f, &total_vram);
     }
-    budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
+    if (config.use_nvfp4_decode != 2) {
+        budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
+    }
 
     // Estimate SSM footprint
     size_t ssm_footprint = 0;
