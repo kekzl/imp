@@ -953,7 +953,7 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
     Scheduler sched(16);
     sched.set_kv_manager(mgr.get());
 
-    // Large request: 80 tokens = 5 blocks (exceeds 4 total)
+    // Large request: 80 tokens = 5 blocks (exceeds 4 total — infeasible, cancelled)
     auto large = std::make_shared<Request>();
     large->id = 1;
     large->input_tokens.resize(80, 0);
@@ -968,13 +968,17 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
     std::vector<std::shared_ptr<Request>> prefill, decode;
     sched.schedule(prefill, decode);
 
-    // Small request admitted, large request skipped (still pending)
+    // Small admitted; large is infeasible (exceeds total cache capacity) so the
+    // scheduler cancels it up-front rather than leaving it pending — leaving
+    // a never-admittable request in pending_ would busy-loop the worker
+    // (Nemotron-H regression that prompted the cancel-on-infeasible path).
     ASSERT_EQ(prefill.size(), 1u);
     EXPECT_EQ(prefill[0]->id, 2);
-    EXPECT_TRUE(sched.has_pending());
+    EXPECT_EQ(large->status, RequestStatus::CANCELLED);
+    EXPECT_FALSE(sched.has_pending());
 }
 
-// 29. All requests too large for memory — nothing admitted
+// 29. All requests too large for memory — all cancelled (none feasible)
 TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
     SKIP_IF_NO_CUDA();
 
@@ -985,11 +989,13 @@ TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
     Scheduler sched(16);
     sched.set_kv_manager(mgr.get());
 
-    // 3 requests each needing 3+ blocks but only 2 available
+    // 3 requests each needing 3 blocks but only 2 available — all infeasible
+    std::vector<std::shared_ptr<Request>> reqs;
     for (int i = 0; i < 3; i++) {
         auto req = std::make_shared<Request>();
         req->input_tokens.resize(48, 0);  // 48 tokens = 3 blocks
         sched.add_request(req);
+        reqs.push_back(req);
     }
 
     std::vector<std::shared_ptr<Request>> prefill, decode;
@@ -997,7 +1003,9 @@ TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
 
     EXPECT_EQ(prefill.size(), 0u);
     EXPECT_EQ(decode.size(), 0u);
-    EXPECT_TRUE(sched.has_pending());
+    EXPECT_FALSE(sched.has_pending());
+    for (const auto& r : reqs)
+        EXPECT_EQ(r->status, RequestStatus::CANCELLED);
 }
 
 // 30. Concurrent new prefill while others decoding
