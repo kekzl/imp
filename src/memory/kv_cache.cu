@@ -42,7 +42,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
       use_mxfp4_(use_mxfp4),
       dtype_(dtype),
       alloc_(alloc),
-      block_bytes_((dtype == QType::INT4 || dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE)
+      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::TURBOQUANT ||
+                    dtype == QType::TURBOQUANT_LITE)
                        ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
                        : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim * dtype_size(dtype))) {
     bool lite = (dtype == QType::TURBOQUANT_LITE);
@@ -74,11 +75,21 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
     // Zero-initialize the pool so fresh blocks start clean
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
 
-    // Allocate separate scale buffer for INT8/INT4/TURBOQUANT/TURBOQUANT_LITE KV cache
-    // For TURBOQUANT_LITE: K scales = FP16 norms, V scales = INT4 per-head scales
-    if (dtype == QType::INT8 || dtype == QType::INT4 || dtype == QType::TURBOQUANT ||
-        dtype == QType::TURBOQUANT_LITE) {
-        scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
+    // Allocate separate scale buffer for quantized KV cache modes.
+    //   INT8/INT4/TURBOQUANT/TURBOQUANT_LITE: 1 half (FP16) per head per token slot.
+    //   NVFP4:                                1 UE4M3 byte per kNVFP4Group=16 FP4 elems along head_dim.
+    bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 || dtype == QType::NVFP4 ||
+                         dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE);
+    if (needs_scales) {
+        if (dtype == QType::NVFP4) {
+            if (head_dim % kNVFP4Group != 0) {
+                throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
+            }
+            int n_groups_per_head = head_dim / kNVFP4Group;
+            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * n_groups_per_head;
+        } else {
+            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
+        }
         // Always 2x: K scales region + V scales region (even for TURBOQUANT_LITE)
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
         if (alloc_) {
@@ -183,14 +194,15 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
                  const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
                  VRAMAllocator* alloc)
     : n_layers_(n_layers), max_blocks_(max_blocks), block_size_(block_size), dtype_(dtype), alloc_(alloc) {
-    // Only FP16, BF16, FP8, INT8, INT4 supported for per-layer variant.
+    // Only FP16, BF16, FP8, INT8, INT4, NVFP4 supported for per-layer variant.
     // (TurboQuant / sketches / mscales aren't per-layer aware yet.)
     if (dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
         throw std::runtime_error("KVCache per-layer shape: TurboQuant variants not supported");
     }
 
-    size_t elem_size = (dtype == QType::INT4) ? 0  // INT4 uses /2 below
-                                              : dtype_size(dtype);
+    bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4);
+    size_t elem_size = packed_4bit ? 0  // 4-bit modes use /2 below
+                                   : dtype_size(dtype);
 
     // Compute per-layer block bytes and offsets.
     layer_block_bytes_.resize(n_layers_);
@@ -211,8 +223,8 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         max_nkv = std::max(max_nkv, nkv);
         max_hd = std::max(max_hd, hd);
 
-        size_t bb = (dtype == QType::INT4) ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
-                                           : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
+        size_t bb = packed_4bit ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
+                                : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
         layer_block_bytes_[l] = bb;
 
         // Layout: K region then V region for this layer.
@@ -226,8 +238,8 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
     // Populate scalar fallback fields with max values (for external queries)
     n_kv_heads_ = max_nkv;
     head_dim_ = max_hd;
-    block_bytes_ = (dtype == QType::INT4) ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
-                                          : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
+    block_bytes_ = packed_4bit ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
+                               : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
 
     // Allocate single contiguous pool
     if (alloc_) {
@@ -248,6 +260,60 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
     // INT8/INT4 per-layer scales not yet supported in per-layer mode.
     if (dtype == QType::INT8 || dtype == QType::INT4) {
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
+    }
+
+    // NVFP4 per-layer scales: each layer's scale-block-bytes derived from its own
+    // (nkv * hd / kNVFP4Group) so that layers with different head_dim (Gemma 4
+    // SWA vs full-attention layers) get correctly-sized scale storage.
+    if (dtype == QType::NVFP4) {
+        layer_scale_block_bytes_.resize(n_layers_);
+        layer_k_scale_offset_.resize(n_layers_);
+        layer_v_scale_offset_.resize(n_layers_);
+        size_t srunning = 0;
+        for (int l = 0; l < n_layers_; l++) {
+            int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
+            int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
+            if (nkv <= 0 || hd <= 0) {
+                layer_scale_block_bytes_[l] = 0;
+                layer_k_scale_offset_[l] = srunning;
+                layer_v_scale_offset_[l] = srunning;
+                continue;
+            }
+            if (hd % kNVFP4Group != 0) {
+                throw std::runtime_error(
+                    "KVCache per-layer NVFP4: head_dim must be a multiple of 16");
+            }
+            size_t sbb = static_cast<size_t>(block_size_) * nkv * (hd / kNVFP4Group);
+            layer_scale_block_bytes_[l] = sbb;
+            layer_k_scale_offset_[l] = srunning;
+            srunning += static_cast<size_t>(max_blocks_) * sbb;
+            layer_v_scale_offset_[l] = srunning;
+            srunning += static_cast<size_t>(max_blocks_) * sbb;
+        }
+        size_t sc_total = srunning;
+        if (alloc_) {
+            scale_pool_ = alloc_->allocate(sc_total, "kv_cache_scales");
+        } else {
+            cudaError_t serr = cudaMalloc(&scale_pool_, sc_total);
+            if (serr != cudaSuccess)
+                scale_pool_ = nullptr;
+        }
+        if (!scale_pool_) {
+            if (alloc_)
+                alloc_->free(pool_);
+            else
+                IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            pool_ = nullptr;
+            char msg[256];
+            std::snprintf(msg, sizeof(msg),
+                          "KVCache(per-layer NVFP4): scale pool alloc failed for %.2f MiB",
+                          static_cast<double>(sc_total) / (1024.0 * 1024.0));
+            throw std::runtime_error(msg);
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, sc_total));
+        // For external queries, scalar fallback uses max-layer block bytes so
+        // sizeof checks see a non-zero value.
+        scale_block_bytes_ = static_cast<size_t>(block_size_) * max_nkv * (max_hd / kNVFP4Group);
     }
 
     // Initialize ref counts and free list
@@ -440,6 +506,12 @@ void* KVCache::k_scale_ptr(int layer, int block_id) {
                       block_id, max_blocks_);
     }
 #endif
+    // Per-layer NVFP4 path
+    if (!layer_scale_block_bytes_.empty()) {
+        size_t off = layer_k_scale_offset_[layer] +
+                     static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer];
+        return static_cast<char*>(scale_pool_) + off;
+    }
     // Scale pool always uses 2x layout (K scales region + V scales region)
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + static_cast<size_t>(block_id)) *
                     scale_block_bytes_;
@@ -455,6 +527,11 @@ void* KVCache::v_scale_ptr(int layer, int block_id) {
                       block_id, max_blocks_);
     }
 #endif
+    if (!layer_scale_block_bytes_.empty()) {
+        size_t off = layer_v_scale_offset_[layer] +
+                     static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer];
+        return static_cast<char*>(scale_pool_) + off;
+    }
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + max_blocks_ +
                      static_cast<size_t>(block_id)) *
                     scale_block_bytes_;
@@ -462,6 +539,15 @@ void* KVCache::v_scale_ptr(int layer, int block_id) {
 }
 
 size_t KVCache::scale_block_bytes() const { return scale_block_bytes_; }
+
+size_t KVCache::scale_block_bytes(int layer) const {
+    if (!layer_scale_block_bytes_.empty()) {
+        if (layer < 0 || layer >= n_layers_)
+            return 0;
+        return layer_scale_block_bytes_[layer];
+    }
+    return scale_block_bytes_;
+}
 
 // ---------------------------------------------------------------------------
 // TurboQuant / TurboQuant Lite QJL sketch pointer computation

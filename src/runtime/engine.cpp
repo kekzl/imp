@@ -461,6 +461,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
     } else if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
+    } else if (config_.kv_cache_dtype == QType::NVFP4) {
+        // NVFP4 KV: ~3.6× compression vs FP16 (4 bits + UE4M3 per-16 + ~3% scale overhead).
+        // Klasse-A unlock for long-ctx dense models (Gemma-4-26B, Gemma-3-27B, Qwen3-32B).
+        IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
+        // FP8 prefill cache stacks another lossy layer; disable to avoid compound drift.
+        if (config_.use_fp8_prefill) {
+            IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
+            config_.use_fp8_prefill = 0;
+        }
     }
 
     // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic

@@ -95,6 +95,19 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     int block_stride, int scale_block_stride, int n_kv_heads, int head_dim, int block_size, int n_tokens,
     int max_blocks_per_seq, int n_sequences);
 
+// NVFP4 KV cache write: per-token-head-group_of_16 absmax → UE4M3 scale, FP4 E2M1
+// nibbles packed 2/byte. Layout matches paged_attention_decode_nvfp4 reader.
+__global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_cache_base,        // [block, slot, head, head_dim/2] packed FP4
+    uint8_t* __restrict__ v_cache_base,        // same shape
+    uint8_t* __restrict__ k_scale_base,        // [block, slot, head, head_dim/16] UE4M3
+    uint8_t* __restrict__ v_scale_base,        // same shape
+    int block_stride,                          // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
+    int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
+
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables,

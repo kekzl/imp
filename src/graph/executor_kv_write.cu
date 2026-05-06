@@ -50,6 +50,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     bool use_fp8 = (cache->qtype() == QType::FP8_E4M3);
     bool use_int8 = (cache->qtype() == QType::INT8);
     bool use_int4 = (cache->qtype() == QType::INT4);
+    bool use_nvfp4 = (cache->qtype() == QType::NVFP4);
     bool use_turboquant = (cache->qtype() == QType::TURBOQUANT);
     bool use_turboquant_lite = (cache->qtype() == QType::TURBOQUANT_LITE);
 
@@ -109,6 +110,21 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                 sketch_block_stride, nkv, hd, sketch_dim, kv_block_size, n, state.max_blocks_per_seq,
                 state.n_sequences);
         }
+    } else if (use_nvfp4) {
+        // NVFP4 quantized KV cache write — 2 FP4 values packed per byte, UE4M3 scale per group of 16
+        Tensor kv = view_tokens(k_, n);
+        Tensor vv = view_tokens(v_, n);
+        int nvfp4_block_stride = kv_block_size * nkv * hd / 2;            // bytes
+        int nvfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);   // bytes (UE4M3)
+        dim3 grid_nvfp4(n, 2);
+        write_kv_cache_nvfp4_kernel<<<grid_nvfp4, 256, 0, stream>>>(
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
+            static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+            static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), nvfp4_block_stride,
+            nvfp4_scale_block_stride, nkv, hd, kv_block_size, n, state.max_blocks_per_seq,
+            state.n_sequences);
     } else if (use_int4) {
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
         Tensor kv = view_tokens(k_, n);

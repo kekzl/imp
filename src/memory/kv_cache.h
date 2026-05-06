@@ -14,6 +14,10 @@ static constexpr int kKVBlockSize = 16;  // default tokens per block
 // MXFP4 micro-scale group size (matching CUTLASS MXFP4 SfVecSize)
 static constexpr int kTQMicroScaleGroup = 32;
 
+// NVFP4 micro-block size: 16 FP4 elements share one UE4M3 scale byte.
+// All imp model head_dims (64/128/256/512) are multiples of 16.
+static constexpr int kNVFP4Group = 16;
+
 class KVCache {
 public:
     // sketch_dim: QJL sketch dimension (only used for TURBOQUANT / TURBOQUANT_LITE).
@@ -49,9 +53,14 @@ public:
     // INT8/INT4/TURBOQUANT/TURBOQUANT_LITE per-head scale access (nullptr if not applicable)
     // For TURBOQUANT: K scales store PolarQuant FP16 norms, V scales store INT4 per-head scales.
     // For TURBOQUANT_LITE: K scales store FP16 norms, V scales store INT4 per-head scales.
+    // For NVFP4: scales store UE4M3 (1 byte per kNVFP4Group=16 FP4 elems along head_dim),
+    //   layout per K block = block_size * n_kv_heads * (head_dim / kNVFP4Group) bytes.
     void* k_scale_ptr(int layer, int block_id);
     void* v_scale_ptr(int layer, int block_id);
     size_t scale_block_bytes() const;
+    // Per-layer scale block bytes (used by NVFP4 in per-layer mode where head_dim varies).
+    // Returns scale_block_bytes_ for the standard path.
+    size_t scale_block_bytes(int layer) const;
 
     // TurboQuant/TurboQuant Lite QJL sketch access (nullptr if not applicable)
     void* k_sketch_ptr(int layer, int block_id);
@@ -99,6 +108,13 @@ private:
     std::vector<size_t> layer_block_bytes_;  // block_size * nkv[l] * hd[l] * dtype_size
     std::vector<size_t> layer_k_offset_;     // byte offset of layer l's K region in pool
     std::vector<size_t> layer_v_offset_;     // byte offset of layer l's V region in pool
+
+    // Per-layer NVFP4 scale offsets (only populated when dtype==NVFP4 in per-layer ctor).
+    // Each layer's scales region holds K scales then V scales, byte counts per block
+    // computed from the layer's nkv*hd/16.
+    std::vector<size_t> layer_scale_block_bytes_;
+    std::vector<size_t> layer_k_scale_offset_;
+    std::vector<size_t> layer_v_scale_offset_;
 
     // INT8/INT4/TURBOQUANT/TURBOQUANT_LITE per-head scales: one half per head per token slot.
     // Layout: 2x blocks per layer (K scales region + V scales region).

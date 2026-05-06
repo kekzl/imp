@@ -137,6 +137,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_fp8.cu
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
+    src/compute/attention_paged_nvfp4.cu
     src/compute/attention_paged_turboquant.cu
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
