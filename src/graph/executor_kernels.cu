@@ -720,6 +720,105 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// NVFP4 KV cache write kernel
+// Per (token, head, group of 16 elems along head_dim):
+//   1. absmax over 16 elems
+//   2. scale = absmax / 6.0  (FP4 E2M1 max = 6.0); store as UE4M3 byte
+//   3. quant each elem to E2M1 nibble (nearest-magnitude + sign), pack 2/byte
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ uint8_t e2m1_quantize(float v, float inv_scale) {
+    float n = v * inv_scale;
+    uint8_t sign = (n < 0.0f) ? 0x8u : 0u;
+    float m = fabsf(n);
+    // Nearest in {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}.
+    // Tested midpoint boundaries: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+    uint8_t mag;
+    if (m < 0.25f)
+        mag = 0;
+    else if (m < 0.75f)
+        mag = 1;
+    else if (m < 1.25f)
+        mag = 2;
+    else if (m < 1.75f)
+        mag = 3;
+    else if (m < 2.5f)
+        mag = 4;
+    else if (m < 3.5f)
+        mag = 5;
+    else if (m < 5.0f)
+        mag = 6;
+    else
+        mag = 7;
+    return sign | mag;
+}
+
+__global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, uint8_t* __restrict__ k_cache_base,
+    uint8_t* __restrict__ v_cache_base, uint8_t* __restrict__ k_scale_base,
+    uint8_t* __restrict__ v_scale_base, int block_stride, int scale_block_stride, int n_kv_heads,
+    int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    constexpr int kGroup = 16;
+
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens)
+        return;
+
+    const int pos = positions[token_idx];
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
+
+    const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
+    uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
+    uint8_t* scale_base = (blockIdx.y == 0) ? k_scale_base : v_scale_base;
+
+    const int row_elems = n_kv_heads * head_dim;
+    const int row_bytes = row_elems / 2;
+    const int row_scale_bytes = n_kv_heads * (head_dim / kGroup);
+    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
+    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                   static_cast<int64_t>(slot_in_block) * row_bytes;
+    uint8_t* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                         static_cast<int64_t>(slot_in_block) * row_scale_bytes;
+
+    const int n_groups_per_head = head_dim / kGroup;
+    const int total_groups = n_kv_heads * n_groups_per_head;
+
+    // One thread per group (each group = 16 elems = 8 bytes packed FP4 + 1 UE4M3 scale byte).
+    for (int g = threadIdx.x; g < total_groups; g += blockDim.x) {
+        int h = g / n_groups_per_head;
+        int gh = g % n_groups_per_head;             // group within head
+        int base_elem = h * head_dim + gh * kGroup;  // first elem in this group
+
+        // absmax
+        float amax = 0.0f;
+#pragma unroll
+        for (int i = 0; i < kGroup; i++) {
+            float v = __half2float(src[base_elem + i]);
+            amax = fmaxf(amax, fabsf(v));
+        }
+        float sc = amax / 6.0f;
+        float inv_sc = (sc > 1e-30f) ? (1.0f / sc) : 0.0f;
+
+        // pack 16 nibbles → 8 bytes
+        int dst_byte_off = h * (head_dim / 2) + gh * (kGroup / 2);
+#pragma unroll
+        for (int p = 0; p < kGroup / 2; p++) {
+            float v0 = __half2float(src[base_elem + 2 * p]);
+            float v1 = __half2float(src[base_elem + 2 * p + 1]);
+            uint8_t q0 = e2m1_quantize(v0, inv_sc);
+            uint8_t q1 = e2m1_quantize(v1, inv_sc);
+            dst[dst_byte_off + p] = static_cast<uint8_t>(q0 | (q1 << 4));
+        }
+
+        // store UE4M3 scale (saturates oversize values, 0 if amax==0)
+        __nv_fp8_e4m3 ue4m3(sc);
+        scale_dst[h * n_groups_per_head + gh] = *reinterpret_cast<uint8_t*>(&ue4m3);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TurboQuant KV cache write kernel
 //
 // K path (blockIdx.y == 0): PolarQuant decomposition + QJL sketch

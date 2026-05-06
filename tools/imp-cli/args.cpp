@@ -155,6 +155,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--kv-int4") == 0) {
             args.kv_int4 = true;
+        } else if (std::strcmp(arg, "--kv-nvfp4") == 0) {
+            args.kv_nvfp4 = true;
         } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
             args.kv_turboquant = true;
         } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {

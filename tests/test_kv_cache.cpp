@@ -402,6 +402,82 @@ TEST(KVCacheTest, KVCacheReadWriteData) {
 // KVCacheManager tests
 // ============================================================================
 
+// 13. NVFP4 storage layout: block_bytes = block_size * n_kv_heads * head_dim / 2 (4-bit packed),
+//     scale_block_bytes = block_size * n_kv_heads * (head_dim / 16) (UE4M3, 1 byte per group of 16).
+TEST(KVCacheTest, KVCacheNVFP4Layout) {
+    SKIP_IF_NO_CUDA();
+
+    const int n_layers = 2;
+    const int n_kv_heads = 8;
+    const int head_dim = 128;
+    const int max_blocks = 4;
+
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::NVFP4, max_blocks);
+
+    EXPECT_EQ(cache.qtype(), QType::NVFP4);
+    EXPECT_EQ(cache.head_dim(), head_dim);
+
+    // 4-bit packed pool sizing: 16 * 8 * 128 / 2 = 8192 bytes per block.
+    size_t expected_block_bytes = static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim / 2;
+    EXPECT_EQ(cache.block_bytes(), expected_block_bytes);
+    EXPECT_EQ(expected_block_bytes, 8192u);
+
+    // UE4M3 scale layout: 16 * 8 * (128/16) = 1024 bytes per block.
+    size_t expected_scale_bytes = static_cast<size_t>(kKVBlockSize) * n_kv_heads * (head_dim / kNVFP4Group);
+    EXPECT_EQ(cache.scale_block_bytes(), expected_scale_bytes);
+    EXPECT_EQ(expected_scale_bytes, 1024u);
+
+    int b0 = cache.allocate_block();
+    ASSERT_GE(b0, 0);
+
+    // K + V data + scales must all be allocated and distinct.
+    void* k_data = cache.k_ptr(0, b0);
+    void* v_data = cache.v_ptr(0, b0);
+    void* k_sc = cache.k_scale_ptr(0, b0);
+    void* v_sc = cache.v_scale_ptr(0, b0);
+    ASSERT_NE(k_data, nullptr);
+    ASSERT_NE(v_data, nullptr);
+    ASSERT_NE(k_sc, nullptr);
+    ASSERT_NE(v_sc, nullptr);
+
+    // K and V scale regions should be disjoint with the V scale region following K.
+    ptrdiff_t scale_diff = static_cast<char*>(v_sc) - static_cast<char*>(k_sc);
+    EXPECT_EQ(static_cast<size_t>(scale_diff), static_cast<size_t>(max_blocks) * cache.scale_block_bytes());
+}
+
+// 13b. NVFP4 head_dim that is not a multiple of 16 must fail with a clear error.
+TEST(KVCacheTest, KVCacheNVFP4HeadDimReject) {
+    SKIP_IF_NO_CUDA();
+    EXPECT_THROW({ KVCache cache(1, 4, 24, QType::NVFP4, 2); }, std::runtime_error);
+}
+
+// 13c. NVFP4 per-layer constructor (Gemma 4 dual head_dim 256 SWA / 512 global).
+TEST(KVCacheTest, KVCacheNVFP4PerLayer) {
+    SKIP_IF_NO_CUDA();
+
+    const int n_layers = 4;
+    const int max_blocks = 2;
+    std::vector<int> nkv = {8, 8, 8, 8};
+    std::vector<int> hd = {128, 256, 128, 256};  // mixed head_dim
+
+    KVCache cache(n_layers, nkv, hd, QType::NVFP4, max_blocks, kKVBlockSize, nullptr);
+    EXPECT_EQ(cache.qtype(), QType::NVFP4);
+
+    // Each layer's scale_block_bytes must match its own (nkv * hd / 16).
+    EXPECT_EQ(cache.scale_block_bytes(0), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
+    EXPECT_EQ(cache.scale_block_bytes(1), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
+    EXPECT_EQ(cache.scale_block_bytes(2), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
+    EXPECT_EQ(cache.scale_block_bytes(3), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
+
+    int b0 = cache.allocate_block();
+    ASSERT_GE(b0, 0);
+    for (int l = 0; l < n_layers; ++l) {
+        EXPECT_NE(cache.k_ptr(l, b0), nullptr) << "layer " << l;
+        EXPECT_NE(cache.k_scale_ptr(l, b0), nullptr) << "layer " << l;
+        EXPECT_NE(cache.v_scale_ptr(l, b0), nullptr) << "layer " << l;
+    }
+}
+
 // Helper to create a KVCacheManager wrapping a fresh KVCache.
 static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks, int n_layers = 2, int n_kv_heads = 4,
                                                    int head_dim = 64, QType dtype = QType::F16) {
