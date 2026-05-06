@@ -1570,7 +1570,20 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // GiB model on 32 GiB GPU) it left vram_budget with available=0,
             // making the KV cache fall back to its 16-block / 512-token floor.
             // Any prompt past 512 tokens then sat in pending_ forever (#102).
-            constexpr size_t kMoeReserve = 1024ULL * 1024 * 1024;
+            //
+            // Override via IMP_MOE_RESERVE_MIB for VRAM-tight setups: lowering it
+            // (e.g. to 768) frees room for the NVFP4 MoE cache on Nemotron-H —
+            // decode jumps from ~44 to ~310 tok/s (7×) by enabling the MoE
+            // fast-path under CUDA graphs. Trade-off: KV capacity shrinks
+            // (Nemotron-H drops from 19k → 2.5k tokens), so prompts longer than
+            // the new KV ceiling won't fit. Use only when prompts are bounded.
+            size_t moe_reserve_mib = 1024;
+            if (const char* env = std::getenv("IMP_MOE_RESERVE_MIB")) {
+                int v = std::atoi(env);
+                if (v >= 128 && v <= 4096)
+                    moe_reserve_mib = static_cast<size_t>(v);
+            }
+            const size_t kMoeReserve = moe_reserve_mib * 1024ULL * 1024ULL;
             moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
         } else {
             moe_budget = (remaining_budget > wcache_.nvfp4_bytes) ? (remaining_budget - wcache_.nvfp4_bytes)
