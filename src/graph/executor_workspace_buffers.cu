@@ -160,7 +160,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // earlier 256 MiB cap pushed the cliff in at pp=2048 (post-cbe083a
         // n<=1024 heuristic removal). Falls through to FMHA on alloc failure
         // (line 174), so VRAM-constrained setups still work.
-        constexpr size_t kMaxAttnScoresMiB = 512;
+        constexpr size_t kMaxAttnScoresMiB = 1024;
         size_t max_s_sz = kMaxAttnScoresMiB << 20;
         // max seq = sqrt(budget / (n_heads * sizeof(half)))
         int attn_seq = max_tokens_;
