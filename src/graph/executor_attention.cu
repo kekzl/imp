@@ -729,8 +729,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                     static_cast<const half*>(vv.data), static_cast<half*>(ao.data), n, nh,
                                     nkv, hd, scale, cfg.attn_logit_softcap, stream, layer_sliding_window);
         } else if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ &&
-                   n <= static_cast<int>(attn_scores_.shape[1]) && (force_cublas_attn || n <= 1024) &&
-                   !sliding_active) {
+                   n <= static_cast<int>(attn_scores_.shape[1]) && !sliding_active) {
             // The n<=1024 heuristic below picks Flash Attention for long contexts
             // (O(1) memory) over cuBLAS (O(n^2) S-matrix). Gemma-4 with mixed
             // head_dims (256 SWA / 512 global) MUST stay on cuBLAS for the
