@@ -1564,26 +1564,46 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (wcache_.nvfp4_decode_mode == 2) {
             size_t free_mem = 0, total_mem = 0;
             IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
-            // 1 GiB reserve so the KV cache (sized after this in init_kv_cache)
-            // can fit at least `min_kv_tokens` (default 16K) + workspaces. The
-            // previous 128 MiB reserve was too tight — on Nemotron-H NVFP4 (22
-            // GiB model on 32 GiB GPU) it left vram_budget with available=0,
-            // making the KV cache fall back to its 16-block / 512-token floor.
-            // Any prompt past 512 tokens then sat in pending_ forever (#102).
+            // Reserve VRAM so the KV cache (sized after this in init_kv_cache)
+            // can fit `min_kv_tokens` (default 16K) + workspaces. Computed from
+            // the model's actual attention layout — the previous 1 GiB constant
+            // was over-cautious for hybrid models (Nemotron-H: 6/52 attn layers,
+            // <100 MiB KV at 16K) where it starved the NVFP4 MoE cache and
+            // forced decode through the legacy D2H-sync fallback.
             //
-            // Override via IMP_MOE_RESERVE_MIB for VRAM-tight setups: lowering it
-            // (e.g. to 768) frees room for the NVFP4 MoE cache on Nemotron-H —
-            // decode jumps from ~44 to ~310 tok/s (7×) by enabling the MoE
-            // fast-path under CUDA graphs. Trade-off: KV capacity shrinks
-            // (Nemotron-H drops from 19k → 2.5k tokens), so prompts longer than
-            // the new KV ceiling won't fit. Use only when prompts are bounded.
-            size_t moe_reserve_mib = 1024;
+            // Capped at 1 GiB (the previous static value) so this can only
+            // RELEASE budget, never tighten it vs the previous behavior. Floor
+            // at 256 MiB to keep workspace + scratch room.
+            //
+            // IMP_MOE_RESERVE_MIB still overrides for manual tuning (range
+            // 128-4096 MiB).
+            int n_attn_layers = 0;
+            for (int i = 0; i < cfg.n_layers; i++) {
+                if (model_->layer(i).wq.data != nullptr &&
+                    model_->layer(i).gdn_gate.data == nullptr)
+                    n_attn_layers++;
+            }
+            if (n_attn_layers == 0)
+                n_attn_layers = cfg.n_layers;
+            int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+            int kv_heads = cfg.n_kv_heads > 0 ? cfg.n_kv_heads : cfg.n_heads;
+            // 16K tokens × n_attn × 2 (K+V) × kv_heads × hd × FP16
+            constexpr int kKvFloorTokens = 16384;
+            size_t per_token_kv = static_cast<size_t>(n_attn_layers) * 2 *
+                                  static_cast<size_t>(kv_heads) * static_cast<size_t>(hd) * 2;
+            size_t kv_reserve = static_cast<size_t>(kKvFloorTokens) * per_token_kv;
+            constexpr size_t kWorkspaceSafety = 256ULL * 1024 * 1024;
+            constexpr size_t kReserveCap = 1024ULL * 1024 * 1024;
+            constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
+            size_t kMoeReserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
             if (const char* env = std::getenv("IMP_MOE_RESERVE_MIB")) {
                 int v = std::atoi(env);
                 if (v >= 128 && v <= 4096)
-                    moe_reserve_mib = static_cast<size_t>(v);
+                    kMoeReserve = static_cast<size_t>(v) * 1024ULL * 1024ULL;
             }
-            const size_t kMoeReserve = moe_reserve_mib * 1024ULL * 1024ULL;
+            IMP_LOG_DEBUG("MoE reserve: %.0f MiB (n_attn=%d, kv_heads=%d, hd=%d → %.0f MiB KV at 16K + 256 MiB workspace)",
+                          kMoeReserve / (1024.0 * 1024.0), n_attn_layers, kv_heads, hd,
+                          kv_reserve / (1024.0 * 1024.0));
             moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
         } else {
             moe_budget = (remaining_budget > wcache_.nvfp4_bytes) ? (remaining_budget - wcache_.nvfp4_bytes)
