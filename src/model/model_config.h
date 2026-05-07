@@ -92,6 +92,12 @@ struct ModelConfig {
     bool is_mxfp4_prequant = false;
     int mxfp4_block_size = 32;  // E8M0 scale per 32 elements is standard
 
+    // AWQ pre-quantized model. Detection-only today — imp does not yet
+    // have an AWQ dequant kernel; weights load with their wire dtype but
+    // inference will likely produce wrong results.
+    bool is_awq_prequant = false;
+    int awq_group_size = 128;
+
     // Author-declared KV-cache quantization hint, sourced from Modelopt's
     // hf_quant_config.json `kv_cache_quant_algo` field (e.g. "FP8"). Empty
     // means the model author did not declare one. Surfaced to the engine as

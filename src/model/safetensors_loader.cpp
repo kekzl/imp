@@ -870,6 +870,23 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             cfg.mxfp4_block_size);
     }
 
+    // AWQ detection. Same posture as MXFP4: the metadata is parsed and
+    // surfaced but no native AWQ kernel exists yet. Future work: dequant-
+    // to-FP16 fallback or proper AWQ-aware GEMM.
+    HFConfigLoader::AWQConfig awq_cfg;
+    if (HFConfigLoader::load_awq_config(model_dir, awq_cfg)) {
+        cfg.is_awq_prequant = true;
+        cfg.awq_group_size = awq_cfg.group_size;
+        IMP_LOG_WARN(
+            "AWQ SafeTensors detected (bits=%d group_size=%d zero_point=%s "
+            "version=%s) — imp does not yet have an AWQ dequant kernel. "
+            "Weights load as their wire dtype and inference will be "
+            "incorrect. Use a GPTQ or NVFP4 export instead.",
+            awq_cfg.bits, awq_cfg.group_size,
+            awq_cfg.zero_point ? "true" : "false",
+            awq_cfg.version.empty() ? "unspecified" : awq_cfg.version.c_str());
+    }
+
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
     if (is_nvfp4) {

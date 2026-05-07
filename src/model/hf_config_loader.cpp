@@ -925,4 +925,49 @@ bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config
     return true;
 }
 
+// ---- load_awq_config ----
+
+bool HFConfigLoader::load_awq_config(const std::string& model_dir, AWQConfig& cfg) {
+    // AWQ ships its config in one of two places:
+    //   1) `config.json:quantization_config` (HuggingFace-standard location)
+    //   2) a separate `quant_config.json` (older AutoAWQ exports)
+    // The fields we care about are `quant_method == "awq"`, `bits`,
+    // `group_size`, `zero_point`, `version` ("gemm"/"gemv"/"marlin").
+    auto try_parse = [&](const std::string& path, bool nested_under_qc) -> bool {
+        JValue root;
+        if (!parse_json_file(path, root))
+            return false;
+        const JValue* base = &root;
+        if (nested_under_qc) {
+            const JValue* qc = jobj_find(root, "quantization_config");
+            if (!qc || qc->type != JType::OBJECT)
+                return false;
+            base = qc;
+        }
+        std::string method;
+        if (!jobj_get_string(*base, "quant_method", method))
+            return false;
+        if (method != "awq" && method != "AWQ")
+            return false;
+
+        jobj_get_int(*base, "bits", cfg.bits);
+        jobj_get_int(*base, "w_bit", cfg.bits);  // older AutoAWQ field name
+        jobj_get_int(*base, "group_size", cfg.group_size);
+        jobj_get_int(*base, "q_group_size", cfg.group_size);  // older field name
+
+        const JValue* zp = jobj_find(*base, "zero_point");
+        if (zp && zp->type == JType::NUMBER)
+            cfg.zero_point = (zp->num_val != 0.0);
+
+        jobj_get_string(*base, "version", cfg.version);
+        return true;
+    };
+
+    if (try_parse(model_dir + "/config.json", /*nested_under_qc=*/true))
+        return true;
+    if (try_parse(model_dir + "/quant_config.json", /*nested_under_qc=*/false))
+        return true;
+    return false;
+}
+
 }  // namespace imp

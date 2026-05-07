@@ -414,6 +414,101 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
     EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
 }
 
+// AWQ detection (audit gap #16). Both nested-under-quantization_config
+// (HF standard) and standalone quant_config.json (older AutoAWQ) are
+// recognised. Detection-only — no kernel exists yet.
+TEST_F(RopeScalingConfigTest, AwqQuantConfigDetection) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "quantization_config": {
+            "quant_method": "awq",
+            "bits": 4,
+            "group_size": 128,
+            "zero_point": true,
+            "version": "gemm"
+        }
+    })");
+    HFConfigLoader::AWQConfig acfg;
+    ASSERT_TRUE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg));
+    EXPECT_EQ(acfg.bits, 4);
+    EXPECT_EQ(acfg.group_size, 128);
+    EXPECT_TRUE(acfg.zero_point);
+    EXPECT_EQ(acfg.version, "gemm");
+
+    // Older AutoAWQ field names (w_bit, q_group_size) in standalone
+    // quant_config.json (no nesting under quantization_config).
+    write_config(R"({"hidden_size": 4096})");  // overwrite to avoid double-detect
+    {
+        std::ofstream f(tmp_dir_ / "quant_config.json");
+        f << R"({"quant_method": "awq", "w_bit": 4, "q_group_size": 64, "zero_point": false})";
+    }
+    HFConfigLoader::AWQConfig acfg2;
+    ASSERT_TRUE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg2));
+    EXPECT_EQ(acfg2.bits, 4);
+    EXPECT_EQ(acfg2.group_size, 64);
+    EXPECT_FALSE(acfg2.zero_point);
+    std::filesystem::remove(tmp_dir_ / "quant_config.json");
+
+    // Non-AWQ method → false.
+    write_config(R"({
+        "quantization_config": {"quant_method": "gptq", "bits": 4}
+    })");
+    HFConfigLoader::AWQConfig acfg3;
+    EXPECT_FALSE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg3));
+}
+
+// DeepSeek V2/V3 MLA detection (audit gap #17). MLA-specific config
+// fields trigger a load-time warning that imp's DEEPSEEK forward path
+// uses standard MHA and will produce wrong outputs.
+TEST_F(RopeScalingConfigTest, DeepseekMlaWarning) {
+    write_config(R"({
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "kv_lora_rank": 512,
+        "q_lora_rank": 1536
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::DEEPSEEK);
+    // Detection only writes the WARN log; the test cannot easily inspect it,
+    // but at least the load doesn't error out — caller continues with the
+    // (incorrect) MHA path so no silent crash.
+
+    // Non-MLA DeepSeek (no kv_lora_rank): no warn, normal load.
+    write_config(R"({
+        "architectures": ["DeepseekV2ForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32
+    })");
+    imp::ModelConfig cfg2;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg2));
+    EXPECT_EQ(cfg2.arch, imp::ModelArch::DEEPSEEK);
+}
+
+// Multimodal model detection (audit gap #18). `vision_config` block
+// presence triggers a warning that the vision tower will be skipped.
+TEST_F(RopeScalingConfigTest, VisionConfigWarning) {
+    write_config(R"({
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "text_config": {
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32
+        },
+        "vision_config": {
+            "model_type": "siglip_vision_model",
+            "hidden_size": 1152
+        }
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::GEMMA3);
+    // vision_config triggers WARN; loader still succeeds.
+}
+
 // MXFP4 quantization config detection (audit gap #13). GPT-OSS and other
 // MXFP4 SafeTensors exports declare `quantization_config.quant_method ==
 // "mxfp4"` at config.json top level. The loader sets the metadata flag

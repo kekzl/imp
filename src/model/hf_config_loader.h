@@ -112,6 +112,17 @@ struct HFConfigLoader {
     };
     static bool load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg);
 
+    // AWQ (Activation-aware Weight Quantization) config. Sourced from
+    // `quantization_config` in `config.json` or a separate `quant_config.json`.
+    // Detection-only today; imp does not yet have an AWQ dequant kernel.
+    struct AWQConfig {
+        int bits = 4;            // typically 4
+        int group_size = 128;    // typical AWQ group_size
+        bool zero_point = true;  // AWQ uses zero-points by default
+        std::string version;     // "gemm", "gemv", "marlin", or empty
+    };
+    static bool load_awq_config(const std::string& model_dir, AWQConfig& cfg);
+
     // Map HF architecture class name to imp ModelArch.
     static ModelArch map_architecture(const std::string& hf_arch);
 };
