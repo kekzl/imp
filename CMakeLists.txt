@@ -167,13 +167,17 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxf4nvf4_probe.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_variants_bench.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxf4nvf4_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
+    # Bench/probe/validate TUs: only consumed by tests and microbenches, never
+    # by production runtime. Skip in server-only builds to cut ~30-60s nvcc.
+    if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxf4nvf4_probe.cu)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_variants_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
+    endif()
 endif()
 
 # Note: TurboQuant paged attention previously required a fast-math override
