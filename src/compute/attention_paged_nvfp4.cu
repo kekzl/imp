@@ -28,18 +28,21 @@ namespace imp {
 // 16-element scale group. lane scale index = lane_offset / 16.
 // ---------------------------------------------------------------------------
 
-// E2M1 4-bit decode: ±{0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-__device__ __forceinline__ float e2m1_decode(uint8_t nib) {
-    static const float mags[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-    float m = mags[nib & 0x7];
-    return (nib & 0x8) ? -m : m;
-}
-
 // UE4M3 byte → float (standard FP8 E4M3, sign always 0 in NVFP4 scale role).
 __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
     __nv_fp8_e4m3 v;
     memcpy(&v, &bits, 1);
     return static_cast<float>(v);
+}
+
+// Decode one packed FP4 byte (low nibble = .x, high nibble = .y) → half2.
+// Single PTX `cvt.rn.f16x2.e2m1x2` (sm_120+, CUDA 13.2+). Replaces the prior
+// per-nibble 8-entry magnitude LUT + sign branch (~12 ops/byte → 1).
+__device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
+    uint32_t fp16x2;
+    asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+        : "=r"(fp16x2) : "r"(byte_val));
+    return *reinterpret_cast<half2*>(&fp16x2);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,18 +135,20 @@ __global__ void paged_attention_decode_nvfp4_kernel(
                 K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
             float v_scale = ue4m3_decode(
                 V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
+            const half2 k_scale_h2 = __float2half2_rn(k_scale);
+            const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
-            // Q.K dot
+            // Q.K dot — HW FP4 decode (cvt.rn.f16x2.e2m1x2) + half2 scale fold
             float dot = 0.0f;
             {
                 const uint8_t* k_bytes = K_tok + lane_offset / 2;
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    uint8_t packed = k_bytes[i];
-                    float k0 = e2m1_decode(packed & 0xF) * k_scale;
-                    float k1 = e2m1_decode((packed >> 4) & 0xF) * k_scale;
-                    dot += q_reg[2 * i] * k0;
-                    dot += q_reg[2 * i + 1] * k1;
+                    half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
+                    kh2 = __hmul2(kh2, k_scale_h2);
+                    float2 kf = __half22float2(kh2);
+                    dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
+                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
                 }
             }
             dot = warp_reduce_sum(dot);
@@ -158,11 +163,11 @@ __global__ void paged_attention_decode_nvfp4_kernel(
                 const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    uint8_t packed = v_bytes[i];
-                    float v0 = e2m1_decode(packed & 0xF) * v_scale;
-                    float v1 = e2m1_decode((packed >> 4) & 0xF) * v_scale;
-                    o_reg[2 * i] = rescale * o_reg[2 * i] + w_new * v0;
-                    o_reg[2 * i + 1] = rescale * o_reg[2 * i + 1] + w_new * v1;
+                    half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
+                    vh2 = __hmul2(vh2, v_scale_h2);
+                    float2 vf = __half22float2(vh2);
+                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
                 }
             }
         }
@@ -272,17 +277,19 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
                 K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
             float v_scale = ue4m3_decode(
                 V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
+            const half2 k_scale_h2 = __float2half2_rn(k_scale);
+            const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
             float dot = 0.0f;
             {
                 const uint8_t* k_bytes = K_tok + lane_offset / 2;
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    uint8_t packed = k_bytes[i];
-                    float k0 = e2m1_decode(packed & 0xF) * k_scale;
-                    float k1 = e2m1_decode((packed >> 4) & 0xF) * k_scale;
-                    dot += q_reg[2 * i] * k0;
-                    dot += q_reg[2 * i + 1] * k1;
+                    half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
+                    kh2 = __hmul2(kh2, k_scale_h2);
+                    float2 kf = __half22float2(kh2);
+                    dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
+                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
                 }
             }
             dot = warp_reduce_sum(dot);
@@ -296,11 +303,11 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
                 const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    uint8_t packed = v_bytes[i];
-                    float v0 = e2m1_decode(packed & 0xF) * v_scale;
-                    float v1 = e2m1_decode((packed >> 4) & 0xF) * v_scale;
-                    o_reg[2 * i] = rescale * o_reg[2 * i] + w_new * v0;
-                    o_reg[2 * i + 1] = rescale * o_reg[2 * i + 1] + w_new * v1;
+                    half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
+                    vh2 = __hmul2(vh2, v_scale_h2);
+                    float2 vf = __half22float2(vh2);
+                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
                 }
             }
         }
@@ -311,6 +318,16 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
+
+// Note: a pipelined splitk variant (double-buffered K + V via smem, mirroring
+// `paged_attention_splitk_int4_pipeline_kernel`) was tested 2026-05-08 and
+// regressed Qwen3-8B Q8 + NVFP4 KV decode by ~3% (147.0 → 142.7 tok/s,
+// 5 reps). Once the inner loop became HW-FP4-cvt-bound (PR landed earlier
+// today) there was no longer enough work between issuing K[t+1] and using
+// K[t] for the prefetch to hide global-memory latency. The int4 pattern
+// works because INT4 dequant is heavier (8-entry LUT + sign branch). Don't
+// re-attempt without first profiling to confirm the kernel is back to
+// memory-bound (e.g. once block_size grows past 16 or HD>512 lands).
 
 // ---------------------------------------------------------------------------
 // Host launcher
