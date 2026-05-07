@@ -3,6 +3,7 @@
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -47,7 +48,11 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
     if (it != arch_map.end())
         return it->second;
 
-    IMP_LOG_WARN("unknown HF architecture: %s, falling back to GENERIC", hf_arch.c_str());
+    IMP_LOG_WARN(
+        "unknown HF architecture '%s' — falling back to GENERIC + tensor-name "
+        "heuristics. If inference is incoherent, the architecture is likely "
+        "unsupported. Add a class mapping in hf_config_loader.cpp.",
+        hf_arch.c_str());
     return ModelArch::GENERIC;
 }
 
@@ -65,6 +70,17 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty()) {
         cfg.arch = map_architecture(archs->arr[0].str_val);
+        if (archs->arr.size() > 1) {
+            std::string dropped;
+            for (size_t i = 1; i < archs->arr.size(); i++) {
+                if (i > 1)
+                    dropped += ", ";
+                dropped += archs->arr[i].str_val;
+            }
+            IMP_LOG_WARN(
+                "config.json `architectures` has %zu entries; using '%s' and ignoring [%s]",
+                archs->arr.size(), archs->arr[0].str_val.c_str(), dropped.c_str());
+        }
     } else {
         // Fallback: map model_type string to arch
         std::string model_type;
@@ -96,7 +112,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             if (it != type_to_class.end()) {
                 cfg.arch = map_architecture(it->second);
             } else {
-                IMP_LOG_WARN("unknown model_type '%s', using GENERIC", model_type.c_str());
+                IMP_LOG_WARN(
+                    "unknown model_type '%s' — falling back to GENERIC + "
+                    "tensor-name heuristics. If inference is incoherent, the "
+                    "architecture is likely unsupported.",
+                    model_type.c_str());
                 cfg.arch = ModelArch::GENERIC;
             }
         }
@@ -192,6 +212,60 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 for (const auto& v : long_f->arr) {
                     cfg.rope_long_factor.push_back(static_cast<float>(v.num_val));
                 }
+            }
+        } else if (rope_type == "llama3") {
+            // Llama-3.x per-frequency RoPE scaling. Reuses LongRoPE infrastructure:
+            // we precompute one factor per rope-pair so the kernel sees
+            //   freqs[i] = base_freq[i] / factor[i]
+            // matching the HF reference algorithm. Since this scaling is
+            // independent of sequence length, both short and long arrays carry
+            // identical values.
+            float low_freq_factor = 1.0f, high_freq_factor = 4.0f;
+            int orig_max_pos = 0;
+            jobj_get_float(*rope_scaling, "low_freq_factor", low_freq_factor);
+            jobj_get_float(*rope_scaling, "high_freq_factor", high_freq_factor);
+            jobj_get_int(*rope_scaling, "original_max_position_embeddings", orig_max_pos);
+            if (orig_max_pos <= 0) {
+                jobj_get_int(eff, "original_max_position_embeddings", orig_max_pos);
+            }
+
+            int hd = cfg.head_dim > 0 ? cfg.head_dim
+                                      : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+            int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            int pairs = rd / 2;
+            if (pairs > 0 && orig_max_pos > 0 && factor > 1.0f &&
+                high_freq_factor > low_freq_factor) {
+                const float low_wavelen = static_cast<float>(orig_max_pos) / low_freq_factor;
+                const float high_wavelen = static_cast<float>(orig_max_pos) / high_freq_factor;
+                const float two_pi = 6.28318530717958647692f;
+                cfg.rope_short_factor.resize(pairs);
+                cfg.rope_long_factor.resize(pairs);
+                for (int i = 0; i < pairs; i++) {
+                    const float base_freq =
+                        1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
+                    const float wavelen = two_pi / base_freq;
+                    float pair_factor;
+                    if (wavelen < high_wavelen) {
+                        pair_factor = 1.0f;
+                    } else if (wavelen > low_wavelen) {
+                        pair_factor = factor;
+                    } else {
+                        const float smooth =
+                            (static_cast<float>(orig_max_pos) / wavelen - low_freq_factor) /
+                            (high_freq_factor - low_freq_factor);
+                        pair_factor = factor / (1.0f - smooth + smooth * factor);
+                    }
+                    cfg.rope_short_factor[i] = pair_factor;
+                    cfg.rope_long_factor[i] = pair_factor;
+                }
+                cfg.rope_scaling_orig_max_pos = orig_max_pos;
+                IMP_LOG_INFO(
+                    "Llama-3 RoPE: factor=%.1f low=%.1f high=%.1f orig_max_pos=%d → %d freq pairs",
+                    factor, low_freq_factor, high_freq_factor, orig_max_pos, pairs);
+            } else {
+                IMP_LOG_WARN(
+                    "Llama-3 RoPE: skipping (pairs=%d orig_max_pos=%d factor=%.2f low=%.2f high=%.2f)",
+                    pairs, orig_max_pos, factor, low_freq_factor, high_freq_factor);
             }
         }
         // "dynamic" uses the same factor as linear at runtime
@@ -443,10 +517,29 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         }
     }
 
-    // tie_word_embeddings is informational (logged but not stored in ModelConfig)
+    // tie_word_embeddings: store as tri-state so the SafeTensors loader can
+    // cross-check the flag against actual lm_head.weight presence rather than
+    // tying purely on null-detection.
     const JValue* tie = jobj_find(root, "tie_word_embeddings");
-    if (tie && tie->type == JType::NUMBER && tie->num_val != 0.0) {
-        IMP_LOG_INFO("  tie_word_embeddings = true");
+    if (tie && tie->type == JType::NUMBER) {
+        cfg.tie_word_embeddings = (tie->num_val != 0.0) ? 1 : 0;
+        IMP_LOG_INFO("  tie_word_embeddings = %s",
+                     cfg.tie_word_embeddings == 1 ? "true" : "false");
+    }
+
+    // attention_bias / mlp_bias: tri-state so the loader can warn when the
+    // config promises bias but the SafeTensors export omits it.
+    const JValue* attn_bias = jobj_find(eff, "attention_bias");
+    if (attn_bias && attn_bias->type == JType::NUMBER) {
+        cfg.attention_bias = (attn_bias->num_val != 0.0) ? 1 : 0;
+    }
+    const JValue* mlp_bias = jobj_find(eff, "mlp_bias");
+    if (mlp_bias && mlp_bias->type == JType::NUMBER) {
+        cfg.mlp_bias = (mlp_bias->num_val != 0.0) ? 1 : 0;
+    }
+
+    if (cfg.arch == ModelArch::GENERIC) {
+        cfg.arch_inferred_fallback = true;
     }
 
     IMP_LOG_INFO("  arch=%s layers=%d d_model=%d heads=%d kv_heads=%d d_ff=%d vocab=%d",

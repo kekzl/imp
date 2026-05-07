@@ -84,6 +84,26 @@ struct ModelConfig {
     // Reconstruction: val = fp4 * weight_scale_fp8 / weight_global_scale
     // (Modelopt: val = fp4 * weight_scale_fp8 * weight_scale_2)
     bool is_llm_compressor_nvfp4 = false;
+
+    // Author-declared KV-cache quantization hint, sourced from Modelopt's
+    // hf_quant_config.json `kv_cache_quant_algo` field (e.g. "FP8"). Empty
+    // means the model author did not declare one. Surfaced to the engine as
+    // an informational signal — engine does NOT auto-flip the KV cache dtype
+    // because FP8 KV is known to break several model families even with
+    // model-author opt-in (see kv_dtype_tradeoffs memory).
+    std::string kv_cache_quant_hint;
+
+    // tri-state config flags (-1 = unset, 0 = false, 1 = true).
+    // Cross-checked against actual tensor presence after load.
+    int tie_word_embeddings = -1;
+    int attention_bias = -1;
+    int mlp_bias = -1;
+
+    // True when load_config() couldn't identify the architecture from
+    // config.json and fell back to ModelArch::GENERIC. Downstream loaders
+    // can use this to decide whether to invoke tensor-name heuristics, and
+    // higher layers can surface an explicit warning to the user.
+    bool arch_inferred_fallback = false;
 };
 
 // Forward declaration — full definition in quant/nvfp4_quant.h.
