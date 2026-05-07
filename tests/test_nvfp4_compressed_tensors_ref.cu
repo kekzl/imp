@@ -482,5 +482,53 @@ TEST(NvFP4ValidateWeightScaleDtype, RejectsNone) {
     EXPECT_FALSE(err.empty());
 }
 
+// ---- F6: weight_packed vs weight_scale shape validation ----
+
+TEST(NvFP4ValidatePackedScaleShapes, AcceptsTypicalQwen3) {
+    // Qwen3-MoE q_proj: logical [4096, 2048]. Packed = [4096, 1024].
+    // weight_scale = [4096, 128] (2048/16).
+    std::string err;
+    EXPECT_TRUE(nvfp4_validate_packed_scale_shapes(4096, 1024, 4096, 128, &err)) << err;
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, AcceptsSmallGemma4Expert) {
+    // Gemma-4 expert dim: 256 rows × packed-K 1408 → scale [256, 176].
+    std::string err;
+    EXPECT_TRUE(nvfp4_validate_packed_scale_shapes(256, 1408, 256, 176, &err)) << err;
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, RejectsOuterDimMismatch) {
+    // Transposed weight_scale would put N as inner dim and K as outer.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_packed_scale_shapes(4096, 1024, 1024, 4096, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, RejectsGroupSize8) {
+    // group_size=8: scale would be [N, K/8] = [4096, 256]. Not the spec.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_packed_scale_shapes(4096, 1024, 4096, 256, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, RejectsGroupSize32) {
+    // group_size=32: scale = [N, K/32] = [4096, 64].
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_packed_scale_shapes(4096, 1024, 4096, 64, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, RejectsZeroScaleInner) {
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_packed_scale_shapes(4096, 1024, 4096, 0, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidatePackedScaleShapes, AcceptsTinyTestShape) {
+    // [16, 64] packed inner with [16, 8] scale inner — used by the F1 baseline test.
+    std::string err;
+    EXPECT_TRUE(nvfp4_validate_packed_scale_shapes(16, 64, 16, 8, &err)) << err;
+}
+
 }  // namespace
 }  // namespace imp

@@ -12,6 +12,34 @@
 
 namespace imp {
 
+// Spec-compliance check for the NVFP4 weight_packed/weight_scale shape pair.
+bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer, int64_t packed_inner,
+                                        int64_t scale_outer, int64_t scale_inner, std::string* err) {
+    if (packed_outer != scale_outer) {
+        if (err) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "weight_packed outer dim %lld != weight_scale outer dim %lld",
+                          static_cast<long long>(packed_outer), static_cast<long long>(scale_outer));
+            *err = buf;
+        }
+        return false;
+    }
+    // packed_inner = K/2, scale_inner = K/16, ratio must be 8 (group_size=16).
+    if (scale_inner <= 0 || packed_inner != scale_inner * 8) {
+        if (err) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "weight_scale inner dim %lld * 8 != weight_packed inner dim %lld "
+                          "(group_size != 16 or shape mismatch)",
+                          static_cast<long long>(scale_inner), static_cast<long long>(packed_inner));
+            *err = buf;
+        }
+        return false;
+    }
+    return true;
+}
+
 // Spec-compliance check for the NVFP4 weight_scale tensor's wire dtype.
 bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err) {
     if (qt == QType::FP8_E4M3)

@@ -255,6 +255,24 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                              "dequant->cuBLAS fallback path).", key, scale_dtype_err.c_str());
                 return false;
             }
+
+            // F6: enforce group_size=16 between weight_packed [N, K/2] and
+            // weight_scale [N, K/16]. The kernel hard-codes kMicroBlockSize=16
+            // (nvfp4_gemm.cu:31); a shape mismatch would silently produce
+            // 12.5% per-element step quant noise on roughly half the elements
+            // (group_size != 16) or align scales onto wrong rows
+            // (transposed weight_scale). Both routes are 2D at promote time
+            // (per-expert weights have been split by weight_upload.cu).
+            if (w.ndim == 2 && sc.weight_scale.ndim == 2) {
+                std::string shape_err;
+                if (!nvfp4_validate_packed_scale_shapes(w.shape[0], w.shape[1],
+                                                       sc.weight_scale.shape[0], sc.weight_scale.shape[1],
+                                                       &shape_err)) {
+                    n_wrong_scale_dtype++;
+                    IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion.", key, shape_err.c_str());
+                    return false;
+                }
+            }
             float h_scale = 1.0f;
             if (sc.weight_scale_2.data) {
                 if (sc.weight_scale_2.on_device) {

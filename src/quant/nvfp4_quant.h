@@ -103,4 +103,16 @@ float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* 
 // instead of silently producing wrong output through the FP8 decoder.
 bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
 
+// Verify that weight_scale's inner dimension matches weight_packed's inner
+// dimension at the spec's group_size=16. weight_packed is stored as [N, K/2]
+// (packed halves) and weight_scale must be [N, K/16] = [N, weight_packed_K/8].
+//
+// Mismatch on outer dim or inner-dim ratio rejects promotion.
+//   packed_inner_dim is `weight.shape[1]` from the SafeTensors loader (= K/2).
+//   scale_inner_dim is `weight_scale.shape[1]`.
+//   packed_outer_dim/scale_outer_dim are shape[0] of each.
+bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer_dim, int64_t packed_inner_dim,
+                                        int64_t scale_outer_dim, int64_t scale_inner_dim,
+                                        std::string* err);
+
 }  // namespace imp
