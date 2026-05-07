@@ -75,8 +75,8 @@ public:
 
     bool is_initialized() const { return initialized_; }
 
-    // Allow the model to emit a free-form preamble (e.g. <think>...</think>)
-    // before strict schema enforcement starts. Pass close_token=-1 to disable.
+    // See JsonConstrainer::set_preamble for semantics — close-token mode for
+    // reasoning models (</think>) or budget-only mode for markdown fences.
     void set_preamble(int32_t close_token, int max_tokens = 8192) {
         preamble_.configure(close_token, max_tokens);
     }

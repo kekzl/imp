@@ -75,8 +75,11 @@ public:
     // Get max tokens to finish (force-close open structures near limit)
     int closing_tokens_needed() const { return static_cast<int>(state_stack_.size()); }
 
-    // Allow the model to emit a free-form preamble (e.g. <think>...</think>)
-    // before strict JSON enforcement starts. Pass close_token=-1 to disable.
+    // Allow the model to emit a free-form preamble before strict JSON
+    // enforcement starts. close_token>=0 enables close-token mode (reasoning
+    // models with </think>); close_token<0 + max_tokens>0 enables budget-only
+    // mode (markdown-fence preambles). Both modes also exit on the first
+    // `{` / `[` seen. Pass close_token=-1 with max_tokens<=0 to fully disable.
     void set_preamble(int32_t close_token, int max_tokens = 8192) {
         preamble_.configure(close_token, max_tokens);
     }

@@ -30,13 +30,19 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     active_schema_ = false;
 
     const int32_t think_close = detect_think_close(tokenizer);
+    // Reasoning models get a large budget (free-form thinking can run for
+    // hundreds of tokens). Non-reasoning models get a small slack window
+    // for markdown fences (` ```json `) or short verbal preambles ("Sure! ").
+    // Either way the gate exits on the first `{` / `[` seen, so this is a
+    // hard cap, not the typical case.
+    const int preamble_budget = (think_close >= 0) ? 8192 : 8;
 
     // Schema mode takes priority over plain JSON mode
     if (!json_schema.empty()) {
         if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
             json_schema == cached_schema_string_) {
             // Reuse cached constrainer — just reset FSM state.
-            schema_constrainer_->set_preamble(think_close);
+            schema_constrainer_->set_preamble(think_close, preamble_budget);
             schema_constrainer_->reset();
             active_schema_ = true;
         } else {
@@ -45,7 +51,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                 schema_constrainer_ = std::make_unique<SchemaConstrainer>();
                 if (tokenizer && schema_constrainer_->init(*tokenizer, std::move(schema))) {
                     cached_schema_string_ = json_schema;
-                    schema_constrainer_->set_preamble(think_close);
+                    schema_constrainer_->set_preamble(think_close, preamble_budget);
                     schema_constrainer_->reset();
                     active_schema_ = true;
                 } else {
@@ -69,7 +75,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                 return;
             }
         }
-        json_constrainer_->set_preamble(think_close);
+        json_constrainer_->set_preamble(think_close, preamble_budget);
         json_constrainer_->reset();
         active_json_ = true;
     }
