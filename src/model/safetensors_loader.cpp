@@ -616,6 +616,18 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     size_t tensor_data_offset = 8 + static_cast<size_t>(header_size);
     uint8_t* tensor_data_base = const_cast<uint8_t*>(data + tensor_data_offset);
 
+    // Counters for malformed-entry diagnostics (F5). Each silent skip is
+    // counted; a per-shard summary is logged at end of load_shard so users
+    // can see which checkpoints have structural issues.
+    int n_dropped_no_dtype = 0;
+    int n_dropped_no_shape = 0;
+    int n_dropped_too_many_dims = 0;
+    int n_dropped_no_offsets = 0;
+    int n_dropped_offset_validation = 0;
+    auto warn_drop = [&](const char* tensor_name, const char* reason) {
+        IMP_LOG_WARN("SafeTensors %s: dropping tensor '%s' — %s", path.c_str(), tensor_name, reason);
+    };
+
     for (const auto& kv : root.obj) {
         std::string tensor_name = kv.first;  // copy — may be mutated by translation
         const JValue& tensor_meta = kv.second;
@@ -634,17 +646,26 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
-        if (!dtype_val || dtype_val->type != JType::STRING)
+        if (!dtype_val || dtype_val->type != JType::STRING) {
+            n_dropped_no_dtype++;
+            warn_drop(tensor_name.c_str(), "missing or non-string 'dtype' field");
             continue;
+        }
         QType dtype = safetensors_dtype(dtype_val->str_val);
 
         const JValue* shape_val = jobj_find(tensor_meta, "shape");
-        if (!shape_val || shape_val->type != JType::ARRAY)
+        if (!shape_val || shape_val->type != JType::ARRAY) {
+            n_dropped_no_shape++;
+            warn_drop(tensor_name.c_str(), "missing or non-array 'shape' field");
             continue;
+        }
 
         int ndim = static_cast<int>(shape_val->arr.size());
-        if (ndim > kMaxDims)
+        if (ndim > kMaxDims) {
+            n_dropped_too_many_dims++;
+            warn_drop(tensor_name.c_str(), "shape ndim exceeds engine kMaxDims");
             continue;
+        }
 
         int64_t shape[kMaxDims] = {};
         for (int d = 0; d < ndim; d++) {
@@ -652,8 +673,11 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         const JValue* offsets_val = jobj_find(tensor_meta, "data_offsets");
-        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2)
+        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2) {
+            n_dropped_no_offsets++;
+            warn_drop(tensor_name.c_str(), "missing or malformed 'data_offsets' field");
             continue;
+        }
 
         uint64_t offset_start = static_cast<uint64_t>(offsets_val->arr[0].as_int());
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
@@ -665,15 +689,22 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             // Unknown wire dtype — skip strict validation but keep the soft
             // OOB check below. safetensors_dtype()'s WARN already fires for
             // unknown wire types when the tensor is actually emitted.
-            if (tensor_data_offset + offset_end > file_size)
+            if (tensor_data_offset + offset_end > file_size) {
+                n_dropped_offset_validation++;
+                warn_drop(tensor_name.c_str(),
+                          "offset_end past EOF (unknown wire dtype, lenient check)");
                 continue;
+            }
         } else {
             int64_t nelem = 1;
             for (int d = 0; d < ndim; d++)
                 nelem *= shape[d];
             uint64_t expected_nbytes = static_cast<uint64_t>(nelem) * static_cast<uint64_t>(wire_bytes);
+            std::string vt_err;
             if (!safetensors_internal::validate_tensor_offsets(
-                    offset_start, offset_end, expected_nbytes, tensor_data_offset, file_size, nullptr)) {
+                    offset_start, offset_end, expected_nbytes, tensor_data_offset, file_size, &vt_err)) {
+                n_dropped_offset_validation++;
+                warn_drop(tensor_name.c_str(), vt_err.c_str());
                 continue;
             }
         }
@@ -687,6 +718,15 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
                       ndim > 1 ? std::to_string(shape[1]).c_str() : "", ndim > 2 ? "," : "",
                       ndim > 2 ? std::to_string(shape[2]).c_str() : "", (unsigned long)offset_start,
                       (unsigned long)offset_end);
+    }
+
+    int n_total_dropped = n_dropped_no_dtype + n_dropped_no_shape + n_dropped_too_many_dims +
+                          n_dropped_no_offsets + n_dropped_offset_validation;
+    if (n_total_dropped > 0) {
+        IMP_LOG_WARN("SafeTensors %s: dropped %d malformed tensors (no_dtype=%d no_shape=%d "
+                     "too_many_dims=%d no_offsets=%d offset_validation=%d)",
+                     path.c_str(), n_total_dropped, n_dropped_no_dtype, n_dropped_no_shape,
+                     n_dropped_too_many_dims, n_dropped_no_offsets, n_dropped_offset_validation);
     }
 
     return true;

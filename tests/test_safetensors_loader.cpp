@@ -9,11 +9,44 @@
 
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace imp {
 namespace {
+
+// Helper: write a synthetic single-shard SafeTensors blob to a temp file.
+// header_json is the inner JSON header text; tensor_payload_size is how
+// much trailing tensor data to allocate (zeroed).
+std::string write_temp_blob(const std::string& header_json, size_t tensor_payload_size) {
+    char tmpl[] = "/tmp/imp_test_st_XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0)
+        return "";
+    std::string path = tmpl;
+    // Add ".safetensors" suffix so load_safetensors path-detection works.
+    std::string final_path = path + ".safetensors";
+    ::close(fd);
+    ::rename(path.c_str(), final_path.c_str());
+
+    std::ofstream out(final_path, std::ios::binary);
+    if (!out)
+        return "";
+    uint64_t hsize = static_cast<uint64_t>(header_json.size());
+    out.write(reinterpret_cast<const char*>(&hsize), sizeof(hsize));
+    out.write(header_json.data(), header_json.size());
+    if (tensor_payload_size > 0) {
+        std::vector<char> zeros(tensor_payload_size, 0);
+        out.write(zeros.data(), zeros.size());
+    }
+    out.close();
+    return final_path;
+}
 
 // ---- F3: header_size validation ----
 
@@ -132,6 +165,54 @@ TEST(SafeTensorsValidateTensorOffsets, EndExactlyAtFileBoundary) {
     // tdo = 8, file_size = 1024 → max usable end is 1016. Exactly that should pass.
     std::string err;
     EXPECT_TRUE(safetensors_internal::validate_tensor_offsets(0, 1016, 1016, 8, 1024, &err)) << err;
+}
+
+// ---- F5: malformed-tensor-entry warnings ----
+
+// Loads a synthetic blob with one tensor missing 'dtype' and one with malformed
+// 'shape'. load_safetensors returns nullptr (no config.json → cannot build a
+// Model) but the per-shard load must drop both bad tensors with a WARN naming
+// each, AND log an end-of-shard summary. We capture stderr and check.
+TEST(SafeTensorsMalformedEntryWarnings, MissingDtypeAndShapeWarn) {
+    // Two malformed tensors; offsets are valid in case they get past the dtype/shape checks.
+    const std::string header =
+        "{\"bad_no_dtype\": {\"shape\": [4], \"data_offsets\": [0, 16]},"
+        " \"bad_no_shape\": {\"dtype\": \"F32\", \"data_offsets\": [0, 16]}}";
+    std::string path = write_temp_blob(header, 16);
+    ASSERT_FALSE(path.empty());
+
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(path);
+    std::string captured = testing::internal::GetCapturedStderr();
+    std::remove(path.c_str());
+
+    // Model build fails (no config.json) — but the per-shard scan must have run
+    // and emitted the WARN lines.
+    EXPECT_EQ(model.get(), nullptr);
+    EXPECT_NE(captured.find("bad_no_dtype"), std::string::npos)
+        << "Expected WARN naming the dtype-less tensor. Captured: " << captured;
+    EXPECT_NE(captured.find("bad_no_shape"), std::string::npos)
+        << "Expected WARN naming the shape-less tensor. Captured: " << captured;
+    EXPECT_NE(captured.find("dropped"), std::string::npos)
+        << "Expected end-of-shard summary line. Captured: " << captured;
+}
+
+TEST(SafeTensorsMalformedEntryWarnings, OffsetByteCountMismatchWarns) {
+    // 4 FP32 elements declared, but only 8 bytes of tensor data (= 2 FP32).
+    const std::string header =
+        "{\"size_mismatch\": {\"dtype\": \"F32\", \"shape\": [4], \"data_offsets\": [0, 8]}}";
+    std::string path = write_temp_blob(header, 16);
+    ASSERT_FALSE(path.empty());
+
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(path);
+    std::string captured = testing::internal::GetCapturedStderr();
+    std::remove(path.c_str());
+
+    EXPECT_EQ(model.get(), nullptr);
+    EXPECT_NE(captured.find("size_mismatch"), std::string::npos) << captured;
+    // The WARN includes the validate_tensor_offsets reason text.
+    EXPECT_NE(captured.find("byte count"), std::string::npos) << captured;
 }
 
 }  // namespace
