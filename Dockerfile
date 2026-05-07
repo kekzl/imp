@@ -19,15 +19,21 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
     && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
 
+# Pre-clone third-party deps into their own layer. Only invalidated when the
+# pinned tags below change — code-only edits keep this layer cached, saving
+# the FetchContent git-clone step (~30-60s) on every Docker rebuild.
+# Tags must mirror the FetchContent_Declare entries in CMakeLists.txt.
+RUN git clone --depth=1 --branch v1.17.0 https://github.com/google/googletest.git /deps/googletest \
+ && git clone --depth=1 --branch v4.4.2  https://github.com/NVIDIA/cutlass.git    /deps/cutlass    \
+ && git clone --depth=1 --branch v0.42.0 https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
+ && git clone --depth=1 --branch v3.12.0 https://github.com/nlohmann/json.git     /deps/json
+
 WORKDIR /src
 COPY . .
 
 # Override -march=native with portable -march=x86-64-v3 for Docker portability
 RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 
-# BuildKit cache mount persists the build directory across Docker builds.
-# On code-only changes, Ninja recompiles only modified translation units
-# instead of rebuilding from scratch (~30s vs ~5min for full CUDA rebuild).
 ARG IMP_BUILD_TESTS=OFF
 ARG IMP_BUILD_BENCH=OFF
 
@@ -37,6 +43,10 @@ RUN cmake -B build -G Ninja \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \
         -DIMP_BUILD_SERVER=ON \
+        -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
+        -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
+        -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
+        -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
     && cmake --build build -j$(nproc) \
     && cp build/imp-server build/imp-cli /tmp/ \
     && if [ -f build/imp-tests ]; then \
