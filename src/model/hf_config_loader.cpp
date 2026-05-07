@@ -563,6 +563,40 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         cfg.mlp_bias = (mlp_bias->num_val != 0.0) ? 1 : 0;
     }
 
+    // DeepSeek V2/V3 Multi-head Latent Attention (MLA) detection. Imp's
+    // DEEPSEEK forward path is standard MHA — feeding it an MLA checkpoint
+    // produces silently wrong outputs. The HF config fields `kv_lora_rank`
+    // and `q_lora_rank` are the unambiguous indicator.
+    if (cfg.arch == ModelArch::DEEPSEEK) {
+        int kv_lora = 0, q_lora = 0;
+        jobj_get_int(eff, "kv_lora_rank", kv_lora);
+        jobj_get_int(eff, "q_lora_rank", q_lora);
+        if (kv_lora > 0 || q_lora > 0) {
+            IMP_LOG_WARN(
+                "DeepSeek-V2/V3 MLA detected (kv_lora_rank=%d q_lora_rank=%d) "
+                "but imp's DEEPSEEK path uses standard MHA. Inference will "
+                "produce incorrect outputs. MLA support is a separate audit "
+                "item (#17).",
+                kv_lora, q_lora);
+        }
+    }
+
+    // Multimodal vision-tower detection. Imp's SafeTensors loader skips
+    // vision tensors today; the user only gets the LLM head. Surface this
+    // explicitly when `vision_config` is present so chat-with-images use
+    // cases don't silently degrade to text-only.
+    const JValue* vc = jobj_find(root, "vision_config");
+    if (vc && vc->type == JType::OBJECT) {
+        std::string model_type;
+        jobj_get_string(*vc, "model_type", model_type);
+        IMP_LOG_WARN(
+            "Multimodal model detected (vision_config present, model_type='%s'). "
+            "imp's SafeTensors loader handles only the language head; the "
+            "vision tower will be skipped. Multimodal SafeTensors support is "
+            "a separate audit item (#18).",
+            model_type.empty() ? "?" : model_type.c_str());
+    }
+
     if (cfg.arch == ModelArch::GENERIC) {
         cfg.arch_inferred_fallback = true;
     }
