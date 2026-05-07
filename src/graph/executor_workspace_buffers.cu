@@ -276,6 +276,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // writing the FP16 intermediate to DRAM entirely, saving ~5x DRAM traffic.
         // Skip allocation if experts are on host (batch dequant only useful for on-device experts).
         if (!skip_batch_dequant) {
+            // Cap at the actual remaining free VRAM minus a reserve for KV
+            // cache + workspaces (init_kv_cache runs after this and sees what's
+            // left). On Nemotron-H NVFP4 (32 GiB GPU, 22 GiB model) the full
+            // n_experts target hit ~1.2 GiB and starved the KV cache → 16-block
+            // floor → long-prompt hang. Leaving ≥ 1 GiB free here covers
+            // vram_budget reserve (~768 MiB) plus a useful KV cache.
+            size_t free_now = 0, total_now = 0;
+            cudaMemGetInfo(&free_now, &total_now);
+            constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
+            size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
+
             int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
             bool allocated = false;
             for (int ne_try : targets) {
@@ -283,6 +294,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     continue;
                 ne_try = std::min(ne_try, cfg.n_experts);
                 size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
+                if (cap_bytes > 0 && sz > cap_bytes) {
+                    IMP_LOG_DEBUG("MoE dequant: skipping %d experts (%.0f MiB > cap %.0f MiB)", ne_try,
+                                  sz / (1024.0 * 1024.0), cap_bytes / (1024.0 * 1024.0));
+                    continue;
+                }
                 moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
                 if (!moe_.batch_dequant_buf) {
                     IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
