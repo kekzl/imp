@@ -6,8 +6,18 @@
 namespace imp {
 
 // Gate that lets a model emit a free-form preamble before strict JSON
-// enforcement kicks in — needed for reasoning models (Qwen3.6, DeepSeek-R1,
-// Gemma-4 thinking) that prepend `<think>...</think>` to every response.
+// enforcement kicks in. Two modes:
+//
+//   1. close-token mode (close_token >= 0)
+//      Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4 thinking) prepend
+//      `<think>...</think>` to every response. Gate stays active until the
+//      close token is observed; budget acts as a safety cap.
+//
+//   2. budget-only mode (close_token < 0, max_tokens > 0)
+//      Non-reasoning models that wrap JSON in markdown fences (` ```json `)
+//      or short verbal preambles ("Sure! ") need a small slack window
+//      before strict enforcement. Gate transitions on the first `{`/`[`
+//      seen, or when the budget is exhausted.
 //
 // State:
 //   active=true   →  apply_mask is a no-op, all tokens accepted
@@ -20,9 +30,11 @@ namespace imp {
 class PreambleGate {
 public:
     void configure(int32_t close_token, int max_tokens) {
-        configured_ = (close_token >= 0);
-        close_token_ = close_token;
         max_tokens_ = max_tokens > 0 ? max_tokens : 0;
+        close_token_ = close_token;
+        // Activate if either a close-token is set, or a positive budget is
+        // configured (budget-only mode for markdown-fence preambles).
+        configured_ = (close_token >= 0) || (max_tokens_ > 0);
         reset();
     }
 
@@ -42,8 +54,10 @@ public:
 
         seen_++;
 
-        // Close token (e.g. </think>) — consume and transition.
-        if (token == close_token_) {
+        // Close token (e.g. </think>) — consume and transition. Only checked
+        // in close-token mode; budget-only mode passes through to the
+        // {/[ + budget exits below.
+        if (close_token_ >= 0 && token == close_token_) {
             active_ = false;
             return true;
         }

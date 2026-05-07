@@ -165,11 +165,55 @@ TEST(PreambleGateTest, DisabledByDefault) {
     EXPECT_FALSE(g.absorb(TOK_TEXT, "hi"));  // gate inactive → don't absorb
 }
 
-TEST(PreambleGateTest, ConfigureNegativeCloseTokenStaysDisabled) {
+TEST(PreambleGateTest, ConfigureNoCloseTokenAndNoBudgetStaysDisabled) {
     PreambleGate g;
-    g.configure(-1, 8192);
+    g.configure(-1, 0);
     EXPECT_FALSE(g.active());
     EXPECT_FALSE(g.absorb(TOK_TEXT, "hi"));
+}
+
+TEST(PreambleGateTest, BudgetOnlyModeActivates) {
+    // Non-reasoning model: no </think> token, but we still want a small
+    // slack window for markdown fences (```json) or short verbal preambles.
+    PreambleGate g;
+    g.configure(-1, 8);
+    EXPECT_TRUE(g.active());
+}
+
+TEST(PreambleGateTest, BudgetOnlyModeAbsorbsMarkdownFenceTokens) {
+    PreambleGate g;
+    g.configure(-1, 8);
+
+    // Tokens like "```", "json", "\n" all absorbed.
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "```"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "json"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "\n"));
+    EXPECT_TRUE(g.active());
+
+    // Then `{` triggers transition (forwarded to FSM).
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, BudgetOnlyModeBudgetExhaustionForcesTransition) {
+    PreambleGate g;
+    g.configure(-1, 3);
+    for (int i = 0; i < 2; i++) {
+        EXPECT_TRUE(g.absorb(TOK_TEXT, "blah"));
+        EXPECT_TRUE(g.active());
+    }
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "blah"));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, BudgetOnlyModeIgnoresNegativeTokenIds) {
+    // close_token_=-1 should not match any real token. Use TOK_THINK_CLOSE
+    // as a stand-in for "any non-{ token" and verify it's absorbed (not
+    // treated as a close-match).
+    PreambleGate g;
+    g.configure(-1, 8);
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_TRUE(g.active());
 }
 
 TEST(PreambleGateTest, ActivatesAfterConfigure) {
