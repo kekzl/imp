@@ -29,6 +29,7 @@
 #include <cuda_fp16.h>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace imp {
@@ -366,6 +367,78 @@ TEST_F(NvFP4CompressedTensorsRef, NegativeWeightsSignPreserved) {
         EXPECT_NEAR(v, expected, 1e-2f) << "Row " << n << " expected " << expected << " got " << v
                                         << " — sign bit dropped in nibble decode?";
     }
+}
+
+// Test 5 (F2): Modelopt path defensively zeros NaN/+Inf weight_scale_2.
+TEST(NvFP4PromoteWeightScale2, ModeloptNaNZeroes) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(std::nanf(""), /*is_llm_compressor=*/false, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_TRUE(zeroed);
+    EXPECT_FALSE(std::isnan(r));
+}
+
+TEST(NvFP4PromoteWeightScale2, ModeloptPlusInfZeroes) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(std::numeric_limits<float>::infinity(),
+                                           /*is_llm_compressor=*/false, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_TRUE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, ModeloptNegInfZeroes) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(-std::numeric_limits<float>::infinity(),
+                                           /*is_llm_compressor=*/false, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_TRUE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, ModeloptZeroIsZeroFlagged) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(0.0f, /*is_llm_compressor=*/false, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_TRUE(zeroed);  // Modelopt zero is a legitimate "null layer" but we still flag for diagnostic
+}
+
+TEST(NvFP4PromoteWeightScale2, ModeloptFinitePassesThrough) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(0.125f, /*is_llm_compressor=*/false, &zeroed);
+    EXPECT_FLOAT_EQ(r, 0.125f);
+    EXPECT_FALSE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, LlmCompressorNaNZeroes) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(std::nanf(""), /*is_llm_compressor=*/true, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_TRUE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, LlmCompressorZeroNoInf) {
+    // The bug PR #113 first guarded: 1/0 = +Inf without the defensive zeroing.
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(0.0f, /*is_llm_compressor=*/true, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_FALSE(std::isinf(r));
+    EXPECT_TRUE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, LlmCompressorTinyNonFiniteFlip) {
+    // Subnormal where 1/x overflows to +Inf — must be defensively zeroed.
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(std::numeric_limits<float>::denorm_min(),
+                                           /*is_llm_compressor=*/true, &zeroed);
+    EXPECT_EQ(r, 0.0f);
+    EXPECT_FALSE(std::isinf(r));
+    EXPECT_TRUE(zeroed);
+}
+
+TEST(NvFP4PromoteWeightScale2, LlmCompressorFiniteFlipsCorrectly) {
+    bool zeroed = false;
+    float r = nvfp4_promote_weight_scale_2(8.0f, /*is_llm_compressor=*/true, &zeroed);
+    EXPECT_FLOAT_EQ(r, 0.125f);
+    EXPECT_FALSE(zeroed);
 }
 
 }  // namespace

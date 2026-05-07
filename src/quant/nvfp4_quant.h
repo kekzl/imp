@@ -75,4 +75,24 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* outpu
 // Free NvFP4MoEQuantResult device memory.
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
 
+// ---------------------------------------------------------------------------
+// Defensive promotion of weight_scale_2 into the GEMM-internal tensor_scale.
+//
+// Modelopt:        val = fp4 * micro_scale * weight_scale_2  (multiply)
+// llm-compressor:  val = fp4 * micro_scale / weight_scale_2  (divide → store 1/x)
+//
+// A weight_scale_2 of 0, NaN, or ±Inf would produce non-finite GEMM output and
+// contaminate the entire layer's hidden state. This helper folds in defensive
+// zeroing for both formats:
+//   - non-finite h_scale         → 0.0f
+//   - llm-compressor h_scale=0   → 0.0f (1/0 would be Inf)
+//   - llm-compressor 1/h_scale non-finite → 0.0f
+//   - Modelopt h_scale=0         → 0.0f (intentionally null layer)
+//
+// `*was_zeroed` is set true when defensive zeroing fired (used for diagnostic
+// counters at end of load).
+//
+// Pure host function — testable without CUDA. Defined in nvfp4_quant.cu.
+float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed);
+
 }  // namespace imp

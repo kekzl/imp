@@ -12,6 +12,40 @@
 
 namespace imp {
 
+// Defensive promotion of weight_scale_2 → GEMM tensor_scale. Pure host fn.
+// See header comment in quant/nvfp4_quant.h for the formula details.
+float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed) {
+    if (was_zeroed)
+        *was_zeroed = false;
+    if (!std::isfinite(h_scale)) {
+        if (was_zeroed)
+            *was_zeroed = true;
+        return 0.0f;
+    }
+    if (is_llm_compressor) {
+        if (h_scale == 0.0f) {
+            if (was_zeroed)
+                *was_zeroed = true;
+            return 0.0f;
+        }
+        float promoted = 1.0f / h_scale;
+        if (!std::isfinite(promoted)) {
+            if (was_zeroed)
+                *was_zeroed = true;
+            return 0.0f;
+        }
+        return promoted;
+    }
+    // Modelopt: multiplicative. Zero is a legitimate "null this layer" value;
+    // we still mark it as zeroed so the caller can surface the count, but we
+    // keep the value itself as 0.0f (no flip → no Inf).
+    if (h_scale == 0.0f) {
+        if (was_zeroed)
+            *was_zeroed = true;
+    }
+    return h_scale;
+}
+
 // ---------------------------------------------------------------------------
 // NVFP4 (FP4 E2M1) quantization with two-level scaling.
 //

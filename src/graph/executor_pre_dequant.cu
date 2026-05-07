@@ -250,32 +250,37 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     memcpy(&h_scale, sc.weight_scale_2.data, sizeof(float));
                 }
             }
-            // Modelopt:        val = fp4 * micro_scale * tensor_scale  (multiply)
-            // llm-compressor:  val = fp4 * micro_scale / tensor_scale  (divide → store 1/x)
-            //
-            // Defensive guard: a zero h_scale would make 1/x = +Inf and
-            // contaminate the entire layer's output via the GEMM. This
-            // happens for layers with all-zero weights (rare but observed
-            // in some llm-compressor exports). Fall back to 0 so the
-            // weight contribution is null instead of NaN/Inf.
-            float promoted_scale;
-            if (cfg.is_llm_compressor_nvfp4) {
-                if (h_scale == 0.0f) {
-                    n_zero_scale++;
-                    promoted_scale = 0.0f;
-                    IMP_LOG_WARN("NVFP4 prequant: %s has weight_scale_2=0 — zeroing tensor_scale "
-                                 "(would otherwise produce Inf via reciprocal flip)", key);
-                } else {
-                    promoted_scale = 1.0f / h_scale;
-                    if (!std::isfinite(promoted_scale)) {
+            // Defensive promotion: zero, NaN, ±Inf weight_scale_2 → 0.0f. Both
+            // Modelopt (multiply) and llm-compressor (divide → 1/x) paths are
+            // guarded; see nvfp4_promote_weight_scale_2 in quant/nvfp4_quant.h.
+            // Without this guard a non-finite scale would propagate through the
+            // GEMM and contaminate the entire layer's hidden state.
+            bool was_zeroed = false;
+            float promoted_scale = nvfp4_promote_weight_scale_2(h_scale, cfg.is_llm_compressor_nvfp4,
+                                                                &was_zeroed);
+            if (was_zeroed) {
+                if (cfg.is_llm_compressor_nvfp4) {
+                    if (h_scale == 0.0f) {
+                        n_zero_scale++;
+                        IMP_LOG_WARN("NVFP4 prequant: %s has weight_scale_2=0 — zeroing tensor_scale "
+                                     "(would otherwise produce Inf via reciprocal flip)", key);
+                    } else {
                         n_nonfinite_after_flip++;
-                        promoted_scale = 0.0f;
                         IMP_LOG_WARN("NVFP4 prequant: %s reciprocal flip produced non-finite scale "
                                      "from h_scale=%.6g — zeroing", key, h_scale);
                     }
+                } else {
+                    if (h_scale == 0.0f) {
+                        n_zero_scale++;
+                        // Modelopt with h_scale=0 is intentional: a calibrated
+                        // null layer. Log at INFO, no WARN.
+                        IMP_LOG_DEBUG("NVFP4 prequant: %s has weight_scale_2=0 (Modelopt null layer)", key);
+                    } else {
+                        n_nonfinite_after_flip++;
+                        IMP_LOG_WARN("NVFP4 prequant: %s has non-finite weight_scale_2=%.6g — zeroing "
+                                     "tensor_scale", key, h_scale);
+                    }
                 }
-            } else {
-                promoted_scale = h_scale;
             }
             if (sc.input_scale.data) {
                 n_with_input_scale++;
@@ -374,8 +379,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (prequant_count > 0) {
             IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars", prequant_count);
             if (n_zero_scale > 0 || n_nonfinite_after_flip > 0) {
-                IMP_LOG_WARN("NVFP4 prequant: %d zero weight_scale_2 / %d non-finite reciprocal flips "
-                             "(weights zeroed defensively)", n_zero_scale, n_nonfinite_after_flip);
+                IMP_LOG_WARN("NVFP4 prequant: %d zero weight_scale_2 / %d non-finite weight_scale_2 "
+                             "(weights zeroed defensively, applies to both Modelopt and llm-compressor)",
+                             n_zero_scale, n_nonfinite_after_flip);
             }
             if (cfg.is_llm_compressor_nvfp4 && n_with_input_scale > 0) {
                 // input_scale is a SmoothQuant-style activation-rescaling vector
