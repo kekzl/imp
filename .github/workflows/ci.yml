@@ -8,15 +8,11 @@ on:
 
 jobs:
   build:
-    name: Build (CUDA ${{ matrix.cuda }})
+    name: Build (CUDA 13.2)
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        cuda: ['13.2']
-        build_type: [Release]
 
     container:
-      image: nvidia/cuda:${{ matrix.cuda }}.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
 
     steps:
       - uses: actions/checkout@v5
@@ -26,16 +22,31 @@ jobs:
           apt-get update
           apt-get install -y cmake g++ git python3
 
+      # Cache the entire build tree (incl. _deps FetchContent clones and Ninja
+      # objects). On code-only PRs Ninja relinks only changed TUs instead of
+      # re-doing the ~5min cold CUDA build. Cache key tracks CMake config files
+      # plus the full source tree so a clean key always matches incrementally.
+      - name: Cache build directory
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: imp-build-${{ runner.os }}-cuda13.2-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**', 'tests/**') }}
+          restore-keys: |
+            imp-build-${{ runner.os }}-cuda13.2-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda13.2-
+
       - name: Configure
         run: |
           cmake -B build \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_BUILD_TYPE=Release \
             -DIMP_BUILD_TESTS=ON \
             -DIMP_BUILD_TOOLS=ON \
-            -DIMP_BUILD_BENCH=ON
-          # CMakeLists.txt pins arch=compute_120f,code=sm_120 directly via
+            -DIMP_BUILD_BENCH=OFF
+          # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. CI compiles PTX/SASS
-          # for sm_120 only; runtime tests need a self-hosted RTX 5090 runner.
+          # for sm_120a only; runtime tests need a self-hosted RTX 5090 runner.
+          # IMP_BUILD_BENCH=OFF skips ~30-60s of mxf4nvf4 microbench TUs that
+          # are bench-only — production server builds don't link them.
 
       - name: Build
         run: cmake --build build -j$(nproc)
@@ -46,7 +57,6 @@ jobs:
           name: imp-build
           path: |
             build/imp-cli
-            build/imp-bench
             build/imp-tests
             build/test-core
             build/test-text
