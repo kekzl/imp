@@ -855,6 +855,21 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // executor_pre_dequant.cu's Phase 0 promote() resolves each scratch key
     // back to the main weight tensor and writes the device pointer onto its
     // .scales / .tensor_scale sidecars. No load-side linking needed here.
+    // MXFP4 detection. We surface the format declaration but do NOT have a
+    // SafeTensors decode path yet — only the GGUF wire format is decoded.
+    // The warn here lets users know they need to convert to GGUF.
+    HFConfigLoader::MxFP4Config mxfp4_cfg;
+    if (HFConfigLoader::load_mxfp4_config(model_dir, mxfp4_cfg)) {
+        cfg.is_mxfp4_prequant = true;
+        cfg.mxfp4_block_size = mxfp4_cfg.block_size;
+        IMP_LOG_WARN(
+            "MXFP4 SafeTensors detected (block_size=%d) — imp does NOT have "
+            "a SafeTensors MXFP4 decode path yet. Weights will load as their "
+            "wire dtype (typically uint8/FP16) and inference will likely be "
+            "incorrect. Convert to GGUF for actual MXFP4 support.",
+            cfg.mxfp4_block_size);
+    }
+
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
     if (is_nvfp4) {

@@ -26,6 +26,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
         {"Qwen3ForCausalLM", ModelArch::QWEN3},
         {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
+        {"Qwen3_5ForCausalLM", ModelArch::QWEN35},
+        {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
         {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
@@ -37,6 +39,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
+        {"Llama4ForCausalLM", ModelArch::LLAMA4},
+        {"Llama4ForConditionalGeneration", ModelArch::LLAMA4},
         {"PhiForCausalLM", ModelArch::LLAMA},
         {"Phi3ForCausalLM", ModelArch::LLAMA},
         {"Phi3SmallForCausalLM", ModelArch::LLAMA},
@@ -95,6 +99,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"qwen2_moe", "Qwen2MoeForCausalLM"},
                 {"qwen3", "Qwen3ForCausalLM"},
                 {"qwen3_moe", "Qwen3MoeForCausalLM"},
+                {"qwen3_5", "Qwen3_5ForCausalLM"},
+                {"qwen3_5_text", "Qwen3_5ForCausalLM"},
                 {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
                 {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
                 {"nemotron_h", "NemotronHForCausalLM"},
@@ -102,6 +108,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"gemma2", "Gemma2ForCausalLM"},
                 {"gemma3", "Gemma3ForCausalLM"},
                 {"gemma4", "Gemma4ForCausalLM"},
+                {"llama4", "Llama4ForCausalLM"},
                 {"deepseek_v2", "DeepseekV2ForCausalLM"},
                 {"deepseek_v3", "DeepseekV3ForCausalLM"},
                 {"phi", "PhiForCausalLM"},
@@ -877,6 +884,45 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
 
     // Neither file present.
     return false;
+}
+
+// ---- load_mxfp4_config ----
+
+bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg) {
+    // MXFP4 is declared at config.json:quantization_config (top-level, not
+    // a separate file like NVFP4 modelopt). GPT-OSS / TorchAO MXFP4 exports
+    // use `quant_method == "mxfp4"` (case-insensitive) plus a `block_size`
+    // field that's typically 32 (E8M0 scale per 32 elements).
+    std::string path = model_dir + "/config.json";
+    JValue root;
+    if (!parse_json_file(path, root))
+        return false;
+
+    const JValue* qc = jobj_find(root, "quantization_config");
+    if (!qc || qc->type != JType::OBJECT)
+        return false;
+
+    std::string method;
+    if (!jobj_get_string(*qc, "quant_method", method))
+        return false;
+
+    // Accept the common spellings.
+    bool is_mxfp4 = (method == "mxfp4" || method == "MXFP4" || method == "mx_fp4");
+    if (!is_mxfp4)
+        return false;
+
+    int bs = 0;
+    if (!jobj_get_int(*qc, "block_size", bs)) {
+        // Some exports nest the block size under a "weight" sub-object.
+        const JValue* w = jobj_find(*qc, "weight");
+        if (w && w->type == JType::OBJECT)
+            jobj_get_int(*w, "block_size", bs);
+    }
+    if (bs > 0)
+        cfg.block_size = bs;
+
+    IMP_LOG_INFO("MXFP4 config: quant_method=%s block_size=%d", method.c_str(), cfg.block_size);
+    return true;
 }
 
 }  // namespace imp

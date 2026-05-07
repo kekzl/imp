@@ -414,6 +414,76 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
     EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
 }
 
+// MXFP4 quantization config detection (audit gap #13). GPT-OSS and other
+// MXFP4 SafeTensors exports declare `quantization_config.quant_method ==
+// "mxfp4"` at config.json top level. The loader sets the metadata flag
+// so downstream code can warn that the SafeTensors decode path isn't
+// implemented yet (use GGUF for actual MXFP4 inference).
+TEST_F(RopeScalingConfigTest, Mxfp4QuantConfigDetection) {
+    write_config(R"({
+        "architectures": ["GptOssForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "quantization_config": {
+            "quant_method": "mxfp4",
+            "block_size": 32
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg;
+    ASSERT_TRUE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg));
+    EXPECT_EQ(mcfg.block_size, 32);
+
+    // Default block_size when omitted: still 32.
+    write_config(R"({
+        "quantization_config": {
+            "quant_method": "MXFP4"
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg2;
+    ASSERT_TRUE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg2));
+    EXPECT_EQ(mcfg2.block_size, 32);
+
+    // Non-MXFP4 quant_method → return false (no metadata to apply).
+    write_config(R"({
+        "quantization_config": {
+            "quant_method": "gptq",
+            "bits": 4
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg3;
+    EXPECT_FALSE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg3));
+
+    // Missing quantization_config block → false.
+    write_config(R"({"hidden_size": 4096})");
+    HFConfigLoader::MxFP4Config mcfg4;
+    EXPECT_FALSE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg4));
+}
+
+// Llama-4 + Qwen3.5 non-MoE HF class names should now map to their
+// existing imp enums (audit gap #15). Previously these silently
+// downgraded to GENERIC.
+TEST_F(RopeScalingConfigTest, NewlyMappedArchClassNames) {
+    EXPECT_EQ(HFConfigLoader::map_architecture("Llama4ForCausalLM"),
+              imp::ModelArch::LLAMA4);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Llama4ForConditionalGeneration"),
+              imp::ModelArch::LLAMA4);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5ForCausalLM"),
+              imp::ModelArch::QWEN35);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5ForConditionalGeneration"),
+              imp::ModelArch::QWEN35);
+
+    // Sanity: existing mappings unaffected.
+    EXPECT_EQ(HFConfigLoader::map_architecture("LlamaForCausalLM"),
+              imp::ModelArch::LLAMA);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5MoeForCausalLM"),
+              imp::ModelArch::QWEN36_MOE);
+
+    // Unknown arch still produces GENERIC (and emits a WARN).
+    EXPECT_EQ(HFConfigLoader::map_architecture("BogusForCausalLM"),
+              imp::ModelArch::GENERIC);
+}
+
 // Sanity: missing original_max_position_embeddings or factor<=1 → skip
 // (warn-and-noop), don't populate the factor table.
 TEST_F(RopeScalingConfigTest, Llama3DegenerateConfigSkipped) {

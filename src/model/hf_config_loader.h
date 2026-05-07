@@ -103,6 +103,15 @@ struct HFConfigLoader {
     };
     static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
+    // MXFP4 quantization config (e.g. GPT-OSS). Sourced from `config.json`
+    // top-level `quantization_config` block (`quant_method == "mxfp4"`).
+    // Only the metadata is parsed; the SafeTensors decode path is not yet
+    // implemented (use the GGUF wire format for actual MXFP4 inference).
+    struct MxFP4Config {
+        int block_size = 32;  // E8M0 scale per 32 elements is the standard
+    };
+    static bool load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg);
+
     // Map HF architecture class name to imp ModelArch.
     static ModelArch map_architecture(const std::string& hf_arch);
 };

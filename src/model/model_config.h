@@ -85,6 +85,13 @@ struct ModelConfig {
     // (Modelopt: val = fp4 * weight_scale_fp8 * weight_scale_2)
     bool is_llm_compressor_nvfp4 = false;
 
+    // MXFP4 pre-quantized model (e.g. GPT-OSS exports). Only the metadata
+    // is recognised on the SafeTensors path today — the actual decode path
+    // is GGUF-only (QType::MXFP4 wire format). Use these flags to surface
+    // the format and warn the user instead of falling through to FP16 silently.
+    bool is_mxfp4_prequant = false;
+    int mxfp4_block_size = 32;  // E8M0 scale per 32 elements is standard
+
     // Author-declared KV-cache quantization hint, sourced from Modelopt's
     // hf_quant_config.json `kv_cache_quant_algo` field (e.g. "FP8"). Empty
     // means the model author did not declare one. Surfaced to the engine as
