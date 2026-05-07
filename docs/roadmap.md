@@ -52,12 +52,6 @@ When a request sets both `tools` and `response_format=json_schema`/`json_object`
 
 ## Performance work
 
-### Native MXFP4 GGUF weight format
-
-Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2–4× prefill speedup vs Q4_K_M.
-
-CUTLASS MXFP4 GEMM is fully implemented today (`attention.mxfp4 = "always"`), but only triggers when an NVFP4 cache exists as source data. Native MXFP4 GGUF would remove that dependency. Required pieces: GGUF type extension + loader, Python converter (SafeTensors → block-Hadamard → MXFP4 → GGUF), GPU-side weight upload, MXFP4 GEMV for decode, and MR-GPTQ calibration. Round-to-nearest MXFP4 sits at +5–15% perplexity vs Q8_0 — worse than Q4_K_M's +2.2% — so calibration is effectively required to ship.
-
 ### Closing the TurboQuant–FP8 gap
 
 TurboQuant currently runs ~23% behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s). The gap is algorithm-inherent — QJL sketch computation adds per-token overhead. Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales.
@@ -76,9 +70,9 @@ These are upstream features that would unlock real wins but haven't been integra
 
 ### CUDA 13.2 / CCCL 3.2 features
 
-- **Grouped GEMM with CUDA Graphs + device-side shapes** (`cublasLtMatmulGrouped` with NVFP4, `sm_120` since CUDA 13.2 Update 1) — host-sync-free MoE expert dispatch, direct unblock for the general MoE D2H limitation above.
-- **`cub::DeviceTopK`** (AIR) — 5× faster top-k for `top_k > 128`.
-- **`cub::DeviceSegmentedReduce`** (fixed-size variant) — up to 66× speedup for small uniform segments. Useful for per-head reductions.
+- ~~**Grouped GEMM with CUDA Graphs + device-side shapes**~~ — re-tested 2026-05-08 against cuBLAS 13.4.0.1 (`tools/analysis/probe_cublaslt_grouped.cu`): zero algorithms returned for FP16/BF16/FP8/NVFP4 on sm_120. Grouped layout API still marked Experimental in `cublasLt.h` 13.4 and only supported on datacenter Blackwell (SM100/B200), not consumer SM120. Re-run probe on each new cuBLAS release.
+- ~~**`cub::DeviceTopK`**~~ — already wired in production (`src/compute/sampling.cu:834`, `cub::DeviceTopK::MaxPairs` for the `top_k > MAX_TOP_K=128` path with a small follow-up `DeviceRadixSort` over just the top-k results for top-p ordering).
+- ~~**`cub::DeviceSegmentedReduce`**~~ — re-evaluated 2026-05-08, no applicable use case in imp. The 66× speedup claim applies to host-launched many-small-segments patterns (e.g. CUB benchmarks reducing thousands of fixed-size rows in one call). imp's per-head reductions are all already inside their owning kernel as warp-/block-level shuffle reductions (RMSNorm, attention softmax, MoE gate norm) — fused, optimal, and unrelated to DeviceSegmentedReduce's regime.
 - **`cudaMemcpyWithAttributesAsync`** — L2 persistence hints on individual transfers; prefix-cache pinning without batched API.
 - **`add.f32x2` native PTX** (Blackwell) — softmax / accumulation instruction-count reduction.
 
@@ -88,7 +82,7 @@ These are upstream features that would unlock real wins but haven't been integra
 - **`st.async.b128`** — 16-byte async stores for KV cache writeback.
 - **`cvt .bf16x2` ↔ narrow** (`.e2m1x2`, `.e4m3x2`) — packed FP4/FP8 pair conversion, 2× throughput for KV cache quant.
 - **`.scale_vec::4X` with `.ue8m0`** for MXFP4 MMA — finer scale granularity (1 per 4 elements vs per block).
-- **`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`** — operand layouts decoded byte-exact in PR #55, integration open.
+- **`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`** — QKT path shipped in PR #56 (commit `b51788e`, default-on via `attention.fmha_blockscale = "auto"`); per-16-element UE4M3 SFA/SFB feed real `q_scales_fp8` / `k_scales_fp8`. Measured +1.8% Qwen3-4B MXFP4 at HD=128 (Phase 1 MMA is only ~15% of FMHA wall time, so 2.5× raw MMA → small visible delta). Open lever is **FP4 PV** (Phase 3 P×V): same MMA op for the second GEMM in attention, ~+13% additional upside but quality-risky (FP4-quant of post-softmax probabilities — needs SageAttention3-style two-level accumulator). 200-300 LoC, prereq is a PV-only A/B test harness. HD=256 models (Qwen3.5 GDN, Gemma-4 globals) would also see a larger Phase-1 fraction and better visible speedup, but no clean MXFP4 HD=256 model is currently in the test set.
 
 ### Long-context KV memory
 
