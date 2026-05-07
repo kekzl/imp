@@ -12,7 +12,14 @@ jobs:
     runs-on: ubuntu-24.04
 
     container:
-      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04
+
+    env:
+      CCACHE_DIR: /github/home/.ccache
+      CCACHE_MAXSIZE: 8G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: "1"
+      CCACHE_COMPRESSLEVEL: "6"
 
     steps:
       - uses: actions/checkout@v5
@@ -20,19 +27,40 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y cmake g++ git python3
+          apt-get install -y cmake g++ git python3 ccache
 
-      # Cache the entire build tree (incl. _deps FetchContent clones and Ninja
-      # objects). On code-only PRs Ninja relinks only changed TUs instead of
-      # re-doing the ~5min cold CUDA build. Cache key tracks CMake config files
-      # plus the full source tree so a clean key always matches incrementally.
+      # ccache caches per-TU compile output by content hash. On a header
+      # change that invalidates many TUs (typical refactor), ccache hits
+      # on the TUs whose post-preprocessor content didn't actually change —
+      # saves the slow nvcc ptxas pass for sm_120a.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.ccache
+          key: ${{ runner.os }}-cuda13.2.1-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.2.1-ccache-
+            ${{ runner.os }}-cuda13.2-ccache-
+
+      - name: Reset ccache stats
+        run: |
+          ccache --version
+          ccache -p | head -20 || true
+          ccache -z
+
+      # Build cache: FetchContent _deps clones + CMake config state. ccache
+      # handles object files separately. Restore-keys fall back to older
+      # caches when src changes; ninja then incrementally rebuilds and
+      # ccache provides per-TU hits even when the build cache misses.
       - name: Cache build directory
         uses: actions/cache@v4
         with:
           path: build
-          key: imp-build-${{ runner.os }}-cuda13.2-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**', 'tests/**') }}
+          key: imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
           restore-keys: |
-            imp-build-${{ runner.os }}-cuda13.2-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
+            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda13.2.1-
             imp-build-${{ runner.os }}-cuda13.2-
 
       - name: Configure
@@ -41,7 +69,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DIMP_BUILD_TESTS=ON \
             -DIMP_BUILD_TOOLS=ON \
-            -DIMP_BUILD_BENCH=OFF
+            -DIMP_BUILD_BENCH=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. CI compiles PTX/SASS
           # for sm_120a only; runtime tests need a self-hosted RTX 5090 runner.
@@ -50,6 +81,9 @@ jobs:
 
       - name: Build
         run: cmake --build build -j$(nproc)
+
+      - name: ccache stats
+        run: ccache -s
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
