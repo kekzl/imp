@@ -7,27 +7,39 @@
 namespace imp {
 
 // Gate that lets a model emit a free-form preamble before strict JSON
-// enforcement kicks in. Two modes:
+// enforcement kicks in. Two-axis configuration: think-close vs. budget
+// (selects when the gate "gives up" on a non-tool path) and tool-aware
+// vs. legacy (controls whether tool-tag transitions are recognised).
 //
-//   1. close-token mode (close_token >= 0)
-//      Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4 thinking) prepend
-//      `<think>...</think>` to every response. Gate stays active until the
-//      close token is observed; budget acts as a safety cap.
+//   Think-close mode (close_token >= 0)
+//     Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4 thinking) prepend
+//     `<think>...</think>` to every response. Gate stays "no-mask"
+//     until the close token; budget is a safety cap.
 //
-//   2. budget-only mode (close_token < 0, max_tokens > 0)
-//      Non-reasoning models that wrap JSON in markdown fences (` ```json `)
-//      or short verbal preambles ("Sure! ") need a small slack window
-//      before strict enforcement. Gate transitions on the first `{`/`[`
-//      seen, or when the budget is exhausted.
+//   Budget-only mode (close_token < 0, max_tokens > 0)
+//     Non-reasoning models that wrap JSON in markdown fences (` ```json `)
+//     or short verbal preambles ("Sure! ") need a small slack window
+//     before strict enforcement. Gate exits on the first `{`/`[`, on
+//     budget exhaustion, or — in tool-aware mode — on a tool opener.
 //
-// State:
-//   active=true   →  apply_mask is a no-op, all tokens accepted
-//   active=false  →  underlying JSON/schema FSM enforces structure
+// Tool-aware overlay (configure_with_tools): hand the gate sets of
+// tool-opener/close token IDs plus optional char-level prefix/suffix
+// for multi-token dialects (Llama3 <function=NAME>). Internal FSM:
 //
-// Transitions out of active (any of):
-//   - close_token observed (e.g. </think>) — token is consumed by gate
-//   - JSON-start char ({ or [) seen in token text — token is forwarded to FSM
-//   - max_tokens budget exhausted — current token forwarded, next gets masked
+//   ACTIVE        — preamble running; mask off; transitions:
+//                     · `{`/`[`/close-token/budget → OFF (mask kicks in)
+//                     · tool-opener (token or char-prefix) → TOOL_BODY
+//   TOOL_BODY     — inside a tool call; mask off; transitions:
+//                     · tool-close (token or char-suffix) → TERMINAL_OFF
+//   TERMINAL_OFF  — tool call closed; mask off forever (parallel calls,
+//                   trailing text, EOS all pass through).
+//   OFF           — preamble exited normally; FSM mask now applies.
+//
+// External API stays binary:
+//   active() = true  → mask is bypassed (ACTIVE / TOOL_BODY / TERMINAL_OFF)
+//   active() = false → mask is enforced by FSM (OFF only)
+//   absorb() returns true if the token was consumed by the gate, false
+//   only on the ACTIVE → OFF transition via `{`/`[` (forwarded to FSM).
 class PreambleGate {
 public:
     // Existing two-arg overload — preserved for non-tool callers.
