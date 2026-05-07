@@ -77,4 +77,22 @@ void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate, const NvFP4Mo
 // PDL registration for all NVFP4 GEMV kernels (called at init when PDL enabled).
 void nvfp4_gemv_pdl_register();
 
+// Set the pre-allocated dequant scratch buffer for the gemm_nvfp4 fallback
+// path (M>1 dequant→FP16→cuBLAS). When set and large enough, gemm_nvfp4
+// reuses this buffer instead of attempting a cudaMalloc — which would fail
+// inside CUDA stream capture. Pass nullptr/0 to clear (e.g., on engine
+// destroy).
+//
+// The fallback path only fires for M>1, so the buffer is sized for the
+// FP16 dequant of the LARGEST NVFP4 weight matrix in the model (N×K×2
+// bytes). The caller is responsible for the buffer's lifetime — this
+// function only stores the pointer and size for later use by ensure_dequant_buffer().
+void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes);
+
+// Test probe: returns the current size of the lazy cudaMalloc'd dequant
+// buffer (the legacy non-graph-safe path). When a workspace is set via
+// set_nvfp4_dequant_workspace(), subsequent gemm_nvfp4 calls should not
+// grow this buffer. Exposed for tests to assert workspace-vs-lazy choice.
+size_t nvfp4_lazy_dequant_buf_size_for_testing();
+
 }  // namespace imp

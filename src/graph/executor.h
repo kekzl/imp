@@ -359,6 +359,13 @@ public:
     // budget: VRAM budget with per-phase caps computed by Engine::plan_vram_budget().
     void pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget);
 
+    // Allocate the gemm_nvfp4 dequant workspace based on max NVFP4 weight size.
+    // Must be called AFTER pre_dequant_weights() so wcache_.nvfp4 is populated.
+    // Skips allocation if no NVFP4 weights exist or if the largest weight
+    // exceeds a sanity cap (currently 512 MiB) — in those cases the gemm_nvfp4
+    // fallback continues to use lazy cudaMalloc on non-captured streams.
+    bool allocate_nvfp4_dequant_workspace();
+
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
         kv_layer_map_ = std::move(map);
@@ -532,6 +539,13 @@ private:
     // LRU cache for host-resident expert weights on GPU.
     // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
     ExpertLRUCache expert_cache_;
+
+    // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
+    // Set up by allocate_nvfp4_dequant_workspace() and registered with the
+    // free function via set_nvfp4_dequant_workspace(). Allows the fallback
+    // path to run inside CUDA stream capture without crashing on cudaMalloc.
+    void* nvfp4_dequant_ws_buf_ = nullptr;
+    size_t nvfp4_dequant_ws_size_ = 0;
 
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
     WeightCaches wcache_;

@@ -618,6 +618,47 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 }
 
+bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
+    // Iterate populated NVFP4 weight cache to find the largest weight matrix.
+    // The gemm_nvfp4 fallback dequantizes one weight at a time to FP16 — the
+    // workspace only needs to fit the LARGEST single weight (N × K × 2 bytes).
+    size_t max_bytes = 0;
+    for (const auto& [ptr, qr] : wcache_.nvfp4) {
+        size_t bytes = static_cast<size_t>(qr.N) * qr.K * sizeof(half);
+        if (bytes > max_bytes)
+            max_bytes = bytes;
+    }
+    if (max_bytes == 0) {
+        // No NVFP4 weights — nothing to do. The fallback won't fire.
+        return true;
+    }
+
+    // Sanity cap: skip workspace alloc for huge weights (e.g. NVFP4 LM head
+    // would be ~1.5 GiB for Qwen3.6-class models). The fallback continues
+    // to use lazy cudaMalloc on non-captured streams; graph capture will
+    // fail-loud via the cudaStreamIsCapturing guard.
+    constexpr size_t kCap = 512ULL * 1024 * 1024;  // 512 MiB
+    if (max_bytes > kCap) {
+        IMP_LOG_WARN(
+            "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap, "
+            "skipping pre-alloc. M>1 fallback during graph capture will fail-loud.",
+            max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0));
+        return false;
+    }
+
+    nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, max_bytes, "nvfp4_dequant");
+    if (!nvfp4_dequant_ws_buf_) {
+        IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes)", max_bytes);
+        nvfp4_dequant_ws_size_ = 0;
+        return false;
+    }
+    nvfp4_dequant_ws_size_ = max_bytes;
+    set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_, nvfp4_dequant_ws_size_);
+    IMP_LOG_INFO("gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback)",
+                 max_bytes / (1024.0 * 1024.0));
+    return true;
+}
+
 void GraphExecutor::release_moe_batch_buf() {
     if (moe_.batch_dequant_buf) {
         size_t freed = moe_.batch_dequant_buf_size;
@@ -754,6 +795,14 @@ void GraphExecutor::free_buffers() {
 
     moe_.free(vram_alloc_);
     expert_cache_.destroy();
+
+    // Free gemm_nvfp4 dequant workspace and unregister from the free function.
+    if (nvfp4_dequant_ws_buf_) {
+        set_nvfp4_dequant_workspace(nullptr, 0);
+        vram_free(vram_alloc_, nvfp4_dequant_ws_buf_);
+        nvfp4_dequant_ws_buf_ = nullptr;
+        nvfp4_dequant_ws_size_ = 0;
+    }
     if (d_sample_result_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_sample_result_));
         d_sample_result_ = nullptr;
