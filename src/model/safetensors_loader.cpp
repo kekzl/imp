@@ -928,7 +928,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // 9. Load tokenizer from tokenizer.json (if available)
     if (!model_dir.empty()) {
         std::string tok_json_path = model_dir + "/tokenizer.json";
-        if (std::filesystem::exists(tok_json_path)) {
+        std::string tok_spm_path = model_dir + "/tokenizer.model";
+        bool has_json = std::filesystem::exists(tok_json_path);
+        bool has_spm = std::filesystem::exists(tok_spm_path);
+        if (has_json) {
             auto tok = std::make_unique<Tokenizer>();
             if (tok->load(tok_json_path)) {
                 // Preserve chat template if already set
@@ -938,6 +941,25 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                 model->set_tokenizer(std::move(tok));
                 IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
             }
+        } else if (has_spm) {
+            // SentencePiece-only checkpoint (older Llama 1/2, Mistral, …).
+            // imp's SafeTensors path doesn't have a native SentencePiece
+            // (.model protobuf) parser yet. Emit an actionable error so the
+            // user knows the workaround instead of failing later with a
+            // confusing null-tokenizer crash.
+            IMP_LOG_ERROR(
+                "Found %s but no tokenizer.json — imp's SafeTensors path does "
+                "not yet parse SentencePiece (.model protobuf) tokenizers. "
+                "Workaround: regenerate tokenizer.json via\n"
+                "  python -c \"from transformers import AutoTokenizer; "
+                "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"\n"
+                "or convert the model to GGUF (which does support .model).",
+                tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
+        } else {
+            IMP_LOG_WARN(
+                "No tokenizer.json or tokenizer.model in %s — model will load "
+                "without a tokenizer; chat input cannot be encoded.",
+                model_dir.c_str());
         }
     }
 
