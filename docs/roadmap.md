@@ -12,18 +12,31 @@ Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV wri
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
 
-### Gemma-4 long-context recall (Gemma-4 specific, not NVFP4-specific)
+### Gemma-4 long-context recall — confirmed imp bug (not model-inherent)
 
-The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on Gemma-4 in every format imp can serve (llm-compressor NVFP4, Q8_0 GGUF). Doc-length sweep 128–2048 tokens (with `max_tokens=512` to admit thinking) shows the failure starts around 768 tokens and is consistent above 1024.
+The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on Gemma-4 in every format imp can serve (llm-compressor NVFP4, Q8_0 GGUF). Doc-length sweep 128–2048 tokens shows failure starts at the 768–1024 boundary and is consistent above.
 
-The same sweep on `Qwen3-30B-A3B-NVFP4-Modelopt` (full attention, no SWA) passes at every size. This isolates the issue to **Gemma-4's SWA architecture** (5 SWA layers + 1 full per block of 6, sliding_window=1024) — not the NVFP4 path. Code review of imp's per-layer Gemma-4 attention dispatch (`src/graph/executor_attention.cu:491-501`, `:532-537`) shows correct SWA gating and per-layer head_dim handling.
+Cross-engine A/B 2026-05-07 on the **same `gemma-4-26B-A4B-it-Q8_0.gguf` file**:
 
-Two unresolved hypotheses pending an external reference (llama.cpp on the same model):
+| doc tokens | imp | llama.cpp (`ghcr.io/ggml-org/llama.cpp:server-cuda` v9049) |
+|---:|:---:|:---:|
+| 128–512 | mostly ✓ | ✓ |
+| 768 | ✓ on Q8_0 | ✓ |
+| 1024 | ✗ regurgitates doc | ✓ |
+| 1280 | ✗ "not in text" | ✓ |
+| 1536 | ✗ "not in text" | ✓ |
+| 1800 | ✗ corrupted "MERIDIAN→WORD" | ✓ |
+| 2048 | ✗ "moon could read its spine" | ✓ |
 
-1. **Model-inherent** — Gemma-4-26B-A4B-it just can't reliably needle-recall via 5/30 full layers.
-2. **imp Gemma-4 bug** — interaction of `partial_rotary_factor=0.25` rope_freqs (zeroed in a non-obvious pattern, see `executor_attention.cu:526` comment) with long-context attention.
+llama.cpp passes every size. Same model, same prompt, same sentinel. So **imp has a Gemma-4 long-context bug** — not a model limitation, not an NVFP4 path issue (Q8_0 fails the same way), and not imp's general long-context (Qwen3-30B-Modelopt passes 128–2048 in imp).
 
-Either way, this no longer belongs under "NVFP4 long-context"; the previous "llm-compressor NVFP4 degenerate output past ~30 tokens" framing is refuted. See `memory/llm_compressor_input_scale_dead_end_2026_05_07.md` for the re-runnable cross-format sweep.
+Suspected: interaction of Gemma-4's 5:1 SWA:full architecture with imp's attention dispatch at `executor_attention.cu:688-763`. A workaround comment at `:701-712` already acknowledges "FMHA chain emits 'own owners and' garbage" for SWA at sliding_active and routes through `naive_attention_prefill`, but per the cross-engine A/B that workaround doesn't fully fix recall. Code paths affected at the failure boundary:
+
+- SWA layer (hd=256), n=1024 exactly: cuBLAS path with causal-only mask (sliding_window not plumbed through `attention_cublas_prefill`).
+- SWA layer at n>1024: `naive_attention_prefill` with window — but recall still fails; root cause not yet isolated.
+- Global layer at n>1024: cuBLAS path (no sliding window applies). FP32 S-matrix.
+
+Real fix needs per-layer numerical comparison vs llama.cpp at long context to identify the exact divergence (RoPE? Q-norm? cuBLAS algorithm choice? KV cache layout?). See `memory/llm_compressor_input_scale_dead_end_2026_05_07.md` for the full sweep + bracket recipe.
 
 ### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
 
