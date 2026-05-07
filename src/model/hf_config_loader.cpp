@@ -3,6 +3,8 @@
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -24,6 +26,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
         {"Qwen3ForCausalLM", ModelArch::QWEN3},
         {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
+        {"Qwen3_5ForCausalLM", ModelArch::QWEN35},
+        {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
         {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
@@ -35,6 +39,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
+        {"Llama4ForCausalLM", ModelArch::LLAMA4},
+        {"Llama4ForConditionalGeneration", ModelArch::LLAMA4},
         {"PhiForCausalLM", ModelArch::LLAMA},
         {"Phi3ForCausalLM", ModelArch::LLAMA},
         {"Phi3SmallForCausalLM", ModelArch::LLAMA},
@@ -47,7 +53,11 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
     if (it != arch_map.end())
         return it->second;
 
-    IMP_LOG_WARN("unknown HF architecture: %s, falling back to GENERIC", hf_arch.c_str());
+    IMP_LOG_WARN(
+        "unknown HF architecture '%s' — falling back to GENERIC + tensor-name "
+        "heuristics. If inference is incoherent, the architecture is likely "
+        "unsupported. Add a class mapping in hf_config_loader.cpp.",
+        hf_arch.c_str());
     return ModelArch::GENERIC;
 }
 
@@ -65,6 +75,17 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty()) {
         cfg.arch = map_architecture(archs->arr[0].str_val);
+        if (archs->arr.size() > 1) {
+            std::string dropped;
+            for (size_t i = 1; i < archs->arr.size(); i++) {
+                if (i > 1)
+                    dropped += ", ";
+                dropped += archs->arr[i].str_val;
+            }
+            IMP_LOG_WARN(
+                "config.json `architectures` has %zu entries; using '%s' and ignoring [%s]",
+                archs->arr.size(), archs->arr[0].str_val.c_str(), dropped.c_str());
+        }
     } else {
         // Fallback: map model_type string to arch
         std::string model_type;
@@ -78,6 +99,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"qwen2_moe", "Qwen2MoeForCausalLM"},
                 {"qwen3", "Qwen3ForCausalLM"},
                 {"qwen3_moe", "Qwen3MoeForCausalLM"},
+                {"qwen3_5", "Qwen3_5ForCausalLM"},
+                {"qwen3_5_text", "Qwen3_5ForCausalLM"},
                 {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
                 {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
                 {"nemotron_h", "NemotronHForCausalLM"},
@@ -85,6 +108,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"gemma2", "Gemma2ForCausalLM"},
                 {"gemma3", "Gemma3ForCausalLM"},
                 {"gemma4", "Gemma4ForCausalLM"},
+                {"llama4", "Llama4ForCausalLM"},
                 {"deepseek_v2", "DeepseekV2ForCausalLM"},
                 {"deepseek_v3", "DeepseekV3ForCausalLM"},
                 {"phi", "PhiForCausalLM"},
@@ -96,7 +120,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             if (it != type_to_class.end()) {
                 cfg.arch = map_architecture(it->second);
             } else {
-                IMP_LOG_WARN("unknown model_type '%s', using GENERIC", model_type.c_str());
+                IMP_LOG_WARN(
+                    "unknown model_type '%s' — falling back to GENERIC + "
+                    "tensor-name heuristics. If inference is incoherent, the "
+                    "architecture is likely unsupported.",
+                    model_type.c_str());
                 cfg.arch = ModelArch::GENERIC;
             }
         }
@@ -193,6 +221,60 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                     cfg.rope_long_factor.push_back(static_cast<float>(v.num_val));
                 }
             }
+        } else if (rope_type == "llama3") {
+            // Llama-3.x per-frequency RoPE scaling. Reuses LongRoPE infrastructure:
+            // we precompute one factor per rope-pair so the kernel sees
+            //   freqs[i] = base_freq[i] / factor[i]
+            // matching the HF reference algorithm. Since this scaling is
+            // independent of sequence length, both short and long arrays carry
+            // identical values.
+            float low_freq_factor = 1.0f, high_freq_factor = 4.0f;
+            int orig_max_pos = 0;
+            jobj_get_float(*rope_scaling, "low_freq_factor", low_freq_factor);
+            jobj_get_float(*rope_scaling, "high_freq_factor", high_freq_factor);
+            jobj_get_int(*rope_scaling, "original_max_position_embeddings", orig_max_pos);
+            if (orig_max_pos <= 0) {
+                jobj_get_int(eff, "original_max_position_embeddings", orig_max_pos);
+            }
+
+            int hd = cfg.head_dim > 0 ? cfg.head_dim
+                                      : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+            int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            int pairs = rd / 2;
+            if (pairs > 0 && orig_max_pos > 0 && factor > 1.0f &&
+                high_freq_factor > low_freq_factor) {
+                const float low_wavelen = static_cast<float>(orig_max_pos) / low_freq_factor;
+                const float high_wavelen = static_cast<float>(orig_max_pos) / high_freq_factor;
+                const float two_pi = 6.28318530717958647692f;
+                cfg.rope_short_factor.resize(pairs);
+                cfg.rope_long_factor.resize(pairs);
+                for (int i = 0; i < pairs; i++) {
+                    const float base_freq =
+                        1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
+                    const float wavelen = two_pi / base_freq;
+                    float pair_factor;
+                    if (wavelen < high_wavelen) {
+                        pair_factor = 1.0f;
+                    } else if (wavelen > low_wavelen) {
+                        pair_factor = factor;
+                    } else {
+                        const float smooth =
+                            (static_cast<float>(orig_max_pos) / wavelen - low_freq_factor) /
+                            (high_freq_factor - low_freq_factor);
+                        pair_factor = factor / (1.0f - smooth + smooth * factor);
+                    }
+                    cfg.rope_short_factor[i] = pair_factor;
+                    cfg.rope_long_factor[i] = pair_factor;
+                }
+                cfg.rope_scaling_orig_max_pos = orig_max_pos;
+                IMP_LOG_INFO(
+                    "Llama-3 RoPE: factor=%.1f low=%.1f high=%.1f orig_max_pos=%d → %d freq pairs",
+                    factor, low_freq_factor, high_freq_factor, orig_max_pos, pairs);
+            } else {
+                IMP_LOG_WARN(
+                    "Llama-3 RoPE: skipping (pairs=%d orig_max_pos=%d factor=%.2f low=%.2f high=%.2f)",
+                    pairs, orig_max_pos, factor, low_freq_factor, high_freq_factor);
+            }
         }
         // "dynamic" uses the same factor as linear at runtime
         else if (rope_type == "dynamic") {
@@ -249,7 +331,24 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         // formula assumes the GGUF tiled layout (heads 0..n_groups-1 are replica
         // 0). Set the flag so executor_ssm_gdn passes grouped_layout=1 to the
         // kernel for HF-loaded checkpoints.
+        //
+        // Cross-converted checkpoints (HF → GGUF → HF, or weights re-packed by
+        // a third-party tool) can ship in the opposite layout. Override via
+        // `IMP_GDN_LAYOUT=tiled` (default for SafeTensors stays grouped).
         cfg.gdn_grouped_head_layout = true;
+        if (const char* env = std::getenv("IMP_GDN_LAYOUT")) {
+            std::string v(env);
+            if (v == "tiled" || v == "TILED") {
+                cfg.gdn_grouped_head_layout = false;
+                IMP_LOG_INFO("GDN head layout: forced to TILED via IMP_GDN_LAYOUT=tiled");
+            } else if (v == "grouped" || v == "GROUPED") {
+                cfg.gdn_grouped_head_layout = true;
+                IMP_LOG_INFO("GDN head layout: forced to GROUPED via IMP_GDN_LAYOUT=grouped");
+            } else {
+                IMP_LOG_WARN("IMP_GDN_LAYOUT='%s' not recognized (expected 'tiled' or 'grouped')",
+                             env);
+            }
+        }
 
         int lin_v_heads = 0, lin_v_hdim = 0;
         int lin_k_heads = 0, lin_k_hdim = 0;
@@ -443,10 +542,63 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         }
     }
 
-    // tie_word_embeddings is informational (logged but not stored in ModelConfig)
+    // tie_word_embeddings: store as tri-state so the SafeTensors loader can
+    // cross-check the flag against actual lm_head.weight presence rather than
+    // tying purely on null-detection.
     const JValue* tie = jobj_find(root, "tie_word_embeddings");
-    if (tie && tie->type == JType::NUMBER && tie->num_val != 0.0) {
-        IMP_LOG_INFO("  tie_word_embeddings = true");
+    if (tie && tie->type == JType::NUMBER) {
+        cfg.tie_word_embeddings = (tie->num_val != 0.0) ? 1 : 0;
+        IMP_LOG_INFO("  tie_word_embeddings = %s",
+                     cfg.tie_word_embeddings == 1 ? "true" : "false");
+    }
+
+    // attention_bias / mlp_bias: tri-state so the loader can warn when the
+    // config promises bias but the SafeTensors export omits it.
+    const JValue* attn_bias = jobj_find(eff, "attention_bias");
+    if (attn_bias && attn_bias->type == JType::NUMBER) {
+        cfg.attention_bias = (attn_bias->num_val != 0.0) ? 1 : 0;
+    }
+    const JValue* mlp_bias = jobj_find(eff, "mlp_bias");
+    if (mlp_bias && mlp_bias->type == JType::NUMBER) {
+        cfg.mlp_bias = (mlp_bias->num_val != 0.0) ? 1 : 0;
+    }
+
+    // DeepSeek V2/V3 Multi-head Latent Attention (MLA) detection. Imp's
+    // DEEPSEEK forward path is standard MHA — feeding it an MLA checkpoint
+    // produces silently wrong outputs. The HF config fields `kv_lora_rank`
+    // and `q_lora_rank` are the unambiguous indicator.
+    if (cfg.arch == ModelArch::DEEPSEEK) {
+        int kv_lora = 0, q_lora = 0;
+        jobj_get_int(eff, "kv_lora_rank", kv_lora);
+        jobj_get_int(eff, "q_lora_rank", q_lora);
+        if (kv_lora > 0 || q_lora > 0) {
+            IMP_LOG_WARN(
+                "DeepSeek-V2/V3 MLA detected (kv_lora_rank=%d q_lora_rank=%d) "
+                "but imp's DEEPSEEK path uses standard MHA. Inference will "
+                "produce incorrect outputs. MLA support is a separate audit "
+                "item (#17).",
+                kv_lora, q_lora);
+        }
+    }
+
+    // Multimodal vision-tower detection. Imp's SafeTensors loader skips
+    // vision tensors today; the user only gets the LLM head. Surface this
+    // explicitly when `vision_config` is present so chat-with-images use
+    // cases don't silently degrade to text-only.
+    const JValue* vc = jobj_find(root, "vision_config");
+    if (vc && vc->type == JType::OBJECT) {
+        std::string model_type;
+        jobj_get_string(*vc, "model_type", model_type);
+        IMP_LOG_WARN(
+            "Multimodal model detected (vision_config present, model_type='%s'). "
+            "imp's SafeTensors loader handles only the language head; the "
+            "vision tower will be skipped. Multimodal SafeTensors support is "
+            "a separate audit item (#18).",
+            model_type.empty() ? "?" : model_type.c_str());
+    }
+
+    if (cfg.arch == ModelArch::GENERIC) {
+        cfg.arch_inferred_fallback = true;
     }
 
     IMP_LOG_INFO("  arch=%s layers=%d d_model=%d heads=%d kv_heads=%d d_ff=%d vocab=%d",
@@ -765,6 +917,90 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
     }
 
     // Neither file present.
+    return false;
+}
+
+// ---- load_mxfp4_config ----
+
+bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg) {
+    // MXFP4 is declared at config.json:quantization_config (top-level, not
+    // a separate file like NVFP4 modelopt). GPT-OSS / TorchAO MXFP4 exports
+    // use `quant_method == "mxfp4"` (case-insensitive) plus a `block_size`
+    // field that's typically 32 (E8M0 scale per 32 elements).
+    std::string path = model_dir + "/config.json";
+    JValue root;
+    if (!parse_json_file(path, root))
+        return false;
+
+    const JValue* qc = jobj_find(root, "quantization_config");
+    if (!qc || qc->type != JType::OBJECT)
+        return false;
+
+    std::string method;
+    if (!jobj_get_string(*qc, "quant_method", method))
+        return false;
+
+    // Accept the common spellings.
+    bool is_mxfp4 = (method == "mxfp4" || method == "MXFP4" || method == "mx_fp4");
+    if (!is_mxfp4)
+        return false;
+
+    int bs = 0;
+    if (!jobj_get_int(*qc, "block_size", bs)) {
+        // Some exports nest the block size under a "weight" sub-object.
+        const JValue* w = jobj_find(*qc, "weight");
+        if (w && w->type == JType::OBJECT)
+            jobj_get_int(*w, "block_size", bs);
+    }
+    if (bs > 0)
+        cfg.block_size = bs;
+
+    IMP_LOG_INFO("MXFP4 config: quant_method=%s block_size=%d", method.c_str(), cfg.block_size);
+    return true;
+}
+
+// ---- load_awq_config ----
+
+bool HFConfigLoader::load_awq_config(const std::string& model_dir, AWQConfig& cfg) {
+    // AWQ ships its config in one of two places:
+    //   1) `config.json:quantization_config` (HuggingFace-standard location)
+    //   2) a separate `quant_config.json` (older AutoAWQ exports)
+    // The fields we care about are `quant_method == "awq"`, `bits`,
+    // `group_size`, `zero_point`, `version` ("gemm"/"gemv"/"marlin").
+    auto try_parse = [&](const std::string& path, bool nested_under_qc) -> bool {
+        JValue root;
+        if (!parse_json_file(path, root))
+            return false;
+        const JValue* base = &root;
+        if (nested_under_qc) {
+            const JValue* qc = jobj_find(root, "quantization_config");
+            if (!qc || qc->type != JType::OBJECT)
+                return false;
+            base = qc;
+        }
+        std::string method;
+        if (!jobj_get_string(*base, "quant_method", method))
+            return false;
+        if (method != "awq" && method != "AWQ")
+            return false;
+
+        jobj_get_int(*base, "bits", cfg.bits);
+        jobj_get_int(*base, "w_bit", cfg.bits);  // older AutoAWQ field name
+        jobj_get_int(*base, "group_size", cfg.group_size);
+        jobj_get_int(*base, "q_group_size", cfg.group_size);  // older field name
+
+        const JValue* zp = jobj_find(*base, "zero_point");
+        if (zp && zp->type == JType::NUMBER)
+            cfg.zero_point = (zp->num_val != 0.0);
+
+        jobj_get_string(*base, "version", cfg.version);
+        return true;
+    };
+
+    if (try_parse(model_dir + "/config.json", /*nested_under_qc=*/true))
+        return true;
+    if (try_parse(model_dir + "/quant_config.json", /*nested_under_qc=*/false))
+        return true;
     return false;
 }
 

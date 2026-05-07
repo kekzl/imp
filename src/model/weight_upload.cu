@@ -890,6 +890,19 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         } else {
             h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
         }
+    } else if (gptq.desc_act) {
+        // Activation-reordered model export but no g_idx tensor → kernel will
+        // run sequential grouping, which silently produces wrong outputs. Warn
+        // once per process so this isn't lost in the per-layer upload spam.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            IMP_LOG_WARN(
+                "GPTQ: config declares desc_act=true but g_idx tensor is "
+                "absent. Dequant will use sequential grouping; if the model "
+                "was exported with activation reordering, outputs will be "
+                "incorrect. (Logged once.)");
+        }
     }
 
     // 5. Allocate FP16 output [N, K]
@@ -1843,7 +1856,13 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             }
             upload_scale(sc.weight_scale);
             upload_scale(sc.weight_scale_2);
-            upload_scale(sc.input_scale);
+            // input_scale is loaded for diagnostics but never read by any
+            // GEMM kernel (see executor_pre_dequant.cu Phase 0 comment + the
+            // dead-end memory). Only upload when audit mode is on so we don't
+            // burn VRAM on a tensor we'll never use in production.
+            if (audit) {
+                upload_scale(sc.input_scale);
+            }
         }
         if (audit && ws2_count > 0) {
             IMP_LOG_INFO(

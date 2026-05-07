@@ -263,4 +263,344 @@ TEST_F(TokenizerFlagsTest, MissingFileReturnsFalse) {
     EXPECT_LT(flags.add_bos_token, 0);
 }
 
+// ---- RoPE scaling ----
+
+class RopeScalingConfigTest : public ::testing::Test {
+protected:
+    std::filesystem::path tmp_dir_;
+
+    void SetUp() override {
+        tmp_dir_ = std::filesystem::temp_directory_path() /
+                   ("imp_test_rope_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(tmp_dir_);
+    }
+
+    void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
+
+    void write_config(const std::string& json) {
+        std::ofstream f(tmp_dir_ / "config.json");
+        f << json;
+    }
+};
+
+// Llama-3.x rope_scaling.type=="llama3": per-frequency factor table.
+// We feed a config matching meta-llama/Llama-3.1-8B-Instruct's published values
+// and check that rope_short_factor / rope_long_factor get populated with one
+// entry per rope-pair, that the highest-frequency dim survives unscaled
+// (factor=1.0) and the lowest-frequency dim is fully scaled (factor=8.0).
+TEST_F(RopeScalingConfigTest, Llama3PerFrequencyFactorTable) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "intermediate_size": 14336,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "num_key_value_heads": 8,
+        "max_position_embeddings": 131072,
+        "rope_theta": 500000.0,
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192
+        },
+        "vocab_size": 128256
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+
+    const int head_dim = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+    const int pairs = head_dim / 2;
+    ASSERT_EQ(static_cast<int>(cfg.rope_short_factor.size()), pairs);
+    ASSERT_EQ(static_cast<int>(cfg.rope_long_factor.size()), pairs);
+    EXPECT_EQ(cfg.rope_scaling_orig_max_pos, 8192);
+
+    // Llama-3 scaling is sequence-length independent, so short and long must match.
+    for (int i = 0; i < pairs; i++) {
+        EXPECT_FLOAT_EQ(cfg.rope_short_factor[i], cfg.rope_long_factor[i]);
+    }
+
+    // Highest-frequency pair (i=0) → wavelen = 2π → < high_wavelen (8192/4=2048).
+    // No scaling: factor = 1.0.
+    EXPECT_FLOAT_EQ(cfg.rope_short_factor[0], 1.0f);
+
+    // Lowest-frequency pair (i=pairs-1) → wavelen >> low_wavelen (8192/1=8192).
+    // Full scaling: factor = 8.0.
+    EXPECT_FLOAT_EQ(cfg.rope_short_factor[pairs - 1], 8.0f);
+
+    // Monotonically non-decreasing: shorter wavelengths get smaller factors.
+    for (int i = 1; i < pairs; i++) {
+        EXPECT_GE(cfg.rope_short_factor[i], cfg.rope_short_factor[i - 1] - 1e-5f);
+    }
+
+    // At least one pair sits in the smooth zone between low and high wavelen
+    // boundaries — i.e., factor strictly between 1.0 and 8.0.
+    bool saw_smooth = false;
+    for (int i = 0; i < pairs; i++) {
+        if (cfg.rope_short_factor[i] > 1.0f + 1e-3f &&
+            cfg.rope_short_factor[i] < 8.0f - 1e-3f) {
+            saw_smooth = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(saw_smooth) << "expected a transition zone between high/low freq";
+}
+
+// tie_word_embeddings is now stored as tri-state so the SafeTensors loader
+// can cross-check against actual lm_head.weight presence rather than
+// silently tying on null.
+TEST_F(RopeScalingConfigTest, TieWordEmbeddingsTriState) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "tie_word_embeddings": false
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.tie_word_embeddings, 0);
+
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "tie_word_embeddings": true
+    })");
+    imp::ModelConfig cfg2;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg2));
+    EXPECT_EQ(cfg2.tie_word_embeddings, 1);
+
+    // Field absent → tri-state stays at -1 (unset); loader falls back to
+    // null-detection.
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32
+    })");
+    imp::ModelConfig cfg3;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg3));
+    EXPECT_EQ(cfg3.tie_word_embeddings, -1);
+}
+
+// Unknown architecture and unknown model_type both surface
+// arch_inferred_fallback so callers can decide to warn loudly.
+TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
+    write_config(R"({
+        "architectures": ["BogusForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_TRUE(cfg.arch_inferred_fallback);
+    EXPECT_EQ(cfg.arch, imp::ModelArch::GENERIC);
+
+    // Recognized arch → flag stays false.
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32
+    })");
+    imp::ModelConfig cfg2;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg2));
+    EXPECT_FALSE(cfg2.arch_inferred_fallback);
+    EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
+}
+
+// AWQ detection (audit gap #16). Both nested-under-quantization_config
+// (HF standard) and standalone quant_config.json (older AutoAWQ) are
+// recognised. Detection-only — no kernel exists yet.
+TEST_F(RopeScalingConfigTest, AwqQuantConfigDetection) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "quantization_config": {
+            "quant_method": "awq",
+            "bits": 4,
+            "group_size": 128,
+            "zero_point": true,
+            "version": "gemm"
+        }
+    })");
+    HFConfigLoader::AWQConfig acfg;
+    ASSERT_TRUE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg));
+    EXPECT_EQ(acfg.bits, 4);
+    EXPECT_EQ(acfg.group_size, 128);
+    EXPECT_TRUE(acfg.zero_point);
+    EXPECT_EQ(acfg.version, "gemm");
+
+    // Older AutoAWQ field names (w_bit, q_group_size) in standalone
+    // quant_config.json (no nesting under quantization_config).
+    write_config(R"({"hidden_size": 4096})");  // overwrite to avoid double-detect
+    {
+        std::ofstream f(tmp_dir_ / "quant_config.json");
+        f << R"({"quant_method": "awq", "w_bit": 4, "q_group_size": 64, "zero_point": false})";
+    }
+    HFConfigLoader::AWQConfig acfg2;
+    ASSERT_TRUE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg2));
+    EXPECT_EQ(acfg2.bits, 4);
+    EXPECT_EQ(acfg2.group_size, 64);
+    EXPECT_FALSE(acfg2.zero_point);
+    std::filesystem::remove(tmp_dir_ / "quant_config.json");
+
+    // Non-AWQ method → false.
+    write_config(R"({
+        "quantization_config": {"quant_method": "gptq", "bits": 4}
+    })");
+    HFConfigLoader::AWQConfig acfg3;
+    EXPECT_FALSE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg3));
+}
+
+// DeepSeek V2/V3 MLA detection (audit gap #17). MLA-specific config
+// fields trigger a load-time warning that imp's DEEPSEEK forward path
+// uses standard MHA and will produce wrong outputs.
+TEST_F(RopeScalingConfigTest, DeepseekMlaWarning) {
+    write_config(R"({
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "kv_lora_rank": 512,
+        "q_lora_rank": 1536
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::DEEPSEEK);
+    // Detection only writes the WARN log; the test cannot easily inspect it,
+    // but at least the load doesn't error out — caller continues with the
+    // (incorrect) MHA path so no silent crash.
+
+    // Non-MLA DeepSeek (no kv_lora_rank): no warn, normal load.
+    write_config(R"({
+        "architectures": ["DeepseekV2ForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32
+    })");
+    imp::ModelConfig cfg2;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg2));
+    EXPECT_EQ(cfg2.arch, imp::ModelArch::DEEPSEEK);
+}
+
+// Multimodal model detection (audit gap #18). `vision_config` block
+// presence triggers a warning that the vision tower will be skipped.
+TEST_F(RopeScalingConfigTest, VisionConfigWarning) {
+    write_config(R"({
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "text_config": {
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32
+        },
+        "vision_config": {
+            "model_type": "siglip_vision_model",
+            "hidden_size": 1152
+        }
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::GEMMA3);
+    // vision_config triggers WARN; loader still succeeds.
+}
+
+// MXFP4 quantization config detection (audit gap #13). GPT-OSS and other
+// MXFP4 SafeTensors exports declare `quantization_config.quant_method ==
+// "mxfp4"` at config.json top level. The loader sets the metadata flag
+// so downstream code can warn that the SafeTensors decode path isn't
+// implemented yet (use GGUF for actual MXFP4 inference).
+TEST_F(RopeScalingConfigTest, Mxfp4QuantConfigDetection) {
+    write_config(R"({
+        "architectures": ["GptOssForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "quantization_config": {
+            "quant_method": "mxfp4",
+            "block_size": 32
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg;
+    ASSERT_TRUE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg));
+    EXPECT_EQ(mcfg.block_size, 32);
+
+    // Default block_size when omitted: still 32.
+    write_config(R"({
+        "quantization_config": {
+            "quant_method": "MXFP4"
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg2;
+    ASSERT_TRUE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg2));
+    EXPECT_EQ(mcfg2.block_size, 32);
+
+    // Non-MXFP4 quant_method → return false (no metadata to apply).
+    write_config(R"({
+        "quantization_config": {
+            "quant_method": "gptq",
+            "bits": 4
+        }
+    })");
+    HFConfigLoader::MxFP4Config mcfg3;
+    EXPECT_FALSE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg3));
+
+    // Missing quantization_config block → false.
+    write_config(R"({"hidden_size": 4096})");
+    HFConfigLoader::MxFP4Config mcfg4;
+    EXPECT_FALSE(HFConfigLoader::load_mxfp4_config(tmp_dir_.string(), mcfg4));
+}
+
+// Llama-4 + Qwen3.5 non-MoE HF class names should now map to their
+// existing imp enums (audit gap #15). Previously these silently
+// downgraded to GENERIC.
+TEST_F(RopeScalingConfigTest, NewlyMappedArchClassNames) {
+    EXPECT_EQ(HFConfigLoader::map_architecture("Llama4ForCausalLM"),
+              imp::ModelArch::LLAMA4);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Llama4ForConditionalGeneration"),
+              imp::ModelArch::LLAMA4);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5ForCausalLM"),
+              imp::ModelArch::QWEN35);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5ForConditionalGeneration"),
+              imp::ModelArch::QWEN35);
+
+    // Sanity: existing mappings unaffected.
+    EXPECT_EQ(HFConfigLoader::map_architecture("LlamaForCausalLM"),
+              imp::ModelArch::LLAMA);
+    EXPECT_EQ(HFConfigLoader::map_architecture("Qwen3_5MoeForCausalLM"),
+              imp::ModelArch::QWEN36_MOE);
+
+    // Unknown arch still produces GENERIC (and emits a WARN).
+    EXPECT_EQ(HFConfigLoader::map_architecture("BogusForCausalLM"),
+              imp::ModelArch::GENERIC);
+}
+
+// Sanity: missing original_max_position_embeddings or factor<=1 → skip
+// (warn-and-noop), don't populate the factor table.
+TEST_F(RopeScalingConfigTest, Llama3DegenerateConfigSkipped) {
+    write_config(R"({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "rope_theta": 500000.0,
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 1.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192
+        }
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_TRUE(cfg.rope_short_factor.empty());
+    EXPECT_TRUE(cfg.rope_long_factor.empty());
+}
+
 }  // namespace

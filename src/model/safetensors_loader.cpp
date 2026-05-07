@@ -311,8 +311,17 @@ static QType safetensors_dtype(const std::string& s) {
         return QType::INT8;
     if (s == "F8_E4M3")
         return QType::FP8_E4M3;
-    if (s == "F8_E5M2")
-        return QType::FP8_E4M3;  // closest proxy
+    if (s == "F8_E5M2") {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            IMP_LOG_WARN(
+                "SafeTensors F8_E5M2 tensors found; mapping to FP8_E4M3 as a "
+                "lossy proxy (no native E5M2 path). Activation-style tensors "
+                "may lose precision. (Logged once.)");
+        }
+        return QType::FP8_E4M3;
+    }
     IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
     return QType::F32;
 }
@@ -652,6 +661,8 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     std::vector<imp::llm_compressor::TranslationCounters> per_shard_counters(shard_list.size());
     std::atomic<bool> any_failure{false};
 
+    std::atomic<size_t> shards_done{0};
+    const size_t total_shards = shard_list.size();
     auto worker = [&](size_t i) {
         std::string shard_path = model_dir + "/" + shard_list[i];
         if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format,
@@ -659,6 +670,9 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             any_failure.store(true);
         }
+        const size_t done = shards_done.fetch_add(1) + 1;
+        IMP_LOG_INFO("  [%zu/%zu] mmap'd shard: %s (%zu tensors)", done, total_shards,
+                     shard_list[i].c_str(), per_shard_maps[i].size());
     };
 
     {
@@ -829,6 +843,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                              &layer.gptq_up, &layer.gptq_down}) {
                 gw->bits = gptq_cfg.bits;
                 gw->group_size = gptq_cfg.group_size;
+                gw->desc_act = gptq_cfg.desc_act;
             }
         }
         IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s", gptq_cfg.bits, gptq_cfg.group_size,
@@ -840,18 +855,75 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // executor_pre_dequant.cu's Phase 0 promote() resolves each scratch key
     // back to the main weight tensor and writes the device pointer onto its
     // .scales / .tensor_scale sidecars. No load-side linking needed here.
+    // MXFP4 detection. We surface the format declaration but do NOT have a
+    // SafeTensors decode path yet — only the GGUF wire format is decoded.
+    // The warn here lets users know they need to convert to GGUF.
+    HFConfigLoader::MxFP4Config mxfp4_cfg;
+    if (HFConfigLoader::load_mxfp4_config(model_dir, mxfp4_cfg)) {
+        cfg.is_mxfp4_prequant = true;
+        cfg.mxfp4_block_size = mxfp4_cfg.block_size;
+        IMP_LOG_WARN(
+            "MXFP4 SafeTensors detected (block_size=%d) — imp does NOT have "
+            "a SafeTensors MXFP4 decode path yet. Weights will load as their "
+            "wire dtype (typically uint8/FP16) and inference will likely be "
+            "incorrect. Convert to GGUF for actual MXFP4 support.",
+            cfg.mxfp4_block_size);
+    }
+
+    // AWQ detection. Same posture as MXFP4: the metadata is parsed and
+    // surfaced but no native AWQ kernel exists yet. Future work: dequant-
+    // to-FP16 fallback or proper AWQ-aware GEMM.
+    HFConfigLoader::AWQConfig awq_cfg;
+    if (HFConfigLoader::load_awq_config(model_dir, awq_cfg)) {
+        cfg.is_awq_prequant = true;
+        cfg.awq_group_size = awq_cfg.group_size;
+        IMP_LOG_WARN(
+            "AWQ SafeTensors detected (bits=%d group_size=%d zero_point=%s "
+            "version=%s) — imp does not yet have an AWQ dequant kernel. "
+            "Weights load as their wire dtype and inference will be "
+            "incorrect. Use a GPTQ or NVFP4 export instead.",
+            awq_cfg.bits, awq_cfg.group_size,
+            awq_cfg.zero_point ? "true" : "false",
+            awq_cfg.version.empty() ? "unspecified" : awq_cfg.version.c_str());
+    }
+
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
     if (is_nvfp4) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
         cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
+        cfg.kv_cache_quant_hint = nvfp4_cfg.kv_cache_quant_algo;
         IMP_LOG_INFO("NVFP4 pre-quantized: %zu scratch entries (group_size=%d)", model->nvfp4_scratch_.size(),
                      nvfp4_cfg.group_size);
+        if (!cfg.kv_cache_quant_hint.empty()) {
+            IMP_LOG_INFO(
+                "Model author declared kv_cache_quant_algo=%s; imp keeps the "
+                "engine's KV-cache dtype default (FP16). Pass --kv-fp8 to honor "
+                "the author's hint (correctness varies by family — see docs).",
+                cfg.kv_cache_quant_hint.c_str());
+        }
     }
 
-    // 7. Tie output projection if not found
-    if (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr) {
+    // 7. Tie output projection if not found.
+    // Cross-check the author's `tie_word_embeddings` flag (parsed by
+    // HFConfigLoader::load_config) against the actual lm_head.weight
+    // presence. Mismatch is a real surprise — most models tie, so silent
+    // tying when the author said `tie=false` would mask a missing lm_head.
+    const bool out_proj_missing =
+        (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr);
+    if (cfg.tie_word_embeddings == 0 && out_proj_missing) {
+        IMP_LOG_WARN(
+            "config.json declares tie_word_embeddings=false but lm_head.weight "
+            "is absent in the SafeTensors files; tying anyway as a fallback.");
+    }
+    if (cfg.tie_word_embeddings == 1 && model->out_proj_.data != nullptr &&
+        model->tok_emb_.data != nullptr && model->out_proj_.data != model->tok_emb_.data) {
+        IMP_LOG_INFO(
+            "config.json declares tie_word_embeddings=true but lm_head.weight "
+            "was loaded as a separate tensor; honoring the file (no tying).");
+    }
+    if (out_proj_missing) {
         model->out_proj_ = model->tok_emb_;
         IMP_LOG_INFO("Tied output projection to token embedding");
     }
@@ -873,7 +945,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // 9. Load tokenizer from tokenizer.json (if available)
     if (!model_dir.empty()) {
         std::string tok_json_path = model_dir + "/tokenizer.json";
-        if (std::filesystem::exists(tok_json_path)) {
+        std::string tok_spm_path = model_dir + "/tokenizer.model";
+        bool has_json = std::filesystem::exists(tok_json_path);
+        bool has_spm = std::filesystem::exists(tok_spm_path);
+        if (has_json) {
             auto tok = std::make_unique<Tokenizer>();
             if (tok->load(tok_json_path)) {
                 // Preserve chat template if already set
@@ -883,6 +958,25 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                 model->set_tokenizer(std::move(tok));
                 IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
             }
+        } else if (has_spm) {
+            // SentencePiece-only checkpoint (older Llama 1/2, Mistral, …).
+            // imp's SafeTensors path doesn't have a native SentencePiece
+            // (.model protobuf) parser yet. Emit an actionable error so the
+            // user knows the workaround instead of failing later with a
+            // confusing null-tokenizer crash.
+            IMP_LOG_ERROR(
+                "Found %s but no tokenizer.json — imp's SafeTensors path does "
+                "not yet parse SentencePiece (.model protobuf) tokenizers. "
+                "Workaround: regenerate tokenizer.json via\n"
+                "  python -c \"from transformers import AutoTokenizer; "
+                "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"\n"
+                "or convert the model to GGUF (which does support .model).",
+                tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
+        } else {
+            IMP_LOG_WARN(
+                "No tokenizer.json or tokenizer.model in %s — model will load "
+                "without a tokenizer; chat input cannot be encoded.",
+                model_dir.c_str());
         }
     }
 
@@ -957,6 +1051,36 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                     patched, missing);
             }
         }
+    }
+
+    // 12. Validate config-promised biases against actual tensor presence.
+    // Some HF configs declare attention_bias/mlp_bias but the SafeTensors
+    // export omits the bias tensors. Without this check the loader silently
+    // leaves bias slots null and inference proceeds with undefined behaviour
+    // depending on which kernels short-circuit on null biases.
+    if (cfg.attention_bias == 1) {
+        int missing_q = 0, missing_k = 0, missing_v = 0;
+        for (const auto& layer : model->layers_) {
+            if (layer.q_bias.data == nullptr) missing_q++;
+            if (layer.k_bias.data == nullptr) missing_k++;
+            if (layer.v_bias.data == nullptr) missing_v++;
+        }
+        if (missing_q || missing_k || missing_v) {
+            IMP_LOG_WARN(
+                "config.json says attention_bias=true but %d/%d Q-biases, "
+                "%d/%d K-biases, %d/%d V-biases are missing from the SafeTensors "
+                "export. Inference will proceed without those biases.",
+                missing_q, static_cast<int>(model->layers_.size()),
+                missing_k, static_cast<int>(model->layers_.size()),
+                missing_v, static_cast<int>(model->layers_.size()));
+        }
+    }
+
+    if (cfg.arch_inferred_fallback) {
+        IMP_LOG_WARN(
+            "Architecture detection fell back to GENERIC + tensor-name "
+            "heuristics (config.json had no recognized architectures/model_type). "
+            "Inference may be incoherent.");
     }
 
     IMP_LOG_INFO("SafeTensors model loaded successfully from %s", path.c_str());

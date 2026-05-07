@@ -378,9 +378,18 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                              "(weights zeroed defensively)", n_zero_scale, n_nonfinite_after_flip);
             }
             if (cfg.is_llm_compressor_nvfp4 && n_with_input_scale > 0) {
-                IMP_LOG_INFO("NVFP4 prequant: %d Linears carry input_scale (loaded but NOT applied at "
-                             "inference — see docs/roadmap.md NVFP4 long-context section). Set "
-                             "IMP_AUDIT_NVFP4_SCALES=1 for per-Linear stats.", n_with_input_scale);
+                // input_scale is a SmoothQuant-style activation-rescaling vector
+                // shipped by some llm-compressor exports. Imp does NOT apply it
+                // at inference: the long-context-bug investigation refuted the
+                // hypothesis that absorbing it would fix Mistral-3.2-NVFP4
+                // drift (see memory `llm_compressor_input_scale_dead_end_2026_05_07.md`).
+                // Loading is kept as a diagnostic path: pass IMP_AUDIT_NVFP4_SCALES=1
+                // for per-Linear stats. Without that env var, scratch tensors
+                // are skipped during GPU upload (no VRAM cost).
+                IMP_LOG_INFO(
+                    "NVFP4 prequant: %d Linears carry input_scale (intentionally NOT applied; "
+                    "set IMP_AUDIT_NVFP4_SCALES=1 for stats).",
+                    n_with_input_scale);
             }
         }
 
