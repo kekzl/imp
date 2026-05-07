@@ -1,0 +1,30 @@
+name: Auto-merge own PRs
+
+# Enables auto-merge (squash) automatically on PRs opened by the repo owner.
+# GitHub then merges the PR as soon as required checks pass and the branch
+# is mergeable. Saves the manual "Enable auto-merge" click on every PR.
+#
+# Scope:
+# - Only PRs authored by the repo owner; community PRs still need manual review.
+# - Skips drafts; transitions to ready_for_review re-fire and enable auto-merge.
+# - Squash mode (matches the repo default visible in `viewerDefaultMergeMethod`).
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+
+jobs:
+  enable-auto-merge:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == github.repository_owner
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Enable squash auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
