@@ -4,6 +4,7 @@
 #include "core/logging.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -323,7 +324,24 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         // formula assumes the GGUF tiled layout (heads 0..n_groups-1 are replica
         // 0). Set the flag so executor_ssm_gdn passes grouped_layout=1 to the
         // kernel for HF-loaded checkpoints.
+        //
+        // Cross-converted checkpoints (HF → GGUF → HF, or weights re-packed by
+        // a third-party tool) can ship in the opposite layout. Override via
+        // `IMP_GDN_LAYOUT=tiled` (default for SafeTensors stays grouped).
         cfg.gdn_grouped_head_layout = true;
+        if (const char* env = std::getenv("IMP_GDN_LAYOUT")) {
+            std::string v(env);
+            if (v == "tiled" || v == "TILED") {
+                cfg.gdn_grouped_head_layout = false;
+                IMP_LOG_INFO("GDN head layout: forced to TILED via IMP_GDN_LAYOUT=tiled");
+            } else if (v == "grouped" || v == "GROUPED") {
+                cfg.gdn_grouped_head_layout = true;
+                IMP_LOG_INFO("GDN head layout: forced to GROUPED via IMP_GDN_LAYOUT=grouped");
+            } else {
+                IMP_LOG_WARN("IMP_GDN_LAYOUT='%s' not recognized (expected 'tiled' or 'grouped')",
+                             env);
+            }
+        }
 
         int lin_v_heads = 0, lin_v_hdim = 0;
         int lin_k_heads = 0, lin_k_hdim = 0;
