@@ -87,4 +87,5 @@ _audit/
 
 # Local AI-agent state (must never be published)
 CLAUDE.md
-.claude/
+.claude/*
+!.claude/skills/
