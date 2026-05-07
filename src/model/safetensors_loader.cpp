@@ -51,6 +51,35 @@ bool validate_header_size(uint64_t file_size, uint64_t declared_header_size, std
     return true;
 }
 
+bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end, uint64_t expected_nbytes,
+                             uint64_t tensor_data_offset, uint64_t file_size, std::string* err) {
+    if (offset_start > offset_end) {
+        if (err)
+            *err = "offset_start > offset_end (data_offsets swap or corrupt)";
+        return false;
+    }
+    // Overflow-safe: tensor_data_offset + offset_end > file_size becomes
+    // offset_end > file_size - tensor_data_offset. file_size >= tensor_data_offset
+    // is guaranteed by the upstream validate_header_size check
+    // (tensor_data_offset = 8 + header_size, header_size <= file_size - 8).
+    if (tensor_data_offset > file_size) {
+        if (err)
+            *err = "tensor_data_offset > file_size (header_size validation invariant violated)";
+        return false;
+    }
+    if (offset_end > file_size - tensor_data_offset) {
+        if (err)
+            *err = "tensor offset_end past end of file (file truncated or corrupt)";
+        return false;
+    }
+    if (offset_end - offset_start != expected_nbytes) {
+        if (err)
+            *err = "tensor byte count does not match shape × dtype width";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace safetensors_internal
 
 // ---- Minimal JSON parser for SafeTensors headers ----
@@ -312,6 +341,26 @@ static const JValue* jobj_find(const JValue& obj, const std::string& key) {
             return &kv.second;
     }
     return nullptr;
+}
+
+// ---- SafeTensors wire dtype string -> bytes-per-element ----
+//
+// Used by validate_tensor_offsets to compute expected_nbytes from shape ×
+// dtype width. Returns 0 for unknown dtype strings (validation is then
+// skipped for that tensor — the existing safetensors_dtype() WARN covers
+// the unknown-type case).
+static size_t safetensors_wire_dtype_bytes(const std::string& s) {
+    if (s == "F64")
+        return 8;
+    if (s == "F32" || s == "I32" || s == "U32")
+        return 4;
+    if (s == "F16" || s == "BF16" || s == "I16" || s == "U16")
+        return 2;
+    if (s == "F8_E4M3" || s == "F8_E5M2" || s == "I8" || s == "U8" || s == "BOOL")
+        return 1;
+    if (s == "I64" || s == "U64")
+        return 8;
+    return 0;
 }
 
 // ---- SafeTensors dtype string to QType ----
@@ -609,8 +658,25 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         uint64_t offset_start = static_cast<uint64_t>(offsets_val->arr[0].as_int());
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
 
-        if (tensor_data_offset + offset_end > file_size)
-            continue;
+        // Per-tensor offset/size validation (F4): reject swap, OOB end, and
+        // shape-vs-byte-count mismatch. expected_nbytes = nelem × wire_dtype_bytes.
+        size_t wire_bytes = safetensors_wire_dtype_bytes(dtype_val->str_val);
+        if (wire_bytes == 0) {
+            // Unknown wire dtype — skip strict validation but keep the soft
+            // OOB check below. safetensors_dtype()'s WARN already fires for
+            // unknown wire types when the tensor is actually emitted.
+            if (tensor_data_offset + offset_end > file_size)
+                continue;
+        } else {
+            int64_t nelem = 1;
+            for (int d = 0; d < ndim; d++)
+                nelem *= shape[d];
+            uint64_t expected_nbytes = static_cast<uint64_t>(nelem) * static_cast<uint64_t>(wire_bytes);
+            if (!safetensors_internal::validate_tensor_offsets(
+                    offset_start, offset_end, expected_nbytes, tensor_data_offset, file_size, nullptr)) {
+                continue;
+            }
+        }
 
         void* tensor_ptr = tensor_data_base + offset_start;
         Tensor t(tensor_ptr, dtype, ndim, shape, /*on_device=*/false);

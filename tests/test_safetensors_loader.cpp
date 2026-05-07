@@ -82,5 +82,57 @@ TEST(SafeTensorsValidateHeaderSize, RejectsAboveSoftCap) {
     EXPECT_TRUE(safetensors_internal::validate_header_size(k128MiB + 8, k128MiB, &err)) << err;
 }
 
+// ---- F4: per-tensor offset validation ----
+
+TEST(SafeTensorsValidateTensorOffsets, AcceptsTypicalValid) {
+    // file_size = 1 KiB, tensor_data_offset = 256 (header occupies first 256 B),
+    // tensor at [0, 64) inside data block — i.e. 32 FP16 elements.
+    std::string err;
+    EXPECT_TRUE(safetensors_internal::validate_tensor_offsets(
+        /*start=*/0, /*end=*/64, /*expected=*/64, /*tdo=*/256, /*file=*/1024, &err))
+        << err;
+}
+
+TEST(SafeTensorsValidateTensorOffsets, RejectsStartAfterEnd) {
+    std::string err;
+    EXPECT_FALSE(safetensors_internal::validate_tensor_offsets(100, 64, 64, 256, 1024, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(SafeTensorsValidateTensorOffsets, RejectsEndPastFile) {
+    std::string err;
+    // file_size = 1024, tdo = 256 → max offset_end is 768. Setting end=1024
+    // would put real bytes at file offset 1280 — past EOF.
+    EXPECT_FALSE(safetensors_internal::validate_tensor_offsets(0, 1024, 1024, 256, 1024, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(SafeTensorsValidateTensorOffsets, RejectsByteCountMismatch) {
+    // 32 FP16 elements declared but only 32 bytes (= 16 FP16) of data on disk.
+    std::string err;
+    EXPECT_FALSE(safetensors_internal::validate_tensor_offsets(0, 32, 64, 256, 1024, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(SafeTensorsValidateTensorOffsets, ZeroSizeTensorIsValid) {
+    // Some checkpoints emit metadata-only entries with size 0.
+    std::string err;
+    EXPECT_TRUE(safetensors_internal::validate_tensor_offsets(0, 0, 0, 256, 1024, &err)) << err;
+}
+
+TEST(SafeTensorsValidateTensorOffsets, RejectsHeaderSizeInvariantViolation) {
+    // tdo > file_size should never reach this validator (header_size check
+    // upstream prevents it), but defend in depth.
+    std::string err;
+    EXPECT_FALSE(safetensors_internal::validate_tensor_offsets(0, 64, 64, /*tdo=*/2000, /*file=*/1024, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(SafeTensorsValidateTensorOffsets, EndExactlyAtFileBoundary) {
+    // tdo = 8, file_size = 1024 → max usable end is 1016. Exactly that should pass.
+    std::string err;
+    EXPECT_TRUE(safetensors_internal::validate_tensor_offsets(0, 1016, 1016, 8, 1024, &err)) << err;
+}
+
 }  // namespace
 }  // namespace imp

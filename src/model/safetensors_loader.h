@@ -34,6 +34,23 @@ constexpr uint64_t kMaxHeaderBytes = 128ULL * 1024ULL * 1024ULL;
 // `err` (when non-null) is populated with a one-line reason on failure.
 bool validate_header_size(uint64_t file_size, uint64_t declared_header_size, std::string* err);
 
+// Validate per-tensor data_offsets [start, end) against the file/header layout.
+// `expected_nbytes` is the byte count implied by the tensor's shape × dtype
+// width (for SafeTensors wire dtypes — none of which are block-quantised).
+// `tensor_data_offset` is `8 + header_size` (start of the tensor data block).
+//
+// Three rules:
+//   1. offset_start <= offset_end                                   (no swap)
+//   2. tensor_data_offset + offset_end <= file_size                 (no OOB)
+//   3. offset_end - offset_start == expected_nbytes                 (size match)
+//
+// Overflow-safe; uses subtractions in the safe ordering.
+//
+// `err` (when non-null) is populated with the first violated rule's reason.
+bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end,
+                             uint64_t expected_nbytes, uint64_t tensor_data_offset,
+                             uint64_t file_size, std::string* err);
+
 }  // namespace safetensors_internal
 
 }  // namespace imp
