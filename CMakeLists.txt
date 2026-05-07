@@ -375,6 +375,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_loader.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
+        tests/test_safetensors_loader.cpp
         tests/test_config.cpp
     )
 

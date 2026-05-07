@@ -25,6 +25,34 @@
 
 namespace imp {
 
+namespace safetensors_internal {
+
+bool validate_header_size(uint64_t file_size, uint64_t declared_header_size, std::string* err) {
+    if (file_size < 8) {
+        if (err)
+            *err = "file truncated below the 8-byte header_size prefix";
+        return false;
+    }
+    // Overflow-safe form: declared_header_size > (file_size - 8) cannot
+    // overflow because file_size - 8 is a valid subtraction (file_size >= 8).
+    // The naive 8 + declared_header_size > file_size would wrap to a small
+    // value when declared_header_size approaches UINT64_MAX, bypassing the
+    // check.
+    if (declared_header_size > file_size - 8) {
+        if (err)
+            *err = "declared header_size exceeds file size (file may be truncated or corrupt)";
+        return false;
+    }
+    if (declared_header_size > kMaxHeaderBytes) {
+        if (err)
+            *err = "declared header_size exceeds 128 MiB cap (suspicious file or pathological input)";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace safetensors_internal
+
 // ---- Minimal JSON parser for SafeTensors headers ----
 
 // JSON value types we care about
@@ -518,9 +546,14 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     auto data = reinterpret_cast<const uint8_t*>(mmap_base);
     uint64_t header_size = 0;
     std::memcpy(&header_size, data, sizeof(uint64_t));
-    if (8 + header_size > file_size) {
-        munmap(mmap_base, file_size);
-        return false;
+    {
+        std::string vh_err;
+        if (!safetensors_internal::validate_header_size(file_size, header_size, &vh_err)) {
+            IMP_LOG_ERROR("SafeTensors %s: %s (file_size=%zu, header_size=%llu)", path.c_str(),
+                          vh_err.c_str(), file_size, static_cast<unsigned long long>(header_size));
+            munmap(mmap_base, file_size);
+            return false;
+        }
     }
 
     const char* json_data = reinterpret_cast<const char*>(data + 8);
