@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include "model/chat_template.h"
 
 namespace imp {
 
@@ -76,6 +77,13 @@ struct Request {
     // JSON mode
     bool json_mode = false;   // Constrain output to valid JSON
     std::string json_schema;  // JSON Schema string (empty = disabled)
+
+    // Tool-call coordination: when true and (json_mode || !json_schema.empty()),
+    // the preamble gate enters tool-aware mode so the schema/JSON FSM mask
+    // does not block the model's tool-tag opener (`<tool_call>`, `<|tool_call>`,
+    // `<function=`).
+    bool has_tools = false;
+    ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML;
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;

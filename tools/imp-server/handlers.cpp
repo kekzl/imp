@@ -618,19 +618,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     json tool_choice = body.value("tool_choice", json("auto"));
     bool has_tools = !tools.empty() && !(tool_choice.is_string() && tool_choice.get<std::string>() == "none");
 
-    // tools + response_format=json_schema/json_object: the schema constraint
-    // would mask the `<` / `{"name":` opener that tool calls need (the model
-    // emits `<tool_call>` for ChatML or `<function=...>` for Llama-3, neither
-    // of which match a JSON-schema mask). Until proper runtime coordination
-    // exists between the tool-tag scanner (handler-side) and the FSM mask
-    // (engine-side), prefer tools and drop the schema with a warning. Users
-    // can still validate tool arguments via each tool's `parameters` schema.
-    if (has_tools && (json_mode || !json_schema_str.empty())) {
-        IMP_LOG_INFO("response_format dropped: tools take priority over JSON schema/mode "
-                     "in this request (tools and response_format both set)");
-        json_mode = false;
-        json_schema_str.clear();
-    }
+    // tools + response_format=json_schema/json_object: the engine-side gate
+    // stays "no-mask" through tool-call bodies (see ConstraintManager::prepare
+    // and PreambleGate::configure_with_tools), so we keep both signals set
+    // and the gate decides at runtime which path the model takes. Tool-call
+    // dialect comes from tpl_family, captured below into the request.
 
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     std::vector<imp::ChatMessage> chat_msgs;
@@ -1001,6 +993,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->top_logprobs = top_logprobs;
         req->json_mode = json_mode;
         req->json_schema = json_schema_str;
+        req->has_tools = has_tools;
+        req->tpl_family = tpl_family;
         req->logit_bias = logit_bias;
         req->think_budget = think_budget;
         req->status = imp::RequestStatus::PENDING;

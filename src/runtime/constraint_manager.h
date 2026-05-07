@@ -4,6 +4,7 @@
 #include "compute/schema_constrain.h"
 #include "compute/json_schema.h"
 #include "model/tokenizer.h"
+#include "model/chat_template.h"
 #include "core/logging.h"
 #include <memory>
 #include <string>
@@ -22,7 +23,13 @@ public:
     // json_mode: enforce valid JSON syntax
     // json_schema: enforce JSON matching this schema string (empty = disabled)
     // tokenizer: needed for lazy init
-    void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer);
+    // has_tools: true if the request also has tools — gate enters tool-aware
+    //   mode, schema/json mask only applies to free-text JSON, not tool bodies
+    // tpl_family: chat-template family — selects which tool-tag dialect to look
+    //   for (only consulted when has_tools is true)
+    void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
+                 bool has_tools = false,
+                 ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML);
 
     // Get current constrainer pointers (nullptr if not active).
     JsonConstrainer* json_constrainer() const noexcept {

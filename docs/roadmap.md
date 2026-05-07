@@ -46,7 +46,7 @@ Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4-thinking) emit `<think>...</thin
 
 Non-reasoning models (Llama-3.2 etc.) get the same gate in budget-only mode (8-token slack) so markdown-fence preambles like ` ```json ` and short verbal openers ("Sure! ") pass through cleanly.
 
-When a request sets both `tools` and `response_format=json_schema`/`json_object`, the schema mask would block the `<` of `<tool_call>`/`<function=` openers and prevent any tool call from being emitted. The server logs a warning and drops `response_format` in that case; tool argument validation still flows through each tool's own `parameters` schema. Lifting this to "schema applies only when the model didn't call a tool" needs runtime coordination between the handler-side tool-tag scanner and the engine-side FSM mask.
+When a request sets both `tools` and `response_format=json_schema`/`json_object`, the engine-side `PreambleGate` enters tool-aware mode. It bypasses the schema mask through the entire tool-call body (delimited by single-token tags for ChatML/Hermes/Mistral/Gemma, or `<function=`/`</function>` char-prefix/suffix for Llama3) and stays unmasked for the rest of the generation, supporting parallel tool calls. If the model emits free-text JSON instead, the schema mask kicks in normally on the first `{`/`[`. Tool argument validation continues to flow through each tool's own `parameters` schema (post-hoc, not in-stream).
 
 ## Performance work
 
