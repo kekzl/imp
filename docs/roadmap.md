@@ -12,15 +12,18 @@ Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV wri
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
 
-### NVFP4 long-context recall (model-inherent, not NVFP4-specific)
+### Gemma-4 long-context recall (Gemma-4 specific, not NVFP4-specific)
 
-The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on multiple model+format combinations:
+The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on Gemma-4 in every format imp can serve (llm-compressor NVFP4, Q8_0 GGUF). Doc-length sweep 128–2048 tokens (with `max_tokens=512` to admit thinking) shows the failure starts around 768 tokens and is consistent above 1024.
 
-- Gemma-4-26B-A4B-it-NVFP4 (llm-compressor format) — fails: emits "the moon could read its spine" (regurgitates document content)
-- gemma-4-26B-A4B-it-Q8_0 GGUF (≈2× higher precision per weight) — same failure mode: emits "thought\nThe library was old…"
-- Qwen3-30B-A3B-NVFP4-Modelopt (Modelopt format) — also fails
+The same sweep on `Qwen3-30B-A3B-NVFP4-Modelopt` (full attention, no SWA) passes at every size. This isolates the issue to **Gemma-4's SWA architecture** (5 SWA layers + 1 full per block of 6, sliding_window=1024) — not the NVFP4 path. Code review of imp's per-layer Gemma-4 attention dispatch (`src/graph/executor_attention.cu:491-501`, `:532-537`) shows correct SWA gating and per-layer head_dim handling.
 
-Since the failure reproduces on Q8_0 (no NVFP4 anywhere) and on Modelopt (different scale convention), this is **not** NVFP4 format- or scale-specific. It's a copy-from-context attention/recall limitation at long context. Any fix likely belongs in attention/KV cache or chat-template handling, not weight quantization. The roadmap previously listed this as _"llm-compressor NVFP4: degenerate output past ~30 tokens"_ — empirical bracketing 2026-05-07 (see `memory/llm_compressor_input_scale_dead_end_2026_05_07.md`) refutes the NVFP4-specific framing.
+Two unresolved hypotheses pending an external reference (llama.cpp on the same model):
+
+1. **Model-inherent** — Gemma-4-26B-A4B-it just can't reliably needle-recall via 5/30 full layers.
+2. **imp Gemma-4 bug** — interaction of `partial_rotary_factor=0.25` rope_freqs (zeroed in a non-obvious pattern, see `executor_attention.cu:526` comment) with long-context attention.
+
+Either way, this no longer belongs under "NVFP4 long-context"; the previous "llm-compressor NVFP4 degenerate output past ~30 tokens" framing is refuted. See `memory/llm_compressor_input_scale_dead_end_2026_05_07.md` for the re-runnable cross-format sweep.
 
 ### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
 
