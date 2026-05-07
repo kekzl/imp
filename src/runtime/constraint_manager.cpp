@@ -4,45 +4,127 @@ namespace imp {
 
 namespace {
 
-// Look up the </think> token id (or -1 if the tokenizer has no thinking
-// markers). Reasoning models — Qwen3.6, DeepSeek-R1, Gemma-4-thinking — all
-// emit `<think>...</think>` before the actual answer; without a preamble
-// gate, strict JSON enforcement would mask the very first token they want
-// to sample.
 int32_t detect_think_close(Tokenizer* tokenizer) {
     if (!tokenizer)
         return -1;
     int32_t close = tokenizer->find_token("</think>");
     if (close < 0)
         return -1;
-    // Only enable preamble if the OPEN token also exists — otherwise the
-    // tokenizer doesn't actually treat thinking as a structural element and
-    // we'd risk swallowing legitimate output.
     if (tokenizer->find_token("<think>") < 0)
         return -1;
     return close;
 }
 
+struct ToolDialect {
+    std::vector<int32_t> open_tokens;
+    std::vector<int32_t> close_tokens;
+    std::string open_prefix;
+    std::string close_suffix;
+
+    bool empty() const {
+        return open_tokens.empty() && close_tokens.empty() && open_prefix.empty() &&
+               close_suffix.empty();
+    }
+};
+
+// Resolves dialect-specific tool tags into token IDs (where the vocab has them
+// as single special tokens) plus char-level prefix/suffix fallbacks.
+//
+// ChatML/Hermes/Mistral: <tool_call>...</tool_call>  (single special tokens)
+// Gemma:                 <|tool_call>...<tool_call|> (single special tokens)
+// Llama3:                <function=...></function>   (multi-token, char fallback)
+// Other families fall through to ChatML defaults.
+ToolDialect resolve_tool_dialect(Tokenizer* tokenizer, ChatTemplateFamily family) {
+    ToolDialect d;
+    if (!tokenizer)
+        return d;
+
+    auto add_token_if_present = [&](const std::string& s, std::vector<int32_t>& out) {
+        int32_t id = tokenizer->find_token(s);
+        if (id >= 0)
+            out.push_back(id);
+    };
+
+    switch (family) {
+        case ChatTemplateFamily::LLAMA3:
+            // <function=NAME> has dynamic NAME — char-prefix is the only path.
+            d.open_prefix = "<function=";
+            d.close_suffix = "</function>";
+            return d;
+
+        case ChatTemplateFamily::GEMMA:
+            d.open_prefix = "<|tool_call>";
+            d.close_suffix = "<tool_call|>";
+            add_token_if_present("<|tool_call>", d.open_tokens);
+            add_token_if_present("<tool_call|>", d.close_tokens);
+            return d;
+
+        case ChatTemplateFamily::CHATML:
+        case ChatTemplateFamily::MISTRAL_V3:
+        case ChatTemplateFamily::DEEPSEEK_R1:
+        case ChatTemplateFamily::PHI:
+        case ChatTemplateFamily::NEMOTRON:
+        case ChatTemplateFamily::LLAMA2:
+        case ChatTemplateFamily::RAW:
+        default:
+            d.open_prefix = "<tool_call>";
+            d.close_suffix = "</tool_call>";
+            add_token_if_present("<tool_call>", d.open_tokens);
+            add_token_if_present("</tool_call>", d.close_tokens);
+            return d;
+    }
+}
+
 }  // namespace
 
-void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer) {
+void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
+                                bool has_tools, ChatTemplateFamily tpl_family) {
     active_json_ = false;
     active_schema_ = false;
 
     const int32_t think_close = detect_think_close(tokenizer);
-    // Reasoning models get a large budget (free-form thinking can run for
-    // hundreds of tokens). Non-reasoning models get a small slack window
-    // for markdown fences (` ```json `) or short verbal preambles ("Sure! ").
-    // Either way the gate exits on the first `{` / `[` seen, so this is a
-    // hard cap, not the typical case.
-    const int preamble_budget = (think_close >= 0) ? 8192 : 8;
 
-    // Schema mode takes priority over plain JSON mode
+    // Reasoning models always get the large think-close budget. Otherwise:
+    //   - has_tools: 64-token slack so short verbal preambles ("Sure! ")
+    //     don't squeeze out the tool-tag opener.
+    //   - no tools: 8-token slack for markdown fences, matches today's
+    //     non-reasoning default.
+    int preamble_budget;
+    if (think_close >= 0) {
+        preamble_budget = 8192;
+    } else if (has_tools) {
+        preamble_budget = 64;
+    } else {
+        preamble_budget = 8;
+    }
+
+    ToolDialect dialect;
+    if (has_tools) {
+        dialect = resolve_tool_dialect(tokenizer, tpl_family);
+        if (dialect.empty()) {
+            // Tokenizer surfaced none of the dialect tags AND the family had
+            // no char fallback — degrade to current "drop schema" behaviour.
+            IMP_LOG_INFO(
+                "ConstraintManager: no tool-tag dialect for family %d, dropping schema/json_mode",
+                static_cast<int>(tpl_family));
+            return;
+        }
+    }
+
+    auto configure_gate = [&](auto* constrainer) {
+        if (has_tools) {
+            constrainer->set_preamble_with_tools(think_close, preamble_budget,
+                                                 dialect.open_tokens, dialect.close_tokens,
+                                                 dialect.open_prefix, dialect.close_suffix);
+        } else {
+            constrainer->set_preamble(think_close, preamble_budget);
+        }
+    };
+
     if (!json_schema.empty()) {
         if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
             json_schema == cached_schema_string_) {
-            // Reuse cached constrainer — just reset FSM state.
-            schema_constrainer_->set_preamble(think_close, preamble_budget);
+            configure_gate(schema_constrainer_.get());
             schema_constrainer_->reset();
             active_schema_ = true;
         } else {
@@ -51,7 +133,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                 schema_constrainer_ = std::make_unique<SchemaConstrainer>();
                 if (tokenizer && schema_constrainer_->init(*tokenizer, std::move(schema))) {
                     cached_schema_string_ = json_schema;
-                    schema_constrainer_->set_preamble(think_close, preamble_budget);
+                    configure_gate(schema_constrainer_.get());
                     schema_constrainer_->reset();
                     active_schema_ = true;
                 } else {
@@ -75,7 +157,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                 return;
             }
         }
-        json_constrainer_->set_preamble(think_close, preamble_budget);
+        configure_gate(json_constrainer_.get());
         json_constrainer_->reset();
         active_json_ = true;
     }
