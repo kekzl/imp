@@ -403,5 +403,52 @@ TEST(PreambleGateTest, ToolModeResetReturnsToActive) {
     EXPECT_TRUE(g.active());
 }
 
+TEST(PreambleGateTest, ToolModeCharPrefixFallback) {
+    // Llama3 dialect: <function= is multi-token. Use char-prefix only;
+    // open_tokens is empty.
+    PreambleGate g;
+    g.configure_with_tools(/*close_token=*/-1, /*budget=*/64,
+                           /*open_tokens=*/{},
+                           /*close_tokens=*/{},
+                           /*open_prefix=*/"<function=",
+                           /*close_suffix=*/"</function>");
+
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "<"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "function"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "="));  // prefix complete here
+    EXPECT_TRUE(g.active());
+
+    // Body content with `{` is absorbed (TOOL_BODY).
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, "{"));
+    EXPECT_TRUE(g.active());
+
+    // Close suffix split across tokens.
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "</"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "function"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, ">"));
+    EXPECT_TRUE(g.active());  // TERMINAL_OFF
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "anything"));
+    EXPECT_TRUE(g.active());
+}
+
+TEST(PreambleGateTest, LegacyConfigureKeepsBinaryBehavior) {
+    // The two-arg configure() must not enable tool detection — protects
+    // existing JsonConstrainer/SchemaConstrainer callers that don't know
+    // about tools.
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192);
+    EXPECT_TRUE(g.active());
+
+    // A token id that *would* be a tool-opener if registered must be
+    // treated as ordinary text here.
+    EXPECT_TRUE(g.absorb(TOK_TOOL_OPEN, "<tool_call>"));
+    EXPECT_TRUE(g.active());  // still in ACTIVE (preamble), not TOOL_BODY
+
+    // `{` still triggers preamble exit (legacy behaviour).
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));
+    EXPECT_FALSE(g.active());
+}
+
 }  // namespace
 }  // namespace imp
