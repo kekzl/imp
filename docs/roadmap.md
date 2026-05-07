@@ -12,17 +12,37 @@ Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV wri
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
 
-### NVFP4 long-context (Mistral-3.2 NVFP4)
+### Gemma-4 long-context recall — confirmed imp bug (not model-inherent)
 
-Long English prose ≥250 tokens with Mistral-Small-3.2-NVFP4 sometimes drifts to contextually-attracted continuations. Root cause is the SmoothQuant 0.9 + NVFP4 + FP16-activation mismatch: the recipe expects dynamic NVFP4 input activation quant, imp uses FP16. The native CUTLASS NVFP4×NVFP4 path (post the prefill cache lighting up) reduces but doesn't eliminate the noise. Final fix would load and apply the per-Linear `input_scale` from the SafeTensors file.
+The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on Gemma-4 in every format imp can serve (llm-compressor NVFP4, Q8_0 GGUF). Doc-length sweep 128–2048 tokens shows failure starts at the 768–1024 boundary and is consistent above.
 
-Practical workaround: PR #78 disabled the 600-token jinja default system prompt for `use_default_system_prompt=false` models, which keeps typical chat prompts inside the coherent range.
+Cross-engine A/B 2026-05-07 on the **same `gemma-4-26B-A4B-it-Q8_0.gguf` file**:
 
-### llm-compressor NVFP4: degenerate output past ~30 tokens
+| doc tokens | imp | llama.cpp (`ghcr.io/ggml-org/llama.cpp:server-cuda` v9049) |
+|---:|:---:|:---:|
+| 128–512 | mostly ✓ | ✓ |
+| 768 | ✓ on Q8_0 | ✓ |
+| 1024 | ✗ regurgitates doc | ✓ |
+| 1280 | ✗ "not in text" | ✓ |
+| 1536 | ✗ "not in text" | ✓ |
+| 1800 | ✗ corrupted "MERIDIAN→WORD" | ✓ |
+| 2048 | ✗ "moon could read its spine" | ✓ |
 
-llm-compressor-format SafeTensors (Mistral-Small-3.2, Gemma-4, Qwen3.6) fail at least one realistic 200-token test. The Modelopt-format equivalent (Qwen3-Coder-30B-A3B) passes the same suite. Likely the `is_llm_compressor_nvfp4` reciprocal-flip on `tensor_scale` accumulates over long sequences, or the post-PR-#88 native FP4×FP4 path amplifies quantization noise that the prior dequant→cuBLAS fallback masked.
+llama.cpp passes every size. Same model, same prompt, same sentinel. So **imp has a Gemma-4 long-context bug** — not a model limitation, not an NVFP4 path issue (Q8_0 fails the same way), and not imp's general long-context (Qwen3-30B-Modelopt passes 128–2048 in imp).
 
-Workaround: prefer Modelopt-format NVFP4 prequant.
+Suspected: interaction of Gemma-4's 5:1 SWA:full architecture with imp's attention dispatch at `executor_attention.cu:688-763`. A workaround comment at `:701-712` already acknowledges "FMHA chain emits 'own owners and' garbage" for SWA at sliding_active and routes through `naive_attention_prefill`, but per the cross-engine A/B that workaround doesn't fully fix recall. Code paths affected at the failure boundary:
+
+- SWA layer (hd=256), n=1024 exactly: cuBLAS path with causal-only mask (sliding_window not plumbed through `attention_cublas_prefill`).
+- SWA layer at n>1024: `naive_attention_prefill` with window — but recall still fails; root cause not yet isolated.
+- Global layer at n>1024: cuBLAS path (no sliding window applies). FP32 S-matrix.
+
+Real fix needs per-layer numerical comparison vs llama.cpp at long context to identify the exact divergence (RoPE? Q-norm? cuBLAS algorithm choice? KV cache layout?). See `memory/llm_compressor_input_scale_dead_end_2026_05_07.md` for the full sweep + bracket recipe.
+
+### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
+
+Mistral-Small-3.2-NVFP4 was calibrated with SmoothQuant 0.9, which records a per-Linear `input_scale` in SafeTensors. imp loads `input_scale` into `nvfp4_scratch_` but does not consume it at inference. PR #78 worked around long-prompt drift by disabling the 600-token default system prompt.
+
+Direct absorption of `input_scale` as a per-tensor scalar GEMM alpha modifier (in either direction) was tested 2026-05-07 on Gemma-4-NVFP4 and refuted: phase4 18/20 → 4/20 (full degeneration). A real fix likely needs the per-channel SmoothQuant scaling vector applied during activation quantization, not a scalar alpha modifier — testable only against Mistral-3.2-NVFP4 (not present in default model set).
 
 ### Qwen3.5-27B MXFP4 fails at load
 
