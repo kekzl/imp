@@ -234,12 +234,25 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         int n_zero_scale = 0;
         int n_nonfinite_after_flip = 0;
         int n_with_input_scale = 0;
+        int n_wrong_scale_dtype = 0;
         auto promote = [&](const NvFP4PreQuantWeight& sc, Tensor& w, const char* key) {
             if (!sc.valid() || !w.data)
                 return false;
             if (!w.on_device || !sc.weight_scale.on_device) {
                 IMP_LOG_DEBUG("NVFP4 prequant: skipping %s (data_dev=%d, scale_dev=%d)", key, w.on_device,
                               sc.weight_scale.on_device);
+                return false;
+            }
+            // F8: enforce compressed-tensors NVFP4 spec: weight_scale must be
+            // float8_e4m3fn. Defending against NVFP4↔MXFP4 cross-misrouting
+            // (where weight_scale would be U8 / UE8M0 power-of-two) and other
+            // accidental dtype mismatches that would silently corrupt output
+            // through the FP8 E4M3 decoder.
+            std::string scale_dtype_err;
+            if (!nvfp4_validate_weight_scale_dtype(sc.weight_scale.qtype, &scale_dtype_err)) {
+                n_wrong_scale_dtype++;
+                IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion (weight stays in "
+                             "dequant->cuBLAS fallback path).", key, scale_dtype_err.c_str());
                 return false;
             }
             float h_scale = 1.0f;
@@ -382,6 +395,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 IMP_LOG_WARN("NVFP4 prequant: %d zero weight_scale_2 / %d non-finite weight_scale_2 "
                              "(weights zeroed defensively, applies to both Modelopt and llm-compressor)",
                              n_zero_scale, n_nonfinite_after_flip);
+            }
+            if (n_wrong_scale_dtype > 0) {
+                IMP_LOG_WARN("NVFP4 prequant: %d weights had non-FP8_E4M3 weight_scale dtype "
+                             "(skipped — possible NVFP4/MXFP4 cross-misroute or corrupt checkpoint)",
+                             n_wrong_scale_dtype);
             }
             if (cfg.is_llm_compressor_nvfp4 && n_with_input_scale > 0) {
                 // input_scale is a SmoothQuant-style activation-rescaling vector

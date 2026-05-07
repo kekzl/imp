@@ -12,6 +12,17 @@
 
 namespace imp {
 
+// Spec-compliance check for the NVFP4 weight_scale tensor's wire dtype.
+bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err) {
+    if (qt == QType::FP8_E4M3)
+        return true;
+    if (err) {
+        *err = std::string("weight_scale qtype is ") + qtype_name(qt) +
+               ", expected FP8_E4M3 (compressed-tensors NVFP4 spec)";
+    }
+    return false;
+}
+
 // Defensive promotion of weight_scale_2 → GEMM tensor_scale. Pure host fn.
 // See header comment in quant/nvfp4_quant.h for the formula details.
 float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed) {

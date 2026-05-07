@@ -441,5 +441,46 @@ TEST(NvFP4PromoteWeightScale2, LlmCompressorFiniteFlipsCorrectly) {
     EXPECT_FALSE(zeroed);
 }
 
+// ---- F8: weight_scale dtype validation ----
+
+TEST(NvFP4ValidateWeightScaleDtype, AcceptsFp8E4m3) {
+    std::string err;
+    EXPECT_TRUE(nvfp4_validate_weight_scale_dtype(QType::FP8_E4M3, &err)) << err;
+    EXPECT_TRUE(err.empty());
+}
+
+TEST(NvFP4ValidateWeightScaleDtype, RejectsUInt8MxFP4Crossroute) {
+    // INT8 maps from the wire 'U8' / 'I8' string that MXFP4 / GPTQ ship
+    // weight_scale (UE8M0 power-of-two) bytes in. Cross-misrouting would
+    // happen if the loader/promote step misclassifies an MXFP4 model as
+    // NVFP4 — the weight_scale bytes would be UE8M0 but read as E4M3.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_weight_scale_dtype(QType::INT8, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidateWeightScaleDtype, RejectsFp8E5m2) {
+    // E5M2 is range-extended FP8 used for activations, never weight scales
+    // in the compressed-tensors spec. Reject defensively.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_weight_scale_dtype(QType::FP8_E5M2, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidateWeightScaleDtype, RejectsF16) {
+    // Some pipelines emit weight_scale as FP16 directly — that's not the
+    // compressed-tensors spec.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_weight_scale_dtype(QType::F16, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(NvFP4ValidateWeightScaleDtype, RejectsNone) {
+    // Sentinel "no qtype set" must never accidentally pass.
+    std::string err;
+    EXPECT_FALSE(nvfp4_validate_weight_scale_dtype(QType::NONE, &err));
+    EXPECT_FALSE(err.empty());
+}
+
 }  // namespace
 }  // namespace imp

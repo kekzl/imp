@@ -3,6 +3,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <string>
 
 namespace imp {
 
@@ -94,5 +95,12 @@ void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
 //
 // Pure host function — testable without CUDA. Defined in nvfp4_quant.cu.
 float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed);
+
+// Valid wire dtype for NVFP4 weight_scale per compressed-tensors spec.
+// Spec mandates float8_e4m3fn. NVFP4/MXFP4 cross-misroutes and corrupt
+// checkpoints would arrive here with U8/I8 (UE8M0) or other dtypes — those
+// must be rejected at promote time so the slow dequant→cuBLAS fallback runs
+// instead of silently producing wrong output through the FP8 decoder.
+bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
 
 }  // namespace imp
