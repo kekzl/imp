@@ -298,7 +298,16 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
     }
 
     if (scheme != "NVFP4" && scheme != "NVFP4_W4A16") {
-        IMP_LOG_ERROR("recipe.yaml scheme '%s' not supported (need NVFP4 or NVFP4_W4A16)", scheme.c_str());
+        // Soft fail: returning false signals "no NVFP4 metadata to apply".
+        // The SafeTensors loader treats that as "load with whatever the wire
+        // dtype gives us" — typically FP16/BF16/FP8. That keeps inference
+        // alive for unsupported llm-compressor schemes (W8A8-INT8, FP8, …)
+        // instead of hard-blocking the load.
+        IMP_LOG_WARN(
+            "recipe.yaml scheme '%s' is not natively supported by imp "
+            "(only NVFP4 / NVFP4_W4A16). Falling back to the on-wire dtype; "
+            "weights will load but quantization metadata is ignored.",
+            scheme.c_str());
         return false;
     }
 
