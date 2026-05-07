@@ -137,18 +137,18 @@ The counter exists but only fires per-tensor at log-level WARN. End-of-load summ
 
 ## Findings summary
 
-| ID | Title | Severity | Action |
-|----|---|---|---|
-| F1 | Reference numerical test for compressed-tensors NVFP4 dequant absent | P0 | Add new unit test |
-| F2 | Modelopt NVFP4 weight_scale_2 not isfinite-checked | P1 | Extend guard + unit test |
-| F3 | Header-size validation has integer overflow | P1 | Reorder check + unit test |
-| F4 | Tensor offsets not validated against shape × dtype | P1 | Validate + unit test |
-| F5 | Silent drop of malformed tensor entries | P2 | WARN + summary + unit test |
-| F6 | NVFP4 weight_packed vs weight_scale shape not validated | P2 | Promote-time check + unit test |
-| F7 | Header-size upper bound missing | P2 | Soft-cap + ERROR + unit test |
-| F8 | NVFP4 weight_scale dtype not enforced | P2 | Promote-time check + unit test |
-| F9 | Header-size 8-byte alignment | P3 | Skip (spec-compliance only) |
-| F10 | Unrecognized-tensor list not retained | P3 | Skip (UX, not correctness) |
+| ID | Title | Severity | Action | Status |
+|----|---|---|---|---|
+| F1 | Reference numerical test for compressed-tensors NVFP4 dequant absent | P0 | Add new unit test | closed-in-168f847 |
+| F2 | Modelopt NVFP4 weight_scale_2 not isfinite-checked | P1 | Extend guard + unit test | closed-in-bb8c54c |
+| F3 | Header-size validation has integer overflow | P1 | Reorder check + unit test | closed-in-5d9b28f |
+| F4 | Tensor offsets not validated against shape × dtype | P1 | Validate + unit test | closed-in-6ede041 |
+| F5 | Silent drop of malformed tensor entries | P2 | WARN + summary + unit test | closed-in-369a806 |
+| F6 | NVFP4 weight_packed vs weight_scale shape not validated | P2 | Promote-time check + unit test | closed-in-4d9b640 |
+| F7 | Header-size upper bound missing | P2 | Soft-cap + ERROR + unit test | closed-in-5d9b28f (combined with F3 — same `validate_header_size`) |
+| F8 | NVFP4 weight_scale dtype not enforced | P2 | Promote-time check + unit test | closed-in-03b8996 |
+| F9 | Header-size 8-byte alignment | P3 | Skip (spec-compliance only) | deferred (P3, no real-world trigger) |
+| F10 | Unrecognized-tensor list not retained | P3 | Skip (UX, not correctness) | deferred (P3, UX only) |
 
 P0: 1 — ships first, mandatory under Quality Gate.
 P1: 3 — all silent correctness bugs.

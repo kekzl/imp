@@ -84,9 +84,9 @@ Borderline calls go to UNCERTAIN, not FEASIBLE.
 
 ## Summary
 
-**FEASIBLE: 0**
-**UNCERTAIN: 1** (AU2 — SentencePiece native parser; deferred this run in favor of correctness-hardening)
-**INFEASIBLE: 21**
+**FEASIBLE: 0** — none entered the master plan
+**UNCERTAIN: 1** (AU2 — SentencePiece native parser; deferred this run in favor of correctness-hardening) — `Status: deferred (see followups.md)`
+**INFEASIBLE: 21** — all in `docs/audit/followups.md`
 **OBSOLETE: 5** (P3 spec-decode, R5 cvt narrow PTX, Lv1 SSM cache, Lv2 NVFP4 KV, Lv4 tile-tuning, Lv5 SFU-exp2)
 
 This is consistent with imp's mature state: most listed items are either explicit dead-ends (already investigated, documented, dropped) or multi-week kernel/architecture work that no autonomous single-run can land at full Quality Gate.

@@ -19,7 +19,7 @@ Tolerance: max-abs-diff < 1e-2 in FP16 (FMA-order divergence between sequential 
 
 Ordered: P0 first, then P1, then P2. Within each tier, dependency order: harness/reference comes first because every subsequent test re-uses it.
 
-### Item 1 — F1: compressed-tensors NVFP4 reference test (P0)
+### Item 1 — F1: compressed-tensors NVFP4 reference test (P0) — `closed-in-168f847`
 
 **Change:** add `tests/test_nvfp4_compressed_tensors_ref.cu`. Builds a synthetic compressed-tensors weight in memory exactly per the spec (`weight_packed` uint8 nibble-packed FP4, `weight_scale` FP8 E4M3 group_size=16, `weight_scale_2` FP32 scalar), constructs a Tensor view with `qtype=NVFP4`, and routes it through `gemv_nvfp4_kpar`. A pure-host reference dequant computes the expected output `Y = X · W^T` from the spec formula `val = fp4 * fp8_e4m3_to_fp32(weight_scale) * weight_scale_2`. Verifies max-abs-diff < 1e-2.
 
@@ -29,7 +29,7 @@ Ordered: P0 first, then P1, then P2. Within each tier, dependency order: harness
 
 **Quality Gate:** numerical correctness ✓, no regression (test-only) ✓, no new deps ✓, no TODO ✓, error path tested via separate sub-cases (NaN scale, zero scale) ✓, no skip ✓, doc unchanged (test, not API) ✓, root-cause oriented (the test IS the root-cause-prevention mechanism) ✓.
 
-### Item 2 — F2: Modelopt NVFP4 weight_scale_2 isfinite guard (P1)
+### Item 2 — F2: Modelopt NVFP4 weight_scale_2 isfinite guard (P1) — `closed-in-bb8c54c`
 
 **Change:** in `executor_pre_dequant.cu:262-279`, extend the existing zero/non-finite guard to also cover the Modelopt branch (`promoted_scale = h_scale;` at line 277-278 today). New behavior: if `!std::isfinite(h_scale)` for either format, set `promoted_scale = 0.0f` and bump a counter; if `h_scale == 0.0f` for Modelopt (currently silent), log INFO that the layer's weights are intentionally null. Update the end-of-loop summary to surface both Modelopt and llm-compressor counts.
 
@@ -39,7 +39,7 @@ Ordered: P0 first, then P1, then P2. Within each tier, dependency order: harness
 
 **Quality Gate:** unit test exercising both NaN and +Inf weight_scale_2 in both Modelopt and llm-compressor paths; the test asserts the layer produces zero output (not NaN/Inf) and the WARN counter increments. No new deps. No TODO.
 
-### Item 3 — F3: header-size validation overflow fix (P1)
+### Item 3 — F3 + F7: header-size overflow-safe validation + 128 MiB cap (P1+P2) — `closed-in-5d9b28f`
 
 **Change:** `src/model/safetensors_loader.cpp:519-524` — replace `8 + header_size > file_size` with `header_size > file_size - 8`. Uses pre-existing invariant `file_size >= 8` from line 495.
 
@@ -49,7 +49,7 @@ Ordered: P0 first, then P1, then P2. Within each tier, dependency order: harness
 
 **Quality Gate:** new unit test writes a 16-byte file with `header_size = UINT64_MAX` and asserts `load_safetensors` returns false without crashing. Companion test with `header_size = file_size - 7` (off-by-one) asserts rejection.
 
-### Item 4 — F4: tensor offset/size validation (P1)
+### Item 4 — F4: tensor offset/size validation (P1) — `closed-in-6ede041`
 
 **Change:** `src/model/safetensors_loader.cpp:572-580` — add three checks:
 1. `offset_start <= offset_end` (else WARN + skip tensor)
@@ -64,7 +64,7 @@ Add `dtype_bytes` helper (private to the .cpp, mapping `QType::F16 → 2`, `QTyp
 
 **Quality Gate:** unit tests for each of the three sub-cases (start>end, oob start, size mismatch). All produce a WARN and skip the tensor without crashing.
 
-### Item 5 — F8: NVFP4 weight_scale dtype enforcement (P2)
+### Item 5 — F8: NVFP4 weight_scale dtype enforcement (P2) — `closed-in-03b8996`
 
 **Change:** `src/graph/executor_pre_dequant.cu:237-287` — in `promote()`, before applying the formula, verify `sc.weight_scale.qtype == QType::FP8_E4M3`. If not, WARN naming the key and the actual qtype, and return false (skip promotion — weight stays in its loaded state for the dequant→cuBLAS fallback path to handle).
 
@@ -74,7 +74,7 @@ Add `dtype_bytes` helper (private to the .cpp, mapping `QType::F16 → 2`, `QTyp
 
 **Quality Gate:** unit test that supplies a `weight_scale` with `qtype = QType::INT8` (UE8M0 bytes) and verifies `promote` rejects it.
 
-### Item 6 — F6: NVFP4 packed shape vs scale shape validation (P2)
+### Item 6 — F6: NVFP4 packed shape vs scale shape validation (P2) — `closed-in-4d9b640`
 
 **Change:** in the same `promote()` function, add `sc.weight_scale.shape[1] * 16 == w.shape[1] * 2` (where `w.shape[1]` is the packed-half K, so logical K = `w.shape[1] * 2`). On mismatch, WARN + skip promotion.
 
@@ -84,7 +84,7 @@ Add `dtype_bytes` helper (private to the .cpp, mapping `QType::F16 → 2`, `QTyp
 
 **Quality Gate:** unit test feeding mismatched shapes; verifies skip + WARN.
 
-### Item 7 — F5: malformed tensor entry warnings (P2)
+### Item 7 — F5: malformed tensor entry warnings (P2) — `closed-in-369a806`
 
 **Change:** `src/model/safetensors_loader.cpp:554-580` — replace each silent `continue` with `IMP_LOG_WARN("safetensors: dropping tensor '%s' — <reason>")` and an end-of-shard summary count. Reasons: missing dtype, missing shape, ndim>kMaxDims, missing data_offsets.
 
@@ -94,7 +94,7 @@ Add `dtype_bytes` helper (private to the .cpp, mapping `QType::F16 → 2`, `QTyp
 
 **Quality Gate:** unit test crafting a SafeTensors blob where one tensor has malformed shape and asserting (a) the load returns success with the other tensors present, (b) the malformed tensor name appears in the WARN log via gtest's stderr capture.
 
-### Item 8 — F7: header-size upper bound (P2)
+### Item 8 — F7: header-size upper bound (P2) — `closed-in-5d9b28f` (combined with F3, see Item 3)
 
 **Change:** `src/model/safetensors_loader.cpp:519` — soft-cap header_size at 128 MiB (a 128 MiB header would represent a >50 M-tensor checkpoint; real models are O(1000) tensors). Above the cap: ERROR + return false.
 
