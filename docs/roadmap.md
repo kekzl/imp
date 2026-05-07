@@ -40,7 +40,9 @@ Non-Gemma-4 / non-NVFP4-prequant MoE decode falls through the legacy expert-rout
 
 Reasoning models (Qwen3.6, DeepSeek-R1, Gemma-4-thinking) emit `<think>...</think>` before every response. Strict JSON / JSON-Schema enforcement starting at token 0 masks the `<think>` opener, leaving the model with no valid token to sample. Auto-detected via the tokenizer (presence of `<think>` + `</think>` special tokens) and handled by `PreambleGate` (`src/compute/preamble_gate.h`): the gate lets all tokens pass until the close marker, an `{` / `[` is observed, or a budget cap is hit, then strict enforcement kicks in.
 
-Open follow-ups: tool-calling response-format combinations (`tools` + `response_format=json_schema`) aren't covered yet; lenient grammar prefixes for non-reasoning preambles like markdown fences (` ```json `) would generalise the same pattern.
+Non-reasoning models (Llama-3.2 etc.) get the same gate in budget-only mode (8-token slack) so markdown-fence preambles like ` ```json ` and short verbal openers ("Sure! ") pass through cleanly.
+
+When a request sets both `tools` and `response_format=json_schema`/`json_object`, the schema mask would block the `<` of `<tool_call>`/`<function=` openers and prevent any tool call from being emitted. The server logs a warning and drops `response_format` in that case; tool argument validation still flows through each tool's own `parameters` schema. Lifting this to "schema applies only when the model didn't call a tool" needs runtime coordination between the handler-side tool-tag scanner and the engine-side FSM mask.
 
 ## Performance work
 
@@ -53,10 +55,6 @@ CUTLASS MXFP4 GEMM is fully implemented today (`attention.mxfp4 = "always"`), bu
 ### Closing the TurboQuant–FP8 gap
 
 TurboQuant currently runs ~23% behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s). The gap is algorithm-inherent — QJL sketch computation adds per-token overhead. Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales.
-
-### 1024→2048 prefill cliff on small dense models
-
-Qwen3-4B Q8_0 drops from 27k to 19k tok/s at the dispatch boundary where cuBLAS attention hands off to FP8 FMHA. Output stays correct; the FP8-FMHA kernel is just less tuned for the small-model regime. Options: raise the cuBLAS cap past 1024, or tune FP8-FMHA occupancy / Bq.
 
 ### `pp=512` on large dense models
 
