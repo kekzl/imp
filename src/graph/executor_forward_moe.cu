@@ -1552,6 +1552,62 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         auto expert_gemm = [&](const Tensor& a, Tensor& c, const Tensor& packed, QType qtype,
                                                const std::vector<Tensor>& fallback,
                                                const std::vector<TensorID>& fallback_ids, int eidx) {
+                            // NVFP4 MoE batch cache path (Nemotron-H non-gated, and any
+                            // NVFP4 MoE model when batch_dequant_buf is too small to fire
+                            // the NVFP4→FP16 batch path). After cache_moe_native_nvfp4
+                            // builds the contiguous buffer and frees per-expert allocs,
+                            // `fallback[eidx].data` is nullptr and dequant_expert can't
+                            // dispatch NVFP4. Slice the cached MoE result instead.
+                            if (qtype == QType::NVFP4) {
+                                auto it = wcache_.nvfp4_moe.find(packed.data);
+                                if (it != wcache_.nvfp4_moe.end()) {
+                                    const auto& moe_cache = it->second;
+                                    size_t pkd_off = static_cast<size_t>(eidx) *
+                                                     moe_cache.expert_stride_packed;
+                                    size_t ms_off = static_cast<size_t>(eidx) *
+                                                    moe_cache.expert_stride_ms;
+                                    // tensor_scale per expert: device array, sync read.
+                                    // For prefill this fires once per active expert per
+                                    // layer (~128*3*23 = ~9k syncs for 200-token prompt).
+                                    // Optimization: pre-cache to host at promote time
+                                    // (left as follow-up; correctness first).
+                                    float ts_h = 1.0f;
+                                    if (moe_cache.tensor_scales) {
+                                        cudaMemcpyAsync(&ts_h,
+                                                        moe_cache.tensor_scales + eidx,
+                                                        sizeof(float),
+                                                        cudaMemcpyDeviceToHost, stream);
+                                        cudaStreamSynchronize(stream);
+                                    }
+                                    NvFP4QuantResult nw;
+                                    nw.packed_data = static_cast<char*>(moe_cache.packed_data) +
+                                                     pkd_off;
+                                    nw.micro_scales = static_cast<char*>(moe_cache.micro_scales) +
+                                                      ms_off;
+                                    nw.tensor_scale = ts_h;
+                                    nw.N = static_cast<int>(moe_cache.N);
+                                    nw.K = static_cast<int>(moe_cache.K);
+                                    int M = static_cast<int>(a.shape[0]);
+                                    if (M == 1) {
+                                        gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                                        static_cast<half*>(c.data),
+                                                        static_cast<int>(nw.N),
+                                                        static_cast<int>(nw.K), stream);
+                                    } else {
+                                        int64_t a_shape[2] = {a.shape[0],
+                                                              static_cast<int64_t>(nw.K)};
+                                        int64_t c_shape[2] = {a.shape[0],
+                                                              static_cast<int64_t>(nw.N)};
+                                        Tensor a_t(
+                                            const_cast<void*>(static_cast<const void*>(a.data)),
+                                            QType::F16, 2, a_shape, true);
+                                        Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                                        gemm_nvfp4(nw, a_t, c_t, stream);
+                                    }
+                                    return;
+                                }
+                            }
+
                             // NVFP4 prequant path: native NVFP4 GEMV (any batch size)
                             const bool has_nvfp4_id = (!fallback_ids.empty() &&
                                                        static_cast<size_t>(eidx) < fallback_ids.size() &&

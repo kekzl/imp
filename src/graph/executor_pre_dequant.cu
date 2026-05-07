@@ -1842,7 +1842,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 g = cache_moe_native_nvfp4(L.expert_gate_packed, L.expert_w_gate);
                 u = cache_moe_native_nvfp4(L.expert_up_packed, L.expert_w_up);
                 d = cache_moe_native_nvfp4(L.expert_down_packed, L.expert_w_down);
-                if ((g || u || d) && !(g && u && d)) {
+                // Non-gated MoE (e.g. Nemotron-H NemotronHForCausalLM): no gate
+                // projection exists, so g=0 is expected when up and down cached.
+                // Suppress the misleading warning in that case; expert_gemm's
+                // wcache_.nvfp4_moe lookup handles the missing-gate path.
+                bool non_gated = (L.expert_gate_packed.data == nullptr &&
+                                  (L.expert_w_gate.empty() ||
+                                   L.expert_w_gate[0].data == nullptr));
+                if ((g || u || d) && !(g && u && d) && !(non_gated && u && d)) {
                     IMP_LOG_WARN(
                         "Layer %d: partial NVFP4 MoE native cache "
                         "(g=%d u=%d d=%d) — fast path may not engage",
