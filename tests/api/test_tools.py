@@ -96,3 +96,54 @@ class TestToolCalling:
                 got_tool_call = True
                 break
         assert got_tool_call, "tool_choice=required failed to produce tool_calls in 3 attempts"
+
+    def test_tools_plus_json_schema_passes_through(self, client, model):
+        """Setting tools + response_format=json_schema must NOT drop the schema.
+
+        The engine-side gate should let the model's tool-tag opener through
+        unconditionally and only apply the schema mask if the model actually
+        emits free-text JSON instead of a tool call. Either outcome (tool_call
+        OR schema-shaped JSON) is acceptable here — what we're catching is the
+        old failure mode where the request was rejected or response_format was
+        silently dropped (which the server used to log).
+        """
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
+            "tools": [WEATHER_TOOL],
+            "tool_choice": "auto",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "weather_or_text",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string"},
+                        },
+                        "required": ["answer"],
+                    },
+                },
+            },
+            "max_tokens": 128,
+            "temperature": 0,
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        choice = body["choices"][0]
+        msg = choice["message"]
+
+        # Either path is acceptable; both must be syntactically valid.
+        if "tool_calls" in msg and msg["tool_calls"]:
+            tc = msg["tool_calls"]
+            assert tc[0]["function"]["name"] == "get_weather"
+            import json
+            args = json.loads(tc[0]["function"]["arguments"])
+            assert isinstance(args, dict)
+        else:
+            # Free-text path: the schema must have been enforced.
+            content = msg.get("content", "")
+            import json
+            payload = json.loads(content)
+            assert "answer" in payload
+            assert isinstance(payload["answer"], str)
