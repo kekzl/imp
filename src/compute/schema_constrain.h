@@ -81,6 +81,22 @@ public:
         preamble_.configure(close_token, max_tokens);
     }
 
+    // Tool-aware preamble: when configured, the gate stays "no-mask" through
+    // a tool-call body (delimited by open_tokens/close_tokens or the
+    // open_prefix/close_suffix char fallback) and never re-enables the mask
+    // after the tool closes. See PreambleGate::configure_with_tools.
+    void set_preamble_with_tools(int32_t close_token, int max_tokens,
+                                 std::vector<int32_t> open_tokens,
+                                 std::vector<int32_t> close_tokens,
+                                 std::string open_prefix,
+                                 std::string close_suffix) {
+        preamble_.configure_with_tools(close_token, max_tokens,
+                                       std::move(open_tokens),
+                                       std::move(close_tokens),
+                                       std::move(open_prefix),
+                                       std::move(close_suffix));
+    }
+
 private:
     bool initialized_ = false;
     int vocab_size_ = 0;
