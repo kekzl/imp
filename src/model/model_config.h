@@ -240,6 +240,7 @@ struct TransformerLayer {
         Tensor g_idx;    // group index (optional, for desc_act)
         int bits = 0;
         int group_size = 128;
+        bool desc_act = false;  // config-declared activation reordering
     };
     GPTQWeight gptq_q, gptq_k, gptq_v, gptq_o;
     GPTQWeight gptq_gate, gptq_up, gptq_down;

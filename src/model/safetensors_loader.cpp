@@ -843,6 +843,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                              &layer.gptq_up, &layer.gptq_down}) {
                 gw->bits = gptq_cfg.bits;
                 gw->group_size = gptq_cfg.group_size;
+                gw->desc_act = gptq_cfg.desc_act;
             }
         }
         IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s", gptq_cfg.bits, gptq_cfg.group_size,
