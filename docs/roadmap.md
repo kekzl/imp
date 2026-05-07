@@ -36,9 +36,11 @@ Direct absorption of `input_scale` as a per-tensor scalar GEMM alpha modifier (i
 
 Q4_K_M decodes coherent for chat but degenerates on complex code-gen prompts (Fibonacci → backtick loop). Cause is accumulated FP16 drift over 30 layers. Practical fix: use Q5_K_M or Q8_0 when output quality matters.
 
-### MoE D2H routing blocks CUDA Graphs (non-fast-path)
+### MoE expert offload disables CUDA Graphs
 
-Non-Gemma-4 / non-NVFP4-prequant MoE decode falls through the legacy expert-routing path with a D2H sync per layer per token, so CUDA Graphs are disabled for these models. Gemma-4 and NVFP4-prequant MoE (Qwen3.6, Gemma-4 llm-compressor) capture cleanly via the decode fast-path. Generalising the fast-path to GGUF MoE would restore Graphs.
+Decode fast-path (`src/graph/executor_forward_moe.cu:524`) handles all device-resident MoE quants — Q6_K, Q8_0, Q4_0, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, NVFP4 — fully device-side (no D2H memcpy of routing or expert offsets), so CUDA Graphs capture cleanly. Verified A/B 2026-05-07: Qwen3-Coder Q6_K tg128 117 → 232 tok/s (+97%), Gemma-4 Q4_K_M tg128 65 → 179 tok/s (+177%).
+
+The remaining limitation is **host-offloaded experts**: when the model + KV doesn't fit in VRAM, `experts_on_host_=true` triggers per-layer H2D staging via `expert_cache_` LRU at `executor_forward_moe.cu:1517`, which inserts a host pointer dereference + `cudaMemcpyAsync` per expert per token. `engine.cpp:936` disables CUDA Graphs in that mode. Tip: bumping `IMP_EXPERT_OVERHEAD_PCT` from 30 to 10 trades VRAM headroom for full on-device experts and unlocks +180% decode on Qwen3.6-35B Q4_K_M. Generalising the LRU prefetch to be device-side / async-pipelined would restore Graphs while keeping host-offload available.
 
 ### Reasoning models + JSON schema — preamble pass-through
 
