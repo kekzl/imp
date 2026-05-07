@@ -109,8 +109,17 @@ private:
     bool absorb_active(int32_t token, const std::string& text) {
         seen_++;
 
-        // Close token (e.g. </think>) — consume and exit to FSM.
+        // Close token (e.g. </think>) — in tool-aware mode, stay ACTIVE so
+        // tool-opener detection runs in the post-think window. Reset the
+        // budget counter so the post-think slack is fresh. In legacy mode
+        // (no tool detection), exit to OFF and let the FSM enforce the
+        // structural mask.
         if (close_token_ >= 0 && token == close_token_) {
+            if (tool_detection_active()) {
+                seen_ = 0;
+                char_buf_.clear();
+                return true;
+            }
             state_ = State::OFF;
             return true;
         }
@@ -168,6 +177,10 @@ private:
         }
 
         return true;  // body content is always absorbed
+    }
+
+    bool tool_detection_active() const {
+        return !open_tokens_.empty() || !open_prefix_.empty();
     }
 
     bool is_tool_open_token(int32_t token) const {

@@ -450,5 +450,64 @@ TEST(PreambleGateTest, LegacyConfigureKeepsBinaryBehavior) {
     EXPECT_FALSE(g.active());
 }
 
+TEST(PreambleGateTest, ToolModeReasoningCloseStaysActiveForToolDetection) {
+    // Reasoning models (Qwen3.6, Gemma-4 thinking) emit <think>...</think>
+    // before any structured output. With tools+schema both set, the gate
+    // must stay ACTIVE after </think> so a subsequent <tool_call> opener
+    // is recognised. In legacy (non-tool) mode, </think> still exits to
+    // OFF — see ResetReactivatesGate / AbsorbsThinkingTokensThenTransitionsOnClose.
+    PreambleGate g;
+    g.configure_with_tools(TOK_THINK_CLOSE, /*budget=*/64,
+                           /*open_tokens=*/{TOK_TOOL_OPEN},
+                           /*close_tokens=*/{TOK_TOOL_CLOSE},
+                           /*open_prefix=*/"",
+                           /*close_suffix=*/"");
+
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "let me think"));
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_TRUE(g.active());  // still ACTIVE in tool-aware mode
+
+    // Tool opener now lands in TOOL_BODY just like the no-think path.
+    EXPECT_TRUE(g.absorb(TOK_TOOL_OPEN, "<tool_call>"));
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, "{"));  // body content, not preamble exit
+    EXPECT_TRUE(g.active());
+
+    // Close-token works as before, → TERMINAL_OFF.
+    EXPECT_TRUE(g.absorb(TOK_TOOL_CLOSE, "</tool_call>"));
+    EXPECT_TRUE(g.active());
+}
+
+TEST(PreambleGateTest, ToolModeReasoningBudgetResetsAfterThinkClose) {
+    // After </think>, the post-think budget should be fresh — i.e. the
+    // budget counter resets so a long thinking block doesn't exhaust the
+    // slack window before the tool opener can fire.
+    PreambleGate g;
+    g.configure_with_tools(TOK_THINK_CLOSE, /*budget=*/4,
+                           {TOK_TOOL_OPEN}, {TOK_TOOL_CLOSE}, "", "");
+
+    // Burn 3 tokens of "thinking" (under budget).
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "a"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "b"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "c"));
+    EXPECT_TRUE(g.active());
+
+    // </think> resets the budget — we should now be able to absorb 3+
+    // more text tokens before exhaust.
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_TRUE(g.active());
+
+    // Three more tokens still fit under fresh budget.
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "d"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "e"));
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "f"));
+    EXPECT_TRUE(g.active());
+
+    // Fourth post-think token exhausts the fresh budget.
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "g"));
+    EXPECT_FALSE(g.active());
+}
+
 }  // namespace
 }  // namespace imp
