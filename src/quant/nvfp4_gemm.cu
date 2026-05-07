@@ -1180,8 +1180,45 @@ static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
 static std::mutex s_nvfp4_dequant_mtx;
 
+// Pre-allocated workspace from the executor. When set, ensure_dequant_buffer
+// uses this instead of the lazy cudaMalloc path — which would fail inside
+// CUDA stream capture. Lifetime owned by caller of set_nvfp4_dequant_workspace.
+static void* s_nvfp4_dequant_ws_buf = nullptr;
+static size_t s_nvfp4_dequant_ws_size = 0;
+
+void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes) {
+    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
+    s_nvfp4_dequant_ws_buf = buf;
+    s_nvfp4_dequant_ws_size = size_bytes;
+}
+
+size_t nvfp4_lazy_dequant_buf_size_for_testing() {
+    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
+    return s_nvfp4_dequant_buf_size;
+}
+
 // Must be called with s_nvfp4_dequant_mtx held.
-static void* ensure_dequant_buffer(size_t needed) {
+static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
+    // Prefer the pre-allocated workspace (graph-safe path).
+    if (s_nvfp4_dequant_ws_buf && needed <= s_nvfp4_dequant_ws_size)
+        return s_nvfp4_dequant_ws_buf;
+
+    // If the stream is in capture mode, cudaMalloc would fail with "operation
+    // not permitted when stream is capturing". Refuse cleanly with a clear
+    // error rather than letting the runtime crash the capture state.
+    cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap_status) == cudaSuccess &&
+        cap_status == cudaStreamCaptureStatusActive) {
+        IMP_LOG_ERROR(
+            "gemm_nvfp4: dequant fallback called inside CUDA stream capture but no "
+            "pre-allocated workspace covers %zu bytes (have %zu). cudaMalloc inside "
+            "capture would fail. Pre-allocate via set_nvfp4_dequant_workspace() "
+            "before capture begins.",
+            needed, s_nvfp4_dequant_ws_size);
+        return nullptr;
+    }
+
+    // Non-capture path: legacy lazy cudaMalloc (re-grows as needed).
     if (needed <= s_nvfp4_dequant_buf_size)
         return s_nvfp4_dequant_buf;
     if (s_nvfp4_dequant_buf)
@@ -1233,7 +1270,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
 
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
-    void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes);
+    void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes, stream);
     if (!dequant_buf)
         return;
 

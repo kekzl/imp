@@ -1166,6 +1166,13 @@ bool Engine::init_kv_cache() {
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
+
+    // Pre-allocate the gemm_nvfp4 fallback dequant workspace. Sized from
+    // wcache_.nvfp4 which is populated by pre_dequant_weights above, so this
+    // call must come AFTER. Lets the M>1 fallback path (used by future
+    // multi-token verify / spec-decode) run inside CUDA stream capture
+    // without crashing on cudaMalloc.
+    (void)executor_->allocate_nvfp4_dequant_workspace();
     if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 
