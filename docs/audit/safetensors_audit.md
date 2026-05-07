@@ -5,6 +5,8 @@
 
 **Audit method:** five parallel `Explore` agents (one per subsection) cross-referenced against the running CLAUDE.md notes.
 
+> **Status (2026-05-07):** Phase 2 has landed via PR #116 — 15 of 18 actionable items are now closed; 3 (#16-18) ship detection + warnings only and are tracked for separate follow-up PRs. See [Phase 2 outcomes](#phase-2-outcomes) below for the full mapping. Body of the audit is the original Phase-1 snapshot — line numbers were accurate at audit time but have drifted by ~50-100 lines for files modified by Phase 2.
+
 ---
 
 ## 1.1 Model Detection
@@ -308,3 +310,58 @@ src/graph/executor_forward*.cu         # runtime dispatch
 src/quant/dequant_*.cu                 # GGML & GPTQ dequant kernels
 src/vision/vision_loader.cpp           # mmproj SigLIP loader
 ```
+
+---
+
+## Phase 2 outcomes
+
+Status of the 22 actionable items (1–17 are unique; 18–22 in the Phase-1 list were "cheap auto-detect" duplicates of items above) after PR #116:
+
+### ✅ Fully resolved (15)
+
+| #  | Item                                                              | Commit         | Notes                                                                                                                          |
+|----|-------------------------------------------------------------------|----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| 1  | RoPE Llama-3 scaling parser                                       | `2a52bc0`      | Per-pair factor table built at parse time, reuses LongRoPE infra. Unit test for HF-published Llama-3.1-8B values.              |
+| 2  | Auto-FP8 KV from Modelopt metadata                                | `2a52bc0`+`2aade68` | Hint surfaced (`cfg.kv_cache_quant_hint`); engine logs author intent but does not auto-flip (correctness varies by family). |
+| 3  | Enforce `tie_word_embeddings` flag                                | `2a52bc0`+`2aade68` | Tri-state parsed; loader cross-checks vs `lm_head.weight` presence and warns on mismatch.                                     |
+| 4  | Warn on FP8 E5M2 → E4M3 silent proxy                              | `2aade68`      | One-shot WARN at first occurrence (avoids per-tensor spam).                                                                    |
+| 5  | Validate `attention_bias` / `mlp_bias` config flags vs tensors    | `2a52bc0`+`2aade68` | Tri-state parsed; per-layer null-check + summary WARN at end of load.                                                          |
+| 6  | Surface unknown-architecture detection                            | `2a52bc0`+`2aade68` | `arch_inferred_fallback` flag + actionable WARN with "add a class mapping" advice.                                            |
+| 7  | Warn on multi-element `architectures` arrays                      | `2a52bc0`      | Lists dropped entries explicitly.                                                                                              |
+| 8  | Warn-and-fallback on non-NVFP4 `recipe.yaml` schemes              | `a0e9734`      | Soft-fail returns false from `load_nvfp4_config()`; SafeTensors loader proceeds with wire dtype.                              |
+| 9  | Multi-shard load progress reporting                               | `2aade68`      | Atomic counter + `[i/N] mmap'd shard …` per worker.                                                                            |
+| 10 | Plumb GPTQ `desc_act` through dequant                             | `28814e6`      | Flag propagated to `GPTQWeight`; warn if `desc_act:true` and `g_idx` tensor absent (silent miscompute path).                  |
+| 11 | NVFP4 `input_scale` decision                                      | `4e8b923`      | Documented as audit-only (refuted as long-context-bug cause); skip prod GPU upload, save VRAM.                                |
+| 12 | GDN head layout from metadata                                     | `01fdcd8`      | Default still loader-path-driven; `IMP_GDN_LAYOUT=tiled\|grouped` env override for cross-converted checkpoints.               |
+| 13 | MXFP4 detection on SafeTensors                                    | `bda0c3d`      | `quantization_config.quant_method == "mxfp4"` parsed → flag + WARN. **Decode path is GGUF-only — future work.**               |
+| 14 | SentencePiece `tokenizer.model` path                              | `da229ad`      | Actionable IMP_LOG_ERROR with the conversion recipe, instead of null-tokenizer crash. **Native parser is future work.**       |
+| 15 | Map Llama-4 / Qwen3.5 non-MoE on SafeTensors                      | `bda0c3d`      | `Llama4ForCausalLM` → `LLAMA4`, `Qwen3_5ForCausalLM` → `QWEN35`. **GLM intentionally not mapped** (no real impl path).         |
+
+### ⚠️ Detection + warning only (3) — implementations are future work
+
+| #  | Item                          | Commit     | What landed                                                                                                                              | What's missing                                                                                          |
+|----|-------------------------------|------------|------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| 16 | AWQ INT4                      | `7c0b8c8`  | `HFConfigLoader::load_awq_config()` covers HF-standard nesting + AutoAWQ legacy field names; loader emits WARN naming bits/group_size.   | Native AWQ dequant kernel (or dequant-to-FP16 fallback). Direction users to GPTQ / NVFP4 for now.       |
+| 17 | DeepSeek MLA (V2/V3)          | `52e0ef0`  | `kv_lora_rank > 0` or `q_lora_rank > 0` → load-time WARN that DEEPSEEK forward path uses MHA and produces incorrect outputs.             | MLA-aware attention path (`q_lora_rank`, `kv_lora_rank`, `qk_rope_head_dim`, `qk_nope_head_dim`, `v_head_dim`). Multi-week effort. |
+| 18 | Multimodal SafeTensors loaders | `52e0ef0` | `vision_config` block presence → WARN naming `model_type`. Vision tower silently skipped today.                                          | Per-family loaders (Qwen-VL, Llava, Pixtral, Gemma-3 vision-from-SafeTensors), vision encoder, prefix-injection wiring. |
+
+### Resolution method (where to look)
+
+- All Phase-2 commits land on branch `chore/safetensors-audit-phase-2` (PR #116). Cherry-picked from the original `fix/gemma4-long-context-chunked-prefill` branch.
+- New unit tests in `tests/test_hf_config_loader.cpp` cover Llama-3 RoPE, tri-state flags, arch fallback, MXFP4 / AWQ / MLA / vision detections, and the newly-mapped HF arch class names. 9 new tests, all green.
+- The chunked-prefill default-fix that originally lived on the same dev branch is shipping separately as PR #117.
+
+### Items that remain truly unresolved
+
+- **GLM** — class not mapped, intentionally. Adding `GlmForCausalLM` → `LLAMA` would silently produce wrong outputs because GLM's architecture (especially in earlier ChatGLM variants) diverges from LLAMA enough to matter. Real fix: add a `GLM` enum entry + dedicated forward path.
+- **Native SentencePiece (.model) parser** — protobuf decoder + Unigram model decoder + byte-fallback handling, ~few hundred LoC. Workaround documented in the WARN.
+- **AWQ dequant kernel** — packing convention differs from GPTQ (column-packed + interleave permutation). MVP path: dequant-to-FP16 + cuBLAS.
+- **DeepSeek MLA attention** — proper multi-head latent attention path. Multi-week effort.
+- **Multimodal SafeTensors loaders** — per-family work (Qwen-VL, Llava, Pixtral, Gemma-3 vision).
+- **Tiktoken parser** — uncommon in supported families; ignored.
+
+### Implementation snapshot — verification
+
+- 322 unit tests pass on the audit branch (1 skipped baseline). 9 new tests added.
+- Pre-push hook `verify-fast` (build + filtered tests + perf gate + Qwen3-4B Q8_0 smoke prompt distinct=8 contains 'Paris') passes cleanly on each push.
+- No changes to compute kernels, no perf-baseline impact (`tests/perf_baseline.json` unchanged).
