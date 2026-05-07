@@ -12,6 +12,79 @@
 
 namespace imp {
 
+// Spec-compliance check for the NVFP4 weight_packed/weight_scale shape pair.
+bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer, int64_t packed_inner,
+                                        int64_t scale_outer, int64_t scale_inner, std::string* err) {
+    if (packed_outer != scale_outer) {
+        if (err) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "weight_packed outer dim %lld != weight_scale outer dim %lld",
+                          static_cast<long long>(packed_outer), static_cast<long long>(scale_outer));
+            *err = buf;
+        }
+        return false;
+    }
+    // packed_inner = K/2, scale_inner = K/16, ratio must be 8 (group_size=16).
+    if (scale_inner <= 0 || packed_inner != scale_inner * 8) {
+        if (err) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "weight_scale inner dim %lld * 8 != weight_packed inner dim %lld "
+                          "(group_size != 16 or shape mismatch)",
+                          static_cast<long long>(scale_inner), static_cast<long long>(packed_inner));
+            *err = buf;
+        }
+        return false;
+    }
+    return true;
+}
+
+// Spec-compliance check for the NVFP4 weight_scale tensor's wire dtype.
+bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err) {
+    if (qt == QType::FP8_E4M3)
+        return true;
+    if (err) {
+        *err = std::string("weight_scale qtype is ") + qtype_name(qt) +
+               ", expected FP8_E4M3 (compressed-tensors NVFP4 spec)";
+    }
+    return false;
+}
+
+// Defensive promotion of weight_scale_2 → GEMM tensor_scale. Pure host fn.
+// See header comment in quant/nvfp4_quant.h for the formula details.
+float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed) {
+    if (was_zeroed)
+        *was_zeroed = false;
+    if (!std::isfinite(h_scale)) {
+        if (was_zeroed)
+            *was_zeroed = true;
+        return 0.0f;
+    }
+    if (is_llm_compressor) {
+        if (h_scale == 0.0f) {
+            if (was_zeroed)
+                *was_zeroed = true;
+            return 0.0f;
+        }
+        float promoted = 1.0f / h_scale;
+        if (!std::isfinite(promoted)) {
+            if (was_zeroed)
+                *was_zeroed = true;
+            return 0.0f;
+        }
+        return promoted;
+    }
+    // Modelopt: multiplicative. Zero is a legitimate "null this layer" value;
+    // we still mark it as zeroed so the caller can surface the count, but we
+    // keep the value itself as 0.0f (no flip → no Inf).
+    if (h_scale == 0.0f) {
+        if (was_zeroed)
+            *was_zeroed = true;
+    }
+    return h_scale;
+}
+
 // ---------------------------------------------------------------------------
 // NVFP4 (FP4 E2M1) quantization with two-level scaling.
 //

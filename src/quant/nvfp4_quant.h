@@ -3,6 +3,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <string>
 
 namespace imp {
 
@@ -74,5 +75,44 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* outpu
 
 // Free NvFP4MoEQuantResult device memory.
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
+
+// ---------------------------------------------------------------------------
+// Defensive promotion of weight_scale_2 into the GEMM-internal tensor_scale.
+//
+// Modelopt:        val = fp4 * micro_scale * weight_scale_2  (multiply)
+// llm-compressor:  val = fp4 * micro_scale / weight_scale_2  (divide → store 1/x)
+//
+// A weight_scale_2 of 0, NaN, or ±Inf would produce non-finite GEMM output and
+// contaminate the entire layer's hidden state. This helper folds in defensive
+// zeroing for both formats:
+//   - non-finite h_scale         → 0.0f
+//   - llm-compressor h_scale=0   → 0.0f (1/0 would be Inf)
+//   - llm-compressor 1/h_scale non-finite → 0.0f
+//   - Modelopt h_scale=0         → 0.0f (intentionally null layer)
+//
+// `*was_zeroed` is set true when defensive zeroing fired (used for diagnostic
+// counters at end of load).
+//
+// Pure host function — testable without CUDA. Defined in nvfp4_quant.cu.
+float nvfp4_promote_weight_scale_2(float h_scale, bool is_llm_compressor, bool* was_zeroed);
+
+// Valid wire dtype for NVFP4 weight_scale per compressed-tensors spec.
+// Spec mandates float8_e4m3fn. NVFP4/MXFP4 cross-misroutes and corrupt
+// checkpoints would arrive here with U8/I8 (UE8M0) or other dtypes — those
+// must be rejected at promote time so the slow dequant→cuBLAS fallback runs
+// instead of silently producing wrong output through the FP8 decoder.
+bool nvfp4_validate_weight_scale_dtype(QType qt, std::string* err);
+
+// Verify that weight_scale's inner dimension matches weight_packed's inner
+// dimension at the spec's group_size=16. weight_packed is stored as [N, K/2]
+// (packed halves) and weight_scale must be [N, K/16] = [N, weight_packed_K/8].
+//
+// Mismatch on outer dim or inner-dim ratio rejects promotion.
+//   packed_inner_dim is `weight.shape[1]` from the SafeTensors loader (= K/2).
+//   scale_inner_dim is `weight_scale.shape[1]`.
+//   packed_outer_dim/scale_outer_dim are shape[0] of each.
+bool nvfp4_validate_packed_scale_shapes(int64_t packed_outer_dim, int64_t packed_inner_dim,
+                                        int64_t scale_outer_dim, int64_t scale_inner_dim,
+                                        std::string* err);
 
 }  // namespace imp

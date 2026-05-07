@@ -234,6 +234,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         int n_zero_scale = 0;
         int n_nonfinite_after_flip = 0;
         int n_with_input_scale = 0;
+        int n_wrong_scale_dtype = 0;
         auto promote = [&](const NvFP4PreQuantWeight& sc, Tensor& w, const char* key) {
             if (!sc.valid() || !w.data)
                 return false;
@@ -241,6 +242,36 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 IMP_LOG_DEBUG("NVFP4 prequant: skipping %s (data_dev=%d, scale_dev=%d)", key, w.on_device,
                               sc.weight_scale.on_device);
                 return false;
+            }
+            // F8: enforce compressed-tensors NVFP4 spec: weight_scale must be
+            // float8_e4m3fn. Defending against NVFP4↔MXFP4 cross-misrouting
+            // (where weight_scale would be U8 / UE8M0 power-of-two) and other
+            // accidental dtype mismatches that would silently corrupt output
+            // through the FP8 E4M3 decoder.
+            std::string scale_dtype_err;
+            if (!nvfp4_validate_weight_scale_dtype(sc.weight_scale.qtype, &scale_dtype_err)) {
+                n_wrong_scale_dtype++;
+                IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion (weight stays in "
+                             "dequant->cuBLAS fallback path).", key, scale_dtype_err.c_str());
+                return false;
+            }
+
+            // F6: enforce group_size=16 between weight_packed [N, K/2] and
+            // weight_scale [N, K/16]. The kernel hard-codes kMicroBlockSize=16
+            // (nvfp4_gemm.cu:31); a shape mismatch would silently produce
+            // 12.5% per-element step quant noise on roughly half the elements
+            // (group_size != 16) or align scales onto wrong rows
+            // (transposed weight_scale). Both routes are 2D at promote time
+            // (per-expert weights have been split by weight_upload.cu).
+            if (w.ndim == 2 && sc.weight_scale.ndim == 2) {
+                std::string shape_err;
+                if (!nvfp4_validate_packed_scale_shapes(w.shape[0], w.shape[1],
+                                                       sc.weight_scale.shape[0], sc.weight_scale.shape[1],
+                                                       &shape_err)) {
+                    n_wrong_scale_dtype++;
+                    IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion.", key, shape_err.c_str());
+                    return false;
+                }
             }
             float h_scale = 1.0f;
             if (sc.weight_scale_2.data) {
@@ -250,32 +281,37 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     memcpy(&h_scale, sc.weight_scale_2.data, sizeof(float));
                 }
             }
-            // Modelopt:        val = fp4 * micro_scale * tensor_scale  (multiply)
-            // llm-compressor:  val = fp4 * micro_scale / tensor_scale  (divide → store 1/x)
-            //
-            // Defensive guard: a zero h_scale would make 1/x = +Inf and
-            // contaminate the entire layer's output via the GEMM. This
-            // happens for layers with all-zero weights (rare but observed
-            // in some llm-compressor exports). Fall back to 0 so the
-            // weight contribution is null instead of NaN/Inf.
-            float promoted_scale;
-            if (cfg.is_llm_compressor_nvfp4) {
-                if (h_scale == 0.0f) {
-                    n_zero_scale++;
-                    promoted_scale = 0.0f;
-                    IMP_LOG_WARN("NVFP4 prequant: %s has weight_scale_2=0 — zeroing tensor_scale "
-                                 "(would otherwise produce Inf via reciprocal flip)", key);
-                } else {
-                    promoted_scale = 1.0f / h_scale;
-                    if (!std::isfinite(promoted_scale)) {
+            // Defensive promotion: zero, NaN, ±Inf weight_scale_2 → 0.0f. Both
+            // Modelopt (multiply) and llm-compressor (divide → 1/x) paths are
+            // guarded; see nvfp4_promote_weight_scale_2 in quant/nvfp4_quant.h.
+            // Without this guard a non-finite scale would propagate through the
+            // GEMM and contaminate the entire layer's hidden state.
+            bool was_zeroed = false;
+            float promoted_scale = nvfp4_promote_weight_scale_2(h_scale, cfg.is_llm_compressor_nvfp4,
+                                                                &was_zeroed);
+            if (was_zeroed) {
+                if (cfg.is_llm_compressor_nvfp4) {
+                    if (h_scale == 0.0f) {
+                        n_zero_scale++;
+                        IMP_LOG_WARN("NVFP4 prequant: %s has weight_scale_2=0 — zeroing tensor_scale "
+                                     "(would otherwise produce Inf via reciprocal flip)", key);
+                    } else {
                         n_nonfinite_after_flip++;
-                        promoted_scale = 0.0f;
                         IMP_LOG_WARN("NVFP4 prequant: %s reciprocal flip produced non-finite scale "
                                      "from h_scale=%.6g — zeroing", key, h_scale);
                     }
+                } else {
+                    if (h_scale == 0.0f) {
+                        n_zero_scale++;
+                        // Modelopt with h_scale=0 is intentional: a calibrated
+                        // null layer. Log at INFO, no WARN.
+                        IMP_LOG_DEBUG("NVFP4 prequant: %s has weight_scale_2=0 (Modelopt null layer)", key);
+                    } else {
+                        n_nonfinite_after_flip++;
+                        IMP_LOG_WARN("NVFP4 prequant: %s has non-finite weight_scale_2=%.6g — zeroing "
+                                     "tensor_scale", key, h_scale);
+                    }
                 }
-            } else {
-                promoted_scale = h_scale;
             }
             if (sc.input_scale.data) {
                 n_with_input_scale++;
@@ -374,8 +410,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (prequant_count > 0) {
             IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars", prequant_count);
             if (n_zero_scale > 0 || n_nonfinite_after_flip > 0) {
-                IMP_LOG_WARN("NVFP4 prequant: %d zero weight_scale_2 / %d non-finite reciprocal flips "
-                             "(weights zeroed defensively)", n_zero_scale, n_nonfinite_after_flip);
+                IMP_LOG_WARN("NVFP4 prequant: %d zero weight_scale_2 / %d non-finite weight_scale_2 "
+                             "(weights zeroed defensively, applies to both Modelopt and llm-compressor)",
+                             n_zero_scale, n_nonfinite_after_flip);
+            }
+            if (n_wrong_scale_dtype > 0) {
+                IMP_LOG_WARN("NVFP4 prequant: %d weights had non-FP8_E4M3 weight_scale dtype "
+                             "(skipped — possible NVFP4/MXFP4 cross-misroute or corrupt checkpoint)",
+                             n_wrong_scale_dtype);
             }
             if (cfg.is_llm_compressor_nvfp4 && n_with_input_scale > 0) {
                 // input_scale is a SmoothQuant-style activation-rescaling vector

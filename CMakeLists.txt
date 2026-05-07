@@ -375,6 +375,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_loader.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
+        tests/test_safetensors_loader.cpp
         tests/test_config.cpp
     )
 
@@ -416,6 +417,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
+        tests/test_nvfp4_compressed_tensors_ref.cu
         tests/test_nvfp4_gemv_kpar_loop.cu
         tests/test_nvfp4_gemm_graph_capture.cu
         tests/test_turboquant.cu
