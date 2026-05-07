@@ -12,31 +12,15 @@ Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV wri
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
 
-### Gemma-4 long-context recall — confirmed imp bug (not model-inherent)
+### Chunked prefill: missing past-KV in attention (paged-prefill kernel pending)
 
-The 2048-token sentinel-recall test in `tests/fixtures/battery_prompts.json` fails on Gemma-4 in every format imp can serve (llm-compressor NVFP4, Q8_0 GGUF). Doc-length sweep 128–2048 tokens shows failure starts at the 768–1024 boundary and is consistent above.
+Root-caused 2026-05-07 via cross-engine A/B (same `gemma-4-26B-A4B-it-Q8_0.gguf`, llama.cpp v9049 vs imp at chunk=512). imp's chunked prefill at `src/graph/executor_attention.cu:188-190` extracts Q/K/V views over the current chunk only (size n=chunk_len). The attention path computes scores over [chunk_len, chunk_len] without reading past chunks' K/V from the cache — chunk N's queries cannot attend to positions [0, offset).
 
-Cross-engine A/B 2026-05-07 on the **same `gemma-4-26B-A4B-it-Q8_0.gguf` file**:
+For full-attention models (Qwen3, Llama) decode recovers via paged attention on the first generated token. For Gemma-4's 5:1 SWA:full architecture the bug bites hard: propagated hidden states are corrupted enough that decode cannot recover. Long-context sentinel recall fails ≥1024 tokens.
 
-| doc tokens | imp | llama.cpp (`ghcr.io/ggml-org/llama.cpp:server-cuda` v9049) |
-|---:|:---:|:---:|
-| 128–512 | mostly ✓ | ✓ |
-| 768 | ✓ on Q8_0 | ✓ |
-| 1024 | ✗ regurgitates doc | ✓ |
-| 1280 | ✗ "not in text" | ✓ |
-| 1536 | ✗ "not in text" | ✓ |
-| 1800 | ✗ corrupted "MERIDIAN→WORD" | ✓ |
-| 2048 | ✗ "moon could read its spine" | ✓ |
+PR #114 (`fix(server): drop 512-token prefill chunking default`) ships the practical mitigation: default `prefill_chunk_size=0` means "single-chunk up to executor max_tokens", clamped by `engine.cpp:1644`. This avoids triggering the bug for typical prompts at the cost of decode blocking during long single-shot prefills. Multi-tenant servers that need decode-latency guarantees should set `--prefill-chunk-size` explicitly. Result: Gemma-4-NVFP4 phase4 battery 18/20 → 19/20 (the remaining failure is a Fibonacci-convention validator artifact, not a recall bug). Doc-length sweep 128–3000 token: 11/11 pass (was 4/11).
 
-llama.cpp passes every size. Same model, same prompt, same sentinel. So **imp has a Gemma-4 long-context bug** — not a model limitation, not an NVFP4 path issue (Q8_0 fails the same way), and not imp's general long-context (Qwen3-30B-Modelopt passes 128–2048 in imp).
-
-Suspected: interaction of Gemma-4's 5:1 SWA:full architecture with imp's attention dispatch at `executor_attention.cu:688-763`. A workaround comment at `:701-712` already acknowledges "FMHA chain emits 'own owners and' garbage" for SWA at sliding_active and routes through `naive_attention_prefill`, but per the cross-engine A/B that workaround doesn't fully fix recall. Code paths affected at the failure boundary:
-
-- SWA layer (hd=256), n=1024 exactly: cuBLAS path with causal-only mask (sliding_window not plumbed through `attention_cublas_prefill`).
-- SWA layer at n>1024: `naive_attention_prefill` with window — but recall still fails; root cause not yet isolated.
-- Global layer at n>1024: cuBLAS path (no sliding window applies). FP32 S-matrix.
-
-Real fix needs per-layer numerical comparison vs llama.cpp at long context to identify the exact divergence (RoPE? Q-norm? cuBLAS algorithm choice? KV cache layout?). See `memory/llm_compressor_input_scale_dead_end_2026_05_07.md` for the full sweep + bracket recipe.
+The deeper bug (chunked prefill not reading past KV) remains for explicit-chunk callers. The proper fix is a paged-prefill kernel that reads K/V from cache during chunked attention — separate, larger work.
 
 ### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
 
