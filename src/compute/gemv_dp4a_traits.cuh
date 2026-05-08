@@ -17,6 +17,18 @@ namespace imp {
 // With stride 9: lane i starts at bank (i*9)%32 — all unique, zero conflicts.
 static constexpr int kSmemQ8Stride = 9;
 
+// Blackwell add.f32x2 PTX: vectorized FP32 add (2 lanes/instruction).
+// sm_120a unconditional; no fallback needed.
+__device__ __forceinline__ float2 add_f32x2(float2 a, float2 b) {
+    uint64_t ar, br, sr;
+    memcpy(&ar, &a, sizeof(float2));
+    memcpy(&br, &b, sizeof(float2));
+    asm("add.f32x2 %0, %1, %2;" : "=l"(sr) : "l"(ar), "l"(br));
+    float2 s;
+    memcpy(&s, &sr, sizeof(float2));
+    return s;
+}
+
 // File-local tag enum for template dispatch (distinct from imp::QType).
 enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
 
@@ -718,8 +730,11 @@ __global__ void gemv_dp4a_kpar_qkv_kernel(const uint8_t* __restrict__ W_q, const
         partial[warp_id] = sum;
     __syncthreads();
 
-    if (threadIdx.x == 0)
-        y_out[local_row] = __float2half(partial[0] + partial[1] + partial[2] + partial[3]);
+    if (threadIdx.x == 0) {
+        const float2 s = add_f32x2(make_float2(partial[0], partial[1]),
+                                   make_float2(partial[2], partial[3]));
+        y_out[local_row] = __float2half(s.x + s.y);
+    }
 }
 
 template <typename QT>
@@ -765,8 +780,11 @@ __global__ void gemv_dp4a_kpar_gate_up_kernel(const uint8_t* __restrict__ gate_w
         partial[warp_id] = sum;
     __syncthreads();
 
-    if (threadIdx.x == 0)
-        y[row] = __float2half(partial[0] + partial[1] + partial[2] + partial[3]);
+    if (threadIdx.x == 0) {
+        const float2 s = add_f32x2(make_float2(partial[0], partial[1]),
+                                   make_float2(partial[2], partial[3]));
+        y[row] = __float2half(s.x + s.y);
+    }
 }
 
 // ============================================================================
