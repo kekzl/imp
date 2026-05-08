@@ -149,7 +149,10 @@ if (chunked_prefill) {
         paged_kv_gather_fp16(v_full, (const half*)cache->v_ptr(kv_layer, 0),
                              state.block_tables, q_offset, kv_bs, nkv, hd, stream);
     } else {  // FP8_E4M3
-        float kv_scale = cache->kv_scale();
+        // Per-layer FP32 scale lives on the executor (matches paged_attention_decode_fp8 path
+        // at executor_attention.cu:928).
+        float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
+                             ? kv_scales_[kv_layer] : 1.0f;
         paged_kv_gather_fp8_to_fp16(k_full,
                                     (const __nv_fp8_e4m3*)cache->k_ptr(kv_layer, 0),
                                     state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
@@ -208,9 +211,10 @@ Sentinel: `imp_config.prefill_chunk_size == -1` means "use model-derived default
 bool Engine::supports_chunked_prefill() const {
     const auto& cfg = model_->config();
     if (cfg.arch == ModelArch::GEMMA4) return false;
-    if (cfg.arch == ModelArch::QWEN35_GDN) return false;
-    if (cfg.arch == ModelArch::QWEN36_MOE) return false;
-    if (cfg.arch == ModelArch::NEMOTRON_H) return false;
+    if (cfg.arch == ModelArch::QWEN35) return false;       // GDN hybrid
+    if (cfg.arch == ModelArch::QWEN35_MOE) return false;   // GDN hybrid
+    if (cfg.arch == ModelArch::QWEN36_MOE) return false;   // GDN hybrid
+    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) return false;  // Mamba2 hybrid
     KVCache* cache = kv_cache_raw_;
     if (cache && cache->qtype() != QType::F16 && cache->qtype() != QType::FP8_E4M3) return false;
     return true;
