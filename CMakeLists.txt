@@ -96,6 +96,7 @@ set(IMP_MODEL_SOURCES
     src/model/gguf_loader.cpp
     src/model/safetensors_loader.cpp
     src/model/llm_compressor_loader.cpp
+    src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
     src/model/hf_hub.cpp
@@ -376,6 +377,7 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
+        tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
     )
 

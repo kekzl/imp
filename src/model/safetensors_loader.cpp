@@ -3,6 +3,8 @@
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
 #include "model/llm_compressor_loader.h"
+#include "model/sentencepiece_loader.h"
+#include "model/tokenizer.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -1099,18 +1101,31 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             }
         } else if (has_spm) {
             // SentencePiece-only checkpoint (older Llama 1/2, Mistral, …).
-            // imp's SafeTensors path doesn't have a native SentencePiece
-            // (.model protobuf) parser yet. Emit an actionable error so the
-            // user knows the workaround instead of failing later with a
-            // confusing null-tokenizer crash.
-            IMP_LOG_ERROR(
-                "Found %s but no tokenizer.json — imp's SafeTensors path does "
-                "not yet parse SentencePiece (.model protobuf) tokenizers. "
-                "Workaround: regenerate tokenizer.json via\n"
-                "  python -c \"from transformers import AutoTokenizer; "
-                "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"\n"
-                "or convert the model to GGUF (which does support .model).",
-                tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
+            // Native protobuf parser populates vocab + scores + token types;
+            // the SPM-style encoder in tokenizer.cpp:encode_spm() handles the
+            // rest. BPE-from-spm checkpoints get loaded with the same vocab
+            // table — the score-based encoder produces equivalent output for
+            // most practical text.
+            SentencePieceModel spm = load_sentencepiece_model_file(tok_spm_path);
+            if (!spm.empty()) {
+                auto tok = std::make_unique<Tokenizer>();
+                tok->set_type("spm");
+                tok->load_vocab(spm.pieces, spm.scores, spm.bos_id, spm.eos_id);
+                tok->load_token_types(spm.types);
+                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty()) {
+                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
+                }
+                model->set_tokenizer(std::move(tok));
+                IMP_LOG_INFO("Loaded SentencePiece tokenizer from %s (no tokenizer.json present)",
+                             tok_spm_path.c_str());
+            } else {
+                IMP_LOG_ERROR(
+                    "Found %s but failed to parse — checkpoint may be corrupt or "
+                    "use an unsupported SentencePiece variant. Workaround: convert via\n"
+                    "  python -c \"from transformers import AutoTokenizer; "
+                    "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"",
+                    tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
+            }
         } else {
             IMP_LOG_WARN(
                 "No tokenizer.json or tokenizer.model in %s — model will load "
