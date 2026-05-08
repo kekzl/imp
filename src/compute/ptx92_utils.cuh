@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cstdint>
+#include <cstring>
 
 namespace imp {
 
@@ -63,5 +64,31 @@ __device__ __forceinline__ uint16_t cvt_f16x2_to_e2m1x2(uint32_t f16x2) {
     return result;
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Blackwell add.f32x2 PTX (sm_120a)
+//
+// 2-lane FP32 add at PTX level. NOTE: ptxas on consumer Blackwell (sm_120)
+// decomposes this into 2× scalar FADD at SASS — the vectorized hardware path
+// is not exposed on consumer Blackwell. The change is structural / forward-
+// compat, not a perf delta. Bit-cast via uint64_t is the only register form
+// ptxas accepts for this PTX op (verified empirically against CUDA 13.2.1
+// nvcc/ptxas; the natural {%0,%1},{%2,%3},{%4,%5} form with =f/f constraints
+// is rejected as "Arguments mismatch for instruction 'add'").
+//
+// Also note: this folds 4 floats as (a0+b0) + (a1+b1) instead of left-fold
+// ((a0+a1)+b0)+b1 — FP add is non-associative, so callers may see a ≤1-ULP
+// FP32 difference on rounding-boundary inputs (sub-ULP at FP16 after a
+// downstream half cast).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float2 add_f32x2(float2 a, float2 b) {
+    uint64_t ar, br, sr;
+    memcpy(&ar, &a, sizeof(float2));
+    memcpy(&br, &b, sizeof(float2));
+    asm("add.f32x2 %0, %1, %2;" : "=l"(sr) : "l"(ar), "l"(br));
+    float2 s;
+    memcpy(&s, &sr, sizeof(float2));
+    return s;
+}
 
 }  // namespace imp

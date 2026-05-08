@@ -5,6 +5,7 @@
 
 #include "compute/gemm.h"
 #include "runtime/pdl.h"
+#include "compute/ptx92_utils.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstring>
@@ -16,18 +17,6 @@ namespace imp {
 // With stride 8: lanes 0,4,8,... all hit the same shared memory bank → 8-way conflict.
 // With stride 9: lane i starts at bank (i*9)%32 — all unique, zero conflicts.
 static constexpr int kSmemQ8Stride = 9;
-
-// Blackwell add.f32x2 PTX: vectorized FP32 add (2 lanes/instruction).
-// sm_120a unconditional; no fallback needed.
-__device__ __forceinline__ float2 add_f32x2(float2 a, float2 b) {
-    uint64_t ar, br, sr;
-    memcpy(&ar, &a, sizeof(float2));
-    memcpy(&br, &b, sizeof(float2));
-    asm("add.f32x2 %0, %1, %2;" : "=l"(sr) : "l"(ar), "l"(br));
-    float2 s;
-    memcpy(&s, &sr, sizeof(float2));
-    return s;
-}
 
 // File-local tag enum for template dispatch (distinct from imp::QType).
 enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
