@@ -632,7 +632,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
         // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.
         if (config_.use_fp8_prefill) {
-            IMP_LOG_INFO("Gemma 4: disabling FP8 prefill (per-layer head_dim not yet supported)");
+            // FP8 prefill on Gemma-4 is correctness-OK (output matches FP16 path
+            // bit-for-bit on the smoke "capital of France is Paris" prompt) but
+            // ~5-19% slower on prefill (measured 2026-05-09 on Q4_K_M: pp=123 was
+            // 270 vs 334 tok/s, pp=833 was 1086 vs 1141 tok/s — both runs FP8 < FP16).
+            // Likely cause: cuBLASLt FP8 algos for Gemma-4's per-layer head_dim
+            // shape (256/512 split) lose to FP16 cuBLAS at our tile sizes. The
+            // earlier "per-layer head_dim not yet supported" comment was inherited
+            // from the FP8 KV story and inaccurate — the issue is perf, not
+            // correctness. Auto-disable for default-perf.
+            IMP_LOG_INFO("Gemma 4: disabling FP8 prefill (~5-19%% slower than FP16 on this arch)");
             config_.use_fp8_prefill = 0;
         }
         if (config_.use_nvfp4_decode) {
