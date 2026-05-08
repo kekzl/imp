@@ -5,6 +5,7 @@
 
 #include "compute/gemm.h"
 #include "runtime/pdl.h"
+#include "compute/ptx92_utils.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstring>
@@ -718,8 +719,11 @@ __global__ void gemv_dp4a_kpar_qkv_kernel(const uint8_t* __restrict__ W_q, const
         partial[warp_id] = sum;
     __syncthreads();
 
-    if (threadIdx.x == 0)
-        y_out[local_row] = __float2half(partial[0] + partial[1] + partial[2] + partial[3]);
+    if (threadIdx.x == 0) {
+        const float2 s = add_f32x2(make_float2(partial[0], partial[1]),
+                                   make_float2(partial[2], partial[3]));
+        y_out[local_row] = __float2half(s.x + s.y);
+    }
 }
 
 template <typename QT>
@@ -765,8 +769,11 @@ __global__ void gemv_dp4a_kpar_gate_up_kernel(const uint8_t* __restrict__ gate_w
         partial[warp_id] = sum;
     __syncthreads();
 
-    if (threadIdx.x == 0)
-        y[row] = __float2half(partial[0] + partial[1] + partial[2] + partial[3]);
+    if (threadIdx.x == 0) {
+        const float2 s = add_f32x2(make_float2(partial[0], partial[1]),
+                                   make_float2(partial[2], partial[3]));
+        y[row] = __float2half(s.x + s.y);
+    }
 }
 
 // ============================================================================

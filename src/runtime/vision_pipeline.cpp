@@ -90,7 +90,12 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
         }
         need_free = true;
     }
-    cudaMemcpyAsync(d_px, h_pixels, pixel_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAttributes attrs{};
+    attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    attrs.srcLocHint     = { cudaMemLocationTypeHostNumaCurrent, 0 };
+    attrs.dstLocHint     = { cudaMemLocationTypeDevice, 0 };
+    attrs.flags          = 0;
+    cudaMemcpyWithAttributesAsync(d_px, h_pixels, pixel_bytes, &attrs, stream);
 
     bool ok = encoder_->encode(d_px, d_embeddings_, stream);
     cudaStreamSynchronize(stream);
