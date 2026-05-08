@@ -254,16 +254,9 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path, co
     }
 
     int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
-    // Default chunk = 0 means "single chunk up to executor max_tokens"
-    // (capped in engine.cpp:1644). Earlier 512-token default for "decode
-    // doesn't block" is wrong: chunked prefill currently computes attention
-    // only within each chunk — past-chunk K/V in the cache is not included.
-    // For Gemma-4 (5:1 SWA:full architecture) this corrupts long-context
-    // recall above ~1024 tokens; cross-engine A/B vs llama.cpp confirmed
-    // imp fails 1024+ tok sentinel recall while llama.cpp passes (memory/
-    // llm_compressor_input_scale_dead_end_2026_05_07.md). Multi-tenant
-    // servers that need decode-latency guarantees should set chunk
-    // explicitly via --prefill-chunk-size.
+    // Default chunk = -1 → engine resolver picks per-arch default (512 for
+    // full-attention + FP16/FP8 KV, 0 for Gemma-4 / hybrid / sub-byte KV).
+    // Pass 0 via --prefill-chunk-size 0 to force single-chunk for all archs.
     config.prefill_chunk_size = chunk;
 
     int nvfp4 = overrides.value("decode_nvfp4", args.decode_nvfp4);

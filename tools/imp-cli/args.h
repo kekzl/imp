@@ -53,7 +53,7 @@ struct CliArgs {
     bool ssm_fp16 = false;               // Use FP16 for SSM h_state
     bool no_cuda_graphs = false;         // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
-    int prefill_chunk_size = 0;          // --prefill-chunk-size: 0 = no chunking
+    int prefill_chunk_size = 0;          // --prefill-chunk-size: >0 = explicit chunk, 0 = use engine default (-1)
     bool prefill_fp8 = false;            // --prefill-fp8: use FP8 E4M3 weight cache for prefill
     int decode_nvfp4 = -1;               // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;          // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill

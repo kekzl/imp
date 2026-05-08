@@ -1241,7 +1241,7 @@ bool Engine::init_features() {
             // cublasLtMatmul to fail with CUBLAS_STATUS_INVALID_VALUE.
             cudaGetLastError();
         }
-        if (green_ctx_.is_available() && config_.prefill_chunk_size > 0)
+        if (green_ctx_.is_available() && resolve_prefill_chunk_size_() > 0)
             if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size))
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
     }
@@ -1636,12 +1636,53 @@ bool Engine::step_schedule() {
 }
 
 // =====================================================================
+// supports_chunked_prefill_ / resolve_prefill_chunk_size_
+// =====================================================================
+
+bool Engine::supports_chunked_prefill_() const {
+    if (!model_)
+        return false;
+    const auto& cfg = model_->config();
+    // Out-of-scope archs: SWA / dual-head_dim / hybrid (GDN / Mamba2).
+    if (cfg.arch == ModelArch::GEMMA4) return false;
+    if (cfg.arch == ModelArch::QWEN35) return false;
+    if (cfg.arch == ModelArch::QWEN35_MOE) return false;
+    if (cfg.arch == ModelArch::QWEN36_MOE) return false;
+    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) return false;
+    // Out-of-scope KV dtypes: only FP16 + FP8 are wired through paged_kv_gather.
+    if (kv_cache_raw_) {
+        QType kvt = kv_cache_raw_->qtype();
+        if (kvt != QType::F16 && kvt != QType::FP8_E4M3)
+            return false;
+    }
+    return true;
+}
+
+int Engine::resolve_prefill_chunk_size_() const {
+    int explicit_val = config_.prefill_chunk_size;
+    if (explicit_val < 0) {
+        return supports_chunked_prefill_() ? 512 : 0;
+    }
+    if (explicit_val == 0)
+        return 0;
+    // explicit_val > 0
+    if (!supports_chunked_prefill_()) {
+        IMP_LOG_WARN(
+            "prefill_chunk_size=%d ignored: arch=%d / kv_dtype=%d not in chunked-prefill scope; using 0",
+            explicit_val, (int)model_->config().arch,
+            kv_cache_raw_ ? (int)kv_cache_raw_->qtype() : -1);
+        return 0;
+    }
+    return explicit_val;
+}
+
+// =====================================================================
 // step_prefill — process all prefill requests
 // =====================================================================
 
 void Engine::step_prefill(cudaStream_t stream) {
-    int effective_chunk = config_.prefill_chunk_size > 0 ? config_.prefill_chunk_size
-                                                         : executor_->max_tokens();
+    int resolved    = resolve_prefill_chunk_size_();
+    int effective_chunk = (resolved > 0) ? resolved : executor_->max_tokens();
     // Hard cap: chunk size must never exceed the executor's max_tokens
     // (which is itself capped to 256 for SSM/GDN+MoE hybrids and 512 for
     // dense GDN to bound workspace VRAM). Without this clamp, a server-side
