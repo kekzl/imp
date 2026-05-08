@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: imp
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - imp-server:8080
+        labels:
+          service: imp

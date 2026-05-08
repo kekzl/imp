@@ -12,15 +12,22 @@ Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV wri
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
 
-### Chunked prefill: missing past-KV in attention (paged-prefill kernel pending)
+### Chunked prefill scope (full-attention + FP16/FP8 KV)
 
-Root-caused 2026-05-07 via cross-engine A/B (same `gemma-4-26B-A4B-it-Q8_0.gguf`, llama.cpp v9049 vs imp at chunk=512). imp's chunked prefill at `src/graph/executor_attention.cu:188-190` extracts Q/K/V views over the current chunk only (size n=chunk_len). The attention path computes scores over [chunk_len, chunk_len] without reading past chunks' K/V from the cache — chunk N's queries cannot attend to positions [0, offset).
+Default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mistral) with FP16 or FP8 KV cache. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk before a rectangular `attention_cublas_prefill` with `q_offset`-aware causal masking. PR #114 mitigation (default `prefill_chunk_size = 0`) is replaced by `Engine::resolve_prefill_chunk_size_()` which clamps to 0 for out-of-scope archs.
 
-For full-attention models (Qwen3, Llama) decode recovers via paged attention on the first generated token. For Gemma-4's 5:1 SWA:full architecture the bug bites hard: propagated hidden states are corrupted enough that decode cannot recover. Long-context sentinel recall fails ≥1024 tokens.
+**Out-of-scope** — stay at `prefill_chunk_size = 0` via per-arch default; explicit `--prefill-chunk-size N` is logged + clamped to 0:
 
-PR #114 (`fix(server): drop 512-token prefill chunking default`) ships the practical mitigation: default `prefill_chunk_size=0` means "single-chunk up to executor max_tokens", clamped by `engine.cpp:1644`. This avoids triggering the bug for typical prompts at the cost of decode blocking during long single-shot prefills. Multi-tenant servers that need decode-latency guarantees should set `--prefill-chunk-size` explicitly. Result: Gemma-4-NVFP4 phase4 battery 18/20 → 19/20 (the remaining failure is a Fibonacci-convention validator artifact, not a recall bug). Doc-length sweep 128–3000 token: 11/11 pass (was 4/11).
+- Gemma-3 / Gemma-4 (SWA — Gemma-4 also has dual head_dim 256/512)
+- Llama-4 (MoE + SWA)
+- Hybrid models with non-attention layers (Qwen3.5/3.6 GDN, Nemotron-H Mamba2)
+- Sub-byte KV cache dtypes (INT4, NVFP4, TurboQuant variants)
 
-The deeper bug (chunked prefill not reading past KV) remains for explicit-chunk callers. The proper fix is a paged-prefill kernel that reads K/V from cache during chunked attention — separate, larger work.
+Each excluded class is a separate larger work item (paged-prefill kernel with SWA-aware mask / dual-head_dim support / sub-byte dequant during gather).
+
+### `d_pf_block_tables_` undersized for prompts ≥ max_seq_len
+
+When a single prompt exceeds `max_seq_len`, the engine's pre-allocated device buffer `d_pf_block_tables_` (sized `max_seq_len / block_size`) overflows during `cudaMemcpyAsync`. Discovered while validating chunked-prefill at >4096-token prompts. Mitigation: configure `max_seq_len` to actual maximum prompt length. Real fix: size `d_pf_block_tables_` from `max_kv_blocks` instead.
 
 ### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
 

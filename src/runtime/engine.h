@@ -59,7 +59,7 @@ struct EngineConfig {
     int kv_block_size = 0;
 
     // Chunked prefill
-    int prefill_chunk_size = 0;  // 0 = no chunking
+    int prefill_chunk_size = -1;  // -1 = per-arch default (512 if supported, 0 otherwise)
 
     // FP8 prefill weight cache: uses FP8 E4M3 instead of FP16 for ~2x prefill throughput
     bool use_fp8_prefill = false;
@@ -223,6 +223,18 @@ private:
 
     // ── Inference helpers ────────────────────────────────────────────
     bool is_stop_token(int32_t token) const;
+
+    // Whether the model arch + KV dtype combination supports chunked prefill.
+    // Returns true for full-attention models (Qwen3, Llama, Mistral) with FP16
+    // or FP8 KV cache. Returns false for Gemma-4 (SWA + dual head_dim), hybrid
+    // models (GDN/Mamba2), and sub-byte KV dtypes.
+    bool supports_chunked_prefill_() const;
+
+    // Resolves config_.prefill_chunk_size considering arch + KV dtype.
+    //   sentinel -1 → per-arch default (512 if supported, 0 otherwise)
+    //   explicit 0  → 0 (force single-chunk, always respected)
+    //   explicit >0 → that value if supported, else 0 with WARN
+    int resolve_prefill_chunk_size_() const;
 
     // Track <think>/<\/think> state and check if generation should stop.
     // Suppresses stop tokens while inside a think block (like llama.cpp).

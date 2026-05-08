@@ -134,6 +134,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
+    src/compute/kv_gather.cu
     src/compute/attention_paged.cu
     src/compute/attention_paged_fp8.cu
     src/compute/attention_paged_int8.cu
@@ -411,6 +412,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
+        tests/test_attention_chunked.cu
     )
 
     imp_add_test_module(test-quant SOURCES
@@ -435,6 +437,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-kv SOURCES
         tests/test_fp8_kv_cache.cu
         tests/test_kv_cache_write.cu
+        tests/test_kv_gather.cu
         tests/test_green_ctx.cu
     )
 
@@ -455,6 +458,7 @@ if(IMP_BUILD_TESTS)
         tests/test_degeneration.cpp
         tests/test_weight_registry_preservation.cpp
         tests/test_e2e_llm_compressor.cpp
+        tests/test_chunked_prefill.cu
     )
 
     set(IMP_TEST_BINARIES

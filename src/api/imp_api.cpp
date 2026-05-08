@@ -62,7 +62,7 @@ ImpConfig imp_config_default(void) {
     config.kv_cache_dtype = IMP_DTYPE_FP16;
     config.ssm_state_dtype = IMP_DTYPE_FP32;
     config.vram_budget_mb = 0;                // use all available
-    config.prefill_chunk_size = 0;            // no chunking
+    config.prefill_chunk_size = -1;           // per-arch default (512 if supported, 0 otherwise)
     config.use_fp8_prefill = 0;               // FP16 weight cache by default
     config.use_nvfp4_decode = -1;             // auto (sm_120→mode2, sm_90→mode1)
     config.use_mxfp4_prefill = 0;             // off by default

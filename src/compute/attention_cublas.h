@@ -5,26 +5,19 @@
 
 namespace imp {
 
-// cuBLAS batched-GEMM attention for prefill.
+// Prefill attention via cuBLAS materialized QK^T + softmax + PV.
 //
-// Computes standard scaled dot-product attention using cuBLAS for the two
-// matrix multiplications (S = Q*K^T, O = P*V), with a custom fused
-// causal-mask + softmax kernel in between.
+// Q: [q_len, n_heads * head_dim] FP16
+// K: [kv_len, n_kv_heads * head_dim] FP16
+// V: [kv_len, n_kv_heads * head_dim] FP16
+// O: [q_len, n_heads * head_dim] FP16
+// S: workspace, sized for [n_heads * q_len * kv_len] in FP16 or FP32 (FP32 picked when buffer fits).
 //
-// This achieves much higher TC utilization than the hand-written WMMA flash
-// attention kernel, because cuBLAS can tile and schedule the GEMMs optimally.
-//
-// Q:   [n_tokens, n_heads * head_dim]   FP16 contiguous
-// K:   [n_tokens, n_kv_heads * head_dim] FP16 contiguous
-// V:   [n_tokens, n_kv_heads * head_dim] FP16 contiguous
-// O:   [n_tokens, n_heads * head_dim]   FP16 contiguous (output)
-// S:   [n_heads, n_tokens, n_tokens]    FP16 workspace (caller-provided)
-//
-// n_heads, n_kv_heads, head_dim: model dimensions
-// scale: 1/sqrt(head_dim)
-// causal: apply causal mask
+// q_offset is the absolute position of Q[0] in the full sequence. When causal=true,
+// Q[i] (abs pos = q_offset + i) is masked against K[j] for j > q_offset + i.
+// q_offset=0 reproduces the historic square path exactly.
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap = 0.0f, cudaStream_t stream = nullptr);
+                              float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr);
 
 }  // namespace imp

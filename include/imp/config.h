@@ -50,7 +50,10 @@ typedef struct {
     size_t vram_budget_mb;  // Max GPU memory to use (MiB), 0 = use all available
 
     // Chunked prefill
-    int prefill_chunk_size;  // Max tokens per prefill chunk (0 = no chunking)
+    int prefill_chunk_size;  // Max tokens per prefill chunk.
+                             //   -1 = use per-arch default (recommended)
+                             //   0  = explicit single-chunk (force)
+                             //   >0 = explicit chunk size (rejected with WARN if arch unsupported)
 
     // Prefill weight cache precision
     int use_fp8_prefill;  // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
