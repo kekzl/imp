@@ -18,7 +18,8 @@ Default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mist
 
 **Out-of-scope** — stay at `prefill_chunk_size = 0` via per-arch default; explicit `--prefill-chunk-size N` is logged + clamped to 0:
 
-- Gemma-4 (SWA + dual head_dim 256/512)
+- Gemma-3 / Gemma-4 (SWA — Gemma-4 also has dual head_dim 256/512)
+- Llama-4 (MoE + SWA)
 - Hybrid models with non-attention layers (Qwen3.5/3.6 GDN, Nemotron-H Mamba2)
 - Sub-byte KV cache dtypes (INT4, NVFP4, TurboQuant variants)
 

@@ -1637,6 +1637,10 @@ bool Engine::step_schedule() {
 
 // =====================================================================
 // supports_chunked_prefill_ / resolve_prefill_chunk_size_
+// Whether the model arch + KV dtype combination supports chunked prefill.
+// Returns true for full-attention models (Qwen3, Llama, Mistral) with FP16
+// or FP8 KV cache. Returns false for SWA models (Gemma-3, Gemma-4, Llama-4),
+// hybrid models (GDN/Mamba2), and sub-byte KV dtypes.
 // =====================================================================
 
 bool Engine::supports_chunked_prefill_() const {
@@ -1644,7 +1648,9 @@ bool Engine::supports_chunked_prefill_() const {
         return false;
     const auto& cfg = model_->config();
     // Out-of-scope archs: SWA / dual-head_dim / hybrid (GDN / Mamba2).
-    if (cfg.arch == ModelArch::GEMMA4) return false;
+    if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA (sliding_window_pattern=6)
+    if (cfg.arch == ModelArch::GEMMA4) return false;       // SWA + dual head_dim
+    if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
     if (cfg.arch == ModelArch::QWEN35) return false;
     if (cfg.arch == ModelArch::QWEN35_MOE) return false;
     if (cfg.arch == ModelArch::QWEN36_MOE) return false;
