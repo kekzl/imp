@@ -5,7 +5,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast install-hooks format format-check
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked install-hooks format format-check
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -83,8 +83,16 @@ verify:
 	@scripts/verify.sh full
 
 # verify-fast: pre-push gate (host build, ~90s). build + filtered tests + 1 smoke.
+# Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast:
 	@scripts/verify.sh fast
+
+# verify-chunked: gates chunked-prefill path (chunk=512) against tests/perf_baseline_chunked.json.
+# Looser thresholds (5%/8%) cover the gather + rect-attn per-chunk overhead.
+verify-chunked:
+	@IMP_VERIFY_BASELINE=tests/perf_baseline_chunked.json \
+	 IMP_VERIFY_CHUNK_SIZE=512 \
+	 scripts/verify.sh fast
 
 # install the pre-push hook that runs verify-fast when source files change
 install-hooks:

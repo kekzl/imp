@@ -16,6 +16,8 @@
 #   IMP_VERIFY_TESTS=build/imp-tests
 #   IMP_VERIFY_MODELS=models
 #   IMP_VERIFY_BASELINE=tests/perf_baseline.json
+#   IMP_VERIFY_CHUNK_SIZE=0   prefill chunk size for perf bench (0 = single-chunk,
+#                             default: 0 for legacy baseline, per-json for v1)
 #   IMP_VERIFY_SKIP_BUILD=1   skip cmake build step
 #   IMP_VERIFY_SKIP_PERF=1    skip perf-baseline regression check (use when the
 #                             baseline is known-stale; refresh with
@@ -51,6 +53,8 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
         -e IMP_VERIFY_SKIP_BUILD=1 \
         -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
+        -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
+        -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         --entrypoint bash imp:test scripts/verify.sh "$@"
 fi
 
@@ -60,6 +64,9 @@ BIN="${IMP_VERIFY_BIN:-build/imp-cli}"
 TESTS_BIN="${IMP_VERIFY_TESTS:-build/imp-tests}"
 MODELS="${IMP_VERIFY_MODELS:-models}"
 BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}"
+# IMP_VERIFY_CHUNK_SIZE: prefill chunk size to use for the perf bench.
+# Empty/unset = use whatever the baseline JSON specifies, or 0 (single-chunk) by default.
+CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}"
 
 RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'; RST=$'\033[0m'
 FAIL=0
@@ -138,48 +145,105 @@ elif [ ! -x "$BIN" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
     skip "jq not installed (needed to parse $BASELINE)"
 else
-    BL_MODEL=$(jq -r '.model' "$BASELINE")
-    BL_TG=$(jq -r '.metrics.decode_tps.tg128' "$BASELINE")
-    BL_PP=$(jq -r '.metrics.prefill_tps.pp512' "$BASELINE")
-    DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
-    PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
-    MODEL_PATH="$MODELS/$BL_MODEL"
+    # Detect baseline schema version.
+    # v1 (perf_baseline_chunked.json): has top-level "models" map + "regression_thresholds".
+    # legacy (perf_baseline.json): single model under "metrics.decode_tps".
+    BL_VERSION=$(jq -r '.version // 0' "$BASELINE")
 
-    if [ ! -f "$MODEL_PATH" ]; then
-        skip "baseline model $MODEL_PATH not present"
-    else
+    if [ "$BL_VERSION" = "1" ]; then
+        # ---- Multi-model v1 schema ----
+        DEC_THR=$(jq -r '.regression_thresholds.decode_pct' "$BASELINE")
+        PRE_THR=$(jq -r '.regression_thresholds.prefill_pct' "$BASELINE")
+        BL_CHUNK=$(jq -r '.prefill_chunk_size // 0' "$BASELINE")
         REPS=3
-        ERR=$(mktemp)
-        "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-              --max-tokens 128 --temperature 0 >/dev/null 2>"$ERR"
-        # Bench lines (stderr) have variable spacing inside parens for short numbers:
-        #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
-        #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
-        PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-        TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-        if [ -z "$PP" ] || [ -z "$TG" ]; then
-            fail "could not parse bench output (see $ERR)"
-            tail -15 "$ERR"
-        else
-            rm -f "$ERR"
-            DEC_DELTA=$(awk -v cur="$TG" -v base="$BL_TG" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
-            PRE_DELTA=$(awk -v cur="$PP" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
-            DEC_REG=$(awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
-            PRE_REG=$(awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
-
-            printf "  decode  tg128 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$TG" "$BL_TG" "$DEC_DELTA"
-            printf "  prefill pp512 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$PP" "$BL_PP" "$PRE_DELTA"
-
-            if [ "$DEC_REG" = "1" ]; then
-                fail "decode regression > ${DEC_THR}%  (if expected: ./scripts/gen_perf_baseline.sh $MODEL_PATH)"
-            else
-                pass "decode within ${DEC_THR}% threshold"
+        BENCH_CHUNK="${CHUNK_SIZE:-$BL_CHUNK}"
+        ANY_MEASURED=0
+        # Iterate over every model entry in the JSON
+        while IFS= read -r BL_MODEL; do
+            BL_TG=$(jq -r ".models[\"$BL_MODEL\"].tg256" "$BASELINE")
+            BL_PP=$(jq -r ".models[\"$BL_MODEL\"].pp512" "$BASELINE")
+            MODEL_PATH="$MODELS/$BL_MODEL"
+            if [ ! -f "$MODEL_PATH" ]; then
+                skip "  skip $BL_MODEL (not present)"
+                continue
             fi
-            if [ "$PRE_REG" = "1" ]; then
-                # prefill is noisy (cuBLAS autotuning), warn only
-                echo "${YLW}WARN${RST} prefill regression > ${PRE_THR}% (often cuBLAS variance, not real)"
+            ANY_MEASURED=1
+            ERR=$(mktemp)
+            "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
+                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR"
+            PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            TG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            if [ -z "$PP" ] || [ -z "$TG" ]; then
+                fail "$BL_MODEL: could not parse bench output (see $ERR)"
+                tail -10 "$ERR"
             else
-                pass "prefill within ${PRE_THR}% threshold"
+                rm -f "$ERR"
+                DEC_DELTA=$(awk -v cur="$TG" -v base="$BL_TG" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                PRE_DELTA=$(awk -v cur="$PP" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                DEC_REG=$(awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+                PRE_REG=$(awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+                printf "  %-42s  tg256=%7.2f (base %7.2f, %+.1f%%)  pp512=%7.1f (base %7.1f, %+.1f%%)\n" \
+                    "$BL_MODEL" "$TG" "$BL_TG" "$DEC_DELTA" "$PP" "$BL_PP" "$PRE_DELTA"
+                if [ "$DEC_REG" = "1" ]; then
+                    fail "$BL_MODEL: decode regression > ${DEC_THR}%"
+                else
+                    pass "$BL_MODEL: decode within ${DEC_THR}% threshold"
+                fi
+                if [ "$PRE_REG" = "1" ]; then
+                    echo "${YLW}WARN${RST} $BL_MODEL: prefill regression > ${PRE_THR}% (cuBLAS variance is common)"
+                fi
+            fi
+        done < <(jq -r '.models | keys[]' "$BASELINE")
+        if [ "$ANY_MEASURED" = "0" ]; then
+            skip "no baseline models found in $MODELS/"
+        fi
+    else
+        # ---- Legacy schema (perf_baseline.json) ----
+        BL_MODEL=$(jq -r '.model' "$BASELINE")
+        BL_TG=$(jq -r '.metrics.decode_tps.tg128' "$BASELINE")
+        BL_PP=$(jq -r '.metrics.prefill_tps.pp512' "$BASELINE")
+        DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
+        PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
+        MODEL_PATH="$MODELS/$BL_MODEL"
+
+        if [ ! -f "$MODEL_PATH" ]; then
+            skip "baseline model $MODEL_PATH not present"
+        else
+            REPS=3
+            ERR=$(mktemp)
+            # --prefill-chunk-size 0 forces single-chunk prefill so the baseline
+            # remains apples-to-apples with the pre-chunked-prefill measurements.
+            "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
+                  --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 >/dev/null 2>"$ERR"
+            # Bench lines (stderr) have variable spacing inside parens for short numbers:
+            #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
+            #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
+            PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            if [ -z "$PP" ] || [ -z "$TG" ]; then
+                fail "could not parse bench output (see $ERR)"
+                tail -15 "$ERR"
+            else
+                rm -f "$ERR"
+                DEC_DELTA=$(awk -v cur="$TG" -v base="$BL_TG" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                PRE_DELTA=$(awk -v cur="$PP" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                DEC_REG=$(awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+                PRE_REG=$(awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+
+                printf "  decode  tg128 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$TG" "$BL_TG" "$DEC_DELTA"
+                printf "  prefill pp512 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$PP" "$BL_PP" "$PRE_DELTA"
+
+                if [ "$DEC_REG" = "1" ]; then
+                    fail "decode regression > ${DEC_THR}%  (if expected: ./scripts/gen_perf_baseline.sh $MODEL_PATH)"
+                else
+                    pass "decode within ${DEC_THR}% threshold"
+                fi
+                if [ "$PRE_REG" = "1" ]; then
+                    # prefill is noisy (cuBLAS autotuning), warn only
+                    echo "${YLW}WARN${RST} prefill regression > ${PRE_THR}% (often cuBLAS variance, not real)"
+                else
+                    pass "prefill within ${PRE_THR}% threshold"
+                fi
             fi
         fi
     fi

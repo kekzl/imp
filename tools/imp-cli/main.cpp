@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
         config.ssm_state_dtype = IMP_DTYPE_FP16;
     if (args.no_cuda_graphs)
         config.enable_cuda_graphs = 0;
-    if (args.prefill_chunk_size > 0)
+    if (args.prefill_chunk_size >= 0)
         config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8)
         config.use_fp8_prefill = 1;

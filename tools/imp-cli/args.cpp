@@ -53,7 +53,7 @@ void print_usage(const char* prog) {
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma, "
             "deepseek_r1, phi\n"
-            "  --prefill-chunk-size <n> Max tokens per prefill chunk (default: 0 = no chunking)\n"
+            "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = single-chunk, default: per-arch)\n"
             "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
             "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
             "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
