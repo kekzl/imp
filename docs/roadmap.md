@@ -6,11 +6,16 @@ This is a single-author single-target experiment, so "roadmap" is more "current 
 
 ## Known limitations
 
-### FP8 KV cache: Gemma-4 carve-out
+### Gemma-4 remaining carve-outs (FP8 prefill, NVFP4 decode cache)
 
-Gemma-4's dual head_dim layout (256 SWA / 512 global) doesn't fit the FP8 KV write/read kernel's single-stride assumption, so Gemma-4 force-falls-back to FP16 KV. Lifting the carve-out needs per-layer head_dim awareness in the KV write/read kernels — separate, larger work item.
+The FP8 *KV cache* carve-out for Gemma-4 was removed in PR #91 (2026-05-01) — `--kv-fp8` works on Q4_K_M / Q5_K_M / NVFP4 Gemma-4. The original "dual head_dim 256/512 needs per-layer-aware kernels" hypothesis turned out to be a red herring; the KV write/read kernels did handle per-layer head_dim correctly via `Q.shape[3]` template dispatch. The actual bugs were (a) FP8 calibration reading the workspace's allocated shape (`max_hd=512`) instead of the live shape (`hd=256` on SWA layers, junk in trailing 256 cols) and (b) warmup-derived absmax poisoning the high-water-mark scale on Gemma-4's `output_norm` outliers (max=588).
 
-Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, and Llama-3.2.
+Two Gemma-4 carve-outs are still active in `engine.cpp:630-660`:
+
+- **FP8 prefill** (`config_.use_fp8_prefill = 0` for Gemma-4) — different code path from the KV cache; needs investigation whether it's the same calibration-shape class of bug or a real per-layer head_dim stride issue in the activation FP8 quantizer.
+- **NVFP4 decode cache for Q*_K → NVFP4 Gemma-4** (`config_.use_nvfp4_decode = 0` when `is_nvfp4_prequant=false`) — Phase 3-MoE cache build. Prequant SafeTensors NVFP4 weights bypass this path (load-bearing — drives the M=1 decode fast path), so prequant Gemma-4 NVFP4 keeps the cache enabled.
+
+Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2, and Gemma-4 (post PR #91).
 
 ### Chunked prefill scope (full-attention + FP16/FP8 KV)
 
