@@ -1836,6 +1836,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.n_sequences = 1;
     state.max_blocks_per_seq = 0;
     state.is_prefill = true;
+    state.prefill_offset = offset;  // absolute pos of state.positions[0]
     fill_sampling_params(*req, state);
 
     // Constraints via ConstraintManager

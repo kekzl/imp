@@ -135,6 +135,10 @@ struct InferenceState {
 
     // Mode
     bool is_prefill = true;
+    // Absolute position of state.positions[0] within the full sequence.
+    // 0 means single-chunk prefill or first chunk of a chunked prefill.
+    // > 0 means a follow-up chunk: tokens [0, prefill_offset) are already in the KV cache.
+    int prefill_offset = 0;
 
     // Sampling parameters
     float temperature = 1.0f;
