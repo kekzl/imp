@@ -693,6 +693,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // attend to past chunks K/V already in the paged cache. Gather past
         // [0, prefill_offset) KV → contiguous, append current chunk, then run
         // rectangular attention_cublas_prefill with q_offset.
+        //
+        // Note: cudaMallocAsync per layer here violates CLAUDE.md "No cudaMalloc in hot
+        // loops". Acknowledged exception — chunked prefill is excluded from CUDA-graph
+        // capture (graphs only capture decode), so the alloc is amortised in the
+        // memory pool and runs once per chunk per layer, not per token.
         const int q_offset = state.prefill_offset;
         if (q_offset > 0) {
             KVCache* cache = state.kv_cache;
@@ -710,6 +715,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int kv_layer = get_kv_layer(kv_layer_map_, layer);
             int kv_bs = cache->block_size();
             int ctx_len = q_offset + n;
+            // attn_scores_ is sized [nh, max_seq, max_seq] (square). Chunked use needs
+            // q_len * kv_len = n * ctx_len ≤ max_seq^2 elements per head. Guard
+            // explicitly: refuse to enter if ctx_len exceeds the buffer's row capacity.
+            // Engine's resolve_prefill_chunk_size() ensures ctx_len ≤ max_seq, so this
+            // is defense-in-depth.
+            int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
+            if (s_cap == 0 || ctx_len > s_cap || n > s_cap) {
+                IMP_LOG_ERROR(
+                    "chunked_prefill: attn_scores_ capacity (%d) too small for ctx_len=%d "
+                    "n=%d at L%d — engine should have prevented this",
+                    s_cap, ctx_len, n, layer);
+                std::abort();
+            }
             size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
 
             half* k_full = nullptr;
