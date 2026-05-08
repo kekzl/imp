@@ -354,7 +354,7 @@ Status of the 22 actionable items (1–17 are unique; 18–22 in the Phase-1 lis
 ### Items that remain truly unresolved
 
 - **GLM** — class not mapped, intentionally. Adding `GlmForCausalLM` → `LLAMA` would silently produce wrong outputs because GLM's architecture (especially in earlier ChatGLM variants) diverges from LLAMA enough to matter. Real fix: add a `GLM` enum entry + dedicated forward path.
-- **Native SentencePiece (.model) parser** — protobuf decoder + Unigram model decoder + byte-fallback handling, ~few hundred LoC. Workaround documented in the WARN.
+- ~~**Native SentencePiece (.model) parser**~~ — closed-in-27a7a7a. Native wire-format protobuf decoder shipped; checkpoints with only `tokenizer.model` now load directly. See `feat/sentencepiece-loader` PR.
 - **AWQ dequant kernel** — packing convention differs from GPTQ (column-packed + interleave permutation). MVP path: dequant-to-FP16 + cuBLAS.
 - **DeepSeek MLA attention** — proper multi-head latent attention path. Multi-week effort.
 - **Multimodal SafeTensors loaders** — per-family work (Qwen-VL, Llava, Pixtral, Gemma-3 vision).
