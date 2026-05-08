@@ -234,9 +234,10 @@ static void ensure_attn_ptr_arrays(int n_heads) {
 // ---------------------------------------------------------------------------
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap, cudaStream_t stream) {
-    int seq_len = static_cast<int>(Q.shape[0]);
-    if (seq_len == 0)
+                              float softcap, int q_offset, cudaStream_t stream) {
+    int q_len = static_cast<int>(Q.shape[0]);
+    int kv_len = static_cast<int>(K.shape[0]);
+    if (q_len == 0)
         return;
 
     int gqa_ratio = n_heads / n_kv_heads;
@@ -252,10 +253,10 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
     int ld_q = n_heads * head_dim;
     int ld_k = n_kv_heads * head_dim;
-    int ld_s = seq_len;
+    int ld_s = kv_len;
     int ld_o = n_heads * head_dim;
 
-    long long strideS = static_cast<long long>(seq_len) * seq_len;
+    long long strideS = static_cast<long long>(q_len) * kv_len;
 
     float alpha_f = scale;
     float beta_f = 0.0f;
@@ -275,7 +276,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
     if (S.ndim >= 3)
         s_buf_fp16_elems *= S.shape[2];
-    int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+    int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * q_len * kv_len;
     bool use_fp32_s = (s_fp32_elems * 2 <= s_buf_fp16_elems);
     float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
 
@@ -285,7 +286,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         // ---------------------------------------------------------------
 
         // S = scale * Q × K^T (FP32 output when use_fp32_s)
-        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_len, seq_len, head_dim, &alpha_f,
+        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f,
                                    K_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), Q_base,
                                    CUDA_R_16F, ld_q, static_cast<long long>(head_dim), &beta_f,
                                    use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base),
@@ -294,7 +295,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // Softcap (if enabled — only for FP16 path, Gemma-4 has no attn softcap)
         if (softcap > 0.0f && !use_fp32_s) {
-            int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+            int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
             softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
@@ -302,25 +303,25 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // Softmax (FP32 or FP16)
         {
-            int threads = (seq_len <= 128) ? 128 : ((seq_len <= 256) ? 256 : 512);
+            int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
             if (threads > 1024)
                 threads = 1024;
-            dim3 grid(seq_len, n_heads);
+            dim3 grid(q_len, n_heads);
             if (use_fp32_s) {
                 // FP32 softmax: reads FP32 scores, writes FP32 probabilities
-                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, seq_len, /*q_offset=*/0, causal);
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, q_len, kv_len, q_offset, causal);
                 // Convert FP32 → FP16 for P@V GEMM
-                int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+                int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, seq_len, /*q_offset=*/0, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, q_len, kv_len, q_offset, causal);
             }
         }
 
         // O = P × V (always FP16)
-        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, seq_len, seq_len, &one_f,
+        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
                                    V_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), S_base,
                                    CUDA_R_16F, ld_s, strideS, &zero_f, O_base, CUDA_R_16F, ld_o,
                                    static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
@@ -352,7 +353,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*),
                                            cudaMemcpyHostToDevice, stream));
 
-        cublasGemmBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_len, seq_len, head_dim, &alpha_f,
+        cublasGemmBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f,
                             (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
                             (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_q, &beta_f,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s,
@@ -360,7 +361,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // Softcap (only FP16 path — Gemma-4 has no attn softcap)
         if (softcap > 0.0f && !use_fp32_s) {
-            int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+            int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
             softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
@@ -368,19 +369,19 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // Softmax
         {
-            int threads = (seq_len <= 128) ? 128 : ((seq_len <= 256) ? 256 : 512);
+            int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
             if (threads > 1024)
                 threads = 1024;
-            dim3 grid(seq_len, n_heads);
+            dim3 grid(q_len, n_heads);
             if (use_fp32_s) {
-                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, seq_len, /*q_offset=*/0, causal);
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, q_len, kv_len, q_offset, causal);
                 // Convert FP32 → FP16 for P@V
-                int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+                int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 imp::fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, seq_len, /*q_offset=*/0, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, q_len, kv_len, q_offset, causal);
             }
         }
 
@@ -399,7 +400,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*),
                                            cudaMemcpyHostToDevice, stream));
 
-        cublasGemmBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, seq_len, seq_len, &one_f,
+        cublasGemmBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
                             (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
                             (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_s, &zero_f,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), CUDA_R_16F, ld_o, n_heads,

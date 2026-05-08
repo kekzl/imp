@@ -745,7 +745,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // fits. Constructing a sub-view with shape=[nh, n, n] hides the
             // real capacity from the FP32-fits check.
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale, /*causal=*/true,
-                                     cfg.attn_logit_softcap, stream);
+                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream);
         } else {
             // Flash attention: tiled O(n) memory, handles softcap + sliding window.
             // Dispatch chain: CUTLASS FMHA → Blackwell WMMA → Hopper WMMA → scalar.
@@ -840,7 +840,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             cudaMalloc(&s_buf, nh * ctx_len * sizeof(half));
             Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
             attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/false,
-                                     cfg.attn_logit_softcap, stream);
+                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream);
             cudaFree(k_flat);
             cudaFree(v_flat);
             cudaFree(s_buf);
