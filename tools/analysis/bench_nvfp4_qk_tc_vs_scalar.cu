@@ -202,13 +202,43 @@ int main() {
     cudaMemcpy(d_K, K_h.data(), K_h.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_Ks, Ks_h.data(), Ks_h.size(), cudaMemcpyHostToDevice);
 
-    qk_dot_scalar_kernel<HEAD_DIM><<<seqlen_kv, 32>>>(d_Q, d_K, d_Ks, d_out_scalar, seqlen_kv);
-    cudaDeviceSynchronize();
     constexpr int N_TILE_TC = 16;
     size_t smem_bytes = (16 * 16 + 16 * 16) * sizeof(__half);  // sQ + sK
-    qk_dot_tc_kernel<HEAD_DIM><<<(seqlen_kv + N_TILE_TC - 1) / N_TILE_TC, 32, smem_bytes>>>(
-        d_Q, d_K, d_Ks, d_out_tc, seqlen_kv);
+
+    // Warmup
+    for (int i = 0; i < 3; i++) {
+        qk_dot_scalar_kernel<HEAD_DIM><<<seqlen_kv, 32>>>(d_Q, d_K, d_Ks, d_out_scalar, seqlen_kv);
+        qk_dot_tc_kernel<HEAD_DIM><<<(seqlen_kv + N_TILE_TC - 1) / N_TILE_TC, 32, smem_bytes>>>(
+            d_Q, d_K, d_Ks, d_out_tc, seqlen_kv);
+    }
     cudaDeviceSynchronize();
+
+    cudaEvent_t a, b;
+    cudaEventCreate(&a);
+    cudaEventCreate(&b);
+    constexpr int REPS = 100;
+
+    cudaEventRecord(a);
+    for (int i = 0; i < REPS; i++)
+        qk_dot_scalar_kernel<HEAD_DIM><<<seqlen_kv, 32>>>(d_Q, d_K, d_Ks, d_out_scalar, seqlen_kv);
+    cudaEventRecord(b);
+    cudaEventSynchronize(b);
+    float scalar_ms = 0.0f;
+    cudaEventElapsedTime(&scalar_ms, a, b);
+    scalar_ms /= REPS;
+
+    cudaEventRecord(a);
+    for (int i = 0; i < REPS; i++)
+        qk_dot_tc_kernel<HEAD_DIM><<<(seqlen_kv + N_TILE_TC - 1) / N_TILE_TC, 32, smem_bytes>>>(
+            d_Q, d_K, d_Ks, d_out_tc, seqlen_kv);
+    cudaEventRecord(b);
+    cudaEventSynchronize(b);
+    float tc_ms = 0.0f;
+    cudaEventElapsedTime(&tc_ms, a, b);
+    tc_ms /= REPS;
+
+    cudaEventDestroy(a);
+    cudaEventDestroy(b);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -226,10 +256,14 @@ int main() {
         if (e > max_abs_err) max_abs_err = e;
         if (fabsf(out_s[i]) > max_val) max_val = fabsf(out_s[i]);
     }
-    printf("scalar[0..2]=%.4f %.4f %.4f\n", out_s[0], out_s[1], out_s[2]);
-    printf("tc    [0..2]=%.4f %.4f %.4f\n", out_t[0], out_t[1], out_t[2]);
-    printf("max_abs_err=%.4e  max_val=%.4f  rel=%.4e\n",
-           max_abs_err, max_val, max_abs_err / (max_val + 1e-9f));
+
+    printf("Phase 0 microbench: HEAD_DIM=%d seqlen_kv=%d\n", HEAD_DIM, seqlen_kv);
+    printf("  scalar (FFMA): %.4f ms / iter\n", scalar_ms);
+    printf("  tc     (HMMA): %.4f ms / iter\n", tc_ms);
+    printf("  speedup: %.2fx (TC vs scalar)\n", scalar_ms / tc_ms);
+    printf("  max_abs_err=%.4e  rel=%.4e\n", max_abs_err, max_abs_err / (max_val + 1e-9f));
+    printf("  scalar[0..2]=%.4f %.4f %.4f\n", out_s[0], out_s[1], out_s[2]);
+    printf("  tc    [0..2]=%.4f %.4f %.4f\n", out_t[0], out_t[1], out_t[2]);
 
     cudaFree(d_Q); cudaFree(d_K); cudaFree(d_Ks);
     cudaFree(d_out_scalar); cudaFree(d_out_tc);
