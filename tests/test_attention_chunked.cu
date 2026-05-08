@@ -68,38 +68,53 @@ TEST(AttentionChunkedTest, RectangularEqualsSquareAtZeroOffset) {
     cudaFree(O.data); cudaFree(S.data);
 }
 
-// Synthesized Q/K to verify the offset-aware causal mask. K is one-hot at column 0
-// (only position 0 has nonzero K, all others are zero), so attention scores are
-// nonzero only when Q attends to position 0. With q_offset=128 and q_len=64,
-// Q[i]'s absolute position is 128 + i — should attend to position 0 (causal: 0 <= 128+i).
-// O[:, 0] should equal V[0][0] = 7 because softmax over the visible K positions
-// collapses to weight 1.0 on j=0 (only nonzero score).
+// Adversarial test for the offset-aware causal mask.
+//
+// Setup:
+//   Q rows have abs_pos = q_offset + i = 128..191.
+//   K[0][0] = 10  → score 100 for every Q row (visible: 0 <= 128..191). GOOD bait.
+//   K[255][0] = 10 → score 100 too, but abs_pos 255 > every Q row's abs_pos. MUST be masked.
+//   V[0][0] = 7, V[255][0] = 99.
+//
+// If the causal mask works:   weight on j=0 → 1.0, O[:,0] ≈ 7.
+// If the causal mask is BROKEN: j=0 and j=255 tie (both score 100), softmax splits 0.5/0.5,
+//   O[:,0] ≈ 0.5*7 + 0.5*99 = 53 — the EXPECT_NEAR(val, 7.0f, 0.05f) assertion fires.
+//
+// kv_len = 256 > q_offset + q_len = 192, placing the sentinel strictly beyond every
+// Q row's absolute position.
 TEST(AttentionChunkedTest, OffsetAwareCausalMask) {
-    const int q_len = 64, kv_len = 192, q_offset = 128, nh = 1, nkv = 1, hd = 16;
+    // kv_len = 256 chosen so kv_len-1 (= 255) is past every Q row's absolute position
+    // (Q rows have abs_pos = q_offset..q_offset+q_len-1 = 128..191). The K sentinel
+    // at position 255 must be excluded by the causal mask for every Q row — otherwise
+    // its score=100 would tie with K[0]'s score=100 and split softmax weight 0.5/0.5,
+    // giving O[:,0] = 0.5*7 + 0.5*99 = 53 instead of the expected 7. This test is the
+    // canary for an offset-aware causal mask vs. a no-mask kernel.
+    const int q_len = 64, kv_len = 256, q_offset = 128, nh = 1, nkv = 1, hd = 16;
     const float scale = 1.0f;
 
     Tensor Q = make_fp16_tensor_2d(q_len, nh * hd);
     Tensor K = make_fp16_tensor_2d(kv_len, nkv * hd);
     Tensor V = make_fp16_tensor_2d(kv_len, nkv * hd);
     Tensor O = make_fp16_tensor_2d(q_len, nh * hd);
-    // S: [nh, kv_len, kv_len] — fp32_elems = 1*64*192 = 12288, buf_fp16 = 1*192*192 = 36864
-    // use_fp32_s = (12288*2 <= 36864) = true → FP32 path (more accurate)
+    // S: [nh, kv_len, kv_len] — fp32_elems = 1*64*256 = 16384, buf_fp16 = 1*256*256 = 65536
+    // use_fp32_s = (16384*2 <= 65536) = true → FP32 path (more accurate)
     Tensor S = make_fp16_tensor_3d(nh, kv_len, kv_len);
 
     // Q: dim 0 = 10, zero elsewhere
     std::vector<half> h_q(q_len * nh * hd, __float2half(0.f));
     for (int i = 0; i < q_len; i++) h_q[i * nh * hd + 0] = __float2half(10.f);
 
-    // K: K[0][0] = 10, rest zero. Score = Q·K*scale: j=0 → 100, j>0 → 0.
-    // The FP32 softmax subtracts max(=100), so exp(-100) ≈ 0 for j>0.
-    // After softmax, weight[0] ≈ 1.0, weight[j>0] ≈ 0. So O[:, 0] ≈ V[0][0].
+    // K: K[0][0] = 10 (visible bait), K[255][0] = 10 (adversarial — beyond every Q row's
+    // abs_pos, must be masked out). All other K = 0.
     std::vector<half> h_k(kv_len * nkv * hd, __float2half(0.f));
     h_k[0 * nkv * hd + 0] = __float2half(10.f);
+    h_k[(kv_len - 1) * nkv * hd + 0] = __float2half(10.f);
 
-    // V: V[j][0] = 7 at j=0, zero elsewhere. After softmax over visible K positions,
-    // P will have weight ~1.0 on j=0 (dominant score), so O[:, 0] ≈ 7.
+    // V: V[0][0] = 7 (the legitimate value to retrieve via softmax),
+    // V[255][0] = 99 (the wrong value if mask fails — the test's adversarial signal).
     std::vector<half> h_v(kv_len * nkv * hd, __float2half(0.f));
     h_v[0 * nkv * hd + 0] = __float2half(7.f);
+    h_v[(kv_len - 1) * nkv * hd + 0] = __float2half(99.f);
 
     cudaMemcpy(Q.data, h_q.data(), h_q.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(K.data, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -148,6 +163,11 @@ TEST(AttentionChunkedTest, GQA_Ratio4) {
     for (size_t i = 0; i < h_o.size(); i++) {
         ASSERT_FALSE(std::isnan(__half2float(h_o[i])));
     }
+    float sum_abs = 0.0f;
+    for (size_t i = 0; i < h_o.size(); i++) {
+        sum_abs += std::fabs(__half2float(h_o[i]));
+    }
+    EXPECT_GT(sum_abs, 0.0f) << "GQA path produced all-zero output";
 
     cudaFree(Q.data); cudaFree(K.data); cudaFree(V.data);
     cudaFree(O.data); cudaFree(S.data);
