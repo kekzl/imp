@@ -2,7 +2,27 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] - 2026-05-08
+
+### Fixed
+
+- **Chunked prefill correctness**: prefill chunks ≥2 now correctly read past chunks' K/V from the paged cache. New `paged_kv_gather_*` kernels + rectangular `attention_cublas_prefill(q_offset)`. Previously, `prefill_chunk_size > 0` produced silently-wrong logits for full-attention models and full degeneration for SWA models like Gemma-4.
+
+### Added
+
+- `Engine::resolve_prefill_chunk_size_()` with sentinel `-1` = "use per-arch default" (512 for full-attention + FP16/FP8 KV, 0 otherwise). Default `Config::prefill_chunk_size` flips from `0` to `-1`.
+- `tests/perf_baseline_chunked.json` — perf baseline for chunked default with looser 5%/8% gates.
+- New unit tests: `test_kv_gather` (3 tests), `test_attention_chunked` (3 tests), `test_chunked_prefill` (5 e2e tests).
+- `make verify-chunked` target — perf gate against the new chunked baseline.
+
+### Changed
+
+- `attention_cublas_prefill` signature now takes `int q_offset` (0 = square path, byte-equivalent to prior behavior).
+- `causal_softmax_inplace_kernel` and `causal_softmax_fp32_inplace_kernel` generalized to `(S, q_len, kv_len, q_offset, causal)`.
+- `make verify-fast` smoke now pins `--prefill-chunk-size 0` to keep `perf_baseline.json` apples-to-apples.
+- imp-cli `--prefill-chunk-size 0` now correctly forces single-chunk (was silently dropped due to `>0` guard).
+
+---
 
 Public-release readiness pass: documentation rewrite, hygiene gate
 (`scripts/check-release.sh`), removal of dev-internal scratch files,
