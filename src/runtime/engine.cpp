@@ -1192,7 +1192,11 @@ bool Engine::init_kv_cache() {
     {
         size_t tok_bytes = config_.max_seq_len * sizeof(int32_t);
         size_t pos_bytes = config_.max_seq_len * sizeof(int);
-        size_t bt_bytes = blocks_per_seq * sizeof(int);
+        // A single request's block_table can grow to the entire KV cache
+        // pool (max_blocks), not just max_seq_len/block_size. Size from
+        // max_blocks so the H2D copy at the prefill metadata upload site
+        // doesn't overflow on long-cumulative-KV requests.
+        size_t bt_bytes = static_cast<size_t>(max_blocks) * sizeof(int);
         size_t cl_bytes = sizeof(int);
         prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + cl_bytes;
         prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
