@@ -412,6 +412,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
+        tests/test_attention_chunked.cu
     )
 
     imp_add_test_module(test-quant SOURCES
