@@ -193,9 +193,14 @@ void LayerOffloadManager::upload_layer_to_slot(int layer, int slot_idx) {
 
     char* dst_base = static_cast<char*>(slot.gpu_buf);
 
+    cudaMemcpyAttributes attrs{};
+    attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    attrs.srcLocHint     = { cudaMemLocationTypeHostNumaCurrent, 0 };
+    attrs.dstLocHint     = { cudaMemLocationTypeDevice, 0 };
+    attrs.flags          = 0;
     for (const auto& e : entries) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dst_base + e.offset_in_slot, e.host_ptr, e.raw_bytes,
-                                           cudaMemcpyHostToDevice, slot.transfer_stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyWithAttributesAsync(dst_base + e.offset_in_slot, e.host_ptr,
+                                                         e.raw_bytes, &attrs, slot.transfer_stream));
     }
 
     // Record event so compute stream can wait on it
