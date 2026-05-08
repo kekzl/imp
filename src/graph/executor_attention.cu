@@ -18,6 +18,7 @@
 #include "compute/attention_cublas.h"
 #include "compute/attention_naive.h"
 #include "compute/attention_paged.h"
+#include "compute/kv_gather.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
 #include "compute/ssm.h"
@@ -687,6 +688,72 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     if (state.is_prefill) {
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
+
+        // Chunked prefill: when prefill_offset > 0, queries from this chunk must
+        // attend to past chunks K/V already in the paged cache. Gather past
+        // [0, prefill_offset) KV → contiguous, append current chunk, then run
+        // rectangular attention_cublas_prefill with q_offset.
+        const int q_offset = state.prefill_offset;
+        if (q_offset > 0) {
+            KVCache* cache = state.kv_cache;
+            QType kvt = cache->qtype();
+            // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
+            // so this code only runs for FP16 / FP8 KV without SWA / dual-head_dim.
+            if ((kvt != QType::F16 && kvt != QType::FP8_E4M3) || sliding_active || per_layer_shapes) {
+                IMP_LOG_ERROR(
+                    "chunked_prefill: unsupported config (kv=%d swa=%d per_layer=%d) at L%d — "
+                    "engine should have prevented this",
+                    (int)kvt, (int)sliding_active, (int)per_layer_shapes, layer);
+                std::abort();
+            }
+
+            int kv_layer = get_kv_layer(kv_layer_map_, layer);
+            int kv_bs = cache->block_size();
+            int ctx_len = q_offset + n;
+            size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
+
+            half* k_full = nullptr;
+            half* v_full = nullptr;
+            cudaMallocAsync(&k_full, full_bytes, stream);
+            cudaMallocAsync(&v_full, full_bytes, stream);
+
+            // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
+            if (kvt == QType::F16) {
+                paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
+                                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
+                                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+            } else {  // FP8_E4M3
+                float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
+                                     ? kv_scales_[kv_layer] : 1.0f;
+                paged_kv_gather_fp8_to_fp16(
+                    k_full, static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
+                    state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_fp8_to_fp16(
+                    v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
+                    state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+            }
+
+            // Append current chunk's K/V at offset q_offset.
+            cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
+                            (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
+                            (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+
+            int64_t kv_full_shape[2] = {(int64_t)ctx_len, (int64_t)(nkv * hd)};
+            Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
+            Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
+
+            attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
+                                     /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream);
+
+            cudaFreeAsync(k_full, stream);
+            cudaFreeAsync(v_full, stream);
+
+            // Persist current chunk's K/V (same as non-chunked path)
+            write_kv_cache(layer, state, stream);
+            goto after_attention;
+        }
 
         // cuBLAS QK^T materialization: faster than flash attention for short prefills
         // (pp<=512). Benchmarked: pp128 cuBLAS 3270 vs FMHA 2918 (+12%), pp512 ~equal.
