@@ -48,7 +48,7 @@ static std::string generate_greedy(const char* model_path, const std::string& pr
         return {};
 
     ImpConfig cfg = imp_config_default();
-    cfg.max_seq_len = 4096;      // explicit: accommodates ~2000-token prompts + generation
+    cfg.max_seq_len = 4096;      // explicit: accommodates ~2800-token prompts + generation
     cfg.max_batch_size = 1;
     cfg.enable_cuda_graphs = 0;
     cfg.prefill_chunk_size = chunk_size;
@@ -102,14 +102,14 @@ protected:
         return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
     }
 
-    // ~1600-token prompt: 100 numbered items with 6 words each.
-    // Forces >=4 chunks at chunk_size=512 and >=26 chunks at chunk_size=64.
-    // Well within the 4096-token context window (leaves ~2400 tokens for generation).
+    // ~2800-token prompt: 200 numbered items with 10 words each.
+    // Forces >=5 chunks at chunk_size=512, >=2 chunks at chunk_size=1024.
+    // Well within the 4096-token context window (leaves ~1200 tokens for generation).
     static std::string long_prompt() {
         std::string p = "Summarize the following list:\n";
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 200; i++) {
             p += "Item " + std::to_string(i) + ": ";
-            for (int w = 0; w < 6; w++)
+            for (int w = 0; w < 10; w++)
                 p += "word" + std::to_string(w) + " ";
             p += "\n";
         }
