@@ -67,10 +67,9 @@ Pre-conditions: multi-tenant decode benchmark + workload model.
 Reason: GLM diverges from LLAMA enough that mapping `GlmForCausalLM → LLAMA` would silently produce wrong outputs. Real fix needs `GLM` enum + dedicated forward path. Multi-week.
 Pre-conditions: GLM model in test fleet, dedicated forward path.
 
-### AU2 — Native SentencePiece (`.model`) parser
+### AU2 — Native SentencePiece (`.model`) parser — `closed-in-27a7a7a`
 
-Reason: "few hundred LoC" but the testing harness (byte-fallback handling, Unigram protobuf decode, tokenization-roundtrip golden against real Llama2/Mistral checkpoints) is the bulk of the work. Defer to a dedicated session that can land it cleanly.
-Pre-conditions: golden roundtrip fixtures from real `.model` files; protobuf decoder.
+Status: closed. In-tree wire-format protobuf decoder + ModelProto/TrainerSpec field extraction + integration with imp's existing SPM-style encoder shipped as `feat/sentencepiece-loader`. 10 new unit tests, no new third-party deps. SafeTensors checkpoints with only `tokenizer.model` (older Llama 1/2, some Mistral variants) now load directly without the previous Python-conversion workaround.
 
 ### AU3 — AWQ INT4 dequant kernel
 

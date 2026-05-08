@@ -76,7 +76,7 @@ Borderline calls go to UNCERTAIN, not FEASIBLE.
 | # | Item | Severity | Feasibility | Reasoning |
 |---|---|---|---|---|
 | AU1 | GLM architecture mapping | P2 | INFEASIBLE | Needs new `GLM` enum + dedicated forward path (multi-week per audit note) |
-| AU2 | Native SentencePiece (`.model`) parser | P2 | UNCERTAIN | "~few hundred LoC" but full byte-fallback/Unigram protobuf decode + tokenization-roundtrip golden against actual checkpoints is a significant testing burden. Defer in favor of correctness-hardening work this run |
+| AU2 | Native SentencePiece (`.model`) parser | P2 | UNCERTAIN→CLOSED | Closed-in-27a7a7a (post-run). 250-line wire-format protobuf decoder + ModelProto extraction + existing SPM encoder reuse. 10 new unit tests, real T5 32k-piece fixture verified |
 | AU3 | AWQ INT4 dequant kernel | P2 | INFEASIBLE | "Multi-week" per audit, requires column-packed + interleave-permutation kernel |
 | AU4 | DeepSeek MLA attention | P1 | INFEASIBLE | "Multi-week effort" per audit |
 | AU5 | Multimodal SafeTensors loaders | P2 | INFEASIBLE | Per-family work for Qwen-VL / Llava / Pixtral / Gemma-3 vision |
