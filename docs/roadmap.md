@@ -98,13 +98,15 @@ These are upstream features that would unlock real wins but haven't been integra
 
 ### Long-context KV memory
 
-Decode is bandwidth-bound and every sub-byte KV quantization tested so far regresses decode. The next class of win comes from reducing the *token count*, not the element precision:
+The "decode is bandwidth-bound, sub-byte KV quant regresses decode" framing was partially obsolete after Lever 2 NVFP4 KV (PR landed 2026-05-07/08): NVFP4 storage with vectorized-PTX dequant is at parity with FP16 decode at 3.9× compression. The remaining decode-perf headroom comes not from changing the storage format but from **changing what kind of compute does the dequantized math** — see BitDecoding below.
 
-- **K2 MLA (DeepSeek)** — latent vector replaces full K/V, ~–90% KV VRAM.
-- **K5 Token eviction (H2O)** — drop 50–70% of tokens by attention score.
+- **K2 MLA (DeepSeek)** — latent vector replaces full K/V, ~–93% KV VRAM, 5.76× max throughput. **DEFERRED**: gates on adding DeepSeek-V2/V3 architecture support to imp; no MLA-arch model in scope today. Bonus paper [arxiv:2502.14837](https://arxiv.org/abs/2502.14837) proposes retrofitting MLA into non-MLA pretrained models — worth tracking but its own research project. Re-eval when imp adds DeepSeek-V2/V3 support or a calibration-only MLA recipe ships.
+- **K5 Token eviction (H2O)** ([arxiv:2306.14048](https://arxiv.org/abs/2306.14048)) — Heavy-Hitter Oracle eviction by attention-score power-law; 5–20% retention, ≤20× memory. **POSSIBLE BUT QUALITY-RISKY**: well-documented retrieval-task degradation since 2023 (RULER, NIAH, multi-hop QA). Build only if VRAM-pressure becomes the bottleneck on contexts that NVFP4 KV alone can't fit. Re-eval if a successor with retrieval-quality fix lands (Q-Hitter, SnapKV, PyramidKV are candidates).
 - **K8 CPU offload** — async prefetch for cold tokens, enables 100K+ context.
 
 ### KV cache compression research
 
-- **BitDecoding** ([arxiv:2503.18773](https://arxiv.org/abs/2503.18773)) — 8.6× vs FP16 FlashDecoding on Blackwell via MXFP4 KV. Builds on existing MXFP4 infrastructure.
-- **DeltaKV** ([arxiv:2602.08005](https://arxiv.org/abs/2602.08005)) — residual-based KV compression, 187 tok/s at 128K context on Blackwell PRO 6000. Orthogonal to weight quant.
+- **BitDecoding** ([arxiv:2503.18773](https://arxiv.org/abs/2503.18773), HPCA 2026) — **HIGHEST-ROI item** in this section. Tensor-Core decode on dequantized NVFP4 KV: 8.6× over FP16 FlashDecoding-v2 on Blackwell (RTX 5090 in benchmarks), 3× E2E latency on Llama-3.1-8B 128K. imp's current NVFP4 KV (Lever 2) gets the VRAM win but uses CUDA cores → parity-only on decode tok/s; BitDecoding is the missing perf piece. Stateless, paged-compatible, no retraining, sm_120 explicit. Adoption effort: ~2–4 wk hand-CUDA port (residual + packing + combined kernels; ref impl at [OpenBitSys/BitDecoding](https://github.com/OpenBitSys/BitDecoding)). First step is a `tools/analysis/` micro-benchmark vs imp's current paged NVFP4 attention to ground-truth the 8× delta on RTX 5090 before committing to the port.
+- **DeltaKV** ([arxiv:2602.08005](https://arxiv.org/abs/2602.08005)) — residual-based sparse KV compression: encode tokens as residuals against retrieved historical references; 29% KV memory, 2× throughput. **DEFERRED**: bundled with [Sparse-vLLM](https://github.com/CURRENTF/Sparse-vLLM) (near-fork, not a library); imp would need to re-architect the dense paged KV layer. Marginal win over the NVFP4 + BitDecoding stack at high engineering cost. Re-eval if imp pushes past 256K context where DeltaKV's long-range similarity advantage grows, or if a paged-vLLM-compatible reference appears.
+
+Detailed per-item evaluation lives in `kv_research_grade_eval_2026_05_09.md` (memory file).
