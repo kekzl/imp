@@ -48,7 +48,7 @@ static std::string generate_greedy(const char* model_path, const std::string& pr
         return {};
 
     ImpConfig cfg = imp_config_default();
-    cfg.max_seq_len = 4096;      // explicit: accommodates ~2800-token prompts + generation
+    cfg.max_seq_len = 4096;      // explicit: accommodates ~3200-token prompts + generation
     cfg.max_batch_size = 1;
     cfg.enable_cuda_graphs = 0;
     cfg.prefill_chunk_size = chunk_size;
@@ -102,12 +102,22 @@ protected:
         return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
     }
 
-    // ~2800-token prompt: 200 numbered items with 10 words each.
-    // Forces >=5 chunks at chunk_size=512, >=2 chunks at chunk_size=1024.
-    // Well within the 4096-token context window (leaves ~1200 tokens for generation).
+    // Long prompt: 120 numbered items × ~27 tokens/item ≈ 3240 tokens total.
+    //
+    // Size rationale (bisected 2026-05-08):
+    //   - Each item tokenizes to ~27 tokens with Qwen3 BPE (Llama similar).
+    //   - max_seq_len=4096 → blocks_per_seq=256 (block_size=16).
+    //     At 120 items: ~200 KV blocks needed, safely below the 256-block buffer
+    //     allocated for d_pf_block_tables_.
+    //   - 200 items → ~5312 tokens > max_seq_len=4096: engine spills into a
+    //     second prefill chunk of 1216 tokens that needs 332 KV blocks, which
+    //     overflows the 256-block d_pf_block_tables_ buffer (cudaMemcpy
+    //     "invalid argument"). The cliff is between 154 and 155 items (~4096 tokens).
+    //   - 120 items sits safely above 2049 tokens (≥4 chunks at chunk=512,
+    //     ≥2 chunks at chunk=1024) and well below the 4096-token cliff.
     static std::string long_prompt() {
         std::string p = "Summarize the following list:\n";
-        for (int i = 0; i < 200; i++) {
+        for (int i = 0; i < 120; i++) {
             p += "Item " + std::to_string(i) + ": ";
             for (int w = 0; w < 10; w++)
                 p += "word" + std::to_string(w) + " ";
