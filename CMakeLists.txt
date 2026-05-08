@@ -16,14 +16,15 @@ find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
 # --- CUDA Architecture ---
-# SM120-only: RTX 5090 (GB202, Blackwell).
-# sm_120f (family feature set) enables FP8 MMA (.kind::f8f6f4) and
-# TMA warp-specialized grouped GEMM tactics.
-# CMake < 3.31 doesn't understand the 'f' suffix, so we pass gencode directly.
+# SM120a only: RTX 5090 (GB202, Blackwell).
+# 'a' suffix = architecture-specific feature set (FP8 MMA .kind::f8f6f4,
+# NVFP4 block-scaled MMA, TMA warp-specialized grouped GEMM tactics).
+# CMake < 3.31 doesn't parse the 'a'/'f' suffix in CMAKE_CUDA_ARCHITECTURES,
+# so we pass gencode directly.
 set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
 set(CMAKE_CUDA_ARCHITECTURES OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-message(STATUS "CUDA architectures: sm_120a (RTX 5090) — testing if ptxas C7600 still hits on CUDA 13.2.1")
+message(STATUS "CUDA architectures: sm_120a (RTX 5090)")
 
 # --- Options ---
 option(IMP_BUILD_TESTS "Build tests" ON)
