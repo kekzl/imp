@@ -38,15 +38,17 @@ static cublasHandle_t get_attn_cublas_handle() {
 // FP32 causal softmax: reads/writes FP32 S matrix.
 // Used when QK^T scores are stored as FP32 (Gemma-4 with scale=1.0).
 // ---------------------------------------------------------------------------
-__global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int seq_len, bool causal) {
+__global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_len, int kv_len,
+                                                    int q_offset, bool causal) {
     int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
     int warp_id = tid / 32, lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
-    float* row_ptr = S + (static_cast<int64_t>(head) * seq_len + row) * seq_len;
+    float* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
+    int abs_row = q_offset + row;
 
     float max_val = -FLT_MAX;
-    for (int j = tid; j < seq_len; j += blockDim.x)
-        max_val = fmaxf(max_val, (causal && j > row) ? -FLT_MAX : row_ptr[j]);
+    for (int j = tid; j < kv_len; j += blockDim.x)
+        max_val = fmaxf(max_val, (causal && j > abs_row) ? -FLT_MAX : row_ptr[j]);
 
     __shared__ float s_max[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -64,8 +66,8 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int se
     max_val = s_max[0];
 
     float sum_val = 0.0f;
-    for (int j = tid; j < seq_len; j += blockDim.x)
-        sum_val += (causal && j > row) ? 0.0f : expf(row_ptr[j] - max_val);
+    for (int j = tid; j < kv_len; j += blockDim.x)
+        sum_val += (causal && j > abs_row) ? 0.0f : expf(row_ptr[j] - max_val);
 
     __shared__ float s_sum[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -82,8 +84,8 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int se
     __syncthreads();
     float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
 
-    for (int j = tid; j < seq_len; j += blockDim.x)
-        row_ptr[j] = (causal && j > row) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
+    for (int j = tid; j < kv_len; j += blockDim.x)
+        row_ptr[j] = (causal && j > abs_row) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +99,8 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int se
 //
 // Warp-level reductions for max and sum using __shfl_xor_sync.
 // ---------------------------------------------------------------------------
-__global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int seq_len, bool causal) {
+__global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, int kv_len,
+                                               int q_offset, bool causal) {
     // Each block processes one row: blockIdx.x = row, blockIdx.y = head
     int row = blockIdx.x;
     int head = blockIdx.y;
@@ -106,13 +109,14 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int seq_len,
     int lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
 
-    half* row_ptr = S + (static_cast<int64_t>(head) * seq_len + row) * seq_len;
+    half* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
+    int abs_row = q_offset + row;
 
     // Step 1: Find max (for numerical stability)
     float max_val = -FLT_MAX;
-    for (int j = tid; j < seq_len; j += blockDim.x) {
+    for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > row) {
+        if (causal && j > abs_row) {
             val = -FLT_MAX;
         } else {
             val = __half2float(row_ptr[j]);
@@ -143,9 +147,9 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int seq_len,
 
     // Step 2: Compute exp and sum
     float sum_val = 0.0f;
-    for (int j = tid; j < seq_len; j += blockDim.x) {
+    for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > row) {
+        if (causal && j > abs_row) {
             val = 0.0f;
         } else {
             val = expf(__half2float(row_ptr[j]) - max_val);
@@ -174,9 +178,9 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int seq_len,
     float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
 
     // Step 3: Normalize and write back
-    for (int j = tid; j < seq_len; j += blockDim.x) {
+    for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > row) {
+        if (causal && j > abs_row) {
             val = 0.0f;
         } else {
             val = expf(__half2float(row_ptr[j]) - max_val) * inv_sum;
@@ -304,14 +308,14 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             dim3 grid(seq_len, n_heads);
             if (use_fp32_s) {
                 // FP32 softmax: reads FP32 scores, writes FP32 probabilities
-                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, causal);
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, seq_len, /*q_offset=*/0, causal);
                 // Convert FP32 → FP16 for P@V GEMM
                 int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, seq_len, /*q_offset=*/0, causal);
             }
         }
 
@@ -369,14 +373,14 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 threads = 1024;
             dim3 grid(seq_len, n_heads);
             if (use_fp32_s) {
-                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, causal);
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(S_f32, seq_len, seq_len, /*q_offset=*/0, causal);
                 // Convert FP32 → FP16 for P@V
                 int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 imp::fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, seq_len, seq_len, /*q_offset=*/0, causal);
             }
         }
 
