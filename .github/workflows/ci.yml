@@ -105,11 +105,13 @@ jobs:
   test:
     name: Test
     needs: build
-    runs-on: ubuntu-24.04
-    # GPU tests require self-hosted runner with NVIDIA GPU.
-    # Uncomment the line below and remove ubuntu-24.04 when a GPU runner is available.
-    # runs-on: [self-hosted, gpu, cuda]
-    if: false  # Skip until GPU runner is configured
+    # GPU tests need a self-hosted runner with NVIDIA GPU. Set the repo variable
+    # HAS_GPU_RUNNER=true (Settings → Secrets and variables → Actions → Variables)
+    # once a runner labeled [self-hosted, gpu, cuda] is registered. Until then,
+    # this job is skipped — same effective behavior as the prior `if: false`,
+    # but flips automatically when a runner appears.
+    if: ${{ vars.HAS_GPU_RUNNER == 'true' }}
+    runs-on: [self-hosted, gpu, cuda]
 
     steps:
       - uses: actions/checkout@v5
@@ -122,5 +124,6 @@ jobs:
 
       - name: Run tests
         run: |
-          chmod +x build/imp-tests
-          cd build && ctest --output-on-failure
+          chmod +x build/imp-tests || true
+          chmod +x build/test-* 2>/dev/null || true
+          cd build && ctest --output-on-failure --timeout 120
