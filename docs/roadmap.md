@@ -25,9 +25,9 @@ Default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mist
 
 Each excluded class is a separate larger work item (paged-prefill kernel with SWA-aware mask / dual-head_dim support / sub-byte dequant during gather).
 
-### `d_pf_block_tables_` undersized for prompts ≥ max_seq_len
+### ~~`d_pf_block_tables_` undersized for prompts ≥ max_seq_len~~ — FIXED #134
 
-When a single prompt exceeds `max_seq_len`, the engine's pre-allocated device buffer `d_pf_block_tables_` (sized `max_seq_len / block_size`) overflows during `cudaMemcpyAsync`. Discovered while validating chunked-prefill at >4096-token prompts. Mitigation: configure `max_seq_len` to actual maximum prompt length. Real fix: size `d_pf_block_tables_` from `max_kv_blocks` instead.
+When a single prompt exceeds `max_seq_len`, the engine's pre-allocated device buffer `d_pf_block_tables_` (sized `max_seq_len / block_size`) overflowed during `cudaMemcpyAsync`. Fixed in PR #134: `d_pf_block_tables_` is now sized from `max_blocks` (the total KV cache pool count), so a single request's block_table can grow to the entire cache without overflowing.
 
 ### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
 
