@@ -1077,7 +1077,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
                     if (fp32_down_active) {
                         size_t fp32_bytes = static_cast<size_t>(expanded) * d * sizeof(float);
-                        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
+                        // Prefer the pre-allocated persistent scratch (avoids per-call
+                        // cudaMallocAsync — see moe_workspace.h::fp32_down_buf).
+                        if (moe_.fp32_down_buf && moe_.fp32_down_buf_size >= fp32_bytes) {
+                            fp32_down_buf = moe_.fp32_down_buf;
+                        } else {
+                            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
+                        }
                     }
 
                     auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
@@ -2001,11 +2007,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
 moe_after_experts:
-    // Free diagnostic FP32 expert-down buffer if it was allocated (FP16 batch path only).
-    if (fp32_down_buf) {
+    // Free diagnostic FP32 expert-down buffer if we malloc'd it ourselves.
+    // The persistent moe_.fp32_down_buf is owned by MoEWorkspace — don't free.
+    if (fp32_down_buf && fp32_down_buf != moe_.fp32_down_buf) {
         cudaFreeAsync(fp32_down_buf, stream);
-        fp32_down_buf = nullptr;
     }
+    fp32_down_buf = nullptr;
     // 8b. Shared expert FFN: all tokens pass through an additional
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).

@@ -320,6 +320,29 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.batch_dequant_buf = nullptr;
                 moe_.batch_dequant_buf_size = 0;
             }
+            // Pre-allocate FP32 down-projection scratch (drops per-call
+            // cudaMallocAsync at executor_forward_moe.cu:1080). Worst-case sizing
+            // matches the per-call: expanded = max_tokens × top_k, d = d_model.
+            // Skipped if VRAM insufficient — forward pass falls back to lazy alloc.
+            {
+                size_t fp32_sz = static_cast<size_t>(max_tokens_) *
+                                 static_cast<size_t>(cfg.n_experts_active) *
+                                 static_cast<size_t>(d) * sizeof(float);
+                size_t free_bytes = 0, total_bytes = 0;
+                cudaMemGetInfo(&free_bytes, &total_bytes);
+                constexpr size_t kReserve = 256ULL * 1024 * 1024;
+                if (fp32_sz > 0 && free_bytes > fp32_sz + kReserve) {
+                    moe_.fp32_down_buf = vram_alloc(vram_alloc_, fp32_sz, "moe_fp32_down");
+                    if (moe_.fp32_down_buf) {
+                        moe_.fp32_down_buf_size = fp32_sz;
+                        IMP_LOG_INFO("MoE fp32_down scratch: %.2f MiB",
+                                     fp32_sz / (1024.0 * 1024.0));
+                    } else {
+                        moe_.fp32_down_buf = nullptr;
+                        moe_.fp32_down_buf_size = 0;
+                    }
+                }
+            }
         } else {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
             moe_.batch_dequant_buf = nullptr;

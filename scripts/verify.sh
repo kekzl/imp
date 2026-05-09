@@ -267,7 +267,17 @@ else
     if [ ! -f "$GRAPHS_MODEL_PATH" ]; then
         skip "graphs gate model $GRAPHS_MODEL_PATH not present"
     else
-        MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.5}"
+        # Threshold lowered from 1.5 → 1.3 after F1's warmup-pre-pass made
+        # graphs-OFF significantly faster on dense Q8 (compresses the ratio).
+        # Cross-model A/B (post-patches, reps=2, pp=256 tg=256):
+        #   Qwen3-4B Q8       1.90x
+        #   Qwen3.5-GDN Q8    2.23x
+        #   Llama-3.2-3B Q8   2.38x
+        #   Qwen3-8B Q8       1.20x   ← bigger model = larger kernel time =
+        #                                less launch-overhead share = lower ratio.
+        # 1.3 catches catastrophic graph failures (≈ 1.0x = full fallback to
+        # per-step decode) without rejecting healthy big-model decodes.
+        MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.3}"
         ERR_NG=$(mktemp); ERR_G=$(mktemp)
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
               --max-tokens 256 --temperature 0 --no-cuda-graphs >/dev/null 2>"$ERR_NG"

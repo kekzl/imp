@@ -13,14 +13,22 @@ echo "Generating performance baseline..."
 echo "Model: $MODEL"
 echo "Reps: $REPS"
 
-# Collect metrics
-pp128=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | grep "^pp " | awk '{print $5}')
-pp512=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | grep "^pp " | awk '{print $5}')
-tg128=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | grep "^tg " | awk '{print $5}')
+# Collect metrics — extract the tok/s value inside parens, not the avg-ms field.
+# Bench line format: `pp   512 tokens  avg    33.95 ms  (15083.10 tok/s)  [5 reps]`
+# Same parser shape as scripts/verify.sh — keep them in sync.
+extract_tps() {
+    grep -oP "$1"'\s+\d+\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' | head -1
+}
+pp128=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | extract_tps "^pp")
+pp512=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | extract_tps "^pp")
+tg128=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps "$REPS" --max-tokens 128 --temperature 0 2>&1 | extract_tps "^tg")
 
-# Get GPU info
+# Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
+# (the runtime image has no nvcc, only the devel image does).
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-CUDA=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//' || echo "unknown")
+CUDA=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//' \
+       || nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' \
+       || echo "unknown")
 VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
 
 # Get model VRAM from benchmark output
