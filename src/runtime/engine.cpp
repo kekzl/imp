@@ -1681,9 +1681,10 @@ bool Engine::step_schedule() {
 // =====================================================================
 // supports_chunked_prefill_ / resolve_prefill_chunk_size_
 // Whether the model arch + KV dtype combination supports chunked prefill.
-// Returns true for full-attention models (Qwen3, Llama, Mistral) with FP16
-// or FP8 KV cache. Returns false for SWA models (Gemma-3, Gemma-4, Llama-4),
-// hybrid models (GDN/Mamba2), and sub-byte KV dtypes.
+// Returns true for full-attention models (Qwen3, Llama, Mistral) and hybrid
+// GDN+MoE / Mamba2+MoE models (Qwen3.5/3.6, Nemotron-H) with FP16, FP8, or
+// NVFP4 KV cache. Returns false for SWA models (Gemma-3/4, Llama-4) and
+// sub-byte KV dtypes (INT4, TurboQuant) lacking gather kernels.
 // =====================================================================
 
 bool Engine::supports_chunked_prefill_() const {
