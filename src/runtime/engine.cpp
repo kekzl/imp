@@ -1763,6 +1763,23 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int total_input = static_cast<int>(req->input_tokens.size());
     int offset = req->prefill_offset;
 
+    // Clamp effective_chunk so n × ctx_len ≤ s_cap² where s_cap is the
+    // attn_scores_ workspace dimension. Worst case is the final chunk where
+    // ctx_len ≈ total_input. Without this, long prompts on hybrid models
+    // (Qwen3.5/3.6 GDN, Nemotron-H) hit "attn_scores_ capacity too small"
+    // abort in executor_attention.cu — see chunked_prefill_attn_scores_capacity_bug.
+    if (executor_) {
+        int s_cap = executor_->attn_scores_cap();
+        if (s_cap > 0 && total_input > 0) {
+            int64_t cap2 = static_cast<int64_t>(s_cap) * s_cap;
+            int max_chunk_for_buf = static_cast<int>(cap2 / total_input);
+            max_chunk_for_buf = (max_chunk_for_buf / kv_bs) * kv_bs;
+            if (max_chunk_for_buf > 0 && effective_chunk > max_chunk_for_buf) {
+                effective_chunk = max_chunk_for_buf;
+            }
+        }
+    }
+
     // Determine chunk boundaries
     int chunk_len = total_input - offset;
     bool is_last_chunk = true;
