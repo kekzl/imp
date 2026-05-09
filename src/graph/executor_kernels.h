@@ -231,6 +231,22 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
                                                            half* __restrict__ out, int64_t n);
 
 // ---------------------------------------------------------------------------
+// GDN/Qwen3.5/3.6 attention output-gate split (interleaved layout):
+// Source row layout: [Q_h0(hd) | Gate_h0(hd) | Q_h1(hd) | Gate_h1(hd) | ...]
+// Splits per head into two contiguous [n, nh*hd] buffers in one launch,
+// replacing the nh × 2 cudaMemcpy2DAsync loop in executor_attention.cu
+// (~656 D2D copies per decode step on Qwen3.5 GDN — Finding 2).
+// Element type is templated; instantiated for half (FP16) and __nv_bfloat16.
+template <typename T>
+__global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
+    const T* __restrict__ src, T* __restrict__ q_dst, T* __restrict__ gate_dst, int n_tokens, int nh,
+    int hd, int q_out_dim);
+
+// Host launcher: dispatches the right T based on dtype size (2 = half/bf16).
+void attn_gate_split_interleaved(const void* src, void* q_dst, void* gate_dst, int n_tokens, int nh, int hd,
+                                 int q_out_dim, int element_bytes, cudaStream_t stream);
+
+// ---------------------------------------------------------------------------
 // dp4a GEMV helpers (shared by executor_forward.cu and executor_kernels.cu)
 // ---------------------------------------------------------------------------
 

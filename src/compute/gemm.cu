@@ -316,9 +316,22 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
 static constexpr int kMaxAlgoCandidates = 8;
 static constexpr int kBenchmarkIters = 5;
 
+// Diagnostic: when IMP_LOG_GEMM_ALGO=1, log shape + per-candidate algoId/tileId
+// + chosen algo for every benchmark_and_select_algo call. Used to enumerate
+// which exact GEMM shapes select cuBLAS legacy WMMA kernels (Finding 1/5).
+static int gemm_algo_log_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("IMP_LOG_GEMM_ALGO");
+        cached = (env && env[0] == '1') ? 1 : 0;
+    }
+    return cached;
+}
+
 static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
-                                      bool is_int_compute, cudaStream_t stream) {
+                                      bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0,
+                                      int K = 0) {
     cublasLtMatmulPreference_t pref = nullptr;
     CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
@@ -335,6 +348,20 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.workspace_size = 0;
         return;
     }
+    // [diag] IMP_LOG_GEMM_ALGO: dump shape + per-candidate algoId/tileId.
+    // Helps identify which shapes are stuck on legacy WMMA candidates.
+    if (gemm_algo_log_enabled() && M > 0) {
+        fprintf(stderr, "[gemm-algo] shape M=%d N=%d K=%d  candidates=%d\n", M, N, K, nresults);
+        for (int i = 0; i < nresults; i++) {
+            int algo_id = -1, tile_id = -1;
+            cublasLtMatmulAlgoCapGetAttribute(&results[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
+                                              &algo_id, sizeof(algo_id), nullptr);
+            cublasLtMatmulAlgoConfigGetAttribute(&results[i].algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id,
+                                                 sizeof(tile_id), nullptr);
+            fprintf(stderr, "[gemm-algo]   cand[%d]: numImplFlags=0x%x tile=%d ws=%zu\n", i, algo_id, tile_id,
+                    results[i].workspaceSize);
+        }
+    }
     // [runtime] deterministic_gemm = true skips timing-based selection so
     // repeat runs produce bitwise-identical prefill outputs.
     const bool s_deterministic_gemm = RuntimeConfig::current().runtime.deterministic_gemm;
@@ -342,6 +369,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
+        if (gemm_algo_log_enabled() && M > 0) {
+            fprintf(stderr, "[gemm-algo]   PICKED cand[0] (deterministic or only candidate)\n");
+        }
         return;
     }
 
@@ -360,15 +390,28 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     float best_ms = 1e30f;
     int best_idx = 0;
 
+    // Warmup all candidates first so steady-state caches are warm before any
+    // candidate is timed. One warmup call per candidate (the previous policy)
+    // let single-rep bench mode pick legacy WMMA paths whose first-call cost
+    // is competitive but whose steady-state cost is 3-9× higher than modern
+    // m16n8k16 (`s16816gemm`) tiles. Three warmups per candidate covers
+    // cuBLASLt's per-algo lazy compile + L2 fill so the timed loop reflects
+    // hot-path behavior, eliminating WMMA-fallback selection (Finding 1).
+    constexpr int kWarmupIters = 3;
     for (int i = 0; i < nresults; i++) {
         if (results[i].workspaceSize > s_workspace_size)
             continue;
         float zero = 0.0f;
-        // Warmup
-        cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
-                       entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
-                       results[i].workspaceSize, stream);
-        // Timed
+        for (int w = 0; w < kWarmupIters; w++)
+            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
+                           entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
+                           results[i].workspaceSize, stream);
+    }
+
+    for (int i = 0; i < nresults; i++) {
+        if (results[i].workspaceSize > s_workspace_size)
+            continue;
+        float zero = 0.0f;
         cudaEventRecord(start, stream);
         for (int r = 0; r < kBenchmarkIters; r++)
             cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
@@ -390,6 +433,13 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     entry.algo = results[best_idx].algo;
     entry.workspace_size = results[best_idx].workspaceSize;
     entry.has_algo = true;
+    if (gemm_algo_log_enabled() && M > 0) {
+        int picked_tile = -1;
+        cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &picked_tile,
+                                             sizeof(picked_tile), nullptr);
+        fprintf(stderr, "[gemm-algo]   PICKED cand[%d] tile=%d  best_ms=%.3f\n", best_idx, picked_tile,
+                best_ms);
+    }
 }
 
 void gemm_cleanup() {
@@ -539,7 +589,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
-                                      (compute_type == CUBLAS_COMPUTE_32I), stream);
+                                      (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K);
 
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
@@ -936,7 +986,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream);
+            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream,
+                                      (int)M, (int)N, (int)K);
 
             auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &ins_it->second;

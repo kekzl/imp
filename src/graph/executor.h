@@ -437,6 +437,13 @@ public:
     int active_workspace() const { return active_workspace_; }
     int max_tokens() const { return max_tokens_; }
 
+    // Capacity of the [n_heads, attn_seq, attn_seq] FP16 attn-scores workspace.
+    // Engine's chunked-prefill path must clamp chunk_len so n × ctx_len ≤ cap².
+    // Returns 0 if the buffer wasn't allocated (VRAM-constrained / WMMA fallback).
+    int attn_scores_cap() const {
+        return attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
+    }
+
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }

@@ -365,9 +365,10 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
                                     cudaStream_t stream) {
     assert(K % kSFVecSize == 0 && "K must be multiple of 16");
 
-    // Zero the SF buffer for padding safety
-    size_t sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
+    // SfAtom padding bytes are pre-zeroed once at workspace allocation
+    // (executor_workspace_buffers.cu). The kernel only writes valid (row, k_group)
+    // cells; padding stays zero. Avoids a cudaMemsetAsync per call (~6720 in
+    // Llama Q8 W1 prefill).
 
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;

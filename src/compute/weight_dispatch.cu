@@ -153,6 +153,10 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                     uint8_t* act_data = reinterpret_cast<uint8_t*>(workspace);
                     void* act_sf = act_data + act_data_bytes;
                     void* ws_buf = reinterpret_cast<uint8_t*>(act_sf) + act_sf_bytes;
+                    // SfAtom layout has padding bytes the kernel doesn't touch;
+                    // workspace path can't assume the slice is pre-zeroed (unlike
+                    // qscratch_.cutlass_act_sf which is zeroed at allocation).
+                    cudaMemsetAsync(act_sf, 0, act_sf_bytes, stream);
                     quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
                     bool ok = gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf,
                                                        ws_needed, stream);
