@@ -1002,25 +1002,44 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 return env && env[0] == '1';
             }();
             if (use_bitdecoding_tc) {
-                // Phase 3b residual read: single-sequence only, gated on
-                // KVCacheManager having an enabled residual buffer AND state
-                // exposing a non-negative kv_seq_id. Multi-seq batch decode
-                // bypasses by passing nullptr/0.
+                // Phase 3b residual read. Two activation paths:
+                //   (multi-seq) state.d_residual_seq_slots != nullptr: kernel
+                //     reads per-batch metadata from the device arrays. Used by
+                //     batched decode.
+                //   (single-seq legacy) state.kv_seq_id >= 0: kernel uses the
+                //     scalar form. Used by single-seq decode that hasn't been
+                //     migrated to the array form (e.g. early-init smoke).
                 const half* k_res = nullptr;
                 const half* v_res = nullptr;
                 int res_count = 0;
                 int res_n = 0;
                 int res_widx = 0;
-                if (state.kv_manager != nullptr && state.kv_manager->residual_enabled() &&
-                    state.n_sequences == 1 && state.kv_seq_id >= 0) {
-                    k_res = static_cast<const half*>(
-                        state.kv_manager->residual_k_ptr(state.kv_seq_id, kv_layer));
-                    v_res = static_cast<const half*>(
-                        state.kv_manager->residual_v_ptr(state.kv_seq_id, kv_layer));
-                    auto rs = state.kv_manager->residual_state(state.kv_seq_id);
-                    res_count = rs.fill_count;
+                const half* k_res_base = nullptr;
+                const half* v_res_base = nullptr;
+                int res_seq_stride_elems = 0;
+
+                const bool residual_on = state.kv_manager != nullptr &&
+                                         state.kv_manager->residual_enabled();
+                if (residual_on) {
                     res_n = state.kv_manager->residual_n_tokens();
-                    res_widx = rs.write_idx;
+                    if (state.d_residual_seq_slots != nullptr) {
+                        // Multi-seq array form
+                        k_res_base = static_cast<const half*>(
+                            state.kv_manager->residual_k_layer_base(kv_layer));
+                        v_res_base = static_cast<const half*>(
+                            state.kv_manager->residual_v_layer_base(kv_layer));
+                        res_seq_stride_elems = static_cast<int>(
+                            state.kv_manager->residual_seq_stride_bytes() / sizeof(__half));
+                    } else if (state.n_sequences == 1 && state.kv_seq_id >= 0) {
+                        // Single-seq scalar form
+                        k_res = static_cast<const half*>(
+                            state.kv_manager->residual_k_ptr(state.kv_seq_id, kv_layer));
+                        v_res = static_cast<const half*>(
+                            state.kv_manager->residual_v_ptr(state.kv_seq_id, kv_layer));
+                        auto rs = state.kv_manager->residual_state(state.kv_seq_id);
+                        res_count = rs.fill_count;
+                        res_widx = rs.write_idx;
+                    }
                 }
                 paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4,
                                                 static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
@@ -1028,7 +1047,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                 state.block_tables, state.context_lens, kv_bs, scale,
                                                 state.max_context_len, layer_sliding_window,
                                                 cfg.attn_logit_softcap, stream, state.max_blocks_per_seq, 0,
-                                                k_res, v_res, res_count, res_n, res_widx);
+                                                k_res, v_res, res_count, res_n, res_widx,
+                                                k_res_base, v_res_base, res_seq_stride_elems,
+                                                state.d_residual_seq_slots,
+                                                state.d_residual_counts,
+                                                state.d_residual_write_idxes);
             } else {
                 paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),

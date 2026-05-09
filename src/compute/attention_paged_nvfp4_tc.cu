@@ -50,8 +50,19 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // Non-Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
+// __launch_bounds__(maxThreadsPerBlock, minBlocksPerSM): with the residual
+// pass adding ~5 WMMA fragments of register pressure on top of the paged
+// path, the default heuristic packed 4+ blocks per SM and forced a 64-byte
+// per-thread local-memory spill (cuobjdump --dump-resource-usage showed
+// STACK:64 for HD>=128). The spilled stack lives in DRAM-backed local
+// memory; every access is a global-memory round-trip, which on the hot
+// per-decode-step path turned into a 3× tg/s regression. Pinning to 1
+// block per SM trades occupancy (8 warps × 1 block = 8 warps per SM,
+// vs the kernel's preferred 4 blocks for paged-only) for a higher register
+// budget per thread (~128 vs 64), eliminating the spill. Net win on long-
+// context decode: residual+graphs-off ≥ paged-only baseline.
 template <int HEAD_DIM>
-__global__ void paged_attention_decode_nvfp4_tc_kernel(
+__global__ __launch_bounds__(BLOCK_THREADS, 1) void paged_attention_decode_nvfp4_tc_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ K_cache,    // packed FP4 pairs
     const uint8_t* __restrict__ V_cache,    // packed FP4 pairs
@@ -60,11 +71,20 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     half* __restrict__ O, const int* __restrict__ block_tables,
     const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size,
     float scale, int max_context_len, int max_num_blocks, int sliding_window, float softcap,
-    // Phase 3b residual args. Active when K_residual != nullptr && residual_count > 0.
-    // Pointer points to the (seq, layer) slice; layout
-    //   [residual_n_tokens, n_kv_heads, head_dim] FP16 (ring-indexed).
+    // Phase 3b residual args.
+    // Single-seq form (batch_size==1): K_residual / V_residual point at the
+    //   (seq, layer) slice; residual_count_scalar / residual_write_idx_scalar
+    //   carry per-seq state. Layout [residual_n_tokens, n_kv_heads, head_dim].
+    // Multi-seq form (batch_size>=1): K_residual_base / V_residual_base point at
+    //   slot 0's (K|V) data for this layer; residual_seq_stride_elems is the FP16
+    //   stride between slots; d_residual_seq_slots/_counts/_write_idxes are device
+    //   arrays of length batch_size, indexed by blockIdx.x.
+    // Multi-seq is selected when d_residual_seq_slots != nullptr.
     const half* __restrict__ K_residual, const half* __restrict__ V_residual,
-    int residual_count, int residual_n_tokens, int residual_write_idx) {
+    int residual_count_scalar, int residual_n_tokens, int residual_write_idx_scalar,
+    const half* __restrict__ K_residual_base, const half* __restrict__ V_residual_base,
+    int residual_seq_stride_elems, const int* __restrict__ d_residual_seq_slots,
+    const int* __restrict__ d_residual_counts, const int* __restrict__ d_residual_write_idxes) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     static_assert(HEAD_DIM % 16 == 0, "HEAD_DIM must be divisible by 16 (NVFP4 group size)");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
@@ -114,11 +134,37 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     if (sliding_window > 0 && ctx_len > sliding_window)
         effective_start = ctx_len - sliding_window;
 
-    // Phase 3b: split absolute KV range into paged-tail-clipped + residual.
-    // residual_active: residual ring is enabled AND has at least one entry that
-    // falls within ctx_len AND falls within effective_start..ctx_len window.
-    const bool residual_have = (K_residual != nullptr) && (V_residual != nullptr) &&
-                               (residual_n_tokens > 0) && (residual_count > 0);
+    // Phase 3b: pick residual form (single-seq scalar vs multi-seq array)
+    // and resolve per-batch K/V residual pointer + count + write_idx.
+    const half* K_res_ptr = nullptr;
+    const half* V_res_ptr = nullptr;
+    int residual_count = 0;
+    int residual_write_idx = 0;
+    if (d_residual_seq_slots != nullptr && K_residual_base != nullptr && residual_n_tokens > 0) {
+        // Multi-seq array form
+        int seq_slot = d_residual_seq_slots[batch_idx];
+        int rc = (d_residual_counts != nullptr) ? d_residual_counts[batch_idx] : 0;
+        int rw = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
+        if (seq_slot >= 0 && rc > 0) {
+            K_res_ptr = K_residual_base + (int64_t)seq_slot * residual_seq_stride_elems;
+            V_res_ptr = V_residual_base + (int64_t)seq_slot * residual_seq_stride_elems;
+            residual_count = rc;
+            residual_write_idx = rw;
+        }
+    } else if (K_residual != nullptr && V_residual != nullptr && residual_count_scalar > 0 &&
+               residual_n_tokens > 0) {
+        // Single-seq scalar form
+        K_res_ptr = K_residual;
+        V_res_ptr = V_residual;
+        residual_count = residual_count_scalar;
+        residual_write_idx = residual_write_idx_scalar;
+    }
+
+    // Split absolute KV range into paged-tail-clipped + residual.
+    // residual_have: residual is enabled for this batch AND has at least one
+    // entry within both ctx_len and the [effective_start, ctx_len) window.
+    const bool residual_have = (K_res_ptr != nullptr) && (V_res_ptr != nullptr) &&
+                               (residual_count > 0);
     int residual_active_count = 0;
     int residual_first_abs = ctx_len;  // start of residual chronological range
     int residual_skip = 0;             // chronologically-stale residual entries to skip
@@ -374,18 +420,22 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 
         constexpr int K_TILES_R = HEAD_DIM / 16;
 
-        using namespace nvcuda;
-        wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag_v;
-        wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> v_frag;
-
         const int n_tiles_r = (residual_active_count + 15) / 16;
         const int slot_base = (residual_write_idx + residual_n_tokens - residual_count + residual_skip)
                               % residual_n_tokens;
 
+        // Fragments declared INSIDE the loop so they don't allocate registers
+        // for warps that skip the loop entirely (register pressure cuts kernel
+        // occupancy and slows the paged loop, which is the dominant cost at
+        // long context — verified via A/B at ctx=1024 vs 4096).
         for (int tile = warp_id; tile < n_tiles_r; tile += NUM_WARPS) {
+            using namespace nvcuda;
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag_v;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> v_frag;
+
             const int tile_first = tile * 16;
             int tile_count = residual_active_count - tile_first;
             if (tile_count > 16) tile_count = 16;
@@ -409,8 +459,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     int hd_global = hd_off + hd_local;
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
-                        sK_r[i] = K_residual[(int64_t)slot * slot_stride_res +
-                                             kv_head * kv_head_stride_res + hd_global];
+                        sK_r[i] = K_res_ptr[(int64_t)slot * slot_stride_res +
+                                            kv_head * kv_head_stride_res + hd_global];
                     } else {
                         sK_r[i] = __float2half(0.0f);
                     }
@@ -427,29 +477,54 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
             __syncwarp();
 
             // Block-softmax (mirrors paged loop's normalized-rescale invariant).
-            float dots_scaled[16];
-            float m_local = -FLT_MAX;
-#pragma unroll
-            for (int t = 0; t < 16; t++) {
-                float d = -FLT_MAX;
-                if (t < tile_count) {
-                    d = __half2float(sK_r[t]) * scale;
-                    d = apply_softcap(d, softcap);
-                    m_local = fmaxf(m_local, d);
-                }
-                dots_scaled[t] = d;
+            //
+            // dots and weights live in shared memory rather than per-thread
+            // register arrays. Per-thread `float[16]` forced a 64-byte stack
+            // spill (cuobjdump STACK:64 at HD>=128) that turned the residual
+            // pass into a 3× tg/s regression on the long-context decode path
+            // — every spilled access is a DRAM round-trip. With shared-mem
+            // tables, lanes 0..15 each compute one entry, the warp shfl-
+            // reduces for m_local / l_local, and the V-phase A-operand fill
+            // reads from shared memory instead of registers. Reuses the front
+            // 32 floats of sFV_r (which is 16×16=256 floats so plenty of room).
+            float* dots_smem = sFV_r;             // [16] floats per warp
+            float* weights_smem = sFV_r + 16;     // [16] floats per warp
+
+            const bool t_active = (lane_id < 16) && (lane_id < tile_count);
+            float my_dot = -FLT_MAX;
+            if (t_active) {
+                my_dot = __half2float(sK_r[lane_id]) * scale;
+                my_dot = apply_softcap(my_dot, softcap);
+            }
+            if (lane_id < 16) dots_smem[lane_id] = my_dot;
+            __syncwarp();
+
+            // Full 32-lane warp reduce so EVERY lane (including 16..31, which
+            // have my_dot = -FLT_MAX) sees the same m_local. Skipping the
+            // off=16 step would leave lanes 16..31 with m_local=-FLT_MAX,
+            // diverging the subsequent m_new / exp_diff / l_inv computation
+            // and corrupting the per-lane sQ_r weight fill (each lane writes
+            // some rows of the A operand; inconsistent l_inv → garbage WMMA).
+            float m_local = my_dot;
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                m_local = fmaxf(m_local, __shfl_xor_sync(0xffffffff, m_local, off));
             }
 
             float m_new = fmaxf(m_w, m_local);
             float exp_diff = (m_w == -FLT_MAX) ? 0.0f : __expf(m_w - m_new);
 
-            float weights[16];
-            float l_local = 0.0f;
-#pragma unroll
-            for (int t = 0; t < 16; t++) {
-                float w = (dots_scaled[t] > -FLT_MAX) ? __expf(dots_scaled[t] - m_new) : 0.0f;
-                weights[t] = w;
-                l_local += w;
+            float my_weight = 0.0f;
+            if (t_active && my_dot > -FLT_MAX) {
+                my_weight = __expf(my_dot - m_new);
+            }
+            if (lane_id < 16) weights_smem[lane_id] = my_weight;
+            __syncwarp();
+
+            float l_local = my_weight;
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                l_local += __shfl_xor_sync(0xffffffff, l_local, off);
             }
 
             float l_new = exp_diff * l_w + l_local;
@@ -462,10 +537,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 #pragma unroll
             for (int i = 0; i < ELEMS; i++) o_reg[i] *= rescale_norm;
 
-            // Replicate normalized weights into sQ_r (A operand).
+            // Replicate normalized weights into sQ_r (A operand). Each lane
+            // reads its column's weight from shared mem — bank-conflict-free
+            // since 32 lanes broadcast-read 16 distinct addresses.
             for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
                 int col = i % 16;
-                sQ_r[i] = __float2half(weights[col] * l_inv);
+                sQ_r[i] = __float2half(weights_smem[col] * l_inv);
             }
             __syncwarp();
 
@@ -484,8 +561,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     int hd_global = hd_off + hd_local;
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
-                        sK_r[i] = V_residual[(int64_t)slot * slot_stride_res +
-                                             kv_head * kv_head_stride_res + hd_global];
+                        sK_r[i] = V_res_ptr[(int64_t)slot * slot_stride_res +
+                                            kv_head * kv_head_stride_res + hd_global];
                     } else {
                         sK_r[i] = __float2half(0.0f);
                     }
@@ -678,7 +755,10 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                   int sliding_window, float softcap, cudaStream_t stream,
                                   int max_blocks_per_seq, int n_sinks,
                                   const half* K_residual, const half* V_residual,
-                                  int residual_count, int residual_n_tokens, int residual_write_idx) {
+                                  int residual_count, int residual_n_tokens, int residual_write_idx,
+                                  const half* K_residual_base, const half* V_residual_base,
+                                  int residual_seq_stride_elems, const int* d_residual_seq_slots,
+                                  const int* d_residual_counts, const int* d_residual_write_idxes) {
     (void)n_sinks;  // streaming not yet wired
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -688,10 +768,18 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    // Phase 3b: residual is single-sequence only and not wired into the
-    // split-K scaffold. Force non-split path when residual is active.
-    const bool residual_active = (K_residual != nullptr) && (V_residual != nullptr) &&
-                                 (residual_count > 0) && (residual_n_tokens > 0) && (batch_size == 1);
+    // Phase 3b: residual is not wired into the split-K scaffold.  Force
+    // non-split path when EITHER form is active. Multi-seq form is selected
+    // by d_residual_seq_slots != nullptr; single-seq scalar form requires
+    // K_residual && residual_count > 0 && batch_size == 1.
+    const bool residual_active_multiseq =
+        (d_residual_seq_slots != nullptr) && (K_residual_base != nullptr) &&
+        (V_residual_base != nullptr) && (residual_n_tokens > 0);
+    const bool residual_active_scalar =
+        (K_residual != nullptr) && (V_residual != nullptr) &&
+        (residual_count > 0) && (residual_n_tokens > 0) && (batch_size == 1) &&
+        !residual_active_multiseq;
+    const bool residual_active = residual_active_multiseq || residual_active_scalar;
 
     // BitDecoding TC variant adds NUM_WARPS * 2048 bytes of WMMA scratch
     // (16x16 sQ halves + 16x16 sK halves + 16x16 sFV floats per warp).
@@ -754,9 +842,17 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data),   \
         block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,       \
         max_num_blocks, sliding_window, softcap,                                                               \
-        residual_active ? K_residual : nullptr, residual_active ? V_residual : nullptr,                        \
-        residual_active ? residual_count : 0, residual_active ? residual_n_tokens : 0,                         \
-        residual_active ? residual_write_idx : 0)
+        residual_active_scalar ? K_residual : nullptr,                                                         \
+        residual_active_scalar ? V_residual : nullptr,                                                         \
+        residual_active_scalar ? residual_count : 0,                                                           \
+        residual_active ? residual_n_tokens : 0,                                                               \
+        residual_active_scalar ? residual_write_idx : 0,                                                       \
+        residual_active_multiseq ? K_residual_base : nullptr,                                                  \
+        residual_active_multiseq ? V_residual_base : nullptr,                                                  \
+        residual_active_multiseq ? residual_seq_stride_elems : 0,                                              \
+        residual_active_multiseq ? d_residual_seq_slots : nullptr,                                             \
+        residual_active_multiseq ? d_residual_counts : nullptr,                                                \
+        residual_active_multiseq ? d_residual_write_idxes : nullptr)
 
         switch (head_dim) {
             case 64:

@@ -127,13 +127,28 @@ struct InferenceState {
     class GDNState* gdn_state = nullptr;
     int gdn_seq_id = 0;
 
-    // BitDecoding Phase 3 residual KV cache: per-sequence ring buffer of the
-    // newest-N FP16 KV entries. -1 = disabled. Single-sequence only — multi-seq
-    // batch decode bypasses the residual pass even when this is set.
+    // BitDecoding Phase 3 residual KV cache.
+    //
+    // Two activation modes: single-seq scalar OR multi-seq array. The
+    // attention dispatcher prefers the multi-seq form whenever the engine
+    // sets up the device arrays (see d_residual_seq_slots below).
+    //
+    // Single-seq mode (legacy / batch_size==1):
+    //   `kv_seq_id` carries the seq_id (= request id) used to look up the
+    //   ring state via KVCacheManager. -1 disables.
     int kv_seq_id = -1;
-    // KVCacheManager owning the residual buffer + ring-state map. Set when
-    // kv_seq_id >= 0 to give the executor access to residual_k_ptr / advance_residual.
+    // KVCacheManager owning the residual buffer + ring-state map.
     class KVCacheManager* kv_manager = nullptr;
+    // Multi-seq array form: device pointers to per-batch metadata, all of
+    // length n_sequences. Built by the engine on each forward step before
+    // the attention call. Each element matches the corresponding row of
+    // block_tables / context_lens. nullptr = multi-seq form inactive.
+    const int* d_residual_seq_slots = nullptr;     // [n_sequences] slot in [0, residual_max_seqs)
+    const int* d_residual_counts = nullptr;         // [n_sequences] fill_count
+    const int* d_residual_write_idxes = nullptr;    // [n_sequences] write_idx
+    // Host array of per-batch seq_ids (request ids), used by the KV write path
+    // to call KVCacheManager::advance_residual per seq. Length = n_sequences.
+    const int* h_residual_seq_ids = nullptr;
 
     // Batching
     int n_sequences = 1;         // number of sequences in the batch

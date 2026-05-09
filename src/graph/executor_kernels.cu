@@ -819,6 +819,54 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// BitDecoding Phase 3c: FP16 residual ring write.
+//
+// blockIdx.x = token_idx (0..n_tokens-1); blockIdx.y selects K (0) or V (1).
+// blockDim.x threads stripe across slot_elems = n_kv_heads * head_dim. The
+// per-token destination pointer (already resolved on the host to the right
+// (seq_slot, layer, K|V, ring_slot) location) is read from the per-token
+// pointer array.
+//
+// Replaces a pair of `cudaMemcpyAsync(dst, src, slot_elems*sizeof(half),
+// cudaMemcpyDeviceToDevice, stream)` calls per layer, which were observed
+// to serialize on the copy engine and dominate decode tg/s when residual
+// was enabled (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
+// ---------------------------------------------------------------------------
+__global__ void residual_kv_write_single_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_dst,
+    half* __restrict__ residual_v_dst,
+    int slot_elems) {
+    const bool is_v = (blockIdx.x == 1);
+    half* dst = is_v ? residual_v_dst : residual_k_dst;
+    if (dst == nullptr) return;
+    const half* src = is_v ? v_in : k_in;
+    const int i = threadIdx.x + blockIdx.y * blockDim.x;
+    if (i < slot_elems) {
+        dst[i] = src[i];
+    }
+}
+
+__global__ void residual_kv_write_multi_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* const* __restrict__ residual_k_dst_ptrs,
+    half* const* __restrict__ residual_v_dst_ptrs,
+    int slot_elems) {
+    const int token_idx = blockIdx.x;
+    const bool is_v = (blockIdx.y == 1);
+
+    half* dst = is_v ? residual_v_dst_ptrs[token_idx] : residual_k_dst_ptrs[token_idx];
+    if (dst == nullptr) return;
+    const half* src = (is_v ? v_in : k_in) + static_cast<int64_t>(token_idx) * slot_elems;
+
+    for (int i = threadIdx.x; i < slot_elems; i += blockDim.x) {
+        dst[i] = src[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TurboQuant KV cache write kernel
 //
 // K path (blockIdx.y == 0): PolarQuant decomposition + QJL sketch

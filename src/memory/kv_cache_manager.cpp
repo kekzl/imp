@@ -83,28 +83,83 @@ bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAl
     residual_n_tokens_ = residual_n;
     residual_max_seqs_ = max_seqs;
 
+    // Initialize the slot free list. LIFO push so slot 0 is allocated first.
+    residual_free_slots_.clear();
+    residual_free_slots_.reserve(max_seqs);
+    for (int i = max_seqs - 1; i >= 0; i--) {
+        residual_free_slots_.push_back(i);
+    }
+    residual_seq_slot_.clear();
+
     IMP_LOG_INFO("KVCacheManager: residual buffer enabled — max_seqs=%d, residual_n=%d, %.2f MiB",
                  max_seqs, residual_n, static_cast<double>(total) / (1024.0 * 1024.0));
     return true;
 }
 
+int KVCacheManager::allocate_residual_slot(int seq_id) {
+    if (!residual_pool_) return -1;
+    auto it = residual_seq_slot_.find(seq_id);
+    if (it != residual_seq_slot_.end()) return it->second;
+    if (residual_free_slots_.empty()) return -1;
+    int slot = residual_free_slots_.back();
+    residual_free_slots_.pop_back();
+    residual_seq_slot_[seq_id] = slot;
+    return slot;
+}
+
+void KVCacheManager::release_residual_slot(int seq_id) {
+    if (!residual_pool_) return;
+    auto it = residual_seq_slot_.find(seq_id);
+    if (it == residual_seq_slot_.end()) return;
+    residual_free_slots_.push_back(it->second);
+    residual_seq_slot_.erase(it);
+    seq_residual_state_.erase(seq_id);
+}
+
+int KVCacheManager::residual_slot_of(int seq_id) const {
+    auto it = residual_seq_slot_.find(seq_id);
+    if (it == residual_seq_slot_.end()) return -1;
+    return it->second;
+}
+
 void* KVCacheManager::residual_k_ptr(int seq_id, int layer) const {
-    if (!residual_pool_ || seq_id < 0 || seq_id >= residual_max_seqs_) return nullptr;
+    if (!residual_pool_) return nullptr;
+    int slot = residual_slot_of(seq_id);
+    if (slot < 0) return nullptr;
     if (layer < 0 || layer >= residual_n_layers_) return nullptr;
     auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(seq_id) * residual_per_seq_bytes_;
+    base += static_cast<size_t>(slot) * residual_per_seq_bytes_;
     base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
     // K is k_or_v=0 → offset 0
     return base;
 }
 
 void* KVCacheManager::residual_v_ptr(int seq_id, int layer) const {
-    if (!residual_pool_ || seq_id < 0 || seq_id >= residual_max_seqs_) return nullptr;
+    if (!residual_pool_) return nullptr;
+    int slot = residual_slot_of(seq_id);
+    if (slot < 0) return nullptr;
     if (layer < 0 || layer >= residual_n_layers_) return nullptr;
     auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(seq_id) * residual_per_seq_bytes_;
+    base += static_cast<size_t>(slot) * residual_per_seq_bytes_;
     base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
     base += residual_per_layer_bytes_;  // V is k_or_v=1
+    return base;
+}
+
+void* KVCacheManager::residual_k_layer_base(int layer) const {
+    if (!residual_pool_) return nullptr;
+    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
+    auto* base = static_cast<char*>(residual_pool_);
+    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
+    return base;
+}
+
+void* KVCacheManager::residual_v_layer_base(int layer) const {
+    if (!residual_pool_) return nullptr;
+    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
+    auto* base = static_cast<char*>(residual_pool_);
+    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
+    base += residual_per_layer_bytes_;
     return base;
 }
 
@@ -239,7 +294,9 @@ void KVCacheManager::free_sequence(int seq_id) {
 
     seq_blocks_.erase(it);
     seq_block_hashes_.erase(seq_id);
-    seq_residual_state_.erase(seq_id);  // Phase 3: reset residual ring state
+    // Phase 3: reset residual ring state AND return the slot to the free list.
+    // release_residual_slot is a no-op if no slot was allocated for this seq.
+    release_residual_slot(seq_id);
 
     // Remove from LRU tracking.
     auto lru_it = lru_map_.find(seq_id);

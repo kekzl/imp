@@ -187,11 +187,42 @@ public:
     bool residual_enabled() const { return residual_pool_ != nullptr; }
     int residual_n_tokens() const { return residual_n_tokens_; }
     int residual_max_seqs() const { return residual_max_seqs_; }
+    int residual_n_kv_heads() const { return residual_n_kv_heads_; }
+    int residual_head_dim() const { return residual_head_dim_; }
 
     // Per-(seq, layer) K/V pointer into the residual pool. Returns nullptr if
-    // residual is not enabled OR seq_id is out of range.
+    // residual is not enabled, seq_id has no allocated slot, or layer is out
+    // of range. Uses the slot allocator (allocate_residual_slot) — falls back
+    // to nullptr if the seq has not been admitted yet.
     void* residual_k_ptr(int seq_id, int layer) const;
     void* residual_v_ptr(int seq_id, int layer) const;
+
+    // Layer-base pointers (pointer to slot 0's K or V data for the given
+    // layer). Combined with `residual_seq_stride_bytes()` this lets a kernel
+    // address per-batch-idx data: `K_for_slot_s = K_layer_base + s * stride`.
+    // Returns nullptr if residual not enabled or layer out of range.
+    void* residual_k_layer_base(int layer) const;
+    void* residual_v_layer_base(int layer) const;
+
+    // Stride (in bytes) between consecutive seq slots in the residual pool.
+    // Same value for K and V — the (slot, layer, K|V) layout makes this
+    // the per-slot row stride independent of layer.
+    size_t residual_seq_stride_bytes() const { return residual_per_seq_bytes_; }
+
+    // ── Slot allocation (multi-seq batch support) ────────────────────
+    //
+    // Each active sequence holds one slot in [0, residual_max_seqs_) for
+    // the duration of its decode. Allocation is FIFO from a free-list.
+    // Returns the assigned slot, or -1 if residual not enabled / pool full.
+    // Idempotent: re-allocating for the same seq returns the existing slot.
+    int allocate_residual_slot(int seq_id);
+
+    // Release a sequence's slot (no-op if not allocated). Called on
+    // free_sequence; safe to call eagerly. Resets the ring state too.
+    void release_residual_slot(int seq_id);
+
+    // Look up a sequence's slot, or -1 if not allocated.
+    int residual_slot_of(int seq_id) const;
 
     // Per-sequence ring state. Returns {0, 0} for unknown / out-of-range seq.
     ResidualRingState residual_state(int seq_id) const;
@@ -200,7 +231,8 @@ public:
     // Increments write_idx (mod residual_n) and fill_count (capped at residual_n).
     void advance_residual(int seq_id);
 
-    // Reset ring state for a sequence (called from free_sequence).
+    // Reset ring state for a sequence (called from free_sequence). Does NOT
+    // release the slot — use release_residual_slot for that.
     void reset_residual(int seq_id);
 
     // ── Hashing utility (public for testing) ─────────────────────────
@@ -275,6 +307,13 @@ private:
     int residual_n_kv_heads_ = 0;             // cached from cache_->n_kv_heads()
     int residual_head_dim_ = 0;               // cached from cache_->head_dim()
     std::unordered_map<int, ResidualRingState> seq_residual_state_;
+    // ── Slot allocator (multi-seq batch) ─────────────────────────────
+    // Free list of unused slot indices in [0, residual_max_seqs_). When
+    // a sequence is admitted we pop one off the back (LIFO for cache-
+    // friendliness); on release we push back. seq_slot_map_ tracks the
+    // currently-assigned slot per active seq_id.
+    std::vector<int> residual_free_slots_;
+    std::unordered_map<int, int> residual_seq_slot_;
 };
 
 }  // namespace imp

@@ -207,6 +207,16 @@ private:
     int32_t* d_penalty_tokens_ = nullptr;
     size_t d_penalty_tokens_capacity_ = 0;
 
+    // ── BitDecoding Phase 3 residual metadata (per-step) ─────────────
+    // Host vectors are reused across decode steps to avoid reallocs.
+    // The device buffer is allocated/freed within step_decode_continuous
+    // (cudaMallocAsync / cudaFreeAsync on the decode stream).
+    int* residual_meta_d_buf_ = nullptr;
+    std::vector<int> residual_meta_h_seq_ids_;
+    std::vector<int> residual_meta_h_slots_;
+    std::vector<int> residual_meta_h_counts_;
+    std::vector<int> residual_meta_h_widxes_;
+
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;
 

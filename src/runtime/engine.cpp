@@ -1924,7 +1924,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
     state.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled()) {
-        state.kv_seq_id = req->id % kv_manager_->residual_max_seqs();
+        // Slot lookup happens inside KVCacheManager::residual_k_ptr; if no
+        // slot is allocated yet (prefill before first decode), the residual
+        // pointers return nullptr and the kernel skips the residual pass.
+        state.kv_seq_id = req->id;
     }
     fill_sampling_params(*req, state);
 
@@ -2199,8 +2202,51 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     state.max_context_len = max_ctx;
     state.is_prefill = false;
     state.kv_manager = kv_manager_.get();
-    if (kv_manager_ && kv_manager_->residual_enabled() && gpu_batch.n_sequences == 1) {
-        state.kv_seq_id = valid_decode[0]->id % kv_manager_->residual_max_seqs();
+    if (kv_manager_ && kv_manager_->residual_enabled()) {
+        // Allocate / refresh per-seq residual metadata for this decode step.
+        // Slot allocation is idempotent (returns existing slot on re-call).
+        const int N = gpu_batch.n_sequences;
+        residual_meta_h_seq_ids_.resize(N);
+        for (int i = 0; i < N; i++) {
+            int sid = valid_decode[i]->id;
+            residual_meta_h_seq_ids_[i] = sid;
+            kv_manager_->allocate_residual_slot(sid);
+        }
+        if (N == 1) {
+            // Single-seq fast path: scalar kernel form, no per-step device
+            // upload. The attention dispatcher reads ring state directly via
+            // residual_k_ptr / residual_state on the host side and passes
+            // scalar args.
+            state.kv_seq_id = valid_decode[0]->id;
+            state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+        } else {
+            // Multi-seq path: build per-batch metadata arrays + upload to
+            // a per-step device buffer.
+            residual_meta_h_slots_.resize(N);
+            residual_meta_h_counts_.resize(N);
+            residual_meta_h_widxes_.resize(N);
+            for (int i = 0; i < N; i++) {
+                int sid = residual_meta_h_seq_ids_[i];
+                residual_meta_h_slots_[i] = kv_manager_->residual_slot_of(sid);
+                auto rs = kv_manager_->residual_state(sid);
+                residual_meta_h_counts_[i] = rs.fill_count;
+                residual_meta_h_widxes_[i] = rs.write_idx;
+            }
+            const size_t meta_bytes = static_cast<size_t>(3) * N * sizeof(int);
+            if (cudaMallocAsync(&residual_meta_d_buf_, meta_bytes, dec_stream) == cudaSuccess) {
+                int* base = residual_meta_d_buf_;
+                cudaMemcpyAsync(base + 0 * N, residual_meta_h_slots_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 1 * N, residual_meta_h_counts_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 2 * N, residual_meta_h_widxes_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                state.d_residual_seq_slots = base + 0 * N;
+                state.d_residual_counts = base + 1 * N;
+                state.d_residual_write_idxes = base + 2 * N;
+                state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            }
+        }
     }
     fill_sampling_params(*valid_decode[0], state);
 
@@ -2327,6 +2373,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
     if (!decode_batch_pool_.is_allocated()) {
         gpu_batch.free();
+    }
+
+    // Free per-step residual metadata buffer (allocated in step_decode_forward
+    // when residual is enabled). cudaFreeAsync orders behind the just-issued
+    // forward + sample on dec_stream.
+    if (residual_meta_d_buf_ != nullptr) {
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(residual_meta_d_buf_, dec_stream));
+        residual_meta_d_buf_ = nullptr;
     }
 
     // Process outputs: logprobs extraction + token distribution
