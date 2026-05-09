@@ -249,6 +249,53 @@ else
     fi
 fi
 
+# ------------------------ 3.5. graphs-ON vs graphs-OFF decode regression gate
+# Catches future PRs that silently break CUDA Graph capture in the decode loop.
+# Without graphs, decode is launch-overhead-bound (875-1170 launches/step on
+# dense Q8). Graphs-ON wins +95-376% (memo: cuda_graphs_moe_works_2026_05_07).
+# A graphs-ON improvement that drops below kMinSpeedupX = 1.5× signals a path
+# that fell out of capture (host sync inside captured region, malloc on hot
+# path, etc.). Skipped by IMP_VERIFY_SKIP_GRAPHS=1.
+section "graphs ON vs OFF decode gate"
+if [ "${IMP_VERIFY_SKIP_GRAPHS:-0}" = "1" ]; then
+    skip "graphs gate (IMP_VERIFY_SKIP_GRAPHS=1)"
+elif [ ! -f "$BIN" ]; then
+    skip "graphs gate requires host build artefacts"
+else
+    GRAPHS_MODEL="${IMP_VERIFY_GRAPHS_MODEL:-Qwen3-4B-Instruct-2507-Q8_0.gguf}"
+    GRAPHS_MODEL_PATH="$MODELS/$GRAPHS_MODEL"
+    if [ ! -f "$GRAPHS_MODEL_PATH" ]; then
+        skip "graphs gate model $GRAPHS_MODEL_PATH not present"
+    else
+        MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.5}"
+        ERR_NG=$(mktemp); ERR_G=$(mktemp)
+        "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
+              --max-tokens 256 --temperature 0 --no-cuda-graphs >/dev/null 2>"$ERR_NG"
+        "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
+              --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR_G"
+        TG_NG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_NG" | head -1)
+        TG_G=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_G" | head -1)
+        if [ -z "$TG_NG" ] || [ -z "$TG_G" ]; then
+            fail "could not parse graphs bench output"
+            echo "  no-graphs stderr tail:"; tail -8 "$ERR_NG"
+            echo "  graphs stderr tail:";    tail -8 "$ERR_G"
+        else
+            SPEEDUP=$(awk -v g="$TG_G" -v ng="$TG_NG" 'BEGIN{printf "%.3f", g/ng}')
+            BELOW=$(awk -v s="$SPEEDUP" -v t="$MIN_SPEEDUP_X" 'BEGIN{print (s < t) ? 1 : 0}')
+            printf "  graphs OFF tg256 = %7.2f tok/s\n" "$TG_NG"
+            printf "  graphs ON  tg256 = %7.2f tok/s   (%.2fx, threshold %sx)\n" \
+                   "$TG_G" "$SPEEDUP" "$MIN_SPEEDUP_X"
+            if [ "$BELOW" = "1" ]; then
+                fail "graph capture broken: speedup ${SPEEDUP}x < ${MIN_SPEEDUP_X}x — \
+look for new host syncs / cudaMalloc on the decode hot path"
+            else
+                pass "graphs ON delivers ≥${MIN_SPEEDUP_X}x decode speedup"
+            fi
+        fi
+        rm -f "$ERR_NG" "$ERR_G"
+    fi
+fi
+
 # ------------------------------------------------------------- 4. smoke prompts
 section "smoke prompts (degeneration check)"
 
