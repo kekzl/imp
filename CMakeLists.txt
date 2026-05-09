@@ -141,6 +141,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu
+    src/compute/attention_paged_nvfp4_tc.cu
     src/compute/attention_paged_turboquant.cu
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
@@ -413,6 +414,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
+        tests/test_attention_paged_nvfp4_tc.cu
         tests/test_attention_chunked.cu
     )
 

@@ -993,12 +993,28 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (cache_dtype == QType::NVFP4) {
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
-                                         static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                         static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                         state.block_tables, state.context_lens, kv_bs, scale,
-                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                         stream, state.max_blocks_per_seq);
+            // BitDecoding TC dispatch opt-in: IMP_USE_BITDECODING_QK=1 routes to
+            // the WMMA-Q.K variant; default keeps the scalar-FFMA path unchanged.
+            // One-shot env-var read per process via static init.
+            static const bool use_bitdecoding_tc = []() {
+                const char* env = std::getenv("IMP_USE_BITDECODING_QK");
+                return env && env[0] == '1';
+            }();
+            if (use_bitdecoding_tc) {
+                paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4,
+                                                static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                                static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                                state.block_tables, state.context_lens, kv_bs, scale,
+                                                state.max_context_len, layer_sliding_window,
+                                                cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+            } else {
+                paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
+                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                             state.block_tables, state.context_lens, kv_bs, scale,
+                                             state.max_context_len, layer_sliding_window,
+                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+            }
         } else if (cache_dtype == QType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
