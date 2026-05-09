@@ -64,12 +64,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     static_assert(HEAD_DIM % 16 == 0, "HEAD_DIM must be divisible by 16 (NVFP4 group size)");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
 
-    // Per-warp WMMA scratch: sQ[16][16] + sK[16][16] = 1024 bytes/warp.
-    // Total: NUM_WARPS * 1024 = 8 KiB. Comes BEFORE the existing smem_nvfp4
-    // region which is allocated at the kernel epilogue for crosswarp_reduce.
+    // Per-warp WMMA scratch: sQ[16][16] halves + sK[16][16] halves +
+    // sFV[16][16] floats = 2048 bytes/warp. Total: NUM_WARPS * 2048 = 16 KiB.
+    // Comes BEFORE the crosswarp_reduce smem region.
     extern __shared__ char tc_smem_raw[];
     __half* tc_smem = reinterpret_cast<__half*>(tc_smem_raw);
-    constexpr int WARP_TC_HALVES = 16 * 16 + 16 * 16;  // sQ + sK
+    constexpr int WARP_TC_HALVES = 16 * 16 + 16 * 16 + 16 * 16 * 2;  // sQ + sK + sFV (float in halves)
 
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -146,6 +146,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         // Per-warp WMMA scratch
         __half* sQ_w = tc_smem + warp_id * WARP_TC_HALVES;
         __half* sK_w = sQ_w + 16 * 16;
+        float*  sFV_w = reinterpret_cast<float*>(sK_w + 16 * 16);  // FP32 V WMMA accum store
 
         using namespace nvcuda;
         wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
@@ -254,26 +255,74 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 #pragma unroll
         for (int i = 0; i < ELEMS; i++) o_reg[i] *= rescale_norm;
 
-        // SCALAR V accum with normalized weights (= weights[t] / l_new).
-        for (int t = first_tok; t < n_toks; t++) {
-            if (weights[t] == 0.0f) continue;
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
-            float v_scale = ue4m3_decode(
-                V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
-            const half2 v_scale_h2 = __float2half2_rn(v_scale);
+        // ---------------------------------------------------------------
+        // WMMA V accum: D[m=16, n=16] = A[m, k]=normalized_weights[k] × B[k=tok, n=hd_local]
+        // (B as row_major reads sK_w[tok*16+hd] = V[tok][hd] directly — no
+        //  transpose needed; different from QK phase's col_major B which
+        //  intentionally transposes K.)
+        //
+        // Per-lane scatter into o_reg: each lane owns ELEMS contiguous
+        // absolute hd offsets within ONE 16-element chunk, so exactly one
+        // kt iteration's contributions land in this lane's o_reg.
+        // ---------------------------------------------------------------
+        constexpr int LANES_PER_CHUNK = (16 / ELEMS) > 0 ? (16 / ELEMS) : 1;
+        const int my_chunk = lane_id / LANES_PER_CHUNK;
+        const int my_offset_in_chunk = (lane_id % LANES_PER_CHUNK) * ELEMS;
 
-            float w_norm = weights[t] * l_inv;
-            const uint8_t* v_bytes = V_tok + lane_offset / 2;
-#pragma unroll
-            for (int i = 0; i < ELEMS / 2; i++) {
-                half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
-                vh2 = __hmul2(vh2, v_scale_h2);
-                float2 vf = __half22float2(vh2);
-                o_reg[2 * i]     = __fmaf_rn(w_norm, vf.x, o_reg[2 * i]);
-                o_reg[2 * i + 1] = __fmaf_rn(w_norm, vf.y, o_reg[2 * i + 1]);
-            }
+        // Replicate normalized weights into sQ_w[16, 16]: A[m, k] = w_norm[k]
+        for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+            int col = i % 16;
+            sQ_w[i] = __float2half(weights[col] * l_inv);
         }
         __syncwarp();
+
+        // FP32 accumulator for V — sums over 16 weighted tokens accumulate
+        // enough error in FP16 to drift output after a few decode steps.
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> v_frag;
+        // V phase B operand is row_major (token in k_dim, hd in n_dim).
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag_v;
+
+#pragma unroll
+        for (int kt = 0; kt < K_TILES; kt++) {
+            const int hd_off = kt * 16;
+
+            // Dequant V[16 tokens × 16 hd_chunk] into sK_w[token, hd_local]
+            for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                int t = i / 16;
+                int hd_local = i % 16;
+                int hd_global = hd_off + hd_local;
+                if (t >= first_tok && t < n_toks) {
+                    const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+                    uint32_t b = V_tok[hd_global / 2];
+                    half2 hh = fp4_byte_to_half2(b);
+                    half v = (hd_global & 1) ? hh.y : hh.x;
+                    float scale_v = ue4m3_decode(
+                        V_sc_block[t * sc_slot_stride + kv_head * sc_groups + (hd_global / 16)]);
+                    sK_w[i] = __float2half(__half2float(v) * scale_v);
+                } else {
+                    sK_w[i] = __float2half(0.0f);
+                }
+            }
+            __syncwarp();
+
+            wmma::fill_fragment(v_frag, 0.0f);
+            wmma::load_matrix_sync(a_frag, sQ_w, 16);
+            wmma::load_matrix_sync(b_frag_v, sK_w, 16);
+            wmma::mma_sync(v_frag, a_frag, b_frag_v, v_frag);
+
+            // Store v_frag (FP32 accumulator) into sFV_w. Row 0 = 16 contributions.
+            wmma::store_matrix_sync(sFV_w, v_frag, 16, wmma::mem_row_major);
+            __syncwarp();
+
+            // Per-lane scatter: only lanes whose owned chunk matches kt accumulate.
+            if (my_chunk == kt) {
+#pragma unroll
+                for (int e = 0; e < ELEMS; e++) {
+                    o_reg[e] += sFV_w[my_offset_in_chunk + e];
+                }
+            }
+            __syncwarp();
+        }
     }
 
     // crosswarp reduce smem starts AFTER the per-warp TC scratch region
@@ -452,9 +501,11 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    // BitDecoding TC variant adds NUM_WARPS * 1024 bytes of WMMA scratch
-    // (16x16 sQ + 16x16 sK halves per warp) at the front of smem.
-    constexpr size_t TC_SCRATCH_PER_WARP = (16 * 16 + 16 * 16) * sizeof(__half);  // 1024
+    // BitDecoding TC variant adds NUM_WARPS * 2048 bytes of WMMA scratch
+    // (16x16 sQ halves + 16x16 sK halves + 16x16 sFV floats per warp).
+    // Total: 8 warps × 2048 = 16 KiB. Comes BEFORE the crosswarp_reduce smem.
+    constexpr size_t TC_SCRATCH_PER_WARP =
+        (16 * 16) * sizeof(__half) + (16 * 16) * sizeof(__half) + (16 * 16) * sizeof(float);
     size_t smem_bytes = NUM_WARPS * TC_SCRATCH_PER_WARP +
                         NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
                         NUM_WARPS * head_dim * sizeof(float);
