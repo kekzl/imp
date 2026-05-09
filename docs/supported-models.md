@@ -8,11 +8,11 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---|---:|---:|---|
-| Qwen3-4B | Q8_0 | 4.0 GB | 401 | GGUF |
+| Qwen3-4B | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF |
-| Qwen3-8B | Q8_0 | 8.2 GB | 255 | GGUF |
+| Qwen3-8B | Q8_0 | 8.2 GB | 149 | GGUF |
 | Qwen3-32B | Q4_K_M | 19 GB | — | GGUF |
-| Llama-3.2-3B | Q8_0 | 3.2 GB | 208 | GGUF |
+| Llama-3.2-3B | Q8_0 | 3.2 GB | 306 | GGUF |
 | Mistral-Small-3.1-24B | Q6_K | 19 GB | — | GGUF |
 | Mistral-Small-3.2-24B | NVFP4 | 13 GB | 101 | SafeTensors (Modelopt) |
 | DeepSeek-R1-Distill-Qwen-7B | Q8_0 | 7.6 GB | — | GGUF |
@@ -24,8 +24,8 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---|---:|---:|---|
-| Qwen3.5-4B (GDN) | Q8_0 | 4.2 GB | 220 | GGUF |
-| Qwen3.5-9B (GDN) | Q8_0 | 8.9 GB | 140 | GGUF |
+| Qwen3.5-4B (GDN) | Q8_0 | 4.2 GB | 222 | GGUF |
+| Qwen3.5-9B (GDN) | Q8_0 | 8.9 GB | 142 | GGUF |
 | Qwen3.5-27B (GDN) | Q4_K_M | 16 GB | — | GGUF |
 | Qwen3.5-27B (GDN) | MXFP4 | — | — | Loads OOM on 32 GB — see [roadmap](roadmap.md) |
 
@@ -33,14 +33,15 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---|---:|---:|---|
-| Qwen3-Coder-30B-A3B | Q6_K | 24 GB | 234 | GGUF |
-| Qwen3-Coder-30B-A3B | NVFP4 | 16 GB | 272 | SafeTensors (Modelopt) |
-| Qwen3.6-35B-A3B | Q4_K_M | 22 GB | 143 | GGUF, set `moe.expert_overhead_pct=10` |
-| Qwen3.6-35B-A3B | NVFP4 | 18 GB | 217 | SafeTensors (Modelopt) |
-| Gemma-4-26B-A4B-it | Q4_K_M | 14 GB | 183 | GGUF |
+| Qwen3-Coder-30B-A3B | Q6_K | 24 GB | 236 | GGUF |
+| Qwen3-Coder-30B-A3B | NVFP4 | 16 GB | 261 | SafeTensors (Modelopt) |
+| Qwen3.6-35B-A3B | Q4_K_M | 22 GB | 243 | GGUF, set `IMP_EXPERT_OVERHEAD_PCT=10` |
+| Qwen3.6-35B-A3B | NVFP4 | 18 GB | 225 | SafeTensors (Modelopt) |
+| Gemma-4-26B-A4B-it | Q4_K_M | 14 GB | 187 | GGUF |
 | Gemma-4-26B-A4B-it | Q5_K_M | 17 GB | 65 | GGUF, recommended for code-gen |
-| Gemma-4-26B-A4B-it | NVFP4 | 14 GB | 213 | SafeTensors (Modelopt) |
+| Gemma-4-26B-A4B-it | NVFP4 | 14 GB | 205 | SafeTensors (Modelopt) |
 | Nemotron-3-Nano-30B-A3B | Q6_K | 32 GB | — | GGUF, Mamba2 + attention + MoE |
+| Nemotron-3-Nano-30B-A3B | NVFP4 | 18 GB | 325 | SafeTensors (Modelopt), Mamba2 + attention + MoE |
 
 ## Vision
 

@@ -77,6 +77,8 @@ SafeTensors per-expert weights
 
 Without `cache_moe_native_nvfp4` the legacy FP16 dequant + cuBLAS sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs and dropping decode 5–17×.
 
+NVFP4 KV cache (`--kv-nvfp4`) supports chunked prefill since PR #149 — past chunks' K/V are gathered from the paged cache via `paged_kv_gather_nvfp4_to_fp16` (PTX `cvt.rn.f16x2.e2m1x2` inner loop + UE4M3 scale fold) and concatenated with the current chunk before rectangular cuBLAS attention. Hybrid GDN+MoE / Mamba2+MoE archs (Qwen3.5/3.6, Nemotron-H) are in scope since PR #156.
+
 ## MXFP4 (GGUF)
 
 MXFP4 uses the same FP4 E2M1 nibble layout as NVFP4 but with UE8M0 micro-scales (per 32 elements) and no separate tensor scale. This matches the format the Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS at full FP4 throughput.
