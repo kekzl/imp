@@ -16,43 +16,49 @@ All numbers come from one machine, one run series. Reproducing them on a differe
 
 Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
+**imp numbers refreshed: 2026-05-10** (post PR #156 chunked-prefill-hybrid + PR #157 auto max_seq_len 16K cap). llama.cpp comparison columns are from earlier captures; treat as historical reference.
+
 ## Decode Throughput (tg256)
 
 Tokens generated per second — the metric that determines how fast a model responds.
 
-| Model | Params | Quant | imp | llama.cpp | Delta |
-|-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **401** | 244 | **+64%** |
-| Qwen3-8B | 8.2B | Q8_0 | **255** | 157 | **+62%** |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **220** | 180 | **+22%** |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **140** | — | — |
-| Llama-3.2-3B | 3.2B | Q8_0 | **208** | — | — |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **272** | — | post PR #88 (was 51 with `--no-graphs`) |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **234** | — | post moe_expert_offload_fix |
-| Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **143** | — | `moe.expert_overhead_pct=10` |
-| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **217** | — | post PR #88 (was 117–142) |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **183** | 151 | **+21%** |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **65** | — | best quality/speed |
-| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **213** | — | post PR #88 (was 157–180) |
-| Mistral-Small-3.2 | 24B | NVFP4 | **101** | — | post PR #88 (was 81) |
+| Model | Params | Quant | imp | llama.cpp | Notes |
+|-------|-------:|-------|----:|----------:|------|
+| Qwen3-4B | 4.0B | Q8_0 | **236** | 244 | |
+| Qwen3-8B | 8.2B | Q8_0 | **149** | 157 | |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **222** | 180 | |
+| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **142** | — | |
+| Llama-3.2-3B | 3.2B | Q8_0 | **306** | — | |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **261** | — | post PR #88 (was 51 with `--no-graphs`) |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **236** | — | post moe_expert_offload_fix |
+| Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **243** | — | `IMP_EXPERT_OVERHEAD_PCT=10` |
+| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **225** | — | post PR #88 (was 117–142) |
+| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **325** | — | hybrid Mamba2+MoE+attention |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **187** | 151 | |
+| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **205** | — | post PR #88 (was 157–180) |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | _65_ | — | not re-tested 2026-05-10 |
+| Mistral-Small-3.2 | 24B | NVFP4 | _101_ | — | not re-tested 2026-05-10 |
 
 ## Prefill Throughput (pp512)
 
 Tokens processed per second during the prompt ingestion phase.
 
-| Model | Params | Quant | imp | llama.cpp | Delta |
-|-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **27201** | 21337 | **+27%** |
-| Qwen3-8B | 8.2B | Q8_0 | **17636** | 14172 | **+24%** |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **13676** | 11149 | **+23%** |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **9483** | — | — |
-| Llama-3.2-3B | 3.2B | Q8_0 | **22544** | — | — |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **1299** | — | post PR #88 (cuBLAS variance ±2.6×) |
-| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **601** | — | post PR #88 |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1650** | 196 | **+742%** |
-| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **1651** | — | post PR #88 |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **88** | — | — |
-| Mistral-Small-3.2 | 24B | NVFP4 | **12804** | — | post PR #88 (CUTLASS NVFP4×NVFP4) |
+| Model | Params | Quant | imp | llama.cpp | Notes |
+|-------|-------:|-------|----:|----------:|------|
+| Qwen3-4B | 4.0B | Q8_0 | **23189** | 21337 | |
+| Qwen3-8B | 8.2B | Q8_0 | **14453** | 14172 | |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **14091** | 11149 | |
+| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **10162** | — | |
+| Llama-3.2-3B | 3.2B | Q8_0 | **27041** | — | |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **1258** | — | cuBLAS variance ±2.6× |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **5643** | — | |
+| Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **3076** | — | `IMP_EXPERT_OVERHEAD_PCT=10` |
+| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **1092** | — | |
+| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **690** | — | hybrid Mamba2+MoE+attention |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1840** | 196 | |
+| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **1472** | — | |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | _88_ | — | not re-tested 2026-05-10 |
+| Mistral-Small-3.2 | 24B | NVFP4 | _12804_ | — | not re-tested 2026-05-10 |
 
 **Gemma-4 notes**: CUDA Graphs are now enabled (PRs #11–#14 unified `forward_decode_async`, PR #20 rope_freqs fix, 2026-04-20 SWA long-context fix). Decode is now **1.21× llama.cpp** on Q4_K_M. The previous gap was two separate bugs: pipeline kernel split-K only issued one 16-byte `cp.async` per load (missing half the data at head_dim=512 on global layers) and cuBLAS dispatch gate forced global layers through a broken FMHA fallback above n=1024. Prefill remains dominated by CUTLASS grouped-GEMM advantage vs llama.cpp's serial expert processing. Q5_K_M recommended when output quality matters on complex prompts — Q4_K_M can degenerate on code-gen.
 

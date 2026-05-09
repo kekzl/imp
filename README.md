@@ -82,9 +82,14 @@ Tested-and-verified models with VRAM and decode `tok/s`: [`docs/supported-models
 
 ## Performance
 
-Headline: **Qwen3-8B Q8_0 decode at 255 tok/s** on a single RTX 5090 (greedy, 256 output tokens, 3-rep average) — about **1.6×** llama.cpp `b8445` on the same hardware.
+Decode highlights (greedy, 256 output tokens, 3-rep average, RTX 5090, refreshed 2026-05-10):
 
-Long-context prefill (`pp=8192`) is where imp is consistently ahead of llama.cpp: ×1.13 to ×1.70 across the dense models tested. NVFP4 prequant decode (Qwen3.6, Gemma-4, Qwen3-Coder) ranges from 200–270 tok/s.
+- **Llama-3.2-3B Q8_0**: 306 tok/s
+- **Nemotron-3-Nano-30B-A3B NVFP4** (hybrid Mamba2+MoE+attention): 325 tok/s
+- **Qwen3.6-35B-A3B Q4_K_M** (MoE): 243 tok/s with `IMP_EXPERT_OVERHEAD_PCT=10`
+- **Qwen3-Coder-30B-A3B NVFP4**: 261 tok/s
+
+Long-context prefill (`pp=8192`) consistently ahead of llama.cpp on dense models: ×1.13 to ×1.70 across the models in [`docs/performance.md`](docs/performance.md). NVFP4 prequant decode (Qwen3.6, Gemma-4, Qwen3-Coder) ranges 200–260 tok/s.
 
 Full numbers, methodology, and the `tests/perf_baseline.json` regression gate: [`docs/performance.md`](docs/performance.md).
 
