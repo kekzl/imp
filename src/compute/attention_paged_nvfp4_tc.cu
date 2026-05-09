@@ -749,6 +749,264 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
                                       num_splits, split_idx);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3b residual + reduce kernel.
+//
+// Replaces `paged_attention_reduce_kernel` for the residual path. Reads the
+// per-split paged partials from `partial_out` (written by the existing splitk
+// paged kernel), processes the FP16 residual ring tokens, and emits the final
+// merged O.
+//
+// Why a fused kernel: profiling (nsys, 2026-05-09) showed the original Phase 3b
+// design — embed the residual pass into the non-splitk decode kernel — forced
+// the launcher onto the slow non-splitk path (414 µs/call vs splitk at 33
+// µs/call, 12× regression). Letting splitk run normally and folding residual
+// into the reduce kernel preserves the splitk parallelism while still matching
+// the residual-FP16 contribution.
+//
+// Math (write-through residual: paged contains all tokens, residual contains
+// the same tail tokens at higher precision):
+//   m_paged   = max over paged splits of m_s
+//   l_paged   = sum_s exp(m_s - m_paged) * l_s
+//   O_paged_unnorm[d] = sum_s exp(m_s - m_paged) * partial_out[s, 2+d]
+//                     = sum over all paged tokens of exp(d_t - m_paged) V_t
+//   m_res, l_res, O_res_unnorm[d]: same accumulation over residual tokens.
+//   m_global  = max(m_paged, m_res)
+//   l_global  = exp(m_paged - m_global) * l_paged + exp(m_res - m_global) * l_res
+//   O_final[d] = (exp(m_paged - m_global) * O_paged_unnorm[d] +
+//                 exp(m_res - m_global) * O_res_unnorm[d]) / l_global
+//
+// One block per (batch, head). NUM_WARPS warps cooperatively process the
+// residual tokens (round-robin); thread 0 reduces paged partials.
+// ---------------------------------------------------------------------------
+template <int HEAD_DIM>
+__global__ void paged_attention_residual_reduce_kernel(
+    const float* __restrict__ partial_out,           // [b, h, num_paged_splits, 2+HD]
+    const half* __restrict__ Q,                      // [b, 1, n_heads, hd]
+    half* __restrict__ O,                            // [b, 1, n_heads, hd]
+    const int* __restrict__ context_lens,            // [b]
+    int n_heads, int n_kv_heads, int num_paged_splits,
+    float scale, int sliding_window, float softcap,
+    int residual_n_tokens,
+    // Single-seq scalar form (active when d_residual_seq_slots == nullptr):
+    const half* __restrict__ K_residual,
+    const half* __restrict__ V_residual,
+    int residual_count_scalar, int residual_write_idx_scalar,
+    // Multi-seq array form:
+    const half* __restrict__ K_residual_base,
+    const half* __restrict__ V_residual_base,
+    int residual_seq_stride_elems,
+    const int* __restrict__ d_residual_seq_slots,
+    const int* __restrict__ d_residual_counts,
+    const int* __restrict__ d_residual_write_idxes) {
+    static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
+    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+    constexpr int partial_stride = 2 + HEAD_DIM;
+
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
+
+    const int ctx_len = context_lens[batch_idx];
+    if (ctx_len <= 0) return;
+
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int lane_offset = lane_id * ELEMS;
+
+    // Resolve residual data (single-seq scalar OR multi-seq array form).
+    const half* K_res = nullptr;
+    const half* V_res = nullptr;
+    int rc = 0, rwi = 0;
+    if (d_residual_seq_slots != nullptr && K_residual_base != nullptr && residual_n_tokens > 0) {
+        int slot = d_residual_seq_slots[batch_idx];
+        int rc_b = (d_residual_counts != nullptr) ? d_residual_counts[batch_idx] : 0;
+        int rw_b = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
+        if (slot >= 0 && rc_b > 0) {
+            K_res = K_residual_base + (int64_t)slot * residual_seq_stride_elems;
+            V_res = V_residual_base + (int64_t)slot * residual_seq_stride_elems;
+            rc = rc_b;
+            rwi = rw_b;
+        }
+    } else if (K_residual != nullptr && V_residual != nullptr && residual_count_scalar > 0 &&
+               residual_n_tokens > 0) {
+        K_res = K_residual;
+        V_res = V_residual;
+        rc = residual_count_scalar;
+        rwi = residual_write_idx_scalar;
+    }
+
+    int effective_start = 0;
+    if (sliding_window > 0 && ctx_len > sliding_window)
+        effective_start = ctx_len - sliding_window;
+    int res_active = 0;
+    int res_skip = 0;
+    if (K_res != nullptr) {
+        int rh = (rc > ctx_len) ? ctx_len : rc;
+        int rcf = ctx_len - rh;
+        int rfa = (effective_start > rcf) ? effective_start : rcf;
+        res_active = ctx_len - rfa;
+        res_skip = rh - res_active;
+        if (res_active < 0) res_active = 0;
+    }
+
+    // Step 1: compute (m_paged, l_paged) from per-split partials. Single-thread
+    // reduction over a small (≤ 32) split count — same pattern as the standard
+    // reduce kernel.
+    const float* paged_base = partial_out +
+        (int64_t)((batch_idx * n_heads + head_idx) * num_paged_splits) * partial_stride;
+
+    __shared__ float s_m_paged;
+    __shared__ float s_l_paged;
+    __shared__ float s_m_res;
+    __shared__ float s_l_res;
+
+    if (threadIdx.x == 0) {
+        float gmax = -FLT_MAX;
+        for (int s = 0; s < num_paged_splits; s++) {
+            gmax = fmaxf(gmax, paged_base[s * partial_stride]);
+        }
+        s_m_paged = gmax;
+        float gl = 0.0f;
+        for (int s = 0; s < num_paged_splits; s++) {
+            float m = paged_base[s * partial_stride];
+            float l = paged_base[s * partial_stride + 1];
+            gl += expf(m - gmax) * l;
+        }
+        s_l_paged = gl;
+    }
+    __syncthreads();
+
+    const float m_paged = s_m_paged;
+    const float l_paged = s_l_paged;
+
+    // Step 2: process residual tokens. Round-robin distribution across warps;
+    // each warp tracks its own (m_w, l_w, o_reg) state.
+    extern __shared__ char smem_red[];
+    float* warp_max = reinterpret_cast<float*>(smem_red);   // [NUM_WARPS]
+    float* warp_l   = warp_max + NUM_WARPS;                  // [NUM_WARPS]
+    float* warp_o   = warp_l + NUM_WARPS;                    // [NUM_WARPS * HEAD_DIM]
+
+    if (res_active > 0) {
+        const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+        float q_reg[ELEMS];
+        const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
+#pragma unroll
+        for (int i = 0; i < ELEMS / 2; i++) {
+            half2 h2 = Q_ptr2[i];
+            q_reg[2 * i] = __half2float(h2.x);
+            q_reg[2 * i + 1] = __half2float(h2.y);
+        }
+
+        const int slot_stride = n_kv_heads * HEAD_DIM;
+        const int sb = (rwi + residual_n_tokens - rc + res_skip) % residual_n_tokens;
+
+        float m_w = -FLT_MAX;
+        float l_w = 0.0f;
+        float o_reg[ELEMS];
+#pragma unroll
+        for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
+
+        for (int t = warp_id; t < res_active; t += NUM_WARPS) {
+            int slot = (sb + t) % residual_n_tokens;
+            const half* K_tok = K_res + (int64_t)slot * slot_stride + kv_head * HEAD_DIM;
+            const half* V_tok = V_res + (int64_t)slot * slot_stride + kv_head * HEAD_DIM;
+
+            float dot = 0.0f;
+            const half2* k_h2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
+#pragma unroll
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 kh = k_h2[i];
+                float2 kf = __half22float2(kh);
+                dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
+                dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
+            }
+            dot = warp_reduce_sum(dot);
+            dot *= scale;
+            dot = apply_softcap(dot, softcap);
+
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
+
+            const half2* v_h2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
+#pragma unroll
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 vh = v_h2[i];
+                float2 vf = __half22float2(vh);
+                o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+            }
+        }
+
+        // Stash per-warp (m, l, o) into smem.
+        if (lane_id == 0) {
+            warp_max[warp_id] = m_w;
+            warp_l[warp_id] = l_w;
+        }
+#pragma unroll
+        for (int i = 0; i < ELEMS; i++)
+            warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            float m_global = -FLT_MAX;
+            for (int w = 0; w < NUM_WARPS; w++) m_global = fmaxf(m_global, warp_max[w]);
+            float l_global = 0.0f;
+            for (int w = 0; w < NUM_WARPS; w++)
+                l_global += expf(warp_max[w] - m_global) * warp_l[w];
+            s_m_res = m_global;
+            s_l_res = l_global;
+        }
+    } else {
+        if (threadIdx.x == 0) {
+            s_m_res = -FLT_MAX;
+            s_l_res = 0.0f;
+        }
+    }
+    __syncthreads();
+
+    const float m_res = s_m_res;
+    const float l_res = s_l_res;
+
+    // Step 3: combined merge (paged + residual) per dim, parallelized across threads.
+    float m_global, w_paged, w_res, inv_l;
+    if (res_active > 0) {
+        m_global = fmaxf(m_paged, m_res);
+        w_paged = expf(m_paged - m_global);
+        w_res = expf(m_res - m_global);
+        float l_global = w_paged * l_paged + w_res * l_res;
+        inv_l = (l_global > 0.0f) ? (1.0f / l_global) : 0.0f;
+    } else {
+        m_global = m_paged;
+        w_paged = 1.0f;
+        w_res = 0.0f;
+        inv_l = (l_paged > 0.0f) ? (1.0f / l_paged) : 0.0f;
+    }
+
+    for (int d = threadIdx.x; d < HEAD_DIM; d += blockDim.x) {
+        // Aggregate paged partials at m_paged basis: sum_s exp(m_s - m_paged) * partial[s, 2+d]
+        float o_paged_unnorm = 0.0f;
+        for (int s = 0; s < num_paged_splits; s++) {
+            float m_s = paged_base[s * partial_stride];
+            float weight_s = expf(m_s - m_paged);
+            o_paged_unnorm += weight_s * paged_base[s * partial_stride + 2 + d];
+        }
+
+        // Aggregate residual partials at m_res basis: sum_w exp(m_w - m_res) * l_w * warp_o[w, d]
+        float o_res_unnorm = 0.0f;
+        if (res_active > 0) {
+            for (int w = 0; w < NUM_WARPS; w++) {
+                float weight_w = expf(warp_max[w] - m_res) * warp_l[w];
+                o_res_unnorm += weight_w * warp_o[w * HEAD_DIM + d];
+            }
+        }
+
+        float final_o = inv_l * (w_paged * o_paged_unnorm + w_res * o_res_unnorm);
+        int out_idx = batch_idx * n_heads * HEAD_DIM + head_idx * HEAD_DIM + d;
+        O[out_idx] = __float2half(final_o);
+    }
+}
+
 // Note: a pipelined splitk variant (double-buffered K + V via smem, mirroring
 // `paged_attention_splitk_int4_pipeline_kernel`) was tested 2026-05-08 and
 // regressed Qwen3-8B Q8 + NVFP4 KV decode by ~3% (147.0 → 142.7 tok/s,
@@ -807,11 +1065,23 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr);
-    if (residual_active) {
-        num_splits = 1;  // residual ring read only wired in non-split kernel
-    }
 
-    if (num_splits > 1) {
+    // Residual path: ALWAYS use splitk + residual_reduce_kernel even if
+    // compute_splitk_splits returned 1. Embedding the residual pass into the
+    // non-splitk decode kernel was the previous design and forced a 12× slow
+    // path (414 µs/call vs splitk at 33 µs/call) per nsys profile (2026-05-09).
+    // The splitk paged kernel runs unmodified (writes per-split partials);
+    // residual_reduce_kernel folds in the FP16 residual contribution as part
+    // of the reduce. Requires scratch_ptr to be allocated — caller (engine
+    // workspace) provides this when NVFP4 KV is enabled.
+    if (residual_active && scratch_ptr == nullptr) {
+        IMP_LOG_WARN("paged_attention_decode_nvfp4_tc: residual active but no splitk "
+                     "scratch — falling back to non-splitk path (slow)");
+    }
+    const bool use_residual_reduce = residual_active && scratch_ptr != nullptr;
+    if (use_residual_reduce && num_splits < 1) num_splits = 1;
+
+    if (num_splits > 1 || use_residual_reduce) {
         float* partial = static_cast<float*>(scratch_ptr);
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
@@ -844,8 +1114,44 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         }
 #undef LAUNCH_SPLITK_NVFP4
 
-        paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream);
+        if (use_residual_reduce) {
+            // Combined paged-reduce + residual-merge. Smem layout:
+            //   warp_max[NUM_WARPS] + warp_l[NUM_WARPS] + warp_o[NUM_WARPS * HEAD_DIM] floats.
+            const size_t reduce_smem =
+                NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
+                NUM_WARPS * head_dim * sizeof(float);
+            dim3 grid_red(batch_size, n_heads);
+            dim3 block_red(BLOCK_THREADS);
+
+#define LAUNCH_RESIDUAL_REDUCE(HD)                                                                            \
+    paged_attention_residual_reduce_kernel<HD><<<grid_red, block_red, reduce_smem, stream>>>(                 \
+        partial, reinterpret_cast<const half*>(Q.data), reinterpret_cast<half*>(O.data),                      \
+        context_lens, n_heads, n_kv_heads, num_splits, scale, sliding_window, softcap,                        \
+        residual_n_tokens,                                                                                    \
+        residual_active_scalar ? K_residual : nullptr,                                                        \
+        residual_active_scalar ? V_residual : nullptr,                                                        \
+        residual_active_scalar ? residual_count : 0,                                                          \
+        residual_active_scalar ? residual_write_idx : 0,                                                      \
+        residual_active_multiseq ? K_residual_base : nullptr,                                                 \
+        residual_active_multiseq ? V_residual_base : nullptr,                                                 \
+        residual_active_multiseq ? residual_seq_stride_elems : 0,                                             \
+        residual_active_multiseq ? d_residual_seq_slots : nullptr,                                            \
+        residual_active_multiseq ? d_residual_counts : nullptr,                                               \
+        residual_active_multiseq ? d_residual_write_idxes : nullptr)
+            switch (head_dim) {
+                case 64:  LAUNCH_RESIDUAL_REDUCE(64);  break;
+                case 128: LAUNCH_RESIDUAL_REDUCE(128); break;
+                case 256: LAUNCH_RESIDUAL_REDUCE(256); break;
+                case 512: LAUNCH_RESIDUAL_REDUCE(512); break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_residual_reduce: unsupported head_dim %d", head_dim);
+                    return;
+            }
+#undef LAUNCH_RESIDUAL_REDUCE
+        } else {
+            paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads,
+                                          head_dim, num_splits, stream);
+        }
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
