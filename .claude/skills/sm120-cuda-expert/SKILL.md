@@ -92,5 +92,5 @@ Guard sm_120 code: `#if __CUDA_ARCH__ >= 1200`.
 
 - **PTX templates** (mxf4nvf4, f8f6f4, cp.async, prmt LUT, FP16→FP8 cvt, warp shuffle, `__ldcs`) → `references/ptx-patterns.md`
 - **Dead ends, version-dependent retries, resolved issues** → `references/known-issues.md`
-- **Repo-internal docs**: `docs/sm120.md` (kernel notes), `docs/sm120-real-perf-plan.md` (active perf plan), `docs/performance.md` (baselines + methodology)
+- **Repo-internal docs**: `docs/sm120.md` (kernel notes), `docs/performance.md` (baselines + methodology). Historical plan at `docs/archive/sm120-real-perf-plan_2026-05-04.md` (all five levers shipped or superseded by 2026-05-10).
 - **Hot-path source**: `src/compute/` (attention, gemm, NVFP4), `src/quant/` (dequant), `tools/imp-bench/`

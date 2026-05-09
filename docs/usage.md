@@ -195,6 +195,17 @@ calling, streaming usage stats, logprobs, and API-key auth
 `/v1/models` lists available GGUF and SafeTensors models in the models
 directory.
 
+Server-only flags (not on `imp-cli`):
+
+| Flag | Effect |
+|---|---|
+| `--api-key <key>` | Require `Authorization: Bearer <key>` on requests |
+| `--max-concurrent <n>` | Max simultaneous requests (default 64, 0 = unlimited) |
+| `--rate-limit <n>` | Max requests/min per IP (default 0 = unlimited) |
+| `--log-requests <path>` | Append per-request JSONL with prompt + response content + timing to `<path>` (opt-in; off by default) |
+| `--reasoning-format <f>` | `deepseek` (default) or `none` — controls `<think>` channel handling |
+| `--think-budget <f>` | Fraction of `max_tokens` reserved for reasoning (default 0.5, 0 = disabled) |
+
 ```bash
 # OpenAI chat completion
 curl -s http://localhost:8080/v1/chat/completions \
