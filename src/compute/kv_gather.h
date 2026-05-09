@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -25,5 +26,15 @@ void paged_kv_gather_fp16(half* dst, const half* src, const int* block_table,
 void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int* block_table,
                                  float kv_scale, int n_past, int block_size, int nkv, int hd,
                                  cudaStream_t stream);
+
+// NVFP4 paged → FP16 flat with per-group-of-16 UE4M3 scale dequant.
+// src_packed layout: [num_blocks, block_size, nkv, hd/2] uint8 (2 FP4 nibbles/byte).
+// src_scales layout: [num_blocks, block_size, nkv, hd/16] uint8 (UE4M3 bytes).
+// Matches `write_kv_cache_nvfp4_kernel` writes / `paged_attention_decode_nvfp4` reads.
+// Used by chunked prefill to materialize past-chunk K/V into FP16 for cuBLAS attention.
+void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
+                                   const uint8_t* src_scales, const int* block_table,
+                                   int n_past, int block_size, int nkv, int hd,
+                                   cudaStream_t stream);
 
 }  // namespace imp

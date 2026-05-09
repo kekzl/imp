@@ -1698,10 +1698,11 @@ bool Engine::supports_chunked_prefill_() const {
     if (cfg.arch == ModelArch::QWEN35_MOE) return false;
     if (cfg.arch == ModelArch::QWEN36_MOE) return false;
     if (cfg.arch == ModelArch::NEMOTRON_H_MOE) return false;
-    // Out-of-scope KV dtypes: only FP16 + FP8 are wired through paged_kv_gather.
+    // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4. Others
+    // (INT4/INT8/TurboQuant) would need their own gather kernels.
     if (kv_cache_raw_) {
         QType kvt = kv_cache_raw_->qtype();
-        if (kvt != QType::F16 && kvt != QType::FP8_E4M3)
+        if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4)
             return false;
     }
     return true;

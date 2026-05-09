@@ -704,8 +704,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             KVCache* cache = state.kv_cache;
             QType kvt = cache->qtype();
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
-            // so this code only runs for FP16 / FP8 KV without SWA / dual-head_dim.
-            if ((kvt != QType::F16 && kvt != QType::FP8_E4M3) || sliding_active || per_layer_shapes) {
+            // so this code only runs for FP16 / FP8 / NVFP4 KV without SWA / dual-head_dim.
+            const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4);
+            if (!kvt_ok || sliding_active || per_layer_shapes) {
                 IMP_LOG_ERROR(
                     "chunked_prefill: unsupported config (kv=%d swa=%d per_layer=%d) at L%d — "
                     "engine should have prevented this",
@@ -716,17 +717,24 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int kv_layer = get_kv_layer(kv_layer_map_, layer);
             int kv_bs = cache->block_size();
             int ctx_len = q_offset + n;
-            // attn_scores_ is sized [nh, max_seq, max_seq] (square). Chunked use needs
-            // q_len * kv_len = n * ctx_len ≤ max_seq^2 elements per head. Guard
-            // explicitly: refuse to enter if ctx_len exceeds the buffer's row capacity.
-            // Engine's resolve_prefill_chunk_size() ensures ctx_len ≤ max_seq, so this
-            // is defense-in-depth.
+            // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked use stores
+            // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The
+            // capacity constraint is `n * ctx_len <= s_cap²`, NOT `ctx_len <= s_cap`
+            // (which was the previous guard — overly strict, wrongly aborted at any
+            // chunked step where the cumulative ctx_len crossed s_cap even though
+            // the actual matrix size still fit). FP32 takes 2× — same gate as
+            // attention_cublas_prefill::use_fp32_s; if FP32 would overflow, the
+            // attention call falls back to FP16-S automatically. So we only need to
+            // guard the FP16 footprint here.
             int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
-            if (s_cap == 0 || ctx_len > s_cap || n > s_cap) {
+            int64_t fp16_elems_needed = static_cast<int64_t>(n) * ctx_len;
+            int64_t fp16_elems_avail  = static_cast<int64_t>(s_cap) * s_cap;
+            if (s_cap == 0 || fp16_elems_needed > fp16_elems_avail || n > s_cap) {
                 IMP_LOG_ERROR(
-                    "chunked_prefill: attn_scores_ capacity (%d) too small for ctx_len=%d "
-                    "n=%d at L%d — engine should have prevented this",
-                    s_cap, ctx_len, n, layer);
+                    "chunked_prefill: attn_scores_ capacity %d×%d=%lld too small for "
+                    "n=%d × ctx_len=%d = %lld at L%d — engine should have prevented this",
+                    s_cap, s_cap, (long long)fp16_elems_avail, n, ctx_len,
+                    (long long)fp16_elems_needed, layer);
                 std::abort();
             }
             size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
@@ -742,7 +750,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                      state.block_tables, q_offset, kv_bs, nkv, hd, stream);
                 paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
                                      state.block_tables, q_offset, kv_bs, nkv, hd, stream);
-            } else {  // FP8_E4M3
+            } else if (kvt == QType::FP8_E4M3) {
                 float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
                                      ? kv_scales_[kv_layer] : 1.0f;
                 paged_kv_gather_fp8_to_fp16(
@@ -751,6 +759,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 paged_kv_gather_fp8_to_fp16(
                     v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
                     state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+            } else {  // NVFP4
+                paged_kv_gather_nvfp4_to_fp16(
+                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                    static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_nvfp4_to_fp16(
+                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                    static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             }
 
             // Append current chunk's K/V at offset q_offset.
