@@ -1221,40 +1221,91 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         UPLOAD_OR_FAIL(L.gdn_beta, L.gdn_beta.qtype, "gdn_beta", i, ctx);
     }
 
-    // GDN alpha/beta packed for decode (M=1) GEMV fusion. Interleaves the two
-    // weights along N as [d_model, 2*n_heads] so the executor can replace two
-    // tiny gemv_fp16_kernel launches with one. Output layout for n=1:
-    // [α₀..α_{H-1}, β₀..β_{H-1}] contiguous; alpha_proj_out / beta_proj_out
-    // become trivial offset views. Skipped (left null) if either weight is
-    // raw-quant (Q*_K, MXFP4, NVFP4) — those paths fall back to the two-call
-    // dispatcher unchanged.
-    if (L.gdn_alpha.data && L.gdn_alpha.on_device && L.gdn_beta.data && L.gdn_beta.on_device &&
-        L.gdn_alpha.ndim == 2 && L.gdn_beta.ndim == 2 && L.gdn_alpha.qtype == L.gdn_beta.qtype &&
-        (L.gdn_alpha.qtype == QType::F16 || L.gdn_alpha.qtype == QType::BF16) &&
-        L.gdn_alpha.shape[0] == L.gdn_beta.shape[0] && L.gdn_alpha.shape[1] == L.gdn_beta.shape[1]) {
-        int64_t d_model = L.gdn_alpha.shape[0];
-        int64_t n_heads = L.gdn_alpha.shape[1];
-        size_t es = 2;  // F16 and BF16 are both 2 bytes per element
+    // GDN input projection fusion (M=1 decode GEMV). Tries the full 4-way pack
+    // first (ssm_in + gdn_gate + gdn_alpha + gdn_beta → one [total_out, d_model]
+    // weight); falls back to the alpha+beta-only 2-way pack if ssm_in / gdn_gate
+    // aren't FP16/BF16 (e.g. raw-quant Q*_K or NVFP4 prequant paths). Originals
+    // stay live so prefill (n>1) keeps the 4-call path unchanged. Decode opt-in
+    // via the executor: when n==1 it slices the fused output instead of running
+    // 4 separate matmuls.
+    auto& a = L.ssm_in;
+    auto& b = L.gdn_gate;
+    auto& c = L.gdn_alpha;
+    auto& d = L.gdn_beta;
+
+    auto fp_uniform = [](QType q, QType expect) {
+        return q == expect && (q == QType::F16 || q == QType::BF16);
+    };
+
+    bool four_way_ok =
+        a.data && a.on_device && b.data && b.on_device && c.data && c.on_device && d.data && d.on_device &&
+        a.ndim == 2 && b.ndim == 2 && c.ndim == 2 && d.ndim == 2 &&
+        (a.qtype == QType::F16 || a.qtype == QType::BF16) && fp_uniform(b.qtype, a.qtype) &&
+        fp_uniform(c.qtype, a.qtype) && fp_uniform(d.qtype, a.qtype) && a.shape[1] == b.shape[1] &&
+        a.shape[1] == c.shape[1] && a.shape[1] == d.shape[1] && c.shape[0] == d.shape[0];
+
+    if (four_way_ok) {
+        int64_t conv_channels = a.shape[0];
+        int64_t inner = b.shape[0];
+        int64_t n_heads = c.shape[0];
+        int64_t d_model = a.shape[1];
+        int64_t total_out = conv_channels + inner + 2 * n_heads;
+        size_t es = 2;  // F16 / BF16 = 2 bytes
+        size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
+        void* d_packed = nullptr;
+        if (cudaMalloc(&d_packed, total_bytes) == cudaSuccess && d_packed) {
+            ctx.gpu_allocs.push_back(d_packed);
+            char* base = static_cast<char*>(d_packed);
+            // Concat in N (rows): each weight is a contiguous [out, d_model] block,
+            // so plain cudaMemcpyAsync into the packed buffer's row range is the
+            // entire pack op.
+            size_t bytes_a = static_cast<size_t>(conv_channels) * d_model * es;
+            size_t bytes_b = static_cast<size_t>(inner) * d_model * es;
+            size_t bytes_c = static_cast<size_t>(n_heads) * d_model * es;
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(base, a.data, bytes_a, cudaMemcpyDeviceToDevice, ctx.stream));
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(base + bytes_a, b.data, bytes_b, cudaMemcpyDeviceToDevice, ctx.stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(base + bytes_a + bytes_b, c.data, bytes_c,
+                                                cudaMemcpyDeviceToDevice, ctx.stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(base + bytes_a + bytes_b + bytes_c, d.data, bytes_c,
+                                                cudaMemcpyDeviceToDevice, ctx.stream));
+            int64_t packed_shape[2] = {total_out, d_model};
+            L.gdn_input_packed = Tensor(d_packed, a.qtype, 2, packed_shape, true);
+            L.gdn_packed_conv_channels = static_cast<int>(conv_channels);
+            L.gdn_packed_inner = static_cast<int>(inner);
+            L.gdn_packed_n_heads = static_cast<int>(n_heads);
+            IMP_LOG_DEBUG("  layer %d: gdn_input_packed [%lld, %lld] %.2f MiB", i, (long long)total_out,
+                          (long long)d_model, total_bytes / (1024.0 * 1024.0));
+        } else {
+            IMP_LOG_WARN(
+                "layer %d: gdn_input_packed alloc failed (%zu bytes), falling back to 2-way / 4-call", i,
+                total_bytes);
+        }
+    }
+
+    // Step-1 fallback: alpha+beta only (decode 2-way fusion). Skipped if
+    // gdn_input_packed already covers the same case.
+    if (!L.gdn_input_packed.data && c.data && c.on_device && d.data && d.on_device && c.ndim == 2 &&
+        d.ndim == 2 && c.qtype == d.qtype && (c.qtype == QType::F16 || c.qtype == QType::BF16) &&
+        c.shape[0] == d.shape[0] && c.shape[1] == d.shape[1]) {
+        int64_t d_model = c.shape[0];
+        int64_t n_heads = c.shape[1];
+        size_t es = 2;
         size_t row_bytes = static_cast<size_t>(n_heads) * es;
         size_t total_bytes = static_cast<size_t>(d_model) * 2 * row_bytes;
         void* d_packed = nullptr;
-        cudaError_t err = cudaMalloc(&d_packed, total_bytes);
-        if (err == cudaSuccess && d_packed) {
+        if (cudaMalloc(&d_packed, total_bytes) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
-            // alpha → packed[d, 0:n_heads]
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(d_packed, 2 * row_bytes, L.gdn_alpha.data, row_bytes,
-                                                 row_bytes, d_model, cudaMemcpyDeviceToDevice, ctx.stream));
-            // beta  → packed[d, n_heads:2*n_heads]
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(d_packed, 2 * row_bytes, c.data, row_bytes, row_bytes,
+                                                 d_model, cudaMemcpyDeviceToDevice, ctx.stream));
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(static_cast<char*>(d_packed) + row_bytes, 2 * row_bytes,
-                                                 L.gdn_beta.data, row_bytes, row_bytes, d_model,
+                                                 d.data, row_bytes, row_bytes, d_model,
                                                  cudaMemcpyDeviceToDevice, ctx.stream));
             int64_t packed_shape[2] = {d_model, 2 * n_heads};
-            L.gdn_alpha_beta_packed = Tensor(d_packed, L.gdn_alpha.qtype, 2, packed_shape, true);
-            IMP_LOG_DEBUG("  layer %d: gdn_alpha_beta_packed [%lld, %lld] %.2f KiB", i, (long long)d_model,
-                          (long long)(2 * n_heads), total_bytes / 1024.0);
-        } else {
-            IMP_LOG_WARN("layer %d: gdn_alpha_beta_packed alloc failed (%zu bytes), falling back to 2-call",
-                         i, total_bytes);
+            L.gdn_alpha_beta_packed = Tensor(d_packed, c.qtype, 2, packed_shape, true);
+            IMP_LOG_DEBUG("  layer %d: gdn_alpha_beta_packed [%lld, %lld] %.2f KiB (Step-1 fallback)", i,
+                          (long long)d_model, (long long)(2 * n_heads), total_bytes / 1024.0);
         }
     }
 

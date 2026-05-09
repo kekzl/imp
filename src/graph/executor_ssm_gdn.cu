@@ -279,12 +279,37 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
+    // M=1 decode 4-way input fusion: when the load-time pack succeeded, run a
+    // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slice
+    // the output for proj / gate_out / alpha / beta. Saves 3 gemv launches per
+    // layer per decode step. Prefill (n>1) keeps the 4-call path unchanged so
+    // we don't have to deinterleave the GEMM output.
+    const bool fused_input = (n == 1) && (ly.gdn_input_packed.data != nullptr) &&
+                             (gdn_fused_proj_buf_.data != nullptr);
+    int packed_conv_channels = fused_input ? ly.gdn_packed_conv_channels : 0;
+    int packed_inner = fused_input ? ly.gdn_packed_inner : 0;
+    int packed_n_heads = fused_input ? ly.gdn_packed_n_heads : 0;
+
     // 2. ssm_in (attn_qkv) projection → [n, conv_channels]
     //    GDN: no z-split, no dt — the full projection goes to conv1d.
-    //    ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only need [n, conv_channels].
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
-    Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-    gemm_dispatch(no, ly.ssm_in, proj, ctx);
+    Tensor proj;
+    if (fused_input) {
+        // One GEMV produces [proj | gate | alpha | beta] contiguously in
+        // gdn_fused_proj_buf_; the views below take offset slices.
+        size_t es_loc = dtype_size(compute_dtype_);
+        int total_out = packed_conv_channels + packed_inner + 2 * packed_n_heads;
+        int64_t fused_shape[2] = {1, total_out};
+        Tensor fused_out(gdn_fused_proj_buf_.data, compute_dtype_, 2, fused_shape, true);
+        gemm_dispatch(no, ly.gdn_input_packed, fused_out, ctx);
+        proj = Tensor(gdn_fused_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
+        (void)es_loc;
+    } else {
+        // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
+        // need [n, conv_channels].
+        proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
+        gemm_dispatch(no, ly.ssm_in, proj, ctx);
+    }
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
     // 3. Conv1d on full projection output [n, conv_channels]
@@ -381,10 +406,20 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                                                    : nullptr;
 
-    // Gate projection — computed before scan, used after in RMSNormGated
+    // Gate projection — computed before scan, used after in RMSNormGated.
+    // Fused-input path: the gate slice is already in gdn_fused_proj_buf_ from
+    // the single up-front GEMV, no dispatch needed.
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
-    Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-    gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
+    Tensor gate_out;
+    if (fused_input) {
+        size_t es_loc = dtype_size(compute_dtype_);
+        char* gate_ptr =
+            static_cast<char*>(gdn_fused_proj_buf_.data) + static_cast<size_t>(packed_conv_channels) * es_loc;
+        gate_out = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
+    } else {
+        gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+        gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
+    }
 
     const bool use_fp32_scan = RuntimeConfig::current().gdn.fp32_scan;
 
@@ -395,26 +430,31 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         Tensor alpha_proj_out, beta_proj_out;
         {
             int64_t ab_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(n_heads)};
-            // Use ssm_dt_buf_ for alpha (it's [max_tokens, n_heads] — perfect fit)
-            // Beta can go right after in the same buffer (plenty of room)
-            alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
-            char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
-                             ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
-            beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
 
-            // Decode (n=1) fused path: single GEMV against the [d_model,
-            // 2*n_heads] packed weight produces [α₀..α_{H-1}, β₀..β_{H-1}]
-            // contiguous in ssm_dt_buf_. Saves one gemv_fp16_kernel launch
-            // per GDN layer per decode step.
-            if (n == 1 && ly.gdn_alpha_beta_packed.data) {
+            if (fused_input) {
+                // Step 2: alpha and beta slices are at the tail of the fused
+                // GEMV output. No dispatch, no copies.
+                char* alpha_ptr = static_cast<char*>(gdn_fused_proj_buf_.data) +
+                                  static_cast<size_t>(packed_conv_channels + packed_inner) * es;
+                char* beta_ptr =
+                    alpha_ptr + static_cast<size_t>(packed_n_heads) * es;
+                alpha_proj_out = Tensor(alpha_ptr, compute_dtype_, 2, ab_shape, true);
+                beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
+            } else if (n == 1 && ly.gdn_alpha_beta_packed.data) {
+                // Step 1: alpha+beta-only fusion. One GEMV against [d_model,
+                // 2*n_heads] produces [α | β] contiguous in ssm_dt_buf_.
                 int64_t ab2_shape[2] = {1, static_cast<int64_t>(2 * n_heads)};
                 Tensor ab_packed_out(ssm_dt_buf_.data, compute_dtype_, 2, ab2_shape, true);
-                // β slice now sits immediately after α (no 256-byte padding gap).
-                beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + n_heads * es, compute_dtype_, 2,
-                                       ab_shape, true);
+                alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
+                beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + n_heads * es, compute_dtype_,
+                                       2, ab_shape, true);
                 gemm_dispatch(no, ly.gdn_alpha_beta_packed, ab_packed_out, ctx);
             } else {
-                // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
+                // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta.
+                alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
+                char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
+                                 ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
+                beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
                 gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
                 gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
             }

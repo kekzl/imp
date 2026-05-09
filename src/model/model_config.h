@@ -241,8 +241,26 @@ struct TransformerLayer {
     // as [d_model, 2*n_gdn_heads]. Fires the M=1 path with a single GEMV
     // launch instead of two. Built at load-time when both alpha and beta are
     // FP16/BF16 + same shape; left null on GGUF/MXFP4 paths so the dispatcher
-    // falls back to the two-call path.
+    // falls back to the two-call path. Superseded by `gdn_input_packed` below
+    // when the full 4-way fusion fires.
     Tensor gdn_alpha_beta_packed;
+
+    // Full GDN input projection fusion: stacks ssm_in + gdn_gate + gdn_alpha +
+    // gdn_beta along the N (output) dim into one [total_out, d_model] weight,
+    // where total_out = conv_channels + inner + 2*n_heads. A single GEMV
+    // produces all four outputs contiguously, then run_gdn slices at:
+    //   [0,                          conv_channels)        → xBC (conv1d input)
+    //   [conv_channels,              conv_channels+inner)  → z / gate_out
+    //   [conv_channels+inner,        ...+n_heads)          → alpha
+    //   [conv_channels+inner+n_heads,total_out)            → beta
+    //
+    // When set, ssm_in / gdn_gate / gdn_alpha / gdn_beta have their device
+    // memory released (their .data goes nullptr, .on_device=false). Null =
+    // fall back to the four separate gemm_dispatch calls.
+    Tensor gdn_input_packed;
+    int gdn_packed_conv_channels = 0;
+    int gdn_packed_inner = 0;
+    int gdn_packed_n_heads = 0;
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
