@@ -59,7 +59,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     const uint8_t* __restrict__ V_scales,   // UE4M3 per group
     half* __restrict__ O, const int* __restrict__ block_tables,
     const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size,
-    float scale, int max_context_len, int max_num_blocks, int sliding_window, float softcap) {
+    float scale, int max_context_len, int max_num_blocks, int sliding_window, float softcap,
+    // Phase 3b residual args. Active when K_residual != nullptr && residual_count > 0.
+    // Pointer points to the (seq, layer) slice; layout
+    //   [residual_n_tokens, n_kv_heads, head_dim] FP16 (ring-indexed).
+    const half* __restrict__ K_residual, const half* __restrict__ V_residual,
+    int residual_count, int residual_n_tokens, int residual_write_idx) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     static_assert(HEAD_DIM % 16 == 0, "HEAD_DIM must be divisible by 16 (NVFP4 group size)");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
@@ -108,8 +113,29 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     int effective_start = 0;
     if (sliding_window > 0 && ctx_len > sliding_window)
         effective_start = ctx_len - sliding_window;
+
+    // Phase 3b: split absolute KV range into paged-tail-clipped + residual.
+    // residual_active: residual ring is enabled AND has at least one entry that
+    // falls within ctx_len AND falls within effective_start..ctx_len window.
+    const bool residual_have = (K_residual != nullptr) && (V_residual != nullptr) &&
+                               (residual_n_tokens > 0) && (residual_count > 0);
+    int residual_active_count = 0;
+    int residual_first_abs = ctx_len;  // start of residual chronological range
+    int residual_skip = 0;             // chronologically-stale residual entries to skip
+    if (residual_have) {
+        int res_have = residual_count;
+        if (res_have > ctx_len) res_have = ctx_len;
+        int res_chrono_first = ctx_len - res_have;
+        residual_first_abs = (effective_start > res_chrono_first) ? effective_start : res_chrono_first;
+        residual_active_count = ctx_len - residual_first_abs;
+        residual_skip = res_have - residual_active_count;
+        if (residual_active_count <= 0) {
+            residual_active_count = 0;  // window excludes all residual entries
+        }
+    }
+    const int paged_end_token = ctx_len - residual_active_count;
     const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const int num_paged_blocks = (paged_end_token + block_size - 1) / block_size;
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
@@ -118,7 +144,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     for (int i = 0; i < ELEMS; i++)
         o_reg[i] = 0.0f;
 
-    for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
+    for (int blk = first_block + warp_id; blk < num_paged_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
@@ -127,8 +153,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 
         int tok_start = blk * block_size;
         int tok_end = tok_start + block_size;
-        if (tok_end > ctx_len)
-            tok_end = ctx_len;
+        if (tok_end > paged_end_token)
+            tok_end = paged_end_token;
 
         int first_tok = 0;
         if (tok_start < effective_start)
@@ -325,6 +351,165 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Phase 3b: residual FP16 pass over the newest `residual_active_count`
+    // tokens. Same WMMA QK + block-softmax + WMMA V structure as the paged
+    // loop, but reads K/V directly as FP16 from the residual ring (no FP4
+    // dequant, no UE4M3 fold). Tiles distribute round-robin across warps;
+    // each warp's m_w/l_w/o_reg evolves independently and the cross-warp
+    // reduce later integrates them correctly.
+    //
+    // Ring slot for chronological position i in the active range:
+    //   slot = (residual_write_idx + residual_n_tokens - residual_count
+    //          + residual_skip + i) % residual_n_tokens
+    // ------------------------------------------------------------------
+    if (residual_active_count > 0) {
+        const int kv_head_stride_res = HEAD_DIM;            // FP16 elems per (slot, kv_head)
+        const int slot_stride_res = n_kv_heads * HEAD_DIM;  // FP16 elems per slot
+
+        // Per-warp scratch (same layout as paged path)
+        __half* sQ_r = tc_smem + warp_id * WARP_TC_HALVES;
+        __half* sK_r = sQ_r + 16 * 16;
+        float*  sFV_r = reinterpret_cast<float*>(sK_r + 16 * 16);
+
+        constexpr int K_TILES_R = HEAD_DIM / 16;
+
+        using namespace nvcuda;
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag_v;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> v_frag;
+
+        const int n_tiles_r = (residual_active_count + 15) / 16;
+        const int slot_base = (residual_write_idx + residual_n_tokens - residual_count + residual_skip)
+                              % residual_n_tokens;
+
+        for (int tile = warp_id; tile < n_tiles_r; tile += NUM_WARPS) {
+            const int tile_first = tile * 16;
+            int tile_count = residual_active_count - tile_first;
+            if (tile_count > 16) tile_count = 16;
+
+            wmma::fill_fragment(c_frag, __float2half(0.0f));
+
+#pragma unroll
+            for (int k_tile = 0; k_tile < K_TILES_R; k_tile++) {
+                const int hd_off = k_tile * 16;
+
+                // Replicate Q[hd_off..hd_off+16] across all 16 rows of sQ_r.
+                for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                    int col = i % 16;
+                    sQ_r[i] = Q_ptr[hd_off + col];
+                }
+
+                // Load FP16 K from residual ring. Out-of-tile slots → 0.
+                for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                    int t = i / 16;
+                    int hd_local = i % 16;
+                    int hd_global = hd_off + hd_local;
+                    if (t < tile_count) {
+                        int slot = (slot_base + tile_first + t) % residual_n_tokens;
+                        sK_r[i] = K_residual[(int64_t)slot * slot_stride_res +
+                                             kv_head * kv_head_stride_res + hd_global];
+                    } else {
+                        sK_r[i] = __float2half(0.0f);
+                    }
+                }
+                __syncwarp();
+
+                wmma::load_matrix_sync(a_frag, sQ_r, 16);
+                wmma::load_matrix_sync(b_frag, sK_r, 16);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                __syncwarp();
+            }
+
+            wmma::store_matrix_sync(sK_r, c_frag, 16, wmma::mem_row_major);
+            __syncwarp();
+
+            // Block-softmax (mirrors paged loop's normalized-rescale invariant).
+            float dots_scaled[16];
+            float m_local = -FLT_MAX;
+#pragma unroll
+            for (int t = 0; t < 16; t++) {
+                float d = -FLT_MAX;
+                if (t < tile_count) {
+                    d = __half2float(sK_r[t]) * scale;
+                    d = apply_softcap(d, softcap);
+                    m_local = fmaxf(m_local, d);
+                }
+                dots_scaled[t] = d;
+            }
+
+            float m_new = fmaxf(m_w, m_local);
+            float exp_diff = (m_w == -FLT_MAX) ? 0.0f : __expf(m_w - m_new);
+
+            float weights[16];
+            float l_local = 0.0f;
+#pragma unroll
+            for (int t = 0; t < 16; t++) {
+                float w = (dots_scaled[t] > -FLT_MAX) ? __expf(dots_scaled[t] - m_new) : 0.0f;
+                weights[t] = w;
+                l_local += w;
+            }
+
+            float l_new = exp_diff * l_w + l_local;
+            float rescale_norm = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
+            float l_inv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
+
+            m_w = m_new;
+            l_w = l_new;
+
+#pragma unroll
+            for (int i = 0; i < ELEMS; i++) o_reg[i] *= rescale_norm;
+
+            // Replicate normalized weights into sQ_r (A operand).
+            for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                int col = i % 16;
+                sQ_r[i] = __float2half(weights[col] * l_inv);
+            }
+            __syncwarp();
+
+            constexpr int LANES_PER_CHUNK_R = (16 / ELEMS) > 0 ? (16 / ELEMS) : 1;
+            const int my_chunk_r = lane_id / LANES_PER_CHUNK_R;
+            const int my_offset_in_chunk_r = (lane_id % LANES_PER_CHUNK_R) * ELEMS;
+
+#pragma unroll
+            for (int kt = 0; kt < K_TILES_R; kt++) {
+                const int hd_off = kt * 16;
+
+                // Load FP16 V from residual ring.
+                for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                    int t = i / 16;
+                    int hd_local = i % 16;
+                    int hd_global = hd_off + hd_local;
+                    if (t < tile_count) {
+                        int slot = (slot_base + tile_first + t) % residual_n_tokens;
+                        sK_r[i] = V_residual[(int64_t)slot * slot_stride_res +
+                                             kv_head * kv_head_stride_res + hd_global];
+                    } else {
+                        sK_r[i] = __float2half(0.0f);
+                    }
+                }
+                __syncwarp();
+
+                wmma::fill_fragment(v_frag, 0.0f);
+                wmma::load_matrix_sync(a_frag, sQ_r, 16);
+                wmma::load_matrix_sync(b_frag_v, sK_r, 16);
+                wmma::mma_sync(v_frag, a_frag, b_frag_v, v_frag);
+                wmma::store_matrix_sync(sFV_r, v_frag, 16, wmma::mem_row_major);
+                __syncwarp();
+
+                if (my_chunk_r == kt) {
+#pragma unroll
+                    for (int e = 0; e < ELEMS; e++) {
+                        o_reg[e] += sFV_r[my_offset_in_chunk_r + e];
+                    }
+                }
+                __syncwarp();
+            }
+        }
+    }
+
     // crosswarp reduce smem starts AFTER the per-warp TC scratch region
     // (NUM_WARPS * WARP_TC_HALVES halves = NUM_WARPS * 1024 bytes).
     char* crosswarp_smem = tc_smem_raw + NUM_WARPS * WARP_TC_HALVES * sizeof(__half);
@@ -491,7 +676,9 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                   const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
                                   const int* context_lens, int block_size, float scale, int max_context_len,
                                   int sliding_window, float softcap, cudaStream_t stream,
-                                  int max_blocks_per_seq, int n_sinks) {
+                                  int max_blocks_per_seq, int n_sinks,
+                                  const half* K_residual, const half* V_residual,
+                                  int residual_count, int residual_n_tokens, int residual_write_idx) {
     (void)n_sinks;  // streaming not yet wired
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -500,6 +687,11 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
 
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
+
+    // Phase 3b: residual is single-sequence only and not wired into the
+    // split-K scaffold. Force non-split path when residual is active.
+    const bool residual_active = (K_residual != nullptr) && (V_residual != nullptr) &&
+                                 (residual_count > 0) && (residual_n_tokens > 0) && (batch_size == 1);
 
     // BitDecoding TC variant adds NUM_WARPS * 2048 bytes of WMMA scratch
     // (16x16 sQ halves + 16x16 sK halves + 16x16 sFV floats per warp).
@@ -513,6 +705,9 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr);
+    if (residual_active) {
+        num_splits = 1;  // residual ring read only wired in non-split kernel
+    }
 
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);
@@ -553,12 +748,15 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
-#define LAUNCH_NVFP4(HD)                                                                                     \
-    paged_attention_decode_nvfp4_tc_kernel<HD><<<grid, block, smem_bytes, stream>>>(                            \
-        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),               \
-        reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
-        block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,     \
-        max_num_blocks, sliding_window, softcap)
+#define LAUNCH_NVFP4(HD)                                                                                       \
+    paged_attention_decode_nvfp4_tc_kernel<HD><<<grid, block, smem_bytes, stream>>>(                              \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),                 \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data),   \
+        block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,       \
+        max_num_blocks, sliding_window, softcap,                                                               \
+        residual_active ? K_residual : nullptr, residual_active ? V_residual : nullptr,                        \
+        residual_active ? residual_count : 0, residual_active ? residual_n_tokens : 0,                         \
+        residual_active ? residual_write_idx : 0)
 
         switch (head_dim) {
             case 64:

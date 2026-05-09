@@ -1,6 +1,7 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
+#include "memory/kv_cache_manager.h"
 #include "graph/executor_gemv_helpers.h"
 #include "graph/executor_debug.h"
 #include "graph/gemm_context.h"
@@ -1001,12 +1002,33 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 return env && env[0] == '1';
             }();
             if (use_bitdecoding_tc) {
+                // Phase 3b residual read: single-sequence only, gated on
+                // KVCacheManager having an enabled residual buffer AND state
+                // exposing a non-negative kv_seq_id. Multi-seq batch decode
+                // bypasses by passing nullptr/0.
+                const half* k_res = nullptr;
+                const half* v_res = nullptr;
+                int res_count = 0;
+                int res_n = 0;
+                int res_widx = 0;
+                if (state.kv_manager != nullptr && state.kv_manager->residual_enabled() &&
+                    state.n_sequences == 1 && state.kv_seq_id >= 0) {
+                    k_res = static_cast<const half*>(
+                        state.kv_manager->residual_k_ptr(state.kv_seq_id, kv_layer));
+                    v_res = static_cast<const half*>(
+                        state.kv_manager->residual_v_ptr(state.kv_seq_id, kv_layer));
+                    auto rs = state.kv_manager->residual_state(state.kv_seq_id);
+                    res_count = rs.fill_count;
+                    res_n = state.kv_manager->residual_n_tokens();
+                    res_widx = rs.write_idx;
+                }
                 paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4,
                                                 static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                                 static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                                                 state.block_tables, state.context_lens, kv_bs, scale,
                                                 state.max_context_len, layer_sliding_window,
-                                                cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+                                                cfg.attn_logit_softcap, stream, state.max_blocks_per_seq, 0,
+                                                k_res, v_res, res_count, res_n, res_widx);
             } else {
                 paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),

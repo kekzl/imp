@@ -127,6 +127,14 @@ struct InferenceState {
     class GDNState* gdn_state = nullptr;
     int gdn_seq_id = 0;
 
+    // BitDecoding Phase 3 residual KV cache: per-sequence ring buffer of the
+    // newest-N FP16 KV entries. -1 = disabled. Single-sequence only — multi-seq
+    // batch decode bypasses the residual pass even when this is set.
+    int kv_seq_id = -1;
+    // KVCacheManager owning the residual buffer + ring-state map. Set when
+    // kv_seq_id >= 0 to give the executor access to residual_k_ptr / advance_residual.
+    class KVCacheManager* kv_manager = nullptr;
+
     // Batching
     int n_sequences = 1;         // number of sequences in the batch
     int max_blocks_per_seq = 0;  // max blocks per sequence (for 2D block_table indexing)

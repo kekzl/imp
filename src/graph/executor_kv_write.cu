@@ -7,6 +7,7 @@
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -222,6 +223,44 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
+    }
+
+    // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────
+    //
+    // Append the just-computed FP16 K/V (one token, n_sequences==1) to the
+    // residual ring. The paged write above already cached the same data in
+    // its native dtype; the residual is a lookaside copy that lets the TC
+    // attention kernel skip dequant on the freshest tokens. Eviction-free:
+    // when the ring fills, the slot at write_idx is overwritten and the
+    // older copy stays in paged. Skipped on prefill (warm-up writes only),
+    // multi-seq batches, and non-NVFP4 caches (residual is gated to NVFP4
+    // by KVCacheManager::enable_residual_buffer).
+    if (!state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
+        state.kv_manager->residual_enabled() && state.n_sequences == 1 &&
+        state.kv_seq_id >= 0 && n == 1) {
+        const int res_n_kv = cache->n_kv_heads();
+        const int res_hd = cache->head_dim();
+        // Per-layer geometry must match the residual's allocated stride
+        // (uniform-head_dim guard from enable_residual_buffer); skip on
+        // mismatch (e.g. Gemma-4 dual-head_dim layers).
+        if (res_n_kv == nkv && res_hd == hd) {
+            void* dst_k = state.kv_manager->residual_k_ptr(state.kv_seq_id, kv_layer);
+            void* dst_v = state.kv_manager->residual_v_ptr(state.kv_seq_id, kv_layer);
+            if (dst_k != nullptr && dst_v != nullptr) {
+                auto rs = state.kv_manager->residual_state(state.kv_seq_id);
+                const size_t slot_elems = static_cast<size_t>(nkv) * hd;
+                const size_t slot_bytes = slot_elems * sizeof(__half);
+                half* k_dst = static_cast<half*>(dst_k) + rs.write_idx * slot_elems;
+                half* v_dst = static_cast<half*>(dst_v) + rs.write_idx * slot_elems;
+                Tensor kv_src = view_tokens(k_, n);
+                Tensor vv_src = view_tokens(v_, n);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_dst, kv_src.data, slot_bytes,
+                                                   cudaMemcpyDeviceToDevice, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_dst, vv_src.data, slot_bytes,
+                                                   cudaMemcpyDeviceToDevice, stream));
+                state.kv_manager->advance_residual(state.kv_seq_id);
+            }
+        }
     }
 }
 

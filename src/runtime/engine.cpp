@@ -1071,7 +1071,19 @@ bool Engine::init_kv_cache() {
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
-            (void)kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_);
+            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_)) {
+                // Phase 3 residual ring state lives on the host (write_idx /
+                // fill_count update per step). CUDA graphs would capture the
+                // values at trace-time, freezing them at every replay → wrong
+                // ring slot reads + writes. Disable graph capture while
+                // residual is active.
+                if (config_.use_cuda_graphs) {
+                    IMP_LOG_INFO(
+                        "BitDecoding residual buffer enabled — disabling CUDA graph capture "
+                        "(host-side ring state incompatible with capture; non-graph decode path used)");
+                    config_.use_cuda_graphs = false;
+                }
+            }
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
                          residual_n);
@@ -1910,6 +1922,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.max_blocks_per_seq = 0;
     state.is_prefill = true;
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
+    state.kv_manager = kv_manager_.get();
+    if (kv_manager_ && kv_manager_->residual_enabled()) {
+        state.kv_seq_id = req->id % kv_manager_->residual_max_seqs();
+    }
     fill_sampling_params(*req, state);
 
     // Constraints via ConstraintManager
@@ -2182,6 +2198,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     state.context_lens = gpu_batch.d_context_lens;
     state.max_context_len = max_ctx;
     state.is_prefill = false;
+    state.kv_manager = kv_manager_.get();
+    if (kv_manager_ && kv_manager_->residual_enabled() && gpu_batch.n_sequences == 1) {
+        state.kv_seq_id = valid_decode[0]->id % kv_manager_->residual_max_seqs();
+    }
     fill_sampling_params(*valid_decode[0], state);
 
     // Derive per-step seed: mix request seed with output count so each
