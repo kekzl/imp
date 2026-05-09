@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Fixed
 
 - **Chunked prefill correctness**: prefill chunks ≥2 now correctly read past chunks' K/V from the paged cache. New `paged_kv_gather_*` kernels + rectangular `attention_cublas_prefill(q_offset)`. Previously, `prefill_chunk_size > 0` produced silently-wrong logits for full-attention models and full degeneration for SWA models like Gemma-4.
+- **Chunked prefill on hybrid GDN+MoE / Mamba2+MoE archs** (Qwen3.5/3.6, Nemotron-H): prompts where `total_input > effective_chunk` were previously rejected with `RequestStatus::CANCELLED`. Two-part fix — Mamba2 plain conv1d kernel now reads trailing context from `conv_state` at the chunk boundary, and `Engine::supports_chunked_prefill_()` carve-out is gated by attention-shape uniformity so HF-loader-populated `n_kv_heads_per_layer` arrays (uniform across attention layers) don't trip the heterogeneous-shape exclusion.
 
 ### Added
 
