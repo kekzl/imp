@@ -19,6 +19,14 @@ compile_commands.json
 *.fatbin
 *.cubin
 
+# Compiled microbench / probe binaries in tools/analysis (sources tracked, binaries not)
+tools/analysis/probe_*
+!tools/analysis/probe_*.cu
+!tools/analysis/probe_*.sh
+tools/analysis/bench_*
+!tools/analysis/bench_*.cu
+!tools/analysis/bench_*.sh
+
 # Logs (debug runs, repro logs, smoke tests)
 *.log
 bringup_artifacts/

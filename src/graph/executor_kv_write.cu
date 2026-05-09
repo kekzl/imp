@@ -7,11 +7,14 @@
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <algorithm>
+#include <cstdlib>
+#include <vector>
 
 namespace imp {
 
@@ -222,6 +225,116 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
+    }
+
+    // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────
+    //
+    // Append each seq's just-computed FP16 K/V (one token per seq,
+    // n_sequences ≥ 1, n_tokens == n_sequences) to its residual ring slot.
+    // The paged write above already cached the same data in its native dtype;
+    // the residual is a lookaside copy that lets the TC attention kernel skip
+    // dequant on the freshest tokens. Eviction-free: when the ring fills, the
+    // slot at write_idx is overwritten and the older copy stays in paged.
+    // Skipped on prefill (warm-up writes only), and non-NVFP4 caches (residual
+    // is gated to NVFP4 by KVCacheManager::enable_residual_buffer).
+    //
+    // Two seq-id sources, mirroring the attention dispatcher:
+    //   - state.h_residual_seq_ids: host array of length n_sequences (multi-seq)
+    //   - state.kv_seq_id: single int (legacy single-seq, used when h_… is null)
+    static const bool skip_residual_write = []() {
+        const char* e = std::getenv("IMP_BITDECODING_SKIP_WRITE");
+        return e && e[0] == '1';
+    }();
+    if (!skip_residual_write && !state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
+        state.kv_manager->residual_enabled() && n == state.n_sequences) {
+        const int res_n_kv = cache->n_kv_heads();
+        const int res_hd = cache->head_dim();
+        // Per-layer geometry must match the residual's allocated stride
+        // (uniform-head_dim guard from enable_residual_buffer); skip on
+        // mismatch (e.g. Gemma-4 dual-head_dim layers).
+        if (res_n_kv == nkv && res_hd == hd) {
+            const int slot_elems = nkv * hd;
+            Tensor kv_src = view_tokens(k_, n);
+            Tensor vv_src = view_tokens(v_, n);
+            const half* src_k_base = static_cast<const half*>(kv_src.data);
+            const half* src_v_base = static_cast<const half*>(vv_src.data);
+            constexpr int kThreads = 256;
+            const int blocks_y = (slot_elems + kThreads - 1) / kThreads;
+
+            if (state.n_sequences == 1) {
+                // Single-seq fast path: resolve destination on the host and
+                // pass scalar pointers — avoids per-step device-pointer-array
+                // upload. Two cudaMemcpyAsync had been the bottleneck here
+                // (-3× decode regression at 4K ctx); a single kernel launch
+                // is several × cheaper.
+                int seq_id;
+                if (state.h_residual_seq_ids != nullptr) {
+                    seq_id = state.h_residual_seq_ids[0];
+                } else if (state.kv_seq_id >= 0) {
+                    seq_id = state.kv_seq_id;
+                } else {
+                    seq_id = -1;
+                }
+                if (seq_id >= 0) {
+                    int slot = state.kv_manager->residual_slot_of(seq_id);
+                    void* base_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
+                    void* base_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
+                    if (slot >= 0 && base_k != nullptr && base_v != nullptr) {
+                        // Diagnostic env to skip the kernel launch.
+                        static const bool no_kernel_launch = []() {
+                            const char* e = std::getenv("IMP_BITDECODING_NO_LAUNCH");
+                            return e && e[0] == '1';
+                        }();
+                        if (!no_kernel_launch) {
+                            // Graph-safe: kernel reads write_idx from device at execution
+                            // time. Per-step advance happens once at end of forward_logits
+                            // (a tiny advance_residual_state_kernel), inside the captured
+                            // graph — replays update ring state correctly.
+                            dim3 grid_single(2, blocks_y);
+                            residual_kv_write_indirect_kernel<<<grid_single, kThreads, 0, stream>>>(
+                                src_k_base, src_v_base,
+                                static_cast<half*>(base_k), static_cast<half*>(base_v),
+                                state.kv_manager->d_residual_widx_ptr(), slot, slot_elems);
+                        }
+                        // No host advance_residual: ring state lives on device, advanced
+                        // once per step by advance_residual_state_kernel in forward_logits.
+                    }
+                }
+            } else if (state.h_residual_seq_ids != nullptr) {
+                // Multi-seq: build device pointer arrays per layer (host-side,
+                // upload via the per-step residual_meta buffer is left to the
+                // engine to pre-upload — we fall back to per-call upload here
+                // for simplicity; n_sequences > 1 is rare so this is OK).
+                std::vector<half*> k_ptrs(n, nullptr), v_ptrs(n, nullptr);
+                for (int s = 0; s < n; s++) {
+                    int seq_id = state.h_residual_seq_ids[s];
+                    if (seq_id < 0) continue;
+                    void* dst_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
+                    void* dst_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
+                    if (dst_k == nullptr || dst_v == nullptr) continue;
+                    auto rs = state.kv_manager->residual_state(seq_id);
+                    k_ptrs[s] = static_cast<half*>(dst_k) + rs.write_idx * slot_elems;
+                    v_ptrs[s] = static_cast<half*>(dst_v) + rs.write_idx * slot_elems;
+                }
+                half** d_k_ptrs = nullptr;
+                half** d_v_ptrs = nullptr;
+                cudaMallocAsync(&d_k_ptrs, n * sizeof(half*), stream);
+                cudaMallocAsync(&d_v_ptrs, n * sizeof(half*), stream);
+                cudaMemcpyAsync(d_k_ptrs, k_ptrs.data(), n * sizeof(half*),
+                                cudaMemcpyHostToDevice, stream);
+                cudaMemcpyAsync(d_v_ptrs, v_ptrs.data(), n * sizeof(half*),
+                                cudaMemcpyHostToDevice, stream);
+                dim3 grid_multi(n, 2);
+                residual_kv_write_multi_kernel<<<grid_multi, kThreads, 0, stream>>>(
+                    src_k_base, src_v_base, d_k_ptrs, d_v_ptrs, slot_elems);
+                cudaFreeAsync(d_k_ptrs, stream);
+                cudaFreeAsync(d_v_ptrs, stream);
+                for (int s = 0; s < n; s++) {
+                    int seq_id = state.h_residual_seq_ids[s];
+                    if (seq_id >= 0) state.kv_manager->advance_residual(seq_id);
+                }
+            }
+        }
     }
 }
 

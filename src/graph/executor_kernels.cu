@@ -819,6 +819,92 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// BitDecoding Phase 3c: FP16 residual ring write.
+//
+// blockIdx.x = token_idx (0..n_tokens-1); blockIdx.y selects K (0) or V (1).
+// blockDim.x threads stripe across slot_elems = n_kv_heads * head_dim. The
+// per-token destination pointer (already resolved on the host to the right
+// (seq_slot, layer, K|V, ring_slot) location) is read from the per-token
+// pointer array.
+//
+// Replaces a pair of `cudaMemcpyAsync(dst, src, slot_elems*sizeof(half),
+// cudaMemcpyDeviceToDevice, stream)` calls per layer, which were observed
+// to serialize on the copy engine and dominate decode tg/s when residual
+// was enabled (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
+// ---------------------------------------------------------------------------
+__global__ void residual_kv_write_single_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_dst,
+    half* __restrict__ residual_v_dst,
+    int slot_elems) {
+    const bool is_v = (blockIdx.x == 1);
+    half* dst = is_v ? residual_v_dst : residual_k_dst;
+    if (dst == nullptr) return;
+    const half* src = is_v ? v_in : k_in;
+    const int i = threadIdx.x + blockIdx.y * blockDim.x;
+    if (i < slot_elems) {
+        dst[i] = src[i];
+    }
+}
+
+__global__ void residual_kv_write_multi_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* const* __restrict__ residual_k_dst_ptrs,
+    half* const* __restrict__ residual_v_dst_ptrs,
+    int slot_elems) {
+    const int token_idx = blockIdx.x;
+    const bool is_v = (blockIdx.y == 1);
+
+    half* dst = is_v ? residual_v_dst_ptrs[token_idx] : residual_k_dst_ptrs[token_idx];
+    if (dst == nullptr) return;
+    const half* src = (is_v ? v_in : k_in) + static_cast<int64_t>(token_idx) * slot_elems;
+
+    for (int i = threadIdx.x; i < slot_elems; i += blockDim.x) {
+        dst[i] = src[i];
+    }
+}
+
+// Graph-safe single-seq variant: reads write_idx from a device pointer at
+// kernel execution time, so the captured kernel sees the current ring state
+// across graph replays. blockIdx.x ∈ {0, 1} selects K or V; threads stripe
+// across slot_elems.
+__global__ void residual_kv_write_indirect_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_layer_seq_base,
+    half* __restrict__ residual_v_layer_seq_base,
+    const int* __restrict__ d_residual_widx_ptr,
+    int seq_slot,
+    int slot_elems) {
+    const bool is_v = (blockIdx.x == 1);
+    half* base = is_v ? residual_v_layer_seq_base : residual_k_layer_seq_base;
+    if (base == nullptr) return;
+    const half* src = is_v ? v_in : k_in;
+    const int widx = d_residual_widx_ptr[seq_slot];
+    half* dst = base + static_cast<int64_t>(widx) * slot_elems;
+
+    const int i = threadIdx.x + blockIdx.y * blockDim.x;
+    if (i < slot_elems) {
+        dst[i] = src[i];
+    }
+}
+
+__global__ void advance_residual_state_kernel(
+    int* __restrict__ d_widx,
+    int* __restrict__ d_fc,
+    int slot,
+    int residual_n_tokens) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int w = d_widx[slot];
+        int f = d_fc[slot];
+        d_widx[slot] = (w + 1) % residual_n_tokens;
+        d_fc[slot] = (f < residual_n_tokens) ? (f + 1) : f;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TurboQuant KV cache write kernel
 //
 // K path (blockIdx.y == 0): PolarQuant decomposition + QJL sketch

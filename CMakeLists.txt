@@ -415,6 +415,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_fmha_mxfp4.cu
         tests/test_paged_attention.cu
         tests/test_attention_paged_nvfp4_tc.cu
+        tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
     )
 

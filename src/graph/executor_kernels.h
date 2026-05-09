@@ -108,6 +108,51 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
     int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
 
+// BitDecoding Phase 3c residual write — copies one (K, V) FP16 row pair per
+// token into the per-(seq, layer) residual ring slot. Replaces a pair of
+// `cudaMemcpyAsync` we used to launch per layer; the device-to-device copy
+// engine path serialized small transfers and dominated decode tg/s
+// (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
+//
+// Single-seq form (n_tokens == 1): pass the resolved (slot, ring_slot)
+// destination pointers directly via residual_k_dst / residual_v_dst.
+// Multi-seq form: pass n_tokens > 1 with the device pointer arrays.
+__global__ void residual_kv_write_single_kernel(
+    const half* __restrict__ k_in,         // single token's K row
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_dst,     // (slot, layer, ring_slot) destination
+    half* __restrict__ residual_v_dst,
+    int slot_elems);
+
+__global__ void residual_kv_write_multi_kernel(
+    const half* __restrict__ k_in,                  // [n_tokens, slot_elems]
+    const half* __restrict__ v_in,                  // [n_tokens, slot_elems]
+    half* const* __restrict__ residual_k_dst_ptrs,  // [n_tokens] device array of dst pointers
+    half* const* __restrict__ residual_v_dst_ptrs,  // [n_tokens] device array of dst pointers
+    int slot_elems);
+
+// Graph-capture-safe variant. Resolves the destination ring slot at kernel
+// execution time by reading the device-resident `widx` (one int per seq slot)
+// pointer + the persistent slot index. Caller passes the per-(seq_slot, layer)
+// K/V base pointer (NOT the ring slot — that's computed inside the kernel).
+__global__ void residual_kv_write_indirect_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_layer_seq_base,    // (slot, layer, K=0) base
+    half* __restrict__ residual_v_layer_seq_base,    // (slot, layer, V=1) base
+    const int* __restrict__ d_residual_widx_ptr,     // [max_seqs] device array
+    int seq_slot,                                     // index into d_residual_widx_ptr
+    int slot_elems);
+
+// Advance the residual ring state for one slot. Single-thread kernel:
+//   d_widx[slot] = (d_widx[slot] + 1) % residual_n_tokens
+//   d_fc[slot]   = min(d_fc[slot] + 1, residual_n_tokens)
+__global__ void advance_residual_state_kernel(
+    int* __restrict__ d_widx,
+    int* __restrict__ d_fc,
+    int slot,
+    int residual_n_tokens);
+
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables,

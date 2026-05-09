@@ -96,6 +96,10 @@ Engine::~Engine() {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
+    if (d_kv_slot_buf_) {
+        cudaFree(d_kv_slot_buf_);
+        d_kv_slot_buf_ = nullptr;
+    }
     if (h_sample_pinned_) {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
@@ -1066,12 +1070,25 @@ bool Engine::init_kv_cache() {
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
     // BitDecoding Phase 3: residual FP16 cache (opt-in).
+    //
+    // Ring state (write_idx / fill_count per slot) lives in device memory
+    // (kv_manager_->d_residual_widx_ptr / d_residual_fc_ptr). Updated by a
+    // tiny advance_residual_state_kernel at the end of forward_logits; the
+    // residual write/read kernels read the state at execution time. This
+    // makes the whole path graph-capture-safe — graphs stay enabled.
     {
         const auto& rcfg = RuntimeConfig::current();
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
-            (void)kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_);
+            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_)) {
+                // Persistent batch→slot lookup buffer (graph-safe). [max_batch_size] ints.
+                size_t slot_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
+                cudaMalloc(&d_kv_slot_buf_, slot_bytes);
+                std::vector<int> init_slots(max_seqs, -1);
+                cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
+                d_kv_slot_last_uploaded_.assign(max_seqs, -1);
+            }
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
                          residual_n);
@@ -1910,6 +1927,13 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.max_blocks_per_seq = 0;
     state.is_prefill = true;
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
+    state.kv_manager = kv_manager_.get();
+    if (kv_manager_ && kv_manager_->residual_enabled()) {
+        // Slot lookup happens inside KVCacheManager::residual_k_ptr; if no
+        // slot is allocated yet (prefill before first decode), the residual
+        // pointers return nullptr and the kernel skips the residual pass.
+        state.kv_seq_id = req->id;
+    }
     fill_sampling_params(*req, state);
 
     // Constraints via ConstraintManager
@@ -2182,6 +2206,64 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     state.context_lens = gpu_batch.d_context_lens;
     state.max_context_len = max_ctx;
     state.is_prefill = false;
+    state.kv_manager = kv_manager_.get();
+    if (kv_manager_ && kv_manager_->residual_enabled()) {
+        // Allocate / refresh per-seq residual metadata for this decode step.
+        // Slot allocation is idempotent (returns existing slot on re-call).
+        const int N = gpu_batch.n_sequences;
+        residual_meta_h_seq_ids_.resize(N);
+        for (int i = 0; i < N; i++) {
+            int sid = valid_decode[i]->id;
+            residual_meta_h_seq_ids_[i] = sid;
+            kv_manager_->allocate_residual_slot(sid);
+        }
+        if (N == 1) {
+            // Single-seq path: kernel reads ring state from kv_manager's
+            // persistent device buffers. Slot is a constant per-request
+            // value uploaded into d_kv_slot_buf_[0]; only re-uploads when
+            // it changes (i.e. when the active request rotates).
+            state.kv_seq_id = valid_decode[0]->id;
+            state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            int slot_for_req = kv_manager_->residual_slot_of(valid_decode[0]->id);
+            if (d_kv_slot_buf_ != nullptr) {
+                if (d_kv_slot_last_uploaded_.empty() ||
+                    d_kv_slot_last_uploaded_[0] != slot_for_req) {
+                    cudaMemcpyAsync(d_kv_slot_buf_, &slot_for_req, sizeof(int),
+                                    cudaMemcpyHostToDevice, dec_stream);
+                    if (d_kv_slot_last_uploaded_.empty()) d_kv_slot_last_uploaded_.assign(1, -1);
+                    d_kv_slot_last_uploaded_[0] = slot_for_req;
+                }
+                state.d_residual_seq_slots = d_kv_slot_buf_;
+            }
+        } else {
+            // Multi-seq path: build per-batch metadata arrays + upload to
+            // a per-step device buffer.
+            residual_meta_h_slots_.resize(N);
+            residual_meta_h_counts_.resize(N);
+            residual_meta_h_widxes_.resize(N);
+            for (int i = 0; i < N; i++) {
+                int sid = residual_meta_h_seq_ids_[i];
+                residual_meta_h_slots_[i] = kv_manager_->residual_slot_of(sid);
+                auto rs = kv_manager_->residual_state(sid);
+                residual_meta_h_counts_[i] = rs.fill_count;
+                residual_meta_h_widxes_[i] = rs.write_idx;
+            }
+            const size_t meta_bytes = static_cast<size_t>(3) * N * sizeof(int);
+            if (cudaMallocAsync(&residual_meta_d_buf_, meta_bytes, dec_stream) == cudaSuccess) {
+                int* base = residual_meta_d_buf_;
+                cudaMemcpyAsync(base + 0 * N, residual_meta_h_slots_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 1 * N, residual_meta_h_counts_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 2 * N, residual_meta_h_widxes_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                state.d_residual_seq_slots = base + 0 * N;
+                state.d_residual_counts = base + 1 * N;
+                state.d_residual_write_idxes = base + 2 * N;
+                state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            }
+        }
+    }
     fill_sampling_params(*valid_decode[0], state);
 
     // Derive per-step seed: mix request seed with output count so each
@@ -2307,6 +2389,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
     if (!decode_batch_pool_.is_allocated()) {
         gpu_batch.free();
+    }
+
+    // Free per-step residual metadata buffer (allocated in step_decode_forward
+    // when residual is enabled). cudaFreeAsync orders behind the just-issued
+    // forward + sample on dec_stream.
+    if (residual_meta_d_buf_ != nullptr) {
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(residual_meta_d_buf_, dec_stream));
+        residual_meta_d_buf_ = nullptr;
     }
 
     // Process outputs: logprobs extraction + token distribution

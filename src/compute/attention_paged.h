@@ -73,14 +73,57 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
 
 // BitDecoding-style TC variant: same signature + semantics as
 // paged_attention_decode_nvfp4 but routes the inner Q.K dot through
-// nvcuda::wmma 16×16×16 Tensor Core MMA. Phase 1 of the BitDecoding
-// port (docs/superpowers/plans/2026-05-09-bitdecoding-port.md). V
-// accumulation remains scalar in Phase 1.
+// nvcuda::wmma 16×16×16 Tensor Core MMA.
+//
+// Phase 3b residual addendum: optional FP16 ring-buffer holding the newest
+// `residual_count` KV tokens (write-through duplicate of paged tail). When
+// active, the kernel splits attention into paged tokens [0, ctx_len -
+// residual_count) (NVFP4 dequant path) and residual tokens [ctx_len -
+// residual_count, ctx_len) (direct FP16 path), merging via the same online-
+// softmax invariant as the paged loop.
+//
+// Two activation forms:
+//   1. Single-seq scalar form (batch_size==1):
+//      pass K_residual / V_residual + residual_count / residual_write_idx
+//      as scalars. d_residual_seq_slots stays nullptr.
+//
+//   2. Multi-seq array form (batch_size >= 1):
+//      pass K_residual_base / V_residual_base = layer-base pointers (slot 0),
+//      residual_seq_stride_elems = FP16 elems between slots,
+//      d_residual_seq_slots / d_residual_counts / d_residual_write_idxes =
+//      device arrays of length batch_size. Kernel reads per blockIdx.x and
+//      computes K_for_seq = K_residual_base + slot * stride.
+//
+// Layout of FP16 residual data per slot:
+//   [residual_n_tokens, n_kv_heads, head_dim] half, ring-indexed; the
+//   chronologically-i-th most recent token is at slot
+//   `(write_idx + residual_n_tokens - residual_count + i) % residual_n_tokens`.
+//
+// Split-K is forced off when residual is active (residual reads only the
+// non-split kernel; split kernel ignores the args).
 void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                      const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
                                      const int* context_lens, int block_size, float scale, int max_context_len,
                                      int sliding_window = 0, float softcap = 0.0f,
-                                     cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0);
+                                     cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0,
+                                     // Single-seq scalar form
+                                     const half* K_residual = nullptr, const half* V_residual = nullptr,
+                                     int residual_count = 0, int residual_n_tokens = 0,
+                                     int residual_write_idx = 0,
+                                     // Multi-seq array form (overrides the scalars when d_residual_seq_slots != nullptr)
+                                     const half* K_residual_base = nullptr,
+                                     const half* V_residual_base = nullptr,
+                                     int residual_seq_stride_elems = 0,
+                                     const int* d_residual_seq_slots = nullptr,
+                                     const int* d_residual_counts = nullptr,
+                                     const int* d_residual_write_idxes = nullptr,
+                                     // Graph-safe per-slot ring state (KVCacheManager's persistent
+                                     // device buffers). When non-null AND d_residual_seq_slots is set,
+                                     // kernel reads fc/widx via slot indirection — graph-capture-safe
+                                     // because nothing is rebuilt per step. Replaces d_residual_counts/
+                                     // d_residual_write_idxes when both pairs are set.
+                                     const int* d_residual_fc_per_slot = nullptr,
+                                     const int* d_residual_widx_per_slot = nullptr);
 
 // TurboQuant Paged attention for decode: PolarQuant K + QJL sketch + INT4 V.
 // K_dir_cache: packed directions — INT4 uniform (K_mscales=nullptr) or FP4 E2M1 (K_mscales!=nullptr)
