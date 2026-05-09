@@ -209,6 +209,13 @@ public:
     // the per-slot row stride independent of layer.
     size_t residual_seq_stride_bytes() const { return residual_per_seq_bytes_; }
 
+    // Device-resident ring state buffers ([max_seqs] ints each). Replaces the
+    // per-step host upload of write_idx/fill_count — kernels read directly,
+    // and an `advance_residual_state_kernel` updates them once per decode step
+    // (graph-capture-safe). Zeroed on slot allocation and release.
+    int* d_residual_widx_ptr() const { return d_residual_widx_; }
+    int* d_residual_fc_ptr() const { return d_residual_fc_; }
+
     // ── Slot allocation (multi-seq batch support) ────────────────────
     //
     // Each active sequence holds one slot in [0, residual_max_seqs_) for
@@ -314,6 +321,9 @@ private:
     // currently-assigned slot per active seq_id.
     std::vector<int> residual_free_slots_;
     std::unordered_map<int, int> residual_seq_slot_;
+    // Device-resident ring state, [max_seqs] ints each. Zeroed at alloc.
+    int* d_residual_widx_ = nullptr;
+    int* d_residual_fc_ = nullptr;
 };
 
 }  // namespace imp

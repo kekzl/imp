@@ -208,14 +208,20 @@ private:
     size_t d_penalty_tokens_capacity_ = 0;
 
     // ── BitDecoding Phase 3 residual metadata (per-step) ─────────────
-    // Host vectors are reused across decode steps to avoid reallocs.
-    // The device buffer is allocated/freed within step_decode_continuous
-    // (cudaMallocAsync / cudaFreeAsync on the decode stream).
+    // residual_meta_d_buf_ is the legacy multi-seq metadata buffer
+    // (cudaMallocAsync per step in step_decode_continuous). d_kv_slot_buf_ is
+    // a persistent [max_batch_size] device array of slot indices indexed by
+    // batch position, updated lazily via cudaMemcpyAsync when the batch
+    // composition changes — graph-capture-safe (kernels read from a stable
+    // device pointer; host updates between graph replays).
     int* residual_meta_d_buf_ = nullptr;
+    int* d_kv_slot_buf_ = nullptr;
     std::vector<int> residual_meta_h_seq_ids_;
     std::vector<int> residual_meta_h_slots_;
     std::vector<int> residual_meta_h_counts_;
     std::vector<int> residual_meta_h_widxes_;
+    // Last-uploaded slot per batch position; only re-upload when changed.
+    std::vector<int> d_kv_slot_last_uploaded_;
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;

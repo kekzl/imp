@@ -41,6 +41,14 @@ KVCacheManager::~KVCacheManager() {
         residual_alloc_->free(residual_pool_);
         residual_pool_ = nullptr;
     }
+    if (d_residual_widx_) {
+        cudaFree(d_residual_widx_);
+        d_residual_widx_ = nullptr;
+    }
+    if (d_residual_fc_) {
+        cudaFree(d_residual_fc_);
+        d_residual_fc_ = nullptr;
+    }
 }
 
 // ─── BitDecoding Phase 3: residual FP16 cache ────────────────────────
@@ -91,6 +99,22 @@ bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAl
     }
     residual_seq_slot_.clear();
 
+    // Allocate device-resident ring state buffers (graph-capture-safe path).
+    // Zero-initialized so that newly-allocated slots start with write_idx=0,
+    // fill_count=0 without an extra reset call.
+    const size_t state_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
+    if (cudaMalloc(&d_residual_widx_, state_bytes) != cudaSuccess ||
+        cudaMalloc(&d_residual_fc_, state_bytes) != cudaSuccess) {
+        IMP_LOG_ERROR("KVCacheManager: residual state buffer alloc failed (%zu bytes)", state_bytes);
+        if (d_residual_widx_) { cudaFree(d_residual_widx_); d_residual_widx_ = nullptr; }
+        if (d_residual_fc_) { cudaFree(d_residual_fc_); d_residual_fc_ = nullptr; }
+        alloc->free(residual_pool_);
+        residual_pool_ = nullptr;
+        return false;
+    }
+    cudaMemset(d_residual_widx_, 0, state_bytes);
+    cudaMemset(d_residual_fc_, 0, state_bytes);
+
     IMP_LOG_INFO("KVCacheManager: residual buffer enabled — max_seqs=%d, residual_n=%d, %.2f MiB",
                  max_seqs, residual_n, static_cast<double>(total) / (1024.0 * 1024.0));
     return true;
@@ -104,6 +128,13 @@ int KVCacheManager::allocate_residual_slot(int seq_id) {
     int slot = residual_free_slots_.back();
     residual_free_slots_.pop_back();
     residual_seq_slot_[seq_id] = slot;
+    // Zero device-resident ring state for this slot. Synchronous — runs once
+    // per request admission, not on the hot decode path.
+    if (d_residual_widx_) {
+        int zero = 0;
+        cudaMemcpy(d_residual_widx_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_residual_fc_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    }
     return slot;
 }
 
@@ -111,9 +142,15 @@ void KVCacheManager::release_residual_slot(int seq_id) {
     if (!residual_pool_) return;
     auto it = residual_seq_slot_.find(seq_id);
     if (it == residual_seq_slot_.end()) return;
-    residual_free_slots_.push_back(it->second);
+    int slot = it->second;
+    residual_free_slots_.push_back(slot);
     residual_seq_slot_.erase(it);
     seq_residual_state_.erase(seq_id);
+    if (d_residual_widx_) {
+        int zero = 0;
+        cudaMemcpy(d_residual_widx_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_residual_fc_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    }
 }
 
 int KVCacheManager::residual_slot_of(int seq_id) const {

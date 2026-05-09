@@ -23,6 +23,8 @@
 #include "compute/sampling.h"
 #include "compute/ssm.h"
 #include "compute/gdn.h"
+#include "memory/kv_cache_manager.h"
+#include "graph/executor_kernels.h"
 #include "memory/gdn_state.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -536,6 +538,23 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Release offloaded layer (restore host pointers)
         if (offload_mgr_) {
             offload_mgr_->release_layer(i);
+        }
+    }
+
+    // BitDecoding Phase 3: advance the residual ring state once per decode
+    // step. Has to happen INSIDE the captured graph (otherwise replays would
+    // reuse the captured-time write_idx). Must come AFTER the layer loop —
+    // each layer reads the same write_idx for its KV write/attention so the
+    // bump applies starting next step. Decode-only (n==1 or n==n_sequences).
+    if (!state.is_prefill && state.kv_manager != nullptr &&
+        state.kv_manager->residual_enabled() && state.kv_seq_id >= 0) {
+        int slot = state.kv_manager->residual_slot_of(state.kv_seq_id);
+        if (slot >= 0) {
+            advance_residual_state_kernel<<<1, 1, 0, stream>>>(
+                state.kv_manager->d_residual_widx_ptr(),
+                state.kv_manager->d_residual_fc_ptr(),
+                slot,
+                state.kv_manager->residual_n_tokens());
         }
     }
 

@@ -866,6 +866,44 @@ __global__ void residual_kv_write_multi_kernel(
     }
 }
 
+// Graph-safe single-seq variant: reads write_idx from a device pointer at
+// kernel execution time, so the captured kernel sees the current ring state
+// across graph replays. blockIdx.x ∈ {0, 1} selects K or V; threads stripe
+// across slot_elems.
+__global__ void residual_kv_write_indirect_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_layer_seq_base,
+    half* __restrict__ residual_v_layer_seq_base,
+    const int* __restrict__ d_residual_widx_ptr,
+    int seq_slot,
+    int slot_elems) {
+    const bool is_v = (blockIdx.x == 1);
+    half* base = is_v ? residual_v_layer_seq_base : residual_k_layer_seq_base;
+    if (base == nullptr) return;
+    const half* src = is_v ? v_in : k_in;
+    const int widx = d_residual_widx_ptr[seq_slot];
+    half* dst = base + static_cast<int64_t>(widx) * slot_elems;
+
+    const int i = threadIdx.x + blockIdx.y * blockDim.x;
+    if (i < slot_elems) {
+        dst[i] = src[i];
+    }
+}
+
+__global__ void advance_residual_state_kernel(
+    int* __restrict__ d_widx,
+    int* __restrict__ d_fc,
+    int slot,
+    int residual_n_tokens) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int w = d_widx[slot];
+        int f = d_fc[slot];
+        d_widx[slot] = (w + 1) % residual_n_tokens;
+        d_fc[slot] = (f < residual_n_tokens) ? (f + 1) : f;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TurboQuant KV cache write kernel
 //

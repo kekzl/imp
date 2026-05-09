@@ -131,6 +131,28 @@ __global__ void residual_kv_write_multi_kernel(
     half* const* __restrict__ residual_v_dst_ptrs,  // [n_tokens] device array of dst pointers
     int slot_elems);
 
+// Graph-capture-safe variant. Resolves the destination ring slot at kernel
+// execution time by reading the device-resident `widx` (one int per seq slot)
+// pointer + the persistent slot index. Caller passes the per-(seq_slot, layer)
+// K/V base pointer (NOT the ring slot — that's computed inside the kernel).
+__global__ void residual_kv_write_indirect_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    half* __restrict__ residual_k_layer_seq_base,    // (slot, layer, K=0) base
+    half* __restrict__ residual_v_layer_seq_base,    // (slot, layer, V=1) base
+    const int* __restrict__ d_residual_widx_ptr,     // [max_seqs] device array
+    int seq_slot,                                     // index into d_residual_widx_ptr
+    int slot_elems);
+
+// Advance the residual ring state for one slot. Single-thread kernel:
+//   d_widx[slot] = (d_widx[slot] + 1) % residual_n_tokens
+//   d_fc[slot]   = min(d_fc[slot] + 1, residual_n_tokens)
+__global__ void advance_residual_state_kernel(
+    int* __restrict__ d_widx,
+    int* __restrict__ d_fc,
+    int slot,
+    int residual_n_tokens);
+
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables,

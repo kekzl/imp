@@ -792,13 +792,20 @@ __global__ void paged_attention_residual_reduce_kernel(
     const half* __restrict__ K_residual,
     const half* __restrict__ V_residual,
     int residual_count_scalar, int residual_write_idx_scalar,
-    // Multi-seq array form:
+    // Multi-seq / per-slot array form. Two indirection styles:
+    //   (a) per-batch arrays:   d_residual_counts[batch_idx], d_residual_write_idxes[batch_idx]
+    //   (b) per-slot arrays:    d_residual_widx_per_slot[slot], d_residual_fc_per_slot[slot]
+    //                           (slot looked up via d_residual_seq_slots[batch_idx])
+    // (b) is graph-capture-safe — kv_manager_'s persistent ring state is used
+    // directly. (a) is the legacy form (engine builds per-step host buffer).
     const half* __restrict__ K_residual_base,
     const half* __restrict__ V_residual_base,
     int residual_seq_stride_elems,
     const int* __restrict__ d_residual_seq_slots,
     const int* __restrict__ d_residual_counts,
-    const int* __restrict__ d_residual_write_idxes) {
+    const int* __restrict__ d_residual_write_idxes,
+    const int* __restrict__ d_residual_fc_per_slot,
+    const int* __restrict__ d_residual_widx_per_slot) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int partial_stride = 2 + HEAD_DIM;
@@ -820,8 +827,16 @@ __global__ void paged_attention_residual_reduce_kernel(
     int rc = 0, rwi = 0;
     if (d_residual_seq_slots != nullptr && K_residual_base != nullptr && residual_n_tokens > 0) {
         int slot = d_residual_seq_slots[batch_idx];
-        int rc_b = (d_residual_counts != nullptr) ? d_residual_counts[batch_idx] : 0;
-        int rw_b = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
+        int rc_b, rw_b;
+        if (d_residual_fc_per_slot != nullptr && d_residual_widx_per_slot != nullptr && slot >= 0) {
+            // Graph-safe per-slot read.
+            rc_b = d_residual_fc_per_slot[slot];
+            rw_b = d_residual_widx_per_slot[slot];
+        } else {
+            // Legacy per-batch read.
+            rc_b = (d_residual_counts != nullptr) ? d_residual_counts[batch_idx] : 0;
+            rw_b = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
+        }
         if (slot >= 0 && rc_b > 0) {
             K_res = K_residual_base + (int64_t)slot * residual_seq_stride_elems;
             V_res = V_residual_base + (int64_t)slot * residual_seq_stride_elems;
@@ -1030,7 +1045,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                   int residual_count, int residual_n_tokens, int residual_write_idx,
                                   const half* K_residual_base, const half* V_residual_base,
                                   int residual_seq_stride_elems, const int* d_residual_seq_slots,
-                                  const int* d_residual_counts, const int* d_residual_write_idxes) {
+                                  const int* d_residual_counts, const int* d_residual_write_idxes,
+                                  const int* d_residual_fc_per_slot, const int* d_residual_widx_per_slot) {
     (void)n_sinks;  // streaming not yet wired
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -1137,7 +1153,9 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         residual_active_multiseq ? residual_seq_stride_elems : 0,                                             \
         residual_active_multiseq ? d_residual_seq_slots : nullptr,                                            \
         residual_active_multiseq ? d_residual_counts : nullptr,                                               \
-        residual_active_multiseq ? d_residual_write_idxes : nullptr)
+        residual_active_multiseq ? d_residual_write_idxes : nullptr,                                          \
+        residual_active_multiseq ? d_residual_fc_per_slot : nullptr,                                          \
+        residual_active_multiseq ? d_residual_widx_per_slot : nullptr)
             switch (head_dim) {
                 case 64:  LAUNCH_RESIDUAL_REDUCE(64);  break;
                 case 128: LAUNCH_RESIDUAL_REDUCE(128); break;

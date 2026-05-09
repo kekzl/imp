@@ -1051,7 +1051,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                 k_res_base, v_res_base, res_seq_stride_elems,
                                                 state.d_residual_seq_slots,
                                                 state.d_residual_counts,
-                                                state.d_residual_write_idxes);
+                                                state.d_residual_write_idxes,
+                                                residual_on ? state.kv_manager->d_residual_fc_ptr() : nullptr,
+                                                residual_on ? state.kv_manager->d_residual_widx_ptr() : nullptr);
             } else {
                 paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),

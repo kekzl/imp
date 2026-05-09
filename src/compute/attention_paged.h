@@ -116,7 +116,14 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                      int residual_seq_stride_elems = 0,
                                      const int* d_residual_seq_slots = nullptr,
                                      const int* d_residual_counts = nullptr,
-                                     const int* d_residual_write_idxes = nullptr);
+                                     const int* d_residual_write_idxes = nullptr,
+                                     // Graph-safe per-slot ring state (KVCacheManager's persistent
+                                     // device buffers). When non-null AND d_residual_seq_slots is set,
+                                     // kernel reads fc/widx via slot indirection — graph-capture-safe
+                                     // because nothing is rebuilt per step. Replaces d_residual_counts/
+                                     // d_residual_write_idxes when both pairs are set.
+                                     const int* d_residual_fc_per_slot = nullptr,
+                                     const int* d_residual_widx_per_slot = nullptr);
 
 // TurboQuant Paged attention for decode: PolarQuant K + QJL sketch + INT4 V.
 // K_dir_cache: packed directions — INT4 uniform (K_mscales=nullptr) or FP4 E2M1 (K_mscales!=nullptr)

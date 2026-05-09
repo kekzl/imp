@@ -96,6 +96,10 @@ Engine::~Engine() {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
+    if (d_kv_slot_buf_) {
+        cudaFree(d_kv_slot_buf_);
+        d_kv_slot_buf_ = nullptr;
+    }
     if (h_sample_pinned_) {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
@@ -1066,23 +1070,24 @@ bool Engine::init_kv_cache() {
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
     // BitDecoding Phase 3: residual FP16 cache (opt-in).
+    //
+    // Ring state (write_idx / fill_count per slot) lives in device memory
+    // (kv_manager_->d_residual_widx_ptr / d_residual_fc_ptr). Updated by a
+    // tiny advance_residual_state_kernel at the end of forward_logits; the
+    // residual write/read kernels read the state at execution time. This
+    // makes the whole path graph-capture-safe — graphs stay enabled.
     {
         const auto& rcfg = RuntimeConfig::current();
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
             if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_)) {
-                // Phase 3 residual ring state lives on the host (write_idx /
-                // fill_count update per step). CUDA graphs would capture the
-                // values at trace-time, freezing them at every replay → wrong
-                // ring slot reads + writes. Disable graph capture while
-                // residual is active.
-                if (config_.use_cuda_graphs) {
-                    IMP_LOG_INFO(
-                        "BitDecoding residual buffer enabled — disabling CUDA graph capture "
-                        "(host-side ring state incompatible with capture; non-graph decode path used)");
-                    config_.use_cuda_graphs = false;
-                }
+                // Persistent batch→slot lookup buffer (graph-safe). [max_batch_size] ints.
+                size_t slot_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
+                cudaMalloc(&d_kv_slot_buf_, slot_bytes);
+                std::vector<int> init_slots(max_seqs, -1);
+                cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
+                d_kv_slot_last_uploaded_.assign(max_seqs, -1);
             }
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
@@ -2213,12 +2218,23 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             kv_manager_->allocate_residual_slot(sid);
         }
         if (N == 1) {
-            // Single-seq fast path: scalar kernel form, no per-step device
-            // upload. The attention dispatcher reads ring state directly via
-            // residual_k_ptr / residual_state on the host side and passes
-            // scalar args.
+            // Single-seq path: kernel reads ring state from kv_manager's
+            // persistent device buffers. Slot is a constant per-request
+            // value uploaded into d_kv_slot_buf_[0]; only re-uploads when
+            // it changes (i.e. when the active request rotates).
             state.kv_seq_id = valid_decode[0]->id;
             state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            int slot_for_req = kv_manager_->residual_slot_of(valid_decode[0]->id);
+            if (d_kv_slot_buf_ != nullptr) {
+                if (d_kv_slot_last_uploaded_.empty() ||
+                    d_kv_slot_last_uploaded_[0] != slot_for_req) {
+                    cudaMemcpyAsync(d_kv_slot_buf_, &slot_for_req, sizeof(int),
+                                    cudaMemcpyHostToDevice, dec_stream);
+                    if (d_kv_slot_last_uploaded_.empty()) d_kv_slot_last_uploaded_.assign(1, -1);
+                    d_kv_slot_last_uploaded_[0] = slot_for_req;
+                }
+                state.d_residual_seq_slots = d_kv_slot_buf_;
+            }
         } else {
             // Multi-seq path: build per-batch metadata arrays + upload to
             // a per-step device buffer.

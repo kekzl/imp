@@ -276,23 +276,28 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                     seq_id = -1;
                 }
                 if (seq_id >= 0) {
-                    void* dst_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
-                    void* dst_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
-                    if (dst_k != nullptr && dst_v != nullptr) {
-                        auto rs = state.kv_manager->residual_state(seq_id);
-                        half* k_dst = static_cast<half*>(dst_k) + rs.write_idx * slot_elems;
-                        half* v_dst = static_cast<half*>(dst_v) + rs.write_idx * slot_elems;
-                        // Diagnostic env to skip the kernel launch but still advance ring state.
+                    int slot = state.kv_manager->residual_slot_of(seq_id);
+                    void* base_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
+                    void* base_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
+                    if (slot >= 0 && base_k != nullptr && base_v != nullptr) {
+                        // Diagnostic env to skip the kernel launch.
                         static const bool no_kernel_launch = []() {
                             const char* e = std::getenv("IMP_BITDECODING_NO_LAUNCH");
                             return e && e[0] == '1';
                         }();
                         if (!no_kernel_launch) {
+                            // Graph-safe: kernel reads write_idx from device at execution
+                            // time. Per-step advance happens once at end of forward_logits
+                            // (a tiny advance_residual_state_kernel), inside the captured
+                            // graph — replays update ring state correctly.
                             dim3 grid_single(2, blocks_y);
-                            residual_kv_write_single_kernel<<<grid_single, kThreads, 0, stream>>>(
-                                src_k_base, src_v_base, k_dst, v_dst, slot_elems);
+                            residual_kv_write_indirect_kernel<<<grid_single, kThreads, 0, stream>>>(
+                                src_k_base, src_v_base,
+                                static_cast<half*>(base_k), static_cast<half*>(base_v),
+                                state.kv_manager->d_residual_widx_ptr(), slot, slot_elems);
                         }
-                        state.kv_manager->advance_residual(seq_id);
+                        // No host advance_residual: ring state lives on device, advanced
+                        // once per step by advance_residual_state_kernel in forward_logits.
                     }
                 }
             } else if (state.h_residual_seq_ids != nullptr) {
