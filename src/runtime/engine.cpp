@@ -1699,6 +1699,29 @@ bool Engine::supports_chunked_prefill_() const {
     if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA (sliding_window_pattern=6)
     if (cfg.arch == ModelArch::GEMMA4) return false;       // SWA + dual head_dim
     if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
+    // Per-layer attention shape uniformity gate. Hybrid archs (QWEN35*, QWEN36_MOE,
+    // NEMOTRON_H_MOE) populate n_kv_heads_per_layer with zeros for non-attention
+    // layers — uniformity here means all *nonzero* values agree. Truly heterogeneous
+    // shapes (Gemma-4 dual head_dim 256/512) would have differing nonzero entries
+    // and stay carved out via the arch block above + this defense-in-depth check.
+    auto first_nonzero_int = [](const std::vector<int>& v) -> int {
+        for (int x : v) if (x > 0) return x;
+        return 0;
+    };
+    auto any_nonzero_differs = [](const std::vector<int>& v, int ref) -> bool {
+        for (int x : v) if (x > 0 && x != ref) return true;
+        return false;
+    };
+    if (!cfg.n_kv_heads_per_layer.empty()) {
+        int ref = first_nonzero_int(cfg.n_kv_heads_per_layer);
+        if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref))
+            return false;
+    }
+    if (!cfg.head_dim_per_layer.empty()) {
+        int ref = first_nonzero_int(cfg.head_dim_per_layer);
+        if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref))
+            return false;
+    }
     // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4. Others
     // (INT4/INT8/TurboQuant) would need their own gather kernels.
     if (kv_cache_raw_) {
@@ -1764,8 +1787,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int total_input = static_cast<int>(req->input_tokens.size());
     int offset = req->prefill_offset;
 
-    // Out-of-scope archs (hybrid GDN+MoE, SWA, etc.) lack a per-layer-shape
-    // aware paged-prefill kernel, so the chunked-prefill path in
+    // Out-of-scope archs (Gemma-3/4 SWA, Llama-4, sub-byte KV) lack a paged
+    // chunked-prefill path, so the chunked-prefill branch in
     // executor_attention.cu aborts on chunk 2+ (q_offset > 0 + per_layer
     // shapes). Reject prompts > effective_chunk gracefully here instead of
     // letting them hit std::abort. Real fix is the paged hybrid-prefill
