@@ -406,6 +406,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
         int ssm_in_dim = inner + conv_channels + n_heads;
 
         size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
+        int fused_total_out = conv_channels + inner + 2 * n_heads;
         ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim *
                                     proj_elem_size)  // proj (FP32 for GDN)
                            + align256(static_cast<size_t>(max_tokens) * conv_channels * es)  // xBC
@@ -413,7 +414,9 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
                            + align256(static_cast<size_t>(max_tokens) * inner * es)          // z
                            + align256(static_cast<size_t>(max_tokens) * d * es)              // out
                            + align256(static_cast<size_t>(max_tokens) * n_heads * (has_gdn_ ? 2 : 1) *
-                                      es);  // dt (2x for GDN: alpha + beta)
+                                      es)  // dt (2x for GDN: alpha + beta)
+                           + (has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es)
+                                       : 0);  // gdn_fused_proj (only on GDN models)
     }
 }
 

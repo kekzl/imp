@@ -567,6 +567,9 @@ private:
     Tensor ssm_z_buf_;     // [max_tokens, inner_size] for gate
     Tensor ssm_out_buf_;   // [max_tokens, d_model] for ssm_out projection
     Tensor ssm_dt_buf_;    // [max_tokens, n_heads] for dt after split
+    Tensor gdn_fused_proj_buf_;  // [max_tokens, conv_channels+inner+2*n_heads] FP16 — output
+                                 // of the fused GDN input GEMV when ly.gdn_input_packed is
+                                 // built; sized only for has_gdn_ models.
 
     // --- Separately allocated buffers (not part of unified workspace) ---
 

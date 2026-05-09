@@ -439,7 +439,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (cfg.ssm_inner_size > 0) {
             int conv_ch = cfg.ssm_inner_size + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
             int ssm_in_dim = cfg.ssm_inner_size + conv_ch + cfg.ssm_dt_rank;
+            int gdn_fused_total = conv_ch + cfg.ssm_inner_size + 2 * cfg.ssm_dt_rank;
             max_dim = std::max(max_dim, ssm_in_dim);
+            max_dim = std::max(max_dim, gdn_fused_total);
             max_dim = std::max(max_dim, cfg.ssm_inner_size);
         }
         qscratch_.fp8_act_size = static_cast<size_t>(max_tokens_) * max_dim;

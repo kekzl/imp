@@ -120,6 +120,13 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     ssm_dt_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads * dt_multiplier,
                                         align256(static_cast<size_t>(max_tokens) * n_heads * dt_multiplier *
                                                  es));
+    // Output buffer for the fused GDN input projection (4-way: ssm_in + gdn_gate +
+    // gdn_alpha + gdn_beta concatenated along N). Only sized on has_gdn_ models.
+    int fused_total_out = conv_channels + inner + 2 * n_heads;
+    size_t fused_bytes =
+        has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es) : align256(0);
+    gdn_fused_proj_buf_ =
+        make_workspace_tensor(ptr, compute_dtype_, max_tokens, fused_total_out, fused_bytes);
 }
 
 bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
