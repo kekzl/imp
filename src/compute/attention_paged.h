@@ -71,6 +71,17 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   int sliding_window = 0, float softcap = 0.0f,
                                   cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0);
 
+// BitDecoding-style TC variant: same signature + semantics as
+// paged_attention_decode_nvfp4 but routes the inner Q.K dot through
+// nvcuda::wmma 16×16×16 Tensor Core MMA. Phase 1 of the BitDecoding
+// port (docs/superpowers/plans/2026-05-09-bitdecoding-port.md). V
+// accumulation remains scalar in Phase 1.
+void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                     const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
+                                     const int* context_lens, int block_size, float scale, int max_context_len,
+                                     int sliding_window = 0, float softcap = 0.0f,
+                                     cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0);
+
 // TurboQuant Paged attention for decode: PolarQuant K + QJL sketch + INT4 V.
 // K_dir_cache: packed directions — INT4 uniform (K_mscales=nullptr) or FP4 E2M1 (K_mscales!=nullptr)
 // K_mscales: nullptr → uniform INT4 dequant (/7.0), non-null → MXFP4 FP4 E2M1 + UE8M0 micro-scales
