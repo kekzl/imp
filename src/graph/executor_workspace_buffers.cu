@@ -556,6 +556,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.cutlass_act_sf_size = 0;
                 qscratch_.cutlass_workspace_size = 0;
             } else {
+                // Pre-zero the SfAtom scale workspace once. The per-call
+                // quantize_fp16_nvfp4_cutlass_kernel only writes the M × K_groups
+                // valid SF cells; SfAtom padding bytes remain whatever they were
+                // before. Zeroing once here lets quantize_fp16_to_nvfp4_cutlass
+                // skip its per-call cudaMemsetAsync (saves ~1 launch per CUTLASS
+                // NVFP4 GEMM, ~6720 calls / 100 ms in Llama Q8 W1 prefill). Sync
+                // because executor init may finish before the first stream-bound
+                // call uses this buffer.
+                IMP_CUDA_CHECK_LOG(cudaMemset(qscratch_.cutlass_act_sf, 0,
+                                              qscratch_.cutlass_act_sf_size));
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
                              (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size +
                               qscratch_.cutlass_workspace_size) /
