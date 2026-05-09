@@ -402,9 +402,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                              ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
             beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
 
-            // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
-            gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
-            gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
+            // Decode (n=1) fused path: single GEMV against the [d_model,
+            // 2*n_heads] packed weight produces [α₀..α_{H-1}, β₀..β_{H-1}]
+            // contiguous in ssm_dt_buf_. Saves one gemv_fp16_kernel launch
+            // per GDN layer per decode step.
+            if (n == 1 && ly.gdn_alpha_beta_packed.data) {
+                int64_t ab2_shape[2] = {1, static_cast<int64_t>(2 * n_heads)};
+                Tensor ab_packed_out(ssm_dt_buf_.data, compute_dtype_, 2, ab2_shape, true);
+                // β slice now sits immediately after α (no 256-byte padding gap).
+                beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + n_heads * es, compute_dtype_, 2,
+                                       ab_shape, true);
+                gemm_dispatch(no, ly.gdn_alpha_beta_packed, ab_packed_out, ctx);
+            } else {
+                // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
+                gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
+                gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
+            }
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
             dump_tensor_npy("gdn_alpha", alpha_proj_out, stream, layer, cur_decode_step_);
