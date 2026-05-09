@@ -17,16 +17,15 @@ Two Gemma-4 carve-outs are still active in `engine.cpp:630-660`:
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2, and Gemma-4 (post PR #91).
 
-### Chunked prefill scope (full-attention + FP16/FP8 KV)
+### Chunked prefill scope (full-attention + hybrid GDN/Mamba2; FP16/FP8/NVFP4 KV)
 
-Default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mistral) with FP16 or FP8 KV cache. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk before a rectangular `attention_cublas_prefill` with `q_offset`-aware causal masking. PR #114 mitigation (default `prefill_chunk_size = 0`) is replaced by `Engine::resolve_prefill_chunk_size_()` which clamps to 0 for out-of-scope archs.
+Default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mistral) and hybrid GDN+MoE / Mamba2+MoE models (Qwen3.5/3.6, Nemotron-H) with FP16, FP8, or NVFP4 KV cache. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk before a rectangular `attention_cublas_prefill` with `q_offset`-aware causal masking. PR #114 mitigation (default `prefill_chunk_size = 0`) is replaced by `Engine::resolve_prefill_chunk_size_()` which clamps to 0 for out-of-scope archs.
 
 **Out-of-scope** — stay at `prefill_chunk_size = 0` via per-arch default; explicit `--prefill-chunk-size N` is logged + clamped to 0:
 
 - Gemma-3 / Gemma-4 (SWA — Gemma-4 also has dual head_dim 256/512)
 - Llama-4 (MoE + SWA)
-- Hybrid models with non-attention layers (Qwen3.5/3.6 GDN, Nemotron-H Mamba2)
-- Sub-byte KV cache dtypes (INT4, NVFP4, TurboQuant variants)
+- Sub-byte KV cache dtypes (INT4, TurboQuant, TurboQuant Lite)
 
 Each excluded class is a separate larger work item (paged-prefill kernel with SWA-aware mask / dual-head_dim support / sub-byte dequant during gather).
 

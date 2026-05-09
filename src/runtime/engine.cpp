@@ -1681,23 +1681,47 @@ bool Engine::step_schedule() {
 // =====================================================================
 // supports_chunked_prefill_ / resolve_prefill_chunk_size_
 // Whether the model arch + KV dtype combination supports chunked prefill.
-// Returns true for full-attention models (Qwen3, Llama, Mistral) with FP16
-// or FP8 KV cache. Returns false for SWA models (Gemma-3, Gemma-4, Llama-4),
-// hybrid models (GDN/Mamba2), and sub-byte KV dtypes.
+// Returns true for full-attention models (Qwen3, Llama, Mistral) and hybrid
+// GDN+MoE / Mamba2+MoE models (Qwen3.5/3.6, Nemotron-H) with FP16, FP8, or
+// NVFP4 KV cache. Returns false for SWA models (Gemma-3/4, Llama-4) and
+// sub-byte KV dtypes (INT4, TurboQuant) lacking gather kernels.
 // =====================================================================
 
 bool Engine::supports_chunked_prefill_() const {
     if (!model_)
         return false;
     const auto& cfg = model_->config();
-    // Out-of-scope archs: SWA / dual-head_dim / hybrid (GDN / Mamba2).
+    // Out-of-scope archs: SWA / dual-head_dim variants. Hybrid GDN+MoE /
+    // Mamba2+MoE archs (QWEN35*, QWEN36_MOE, NEMOTRON_H_MOE) ARE supported —
+    // their attention layers share one (nkv, hd) geometry, the existing
+    // chunked-attention path handles them, and SSM/GDN/Mamba2 forward kernels
+    // persist state across chunks.
     if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA (sliding_window_pattern=6)
     if (cfg.arch == ModelArch::GEMMA4) return false;       // SWA + dual head_dim
     if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
-    if (cfg.arch == ModelArch::QWEN35) return false;
-    if (cfg.arch == ModelArch::QWEN35_MOE) return false;
-    if (cfg.arch == ModelArch::QWEN36_MOE) return false;
-    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) return false;
+    // Per-layer attention shape uniformity gate. Hybrid archs (QWEN35*, QWEN36_MOE,
+    // NEMOTRON_H_MOE) populate n_kv_heads_per_layer with zeros for non-attention
+    // layers — uniformity here means all *nonzero* values agree. Truly heterogeneous
+    // shapes (Gemma-4 dual head_dim 256/512) would have differing nonzero entries
+    // and stay carved out via the arch block above + this defense-in-depth check.
+    auto first_nonzero_int = [](const std::vector<int>& v) -> int {
+        for (int x : v) if (x > 0) return x;
+        return 0;
+    };
+    auto any_nonzero_differs = [](const std::vector<int>& v, int ref) -> bool {
+        for (int x : v) if (x > 0 && x != ref) return true;
+        return false;
+    };
+    if (!cfg.n_kv_heads_per_layer.empty()) {
+        int ref = first_nonzero_int(cfg.n_kv_heads_per_layer);
+        if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref))
+            return false;
+    }
+    if (!cfg.head_dim_per_layer.empty()) {
+        int ref = first_nonzero_int(cfg.head_dim_per_layer);
+        if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref))
+            return false;
+    }
     // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4. Others
     // (INT4/INT8/TurboQuant) would need their own gather kernels.
     if (kv_cache_raw_) {
@@ -1763,8 +1787,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int total_input = static_cast<int>(req->input_tokens.size());
     int offset = req->prefill_offset;
 
-    // Out-of-scope archs (hybrid GDN+MoE, SWA, etc.) lack a per-layer-shape
-    // aware paged-prefill kernel, so the chunked-prefill path in
+    // Out-of-scope archs (Gemma-3/4 SWA, Llama-4, sub-byte KV) lack a paged
+    // chunked-prefill path, so the chunked-prefill branch in
     // executor_attention.cu aborts on chunk 2+ (q_offset > 0 + per_layer
     // shapes). Reject prompts > effective_chunk gracefully here instead of
     // letting them hit std::abort. Real fix is the paged hybrid-prefill

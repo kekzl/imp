@@ -696,11 +696,39 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
             // so this code only runs for FP16 / FP8 / NVFP4 KV without SWA / dual-head_dim.
             const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4);
-            if (!kvt_ok || sliding_active || per_layer_shapes) {
+            // `per_layer_shapes` (line 196) is true whenever cfg.head_dim_per_layer or
+            // cfg.n_kv_heads_per_layer is populated. HF loaders for hybrid archs
+            // (Qwen3.5/3.6 GDN via layer_types, Nemotron-H via hybrid_override_pattern)
+            // populate n_kv_heads_per_layer with cfg.n_kv_heads on attention layers and
+            // 0 on SSM/GDN/MoE non-attention layers — uniform across attention layers,
+            // safe to chunk. Only Gemma-4 (dual head_dim 256 SWA / 512 global) has
+            // truly heterogeneous attention shapes that the cuBLAS-prefill chunked path
+            // can't handle. Detect "any nonzero entries differ from each other" instead
+            // of "any per-layer array populated".
+            auto first_nonzero_int = [](const std::vector<int>& v) -> int {
+                for (int x : v) if (x > 0) return x;
+                return 0;
+            };
+            auto any_nonzero_differs = [](const std::vector<int>& v, int ref) -> bool {
+                for (int x : v) if (x > 0 && x != ref) return true;
+                return false;
+            };
+            bool attn_shapes_vary = false;
+            if (!cfg.head_dim_per_layer.empty()) {
+                int ref = first_nonzero_int(cfg.head_dim_per_layer);
+                if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref))
+                    attn_shapes_vary = true;
+            }
+            if (!cfg.n_kv_heads_per_layer.empty()) {
+                int ref = first_nonzero_int(cfg.n_kv_heads_per_layer);
+                if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref))
+                    attn_shapes_vary = true;
+            }
+            if (!kvt_ok || sliding_active || attn_shapes_vary) {
                 IMP_LOG_ERROR(
-                    "chunked_prefill: unsupported config (kv=%d swa=%d per_layer=%d) at L%d — "
+                    "chunked_prefill: unsupported config (kv=%d swa=%d attn_shapes_vary=%d) at L%d — "
                     "engine should have prevented this",
-                    (int)kvt, (int)sliding_active, (int)per_layer_shapes, layer);
+                    (int)kvt, (int)sliding_active, (int)attn_shapes_vary, layer);
                 std::abort();
             }
 

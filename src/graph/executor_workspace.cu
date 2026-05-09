@@ -111,14 +111,14 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
         max_tokens_ = 4096;
     }
 
-    // Cap max_tokens for hybrid MoE+SSM/GDN models to limit workspace.
-    // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB VRAM.
-    // The original 256/512 caps were too tight: chunked-prefill on hybrid
-    // arch is out-of-scope (no per_layer-shapes-aware paged kernel yet),
-    // so any prompt > max_tokens forces the engine into a multi-chunk
-    // path that aborts in executor_attention.cu. Bumping the hybrid-MoE
-    // cap to 2048 covers most real prompts in single-shot at ~190 MiB
-    // shared workspace (attn_scores n_heads × N² is the dominant term).
+    // Cap max_tokens for hybrid MoE+SSM/GDN models to bound workspace VRAM.
+    // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB VRAM at the
+    // model's full max_seq_len. Chunked-prefill on hybrid archs IS supported
+    // now (uniform attention shapes across layers), but the cap still keeps
+    // single-chunk prefills cheap; the engine clamps effective_chunk to this
+    // value and falls into the chunked path for longer prompts. 2048 covers
+    // most real prompts in one shot at ~190 MiB shared workspace
+    // (attn_scores n_heads × N² is the dominant term).
     if (has_ssm_ && (has_moe_ || has_gdn_)) {
         int capped = has_moe_ ? 2048 : 2048;
         if (max_tokens_ > capped) {
