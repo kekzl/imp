@@ -104,6 +104,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.kv_cache.allow_nondeterministic_fp8 = parse_bool(val, cfg.kv_cache.allow_nondeterministic_fp8);
     else if (eq("kv_cache.fp8_auto_legacy"))
         cfg.kv_cache.fp8_auto_legacy = parse_bool(val, cfg.kv_cache.fp8_auto_legacy);
+    else if (eq("kv_cache.bitdecoding_residual_tokens"))
+        cfg.kv_cache.bitdecoding_residual_tokens = parse_int(val, cfg.kv_cache.bitdecoding_residual_tokens);
 
     // [attention]
     else if (eq("attention.fp8_prefill"))

@@ -161,6 +161,48 @@ public:
     // Returns number of blocks restored, or -1 on error.
     int load_prefix_cache(const std::string& path, cudaStream_t stream = nullptr);
 
+    // ── BitDecoding Phase 3: residual FP16 cache ─────────────────────
+    //
+    // Optional per-sequence ring buffer of FP16 K/V for the newest N tokens.
+    // Decode kernel reads attention from BOTH the NVFP4 paged cache and the
+    // FP16 residual; the K/V write path appends FP16 to the ring first and
+    // only quantizes-to-NVFP4 when the ring fills (the to-be-overwritten
+    // entry is then evicted to the paged cache).
+    //
+    // Phase 3a (this PR): allocation + accessor surface only. Phase 3b
+    // (kernel) and Phase 3c (write path) build on top.
+    //
+    // Layout: `[max_seqs, n_layers, 2 (K|V), residual_n, n_kv_heads, head_dim]`
+    // FP16 contiguous. Indexed by (seq_slot, layer, k_or_v).
+
+    struct ResidualRingState {
+        int write_idx = 0;    // next slot to write into [0, residual_n)
+        int fill_count = 0;   // populated entries [0, residual_n]
+    };
+
+    // Allocate the residual pool. Idempotent: returns false if already enabled.
+    // Returns true on success, false on alloc failure or if residual_n==0.
+    [[nodiscard]] bool enable_residual_buffer(int max_seqs, int residual_n, VRAMAllocator* alloc);
+
+    bool residual_enabled() const { return residual_pool_ != nullptr; }
+    int residual_n_tokens() const { return residual_n_tokens_; }
+    int residual_max_seqs() const { return residual_max_seqs_; }
+
+    // Per-(seq, layer) K/V pointer into the residual pool. Returns nullptr if
+    // residual is not enabled OR seq_id is out of range.
+    void* residual_k_ptr(int seq_id, int layer) const;
+    void* residual_v_ptr(int seq_id, int layer) const;
+
+    // Per-sequence ring state. Returns {0, 0} for unknown / out-of-range seq.
+    ResidualRingState residual_state(int seq_id) const;
+
+    // Advance the ring after a write at the current write_idx.
+    // Increments write_idx (mod residual_n) and fill_count (capped at residual_n).
+    void advance_residual(int seq_id);
+
+    // Reset ring state for a sequence (called from free_sequence).
+    void reset_residual(int seq_id);
+
     // ── Hashing utility (public for testing) ─────────────────────────
 
     // Compute the hash for a block of tokens. `parent_hash` is the hash
@@ -217,6 +259,22 @@ private:
 
     // Internal: allocate a fresh block, reclaiming cached blocks if needed.
     int allocate_block_with_eviction();
+
+    // ── Residual FP16 cache state ────────────────────────────────────
+    // Single contiguous pool. Layout per element:
+    //   pool[seq_slot, layer, k_or_v, ring_idx, kv_head, hd_elem]
+    // where seq_slot ∈ [0, residual_max_seqs_), layer ∈ [0, n_layers),
+    // k_or_v ∈ {0,1}, ring_idx ∈ [0, residual_n_tokens_).
+    void* residual_pool_ = nullptr;
+    VRAMAllocator* residual_alloc_ = nullptr;
+    int residual_n_tokens_ = 0;
+    int residual_max_seqs_ = 0;
+    size_t residual_per_layer_bytes_ = 0;     // bytes per (seq, layer, K-or-V)
+    size_t residual_per_seq_bytes_ = 0;       // bytes per seq across all layers
+    int residual_n_layers_ = 0;               // cached from cache_->n_layers()
+    int residual_n_kv_heads_ = 0;             // cached from cache_->n_kv_heads()
+    int residual_head_dim_ = 0;               // cached from cache_->head_dim()
+    std::unordered_map<int, ResidualRingState> seq_residual_state_;
 };
 
 }  // namespace imp

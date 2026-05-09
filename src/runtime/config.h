@@ -36,6 +36,10 @@ struct RuntimeConfig {
         std::string dtype = "fp16";  // fp16 | fp8 | int8 | int4 | nvfp4
         bool allow_nondeterministic_fp8 = false;
         bool fp8_auto_legacy = false;  // legacy IMP_KV_FP8_AUTO compat
+        // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
+        // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
+        // Only meaningful with kv_cache.dtype = "nvfp4" + IMP_USE_BITDECODING_QK=1.
+        int bitdecoding_residual_tokens = 0;
     } kv_cache;
 
     struct Attention {

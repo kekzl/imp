@@ -1,4 +1,5 @@
 #include "memory/kv_cache_manager.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -6,6 +7,7 @@
 #include <cstdio>
 #include <functional>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 namespace imp {
 
@@ -34,7 +36,94 @@ static void rollback_partial_allocation(KVCache* cache, std::unordered_map<int, 
 
 KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache) : cache_(std::move(cache)) {}
 
-KVCacheManager::~KVCacheManager() = default;
+KVCacheManager::~KVCacheManager() {
+    if (residual_pool_ && residual_alloc_) {
+        residual_alloc_->free(residual_pool_);
+        residual_pool_ = nullptr;
+    }
+}
+
+// ─── BitDecoding Phase 3: residual FP16 cache ────────────────────────
+
+bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAllocator* alloc) {
+    if (residual_pool_) {
+        IMP_LOG_WARN("KVCacheManager: residual buffer already enabled, ignoring re-enable");
+        return false;
+    }
+    if (max_seqs <= 0 || residual_n <= 0 || alloc == nullptr) {
+        return false;
+    }
+
+    residual_n_layers_   = cache_->n_layers();
+    residual_n_kv_heads_ = cache_->n_kv_heads();
+    residual_head_dim_   = cache_->head_dim();
+    if (residual_n_kv_heads_ <= 0 || residual_head_dim_ <= 0) {
+        IMP_LOG_WARN("KVCacheManager: residual buffer needs uniform per-layer head_dim — disabled (multi-head_dim model)");
+        return false;
+    }
+
+    // Per (seq, layer, K|V) live region:
+    //   residual_n × n_kv_heads × head_dim FP16 elems
+    residual_per_layer_bytes_ = static_cast<size_t>(residual_n) *
+                                residual_n_kv_heads_ * residual_head_dim_ * sizeof(__half);
+    // Per (seq) across all layers, both K and V:
+    residual_per_seq_bytes_ = static_cast<size_t>(residual_n_layers_) * 2 *
+                              residual_per_layer_bytes_;
+    size_t total = static_cast<size_t>(max_seqs) * residual_per_seq_bytes_;
+
+    void* pool = alloc->allocate(total, "kv_residual");
+    if (!pool) {
+        IMP_LOG_ERROR("KVCacheManager: residual buffer allocation failed (%.2f MiB)",
+                      static_cast<double>(total) / (1024.0 * 1024.0));
+        return false;
+    }
+
+    residual_pool_ = pool;
+    residual_alloc_ = alloc;
+    residual_n_tokens_ = residual_n;
+    residual_max_seqs_ = max_seqs;
+
+    IMP_LOG_INFO("KVCacheManager: residual buffer enabled — max_seqs=%d, residual_n=%d, %.2f MiB",
+                 max_seqs, residual_n, static_cast<double>(total) / (1024.0 * 1024.0));
+    return true;
+}
+
+void* KVCacheManager::residual_k_ptr(int seq_id, int layer) const {
+    if (!residual_pool_ || seq_id < 0 || seq_id >= residual_max_seqs_) return nullptr;
+    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
+    auto* base = static_cast<char*>(residual_pool_);
+    base += static_cast<size_t>(seq_id) * residual_per_seq_bytes_;
+    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
+    // K is k_or_v=0 → offset 0
+    return base;
+}
+
+void* KVCacheManager::residual_v_ptr(int seq_id, int layer) const {
+    if (!residual_pool_ || seq_id < 0 || seq_id >= residual_max_seqs_) return nullptr;
+    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
+    auto* base = static_cast<char*>(residual_pool_);
+    base += static_cast<size_t>(seq_id) * residual_per_seq_bytes_;
+    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
+    base += residual_per_layer_bytes_;  // V is k_or_v=1
+    return base;
+}
+
+KVCacheManager::ResidualRingState KVCacheManager::residual_state(int seq_id) const {
+    auto it = seq_residual_state_.find(seq_id);
+    if (it == seq_residual_state_.end()) return {0, 0};
+    return it->second;
+}
+
+void KVCacheManager::advance_residual(int seq_id) {
+    if (!residual_pool_ || residual_n_tokens_ <= 0) return;
+    auto& s = seq_residual_state_[seq_id];
+    s.write_idx = (s.write_idx + 1) % residual_n_tokens_;
+    if (s.fill_count < residual_n_tokens_) s.fill_count++;
+}
+
+void KVCacheManager::reset_residual(int seq_id) {
+    seq_residual_state_.erase(seq_id);
+}
 
 // ─── Hashing utility ─────────────────────────────────────────────────
 
@@ -150,6 +239,7 @@ void KVCacheManager::free_sequence(int seq_id) {
 
     seq_blocks_.erase(it);
     seq_block_hashes_.erase(seq_id);
+    seq_residual_state_.erase(seq_id);  // Phase 3: reset residual ring state
 
     // Remove from LRU tracking.
     auto lru_it = lru_map_.find(seq_id);

@@ -1065,6 +1065,19 @@ bool Engine::init_kv_cache() {
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
+    // BitDecoding Phase 3: residual FP16 cache (opt-in).
+    {
+        const auto& rcfg = RuntimeConfig::current();
+        int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
+        if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
+            int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
+            (void)kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_);
+        } else if (residual_n > 0) {
+            IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
+                         residual_n);
+        }
+    }
+
     if (config_.use_prefix_caching) {
         if (mcfg.ssm_inner_size > 0) {
             IMP_LOG_WARN(
