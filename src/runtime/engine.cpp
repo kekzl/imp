@@ -1763,6 +1763,21 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int total_input = static_cast<int>(req->input_tokens.size());
     int offset = req->prefill_offset;
 
+    // Out-of-scope archs (hybrid GDN+MoE, SWA, etc.) lack a per-layer-shape
+    // aware paged-prefill kernel, so the chunked-prefill path in
+    // executor_attention.cu aborts on chunk 2+ (q_offset > 0 + per_layer
+    // shapes). Reject prompts > effective_chunk gracefully here instead of
+    // letting them hit std::abort. Real fix is the paged hybrid-prefill
+    // kernel (roadmap).
+    if (offset == 0 && total_input > effective_chunk && !supports_chunked_prefill_()) {
+        IMP_LOG_ERROR(
+            "Prompt has %d tokens but max_tokens=%d on hybrid/out-of-scope arch — "
+            "chunked prefill not supported. Cancelling request %d.",
+            total_input, effective_chunk, req->id);
+        req->status = RequestStatus::CANCELLED;
+        return;
+    }
+
     // Clamp effective_chunk so n × ctx_len ≤ s_cap² where s_cap is the
     // attn_scores_ workspace dimension. Worst case is the final chunk where
     // ctx_len ≈ total_input. Without this, long prompts on hybrid models

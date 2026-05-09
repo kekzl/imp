@@ -279,19 +279,34 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     int skipped = 0;
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+    const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
     const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
+    // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.6-VL)
+    // share the same `model.language_model.*` / `model.vision_tower.*` layout.
+    // Text-only Qwen3.6 ships bare `model.*` keys, so the strip is a no-op
+    // there.
+    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe;
 
     for (auto& [orig_name, tensor] : tensors) {
-        // Gemma 4 uses Gemma4ForConditionalGeneration wrapper with
-        // `model.language_model.` and `model.vision_tower.` prefixes. Strip
-        // the language_model prefix so downstream handlers see the same
-        // `model.layers.X...` layout as other archs. Skip vision tower for
-        // now (text-only loading path).
         std::string name = orig_name;
-        if (is_gemma4) {
+        if (needs_multimodal_strip) {
             const std::string vt_prefix = "model.vision_tower.";
             if (name.compare(0, vt_prefix.size(), vt_prefix) == 0) {
                 ++skipped;  // silently skip vision encoder weights
+                continue;
+            }
+            // Qwen3.6-VL also ships a separate visual tower under
+            // `model.visual.*` and a multi-token-prediction head under
+            // `mtp.*`. Both arrive in distinct shards we never load, but if
+            // they ever appear in the main shard, drop them here.
+            const std::string visual_prefix = "model.visual.";
+            if (name.compare(0, visual_prefix.size(), visual_prefix) == 0) {
+                ++skipped;
+                continue;
+            }
+            if (name.compare(0, 4, "mtp.") == 0 ||
+                name.compare(0, 10, "model.mtp.") == 0) {
+                ++skipped;
                 continue;
             }
             const std::string lm_prefix = "model.language_model.";
