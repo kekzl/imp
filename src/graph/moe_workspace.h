@@ -36,6 +36,12 @@ struct MoEWorkspace {
     void* batch_dequant_buf = nullptr;
     size_t batch_dequant_buf_size = 0;
 
+    // FP32 scratch for MoE prefill down-projection when fp32_down_active=true.
+    // Sized for max_tokens × top_k × d_model × sizeof(float). Pre-allocated once
+    // to eliminate per-call cudaMallocAsync at executor_forward_moe.cu:1080.
+    void* fp32_down_buf = nullptr;
+    size_t fp32_down_buf_size = 0;
+
     // Pre-allocated device pointer array for batched MoE GEMM.
     // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
     void** d_work_ptrs = nullptr;
