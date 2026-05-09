@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <mma.h>
 #include <float.h>
 
 namespace imp {
@@ -62,6 +63,13 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     static_assert(HEAD_DIM % 16 == 0, "HEAD_DIM must be divisible by 16 (NVFP4 group size)");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+
+    // Per-warp WMMA scratch: sQ[16][16] + sK[16][16] = 1024 bytes/warp.
+    // Total: NUM_WARPS * 1024 = 8 KiB. Comes BEFORE the existing smem_nvfp4
+    // region which is allocated at the kernel epilogue for crosswarp_reduce.
+    extern __shared__ char tc_smem_raw[];
+    __half* tc_smem = reinterpret_cast<__half*>(tc_smem_raw);
+    constexpr int WARP_TC_HALVES = 16 * 16 + 16 * 16;  // sQ + sK
 
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -126,55 +134,103 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         if (tok_start < effective_start)
             first_tok = effective_start - tok_start;
 
-        for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * kv_head_bytes;
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+        // ---------------------------------------------------------------
+        // BitDecoding TC dispatch: WMMA Q.K^T over all valid tokens of this
+        // page block at once. block_size <= 16 maps cleanly to a 16x16 WMMA
+        // tile (m=16 rows of replicated Q × n=16 token columns, k=16
+        // head-dim chunks). V accumulation remains per-token scalar in
+        // Phase 1 (Phase 2 will TC the PV path).
+        // ---------------------------------------------------------------
+        constexpr int K_TILES = HEAD_DIM / 16;
 
-            // Per-lane scale (one group covers all ELEMS for this lane)
-            float k_scale = ue4m3_decode(
-                K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
-            float v_scale = ue4m3_decode(
-                V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
-            const half2 k_scale_h2 = __float2half2_rn(k_scale);
-            const half2 v_scale_h2 = __float2half2_rn(v_scale);
+        // Per-warp WMMA scratch
+        __half* sQ_w = tc_smem + warp_id * WARP_TC_HALVES;
+        __half* sK_w = sQ_w + 16 * 16;
 
-            // Q.K dot — HW FP4 decode (cvt.rn.f16x2.e2m1x2) + half2 scale fold
-            float dot = 0.0f;
-            {
-                const uint8_t* k_bytes = K_tok + lane_offset / 2;
+        using namespace nvcuda;
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
+        wmma::fill_fragment(c_frag, __float2half(0.0f));
+
+        const int n_toks = tok_end - tok_start;
+
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
-                    kh2 = __hmul2(kh2, k_scale_h2);
-                    float2 kf = __half22float2(kh2);
-                    dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
-                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
+        for (int k_tile = 0; k_tile < K_TILES; k_tile++) {
+            const int hd_off = k_tile * 16;
+
+            // Replicate Q[hd_off..hd_off+16] across all 16 rows of sQ_w.
+            // 16 threads suffice; spread over the warp's 32 lanes.
+            for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                int col = i % 16;
+                sQ_w[i] = Q_ptr[hd_off + col];
+            }
+
+            // Dequant 16 tokens × 16 hd-chunk into sK_w[token, hd_local].
+            // Out-of-range tokens (past tok_end OR before first_tok) get 0
+            // so their dot product is 0 → softmax weight 0 after scaling.
+            for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
+                int t = i / 16;
+                int hd_local = i % 16;
+                int hd_global = hd_off + hd_local;
+                if (t >= first_tok && t < n_toks) {
+                    const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+                    uint32_t b = K_tok[hd_global / 2];
+                    half2 hh = fp4_byte_to_half2(b);
+                    half v = (hd_global & 1) ? hh.y : hh.x;
+                    float scale_k = ue4m3_decode(
+                        K_sc_block[t * sc_slot_stride + kv_head * sc_groups + (hd_global / 16)]);
+                    sK_w[i] = __float2half(__half2float(v) * scale_k);
+                } else {
+                    sK_w[i] = __float2half(0.0f);
                 }
             }
-            dot = warp_reduce_sum(dot);
+            __syncwarp();
+
+            wmma::load_matrix_sync(a_frag, sQ_w, 16);
+            // Row-major sK_w loaded with col_major declaration → effectively
+            // transposed: B[hd, tok] = sK_w[tok][hd].
+            wmma::load_matrix_sync(b_frag, sK_w, 16);
+            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            __syncwarp();
+        }
+
+        // Store accumulator back to sK_w. Row 0 holds the 16 token dots.
+        wmma::store_matrix_sync(sK_w, c_frag, 16, wmma::mem_row_major);
+        __syncwarp();
+
+        // Per-token softmax + V accum (V still scalar in Phase 1)
+        for (int t = first_tok; t < n_toks; t++) {
+            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+
+            float dot = __half2float(sK_w[t]);  // pre-computed by WMMA above
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
             float rescale, w_new;
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
-            // V accumulation
-            {
-                const uint8_t* v_bytes = V_tok + lane_offset / 2;
+            float v_scale = ue4m3_decode(
+                V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
+            const half2 v_scale_h2 = __float2half2_rn(v_scale);
+
+            const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
-                    vh2 = __hmul2(vh2, v_scale_h2);
-                    float2 vf = __half22float2(vh2);
-                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
-                }
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
+                vh2 = __hmul2(vh2, v_scale_h2);
+                float2 vf = __half22float2(vh2);
+                o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
             }
         }
+        __syncwarp();
     }
 
-    extern __shared__ char smem_nvfp4[];
-    crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_nvfp4), m_w, l_w, o_reg, warp_id,
+    // crosswarp reduce smem starts AFTER the per-warp TC scratch region
+    // (NUM_WARPS * WARP_TC_HALVES halves = NUM_WARPS * 1024 bytes).
+    char* crosswarp_smem = tc_smem_raw + NUM_WARPS * WARP_TC_HALVES * sizeof(__half);
+    crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(crosswarp_smem), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
 }
 
@@ -347,7 +403,11 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
+    // BitDecoding TC variant adds NUM_WARPS * 1024 bytes of WMMA scratch
+    // (16x16 sQ + 16x16 sK halves per warp) at the front of smem.
+    constexpr size_t TC_SCRATCH_PER_WARP = (16 * 16 + 16 * 16) * sizeof(__half);  // 1024
+    size_t smem_bytes = NUM_WARPS * TC_SCRATCH_PER_WARP +
+                        NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
                         NUM_WARPS * head_dim * sizeof(float);
 
     void* scratch_ptr = nullptr;
