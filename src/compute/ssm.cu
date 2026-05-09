@@ -209,9 +209,19 @@ __global__ void ssm_conv1d_prefill_kernel(
 
         for (int k = 0; k < kernel_size; k++) {
             int src_t = token - (kernel_size - 1) + k;
-            float val = 0.0f;
+            float val;
             if (src_t >= 0) {
                 val = __half2float(x_in[src_t * channels + ch]);
+            } else if (conv_state) {
+                // Chunked prefill: read trailing context from previous chunk's
+                // conv_state instead of zero-padding. conv_state[ch*K + s] holds
+                // the input at global position (chunk_offset - K + s).
+                int state_idx = src_t + kernel_size;  // maps to [1..K-1]
+                val = (state_idx >= 0 && state_idx < kernel_size)
+                          ? conv_state[ch * kernel_size + state_idx]
+                          : 0.0f;
+            } else {
+                val = 0.0f;
             }
             // Weight layout: [channels, kernel_size] — kernel_size is contiguous per channel
             sum += val * __half2float(weight[ch * kernel_size + k]);

@@ -305,5 +305,100 @@ TEST(SSMConv1dTest, FP32SiLUFused) {
     free_tensor(d_w);
 }
 
+// ===========================================================================
+// Test: Chunked prefill equivalence — splitting a sequence across two
+// ssm_conv1d_prefill calls (with conv_state threaded between them) must
+// produce identical output to a single full-sequence call. Catches the
+// zero-pad-instead-of-conv_state-read bug at chunk boundary.
+// ===========================================================================
+TEST(SSMConv1dTest, ChunkedPrefillEquivalence) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int channels = 4;
+    constexpr int kernel_size = 4;
+    constexpr int n_chunk_a = 5;
+    constexpr int n_chunk_b = 5;
+    constexpr int n_total = n_chunk_a + n_chunk_b;
+
+    std::vector<float> h_x(n_total * channels);
+    for (int i = 0; i < n_total * channels; i++)
+        h_x[i] = std::sin(static_cast<float>(i) * 0.7f) * 2.0f;
+
+    std::vector<float> h_w(channels * kernel_size);
+    for (int i = 0; i < channels * kernel_size; i++)
+        h_w[i] = (i % 2 == 0) ? 0.3f : -0.5f;
+
+    // ---- Reference: single full-sequence prefill ----
+    float* d_state_full;
+    cudaMalloc(&d_state_full, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_full, 0, channels * kernel_size * sizeof(float));
+
+    Tensor d_x_full = make_fp16_gpu(h_x.data(), {n_total, channels});
+    Tensor d_w_full = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_out_full = alloc_fp16_gpu({n_total, channels});
+    Tensor d_bias = make_empty_tensor();
+
+    ssm_conv1d_prefill(d_state_full, d_x_full, d_w_full, d_bias, d_out_full, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+
+    auto out_full = read_fp16(d_out_full);
+    std::vector<float> state_full(channels * kernel_size);
+    cudaMemcpy(state_full.data(), d_state_full, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    // ---- Chunked: chunk A then chunk B, threading conv_state ----
+    float* d_state_chunked;
+    cudaMalloc(&d_state_chunked, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_chunked, 0, channels * kernel_size * sizeof(float));
+
+    Tensor d_x_a = make_fp16_gpu(h_x.data(), {n_chunk_a, channels});
+    Tensor d_w_a = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_out_a = alloc_fp16_gpu({n_chunk_a, channels});
+    ssm_conv1d_prefill(d_state_chunked, d_x_a, d_w_a, d_bias, d_out_a, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+
+    Tensor d_x_b = make_fp16_gpu(h_x.data() + n_chunk_a * channels, {n_chunk_b, channels});
+    Tensor d_w_b = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_out_b = alloc_fp16_gpu({n_chunk_b, channels});
+    ssm_conv1d_prefill(d_state_chunked, d_x_b, d_w_b, d_bias, d_out_b, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+
+    auto out_a = read_fp16(d_out_a);
+    auto out_b = read_fp16(d_out_b);
+    std::vector<float> state_chunked(channels * kernel_size);
+    cudaMemcpy(state_chunked.data(), d_state_chunked, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    // ---- Compare ----
+    for (int t = 0; t < n_chunk_a; t++) {
+        for (int ch = 0; ch < channels; ch++) {
+            EXPECT_NEAR(out_full[t * channels + ch], out_a[t * channels + ch], 1e-2f)
+                << "Chunk A mismatch at t=" << t << " ch=" << ch;
+        }
+    }
+    for (int t = 0; t < n_chunk_b; t++) {
+        for (int ch = 0; ch < channels; ch++) {
+            EXPECT_NEAR(out_full[(n_chunk_a + t) * channels + ch], out_b[t * channels + ch], 1e-2f)
+                << "Chunk B mismatch at t=" << t << " ch=" << ch;
+        }
+    }
+    for (int i = 0; i < channels * kernel_size; i++) {
+        EXPECT_NEAR(state_full[i], state_chunked[i], 1e-2f)
+            << "State mismatch at i=" << i;
+    }
+
+    cudaFree(d_state_full);
+    cudaFree(d_state_chunked);
+    free_tensor(d_x_full);
+    free_tensor(d_w_full);
+    free_tensor(d_out_full);
+    free_tensor(d_x_a);
+    free_tensor(d_w_a);
+    free_tensor(d_out_a);
+    free_tensor(d_x_b);
+    free_tensor(d_w_b);
+    free_tensor(d_out_b);
+}
+
 }  // namespace
 }  // namespace imp
