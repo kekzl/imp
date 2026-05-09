@@ -572,20 +572,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Per-head interleaved: Qwen 3.5 layout.
             // Q[t, h*hd:(h+1)*hd] = src[t, h*2*hd : h*2*hd+hd]
             // Gate[t, h*hd:(h+1)*hd] = src[t, h*2*hd+hd : (h+1)*2*hd]
-            for (int h_idx = 0; h_idx < nh; h_idx++) {
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpy2DAsync(static_cast<char*>(qv.data) + h_idx * hd * es_q,
-                                      static_cast<size_t>(q_actual_dim) * es_q,
-                                      static_cast<char*>(q_target.data) + h_idx * 2 * hd * es_q,
-                                      static_cast<size_t>(q_out_dim) * es_q, static_cast<size_t>(hd) * es_q,
-                                      n, cudaMemcpyDeviceToDevice, stream));
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpy2DAsync(static_cast<char*>(attn_gate_buf.data) + h_idx * hd * es_q,
-                                      static_cast<size_t>(q_actual_dim) * es_q,
-                                      static_cast<char*>(q_target.data) + (h_idx * 2 + 1) * hd * es_q,
-                                      static_cast<size_t>(q_out_dim) * es_q, static_cast<size_t>(hd) * es_q,
-                                      n, cudaMemcpyDeviceToDevice, stream));
-            }
+            // Replaced nh × 2 cudaMemcpy2DAsync loop with one fused kernel
+            // (~656 D2D copies/decode-step → 1 launch on Qwen3.5 GDN W2).
+            attn_gate_split_interleaved(q_target.data, qv.data, attn_gate_buf.data, n, nh, hd, q_out_dim,
+                                        static_cast<int>(es_q), stream);
         }
     }
 
