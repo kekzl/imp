@@ -199,29 +199,78 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         wmma::store_matrix_sync(sK_w, c_frag, 16, wmma::mem_row_major);
         __syncwarp();
 
-        // Per-token softmax + V accum (V still scalar in Phase 1)
+        // ---------------------------------------------------------------
+        // Phase 2 BISECT STEP A: block-softmax + SCALAR V accum.
+        //
+        // Critical: Phase 1's online_softmax_step (in attention_paged_common.cuh)
+        // produces NORMALIZED rescale + w_new (divided by l_new at each step),
+        // so o_reg is always normalized = (running sum exp(d-m_w) V) / l_w.
+        // crosswarp_reduce_and_write assumes warp_o is normalized — it computes
+        //   weight = exp(m_w - global_max) * l_w
+        //   o_val += weight * warp_o[w]
+        //   o_val /= global_l
+        // For this to give the correct global attention, warp_o must be the
+        // l_w-divided normalized form. Block-softmax must preserve that
+        // invariant.
+        // ---------------------------------------------------------------
+
+        // Pass 1: read all 16 dots, find local max
+        float dots_scaled[16];
+        float m_local = -FLT_MAX;
+#pragma unroll
+        for (int t = 0; t < 16; t++) {
+            float d = -FLT_MAX;
+            if (t >= first_tok && t < n_toks) {
+                d = __half2float(sK_w[t]) * scale;
+                d = apply_softcap(d, softcap);
+                m_local = fmaxf(m_local, d);
+            }
+            dots_scaled[t] = d;
+        }
+
+        float m_new = fmaxf(m_w, m_local);
+        float exp_diff = (m_w == -FLT_MAX) ? 0.0f : __expf(m_w - m_new);
+
+        // Pass 2: per-token un-normalized weights + l_local
+        float weights[16];
+        float l_local = 0.0f;
+#pragma unroll
+        for (int t = 0; t < 16; t++) {
+            float w = (dots_scaled[t] > -FLT_MAX) ? __expf(dots_scaled[t] - m_new) : 0.0f;
+            weights[t] = w;
+            l_local += w;
+        }
+
+        float l_new = exp_diff * l_w + l_local;
+        // Normalized rescale: (exp_diff * l_w_old) / l_new — same role as
+        // Phase 1's online_softmax_step.rescale, applied once per block.
+        float rescale_norm = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
+        float l_inv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
+
+        m_w = m_new;
+        l_w = l_new;
+
+        // Apply normalized rescale to existing o_reg
+#pragma unroll
+        for (int i = 0; i < ELEMS; i++) o_reg[i] *= rescale_norm;
+
+        // SCALAR V accum with normalized weights (= weights[t] / l_new).
         for (int t = first_tok; t < n_toks; t++) {
+            if (weights[t] == 0.0f) continue;
             const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
-
-            float dot = __half2float(sK_w[t]);  // pre-computed by WMMA above
-            dot *= scale;
-            dot = apply_softcap(dot, softcap);
-
-            float rescale, w_new;
-            online_softmax_step(dot, m_w, l_w, rescale, w_new);
-
             float v_scale = ue4m3_decode(
                 V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
+            float w_norm = weights[t] * l_inv;
             const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
             for (int i = 0; i < ELEMS / 2; i++) {
                 half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
                 vh2 = __hmul2(vh2, v_scale_h2);
                 float2 vf = __half22float2(vh2);
-                o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+                o_reg[2 * i]     = __fmaf_rn(w_norm, vf.x, o_reg[2 * i]);
+                o_reg[2 * i + 1] = __fmaf_rn(w_norm, vf.y, o_reg[2 * i + 1]);
             }
         }
         __syncwarp();
