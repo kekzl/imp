@@ -237,6 +237,13 @@ struct TransformerLayer {
     Tensor gdn_alpha;  // [d_model, n_gdn_heads] delta rule decay
     Tensor gdn_beta;   // [d_model, n_gdn_heads] delta rule learning rate
 
+    // Decode-only fused weight: gdn_alpha and gdn_beta interleaved along N
+    // as [d_model, 2*n_gdn_heads]. Fires the M=1 path with a single GEMV
+    // launch instead of two. Built at load-time when both alpha and beta are
+    // FP16/BF16 + same shape; left null on GGUF/MXFP4 paths so the dispatcher
+    // falls back to the two-call path.
+    Tensor gdn_alpha_beta_packed;
+
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
 
