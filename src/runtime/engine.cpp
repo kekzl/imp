@@ -726,20 +726,42 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         size_t free_vram = 0, total_vram = 0;
         cudaMemGetInfo(&free_vram, &total_vram);
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+        // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
+        // n_kv_heads_per_layer with zeros for non-attention layers — those don't
+        // contribute to the KV cache. Counting only nonzero entries avoids a
+        // 4-9× per-token-bytes overestimate that clamped max_seq_len far below
+        // VRAM-feasible (e.g. Qwen3.5-4B GDN: 32 total / 8 attention = 4×).
+        int kv_layer_count = mcfg.n_layers;
+        if (!mcfg.n_kv_heads_per_layer.empty()) {
+            int populated = 0;
+            for (int v : mcfg.n_kv_heads_per_layer)
+                if (v > 0)
+                    ++populated;
+            if (populated > 0)
+                kv_layer_count = populated;
+        }
         // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
         auto kv = config_.kv_cache_dtype;
         bool packed_int4 = (kv == QType::INT4 || kv == QType::TURBOQUANT || kv == QType::TURBOQUANT_LITE);
-        size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * mcfg.n_layers *
-                               2;  // K+V, per KV head, all layers
+        size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
+                               2;  // K+V, per KV head, attention layers only
         size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
         // The budget planner downstream uses 80% of free VRAM for KV. Cap the
         // auto-detect at ~60% so it doesn't undershoot what the planner can
         // afford. (Was 30%, calibrated when weight caches competed at FP16.)
         int max_by_vram = (kv_bytes_per_token > 0) ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
                                                    : 131072;
-        config_.max_seq_len = std::min(model_ctx, std::max(max_by_vram, 4096));
-        IMP_LOG_INFO("max_seq_len: auto → %d (model=%d, vram_cap=%d, kv=%zu B/tok)", config_.max_seq_len,
-                     model_ctx, max_by_vram, kv_bytes_per_token);
+        // Conservative auto-default: cap at 16K even when model + VRAM both
+        // allow more. Long contexts (Qwen3.6 256K, Qwen3 40K) consume a lot of
+        // VRAM and most workloads don't need them. Users requesting longer
+        // context pass --max-seq-len explicitly; the cap doesn't apply when
+        // the user sets it.
+        constexpr int kAutoMaxSeqLenCap = 16384;
+        config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
+        IMP_LOG_INFO(
+            "max_seq_len: auto → %d (model=%d, vram_cap=%d, auto_cap=%d, kv=%zu B/tok, attn_layers=%d/%d)",
+            config_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token,
+            kv_layer_count, mcfg.n_layers);
     }
 
     // --- Core initialization ---
