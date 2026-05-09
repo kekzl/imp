@@ -1690,14 +1690,14 @@ bool Engine::supports_chunked_prefill_() const {
     if (!model_)
         return false;
     const auto& cfg = model_->config();
-    // Out-of-scope archs: SWA / dual-head_dim / hybrid (GDN / Mamba2).
+    // Out-of-scope archs: SWA / dual-head_dim variants. Hybrid GDN+MoE /
+    // Mamba2+MoE archs (QWEN35*, QWEN36_MOE, NEMOTRON_H_MOE) ARE supported —
+    // their attention layers share one (nkv, hd) geometry, the existing
+    // chunked-attention path handles them, and SSM/GDN/Mamba2 forward kernels
+    // persist state across chunks.
     if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA (sliding_window_pattern=6)
     if (cfg.arch == ModelArch::GEMMA4) return false;       // SWA + dual head_dim
     if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
-    if (cfg.arch == ModelArch::QWEN35) return false;
-    if (cfg.arch == ModelArch::QWEN35_MOE) return false;
-    if (cfg.arch == ModelArch::QWEN36_MOE) return false;
-    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) return false;
     // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4. Others
     // (INT4/INT8/TurboQuant) would need their own gather kernels.
     if (kv_cache_raw_) {
