@@ -512,5 +512,169 @@ TEST_F(PagedAttentionNvfp4TCResidualTest, ResidualOnlyShortContext_HD64) {
     cudaFree(d_cl);
 }
 
+// Splitk fast-path launch test: allocate splitk scratch, force the launcher
+// onto the splitk + paged_attention_residual_reduce_kernel path (the path
+// the engine uses on real workloads). Verifies the kernel dispatches
+// without CUDA errors — a full numerical equivalence test is blocked by
+// the same synthetic-random-NVFP4-→-NaN limitation called out in
+// PagedAttentionNvfp4TCTest. The non-splitk equivalence test above proves
+// the math; the splitk path reuses the same residual_reduce_kernel.
+TEST_F(PagedAttentionNvfp4TCResidualTest, SplitKResidualLaunchSucceeds_HD128) {
+    constexpr int batch = 1;
+    constexpr int n_heads = 8;
+    constexpr int n_kv_heads = 8;
+    constexpr int HEAD_DIM = 128;
+    constexpr int block_size = 16;
+    constexpr int seqlen_kv = 64;
+    constexpr int residual_count = 4;
+    constexpr int residual_n_tokens = 8;
+    constexpr int n_blocks = seqlen_kv / block_size;
+    constexpr int kv_head_bytes = HEAD_DIM / 2;
+    constexpr int sc_groups = HEAD_DIM / 16;
+
+    std::vector<half> h_Q(batch * n_heads * HEAD_DIM);
+    for (size_t i = 0; i < h_Q.size(); i++)
+        h_Q[i] = __float2half(0.05f * static_cast<float>((i % 7) - 3));
+
+    const size_t kv_bytes = static_cast<size_t>(n_blocks) * block_size * n_kv_heads * kv_head_bytes;
+    const size_t sc_bytes = static_cast<size_t>(n_blocks) * block_size * n_kv_heads * sc_groups;
+    std::vector<uint8_t> h_K(kv_bytes), h_V(kv_bytes);
+    std::vector<uint8_t> h_Ks(sc_bytes, 0x38), h_Vs(sc_bytes, 0x38);
+    auto rng = [](int seed) { return static_cast<uint8_t>((seed * 13 + 7) % 5); };
+    for (size_t i = 0; i < kv_bytes; i++) {
+        uint8_t lo = rng(static_cast<int>(2 * i));
+        uint8_t hi = rng(static_cast<int>(2 * i + 1));
+        h_K[i] = (hi << 4) | lo;
+        h_V[i] = (rng(static_cast<int>(3 * i + 11)) << 4) | rng(static_cast<int>(3 * i + 17));
+    }
+
+    const size_t res_slot_elems = static_cast<size_t>(n_kv_heads) * HEAD_DIM;
+    std::vector<half> h_K_res(static_cast<size_t>(residual_n_tokens) * res_slot_elems, __float2half(0.0f));
+    std::vector<half> h_V_res(static_cast<size_t>(residual_n_tokens) * res_slot_elems, __float2half(0.0f));
+
+    auto dequant_token = [&](const std::vector<uint8_t>& kv_packed,
+                             const std::vector<uint8_t>& kv_scales, int abs_t,
+                             half* dst) {
+        const int blk = abs_t / block_size;
+        const int t_in_block = abs_t % block_size;
+        const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
+        const int kv_slot_stride = n_kv_heads * kv_head_bytes;
+        const int sc_block_stride = block_size * n_kv_heads * sc_groups;
+        const int sc_slot_stride = n_kv_heads * sc_groups;
+        const uint8_t* K_block = kv_packed.data() + (size_t)blk * kv_block_stride;
+        const uint8_t* sc_block = kv_scales.data() + (size_t)blk * sc_block_stride;
+        for (int kv_h = 0; kv_h < n_kv_heads; kv_h++) {
+            const uint8_t* K_tok = K_block + t_in_block * kv_slot_stride + kv_h * kv_head_bytes;
+            const uint8_t* sc_tok = sc_block + t_in_block * sc_slot_stride + kv_h * sc_groups;
+            for (int hd = 0; hd < HEAD_DIM; hd++) {
+                uint8_t byte = K_tok[hd / 2];
+                uint8_t nibble = (hd & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                float v = e2m1_to_float(nibble);
+                float scale = ue4m3_byte_to_float(sc_tok[hd / 16]);
+                dst[kv_h * HEAD_DIM + hd] = __float2half(v * scale);
+            }
+        }
+    };
+
+    constexpr int residual_write_idx = residual_count;
+    for (int i = 0; i < residual_count; i++) {
+        int abs_t = seqlen_kv - residual_count + i;
+        int slot = (residual_write_idx + residual_n_tokens - residual_count + i) % residual_n_tokens;
+        dequant_token(h_K, h_Ks, abs_t, h_K_res.data() + (size_t)slot * res_slot_elems);
+        dequant_token(h_V, h_Vs, abs_t, h_V_res.data() + (size_t)slot * res_slot_elems);
+    }
+
+    void *d_Q = nullptr, *d_K = nullptr, *d_V = nullptr, *d_Ks = nullptr, *d_Vs = nullptr;
+    void *d_O_paged = nullptr, *d_O_resid = nullptr;
+    void *d_K_res = nullptr, *d_V_res = nullptr;
+    int *d_bt = nullptr, *d_cl = nullptr;
+    const size_t q_bytes = h_Q.size() * sizeof(half);
+    const size_t res_bytes = h_K_res.size() * sizeof(half);
+
+    cudaMalloc(&d_Q, q_bytes);
+    cudaMalloc(&d_K, kv_bytes);
+    cudaMalloc(&d_V, kv_bytes);
+    cudaMalloc(&d_Ks, sc_bytes);
+    cudaMalloc(&d_Vs, sc_bytes);
+    cudaMalloc(&d_O_paged, q_bytes);
+    cudaMalloc(&d_O_resid, q_bytes);
+    cudaMalloc(&d_K_res, res_bytes);
+    cudaMalloc(&d_V_res, res_bytes);
+    cudaMalloc(&d_bt, n_blocks * sizeof(int));
+    cudaMalloc(&d_cl, sizeof(int));
+
+    // Allocate splitk scratch big enough for any num_splits the launcher
+    // might pick. compute_splitk_splits caps at 32, and partial_stride is
+    // 2 + HEAD_DIM. For batch=1, n_heads=8: 8 × 32 × 130 × 4 = ~133 KB.
+    constexpr int max_splits = 32;
+    const size_t scratch_size = (size_t)batch * n_heads * max_splits * (2 + HEAD_DIM) * sizeof(float);
+    void* d_splitk_scratch = nullptr;
+    cudaMalloc(&d_splitk_scratch, scratch_size);
+    paged_attention_set_splitk_scratch(d_splitk_scratch, scratch_size);
+
+    cudaMemcpyAsync(d_Q, h_Q.data(), q_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_K, h_K.data(), kv_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_V, h_V.data(), kv_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_Ks, h_Ks.data(), sc_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_Vs, h_Vs.data(), sc_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_K_res, h_K_res.data(), res_bytes, cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(d_V_res, h_V_res.data(), res_bytes, cudaMemcpyHostToDevice, stream_);
+
+    std::vector<int> bt(n_blocks);
+    for (int i = 0; i < n_blocks; i++) bt[i] = i;
+    cudaMemcpyAsync(d_bt, bt.data(), n_blocks * sizeof(int), cudaMemcpyHostToDevice, stream_);
+    int ctx_len = seqlen_kv;
+    cudaMemcpyAsync(d_cl, &ctx_len, sizeof(int), cudaMemcpyHostToDevice, stream_);
+    cudaMemsetAsync(d_O_paged, 0, q_bytes, stream_);
+    cudaMemsetAsync(d_O_resid, 0, q_bytes, stream_);
+
+    int64_t Q_shape[]  = {batch, 1, n_heads, HEAD_DIM};
+    int64_t KV_shape[] = {n_blocks, block_size, n_kv_heads, HEAD_DIM / 2};
+    Tensor Q_t(d_Q, QType::F16, 4, Q_shape, true);
+    Tensor K_t(d_K, QType::FP4_E2M1, 4, KV_shape, true);
+    Tensor V_t(d_V, QType::FP4_E2M1, 4, KV_shape, true);
+    Tensor O_paged(d_O_paged, QType::F16, 4, Q_shape, true);
+    Tensor O_resid(d_O_resid, QType::F16, 4, Q_shape, true);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(HEAD_DIM));
+
+    // (A) all-paged baseline (splitk + standard reduce)
+    paged_attention_decode_nvfp4_tc(Q_t, K_t, V_t, O_paged,
+                                    static_cast<const uint8_t*>(d_Ks),
+                                    static_cast<const uint8_t*>(d_Vs),
+                                    d_bt, d_cl, block_size, scale, ctx_len,
+                                    /*sliding_window=*/0, /*softcap=*/0.0f, stream_);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "all-paged splitk launch failed";
+
+    // (B) splitk + residual_reduce_kernel (the production residual path)
+    paged_attention_decode_nvfp4_tc(Q_t, K_t, V_t, O_resid,
+                                    static_cast<const uint8_t*>(d_Ks),
+                                    static_cast<const uint8_t*>(d_Vs),
+                                    d_bt, d_cl, block_size, scale, ctx_len,
+                                    /*sliding_window=*/0, /*softcap=*/0.0f, stream_,
+                                    /*max_blocks_per_seq=*/0, /*n_sinks=*/0,
+                                    static_cast<const half*>(d_K_res),
+                                    static_cast<const half*>(d_V_res),
+                                    residual_count, residual_n_tokens, residual_write_idx);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "splitk+residual launch failed";
+
+    cudaStreamSynchronize(stream_);
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "splitk+residual path produced a CUDA error";
+
+    paged_attention_set_splitk_scratch(nullptr, 0);  // clear so other tests don't see it
+    cudaFree(d_splitk_scratch);
+    cudaFree(d_Q);
+    cudaFree(d_K);
+    cudaFree(d_V);
+    cudaFree(d_Ks);
+    cudaFree(d_Vs);
+    cudaFree(d_O_paged);
+    cudaFree(d_O_resid);
+    cudaFree(d_K_res);
+    cudaFree(d_V_res);
+    cudaFree(d_bt);
+    cudaFree(d_cl);
+}
+
 }  // namespace
 }  // namespace imp
