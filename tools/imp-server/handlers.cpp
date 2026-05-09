@@ -467,7 +467,53 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
     return true;
 }
 
+// Set true on the calling thread when handle_messages is delegating to
+// handle_chat_completions via a shim — suppresses inner request-log entries
+// so the Anthropic call only logs once at the outer handler.
+thread_local bool g_in_anthropic_shim = false;
+
+// Write one JSONL line capturing this request: timing, endpoint, raw client
+// body, token counts, finish reason, and (for non-streaming) the response.
+// Streaming responses pass an empty `response_body` since per-chunk text is
+// not accumulated.
+static void log_request_jsonl(ServerState& state, bool skip,
+                              const std::chrono::system_clock::time_point& t_start,
+                              const std::string& req_id, const std::string& endpoint,
+                              const std::string& client_ip, const std::string& raw_body,
+                              double latency_ms, int prompt_tokens, int completion_tokens,
+                              const char* finish_reason, const json& response_body) {
+    if (skip || !state.request_logger.enabled)
+        return;
+    json record;
+    record["ts_ms"] =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t_start.time_since_epoch()).count();
+    record["req_id"] = req_id;
+    record["endpoint"] = endpoint;
+    record["client_ip"] = client_ip;
+    record["latency_ms"] = latency_ms;
+    record["prompt_tokens"] = prompt_tokens;
+    record["completion_tokens"] = completion_tokens;
+    record["finish_reason"] = finish_reason ? finish_reason : "";
+    try {
+        record["request"] = json::parse(raw_body);
+    } catch (...) {
+        record["request"] = raw_body;
+    }
+    record["response"] = response_body;
+    state.request_logger.log(record);
+}
+
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // Capture inputs for opt-in JSONL request logging. Only used when
+    // state.request_logger.enabled and the call is not an inner shim.
+    const auto t_log_start = std::chrono::system_clock::now();
+    const std::string log_endpoint = req.path;
+    std::string log_client_ip = req.get_header_value("X-Forwarded-For");
+    if (log_client_ip.empty())
+        log_client_ip = req.remote_addr;
+    const std::string log_raw_body = req.body;
+    const bool log_skip = g_in_anthropic_shim;
+
     // Parse request body
     json body;
     try {
@@ -1114,6 +1160,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         state.metrics.tokens_completion_total += n_output_tokens;
         state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
+        json response_for_log = {{"id", req_id},
+                                 {"object", "chat.completion"},
+                                 {"model", snap_model_name},
+                                 {"choices", json::array({{{"index", 0},
+                                                            {"message", {{"role", "assistant"},
+                                                                         {"content", content}}},
+                                                            {"finish_reason", "stop"}}})}};
+        log_request_jsonl(state, log_skip, t_log_start, req_id, log_endpoint, log_client_ip, log_raw_body, ms,
+                          n_prompt_tokens, n_output_tokens, "stop", response_for_log);
+
         json response = {{"id", req_id},
                          {"object", "chat.completion"},
                          {"created", unix_timestamp()},
@@ -1157,7 +1213,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
              max_stop_len, req_logprobs, include_usage, enable_thinking, has_tools, tpl_family, think_budget,
              snap_tok, snap_have_template, snap_model_name, snap_is_think_model, snap_think_start_id,
              snap_think_end_id, snap_channel_open_id, snap_channel_close_id, snap_channel_newline_id,
-             snap_stop_token_ids](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+             snap_stop_token_ids, log_skip, t_log_start, log_endpoint, log_client_ip,
+             log_raw_body](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 // Active request ref for logprobs access
                 auto active_req = server_req->request;
 
@@ -1912,6 +1969,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
                 state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
 
+                // Streaming response content is not accumulated across SSE
+                // chunks, so the JSONL `response` field stays null. The
+                // request body, token counts, finish reason, and latency
+                // still reflect everything the client did.
+                log_request_jsonl(state, log_skip, t_log_start, comp_id, log_endpoint, log_client_ip,
+                                  log_raw_body, ms, n_prompt_tokens, n_output_tokens, finish, json());
+
                 return true;
             });
     } else {
@@ -2163,6 +2227,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         json response = {{"id", comp_id},      {"object", "chat.completion"},
                          {"created", created}, {"model", snap_model_name},
                          {"choices", choices}, {"usage", usage}};
+
+        // Pull the final finish_reason from choice 0 for log correlation;
+        // multi-completion requests still record only the aggregate.
+        const char* nonstream_finish = nullptr;
+        if (!choices.empty() && choices[0].contains("finish_reason") &&
+            choices[0]["finish_reason"].is_string()) {
+            nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
+        }
+        log_request_jsonl(state, log_skip, t_log_start, comp_id, log_endpoint, log_client_ip, log_raw_body,
+                          ms, n_prompt_tokens, total_output_tokens, nonstream_finish, response);
 
         res.set_content(response.dump(), "application/json");
     }
@@ -3101,6 +3175,14 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     namespace anth = imp_server::anthropic;
 
+    // Capture original Anthropic request data for opt-in JSONL logging.
+    const auto t_log_start = std::chrono::system_clock::now();
+    const std::string log_endpoint = req.path;
+    std::string log_client_ip = req.get_header_value("X-Forwarded-For");
+    if (log_client_ip.empty())
+        log_client_ip = req.remote_addr;
+    const std::string log_raw_body = req.body;
+
     json anth_body;
     try {
         anth_body = json::parse(req.body);
@@ -3155,7 +3237,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     shim_req.headers.erase("content-length");
 
     httplib::Response shim_res;
+    g_in_anthropic_shim = true;
     handle_chat_completions(shim_req, shim_res, state);
+    g_in_anthropic_shim = false;
 
     // Propagate error envelopes (transform them to Anthropic error shape).
     // httplib::Response defaults status to -1 and auto-promotes to 200 only
@@ -3190,6 +3274,20 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     }
 
     json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model);
+
+    // JSONL log — built from Anthropic shapes so /v1/messages clients see
+    // exactly what they sent and what they got back.
+    {
+        auto t_end = std::chrono::system_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_log_start).count();
+        int prompt_t = oai_response.value("usage", json::object()).value("prompt_tokens", 0);
+        int completion_t = oai_response.value("usage", json::object()).value("completion_tokens", 0);
+        std::string stop_reason = anth_response.value("stop_reason", "");
+        std::string req_id = anth_response.value("id", make_completion_id(state));
+        log_request_jsonl(state, /*skip=*/false, t_log_start, req_id, log_endpoint, log_client_ip,
+                          log_raw_body, ms, prompt_t, completion_t,
+                          stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response);
+    }
 
     if (!want_stream) {
         res.status = 200;

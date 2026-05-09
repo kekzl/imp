@@ -74,6 +74,11 @@ int main(int argc, char** argv) {
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
     state.rate_limit = args.rate_limit;
+    if (!args.log_requests_path.empty()) {
+        if (state.request_logger.open(args.log_requests_path)) {
+            printf("Request logging: appending JSONL to %s\n", args.log_requests_path.c_str());
+        }
+    }
 
     // CORS headers + API key auth on every response
     svr.set_pre_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {

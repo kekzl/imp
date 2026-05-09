@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +20,35 @@
 #include <vector>
 
 using json = nlohmann::json;
+
+// Per-request JSONL logger. Opt-in via --log-requests <path>; appends one
+// line per chat/completions or messages call with the raw client body, basic
+// metadata, and (for non-streaming) the assistant response. Thread-safe.
+struct RequestLogger {
+    std::ofstream file;
+    std::mutex mtx;
+    bool enabled = false;
+
+    bool open(const std::string& path) {
+        if (path.empty())
+            return true;
+        file.open(path, std::ios::app);
+        if (!file.is_open()) {
+            fprintf(stderr, "warning: --log-requests: failed to open %s\n", path.c_str());
+            return false;
+        }
+        enabled = true;
+        return true;
+    }
+
+    void log(const json& record) {
+        if (!enabled)
+            return;
+        std::lock_guard<std::mutex> lock(mtx);
+        file << record.dump() << '\n';
+        file.flush();
+    }
+};
 
 // Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
 struct ServerMetrics {
@@ -73,6 +103,9 @@ struct ServerState {
     // Rate limiter state: IP → list of request timestamps
     std::mutex rate_mutex;
     std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> rate_tracker;
+
+    // Per-request JSONL logger (opt-in via --log-requests).
+    RequestLogger request_logger;
 
     bool model_loaded() const { return ctx != nullptr; }
 
