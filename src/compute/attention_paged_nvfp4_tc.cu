@@ -50,19 +50,12 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // Non-Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
-// __launch_bounds__(maxThreadsPerBlock, minBlocksPerSM): with the residual
-// pass adding ~5 WMMA fragments of register pressure on top of the paged
-// path, the default heuristic packed 4+ blocks per SM and forced a 64-byte
-// per-thread local-memory spill (cuobjdump --dump-resource-usage showed
-// STACK:64 for HD>=128). The spilled stack lives in DRAM-backed local
-// memory; every access is a global-memory round-trip, which on the hot
-// per-decode-step path turned into a 3× tg/s regression. Pinning to 1
-// block per SM trades occupancy (8 warps × 1 block = 8 warps per SM,
-// vs the kernel's preferred 4 blocks for paged-only) for a higher register
-// budget per thread (~128 vs 64), eliminating the spill. Net win on long-
-// context decode: residual+graphs-off ≥ paged-only baseline.
+// Kernel uses no __launch_bounds__: with the dots/weights moved to shared
+// mem (warp-shfl reduction, see block-softmax section) the spill is gone
+// (cuobjdump STACK:0 across HD ∈ {64,128,256,512}); the compiler picks the
+// best occupancy/register trade-off automatically.
 template <int HEAD_DIM>
-__global__ __launch_bounds__(BLOCK_THREADS, 1) void paged_attention_decode_nvfp4_tc_kernel(
+__global__ void paged_attention_decode_nvfp4_tc_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ K_cache,    // packed FP4 pairs
     const uint8_t* __restrict__ V_cache,    // packed FP4 pairs
@@ -287,32 +280,51 @@ __global__ __launch_bounds__(BLOCK_THREADS, 1) void paged_attention_decode_nvfp4
         // invariant.
         // ---------------------------------------------------------------
 
-        // Pass 1: read all 16 dots, find local max
-        float dots_scaled[16];
-        float m_local = -FLT_MAX;
-#pragma unroll
-        for (int t = 0; t < 16; t++) {
-            float d = -FLT_MAX;
-            if (t >= first_tok && t < n_toks) {
-                d = __half2float(sK_w[t]) * scale;
-                d = apply_softcap(d, softcap);
-                m_local = fmaxf(m_local, d);
-            }
-            dots_scaled[t] = d;
+        // Block-softmax with shared-mem dots/weights to avoid the per-thread
+        // float[16] arrays (forced a 64-byte stack spill into DRAM-backed
+        // local memory at HD>=128, dominated decode tg/s).
+        //
+        // Lanes 0..15 each compute one entry; full 32-lane warp-shfl reduce
+        // for m_local / l_local so EVERY lane sees the same scalar (the
+        // sQ_w fill below has lanes 16..31 also reading weights[col], so
+        // they need consistent l_inv).
+        float* dots_smem_p = reinterpret_cast<float*>(sK_w) + 16 * 16 / 2;  // alias unused half region
+        // Use the front of sFV_w for dots/weights — sFV_w is per-warp (1024B
+        // floats = 256 entries) and only used after this for V WMMA store.
+        float* dots_smem = sFV_w;
+        float* weights_smem = sFV_w + 16;
+
+        const bool t_active_p = (lane_id < 16) && (lane_id >= first_tok) && (lane_id < n_toks);
+        float my_dot_p = -FLT_MAX;
+        if (t_active_p) {
+            my_dot_p = __half2float(sK_w[lane_id]) * scale;
+            my_dot_p = apply_softcap(my_dot_p, softcap);
+        }
+        if (lane_id < 16) dots_smem[lane_id] = my_dot_p;
+        __syncwarp();
+
+        float m_local = my_dot_p;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            m_local = fmaxf(m_local, __shfl_xor_sync(0xffffffff, m_local, off));
         }
 
         float m_new = fmaxf(m_w, m_local);
         float exp_diff = (m_w == -FLT_MAX) ? 0.0f : __expf(m_w - m_new);
 
-        // Pass 2: per-token un-normalized weights + l_local
-        float weights[16];
-        float l_local = 0.0f;
-#pragma unroll
-        for (int t = 0; t < 16; t++) {
-            float w = (dots_scaled[t] > -FLT_MAX) ? __expf(dots_scaled[t] - m_new) : 0.0f;
-            weights[t] = w;
-            l_local += w;
+        float my_weight_p = 0.0f;
+        if (t_active_p && my_dot_p > -FLT_MAX) {
+            my_weight_p = __expf(my_dot_p - m_new);
         }
+        if (lane_id < 16) weights_smem[lane_id] = my_weight_p;
+        __syncwarp();
+
+        float l_local = my_weight_p;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            l_local += __shfl_xor_sync(0xffffffff, l_local, off);
+        }
+        (void)dots_smem_p;  // alias not used; keep dots in sFV_w for clarity
 
         float l_new = exp_diff * l_w + l_local;
         // Normalized rescale: (exp_diff * l_w_old) / l_new — same role as
@@ -341,10 +353,12 @@ __global__ __launch_bounds__(BLOCK_THREADS, 1) void paged_attention_decode_nvfp4
         const int my_chunk = lane_id / LANES_PER_CHUNK;
         const int my_offset_in_chunk = (lane_id % LANES_PER_CHUNK) * ELEMS;
 
-        // Replicate normalized weights into sQ_w[16, 16]: A[m, k] = w_norm[k]
+        // Replicate normalized weights into sQ_w[16, 16]: A[m, k] = w_norm[k].
+        // Reads weights_smem[col] (not a per-thread array) — bank-conflict-free
+        // since 32 lanes broadcast-read 16 distinct addresses.
         for (int i = lane_id; i < 16 * 16; i += WARP_SIZE) {
             int col = i % 16;
-            sQ_w[i] = __float2half(weights[col] * l_inv);
+            sQ_w[i] = __float2half(weights_smem[col] * l_inv);
         }
         __syncwarp();
 
