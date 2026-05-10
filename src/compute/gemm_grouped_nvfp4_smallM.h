@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <vector>
 
 namespace imp {
 
@@ -34,5 +35,23 @@ bool gemm_grouped_nvfp4_smallM(
 
 bool gemm_grouped_nvfp4_smallM_available();
 void gemm_grouped_nvfp4_smallM_cleanup();
+
+namespace detail {
+
+struct WorkItem {
+    int expert_id;
+    int m_tile_idx;       // tile index along M (per expert)
+    int n_tile_idx;       // tile index along N
+    uint8_t m_tile_size;  // 16, 32, 64, or 128
+};
+
+// Pick the smallest viable M-tile for an expert with M_e tokens.
+int pick_m_tile(int M_e);
+
+// Build the work queue, sorted by descending tile size for shorter tail latency.
+// Inactive experts (M_e <= 0) are skipped.
+std::vector<WorkItem> build_work_queue(int n_experts, const int* M_per, int N);
+
+}  // namespace detail
 
 }  // namespace imp

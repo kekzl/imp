@@ -2,8 +2,40 @@
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <vector>
 
 namespace imp {
+
+namespace detail {
+
+int pick_m_tile(int M_e) {
+    if (M_e <= 16) return 16;
+    if (M_e <= 32) return 32;
+    if (M_e <= 64) return 64;
+    return 128;
+}
+
+std::vector<WorkItem> build_work_queue(int n_experts, const int* M_per, int N) {
+    std::vector<WorkItem> q;
+    q.reserve((size_t)n_experts * (size_t)((N + 127) / 128) + 8);
+    for (int e = 0; e < n_experts; ++e) {
+        if (M_per[e] <= 0) continue;
+        int tm = pick_m_tile(M_per[e]);
+        int nm = (M_per[e] + tm - 1) / tm;
+        int nn = (N + 127) / 128;
+        for (int mi = 0; mi < nm; ++mi)
+            for (int ni = 0; ni < nn; ++ni)
+                q.push_back({e, mi, ni, (uint8_t)tm});
+    }
+    std::stable_sort(q.begin(), q.end(),
+        [](const WorkItem& a, const WorkItem& b) {
+            return a.m_tile_size > b.m_tile_size;
+        });
+    return q;
+}
+
+}  // namespace detail
 
 static int s_smallM_available = -1;
 
