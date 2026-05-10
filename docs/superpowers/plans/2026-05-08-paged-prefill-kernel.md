@@ -1257,7 +1257,7 @@ Expected: coherent. Engine resolves to 512 default for Qwen3-4B + FP16 KV.
 
 Smoke (Gemma-4 should ignore explicit):
 ```bash
-./build/tools/imp-cli/imp-cli -m /home/kekz/models/gemma-4-26B-A4B-it-Q4_K_M.gguf \
+./build/tools/imp-cli/imp-cli -m $IMP_MODELS_DIR/gemma-4-26B-A4B-it-Q4_K_M.gguf \
     --prefill-chunk-size 512 -p "Hello" -n 4
 ```
 Expected: coherent output + WARN line in stderr saying `prefill_chunk_size=512 ignored: arch=11 ...`.

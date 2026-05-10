@@ -258,8 +258,8 @@ block-scaled kernel (confirmed in `vllm_kernel_audit.md`).
 ```bash
 # Re-profile after landing changes:
 docker run --rm --gpus all \
-  -v /home/kekz/models:/models:ro \
-  -v /home/kekz/github.com/kekzl/imp/bench/results:/out:rw \
+  -v $IMP_MODELS_DIR:/models:ro \
+  -v $REPO/bench/results:/out:rw \
   -v /opt/nvidia/nsight-systems/2025.6.3:/nsys:ro \
   --entrypoint /nsys/bin/nsys imp:test \
   profile --trace=cuda --force-overwrite=true \

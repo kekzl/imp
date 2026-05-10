@@ -12,7 +12,7 @@ For each profile, prints:
 Usage:
     python3 analyze_csv.py [csv_dir]
 
-Default csv_dir = /home/kekz/github.com/kekzl/imp/profiles/csv
+Default csv_dir = $REPO/profiles/csv
 """
 from __future__ import annotations
 import csv
@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 
 CSV_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else
-               "/home/kekz/github.com/kekzl/imp/profiles/csv")
+               "$REPO/profiles/csv")
 
 GREEN = "\033[32m"; RED = "\033[31m"; YEL = "\033[33m"; CYAN = "\033[36m"; RST = "\033[0m"
 def color(s, c): return f"{c}{s}{RST}"

@@ -8,7 +8,7 @@ This audit complements rather than replaces the prior one. The prior audit's "It
 
 - Re-read every file Phase 1 named, plus the post-Phase-2 commits (`454ca58`, `3eb7ef5`, `b6c2b9c`).
 - Re-read every NVFP4 test fixture (`tests/test_nvfp4_*.cu`).
-- Inspected real on-disk checkpoints (`/home/kekz/models/Gemma-4-26B-A4B-it-NVFP4/`, `/home/kekz/models/Qwen3-30B-A3B-NVFP4-Modelopt/`) for `weight_packed` / `weight_scale` / `weight_scale_2` shape and dtype.
+- Inspected real on-disk checkpoints (`$IMP_MODELS_DIR/Gemma-4-26B-A4B-it-NVFP4/`, `$IMP_MODELS_DIR/Qwen3-30B-A3B-NVFP4-Modelopt/`) for `weight_packed` / `weight_scale` / `weight_scale_2` shape and dtype.
 - Walked the dequant code path end-to-end: `safetensors_loader.cpp` → `weight_map.cpp` → `weight_upload.cu` → `executor_pre_dequant.cu` (Phase 0 promote) → `nvfp4_gemm.cu` (`gemv_nvfp4_row` formula).
 
 ## Findings

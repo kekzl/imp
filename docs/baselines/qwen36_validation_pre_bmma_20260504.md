@@ -20,7 +20,7 @@ Phase legend: 0=load+tokenizer, 3=graph replay (32x byte-identical), 4=20-prompt
 **Failure reason:** battery passed 3/4; logit_health_ok=True; det3=True; graph_replay=4/4  
 
 ### Config
-- Path: `/home/kekz/models/Qwen3.6-35B-A3B-NVFP4`
+- Path: `$IMP_MODELS_DIR/Qwen3.6-35B-A3B-NVFP4`
 - Arch: `Qwen3_5MoeForConditionalGeneration`
 - Param count (≈): 50.1B
 - Weight files: 3 (25.04 GB)

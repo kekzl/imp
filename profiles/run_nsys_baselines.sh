@@ -9,7 +9,7 @@
 # Output: profiles/baselines/<model>_<workload>_<graphs>.nsys-rep
 set -euo pipefail
 
-REPO="/home/kekz/github.com/kekzl/imp"
+REPO="$REPO"
 PROFILES="${REPO}/profiles/baselines"
 mkdir -p "${PROFILES}"
 

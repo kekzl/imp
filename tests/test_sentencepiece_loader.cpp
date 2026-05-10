@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -248,14 +249,17 @@ TEST(SentencePieceLoader, NegativePadIdRoundtrips) {
 // Skipped when the file is not present (the test runner box may differ).
 TEST(SentencePieceLoader, RealHfCacheSpieceModelLoadsCleanly) {
     namespace fs = std::filesystem;
-    const std::vector<std::string> candidates = {
-        // Host path (when running outside docker)
-        "/home/kekz/.cache/huggingface/hub/models--facebook--musicgen-small/"
-        "snapshots/4c8334b02c6ec4e8664a91979669a501ec497792/spiece.model",
-        // Container path (when -v /home/kekz/.cache/huggingface:/hf_cache is bound)
+    const char* home = std::getenv("HOME");
+    std::vector<std::string> candidates = {
+        // Container path (when -v $HOME/.cache/huggingface:/hf_cache is bound)
         "/hf_cache/hub/models--facebook--musicgen-small/"
         "snapshots/4c8334b02c6ec4e8664a91979669a501ec497792/spiece.model",
     };
+    if (home) {
+        candidates.push_back(std::string(home) +
+            "/.cache/huggingface/hub/models--facebook--musicgen-small/"
+            "snapshots/4c8334b02c6ec4e8664a91979669a501ec497792/spiece.model");
+    }
 
     std::string found;
     for (const auto& p : candidates) {

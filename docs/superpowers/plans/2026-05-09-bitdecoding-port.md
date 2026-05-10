@@ -191,7 +191,7 @@ int main() {
 
 Run:
 ```bash
-cd /home/kekz/github.com/kekzl/imp
+cd $REPO
 /usr/local/cuda/bin/nvcc -O2 --generate-code=arch=compute_120a,code=sm_120a \
   tools/analysis/bench_nvfp4_qk_tc_vs_scalar.cu \
   -o /tmp/bench_nvfp4_qk_tc_vs_scalar
@@ -1130,12 +1130,12 @@ If `attention_paged.h` doesn't already include `<cstdlib>` for `std::getenv`, ad
 
 ```bash
 make build
-docker run --rm --gpus all -v /home/kekz/github.com/kekzl/imp/models:/models imp:test \
+docker run --rm --gpus all -v $REPO/models:/models imp:test \
     imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
     --prompt "The capital of France is" --max-tokens 32 --temperature 0 \
     --chat-template none --kv-nvfp4 2>&1 | tail -5
 
-docker run --rm --gpus all -v /home/kekz/github.com/kekzl/imp/models:/models -e IMP_USE_BITDECODING_QK=1 imp:test \
+docker run --rm --gpus all -v $REPO/models:/models -e IMP_USE_BITDECODING_QK=1 imp:test \
     imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
     --prompt "The capital of France is" --max-tokens 32 --temperature 0 \
     --chat-template none --kv-nvfp4 2>&1 | tail -5
@@ -1387,13 +1387,13 @@ EOF
 PROMPT="The history of artificial intelligence began in antiquity with myths and stories of artificial beings endowed with intelligence. The seeds of modern AI were planted by classical philosophers who attempted to describe the process of human thinking as the mechanical manipulation of symbols."
 
 echo "=== scalar (default) ==="
-docker run --rm --gpus all -v /home/kekz/github.com/kekzl/imp/models:/models imp:test \
+docker run --rm --gpus all -v $REPO/models:/models imp:test \
     imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
     --prompt "$PROMPT" --max-tokens 64 --temperature 0 --chat-template none \
     --kv-nvfp4 2>&1 | grep -E "^pp |^tg |^total"
 
 echo "=== TC (IMP_USE_BITDECODING_QK=1) ==="
-docker run --rm --gpus all -v /home/kekz/github.com/kekzl/imp/models:/models -e IMP_USE_BITDECODING_QK=1 imp:test \
+docker run --rm --gpus all -v $REPO/models:/models -e IMP_USE_BITDECODING_QK=1 imp:test \
     imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
     --prompt "$PROMPT" --max-tokens 64 --temperature 0 --chat-template none \
     --kv-nvfp4 2>&1 | grep -E "^pp |^tg |^total"

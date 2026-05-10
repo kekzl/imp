@@ -187,7 +187,7 @@ Run `imp-cli` with `IMP_LOG_LEVEL=debug` on Qwen3-Coder NVFP4 model and
 capture lines mentioning `nvfp4_moe_ms_native`:
 
 ```bash
-docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
   -e IMP_LOG_LEVEL=debug imp:test \
   imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
           --bench --bench-pp 1 --max-tokens 1 --bench-reps 1 2>&1 \
@@ -1601,7 +1601,7 @@ Quick smoke: kernel doesn't crash on real model.
 
 ```bash
 make build
-docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
   -e IMP_NVFP4_SMALLM=1 imp:test \
   imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
           --bench --bench-pp 64 --max-tokens 16 --bench-reps 1 --temperature 0
@@ -1627,7 +1627,7 @@ git commit -m "feat(executor): smallM kernel dispatch via IMP_NVFP4_SMALLM env"
 - [ ] **Step 1: 10-rep cold-container A/B**
 
 ```bash
-RESULTS=/home/kekz/github.com/kekzl/imp/bench/results/smallM_baseline_$(date +%Y%m%d_%H%M%S).log
+RESULTS=$REPO/bench/results/smallM_baseline_$(date +%Y%m%d_%H%M%S).log
 mkdir -p $(dirname $RESULTS)
 echo "=== smallM A/B: Qwen3-Coder-30B-A3B-NVFP4 pp512 ===" | tee $RESULTS
 echo "Date: $(date -Iseconds)  Commit: $(git rev-parse --short HEAD)" | tee -a $RESULTS
@@ -1635,7 +1635,7 @@ echo "Date: $(date -Iseconds)  Commit: $(git rev-parse --short HEAD)" | tee -a $
 echo "" | tee -a $RESULTS
 echo "--- Baseline (CUTLASS path, IMP_NVFP4_SMALLM unset) ---" | tee -a $RESULTS
 for i in $(seq 1 10); do
-  docker run --rm --gpus all -v /home/kekz/models:/models:ro imp:test \
+  docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro imp:test \
     imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
             --bench --bench-pp 512 --max-tokens 256 --bench-reps 1 --temperature 0 \
     2>&1 | grep -E '^(pp|tg)' | tee -a $RESULTS
@@ -1644,7 +1644,7 @@ done
 echo "" | tee -a $RESULTS
 echo "--- smallM (IMP_NVFP4_SMALLM=1) ---" | tee -a $RESULTS
 for i in $(seq 1 10); do
-  docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+  docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
     -e IMP_NVFP4_SMALLM=1 imp:test \
     imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
             --bench --bench-pp 512 --max-tokens 256 --bench-reps 1 --temperature 0 \
@@ -1704,7 +1704,7 @@ const bool use_smallM = (smallM_env != nullptr) && (max_M <= threshold);
 
 Build verify:
 ```bash
-make build && docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+make build && docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
   -e IMP_NVFP4_SMALLM=1 -e IMP_NVFP4_SMALLM_THRESHOLD=32 imp:test \
   imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
           --bench --bench-pp 512 --max-tokens 4 --bench-reps 1
@@ -1718,7 +1718,7 @@ Expected: completes; if max_M > 32, falls back to CUTLASS path (verify via log).
 # scripts/smallM_calibration_sweep.sh
 #!/usr/bin/env bash
 set -euo pipefail
-RESULTS=/home/kekz/github.com/kekzl/imp/bench/results/smallM_threshold_calibration.csv
+RESULTS=$REPO/bench/results/smallM_threshold_calibration.csv
 mkdir -p $(dirname $RESULTS)
 
 echo "model,pp_size,threshold,run,pp_tok_s,tg_tok_s" > $RESULTS
@@ -1728,7 +1728,7 @@ for MODEL in "Qwen3-Coder-30B-A3B-Instruct-FP4" "Qwen3.6-35B-A3B-NVFP4" \
   for PP in 128 512 1024 2048; do
     # baseline (CUTLASS path; threshold=0 disables smallM)
     for run in 1 2 3 4 5; do
-      out=$(docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+      out=$(docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
         imp:test imp-cli --model /models/$MODEL \
           --bench --bench-pp $PP --max-tokens 64 --bench-reps 1 \
           --temperature 0 2>&1)
@@ -1739,7 +1739,7 @@ for MODEL in "Qwen3-Coder-30B-A3B-Instruct-FP4" "Qwen3.6-35B-A3B-NVFP4" \
     # smallM at varying thresholds
     for THR in 16 32 48 64 80 96 128; do
       for run in 1 2 3 4 5; do
-        out=$(docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+        out=$(docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
           -e IMP_NVFP4_SMALLM=1 -e IMP_NVFP4_SMALLM_THRESHOLD=$THR \
           imp:test imp-cli --model /models/$MODEL \
             --bench --bench-pp $PP --max-tokens 64 --bench-reps 1 \
@@ -1902,7 +1902,7 @@ const bool use_smallM = (threshold > 0) &&
 
 ```bash
 make verify-fast
-docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
   -e IMP_NVFP4_SMALLM=1 imp:test \
   imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
           --bench --bench-pp 512 --max-tokens 256 --bench-reps 5
@@ -1938,7 +1938,7 @@ git commit -m "feat(executor): smallM auto-heuristic max_M ≤ 64"
 
 ```bash
 IMP_DOCKER_IMG=imp:test \
-IMP_MODELS_DIR=/home/kekz/models \
+IMP_MODELS_DIR=$IMP_MODELS_DIR \
 python3 scripts/validate_safetensors.py \
   --smoke \
   --model Qwen3-Coder-30B-A3B-Instruct-FP4 \
@@ -1975,7 +1975,7 @@ git commit -m "test: smallM 4/4 graph_replay determinism (vs CUTLASS 1-2/4)"
 ```bash
 for env in "" "IMP_NVFP4_SMALLM=1"; do
     for i in $(seq 1 20); do
-        docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+        docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
             $(test -n "$env" && echo "-e $env") imp:test \
             imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
                 --bench --bench-pp 1 --max-tokens 256 --bench-reps 1 \
@@ -2011,7 +2011,7 @@ Expected: all 574 tests pass.
 
 ```bash
 # With smallM ON
-docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
     -e IMP_NVFP4_SMALLM=1 imp:test \
     imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
             --bench --bench-pp 512 --max-tokens 32 --bench-reps 1 \
@@ -2034,8 +2034,8 @@ git commit -m "test: smallM full GTest pass + VRAM ≤ baseline"
 - [ ] **Step 1: Profile with smallM enabled**
 
 ```bash
-NSYS_OUT=/home/kekz/github.com/kekzl/imp/bench/results/nsys_smallM_$(date +%Y%m%d_%H%M%S)
-docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+NSYS_OUT=$REPO/bench/results/nsys_smallM_$(date +%Y%m%d_%H%M%S)
+docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro \
   -v /opt/nvidia/nsight-systems/2025.6.3:/nsys:ro \
   -v $(dirname $NSYS_OUT):/out --user 0:0 \
   --entrypoint sh -e IMP_NVFP4_SMALLM=1 imp:test -c \

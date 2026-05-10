@@ -4,7 +4,7 @@
 #          cuda_api_sum (host API calls), cuda_gpu_sum (per-stream summary)
 set -euo pipefail
 
-REPO="/home/kekz/github.com/kekzl/imp"
+REPO="$REPO"
 BASE="${REPO}/profiles/baselines"
 CSV="${REPO}/profiles/csv"
 mkdir -p "${CSV}"
