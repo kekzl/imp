@@ -46,13 +46,39 @@ GrpTileShape = Shape<_64, _128, _128>;
 
 CUTLASS error: `TMA requires CTA_Tile and SLayout top-level size equivalence`. The SfAtom layout for block-scaled NVFP4 is fixed at 128 rows, so the M tile dimension must be ≥128. Cannot reduce M-tile to better fit our M ≈ 32 per-expert distribution.
 
-### 2. N=256 tile — regresses prefill -44%
+### 2a. N=256 tile — regresses prefill -44%
 
 ```
 GrpTileShape = Shape<_128, _256, _128>;
 ```
 
 Bench: 13046 → **7366 tok/s** on the same model. Larger N tile = fewer thread blocks (only 4 N-tiles per expert × 128 = 512 TBs vs 1024 with N=128) → less wave-level parallelism on 170-SM RTX 5090. The auto schedule already picks the best balance.
+
+### 2b. K=256 tile — noise, does not improve
+
+```
+GrpTileShape = Shape<_128, _128, _256>;
+```
+
+Build: clean. `CutlassGrouped3xNvfp4Test.GroupedMatchesPerExpertSingle`: PASS.
+
+Bench (8 cold-start reps, Qwen3-Coder-30B-A3B-NVFP4 pp512):
+
+| rep | K=256 tok/s |
+|---|---:|
+| 1 | 8,290 |
+| 2 | 12,196 |
+| 3 | 8,403 |
+| 4 | 8,416 |
+| 5 | 15,863 |
+| 6 | 12,886 |
+| 7 | 16,451 |
+| 8 | 16,520 |
+| **median** | **12,541** |
+
+K=128 baseline median (N=10, from earlier in this session): **12,282**.
+
+Delta: +2% — within measurement noise. The cuBLAS attention autotune variance (7k–17k range, p25=10k, p75=16k) completely swamps any K-tile effect. K=256 was **reverted** — does not meet the ≥13,000 median acceptance gate. Hypothesis closed: K-tile doesn't matter when CUTLASS Auto picks the cooperative schedule with StageCountAutoCarveout; the auto-tuner already accounts for SMEM budget vs stage count.
 
 ### 3. Explicit `KernelPtrArrayTmaWarpSpecializedPingpongBlockScaledSm120<3>` schedule — fails to compile
 
