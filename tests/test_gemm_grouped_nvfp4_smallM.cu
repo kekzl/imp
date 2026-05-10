@@ -128,25 +128,24 @@ TEST(SmallMScheduler, WorkQueueOrderedByTileSize) {
 }
 
 // ---------------------------------------------------------------------------
-// First end-to-end smallM kernel correctness test (Task 1.7).
-// Single expert, M=N=K=128, single CTA per (expert, n_tile).  Produces FP16
-// output that must match an FP32 host matmul of the original (pre-quant) FP16
-// inputs to within 5% relative error (NVFP4 noise floor).
+// Helper: run a single-expert smallM GEMM and validate correctness.
+//
+// Builds random FP16 A[M,K] and B[N,K], quantizes both to NVFP4, runs the
+// smallM kernel, and checks the output against a dequantized FP32 reference.
+// The acceptance criterion is: kernel output vs. post-quantize ideal (CTRL)
+// has a relative RMSE below `ctrl_rmse_tol`.
 // ---------------------------------------------------------------------------
-TEST(SmallMKernel, SingleExpert128x128x128) {
-    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
-
-    const int M = 128, N = 128, K = 128;
-
+static void run_smallm_single_expert(int M, int N, int K,
+                                     double ctrl_rmse_tol = 1e-2) {
     // ----- Build FP16 weights B[N, K] and quantize via reference quantize_fp16_to_nvfp4
     std::mt19937 rng_w(13);
     std::uniform_real_distribution<float> dist_w(-0.5f, 0.5f);
-    std::vector<__half> h_B_fp16(N * K);
+    std::vector<__half> h_B_fp16((size_t)N * K);
     for (auto& v : h_B_fp16) v = __float2half(dist_w(rng_w));
 
     __half* d_B_fp16 = nullptr;
-    cudaMalloc(&d_B_fp16, N * K * sizeof(__half));
-    cudaMemcpy(d_B_fp16, h_B_fp16.data(), N * K * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_B_fp16, (size_t)N * K * sizeof(__half));
+    cudaMemcpy(d_B_fp16, h_B_fp16.data(), (size_t)N * K * sizeof(__half), cudaMemcpyHostToDevice);
     int64_t b_shape[2] = {N, K};
     imp::Tensor B_t(d_B_fp16, imp::QType::F16, 2, b_shape, true);
     imp::NvFP4QuantResult B_q;
@@ -156,17 +155,17 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     // ----- Build FP16 activations A[M, K]
     std::mt19937 rng_a(7);
     std::uniform_real_distribution<float> dist_a(-1.f, 1.f);
-    std::vector<__half> h_A_fp16(M * K);
+    std::vector<__half> h_A_fp16((size_t)M * K);
     for (auto& v : h_A_fp16) v = __float2half(dist_a(rng_a));
 
     __half* d_A_fp16 = nullptr;
-    cudaMalloc(&d_A_fp16, M * K * sizeof(__half));
-    cudaMemcpy(d_A_fp16, h_A_fp16.data(), M * K * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_A_fp16, (size_t)M * K * sizeof(__half));
+    cudaMemcpy(d_A_fp16, h_A_fp16.data(), (size_t)M * K * sizeof(__half), cudaMemcpyHostToDevice);
 
     // Quantize activations via the moe_native quantize (1-expert).
     void* d_A_packed = nullptr; void* d_A_sf = nullptr;
-    cudaMalloc(&d_A_packed, M * K / 2);
-    cudaMalloc(&d_A_sf,     M * K / 16);
+    cudaMalloc(&d_A_packed, (size_t)M * K / 2);
+    cudaMalloc(&d_A_sf,     (size_t)M * K / 16);
     int h_off[2] = {0, M};
     int* d_off = nullptr; cudaMalloc(&d_off, sizeof(h_off));
     cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
@@ -183,8 +182,8 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     float combined_alpha = a_tensor_scale * B_q.tensor_scale;
 
     // ----- Run smallM kernel.
-    void* d_D = nullptr; cudaMalloc(&d_D, M * N * sizeof(__half));
-    cudaMemset(d_D, 0, M * N * sizeof(__half));
+    void* d_D = nullptr; cudaMalloc(&d_D, (size_t)M * N * sizeof(__half));
+    cudaMemset(d_D, 0, (size_t)M * N * sizeof(__half));
     int M_per[1] = {M};
     const void* A_arr[1]   = {d_A_packed};
     const void* SFA_arr[1] = {d_A_sf};
@@ -202,15 +201,15 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     //   ref[m, n] = sum_k A_fp16[m, k] * B_fp16[n, k]
     // (This is the high-precision reference. The kernel's NVFP4 output is
     // expected to deviate from this by the FP4 quantization noise floor.)
-    std::vector<float> ref(M * N, 0.f);
+    std::vector<float> ref((size_t)M * N, 0.f);
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
             float acc = 0.f;
             for (int k = 0; k < K; ++k) {
-                acc += __half2float(h_A_fp16[m * K + k]) *
-                       __half2float(h_B_fp16[n * K + k]);
+                acc += __half2float(h_A_fp16[(size_t)m * K + k]) *
+                       __half2float(h_B_fp16[(size_t)n * K + k]);
             }
-            ref[m * N + n] = acc;
+            ref[(size_t)m * N + n] = acc;
         }
     }
 
@@ -218,15 +217,15 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     // matmul. This is the "ideal" output the kernel SHOULD produce (modulo
     // FP16 vs FP32 accumulation differences). Comparing kernel-output to
     // this `ctrl` isolates kernel correctness from quantization noise.
-    std::vector<__half> h_A_dq(M * K), h_B_dq(N * K);
+    std::vector<__half> h_A_dq((size_t)M * K), h_B_dq((size_t)N * K);
     {
         // Dequantize A (per moe_native): each row m, micro-block kb has
         //   sf = ue4m3(SFA[m, kb]),
         //   dequant_val = fp4_int_decoded * a_tensor_scale * sf
-        std::vector<uint8_t> h_A_packed(M * K / 2);
-        std::vector<uint8_t> h_A_sf((size_t)M * K / 16);
-        cudaMemcpy(h_A_packed.data(), d_A_packed, h_A_packed.size(), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_A_sf.data(),     d_A_sf,     h_A_sf.size(),     cudaMemcpyDeviceToHost);
+        std::vector<uint8_t> h_A_packed_v((size_t)M * K / 2);
+        std::vector<uint8_t> h_A_sf_v((size_t)M * K / 16);
+        cudaMemcpy(h_A_packed_v.data(), d_A_packed, h_A_packed_v.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_A_sf_v.data(),     d_A_sf,     h_A_sf_v.size(),     cudaMemcpyDeviceToHost);
         const float kFP4Mag[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
         auto ue4m3 = [&](uint8_t b) {
             uint32_t sign = (b >> 7) & 1;
@@ -246,50 +245,50 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
         };
         for (int m = 0; m < M; ++m) {
             for (int kb = 0; kb < K / 16; ++kb) {
-                float sf = ue4m3(h_A_sf[m * (K / 16) + kb]);
+                float sf = ue4m3(h_A_sf_v[(size_t)m * (K / 16) + kb]);
                 for (int j = 0; j < 8; ++j) {
-                    uint8_t byte = h_A_packed[m * (K / 2) + kb * 8 + j];
+                    uint8_t byte = h_A_packed_v[(size_t)m * (K / 2) + kb * 8 + j];
                     uint8_t lo = byte & 0xF, hi = (byte >> 4) & 0xF;
                     float v0 = kFP4Mag[lo & 7] * (lo & 8 ? -1.f : 1.f) * sf * a_tensor_scale;
                     float v1 = kFP4Mag[hi & 7] * (hi & 8 ? -1.f : 1.f) * sf * a_tensor_scale;
-                    h_A_dq[m * K + kb * 16 + j * 2]     = __float2half(v0);
-                    h_A_dq[m * K + kb * 16 + j * 2 + 1] = __float2half(v1);
+                    h_A_dq[(size_t)m * K + kb * 16 + j * 2]     = __float2half(v0);
+                    h_A_dq[(size_t)m * K + kb * 16 + j * 2 + 1] = __float2half(v1);
                 }
             }
         }
         // Dequantize B (per nvfp4_quant.cu, exact same row-major layout)
-        std::vector<uint8_t> h_B_packed((size_t)N * K / 2);
-        std::vector<uint8_t> h_B_sf((size_t)N * K / 16);
-        cudaMemcpy(h_B_packed.data(), B_q.packed_data, h_B_packed.size(), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_B_sf.data(),     B_q.micro_scales, h_B_sf.size(),    cudaMemcpyDeviceToHost);
+        std::vector<uint8_t> h_B_packed_v((size_t)N * K / 2);
+        std::vector<uint8_t> h_B_sf_v((size_t)N * K / 16);
+        cudaMemcpy(h_B_packed_v.data(), B_q.packed_data, h_B_packed_v.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_B_sf_v.data(),     B_q.micro_scales, h_B_sf_v.size(),    cudaMemcpyDeviceToHost);
         for (int n = 0; n < N; ++n) {
             for (int kb = 0; kb < K / 16; ++kb) {
-                float sf = ue4m3(h_B_sf[n * (K / 16) + kb]);
+                float sf = ue4m3(h_B_sf_v[(size_t)n * (K / 16) + kb]);
                 for (int j = 0; j < 8; ++j) {
-                    uint8_t byte = h_B_packed[n * (K / 2) + kb * 8 + j];
+                    uint8_t byte = h_B_packed_v[(size_t)n * (K / 2) + kb * 8 + j];
                     uint8_t lo = byte & 0xF, hi = (byte >> 4) & 0xF;
                     float v0 = kFP4Mag[lo & 7] * (lo & 8 ? -1.f : 1.f) * sf * B_q.tensor_scale;
                     float v1 = kFP4Mag[hi & 7] * (hi & 8 ? -1.f : 1.f) * sf * B_q.tensor_scale;
-                    h_B_dq[n * K + kb * 16 + j * 2]     = __float2half(v0);
-                    h_B_dq[n * K + kb * 16 + j * 2 + 1] = __float2half(v1);
+                    h_B_dq[(size_t)n * K + kb * 16 + j * 2]     = __float2half(v0);
+                    h_B_dq[(size_t)n * K + kb * 16 + j * 2 + 1] = __float2half(v1);
                 }
             }
         }
     }
-    std::vector<float> ctrl(M * N, 0.f);
+    std::vector<float> ctrl((size_t)M * N, 0.f);
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
             float acc = 0.f;
             for (int k = 0; k < K; ++k) {
-                acc += __half2float(h_A_dq[m * K + k]) *
-                       __half2float(h_B_dq[n * K + k]);
+                acc += __half2float(h_A_dq[(size_t)m * K + k]) *
+                       __half2float(h_B_dq[(size_t)n * K + k]);
             }
-            ctrl[m * N + n] = acc;
+            ctrl[(size_t)m * N + n] = acc;
         }
     }
 
-    std::vector<__half> got(M * N);
-    cudaMemcpy(got.data(), d_D, M * N * sizeof(__half), cudaMemcpyDeviceToHost);
+    std::vector<__half> got((size_t)M * N);
+    cudaMemcpy(got.data(), d_D, (size_t)M * N * sizeof(__half), cudaMemcpyDeviceToHost);
 
     // ----- Tolerance: NVFP4 noise floor — accept 5% relative max error.
     // We measure relative error against a noise floor scaled to the typical
@@ -328,10 +327,10 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     double rmse_rel_ctrl = std::sqrt(sum_sq_err_ctrl / std::max(sum_sq_ctrl, 1e-12));
 
     // Acceptance criterion: kernel output must match the post-quantize ideal
-    // (CTRL) to within 1% relative RMSE. CTRL itself differs from the FP32
-    // reference by ~10-15% RMSE (NVFP4 noise floor), which is fundamental to
-    // 4-bit quantization and not a kernel correctness issue.
-    EXPECT_LT(rmse_rel_ctrl, 1e-2f)
+    // (CTRL) to within ctrl_rmse_tol relative RMSE. CTRL itself differs from
+    // the FP32 reference by ~10-15% RMSE (NVFP4 noise floor), which is
+    // fundamental to 4-bit quantization and not a kernel correctness issue.
+    EXPECT_LT(rmse_rel_ctrl, ctrl_rmse_tol)
         << "kernel vs post-quantize ideal:"
         << " rmse_rel_ctrl=" << rmse_rel_ctrl
         << " max_abs_err_ctrl=" << max_abs_err_ctrl
@@ -345,6 +344,30 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     cudaFree(d_A_fp16); cudaFree(d_A_packed); cudaFree(d_A_sf);
     cudaFree(d_off); cudaFree(d_D); cudaFree(d_B_fp16);
     imp::free_nvfp4_result(B_q);
+}
+
+// ---------------------------------------------------------------------------
+// First end-to-end smallM kernel correctness test (Task 1.7).
+// Single expert, M=N=K=128, single CTA per (expert, n_tile).  Produces FP16
+// output that must match an FP32 host matmul of the original (pre-quant) FP16
+// inputs to within 5% relative error (NVFP4 noise floor).
+// ---------------------------------------------------------------------------
+TEST(SmallMKernel, SingleExpert128x128x128) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    run_smallm_single_expert(/*M=*/128, /*N=*/128, /*K=*/128);
+}
+
+// ---------------------------------------------------------------------------
+// K-tile loop test (Task 1.8).
+// Single expert, M=N=128, K=2048 (Qwen3-Coder-30B-A3B hidden_dim).
+// Exercises 16 K-tile iterations of the outer loop added in T1.8.
+// ---------------------------------------------------------------------------
+TEST(SmallMKernel, SingleExpertK2048) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    // Allow slightly looser tolerance than K=128: longer K-reduction chain
+    // accumulates more FP4 quantization noise. 5e-2 is generous; if it
+    // consistently lands well under this in practice, tighten in a follow-up.
+    run_smallm_single_expert(/*M=*/128, /*N=*/128, /*K=*/2048, /*ctrl_rmse_tol=*/5e-2);
 }
 
 // ---------------------------------------------------------------------------

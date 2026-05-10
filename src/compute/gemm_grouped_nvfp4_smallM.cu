@@ -264,6 +264,7 @@ __global__ void smallM_kernel_v1(
     const int n_base     = n_tile * TILE_N;
     const int M_eff      = min(M_e, TILE_M);
     const int N_eff      = min(TILE_N, N - n_base);
+    (void)N_eff;
 
     // SMEM layout: [A_TILE | B_TILE | SFA_TILE | SFB_TILE | D_TILE_FP16]
     // D_TILE not used by this kernel (direct global writes), but reserved per
@@ -282,163 +283,189 @@ __global__ void smallM_kernel_v1(
     const int warp_id   = tid / 32;
     const int lane_id   = tid & 31;
 
-    // ---- Stage 1: cp.async A tile. 8 KiB in 16-byte chunks = 512 ops / 256 = 2/thread.
-    {
-        constexpr int N_OPS = A_TILE_BYTES / 16;          // 512
-        for (int op = tid; op < N_OPS; op += n_threads) {
-            int row = op / (A_BYTES_ROW / 16);             // op / 4
-            int chunk = op % (A_BYTES_ROW / 16);           // 0..3
-            // Bounds: rows beyond M_eff just zero-load. cp.async can't zero;
-            // for simplicity, we instead copy from a zero scratch via a
-            // ternary ld + sync write. Out-of-bounds A rows are extremely
-            // rare (M_eff < TILE_M only when expert M_e<128); just skip
-            // copy and rely on SMEM init below.
-            uint8_t* dst = smem_A + (size_t)row * A_BYTES_ROW + chunk * 16;
-            if (row < M_eff) {
-                const uint8_t* src = A_e + (size_t)row * K_half + chunk * 16;
-                cp_async_cg_16_local(dst, src);
-            } else {
-                // Zero-fill: store 0s to SMEM via vector store. Safe because
-                // dst is 16B-aligned (starts every 16B chunk).
-                ulonglong2 z = {0ULL, 0ULL};
-                *reinterpret_cast<ulonglong2*>(dst) = z;
-            }
-        }
-    }
-
-    // ---- Stage 2: cp.async B tile. 8 KiB / 16 / 256 = 2/thread.
-    {
-        constexpr int N_OPS = B_TILE_BYTES / 16;
-        for (int op = tid; op < N_OPS; op += n_threads) {
-            int row = op / (B_BYTES_ROW / 16);
-            int chunk = op % (B_BYTES_ROW / 16);
-            int n_global = n_base + row;
-            uint8_t* dst = smem_B + (size_t)row * B_BYTES_ROW + chunk * 16;
-            if (n_global < N) {
-                const uint8_t* src = B_e + (size_t)n_global * K_half + chunk * 16;
-                cp_async_cg_16_local(dst, src);
-            } else {
-                ulonglong2 z = {0ULL, 0ULL};
-                *reinterpret_cast<ulonglong2*>(dst) = z;
-            }
-        }
-    }
-
-    // ---- Stage 3: cp.async SFA. 1 KiB row stride 8 → 1 op of 8 bytes per row;
-    // 128 rows / 256 threads → many idle. Keep it simple with 8-byte cp.async.
-    {
-        constexpr int N_OPS = SFA_TILE_BYTES / 8;          // 128
-        for (int op = tid; op < N_OPS; op += n_threads) {
-            int row = op;
-            uint8_t* dst = smem_SFA + (size_t)row * SFA_BYTES_ROW;
-            if (row < M_eff) {
-                const uint8_t* src = SFA_e + (size_t)row * K_groups;
-                cp_async_ca_8_local(dst, src);
-            } else {
-                *reinterpret_cast<uint64_t*>(dst) = 0ULL;
-            }
-        }
-    }
-
-    // ---- Stage 4: cp.async SFB. Same shape.
-    {
-        constexpr int N_OPS = SFB_TILE_BYTES / 8;          // 128
-        for (int op = tid; op < N_OPS; op += n_threads) {
-            int row = op;
-            int n_global = n_base + row;
-            uint8_t* dst = smem_SFB + (size_t)row * SFB_BYTES_ROW;
-            if (n_global < N) {
-                const uint8_t* src = SFB_e + (size_t)n_global * K_groups;
-                cp_async_ca_8_local(dst, src);
-            } else {
-                *reinterpret_cast<uint64_t*>(dst) = 0ULL;
-            }
-        }
-    }
-
-    cp_async_commit_local();
-    cp_async_wait_group_local<0>();
-    __syncthreads();
-
-    // ---- MMA loop: warp 0 only, walks 8×16 sub-tiles, 2 K-stripes each.
-    if (warp_id != 0) return;
-
-    const int T0 = lane_id & 3;          // thread_in_group ∈ [0,4)
-    const int T1 = lane_id >> 2;         // group_id ∈ [0,8)
-    const int byte_offset = T0 * 4;
-    const int m_sfa = T1 + (T0 & 1) * 8; // 16 unique m's (T0%2 broadcasts)
-    const int n_sfb = T1;                // 8 unique n's
-
     constexpr int M_SUBTILES = TILE_M / 16;   // 8
     constexpr int N_SUBTILES = TILE_N / 8;    // 16
     constexpr int K_STRIPES  = TILE_K / 64;   // 2
 
-    #pragma unroll 1
-    for (int mi = 0; mi < M_SUBTILES; ++mi) {
-        const int m_lo = mi * 16 + T1;        // m for a0, a2
-        const int m_hi = m_lo + 8;            // m for a1, a3
+    // ---- Per-(mi, ni) FP32 accumulator — initialized once, accumulated across
+    //      all K-tiles, and cast to FP16 only after the outer loop completes.
+    //      Warp 0 layout: acc[mi][ni][4 floats].
+    float acc[M_SUBTILES][N_SUBTILES][4];
+    if (warp_id == 0) {
+        #pragma unroll
+        for (int mi = 0; mi < M_SUBTILES; ++mi)
+            #pragma unroll
+            for (int ni = 0; ni < N_SUBTILES; ++ni)
+                acc[mi][ni][0] = acc[mi][ni][1] = acc[mi][ni][2] = acc[mi][ni][3] = 0.f;
+    }
+
+    // ---- Outer K-tile loop: iterate over K in steps of TILE_K.
+    for (int k_offset = 0; k_offset < K; k_offset += TILE_K) {
+        // Byte offsets into the packed FP4 and scale buffers.
+        const int k_packed_off = k_offset / 2;        // FP4: 2 nibbles per byte
+        const int k_sf_off     = k_offset / 16;       // UE4M3: 1 byte per 16 FP4 elems
+
+        // ---- Stage 1: cp.async A tile. 8 KiB in 16-byte chunks = 512 ops / 256 = 2/thread.
+        {
+            constexpr int N_OPS = A_TILE_BYTES / 16;          // 512
+            for (int op = tid; op < N_OPS; op += n_threads) {
+                int row   = op / (A_BYTES_ROW / 16);           // op / 4
+                int chunk = op % (A_BYTES_ROW / 16);           // 0..3
+                uint8_t* dst = smem_A + (size_t)row * A_BYTES_ROW + chunk * 16;
+                if (row < M_eff) {
+                    const uint8_t* src = A_e + (size_t)row * K_half + k_packed_off + chunk * 16;
+                    cp_async_cg_16_local(dst, src);
+                } else {
+                    ulonglong2 z = {0ULL, 0ULL};
+                    *reinterpret_cast<ulonglong2*>(dst) = z;
+                }
+            }
+        }
+
+        // ---- Stage 2: cp.async B tile. 8 KiB / 16 / 256 = 2/thread.
+        {
+            constexpr int N_OPS = B_TILE_BYTES / 16;
+            for (int op = tid; op < N_OPS; op += n_threads) {
+                int row   = op / (B_BYTES_ROW / 16);
+                int chunk = op % (B_BYTES_ROW / 16);
+                int n_global = n_base + row;
+                uint8_t* dst = smem_B + (size_t)row * B_BYTES_ROW + chunk * 16;
+                if (n_global < N) {
+                    const uint8_t* src = B_e + (size_t)n_global * K_half + k_packed_off + chunk * 16;
+                    cp_async_cg_16_local(dst, src);
+                } else {
+                    ulonglong2 z = {0ULL, 0ULL};
+                    *reinterpret_cast<ulonglong2*>(dst) = z;
+                }
+            }
+        }
+
+        // ---- Stage 3: cp.async SFA. 1 KiB row stride 8 → 1 op of 8 bytes per row;
+        // 128 rows / 256 threads → many idle. Keep it simple with 8-byte cp.async.
+        {
+            constexpr int N_OPS = SFA_TILE_BYTES / 8;          // 128
+            for (int op = tid; op < N_OPS; op += n_threads) {
+                int row = op;
+                uint8_t* dst = smem_SFA + (size_t)row * SFA_BYTES_ROW;
+                if (row < M_eff) {
+                    const uint8_t* src = SFA_e + (size_t)row * K_groups + k_sf_off;
+                    cp_async_ca_8_local(dst, src);
+                } else {
+                    *reinterpret_cast<uint64_t*>(dst) = 0ULL;
+                }
+            }
+        }
+
+        // ---- Stage 4: cp.async SFB. Same shape.
+        {
+            constexpr int N_OPS = SFB_TILE_BYTES / 8;          // 128
+            for (int op = tid; op < N_OPS; op += n_threads) {
+                int row = op;
+                int n_global = n_base + row;
+                uint8_t* dst = smem_SFB + (size_t)row * SFB_BYTES_ROW;
+                if (n_global < N) {
+                    const uint8_t* src = SFB_e + (size_t)n_global * K_groups + k_sf_off;
+                    cp_async_ca_8_local(dst, src);
+                } else {
+                    *reinterpret_cast<uint64_t*>(dst) = 0ULL;
+                }
+            }
+        }
+
+        cp_async_commit_local();
+        cp_async_wait_group_local<0>();
+        __syncthreads();
+
+        // ---- MMA loop: warp 0 only, walks 8×16 sub-tiles, 2 K-stripes each.
+        //      Accumulates into acc[mi][ni] — NOT re-zeroed between K-tiles.
+        if (warp_id == 0) {
+            const int T0 = lane_id & 3;           // thread_in_group ∈ [0,4)
+            const int T1 = lane_id >> 2;          // group_id ∈ [0,8)
+            const int byte_offset = T0 * 4;
+            const int m_sfa = T1 + (T0 & 1) * 8; // 16 unique m's (T0%2 broadcasts)
+            const int n_sfb = T1;                 // 8 unique n's
+
+            #pragma unroll 1
+            for (int mi = 0; mi < M_SUBTILES; ++mi) {
+                const int m_lo = mi * 16 + T1;    // m for a0, a2
+                const int m_hi = m_lo + 8;        // m for a1, a3
+
+                #pragma unroll 1
+                for (int ni = 0; ni < N_SUBTILES; ++ni) {
+                    const int n_b = ni * 8 + T1;  // n for b0, b1
+
+                    #pragma unroll
+                    for (int ki = 0; ki < K_STRIPES; ++ki) {
+                        const int stripe_byte = ki * 32;
+                        const int kg_base = ki * 4;
+
+                        // A fragment (4 b32). Reads 4 bytes (8 nibbles) per register.
+                        uint32_t a0, a1, a2, a3;
+                        a0 = *reinterpret_cast<const uint32_t*>(
+                            smem_A + (size_t)m_lo * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
+                        a1 = *reinterpret_cast<const uint32_t*>(
+                            smem_A + (size_t)m_hi * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
+                        a2 = *reinterpret_cast<const uint32_t*>(
+                            smem_A + (size_t)m_lo * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
+                        a3 = *reinterpret_cast<const uint32_t*>(
+                            smem_A + (size_t)m_hi * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
+
+                        // B fragment (2 b32).
+                        uint32_t b0, b1;
+                        b0 = *reinterpret_cast<const uint32_t*>(
+                            smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte +  0 + byte_offset);
+                        b1 = *reinterpret_cast<const uint32_t*>(
+                            smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte + 16 + byte_offset);
+
+                        // Scale fragments (1 b32 each = 4 UE4M3 bytes).
+                        uint32_t sfa = *reinterpret_cast<const uint32_t*>(
+                            smem_SFA + (size_t)(mi * 16 + m_sfa) * SFA_BYTES_ROW + kg_base);
+                        uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                            smem_SFB + (size_t)(ni * 8  + n_sfb) * SFB_BYTES_ROW + kg_base);
+
+                        uint32_t a_arr[4] = {a0, a1, a2, a3};
+                        uint32_t b_arr[2] = {b0, b1};
+                        mma_sync_mxf4nvf4_m16n8k64(acc[mi][ni], a_arr, b_arr, sfa, sfb);
+                    }
+                }
+            }
+        }
+
+        // All threads must sync before the next iteration overwrites SMEM.
+        __syncthreads();
+    }  // end outer K-tile loop
+
+    // ---- Epilogue: warp 0 casts accumulated FP32 → FP16 and writes to global D.
+    //      SM80_16x8_Row (T32,V4)→(M16,N8). Apply alpha.
+    if (warp_id == 0) {
+        const int T0 = lane_id & 3;
+        const int T1 = lane_id >> 2;
 
         #pragma unroll 1
-        for (int ni = 0; ni < N_SUBTILES; ++ni) {
-            const int n_b = ni * 8 + T1;      // n for b0, b1
+        for (int mi = 0; mi < M_SUBTILES; ++mi) {
+            #pragma unroll 1
+            for (int ni = 0; ni < N_SUBTILES; ++ni) {
+                const int m0 = mi * 16 + T1;
+                const int m1 = m0 + 8;
+                const int n0_local = ni * 8 + T0 * 2;
+                const int n1_local = n0_local + 1;
+                const int n0_g = n_base + n0_local;
+                const int n1_g = n_base + n1_local;
 
-            float d[4] = {0.f, 0.f, 0.f, 0.f};
+                const float a0_out = acc[mi][ni][0] * alpha;
+                const float a1_out = acc[mi][ni][1] * alpha;
+                const float a2_out = acc[mi][ni][2] * alpha;
+                const float a3_out = acc[mi][ni][3] * alpha;
 
-            #pragma unroll
-            for (int ki = 0; ki < K_STRIPES; ++ki) {
-                const int stripe_byte = ki * 32;
-                const int kg_base = ki * 4;
-
-                // A fragment (4 b32). Reads 4 bytes (8 nibbles) per register.
-                uint32_t a0, a1, a2, a3;
-                a0 = *reinterpret_cast<const uint32_t*>(
-                    smem_A + (size_t)m_lo * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                a1 = *reinterpret_cast<const uint32_t*>(
-                    smem_A + (size_t)m_hi * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                a2 = *reinterpret_cast<const uint32_t*>(
-                    smem_A + (size_t)m_lo * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
-                a3 = *reinterpret_cast<const uint32_t*>(
-                    smem_A + (size_t)m_hi * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
-
-                // B fragment (2 b32).
-                uint32_t b0, b1;
-                b0 = *reinterpret_cast<const uint32_t*>(
-                    smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                b1 = *reinterpret_cast<const uint32_t*>(
-                    smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte + 16 + byte_offset);
-
-                // Scale fragments (1 b32 each = 4 UE4M3 bytes).
-                uint32_t sfa = *reinterpret_cast<const uint32_t*>(
-                    smem_SFA + (size_t)(mi * 16 + m_sfa) * SFA_BYTES_ROW + kg_base);
-                uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                    smem_SFB + (size_t)(ni * 8  + n_sfb) * SFB_BYTES_ROW + kg_base);
-
-                uint32_t a_arr[4] = {a0, a1, a2, a3};
-                uint32_t b_arr[2] = {b0, b1};
-                mma_sync_mxf4nvf4_m16n8k64(d, a_arr, b_arr, sfa, sfb);
+                if (m0 < M_eff && n0_g < N)
+                    D_e[(size_t)m0 * N + n0_g] = __float2half(a0_out);
+                if (m0 < M_eff && n1_g < N)
+                    D_e[(size_t)m0 * N + n1_g] = __float2half(a1_out);
+                if (m1 < M_eff && n0_g < N)
+                    D_e[(size_t)m1 * N + n0_g] = __float2half(a2_out);
+                if (m1 < M_eff && n1_g < N)
+                    D_e[(size_t)m1 * N + n1_g] = __float2half(a3_out);
             }
-
-            // ---- Epilogue: SM80_16x8_Row (T32,V4)→(M16,N8). Apply alpha.
-            const int m0 = mi * 16 + T1;
-            const int m1 = m0 + 8;
-            const int n0_local = ni * 8 + T0 * 2;
-            const int n1_local = n0_local + 1;
-            const int n0_g = n_base + n0_local;
-            const int n1_g = n_base + n1_local;
-
-            const float a0_out = d[0] * alpha;
-            const float a1_out = d[1] * alpha;
-            const float a2_out = d[2] * alpha;
-            const float a3_out = d[3] * alpha;
-
-            if (m0 < M_eff && n0_g < N)
-                D_e[(size_t)m0 * N + n0_g] = __float2half(a0_out);
-            if (m0 < M_eff && n1_g < N)
-                D_e[(size_t)m0 * N + n1_g] = __float2half(a1_out);
-            if (m1 < M_eff && n0_g < N)
-                D_e[(size_t)m1 * N + n0_g] = __float2half(a2_out);
-            if (m1 < M_eff && n1_g < N)
-                D_e[(size_t)m1 * N + n1_g] = __float2half(a3_out);
         }
     }
 }
