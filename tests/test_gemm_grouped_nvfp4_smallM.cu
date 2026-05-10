@@ -371,6 +371,225 @@ TEST(SmallMKernel, SingleExpertK2048) {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-expert test (Task 1.9).
+// 4 experts with varying M_e: {128, 128, 64, 32}, N=256, K=512.
+// All M_e ≤ 128 (Phase A constraint). Smaller experts (M_e=64, 32) round up
+// to TILE_M=128 internally — padding rows do useless compute but the actual
+// M_e output rows must be numerically correct.
+// ---------------------------------------------------------------------------
+TEST(SmallMKernel, FourExpertsVaryingM) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+
+    const int N = 256, K = 512, ne = 4;
+    const int M_per[ne] = {128, 128, 64, 32};
+
+    // Build per-expert weights B[e][N, K] FP16, quantize each.
+    std::vector<imp::NvFP4QuantResult> B_q(ne);
+    std::vector<std::vector<__half>> h_B_fp16(ne);
+    for (int e = 0; e < ne; ++e) {
+        std::mt19937 rng(13 + e);
+        std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+        h_B_fp16[e].resize((size_t)N * K);
+        for (auto& v : h_B_fp16[e]) v = __float2half(dist(rng));
+        __half* d_B_fp16 = nullptr;
+        cudaMalloc(&d_B_fp16, (size_t)N * K * sizeof(__half));
+        cudaMemcpy(d_B_fp16, h_B_fp16[e].data(), (size_t)N * K * sizeof(__half), cudaMemcpyHostToDevice);
+        int64_t b_shape[2] = {N, K};
+        imp::Tensor B_t(d_B_fp16, imp::QType::F16, 2, b_shape, true);
+        imp::quantize_fp16_to_nvfp4(B_t, B_q[e], /*stream*/0);
+        cudaStreamSynchronize(0);
+        cudaFree(d_B_fp16);
+    }
+
+    // Build activations: total_M = sum(M_per), [total_M, K] FP16.
+    int h_offsets[ne + 1];
+    h_offsets[0] = 0;
+    for (int e = 0; e < ne; ++e) h_offsets[e + 1] = h_offsets[e] + M_per[e];
+    int total_M = h_offsets[ne];
+
+    std::vector<__half> h_A_fp16((size_t)total_M * K);
+    {
+        std::mt19937 rng_a(7);
+        std::uniform_real_distribution<float> dist_a(-1.f, 1.f);
+        for (auto& v : h_A_fp16) v = __float2half(dist_a(rng_a));
+    }
+    __half* d_A_fp16 = nullptr;
+    cudaMalloc(&d_A_fp16, (size_t)total_M * K * sizeof(__half));
+    cudaMemcpy(d_A_fp16, h_A_fp16.data(), (size_t)total_M * K * sizeof(__half), cudaMemcpyHostToDevice);
+
+    // Upload offsets for moe_native quantize.
+    int* d_offsets = nullptr;
+    cudaMalloc(&d_offsets, (ne + 1) * sizeof(int));
+    cudaMemcpy(d_offsets, h_offsets, (ne + 1) * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Allocate per-expert packed/SF/output buffers.
+    std::vector<void*> d_packed(ne), d_sf(ne), d_D(ne);
+    for (int e = 0; e < ne; ++e) {
+        cudaMalloc(&d_packed[e], (size_t)M_per[e] * K / 2);
+        cudaMalloc(&d_sf[e],     (size_t)M_per[e] * K / 16);
+        cudaMalloc(&d_D[e],      (size_t)M_per[e] * N * sizeof(__half));
+        cudaMemset(d_D[e], 0,    (size_t)M_per[e] * N * sizeof(__half));
+    }
+
+    // Quantize activations via moe_native (per-expert packed + SF buffers).
+    imp::quantize_fp16_to_nvfp4_moe_native(
+        d_A_fp16, d_packed.data(), d_sf.data(), d_offsets, total_M, K, ne, /*stream*/0);
+    cudaStreamSynchronize(0);
+
+    // Compute per-expert tensor_scale for A (mirrors moe_native: absmax/6).
+    std::vector<float> a_tensor_scale(ne);
+    for (int e = 0; e < ne; ++e) {
+        float absmax = 0.f;
+        const __half* row = h_A_fp16.data() + (size_t)h_offsets[e] * K;
+        for (int i = 0; i < M_per[e] * K; ++i)
+            absmax = std::max(absmax, std::fabs(__half2float(row[i])));
+        a_tensor_scale[e] = (absmax == 0.f) ? 1.f : (absmax / 6.0f);
+    }
+
+    // Run kernel.
+    std::vector<const void*> A_arr(ne), SFA_arr(ne), B_arr(ne), SFB_arr(ne);
+    std::vector<float> alpha(ne);
+    for (int e = 0; e < ne; ++e) {
+        A_arr[e]   = d_packed[e];
+        SFA_arr[e] = d_sf[e];
+        B_arr[e]   = B_q[e].packed_data;
+        SFB_arr[e] = B_q[e].micro_scales;
+        alpha[e]   = a_tensor_scale[e] * B_q[e].tensor_scale;
+    }
+    bool ok = imp::gemm_grouped_nvfp4_smallM(
+        ne, M_per, N, K, A_arr.data(), SFA_arr.data(),
+        B_arr.data(), SFB_arr.data(), d_D.data(), alpha.data(), /*stream*/0);
+    ASSERT_TRUE(ok);
+    cudaError_t err = cudaDeviceSynchronize();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    // Per-expert reference + check (same CTRL-based approach as run_smallm_single_expert).
+    const float kFP4Mag[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
+    auto ue4m3 = [&](uint8_t b) {
+        uint32_t sign = (b >> 7) & 1;
+        uint32_t exp  = (b >> 3) & 0x0F;
+        uint32_t man  = b & 0x07;
+        uint32_t fp32;
+        if (exp == 0) {
+            float v = (float)man * (1.0f / 512.0f);
+            std::memcpy(&fp32, &v, 4);
+            fp32 |= (sign << 31);
+        } else {
+            fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
+        }
+        float r;
+        std::memcpy(&r, &fp32, 4);
+        return r;
+    };
+
+    for (int e = 0; e < ne; ++e) {
+        int M_e = M_per[e];
+        const __half* A_e = h_A_fp16.data() + (size_t)h_offsets[e] * K;
+
+        // Dequantize A_e (per moe_native layout).
+        std::vector<uint8_t> h_A_packed_v((size_t)M_e * K / 2);
+        std::vector<uint8_t> h_A_sf_v((size_t)M_e * K / 16);
+        cudaMemcpy(h_A_packed_v.data(), d_packed[e], h_A_packed_v.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_A_sf_v.data(),     d_sf[e],     h_A_sf_v.size(),     cudaMemcpyDeviceToHost);
+        std::vector<__half> h_A_dq((size_t)M_e * K);
+        for (int m = 0; m < M_e; ++m) {
+            for (int kb = 0; kb < K / 16; ++kb) {
+                float sf = ue4m3(h_A_sf_v[(size_t)m * (K / 16) + kb]);
+                for (int j = 0; j < 8; ++j) {
+                    uint8_t byte = h_A_packed_v[(size_t)m * (K / 2) + kb * 8 + j];
+                    uint8_t lo = byte & 0xF, hi = (byte >> 4) & 0xF;
+                    float v0 = kFP4Mag[lo & 7] * (lo & 8 ? -1.f : 1.f) * sf * a_tensor_scale[e];
+                    float v1 = kFP4Mag[hi & 7] * (hi & 8 ? -1.f : 1.f) * sf * a_tensor_scale[e];
+                    h_A_dq[(size_t)m * K + kb * 16 + j * 2]     = __float2half(v0);
+                    h_A_dq[(size_t)m * K + kb * 16 + j * 2 + 1] = __float2half(v1);
+                }
+            }
+        }
+
+        // Dequantize B_e.
+        std::vector<uint8_t> h_B_packed_v((size_t)N * K / 2);
+        std::vector<uint8_t> h_B_sf_v((size_t)N * K / 16);
+        cudaMemcpy(h_B_packed_v.data(), B_q[e].packed_data,  h_B_packed_v.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_B_sf_v.data(),     B_q[e].micro_scales, h_B_sf_v.size(),     cudaMemcpyDeviceToHost);
+        std::vector<__half> h_B_dq((size_t)N * K);
+        for (int n = 0; n < N; ++n) {
+            for (int kb = 0; kb < K / 16; ++kb) {
+                float sf = ue4m3(h_B_sf_v[(size_t)n * (K / 16) + kb]);
+                for (int j = 0; j < 8; ++j) {
+                    uint8_t byte = h_B_packed_v[(size_t)n * (K / 2) + kb * 8 + j];
+                    uint8_t lo = byte & 0xF, hi = (byte >> 4) & 0xF;
+                    float v0 = kFP4Mag[lo & 7] * (lo & 8 ? -1.f : 1.f) * sf * B_q[e].tensor_scale;
+                    float v1 = kFP4Mag[hi & 7] * (hi & 8 ? -1.f : 1.f) * sf * B_q[e].tensor_scale;
+                    h_B_dq[(size_t)n * K + kb * 16 + j * 2]     = __float2half(v0);
+                    h_B_dq[(size_t)n * K + kb * 16 + j * 2 + 1] = __float2half(v1);
+                }
+            }
+        }
+
+        // FP32 reference (pre-quant FP16 inputs).
+        std::vector<float> ref((size_t)M_e * N, 0.f);
+        for (int m = 0; m < M_e; ++m) {
+            for (int n = 0; n < N; ++n) {
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k)
+                    acc += __half2float(A_e[(size_t)m * K + k]) *
+                           __half2float(h_B_fp16[e][(size_t)n * K + k]);
+                ref[(size_t)m * N + n] = acc;
+            }
+        }
+
+        // Post-quantize ideal (CTRL): dequantized A × dequantized B.
+        std::vector<float> ctrl((size_t)M_e * N, 0.f);
+        for (int m = 0; m < M_e; ++m) {
+            for (int n = 0; n < N; ++n) {
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k)
+                    acc += __half2float(h_A_dq[(size_t)m * K + k]) *
+                           __half2float(h_B_dq[(size_t)n * K + k]);
+                ctrl[(size_t)m * N + n] = acc;
+            }
+        }
+
+        // Fetch kernel output.
+        std::vector<__half> got((size_t)M_e * N);
+        cudaMemcpy(got.data(), d_D[e], (size_t)M_e * N * sizeof(__half), cudaMemcpyDeviceToHost);
+
+        // Tolerance: kernel vs CTRL (post-quantize ideal) relative RMSE < 1%.
+        float max_abs_ref = 0.f;
+        for (int i = 0; i < M_e * N; ++i)
+            max_abs_ref = std::max(max_abs_ref, std::fabs(ref[i]));
+
+        double sum_sq_err_ctrl = 0.0, sum_sq_ctrl = 0.0;
+        float max_abs_err_ctrl = 0.f;
+        for (int i = 0; i < M_e * N; ++i) {
+            float g = __half2float(got[i]);
+            float c = ctrl[i];
+            float diff = g - c;
+            sum_sq_err_ctrl += (double)diff * diff;
+            sum_sq_ctrl += (double)c * c;
+            max_abs_err_ctrl = std::max(max_abs_err_ctrl, std::fabs(diff));
+        }
+        double rmse_rel_ctrl = std::sqrt(sum_sq_err_ctrl / std::max(sum_sq_ctrl, 1e-12));
+
+        EXPECT_LT(rmse_rel_ctrl, 1e-2)
+            << "expert " << e << " (M_e=" << M_e << ")"
+            << " rmse_rel_ctrl=" << rmse_rel_ctrl
+            << " max_abs_err_ctrl=" << max_abs_err_ctrl
+            << " | max|ref|=" << max_abs_ref;
+    }
+
+    // Cleanup.
+    cudaFree(d_A_fp16);
+    cudaFree(d_offsets);
+    for (int e = 0; e < ne; ++e) {
+        cudaFree(d_packed[e]);
+        cudaFree(d_sf[e]);
+        cudaFree(d_D[e]);
+        imp::free_nvfp4_result(B_q[e]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostic cross-check: run the production HW MMA kernel and the software
 // reference kernel on the SAME quantized inputs, then compare element-wise.
 // Compiled only with SMALLM_SOFTWARE_REF — not part of the default suite,
