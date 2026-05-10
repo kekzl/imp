@@ -26,6 +26,8 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_smallM.h"
+#include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -1288,10 +1290,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // Gated by IMP_CUTLASS3X_MOE=1. Zero dequant overhead vs the nvfp4→FP16
                     // batch path; per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
                     // =========================================================================
-                    if (layer == 0)
-                        IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n,
-                                     expanded);
-
                     std::vector<int32_t> h_offsets(ne + 1);
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
@@ -1307,6 +1305,255 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
                     char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
                     char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+                    // ---------------------------------------------------------------------
+                    // Optional smallM kernel branch — opt-in via IMP_NVFP4_SMALLM=1.
+                    // Activates when max(M_per) <= IMP_NVFP4_SMALLM_THRESHOLD (default 64)
+                    // AND all three NVFP4 native MoE pointers are populated for this layer
+                    // (the native [n_experts, N, K/16] layout is what smallM consumes).
+                    // Falls through to CUTLASS 3.x on any failure / unavailability.
+                    // ---------------------------------------------------------------------
+                    bool smallM_done = false;
+                    {
+                        const char* smallM_env = ::getenv("IMP_NVFP4_SMALLM");
+                        const bool smallM_optin = smallM_env && atoi(smallM_env) != 0;
+                        if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
+                            const char* thr_env = ::getenv("IMP_NVFP4_SMALLM_THRESHOLD");
+                            const int smallM_threshold =
+                                thr_env ? std::clamp(atoi(thr_env), 0, 128) : 64;
+                            int max_M = 0;
+                            for (int e = 0; e < ne; ++e)
+                                max_M = std::max(max_M, M_per[e]);
+                            const bool native_up_ok = (ly.nvfp4_moe_up_ptr != nullptr);
+                            const bool native_down_ok = (ly.nvfp4_moe_down_ptr != nullptr);
+                            const bool native_gate_ok =
+                                non_gated_experts || (ly.nvfp4_moe_gate_ptr != nullptr);
+                            const bool gate_ne_ok =
+                                non_gated_experts ||
+                                (ly.nvfp4_moe_gate_ptr && ly.nvfp4_moe_gate_ptr->n_experts == ne);
+                            const bool up_ne_ok =
+                                native_up_ok && ly.nvfp4_moe_up_ptr->n_experts == ne;
+                            const bool down_ne_ok =
+                                native_down_ok && ly.nvfp4_moe_down_ptr->n_experts == ne;
+                            const bool use_smallM = max_M > 0 && max_M <= smallM_threshold &&
+                                                    native_up_ok && native_down_ok &&
+                                                    native_gate_ok && up_ne_ok && down_ne_ok &&
+                                                    gate_ne_ok;
+                            if (use_smallM) {
+                                if (layer == 0) {
+                                    IMP_LOG_INFO(
+                                        "MoE prefill: smallM kernel branch (n=%d, expanded=%d, "
+                                        "max_M=%d, thr=%d)",
+                                        n, expanded, max_M, smallM_threshold);
+                                }
+
+                                // Per-expert offsets into the activation scratch (native
+                                // row-major: K/2 bytes per FP4 row, K/16 per UE4M3-SF row).
+                                auto compute_offsets =
+                                    [&](int K_in, std::vector<size_t>& packed_offs,
+                                        std::vector<size_t>& sf_offs) {
+                                        packed_offs.assign(ne + 1, 0);
+                                        sf_offs.assign(ne + 1, 0);
+                                        for (int e = 0; e < ne; ++e) {
+                                            packed_offs[e + 1] =
+                                                packed_offs[e] +
+                                                static_cast<size_t>(M_per[e]) * K_in / 2;
+                                            sf_offs[e + 1] =
+                                                sf_offs[e] +
+                                                static_cast<size_t>(M_per[e]) * K_in / 16;
+                                        }
+                                    };
+
+                                char* act_packed_base =
+                                    static_cast<char*>(moe_.cutlass3x_packed);
+                                char* act_sf_base = static_cast<char*>(moe_.cutlass3x_sf);
+
+                                std::vector<size_t> packed_offs_du, sf_offs_du;
+                                compute_offsets(d, packed_offs_du, sf_offs_du);
+
+                                bool ok = (packed_offs_du[ne] <= moe_.cutlass3x_packed_size) &&
+                                          (sf_offs_du[ne] <= moe_.cutlass3x_sf_size);
+                                if (!ok) {
+                                    IMP_LOG_ERROR(
+                                        "smallM gate/up scratch too small (need %zu/%zu, "
+                                        "have %zu/%zu); falling back to CUTLASS 3.x",
+                                        packed_offs_du[ne], sf_offs_du[ne],
+                                        moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                                }
+
+                                std::vector<void*> act_packed_ptrs(ne), act_sf_ptrs(ne);
+                                std::vector<float> h_act_tscales(ne, 1.0f);
+                                float* d_act_tscales = nullptr;
+                                if (ok) {
+                                    for (int e = 0; e < ne; ++e) {
+                                        act_packed_ptrs[e] = act_packed_base + packed_offs_du[e];
+                                        act_sf_ptrs[e] = act_sf_base + sf_offs_du[e];
+                                    }
+
+                                    // Allocate a transient device buffer for per-expert
+                                    // activation tensor_scales. Tiny — ne*4 bytes.
+                                    IMP_CUDA_CHECK_LOG(cudaMallocAsync(
+                                        &d_act_tscales,
+                                        static_cast<size_t>(ne) * sizeof(float), stream));
+                                    // Quantize gathered FP16 activations native row-major,
+                                    // and have the kernel emit per-expert tensor_scales.
+                                    imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
+                                        reinterpret_cast<const __half*>(gathered_base),
+                                        act_packed_ptrs.data(), act_sf_ptrs.data(),
+                                        d_act_tscales,
+                                        static_cast<const int*>(routing.expert_offsets.data),
+                                        expanded, d, ne, stream);
+                                    // Read back per-expert activation tensor_scales (D2H sync).
+                                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                        h_act_tscales.data(), d_act_tscales,
+                                        static_cast<size_t>(ne) * sizeof(float),
+                                        cudaMemcpyDeviceToHost, stream));
+                                    cudaStreamSynchronize(stream);
+                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
+                                }
+
+                                // Build per-expert weight pointer arrays from the native
+                                // NvFP4MoEQuantResult cache. smallM expects alpha = product
+                                // of activation tensor_scale and weight tensor_scale per
+                                // expert (test_gemm_grouped_nvfp4_smallM:182 convention).
+                                auto run_proj = [&](const NvFP4MoEQuantResult* W,
+                                                    const std::vector<void*>& act_packed,
+                                                    const std::vector<void*>& act_sf,
+                                                    const std::vector<float>& h_act_ts, char* c_base,
+                                                    int K_in, int N_out) -> bool {
+                                    std::vector<float> h_w_tscales(ne, 1.0f);
+                                    if (W && W->tensor_scales) {
+                                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                            h_w_tscales.data(), W->tensor_scales,
+                                            static_cast<size_t>(ne) * sizeof(float),
+                                            cudaMemcpyDeviceToHost, stream));
+                                        cudaStreamSynchronize(stream);
+                                    }
+                                    std::vector<int> active_M_local;
+                                    std::vector<const void*> hA, hSFA, hB, hSFB;
+                                    std::vector<void*> hD;
+                                    std::vector<float> hAlpha;
+                                    active_M_local.reserve(ne);
+                                    hA.reserve(ne);
+                                    hSFA.reserve(ne);
+                                    hB.reserve(ne);
+                                    hSFB.reserve(ne);
+                                    hD.reserve(ne);
+                                    hAlpha.reserve(ne);
+                                    for (int e = 0; e < ne; ++e) {
+                                        if (M_per[e] == 0)
+                                            continue;
+                                        active_M_local.push_back(M_per[e]);
+                                        hA.push_back(act_packed[e]);
+                                        hSFA.push_back(act_sf[e]);
+                                        hB.push_back(static_cast<char*>(W->packed_data) +
+                                                     static_cast<size_t>(e) *
+                                                         W->expert_stride_packed);
+                                        hSFB.push_back(static_cast<char*>(W->micro_scales) +
+                                                       static_cast<size_t>(e) *
+                                                           W->expert_stride_ms);
+                                        hD.push_back(c_base +
+                                                     static_cast<size_t>(h_offsets[e]) * N_out *
+                                                         sizeof(half));
+                                        hAlpha.push_back(h_act_ts[e] * h_w_tscales[e]);
+                                    }
+                                    const int na = static_cast<int>(active_M_local.size());
+                                    if (na == 0)
+                                        return true;
+                                    return imp::gemm_grouped_nvfp4_smallM(
+                                        na, active_M_local.data(), N_out, K_in, hA.data(),
+                                        hSFA.data(), hB.data(), hSFB.data(), hD.data(),
+                                        hAlpha.data(), stream);
+                                };
+
+                                bool ok_gate = ok;
+                                if (ok && !non_gated_experts) {
+                                    ok_gate = run_proj(ly.nvfp4_moe_gate_ptr, act_packed_ptrs,
+                                                       act_sf_ptrs, h_act_tscales,
+                                                       expert_gate_base, d, eff);
+                                }
+                                bool ok_up = ok;
+                                if (ok) {
+                                    ok_up = run_proj(ly.nvfp4_moe_up_ptr, act_packed_ptrs,
+                                                     act_sf_ptrs, h_act_tscales,
+                                                     expert_up_base, d, eff);
+                                }
+
+                                if (ok && ok_gate && ok_up) {
+                                    apply_expert_activation(
+                                        moe_.expert_gate.data, moe_.expert_up.data,
+                                        moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
+                                        compute_dtype_, cfg.ffn_activation, stream);
+
+                                    // Down projection: re-quantize post-activation buffer
+                                    // (K_in = eff). Reuse staging via stream-ordered
+                                    // overwrite.
+                                    std::vector<size_t> packed_offs_dn, sf_offs_dn;
+                                    compute_offsets(eff, packed_offs_dn, sf_offs_dn);
+                                    bool down_ok =
+                                        (packed_offs_dn[ne] <= moe_.cutlass3x_packed_size) &&
+                                        (sf_offs_dn[ne] <= moe_.cutlass3x_sf_size);
+                                    if (!down_ok) {
+                                        IMP_LOG_ERROR(
+                                            "smallM down scratch too small (need %zu/%zu, "
+                                            "have %zu/%zu); falling back to CUTLASS 3.x",
+                                            packed_offs_dn[ne], sf_offs_dn[ne],
+                                            moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                                    }
+                                    if (down_ok) {
+                                        for (int e = 0; e < ne; ++e) {
+                                            act_packed_ptrs[e] =
+                                                act_packed_base + packed_offs_dn[e];
+                                            act_sf_ptrs[e] = act_sf_base + sf_offs_dn[e];
+                                        }
+                                        char* down_act = non_gated_experts ? expert_up_base
+                                                                            : expert_swiglu_base;
+                                        // Re-quantize post-SwiGLU activations and emit
+                                        // per-expert tensor_scales for the down GEMM alpha.
+                                        std::vector<float> h_act_tscales_dn(ne, 1.0f);
+                                        float* d_act_tscales_dn = nullptr;
+                                        IMP_CUDA_CHECK_LOG(cudaMallocAsync(
+                                            &d_act_tscales_dn,
+                                            static_cast<size_t>(ne) * sizeof(float), stream));
+                                        imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
+                                            reinterpret_cast<const __half*>(down_act),
+                                            act_packed_ptrs.data(), act_sf_ptrs.data(),
+                                            d_act_tscales_dn,
+                                            static_cast<const int*>(routing.expert_offsets.data),
+                                            expanded, eff, ne, stream);
+                                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                            h_act_tscales_dn.data(), d_act_tscales_dn,
+                                            static_cast<size_t>(ne) * sizeof(float),
+                                            cudaMemcpyDeviceToHost, stream));
+                                        cudaStreamSynchronize(stream);
+                                        IMP_CUDA_CHECK_LOG(
+                                            cudaFreeAsync(d_act_tscales_dn, stream));
+                                        bool ok_down =
+                                            run_proj(ly.nvfp4_moe_down_ptr, act_packed_ptrs,
+                                                     act_sf_ptrs, h_act_tscales_dn,
+                                                     expert_down_base, eff, d);
+                                        if (ok_down) {
+                                            smallM_done = true;
+                                        } else {
+                                            IMP_LOG_ERROR(
+                                                "smallM down dispatch failed; falling back to "
+                                                "CUTLASS 3.x");
+                                        }
+                                    }
+                                } else if (ok) {
+                                    IMP_LOG_ERROR(
+                                        "smallM gate/up dispatch failed; falling back to "
+                                        "CUTLASS 3.x");
+                                }
+                            }
+                        }
+                    }
+
+                    if (!smallM_done && layer == 0)
+                        IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)",
+                                     n, expanded);
+
+                    if (!smallM_done) {
 
                     // Active-expert SFA offset table (computed per K_in; different for d vs eff).
                     // Shared across same-K_in projections: gate and up both use K_in=d,
@@ -1413,6 +1660,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
                         grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);
                     }
+                    }  // !smallM_done
 
                     // Falls through to scatter (step 7)
 

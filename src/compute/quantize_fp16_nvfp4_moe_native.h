@@ -35,4 +35,20 @@ void quantize_fp16_to_nvfp4_moe_native(
     int n_experts,
     cudaStream_t stream);
 
+// Same as above, but additionally writes per-expert FP32 tensor scale into
+// `d_tensor_scales` (device pointer to [n_experts] FP32). The convention is
+// `tensor_scale_e = absmax_e / 6.0` (1.0 if absmax_e==0), matching the
+// internal scale used during quantization. Required for the smallM grouped
+// GEMM dispatch which folds (a_tensor_scale * b_tensor_scale) into alpha.
+void quantize_fp16_to_nvfp4_moe_native_with_scales(
+    const __half* src_fp16,
+    void* const* d_packed_ptrs,
+    void* const* d_sf_ptrs,
+    float* d_tensor_scales,              // [n_experts] FP32, written by callee
+    const int* d_expert_offsets,
+    int expanded,
+    int K,
+    int n_experts,
+    cudaStream_t stream);
+
 }  // namespace imp

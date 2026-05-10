@@ -200,13 +200,28 @@ __global__ void nvfp4_moe_native_quant_kernel(
     }
 }
 
+// Tiny finalization kernel: convert per-expert absmax → tensor_scale (absmax/6,
+// or 1.0 if absmax==0). One thread per expert.
+__global__ void nvfp4_moe_native_finalize_scales_kernel(
+    const float* __restrict__ d_absmax,  // [ne]
+    float* __restrict__ d_tensor_scales, // [ne]
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= n_experts)
+        return;
+    float a = d_absmax[e];
+    d_tensor_scales[e] = (a == 0.0f) ? 1.0f : (a / kNativeFP4E2M1Max);
+}
+
 // ---------------------------------------------------------------------------
-// Host entry point
+// Host entry points
 // ---------------------------------------------------------------------------
-void quantize_fp16_to_nvfp4_moe_native(
+static void quantize_fp16_to_nvfp4_moe_native_impl(
     const __half* src_fp16,
     void* const* d_packed_ptrs,
     void* const* d_sf_ptrs,
+    float* d_tensor_scales_opt,          // optional: nullptr to skip
     const int* d_expert_offsets,
     int expanded,
     int K,
@@ -243,6 +258,14 @@ void quantize_fp16_to_nvfp4_moe_native(
             src_fp16, d_expert_offsets, K, d_absmax);
     }
 
+    // Optional pass 1.5: write per-expert tensor_scales = absmax/6 to caller buffer.
+    if (d_tensor_scales_opt) {
+        int threads = 64;
+        int blocks = (n_experts + threads - 1) / threads;
+        nvfp4_moe_native_finalize_scales_kernel<<<blocks, threads, 0, stream>>>(
+            d_absmax, d_tensor_scales_opt, n_experts);
+    }
+
     // Pass 2: quantize (one CTA-x per expert, CTA-y slices for parallelism).
     {
         dim3 block(256);
@@ -259,6 +282,37 @@ void quantize_fp16_to_nvfp4_moe_native(
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_packed_dev, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_sf_dev,     stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_absmax,     stream));
+}
+
+void quantize_fp16_to_nvfp4_moe_native(
+    const __half* src_fp16,
+    void* const* d_packed_ptrs,
+    void* const* d_sf_ptrs,
+    const int* d_expert_offsets,
+    int expanded,
+    int K,
+    int n_experts,
+    cudaStream_t stream)
+{
+    quantize_fp16_to_nvfp4_moe_native_impl(
+        src_fp16, d_packed_ptrs, d_sf_ptrs, /*d_tensor_scales_opt=*/nullptr,
+        d_expert_offsets, expanded, K, n_experts, stream);
+}
+
+void quantize_fp16_to_nvfp4_moe_native_with_scales(
+    const __half* src_fp16,
+    void* const* d_packed_ptrs,
+    void* const* d_sf_ptrs,
+    float* d_tensor_scales,
+    const int* d_expert_offsets,
+    int expanded,
+    int K,
+    int n_experts,
+    cudaStream_t stream)
+{
+    quantize_fp16_to_nvfp4_moe_native_impl(
+        src_fp16, d_packed_ptrs, d_sf_ptrs, d_tensor_scales,
+        d_expert_offsets, expanded, K, n_experts, stream);
 }
 
 }  // namespace imp
