@@ -229,9 +229,11 @@ __global__ void smallM_kernel_v1(
     const int* __restrict__ d_M_per_expert,
     const CUtensorMap* __restrict__ d_descs,    // 2 descriptors per expert: [A, B]
     int N, int K) {
-    static_assert(TILE_M == 128 && TILE_N == 128 && TILE_K == 128,
-                  "smallM_kernel_v1 currently fixed at 128×128×128");
-    static_assert(N_STAGES == 3, "Currently 3-stage pipeline only");
+    static_assert(TILE_M == 128 && TILE_N == 128,
+                  "smallM_kernel_v1: TILE_M=TILE_N=128 fixed (Phase A)");
+    static_assert(TILE_K == 128 || TILE_K == 256,
+                  "smallM_kernel_v1: TILE_K must be 128 or 256");
+    static_assert(N_STAGES >= 2 && N_STAGES <= 4, "N_STAGES in [2,4]");
 
     const int e      = blockIdx.x;
     const int n_tile = blockIdx.y;
@@ -289,27 +291,137 @@ __global__ void smallM_kernel_v1(
 
     constexpr int M_SUBTILES       = TILE_M / 16;   // 8
     constexpr int N_SUBTILES       = TILE_N / 8;    // 16
-    constexpr int K_STRIPES        = TILE_K / 64;   // 2
+    constexpr int K_STRIPES        = TILE_K / 64;   // 2 or 4
     constexpr int WARPS_PER_CTA    = 8;
-    constexpr int N_ITERS_PER_WARP = N_SUBTILES / WARPS_PER_CTA;  // 2
-    static_assert(N_ITERS_PER_WARP * WARPS_PER_CTA == N_SUBTILES,
-                  "N_SUBTILES must divide evenly across warps");
+    // Warp-specialized split: 4 producer warps + 4 consumer warps. Each
+    // consumer warp owns N_ITERS_PER_CONSUMER N-iters (4 of 16 = 4 each).
+    constexpr int N_PRODUCER_WARPS = 4;
+    constexpr int N_CONSUMER_WARPS = 4;
+    constexpr int PRODUCER_THREADS = N_PRODUCER_WARPS * 32;  // 128
+    constexpr int CONSUMER_THREADS = N_CONSUMER_WARPS * 32;  // 128
+    static_assert(N_PRODUCER_WARPS + N_CONSUMER_WARPS == WARPS_PER_CTA, "");
+    constexpr int N_ITERS_PER_CONSUMER = N_SUBTILES / N_CONSUMER_WARPS;  // 4
+    static_assert(N_ITERS_PER_CONSUMER * N_CONSUMER_WARPS == N_SUBTILES, "");
+
+    // Two mbarrier arrays per stage: bar_full (data ready) + bar_empty (free).
+    //   bar_full[s]: arrival_count = PRODUCER_THREADS, expected_tx = TMA_BYTES.
+    //     • W0L0 contributes 1 arrival via mbarrier.arrive.expect_tx (also issues TMA).
+    //     • The other 127 producer threads each cp.async + wait + plain arrive.
+    //   bar_empty[s]: arrival_count = CONSUMER_THREADS.
+    //     • Each consumer thread arrives once after MMA on stage S finishes.
+    uint64_t* bar_full  = smem_mbar;                 // [N_STAGES]
+    uint64_t* bar_empty = smem_mbar + N_STAGES;      // [N_STAGES]
 
     // ---- Init mbarriers (one elected thread).
     if (tid == 0) {
         #pragma unroll
         for (int s = 0; s < N_STAGES; ++s) {
-            mbarrier_init(&smem_mbar[s], n_threads);
+            mbarrier_init(&bar_full[s],  PRODUCER_THREADS);
+            mbarrier_init(&bar_empty[s], CONSUMER_THREADS);
         }
     }
     __syncthreads();
 
+    const bool is_producer = (warp_id < N_PRODUCER_WARPS);
+
+    // Total number of K-tiles.
+    const int N_K_TILES = K / TILE_K;
+
+    // ============================================================================
+    // PRODUCER PATH (warps 0-3): TMA + cp.async, no MMA.
+    // ============================================================================
+    if (is_producer) {
+        // Producer phase tracking: bar_empty[stage] starts unsignaled. We skip
+        // waiting on it for the first N_STAGES iterations (initial fill).
+        uint32_t pe_phase[N_STAGES];
+        #pragma unroll
+        for (int s = 0; s < N_STAGES; ++s) pe_phase[s] = 0u;
+
+        for (int k_idx = 0; k_idx < N_K_TILES; ++k_idx) {
+            const int stage = k_idx % N_STAGES;
+
+            // After the initial fill, wait for consumers to free this stage.
+            if (k_idx >= N_STAGES) {
+                mbarrier_wait(&bar_empty[stage], pe_phase[stage]);
+                pe_phase[stage] ^= 1u;
+            }
+
+            const int k_offset = k_idx * TILE_K;
+            const int k_packed = k_offset / 2;
+            const int k_sf     = k_offset / 16;
+
+            uint64_t* bar = &bar_full[stage];
+
+            // W0L0: arrive.expect_tx + issue both TMAs. Single arrival from W0L0.
+            // W0L0 does NOT participate in cp.async (so its arrive.expect_tx
+            // covers only its own writes — TMA bytes go via complete_tx).
+            if (tid == 0) {
+                mbarrier_arrive_expect_tx(bar, TMA_BYTES_PER_STAGE);
+                cp_async_bulk_tensor_2d(stage_A(stage), desc_A, k_packed, 0,      bar);
+                cp_async_bulk_tensor_2d(stage_B(stage), desc_B, k_packed, n_base, bar);
+            } else {
+                // Other producer threads: cp.async load SF + arrive.
+                // cp.async work distribution: tid in [1, PRODUCER_THREADS).
+                // SFA tile rows × SFA_BYTES_ROW. Ops per tile:
+                //   TILE_K=128 → SFA: 128 rows × 8B = 128 ops total.
+                //   TILE_K=256 → SFA: 128 rows × 16B = 256 ops total.
+                // (PRODUCER_THREADS - 1) = 127 threads cover these ops.
+                {
+                    constexpr int N_OPS_PER_ROW = SFA_BYTES_ROW / 8;
+                    constexpr int N_OPS         = SFA_TILE_BYTES / 8;
+                    for (int op = tid - 1; op < N_OPS; op += (PRODUCER_THREADS - 1)) {
+                        int row = op / N_OPS_PER_ROW;
+                        int col = (op % N_OPS_PER_ROW) * 8;
+                        uint8_t* dst = stage_SFA(stage) + (size_t)row * SFA_BYTES_ROW + col;
+                        if (row < M_eff) {
+                            const uint8_t* src = SFA_e + (size_t)row * K_groups + k_sf + col;
+                            cp_async_ca_8_local(dst, src);
+                        } else {
+                            *reinterpret_cast<uint64_t*>(dst) = 0ULL;
+                        }
+                    }
+                }
+                {
+                    constexpr int N_OPS_PER_ROW = SFB_BYTES_ROW / 8;
+                    constexpr int N_OPS         = SFB_TILE_BYTES / 8;
+                    for (int op = tid - 1; op < N_OPS; op += (PRODUCER_THREADS - 1)) {
+                        int row = op / N_OPS_PER_ROW;
+                        int col = (op % N_OPS_PER_ROW) * 8;
+                        int n_global = n_base + row;
+                        uint8_t* dst = stage_SFB(stage) + (size_t)row * SFB_BYTES_ROW + col;
+                        if (n_global < N) {
+                            const uint8_t* src = SFB_e + (size_t)n_global * K_groups + k_sf + col;
+                            cp_async_ca_8_local(dst, src);
+                        } else {
+                            *reinterpret_cast<uint64_t*>(dst) = 0ULL;
+                        }
+                    }
+                }
+                cp_async_commit_local();
+                cp_async_wait_group_local<0>();
+
+                // Arrive on bar_full. Release semantics ensure cp.async writes
+                // become visible to consumer warps once bar_full flips.
+                uint32_t bs = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+                asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(bs));
+            }
+        }
+
+        // Producer warps exit. Consumer warps continue with epilogue.
+        // No mbarrier invalidate from here — we let the consumer-side handle it.
+        return;
+    }
+
+    // ============================================================================
+    // CONSUMER PATH (warps 4-7): wait + MMA + signal bar_empty.
+    // ============================================================================
+
     // ---- Output accumulators (in registers).
-    float acc[M_SUBTILES][N_ITERS_PER_WARP][4];
+    float acc[M_SUBTILES][N_ITERS_PER_CONSUMER][4];
     #pragma unroll
     for (int mi = 0; mi < M_SUBTILES; ++mi) {
         #pragma unroll
-        for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+        for (int ni_local = 0; ni_local < N_ITERS_PER_CONSUMER; ++ni_local) {
             acc[mi][ni_local][0] = 0.f;
             acc[mi][ni_local][1] = 0.f;
             acc[mi][ni_local][2] = 0.f;
@@ -317,138 +429,20 @@ __global__ void smallM_kernel_v1(
         }
     }
 
-    // Total number of K-tiles.
-    const int N_K_TILES = K / TILE_K;
-
-    // Phase tracking per stage (toggled each time a stage is reused).
-    uint32_t phase[N_STAGES];
+    // Phase tracking per stage for bar_full (toggled each time stage is reused).
+    uint32_t pf_phase[N_STAGES];
     #pragma unroll
-    for (int s = 0; s < N_STAGES; ++s) phase[s] = 0u;
+    for (int s = 0; s < N_STAGES; ++s) pf_phase[s] = 0u;
 
-    // ---- Producer helper: load tile k_idx into SMEM[stage].
-    //      Issued cooperatively by the whole block:
-    //        - Lane 0 of warp 0 issues both TMAs (A and B).
-    //        - All threads cp.async SFA / SFB sub-tiles.
-    //      All threads call mbarrier.arrive (count-based barrier flips when
-    //      every thread has arrived AND TMA tx-bytes are complete).
-    auto issue_load = [&](int k_idx, int stage) {
-        const int k_offset    = k_idx * TILE_K;
-        const int k_packed    = k_offset / 2;
-        const int k_sf        = k_offset / 16;
+    // Consumer warp index in [0, N_CONSUMER_WARPS). warps 4-7 → 0-3.
+    const int consumer_warp = warp_id - N_PRODUCER_WARPS;
 
-        uint64_t* bar = &smem_mbar[stage];
-
-        if (tid == 0) {
-            // Account for TMA bytes via expect_tx (only TMA loads contribute
-            // to tx-bytes; cp.async does not).
-            mbarrier_arrive_expect_tx(bar, TMA_BYTES_PER_STAGE);
-            // Issue A: gmem coord (k_packed, 0). Box (TILE_K/2, TILE_M).
-            cp_async_bulk_tensor_2d(stage_A(stage), desc_A, k_packed, 0, bar);
-            // Issue B: gmem coord (k_packed, n_base). Box (TILE_K/2, TILE_N).
-            cp_async_bulk_tensor_2d(stage_B(stage), desc_B, k_packed, n_base, bar);
-        } else {
-            // Other threads still need to arrive on the count-barrier.
-            uint32_t bs = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-            asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(bs));
-        }
-
-        // SFA: 1 KiB / 8B = 128 ops. Spread over 256 threads → ≤1/thread.
-        {
-            constexpr int N_OPS = SFA_TILE_BYTES / 8;          // 128
-            for (int op = tid; op < N_OPS; op += n_threads) {
-                int row = op;
-                uint8_t* dst = stage_SFA(stage) + (size_t)row * SFA_BYTES_ROW;
-                if (row < M_eff) {
-                    const uint8_t* src = SFA_e + (size_t)row * K_groups + k_sf;
-                    cp_async_ca_8_local(dst, src);
-                } else {
-                    *reinterpret_cast<uint64_t*>(dst) = 0ULL;
-                }
-            }
-        }
-        // SFB: same shape.
-        {
-            constexpr int N_OPS = SFB_TILE_BYTES / 8;
-            for (int op = tid; op < N_OPS; op += n_threads) {
-                int row = op;
-                int n_global = n_base + row;
-                uint8_t* dst = stage_SFB(stage) + (size_t)row * SFB_BYTES_ROW;
-                if (n_global < N) {
-                    const uint8_t* src = SFB_e + (size_t)n_global * K_groups + k_sf;
-                    cp_async_ca_8_local(dst, src);
-                } else {
-                    *reinterpret_cast<uint64_t*>(dst) = 0ULL;
-                }
-            }
-        }
-        cp_async_commit_local();
-    };
-
-    // ---- Pre-fill the pipeline: kick off the first min(N_STAGES, N_K_TILES) loads.
-    const int prefetch = (N_K_TILES < N_STAGES) ? N_K_TILES : N_STAGES;
-    for (int s = 0; s < prefetch; ++s) {
-        issue_load(s, s);
-    }
-
-    // ---- Main loop: consumer waits on stage S, runs MMAs, then producer
-    //      issues the next K-tile into the same stage. Same warp does both
-    //      (single-warp-group pipeline; the cooperative count-barrier covers
-    //      all 8 warps so we don't need explicit producer/consumer split).
     for (int k_idx = 0; k_idx < N_K_TILES; ++k_idx) {
         const int stage = k_idx % N_STAGES;
 
-        // Wait for SFA/SFB cp.async to complete for THIS stage.
-        // We use one sync per stage rather than multi-stage cp.async tracking,
-        // because cp.async.wait_group is global to the issuing thread.
-        // Specifically: when we get to stage S, all earlier stages' cp.async
-        // groups must be in flight — wait for at most (prefetch_remaining)
-        // to complete. The simplest correct rule is wait_group<remaining>
-        // where remaining = min(N_K_TILES - k_idx - 1, N_STAGES - 1) (number
-        // of cp.async commits still in flight that aren't this stage's).
-        // We'll just wait for stage's data to arrive: TMA via mbarrier,
-        // cp.async via wait_group<0> after the LAST commit before mma —
-        // but since we issue more commits ahead, we need to be conservative
-        // here; wait for all cp.async groups except those still pending for
-        // future stages.
-        //
-        // Concretely: while consuming stage S, the cp.async group emitted
-        // for stage S is the (S - first_in_flight + 1)-th most recent.
-        // After the prefill we have N_STAGES groups in flight; after we
-        // consume stage 0, only N_STAGES-1 are still in flight.
-        //
-        // We commit one group per issue_load(); we drain to "leave at most
-        // N_STAGES - (k_idx+1 - prefetch_remaining)" — easier: issue_load
-        // commits, consume waits until the OLDEST group (this one) is done.
-        // Since groups complete in commit-order under cp.async, we wait for
-        // (in_flight - 1) groups to remain, i.e. wait_group<in_flight - 1>.
-        //
-        // After prefill, in_flight = prefetch (could be < N_STAGES if K_TILES
-        // is short). Each main-loop iter we wait then issue one more (if any
-        // more remain). At consumption of k_idx, we want stage k_idx's group
-        // to be done — i.e. the OLDEST in-flight group must be drained.
-        // Number of newer groups still pending = (committed - 1 - k_idx).
-        // Committed ≤ min(N_K_TILES, k_idx + N_STAGES). At iteration k_idx,
-        // before issuing the k_idx+N_STAGES-1 commit, committed = min(N_K_TILES, k_idx + prefetch).
-        //
-        // To keep this simple and correct, we wait for ALL in-flight groups
-        // ABOVE this stage's: target = min(N_STAGES - 1, N_K_TILES - k_idx - 1).
-        const int remaining_after = N_K_TILES - k_idx - 1;
-        const int target_in_flight = remaining_after < (N_STAGES - 1)
-                                      ? remaining_after : (N_STAGES - 1);
-        switch (target_in_flight) {
-            case 0:  cp_async_wait_group_local<0>(); break;
-            case 1:  cp_async_wait_group_local<1>(); break;
-            case 2:  cp_async_wait_group_local<2>(); break;
-            default: cp_async_wait_group_local<0>(); break;
-        }
-
-        // Wait for TMA (mbarrier) on this stage.
-        mbarrier_wait(&smem_mbar[stage], phase[stage]);
-        phase[stage] ^= 1u;
-        // SFA/SFB-side cp.async writes are not covered by the mbarrier; the
-        // wait_group above covered them. Sync threads to publish all SMEM
-        // writes (cp.async writes are warp-private until __syncthreads).
-        __syncthreads();
+        // Wait for producers to fill stage.
+        mbarrier_wait(&bar_full[stage], pf_phase[stage]);
+        pf_phase[stage] ^= 1u;
 
         // ---- MMA loop on stage SMEM.
         {
@@ -457,7 +451,7 @@ __global__ void smallM_kernel_v1(
             const int byte_offset = T0 * 4;
             const int m_sfa = T1 + (T0 & 1) * 8;
             const int n_sfb = T1;
-            const int ni_base = warp_id * N_ITERS_PER_WARP;
+            const int ni_base = consumer_warp * N_ITERS_PER_CONSUMER;
 
             uint8_t* sA   = stage_A(stage);
             uint8_t* sB   = stage_B(stage);
@@ -470,7 +464,7 @@ __global__ void smallM_kernel_v1(
                 const int m_hi = m_lo + 8;
 
                 #pragma unroll
-                for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+                for (int ni_local = 0; ni_local < N_ITERS_PER_CONSUMER; ++ni_local) {
                     const int ni  = ni_base + ni_local;
                     const int n_b = ni * 8 + T1;
 
@@ -508,32 +502,24 @@ __global__ void smallM_kernel_v1(
             }
         }
 
-        // ---- Issue next load (k_idx + N_STAGES) into this just-consumed stage.
-        const int k_next = k_idx + N_STAGES;
-        if (k_next < N_K_TILES) {
-            __syncthreads();   // ensure all warps done with this stage's SMEM.
-            issue_load(k_next, stage);
+        // Signal producers that this stage is now free for refill.
+        // Each consumer thread arrives once.
+        {
+            uint32_t bs = static_cast<uint32_t>(__cvta_generic_to_shared(&bar_empty[stage]));
+            asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(bs));
         }
     }
 
-    // ---- Invalidate mbarriers (cleanup; optional but tidy).
-    if (tid == 0) {
-        #pragma unroll
-        for (int s = 0; s < N_STAGES; ++s) {
-            mbarrier_invalidate(&smem_mbar[s]);
-        }
-    }
-
-    // ---- Epilogue: each warp casts FP32 → FP16 and writes to global D.
+    // ---- Epilogue: each consumer warp casts FP32 → FP16 and writes to global D.
     {
         const int T0 = lane_id & 3;
         const int T1 = lane_id >> 2;
-        const int ni_base = warp_id * N_ITERS_PER_WARP;
+        const int ni_base = consumer_warp * N_ITERS_PER_CONSUMER;
 
         #pragma unroll 1
         for (int mi = 0; mi < M_SUBTILES; ++mi) {
             #pragma unroll
-            for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+            for (int ni_local = 0; ni_local < N_ITERS_PER_CONSUMER; ++ni_local) {
                 const int ni = ni_base + ni_local;
                 const int m0 = mi * 16 + T1;
                 const int m1 = m0 + 8;
@@ -786,16 +772,20 @@ bool gemm_grouped_nvfp4_smallM(
     for (int e = 0; e < n_experts; ++e) max_M = std::max(max_M, host_M[e]);
     if (max_M > 128) return false;
 
-    constexpr int TILE_M = 128, TILE_N = 128, TILE_K = 128;
-    constexpr int N_STAGES = 3;
+    constexpr int TILE_M = 128, TILE_N = 128;
+    // Pick TILE_K=256 when K is divisible by 256 (more bytes per TMA stage,
+    // amortizes pipeline overhead). Fall back to TILE_K=128 for K=128, 384,
+    // etc. STAGES selected to keep SMEM under sm_120 99 KiB cap.
+    const bool use_tilek_256 = (K % 256) == 0;
+    const int TILE_K_rt   = use_tilek_256 ? 256 : 128;
 
     // Build per-expert CUtensorMap descriptors on host.
     // 2 descriptors per active expert: [A, B]. Inactive experts get a dummy
     // descriptor pointing at a 1×16 dummy buffer — they won't be loaded
     // because the kernel early-exits on M_e ≤ 0.
     // Box geometry:
-    //   A: gmem (M_e, K/2) bytes, box (TILE_M, TILE_K/2)   = (128, 64)
-    //   B: gmem (N,   K/2) bytes, box (TILE_N, TILE_K/2)   = (128, 64)
+    //   A: gmem (M_e, K/2) bytes, box (TILE_M, TILE_K/2)
+    //   B: gmem (N,   K/2) bytes, box (TILE_N, TILE_K/2)
     std::vector<CUtensorMap> h_descs(2 * n_experts);
     static uint8_t* s_dummy = nullptr;
     static int s_dummy_ready = 0;
@@ -808,8 +798,8 @@ bool gemm_grouped_nvfp4_smallM(
         const int M_e = host_M[e];
         if (M_e <= 0) {
             // Dummy descriptor — won't be used.
-            build_tma_2d_u8(&h_descs[2 * e + 0], s_dummy, 16, 16, TILE_M, TILE_K / 2);
-            build_tma_2d_u8(&h_descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K / 2);
+            build_tma_2d_u8(&h_descs[2 * e + 0], s_dummy, 16, 16, TILE_M, TILE_K_rt / 2);
+            build_tma_2d_u8(&h_descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
             continue;
         }
         // A: rows = max(M_e, TILE_M) (pad rows out-of-bounds, OOB filled by TMA)
@@ -818,7 +808,7 @@ bool gemm_grouped_nvfp4_smallM(
         if (!build_tma_2d_u8(&h_descs[2 * e + 0],
                               const_cast<void*>(host_ptr_A[e]),
                               /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_M, /*box_cols=*/TILE_K / 2)) {
+                              /*box_rows=*/TILE_M, /*box_cols=*/TILE_K_rt / 2)) {
             std::fprintf(stderr, "[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)\n",
                          e, M_e, K);
             return false;
@@ -826,7 +816,7 @@ bool gemm_grouped_nvfp4_smallM(
         if (!build_tma_2d_u8(&h_descs[2 * e + 1],
                               const_cast<void*>(host_ptr_B[e]),
                               /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_N, /*box_cols=*/TILE_K / 2)) {
+                              /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
             std::fprintf(stderr, "[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)\n",
                          e, N, K);
             return false;
@@ -860,27 +850,51 @@ bool gemm_grouped_nvfp4_smallM(
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
 
-    // SMEM: (A 8 + B 8 + SFA 1 + SFB 1) × 3 stages + 64 B mbarriers ≈ 54 KiB.
-    // Exceeds 48 KiB default static cap → opt-in via cudaFuncSetAttribute.
-    constexpr int A_BYTES   = TILE_M * (TILE_K / 2);
-    constexpr int B_BYTES   = TILE_N * (TILE_K / 2);
-    constexpr int SFA_BYTES = TILE_M * (TILE_K / 16);
-    constexpr int SFB_BYTES = TILE_N * (TILE_K / 16);
-    constexpr int SMEM_BYTES = N_STAGES * (A_BYTES + B_BYTES + SFA_BYTES + SFB_BYTES) + 128;
+    // SMEM budget per (TILE_K, N_STAGES):
+    //   TILE_K=128, STAGES=3:  3 × (8 + 8 + 1 + 1) KiB + 128 B = ~54 KiB
+    //   TILE_K=256, STAGES=2:  2 × (16 + 16 + 2 + 2) KiB + 128 B = ~72 KiB
+    // Both exceed 48 KiB default static cap → opt-in via cudaFuncSetAttribute.
+    auto smem_bytes_for = [](int TK, int NS) {
+        const int A   = TILE_M * (TK / 2);
+        const int B   = TILE_N * (TK / 2);
+        const int SFA = TILE_M * (TK / 16);
+        const int SFB = TILE_N * (TK / 16);
+        return NS * (A + B + SFA + SFB) + 128;
+    };
 
-    static int s_smem_attr_set = 0;
-    if (!s_smem_attr_set) {
-        cudaFuncSetAttribute(
-            (const void*)smallM_kernel_v1<TILE_M, TILE_N, TILE_K, N_STAGES>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            SMEM_BYTES);
-        s_smem_attr_set = 1;
+    static int s_smem_attr_set_128 = 0;
+    static int s_smem_attr_set_256 = 0;
+
+    if (use_tilek_256) {
+        constexpr int TK_ = 256, NS_ = 2;
+        const int SMEM_BYTES = smem_bytes_for(TK_, NS_);
+        if (!s_smem_attr_set_256) {
+            cudaFuncSetAttribute(
+                (const void*)smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                SMEM_BYTES);
+            s_smem_attr_set_256 = 1;
+        }
+        smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_><<<grid, block, SMEM_BYTES, stream>>>(
+            (const void* const*)d_A, (const void* const*)d_SFA,
+            (const void* const*)d_B, (const void* const*)d_SFB,
+            d_D, dev_alpha, d_M, d_descs, N, K);
+    } else {
+        constexpr int TK_ = 128, NS_ = 3;
+        const int SMEM_BYTES = smem_bytes_for(TK_, NS_);
+        if (!s_smem_attr_set_128) {
+            cudaFuncSetAttribute(
+                (const void*)smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                SMEM_BYTES);
+            s_smem_attr_set_128 = 1;
+        }
+        smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_><<<grid, block, SMEM_BYTES, stream>>>(
+            (const void* const*)d_A, (const void* const*)d_SFA,
+            (const void* const*)d_B, (const void* const*)d_SFB,
+            d_D, dev_alpha, d_M, d_descs, N, K);
     }
-
-    smallM_kernel_v1<TILE_M, TILE_N, TILE_K, N_STAGES><<<grid, block, SMEM_BYTES, stream>>>(
-        (const void* const*)d_A, (const void* const*)d_SFA,
-        (const void* const*)d_B, (const void* const*)d_SFB,
-        d_D, dev_alpha, d_M, d_descs, N, K);
+    (void)TILE_K_rt;
 
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
