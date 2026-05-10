@@ -10,19 +10,29 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-10-nvfp4-smallM-kernel-design.md`
 
-**Acceptance gates (from spec):**
-- pp512 ≥ 22000 tok/s median on Qwen3-Coder-30B-A3B-NVFP4 (10 reps)
+**Acceptance gates (revised post-Phase 0, see spec commit `27638db`):**
+- pp512 ≥ **19000 tok/s** median on Qwen3-Coder-30B-A3B-NVFP4 (10 reps), under best-threshold heuristic
+- pp512 +15% on ≥3 of 4 NVFP4 MoE models under calibrated per-shape heuristic
 - tg256 ≥ 268 tok/s (no regression)
 - 4/4 graph_replay byte-identical
 - All 574 GTest pass, sm_120a clean build, ≤0 MiB VRAM regression
+- Per-shape calibration table populated for 4 models × 4 pp-sizes × 7 thresholds
+
+**Phase 0 status:**
+- T0.1 (TMA microbench) — DONE, commit `a591dac`. Spec assumption REJECTED (speedup 1.0×, gate >1.05×). Kernel design now uses CUTLASS-style 2-descriptor pattern. See spec "Phase 0 findings" section for details.
+- T0.2 (SF layout audit) — pending.
 
 ---
 
-## Phase 0 — Pre-validation (1.5 days)
+## Phase 0 — Pre-validation
 
-Validate two foundational assumptions before committing kernel work.
+### ✅ Task 0.1: Block-scale-aware TMA microbench — DONE (commit `a591dac`)
 
-### Task 0.1: Block-scale-aware TMA microbench
+Result: fused-vs-separate TMA descriptor speedup 0.95-1.05× on SM120 sm_120a.
+Spec's "+10-20%" claim REJECTED. Kernel design follows CUTLASS 2-descriptor
+pattern (TMA_A + TMA_SFA separate). See spec Phase 0 findings.
+
+Original task description preserved below for reference (do not re-implement):
 
 **Why:** Spec depends on the "single TMA descriptor for data + scales" claim from memory `sm120_real_perf_levers`. Verify this is actually faster than separate descriptors before designing the kernel around it.
 
@@ -1671,74 +1681,234 @@ git commit -m "bench: smallM A/B Qwen3-Coder NVFP4 baseline"
 
 ---
 
-### Task 3.3: Cross-model perf sweep
+### Task 3.3: Per-shape A/B calibration sweep (revised post-Phase 0)
 
 **Files:**
-- Create: `bench/results/smallM_cross_model.log`
+- Create: `bench/results/smallM_threshold_calibration.csv`
+- Create: `scripts/smallM_calibration_sweep.sh`
 
-- [ ] **Step 1: Loop all 4 NVFP4 MoE models, 5 cold-runs each**
+Replaces the original "single-pass cross-model bench". The post-Phase-0 spec
+makes auto-heuristic first-class — we need a **populated heuristic table**,
+not just a yes/no gate.
+
+- [ ] **Step 1: Add a runtime-tunable max_M_threshold env var**
+
+In `src/graph/executor_forward_moe.cu` dispatch, allow override of the
+threshold via `IMP_NVFP4_SMALLM_THRESHOLD`:
+
+```cpp
+const char* thr_env = ::getenv("IMP_NVFP4_SMALLM_THRESHOLD");
+const int threshold = thr_env ? std::clamp(atoi(thr_env), 0, 128) : 64;
+const bool use_smallM = (smallM_env != nullptr) && (max_M <= threshold);
+```
+
+Build verify:
+```bash
+make build && docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+  -e IMP_NVFP4_SMALLM=1 -e IMP_NVFP4_SMALLM_THRESHOLD=32 imp:test \
+  imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
+          --bench --bench-pp 512 --max-tokens 4 --bench-reps 1
+```
+
+Expected: completes; if max_M > 32, falls back to CUTLASS path (verify via log).
+
+- [ ] **Step 2: Sweep script**
 
 ```bash
-RESULTS=/home/kekz/github.com/kekzl/imp/bench/results/smallM_cross_model_$(date +%Y%m%d_%H%M%S).log
+# scripts/smallM_calibration_sweep.sh
+#!/usr/bin/env bash
+set -euo pipefail
+RESULTS=/home/kekz/github.com/kekzl/imp/bench/results/smallM_threshold_calibration.csv
 mkdir -p $(dirname $RESULTS)
+
+echo "model,pp_size,threshold,run,pp_tok_s,tg_tok_s" > $RESULTS
 
 for MODEL in "Qwen3-Coder-30B-A3B-Instruct-FP4" "Qwen3.6-35B-A3B-NVFP4" \
              "Gemma-4-26B-A4B-it-NVFP4" "Qwen3-30B-A3B-NVFP4-Modelopt"; do
-    echo "===== $MODEL =====" | tee -a $RESULTS
-    for env_pair in "" "IMP_NVFP4_SMALLM=1"; do
-        echo "--- env=$env_pair ---" | tee -a $RESULTS
-        for i in 1 2 3 4 5; do
-            docker run --rm --gpus all -v /home/kekz/models:/models:ro \
-                $(test -n "$env_pair" && echo "-e $env_pair") \
-                imp:test imp-cli --model /models/$MODEL \
-                    --bench --bench-pp 512 --max-tokens 256 --bench-reps 1 --temperature 0 \
-                2>&1 | grep -E '^(pp|tg)' | tee -a $RESULTS
-        done
+  for PP in 128 512 1024 2048; do
+    # baseline (CUTLASS path; threshold=0 disables smallM)
+    for run in 1 2 3 4 5; do
+      out=$(docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+        imp:test imp-cli --model /models/$MODEL \
+          --bench --bench-pp $PP --max-tokens 64 --bench-reps 1 \
+          --temperature 0 2>&1)
+      pp=$(echo "$out" | grep '^pp' | awk '{print $5}' | tr -d '(')
+      tg=$(echo "$out" | grep '^tg' | awk '{print $5}' | tr -d '(')
+      echo "$MODEL,$PP,baseline,$run,$pp,$tg" >> $RESULTS
     done
+    # smallM at varying thresholds
+    for THR in 16 32 48 64 80 96 128; do
+      for run in 1 2 3 4 5; do
+        out=$(docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+          -e IMP_NVFP4_SMALLM=1 -e IMP_NVFP4_SMALLM_THRESHOLD=$THR \
+          imp:test imp-cli --model /models/$MODEL \
+            --bench --bench-pp $PP --max-tokens 64 --bench-reps 1 \
+            --temperature 0 2>&1)
+        pp=$(echo "$out" | grep '^pp' | awk '{print $5}' | tr -d '(')
+        tg=$(echo "$out" | grep '^tg' | awk '{print $5}' | tr -d '(')
+        echo "$MODEL,$PP,$THR,$run,$pp,$tg" >> $RESULTS
+      done
+    done
+  done
 done
 ```
 
-- [ ] **Step 2: Verify cross-model gate**
+Total runs: 4 models × 4 pp_sizes × (1 baseline + 7 thresholds) × 5 reps = 640 runs.
+At ~30s per run cold-container: ~5.5 hours total wall time. Run overnight.
 
-Per spec: pp512 +30% on Qwen3.6 + Gemma-4 (8.8k → 11.5k+) under smallM.
-
-If a model regresses (e.g. tg256 drops below 268 on Qwen3-Coder), the
-fix is the auto-heuristic (Task 3.4): smallM only enabled when max_M ≤ 64.
-
-- [ ] **Step 3: Commit results**
+- [ ] **Step 3: Run sweep**
 
 ```bash
-git add bench/results/smallM_cross_model_*.log
-git commit -m "bench: smallM cross-model sweep (4 NVFP4 MoE models)"
+chmod +x scripts/smallM_calibration_sweep.sh
+nohup bash scripts/smallM_calibration_sweep.sh > /tmp/smallM_sweep.log 2>&1 &
+# ~5.5 hours; check progress: tail -f /tmp/smallM_sweep.log
+```
+
+- [ ] **Step 4: Analyze + populate heuristic table**
+
+```python
+# scripts/analyze_smallM_calibration.py — produces a per-(model,pp_size) best threshold
+import csv, statistics, sys
+from collections import defaultdict
+data = defaultdict(list)
+with open(sys.argv[1]) as f:
+    for row in csv.DictReader(f):
+        key = (row['model'], int(row['pp_size']), row['threshold'])
+        data[key].append((float(row['pp_tok_s']), float(row['tg_tok_s'])))
+
+# For each (model, pp_size), find the threshold with best median pp_tok_s
+# subject to tg_tok_s no worse than baseline -2%.
+print('model,pp_size,best_threshold,pp_gain_pct,tg_delta_pct')
+seen = set()
+for (model, pp_size, thr), runs in sorted(data.items()):
+    if (model, pp_size) in seen: continue
+    baseline_runs = data[(model, pp_size, 'baseline')]
+    base_pp = statistics.median([r[0] for r in baseline_runs])
+    base_tg = statistics.median([r[1] for r in baseline_runs])
+    best_thr, best_gain, best_tg_delta = 'baseline', 0.0, 0.0
+    for THR in ['16','32','48','64','80','96','128']:
+        runs = data.get((model, pp_size, THR), [])
+        if not runs: continue
+        pp_med = statistics.median([r[0] for r in runs])
+        tg_med = statistics.median([r[1] for r in runs])
+        tg_delta_pct = (tg_med - base_tg) / base_tg * 100
+        if tg_delta_pct < -2.0: continue  # decode regression — reject
+        gain = (pp_med - base_pp) / base_pp * 100
+        if gain > best_gain:
+            best_thr, best_gain, best_tg_delta = THR, gain, tg_delta_pct
+    print(f'{model},{pp_size},{best_thr},{best_gain:.1f},{best_tg_delta:.1f}')
+    seen.add((model, pp_size))
+```
+
+```bash
+python3 scripts/analyze_smallM_calibration.py bench/results/smallM_threshold_calibration.csv \
+    | tee bench/results/smallM_best_thresholds.csv
+```
+
+Output is a CSV: `model, pp_size, best_threshold, pp_gain_pct, tg_delta_pct`.
+
+- [ ] **Step 5: Decision gate**
+
+Per spec abort trigger: if no threshold delivers ≥+5% pp on **any** of
+the 4 models without decode regression > 2%, abort the entire branch.
+
+```bash
+# Acceptance check
+python3 -c "
+import csv, sys
+ok_models = set()
+with open('bench/results/smallM_best_thresholds.csv') as f:
+    for row in csv.DictReader(f):
+        if float(row['pp_gain_pct']) >= 5.0:
+            ok_models.add(row['model'])
+print(f'Models with ≥+5% pp at some threshold: {len(ok_models)}/4')
+print('PASS' if len(ok_models) >= 1 else 'FAIL — abort branch')
+"
+```
+
+If FAIL: stop, escalate to user, re-evaluate Fusion-First.
+If PASS: proceed to Task 3.4 with the populated table.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/smallM_calibration_sweep.sh scripts/analyze_smallM_calibration.py \
+        bench/results/smallM_threshold_calibration.csv bench/results/smallM_best_thresholds.csv
+git commit -m "bench: per-shape A/B calibration sweep — 4 models × 4 pp × 7 thresholds"
 ```
 
 ---
 
-### Task 3.4: Auto-heuristic in dispatch
+### Task 3.4: Bake calibrated heuristic into dispatch
 
 **Files:**
 - Modify: `src/graph/executor_forward_moe.cu`
+- Create: `src/graph/smallM_heuristic_table.h` (generated from Task 3.3 output)
 
-After cross-model bench data is in, set the right defaults:
+After Task 3.3 produces `smallM_best_thresholds.csv`, embed those thresholds
+as a compile-time table for the runtime dispatch.
 
-- [ ] **Step 1: Update threshold logic**
+- [ ] **Step 1: Generate heuristic header**
 
-The threshold defaults to 64 unless `IMP_NVFP4_SMALLM_FULL` is set. After
-Phase B+C bench data, validate that this is the right cutoff.
-
-If data shows smallM wins for max_M ≤ 80 (e.g.), update the constant.
-
-- [ ] **Step 2: Optional: auto-detect (no env var)**
-
-```cpp
-// Default to enabled when conditions favorable.
-const bool smallM_default = imp::gemm_grouped_nvfp4_smallM_available()
-                          && max_M <= AUTO_THRESHOLD;
-const bool use_smallM = smallM_env ? (atoi(smallM_env) != 0)
-                                    : smallM_default;
+```python
+# scripts/gen_smallM_heuristic_header.py
+import csv, sys
+print('// Generated from bench/results/smallM_best_thresholds.csv')
+print('// Per-(model_arch, pp_size) M-thresholds. Auto-disabled (threshold=0)')
+print('// for shapes where calibration showed no win or decode regression.')
+print('#pragma once')
+print('#include <string>')
+print('namespace imp {')
+print('struct SmallMHeuristic { const char* arch_pattern; int pp_size; int threshold; };')
+print('static constexpr SmallMHeuristic kSmallMHeuristics[] = {')
+with open(sys.argv[1]) as f:
+    for row in csv.DictReader(f):
+        thr = row['best_threshold']
+        if thr == 'baseline': thr = '0'
+        print(f'  {{"{row["model"]}", {row["pp_size"]}, {thr}}},')
+print('};')
+print('inline int smallM_threshold_for(const std::string& model_arch, int pp_size) {')
+print('  for (auto& h : kSmallMHeuristics)')
+print('    if (model_arch.find(h.arch_pattern) != std::string::npos && h.pp_size == pp_size)')
+print('      return h.threshold;')
+print('  return 64;  // fallback default')
+print('}')
+print('}')
 ```
 
-(Phase C: still env-gated. Auto-default in Phase D.)
+```bash
+python3 scripts/gen_smallM_heuristic_header.py \
+    bench/results/smallM_best_thresholds.csv \
+    > src/graph/smallM_heuristic_table.h
+```
+
+- [ ] **Step 2: Use in dispatch**
+
+```cpp
+// in executor_forward_moe.cu
+#include "graph/smallM_heuristic_table.h"
+...
+const int auto_threshold = imp::smallM_threshold_for(cfg.model_arch_name, n);
+const char* thr_env = ::getenv("IMP_NVFP4_SMALLM_THRESHOLD");
+const int threshold = thr_env ? atoi(thr_env) : auto_threshold;
+const bool use_smallM = (threshold > 0) &&
+                       (max_M <= threshold) &&
+                       imp::gemm_grouped_nvfp4_smallM_available();
+```
+
+(Phase C: still requires `IMP_NVFP4_SMALLM=1` opt-in. Phase D: auto-on.)
+
+- [ ] **Step 3: Re-run gates with calibrated heuristic**
+
+```bash
+make verify-fast
+docker run --rm --gpus all -v /home/kekz/models:/models:ro \
+  -e IMP_NVFP4_SMALLM=1 imp:test \
+  imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
+          --bench --bench-pp 512 --max-tokens 256 --bench-reps 5
+```
+
+Expected: pp matches the best-threshold result from Task 3.3.
 
 - [ ] **Step 3: Re-run gates**
 
