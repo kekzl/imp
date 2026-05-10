@@ -20,6 +20,7 @@
 //     [BS_MXF8F6F4_1X_44]  mxf8f6f4 vec::1X k32 ue8m0 e4m3.e4m3  (FP8 × FP8 mixed)
 //     [BS_MXF8F6F4_1X_41]  mxf8f6f4 vec::1X k32 ue8m0 e4m3.e2m1  (FP8 Q × FP4 K)
 //     [BS_MXF8F6F4_1X_11]  mxf8f6f4 vec::1X k32 ue8m0 e2m1.e2m1  (FP4 × FP4 with HW scale)
+//     [BS_MXF8F6F4_2X_11]  mxf8f6f4 vec::2X k64 e2m1.e2m1 — DISABLED (ptxas rejects k64 for mxf8f6f4)
 //
 //   Sparse (require 2:4 sparsity on A):
 //     [SP_F8F6F4_K64]      f8f6f4.sp::ordered_metadata k64
@@ -217,7 +218,22 @@ __global__ void bench_v_mxf8f6f4_1x_e4m3_e2m1(int iterations, float* sink) {
 }
 
 // ---------------------------------------------------------------------------
-// (8) SP_F8F6F4_K64 — sparse f8f6f4 at K=64 (no scaling; 2× K vs dense legacy)
+// (8) BS_MXF8F6F4_2X_E2M1_K64 — DISABLED. ptxas rejects on sm_120a:
+// "Incorrect instruction type specified for mma with shape '.m16n8k64'".
+// kind::mxf8f6f4 is limited to m16n8k32 — k64 is only valid for kind::mxf4nvf4.
+// The mxf8f6f4 kind covers FP8/FP6/FP4 formats (min element = 4 bits, max = 8
+// bits), so k32 already exercises 256 elements per tile at 8 bpe. Combining
+// scale_vec::2X with k64 would require PTX support that simply doesn't exist.
+// Dead end — do not retry.
+// ---------------------------------------------------------------------------
+__global__ void bench_v_mxf8f6f4_2x_e2m1_k64(int iterations, float* sink) {
+    BENCH_PREAMBLE;
+    // Intentionally empty — ptxas rejects mxf8f6f4 m16n8k64 on sm_120a.
+    BENCH_SINK_STORE;
+}
+
+// ---------------------------------------------------------------------------
+// (9) SP_F8F6F4_K64 — sparse f8f6f4 at K=64 (no scaling; 2× K vs dense legacy)
 // ---------------------------------------------------------------------------
 __global__ void bench_v_sparse_f8f6f4_k64(int iterations, float* sink) {
     BENCH_PREAMBLE;
@@ -300,6 +316,7 @@ MmaVariantsBenchResult bench_mma_variants(int warps, int iterations, cudaStream_
         {"bs_mxf8f6f4_1x_e2m1", bench_v_mxf8f6f4_1x_e2m1, 16.0 * 8.0 * 32.0 * 2.0},
         {"bs_mxf8f6f4_1x_e4m3", bench_v_mxf8f6f4_1x_e4m3, 16.0 * 8.0 * 32.0 * 2.0},
         {"bs_mxf8f6f4_1x_e4m3xe2m1", bench_v_mxf8f6f4_1x_e4m3_e2m1, 16.0 * 8.0 * 32.0 * 2.0},
+        // bs_mxf8f6f4_2x_e2m1_k64: ptxas rejects mxf8f6f4 m16n8k64 on sm_120a. Stub kernel, not measured.
         {"sp_f8f6f4_k64", bench_v_sparse_f8f6f4_k64, 16.0 * 8.0 * 64.0 * 2.0},
         // sp_nvfp4_4x_k128: ptxas rejects on sm_120f. See comment above kernel.
     };
