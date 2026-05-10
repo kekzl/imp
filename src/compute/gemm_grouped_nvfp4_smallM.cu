@@ -187,14 +187,16 @@ __global__ void smallM_kernel_v1_software_ref(
 // smallM kernel v1 — PRODUCTION HW MMA PATH.
 //
 // Grid:  (n_experts, N / TILE_N).  Each CTA owns one expert × one n-tile.
-// Block: 256 threads (8 warps); single-warp (warp 0) issues the MMAs
-//        for correctness baseline.  Multi-warp split deferred to T1.10.
+// Block: 256 threads (8 warps); each warp owns a stripe of N_ITERS_PER_WARP
+//        contiguous n_iter sub-tiles (T1.10a: multi-warp work split).
 //
 // Pipeline:
 //   1. cp.async A, B, SFA, SFB tiles from global → SMEM (all warps).
 //   2. cp.async.wait_group + __syncthreads.
-//   3. Warp 0 walks (mi, ni) sub-tiles (8 × 16 = 128 sub-tiles per CTA),
-//      issuing 2 mma.sync.kind::mxf4nvf4 per sub-tile (one per K-stripe of 64).
+//   3. Each warp walks (mi, ni_local) sub-tiles (8 × N_ITERS_PER_WARP), with
+//      ni = warp_id * N_ITERS_PER_WARP + ni_local. Issues 2 mma.sync per
+//      sub-tile (one per K-stripe of 64). 8 warps × 2 ni_local × 8 mi × 2 ki
+//      = 256 MMAs/CTA total — same total work, 8x parallelism.
 //   4. Each lane writes its 4 FP32 → FP16 outputs directly to D_e in global
 //      with the alpha factor folded in.
 //
@@ -279,24 +281,32 @@ __global__ void smallM_kernel_v1(
 
     const int tid = threadIdx.x;
     const int n_threads = blockDim.x;
-    // Warp-level identifiers. Single-warp version: only warp 0 issues MMAs.
+    // Warp-level identifiers. Each of the 8 warps owns a contiguous N-stripe.
     const int warp_id   = tid / 32;
     const int lane_id   = tid & 31;
 
-    constexpr int M_SUBTILES = TILE_M / 16;   // 8
-    constexpr int N_SUBTILES = TILE_N / 8;    // 16
-    constexpr int K_STRIPES  = TILE_K / 64;   // 2
+    constexpr int M_SUBTILES       = TILE_M / 16;   // 8
+    constexpr int N_SUBTILES       = TILE_N / 8;    // 16
+    constexpr int K_STRIPES        = TILE_K / 64;   // 2
+    constexpr int WARPS_PER_CTA    = 8;
+    constexpr int N_ITERS_PER_WARP = N_SUBTILES / WARPS_PER_CTA;  // 16/8 = 2
+    static_assert(N_ITERS_PER_WARP * WARPS_PER_CTA == N_SUBTILES,
+                  "N_SUBTILES must divide evenly across warps");
 
-    // ---- Per-(mi, ni) FP32 accumulator — initialized once, accumulated across
-    //      all K-tiles, and cast to FP16 only after the outer loop completes.
-    //      Warp 0 layout: acc[mi][ni][4 floats].
-    float acc[M_SUBTILES][N_SUBTILES][4];
-    if (warp_id == 0) {
+    // ---- Per-(mi, ni_local) FP32 accumulator — each warp owns a slice of the
+    //      output tile (2 of the 16 n_iter values). Initialized once,
+    //      accumulated across all K-tiles, and cast to FP16 only after the
+    //      outer loop completes.
+    float acc[M_SUBTILES][N_ITERS_PER_WARP][4];
+    #pragma unroll
+    for (int mi = 0; mi < M_SUBTILES; ++mi) {
         #pragma unroll
-        for (int mi = 0; mi < M_SUBTILES; ++mi)
-            #pragma unroll
-            for (int ni = 0; ni < N_SUBTILES; ++ni)
-                acc[mi][ni][0] = acc[mi][ni][1] = acc[mi][ni][2] = acc[mi][ni][3] = 0.f;
+        for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+            acc[mi][ni_local][0] = 0.f;
+            acc[mi][ni_local][1] = 0.f;
+            acc[mi][ni_local][2] = 0.f;
+            acc[mi][ni_local][3] = 0.f;
+        }
     }
 
     // ---- Outer K-tile loop: iterate over K in steps of TILE_K.
@@ -376,23 +386,30 @@ __global__ void smallM_kernel_v1(
         cp_async_wait_group_local<0>();
         __syncthreads();
 
-        // ---- MMA loop: warp 0 only, walks 8×16 sub-tiles, 2 K-stripes each.
-        //      Accumulates into acc[mi][ni] — NOT re-zeroed between K-tiles.
-        if (warp_id == 0) {
+        // ---- MMA loop: each warp walks its M_SUBTILES × N_ITERS_PER_WARP slice,
+        //      2 K-stripes each. Accumulates into acc[mi][ni_local] — NOT
+        //      re-zeroed between K-tiles. All 8 warps run in parallel:
+        //        warp 0 → ni ∈ [0, 2)
+        //        warp 1 → ni ∈ [2, 4)
+        //        ...
+        //        warp 7 → ni ∈ [14, 16)
+        {
             const int T0 = lane_id & 3;           // thread_in_group ∈ [0,4)
             const int T1 = lane_id >> 2;          // group_id ∈ [0,8)
             const int byte_offset = T0 * 4;
             const int m_sfa = T1 + (T0 & 1) * 8; // 16 unique m's (T0%2 broadcasts)
             const int n_sfb = T1;                 // 8 unique n's
+            const int ni_base = warp_id * N_ITERS_PER_WARP;
 
             #pragma unroll 1
             for (int mi = 0; mi < M_SUBTILES; ++mi) {
                 const int m_lo = mi * 16 + T1;    // m for a0, a2
                 const int m_hi = m_lo + 8;        // m for a1, a3
 
-                #pragma unroll 1
-                for (int ni = 0; ni < N_SUBTILES; ++ni) {
-                    const int n_b = ni * 8 + T1;  // n for b0, b1
+                #pragma unroll
+                for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+                    const int ni  = ni_base + ni_local;  // unique to this warp
+                    const int n_b = ni * 8 + T1;          // n for b0, b1
 
                     #pragma unroll
                     for (int ki = 0; ki < K_STRIPES; ++ki) {
@@ -400,6 +417,7 @@ __global__ void smallM_kernel_v1(
                         const int kg_base = ki * 4;
 
                         // A fragment (4 b32). Reads 4 bytes (8 nibbles) per register.
+                        // A is shared across warps: same (mi, ki) → same SMEM addresses.
                         uint32_t a0, a1, a2, a3;
                         a0 = *reinterpret_cast<const uint32_t*>(
                             smem_A + (size_t)m_lo * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
@@ -410,7 +428,7 @@ __global__ void smallM_kernel_v1(
                         a3 = *reinterpret_cast<const uint32_t*>(
                             smem_A + (size_t)m_hi * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
 
-                        // B fragment (2 b32).
+                        // B fragment (2 b32). Per-warp: each warp reads its own n_b row.
                         uint32_t b0, b1;
                         b0 = *reinterpret_cast<const uint32_t*>(
                             smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte +  0 + byte_offset);
@@ -418,6 +436,7 @@ __global__ void smallM_kernel_v1(
                             smem_B + (size_t)n_b * B_BYTES_ROW + stripe_byte + 16 + byte_offset);
 
                         // Scale fragments (1 b32 each = 4 UE4M3 bytes).
+                        // SFA shared across warps; SFB per-warp via ni.
                         uint32_t sfa = *reinterpret_cast<const uint32_t*>(
                             smem_SFA + (size_t)(mi * 16 + m_sfa) * SFA_BYTES_ROW + kg_base);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
@@ -425,7 +444,7 @@ __global__ void smallM_kernel_v1(
 
                         uint32_t a_arr[4] = {a0, a1, a2, a3};
                         uint32_t b_arr[2] = {b0, b1};
-                        mma_sync_mxf4nvf4_m16n8k64(acc[mi][ni], a_arr, b_arr, sfa, sfb);
+                        mma_sync_mxf4nvf4_m16n8k64(acc[mi][ni_local], a_arr, b_arr, sfa, sfb);
                     }
                 }
             }
@@ -435,16 +454,18 @@ __global__ void smallM_kernel_v1(
         __syncthreads();
     }  // end outer K-tile loop
 
-    // ---- Epilogue: warp 0 casts accumulated FP32 → FP16 and writes to global D.
-    //      SM80_16x8_Row (T32,V4)→(M16,N8). Apply alpha.
-    if (warp_id == 0) {
+    // ---- Epilogue: each warp casts its accumulator slice FP32 → FP16 and
+    //      writes to global D. SM80_16x8_Row (T32,V4)→(M16,N8). Apply alpha.
+    {
         const int T0 = lane_id & 3;
         const int T1 = lane_id >> 2;
+        const int ni_base = warp_id * N_ITERS_PER_WARP;
 
         #pragma unroll 1
         for (int mi = 0; mi < M_SUBTILES; ++mi) {
-            #pragma unroll 1
-            for (int ni = 0; ni < N_SUBTILES; ++ni) {
+            #pragma unroll
+            for (int ni_local = 0; ni_local < N_ITERS_PER_WARP; ++ni_local) {
+                const int ni = ni_base + ni_local;
                 const int m0 = mi * 16 + T1;
                 const int m1 = m0 + 8;
                 const int n0_local = ni * 8 + T0 * 2;
@@ -452,10 +473,10 @@ __global__ void smallM_kernel_v1(
                 const int n0_g = n_base + n0_local;
                 const int n1_g = n_base + n1_local;
 
-                const float a0_out = acc[mi][ni][0] * alpha;
-                const float a1_out = acc[mi][ni][1] * alpha;
-                const float a2_out = acc[mi][ni][2] * alpha;
-                const float a3_out = acc[mi][ni][3] * alpha;
+                const float a0_out = acc[mi][ni_local][0] * alpha;
+                const float a1_out = acc[mi][ni_local][1] * alpha;
+                const float a2_out = acc[mi][ni_local][2] * alpha;
+                const float a3_out = acc[mi][ni_local][3] * alpha;
 
                 if (m0 < M_eff && n0_g < N)
                     D_e[(size_t)m0 * N + n0_g] = __float2half(a0_out);
