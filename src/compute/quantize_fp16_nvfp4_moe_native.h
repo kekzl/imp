@@ -51,4 +51,22 @@ void quantize_fp16_to_nvfp4_moe_native_with_scales(
     int n_experts,
     cudaStream_t stream);
 
+// Compute per-expert alpha = activation_tensor_scale * weight_tensor_scale
+// on device, given both scale arrays on device. Result is written to
+// d_alpha_out. All three pointers are device pointers.
+//
+// d_act_scales    : [n_experts] device floats — per-expert activation tensor_scale
+//                   (output of quantize_fp16_to_nvfp4_moe_native_with_scales)
+// d_weight_scales : [n_experts] device floats — per-expert weight tensor_scale
+//                   (W->tensor_scales from NvFP4MoEQuantResult, already on device)
+// d_alpha_out     : [n_experts] device floats — output (act * weight per expert)
+//
+// Launches a tiny 1-block kernel; no host/device synchronization required.
+void compute_moe_alpha_device(
+    const float* d_act_scales,
+    const float* d_weight_scales,
+    float* d_alpha_out,
+    int n_experts,
+    cudaStream_t stream);
+
 }  // namespace imp

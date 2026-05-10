@@ -1382,7 +1382,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 }
 
                                 std::vector<void*> act_packed_ptrs(ne), act_sf_ptrs(ne);
-                                std::vector<float> h_act_tscales(ne, 1.0f);
+                                // d_act_tscales stays on device — no D2H sync.
                                 float* d_act_tscales = nullptr;
                                 if (ok) {
                                     for (int e = 0; e < ne; ++e) {
@@ -1403,43 +1403,65 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                         d_act_tscales,
                                         static_cast<const int*>(routing.expert_offsets.data),
                                         expanded, d, ne, stream);
-                                    // Read back per-expert activation tensor_scales (D2H sync).
-                                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                                        h_act_tscales.data(), d_act_tscales,
-                                        static_cast<size_t>(ne) * sizeof(float),
-                                        cudaMemcpyDeviceToHost, stream));
-                                    cudaStreamSynchronize(stream);
-                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
+                                    // No D2H sync — d_act_tscales stays on device.
                                 }
 
                                 // Build per-expert weight pointer arrays from the native
-                                // NvFP4MoEQuantResult cache. smallM expects alpha = product
-                                // of activation tensor_scale and weight tensor_scale per
-                                // expert (test_gemm_grouped_nvfp4_smallM:182 convention).
+                                // NvFP4MoEQuantResult cache. alpha = act_ts * weight_ts,
+                                // computed entirely on device via compute_moe_alpha_device.
+                                //
+                                // run_proj signature: takes d_act_ts (device float*) instead of
+                                // the old host vector. Weight scales are H2D'd once per
+                                // projection (~ne*4 bytes = 256–512 bytes) as a device buffer,
+                                // then multiplied on device with no round-trip.
                                 auto run_proj = [&](const NvFP4MoEQuantResult* W,
                                                     const std::vector<void*>& act_packed,
                                                     const std::vector<void*>& act_sf,
-                                                    const std::vector<float>& h_act_ts, char* c_base,
+                                                    const float* d_act_ts,  // device ptr
+                                                    char* c_base,
                                                     int K_in, int N_out) -> bool {
-                                    std::vector<float> h_w_tscales(ne, 1.0f);
+                                    // Upload weight tensor_scales H2D once per projection.
+                                    // W->tensor_scales is already on device if non-null.
+                                    float* d_alpha = nullptr;
+                                    IMP_CUDA_CHECK_LOG(cudaMallocAsync(
+                                        &d_alpha, static_cast<size_t>(ne) * sizeof(float), stream));
                                     if (W && W->tensor_scales) {
+                                        // Compute alpha = act_ts * weight_ts on device.
+                                        imp::compute_moe_alpha_device(
+                                            d_act_ts, W->tensor_scales, d_alpha, ne, stream);
+                                    } else {
+                                        // No weight tensor_scale: alpha = act_ts * 1.0
+                                        // Copy act_ts into d_alpha directly.
                                         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                                            h_w_tscales.data(), W->tensor_scales,
+                                            d_alpha, d_act_ts,
                                             static_cast<size_t>(ne) * sizeof(float),
-                                            cudaMemcpyDeviceToHost, stream));
-                                        cudaStreamSynchronize(stream);
+                                            cudaMemcpyDeviceToDevice, stream));
                                     }
                                     std::vector<int> active_M_local;
                                     std::vector<const void*> hA, hSFA, hB, hSFB;
                                     std::vector<void*> hD;
-                                    std::vector<float> hAlpha;
+                                    // Note: no hAlpha — alpha stays on device.
+                                    // We build a device-indexed view of d_alpha for active
+                                    // experts. Since gemm_grouped_nvfp4_smallM accepts a
+                                    // contiguous [n_experts] device array and uses blockIdx.x
+                                    // as the expert index, we need d_alpha indexed by the
+                                    // active-expert position. Build a compact device buffer.
+                                    std::vector<float> h_alpha_compact;
                                     active_M_local.reserve(ne);
                                     hA.reserve(ne);
                                     hSFA.reserve(ne);
                                     hB.reserve(ne);
                                     hSFB.reserve(ne);
                                     hD.reserve(ne);
-                                    hAlpha.reserve(ne);
+                                    h_alpha_compact.reserve(ne);
+                                    // We need to read d_alpha to compact it for active experts
+                                    // only when M_per[e]==0 experts are skipped. Read d_alpha
+                                    // back if any expert is inactive; otherwise pass d_alpha as-is.
+                                    // Optimization: if all experts are active, pass d_alpha directly.
+                                    bool all_active = true;
+                                    for (int e = 0; e < ne; ++e)
+                                        if (M_per[e] == 0) { all_active = false; break; }
+
                                     for (int e = 0; e < ne; ++e) {
                                         if (M_per[e] == 0)
                                             continue;
@@ -1455,28 +1477,68 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                         hD.push_back(c_base +
                                                      static_cast<size_t>(h_offsets[e]) * N_out *
                                                          sizeof(half));
-                                        hAlpha.push_back(h_act_ts[e] * h_w_tscales[e]);
                                     }
                                     const int na = static_cast<int>(active_M_local.size());
-                                    if (na == 0)
+                                    if (na == 0) {
+                                        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha, stream));
                                         return true;
-                                    return imp::gemm_grouped_nvfp4_smallM(
+                                    }
+
+                                    // d_alpha_active: compact device buffer for the na active
+                                    // experts. When all experts are active, d_alpha == d_alpha_active.
+                                    float* d_alpha_active = d_alpha;
+                                    float* d_alpha_compact_dev = nullptr;
+                                    if (!all_active) {
+                                        // Need to compact alpha for active experts.
+                                        // Cheapest: D2H the small d_alpha buffer (ne floats),
+                                        // compact, H2D compact array. Still eliminates the
+                                        // D2H of activation scales (the expensive one).
+                                        std::vector<float> h_alpha_full(ne);
+                                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                            h_alpha_full.data(), d_alpha,
+                                            static_cast<size_t>(ne) * sizeof(float),
+                                            cudaMemcpyDeviceToHost, stream));
+                                        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                                        for (int e = 0; e < ne; ++e)
+                                            if (M_per[e] > 0)
+                                                h_alpha_compact.push_back(h_alpha_full[e]);
+                                        IMP_CUDA_CHECK_LOG(cudaMallocAsync(
+                                            &d_alpha_compact_dev,
+                                            static_cast<size_t>(na) * sizeof(float), stream));
+                                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                            d_alpha_compact_dev, h_alpha_compact.data(),
+                                            static_cast<size_t>(na) * sizeof(float),
+                                            cudaMemcpyHostToDevice, stream));
+                                        d_alpha_active = d_alpha_compact_dev;
+                                    }
+
+                                    bool ret = imp::gemm_grouped_nvfp4_smallM(
                                         na, active_M_local.data(), N_out, K_in, hA.data(),
                                         hSFA.data(), hB.data(), hSFB.data(), hD.data(),
-                                        hAlpha.data(), stream);
+                                        d_alpha_active, stream);
+                                    if (d_alpha_compact_dev)
+                                        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha_compact_dev, stream));
+                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha, stream));
+                                    return ret;
                                 };
 
                                 bool ok_gate = ok;
                                 if (ok && !non_gated_experts) {
                                     ok_gate = run_proj(ly.nvfp4_moe_gate_ptr, act_packed_ptrs,
-                                                       act_sf_ptrs, h_act_tscales,
+                                                       act_sf_ptrs, d_act_tscales,
                                                        expert_gate_base, d, eff);
                                 }
                                 bool ok_up = ok;
                                 if (ok) {
                                     ok_up = run_proj(ly.nvfp4_moe_up_ptr, act_packed_ptrs,
-                                                     act_sf_ptrs, h_act_tscales,
+                                                     act_sf_ptrs, d_act_tscales,
                                                      expert_up_base, d, eff);
+                                }
+
+                                // Free gate/up activation scales (down will use a fresh d_act_tscales_dn).
+                                if (d_act_tscales) {
+                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
+                                    d_act_tscales = nullptr;
                                 }
 
                                 if (ok && ok_gate && ok_up) {
@@ -1508,9 +1570,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                         }
                                         char* down_act = non_gated_experts ? expert_up_base
                                                                             : expert_swiglu_base;
-                                        // Re-quantize post-SwiGLU activations and emit
-                                        // per-expert tensor_scales for the down GEMM alpha.
-                                        std::vector<float> h_act_tscales_dn(ne, 1.0f);
+                                        // Re-quantize post-SwiGLU activations; keep scales on device.
                                         float* d_act_tscales_dn = nullptr;
                                         IMP_CUDA_CHECK_LOG(cudaMallocAsync(
                                             &d_act_tscales_dn,
@@ -1521,17 +1581,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                             d_act_tscales_dn,
                                             static_cast<const int*>(routing.expert_offsets.data),
                                             expanded, eff, ne, stream);
-                                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                                            h_act_tscales_dn.data(), d_act_tscales_dn,
-                                            static_cast<size_t>(ne) * sizeof(float),
-                                            cudaMemcpyDeviceToHost, stream));
-                                        cudaStreamSynchronize(stream);
-                                        IMP_CUDA_CHECK_LOG(
-                                            cudaFreeAsync(d_act_tscales_dn, stream));
+                                        // No D2H sync — pass d_act_tscales_dn directly.
                                         bool ok_down =
                                             run_proj(ly.nvfp4_moe_down_ptr, act_packed_ptrs,
-                                                     act_sf_ptrs, h_act_tscales_dn,
+                                                     act_sf_ptrs, d_act_tscales_dn,
                                                      expert_down_base, eff, d);
+                                        IMP_CUDA_CHECK_LOG(
+                                            cudaFreeAsync(d_act_tscales_dn, stream));
                                         if (ok_down) {
                                             smallM_done = true;
                                         } else {
@@ -1544,6 +1600,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     IMP_LOG_ERROR(
                                         "smallM gate/up dispatch failed; falling back to "
                                         "CUTLASS 3.x");
+                                }
+                                // Free activation scales if not yet freed (early-exit paths).
+                                if (d_act_tscales) {
+                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
+                                    d_act_tscales = nullptr;
                                 }
                             }
                         }

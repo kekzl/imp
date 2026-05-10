@@ -19,6 +19,10 @@ namespace imp {
 //   D_i  : [M_i, N]      FP16 output, RowMajor
 //   alpha_i: per-expert tensor_scale (applied as GEMM alpha)
 //
+// IMPORTANT: dev_alpha is a DEVICE pointer to [n_experts] float values.
+// Caller is responsible for keeping this buffer live until the stream
+// has consumed the kernel.
+//
 // K and N must be identical across all experts. M_i varies.
 // Returns false if SM120 unavailable or any precondition fails.
 bool gemm_grouped_nvfp4_smallM(
@@ -30,7 +34,7 @@ bool gemm_grouped_nvfp4_smallM(
     const void* const* host_ptr_B,    // [n_experts] device packed B
     const void* const* host_ptr_SFB,  // [n_experts] device SFB (native row-major)
     void* const* host_ptr_D,          // [n_experts] device FP16 outputs
-    const float* host_alpha,          // [n_experts] per-expert tensor_scale
+    const float* dev_alpha,           // [n_experts] per-expert tensor_scale (DEVICE ptr)
     cudaStream_t stream);
 
 bool gemm_grouped_nvfp4_smallM_available();

@@ -500,7 +500,7 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
-    void* const* host_ptr_D,         const float* host_alpha,
+    void* const* host_ptr_D,         const float* dev_alpha,
     cudaStream_t stream) {
     if (!gemm_grouped_nvfp4_smallM_available()) return false;
     if (n_experts <= 0 || N <= 0 || K <= 0) return false;
@@ -513,33 +513,31 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
 
     void** d_A = nullptr;   void** d_SFA = nullptr;
     void** d_B = nullptr;   void** d_SFB = nullptr;
-    void** d_D = nullptr;   float* d_alpha = nullptr;
+    void** d_D = nullptr;
     int*   d_M = nullptr;
-    cudaMallocAsync(&d_A,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFA,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_B,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFB,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_D,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_alpha, sizeof(float) * n_experts, stream);
-    cudaMallocAsync(&d_M,     sizeof(int)   * n_experts, stream);
-    cudaMemcpyAsync(d_A,     host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFA,   host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_B,     host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFB,   host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_D,     host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_alpha, host_alpha,   sizeof(float) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_M,     host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMallocAsync(&d_A,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFA, sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_B,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFB, sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_D,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_M,   sizeof(int)   * n_experts, stream);
+    cudaMemcpyAsync(d_A,   host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFA, host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_B,   host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFB, host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_D,   host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_M,   host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
 
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
     smallM_kernel_v1_software_ref<TILE_M, TILE_N, TILE_K><<<grid, block, 0, stream>>>(
         (const void* const*)d_A, (const void* const*)d_SFA,
         (const void* const*)d_B, (const void* const*)d_SFB,
-        d_D, d_alpha, d_M, N, K);
+        d_D, dev_alpha, d_M, N, K);
 
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
-    cudaFreeAsync(d_D, stream);   cudaFreeAsync(d_alpha, stream);
+    cudaFreeAsync(d_D, stream);
     cudaFreeAsync(d_M, stream);
     return true;
 }
@@ -671,7 +669,7 @@ bool gemm_grouped_nvfp4_smallM(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
-    void* const* host_ptr_D,         const float* host_alpha,
+    void* const* host_ptr_D,         const float* dev_alpha,
     cudaStream_t stream) {
     if (!gemm_grouped_nvfp4_smallM_available()) return false;
     if (n_experts <= 0 || N <= 0 || K <= 0) return false;
@@ -685,25 +683,24 @@ bool gemm_grouped_nvfp4_smallM(
     constexpr int TILE_M = 128, TILE_N = 128, TILE_K = 128;
 
     // Upload pointer arrays + M to device.
+    // dev_alpha is already a device pointer — no alloc/copy needed for alpha.
     void** d_A = nullptr;   void** d_SFA = nullptr;
     void** d_B = nullptr;   void** d_SFB = nullptr;
-    void** d_D = nullptr;   float* d_alpha = nullptr;
+    void** d_D = nullptr;
     int*   d_M = nullptr;
-    cudaMallocAsync(&d_A,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFA,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_B,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_SFB,   sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_D,     sizeof(void*) * n_experts, stream);
-    cudaMallocAsync(&d_alpha, sizeof(float) * n_experts, stream);
-    cudaMallocAsync(&d_M,     sizeof(int)   * n_experts, stream);
+    cudaMallocAsync(&d_A,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFA, sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_B,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFB, sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_D,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_M,   sizeof(int)   * n_experts, stream);
 
-    cudaMemcpyAsync(d_A,     host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFA,   host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_B,     host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_SFB,   host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_D,     host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_alpha, host_alpha,   sizeof(float) * n_experts, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_M,     host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_A,   host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFA, host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_B,   host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFB, host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_D,   host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_M,   host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
 
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
@@ -717,11 +714,11 @@ bool gemm_grouped_nvfp4_smallM(
     smallM_kernel_v1<TILE_M, TILE_N, TILE_K><<<grid, block, SMEM_BYTES, stream>>>(
         (const void* const*)d_A, (const void* const*)d_SFA,
         (const void* const*)d_B, (const void* const*)d_SFB,
-        d_D, d_alpha, d_M, N, K);
+        d_D, dev_alpha, d_M, N, K);
 
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
-    cudaFreeAsync(d_D, stream);   cudaFreeAsync(d_alpha, stream);
+    cudaFreeAsync(d_D, stream);
     cudaFreeAsync(d_M, stream);
     return true;
 }

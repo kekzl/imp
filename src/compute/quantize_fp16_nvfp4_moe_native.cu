@@ -315,4 +315,33 @@ void quantize_fp16_to_nvfp4_moe_native_with_scales(
         d_expert_offsets, expanded, K, n_experts, stream);
 }
 
+// ---------------------------------------------------------------------------
+// compute_moe_alpha_device: element-wise product of two device float arrays.
+// One thread per expert; single block (n_experts typically ≤ 256).
+// ---------------------------------------------------------------------------
+__global__ void moe_alpha_mul_kernel(
+    const float* __restrict__ d_act,
+    const float* __restrict__ d_weight,
+    float* __restrict__ d_out,
+    int n)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < n)
+        d_out[e] = d_act[e] * d_weight[e];
+}
+
+void compute_moe_alpha_device(
+    const float* d_act_scales,
+    const float* d_weight_scales,
+    float* d_alpha_out,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) return;
+    int threads = std::min(n_experts, 256);
+    int blocks  = (n_experts + threads - 1) / threads;
+    moe_alpha_mul_kernel<<<blocks, threads, 0, stream>>>(
+        d_act_scales, d_weight_scales, d_alpha_out, n_experts);
+}
+
 }  // namespace imp

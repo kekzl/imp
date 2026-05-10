@@ -28,7 +28,7 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
-    void* const* host_ptr_D,         const float* host_alpha,
+    void* const* host_ptr_D,         const float* dev_alpha,
     cudaStream_t stream);
 #endif
 
@@ -190,9 +190,13 @@ static void run_smallm_single_expert(int M, int N, int K,
     const void* B_arr[1]   = {B_q.packed_data};
     const void* SFB_arr[1] = {B_q.micro_scales};
     void* D_arr[1]   = {d_D};
-    float alpha[1]   = {combined_alpha};
+    // API now requires a device pointer for alpha.
+    float h_alpha[1] = {combined_alpha};
+    float* d_alpha = nullptr;
+    cudaMalloc(&d_alpha, sizeof(float));
+    cudaMemcpy(d_alpha, h_alpha, sizeof(float), cudaMemcpyHostToDevice);
     bool ok = imp::gemm_grouped_nvfp4_smallM(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr, alpha, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr, d_alpha, /*stream*/0);
     ASSERT_TRUE(ok);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -342,7 +346,7 @@ static void run_smallm_single_expert(int M, int N, int K,
         << " | max|ref|=" << max_abs_ref;
 
     cudaFree(d_A_fp16); cudaFree(d_A_packed); cudaFree(d_A_sf);
-    cudaFree(d_off); cudaFree(d_D); cudaFree(d_B_fp16);
+    cudaFree(d_off); cudaFree(d_D); cudaFree(d_alpha); cudaFree(d_B_fp16);
     imp::free_nvfp4_result(B_q);
 }
 
@@ -446,19 +450,22 @@ TEST(SmallMKernel, FourExpertsVaryingM) {
         a_tensor_scale[e] = (absmax == 0.f) ? 1.f : (absmax / 6.0f);
     }
 
-    // Run kernel.
+    // Run kernel. API requires dev_alpha as a device pointer.
     std::vector<const void*> A_arr(ne), SFA_arr(ne), B_arr(ne), SFB_arr(ne);
-    std::vector<float> alpha(ne);
+    std::vector<float> h_alpha(ne);
     for (int e = 0; e < ne; ++e) {
         A_arr[e]   = d_packed[e];
         SFA_arr[e] = d_sf[e];
         B_arr[e]   = B_q[e].packed_data;
         SFB_arr[e] = B_q[e].micro_scales;
-        alpha[e]   = a_tensor_scale[e] * B_q[e].tensor_scale;
+        h_alpha[e] = a_tensor_scale[e] * B_q[e].tensor_scale;
     }
+    float* d_alpha = nullptr;
+    cudaMalloc(&d_alpha, ne * sizeof(float));
+    cudaMemcpy(d_alpha, h_alpha.data(), ne * sizeof(float), cudaMemcpyHostToDevice);
     bool ok = imp::gemm_grouped_nvfp4_smallM(
         ne, M_per, N, K, A_arr.data(), SFA_arr.data(),
-        B_arr.data(), SFB_arr.data(), d_D.data(), alpha.data(), /*stream*/0);
+        B_arr.data(), SFB_arr.data(), d_D.data(), d_alpha, /*stream*/0);
     ASSERT_TRUE(ok);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -581,6 +588,7 @@ TEST(SmallMKernel, FourExpertsVaryingM) {
     // Cleanup.
     cudaFree(d_A_fp16);
     cudaFree(d_offsets);
+    cudaFree(d_alpha);
     for (int e = 0; e < ne; ++e) {
         cudaFree(d_packed[e]);
         cudaFree(d_sf[e]);
@@ -648,13 +656,17 @@ TEST(SmallMKernel, HwMatchesSoftwareReference) {
     const void* SFB_arr[1] = {B_q.micro_scales};
     void* D_arr_hw[1]   = {d_D_hw};
     void* D_arr_sw[1]   = {d_D_sw};
-    float alpha[1]   = {combined_alpha};
+    // API now requires a device pointer for alpha.
+    float h_alpha_sw[1] = {combined_alpha};
+    float* d_alpha_sw = nullptr;
+    cudaMalloc(&d_alpha_sw, sizeof(float));
+    cudaMemcpy(d_alpha_sw, h_alpha_sw, sizeof(float), cudaMemcpyHostToDevice);
 
     bool ok_hw = imp::gemm_grouped_nvfp4_smallM(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_hw, alpha, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_hw, d_alpha_sw, /*stream*/0);
     ASSERT_TRUE(ok_hw);
     bool ok_sw = gemm_grouped_nvfp4_smallM_software_ref(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_sw, alpha, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_sw, d_alpha_sw, /*stream*/0);
     ASSERT_TRUE(ok_sw);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -679,7 +691,8 @@ TEST(SmallMKernel, HwMatchesSoftwareReference) {
         << " hw=" << __half2float(got_hw[worst]) << " sw=" << __half2float(got_sw[worst]);
 
     cudaFree(d_A_fp16); cudaFree(d_A_packed); cudaFree(d_A_sf);
-    cudaFree(d_off); cudaFree(d_D_hw); cudaFree(d_D_sw); cudaFree(d_B_fp16);
+    cudaFree(d_off); cudaFree(d_D_hw); cudaFree(d_D_sw);
+    cudaFree(d_alpha_sw); cudaFree(d_B_fp16);
     imp::free_nvfp4_result(B_q);
 }
 #endif  // SMALLM_SOFTWARE_REF
