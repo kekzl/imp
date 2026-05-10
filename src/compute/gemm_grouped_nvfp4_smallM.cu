@@ -2,8 +2,10 @@
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <algorithm>
 #include <vector>
+#include <cstdint>
 
 #include "cute/tensor.hpp"
 #include "cute/atom/copy_atom.hpp"
@@ -50,6 +52,130 @@ __device__ __forceinline__ void mma_sync_mxf4nvf4_m16n8k64(
 #else
     (void)d; (void)a; (void)b; (void)sfa; (void)sfb;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// smallM kernel v1 — END-TO-END CORRECTNESS PATH.
+//
+// Grid:  (n_experts, N / TILE_N).  Each CTA owns one expert × one n-tile.
+// Block: 256 threads.
+//
+// This first version is a SOFTWARE FP4-decode reference: each thread reads
+// FP4 nibbles directly from global memory, decodes to FP32 in software,
+// applies the per-(row, micro-block) UE4M3 scale + tensor scale, and
+// accumulates into FP32. Output is cast to FP16.
+//
+// Why software-decode rather than mma.sync.mxf4nvf4? The HW block_scale
+// PTX has a non-trivial SFA/SFB lane-byte distribution layout (CUTLASS
+// SfALayout in mma_traits_sm120.hpp) that is non-obvious from the public
+// PTX docs. Correctness first; T2.x will swap in the validated MMA path
+// (mma_sync_mxf4nvf4_m16n8k64 — wrapper above is unit-tested already in
+// the SmallMMmaWrapper.* tests) once the scale-fragment layout is mapped.
+//
+// Layout consumed:
+//   A_e   : [M_e, K/2]   row-major packed FP4 (low-nibble = even index)
+//   SFA_e : [M_e, K/16]  row-major UE4M3 byte (1 byte / 16 elements)
+//   B_e   : [N,   K/2]   row-major packed FP4
+//   SFB_e : [N,   K/16]  row-major UE4M3 byte
+//   D_e   : [M_e, N]     row-major FP16 output
+//
+// This matches the layout produced by `quantize_fp16_to_nvfp4_moe_native`
+// (for A) and `quantize_fp16_to_nvfp4` (for B) — same row-major dense
+// convention. The kernel is correct end-to-end when fed those two
+// quantize functions' outputs. Verified by SmallMKernel.SingleExpert128*.
+// ---------------------------------------------------------------------------
+
+// Lookup: e2m1 nibble → FP32 magnitude.  Sign comes from the high bit of nibble.
+__device__ __forceinline__ float e2m1_nibble_to_fp32(uint8_t nib) {
+    // E2M1: 1 sign | 2 exp | 1 mant.  Magnitudes: 0, .5, 1, 1.5, 2, 3, 4, 6.
+    static constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    float mag = kMag[nib & 0x7];
+    return (nib & 0x8) ? -mag : mag;
+}
+
+// Software FP8 E4M3 byte → FP32 (canonical fast bit-repack from fp8_utils.cuh).
+//   Normal (exp>0): value = (1 + man/8) * 2^(exp - 7)   [bias 7]
+//   Denorm (exp=0): value = man * 2^-9
+__device__ __forceinline__ float ue4m3_to_fp32(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 1;
+    uint32_t exp  = (bits >> 3) & 0x0F;
+    uint32_t man  = bits & 0x07;
+    uint32_t fp32;
+    if (exp == 0) {
+        float v = (float)man * (1.0f / 512.0f);
+        fp32 = (sign << 31) | __float_as_uint(v);
+    } else {
+        fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
+    }
+    return __uint_as_float(fp32);
+}
+
+template <int TILE_M, int TILE_N, int TILE_K>
+__global__ void smallM_kernel_swref(
+    const void* const* __restrict__ d_A,
+    const void* const* __restrict__ d_SFA,
+    const void* const* __restrict__ d_B,
+    const void* const* __restrict__ d_SFB,
+    void* const* __restrict__ d_D,
+    const float* __restrict__ d_alpha,
+    const int* __restrict__ d_M_per_expert,
+    int N, int K) {
+    const int e      = blockIdx.x;
+    const int n_tile = blockIdx.y;
+    const int M_e = d_M_per_expert[e];
+    if (M_e <= 0) return;
+
+    const uint8_t* A_e   = static_cast<const uint8_t*>(d_A[e]);
+    const uint8_t* B_e   = static_cast<const uint8_t*>(d_B[e]);
+    const uint8_t* SFA_e = static_cast<const uint8_t*>(d_SFA[e]);
+    const uint8_t* SFB_e = static_cast<const uint8_t*>(d_SFB[e]);
+    half*          D_e   = static_cast<half*>(d_D[e]);
+    const float    alpha = d_alpha[e];
+
+    const int K_half  = K / 2;
+    const int K_block = K / 16;
+
+    // Each thread computes a single (m, n) output cell in this v1 software
+    // reference path. Block of 256 threads → 256 cells per CTA. With
+    // TILE_M=TILE_N=128 → 16384 cells, we need a strided loop.
+    const int n_base = n_tile * TILE_N;
+    const int M_eff = min(M_e, TILE_M);
+
+    const int total_cells = TILE_M * TILE_N;
+    for (int idx = (int)threadIdx.x; idx < total_cells; idx += (int)blockDim.x) {
+        int m = idx / TILE_N;
+        int n = idx % TILE_N;
+        if (m >= M_eff) continue;
+        if (n_base + n >= N) continue;
+
+        float acc = 0.f;
+        // Walk K in micro-blocks of 16.
+        for (int kb = 0; kb < K_block; ++kb) {
+            float sfa = ue4m3_to_fp32(SFA_e[(int64_t)m * K_block + kb]);
+            float sfb = ue4m3_to_fp32(SFB_e[(int64_t)(n_base + n) * K_block + kb]);
+            float scale = sfa * sfb;
+
+            // 16 FP4 elements per micro-block = 8 packed bytes.
+            const uint8_t* a_ptr = A_e + (int64_t)m * K_half + kb * 8;
+            const uint8_t* b_ptr = B_e + (int64_t)(n_base + n) * K_half + kb * 8;
+
+            float partial = 0.f;
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                uint8_t ab = a_ptr[i];
+                uint8_t bb = b_ptr[i];
+                float a0v = e2m1_nibble_to_fp32(ab & 0xF);
+                float a1v = e2m1_nibble_to_fp32((ab >> 4) & 0xF);
+                float b0v = e2m1_nibble_to_fp32(bb & 0xF);
+                float b1v = e2m1_nibble_to_fp32((bb >> 4) & 0xF);
+                partial += a0v * b0v + a1v * b1v;
+            }
+            acc += partial * scale;
+        }
+        // Apply tensor-scale alpha.
+        acc *= alpha;
+        D_e[(int64_t)m * N + (n_base + n)] = __float2half(acc);
+    }
 }
 
 }  // anonymous namespace
@@ -177,12 +303,56 @@ bool gemm_grouped_nvfp4_smallM_available() {
 void gemm_grouped_nvfp4_smallM_cleanup() {}
 
 bool gemm_grouped_nvfp4_smallM(
-    int /*n_experts*/, const int* /*host_M*/, int /*N*/, int /*K*/,
-    const void* const* /*host_ptr_A*/, const void* const* /*host_ptr_SFA*/,
-    const void* const* /*host_ptr_B*/, const void* const* /*host_ptr_SFB*/,
-    void* const* /*host_ptr_D*/, const float* /*host_alpha*/,
-    cudaStream_t /*stream*/) {
-    return false;  // skeleton: caller falls back to CUTLASS path
+    int n_experts, const int* host_M, int N, int K,
+    const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
+    const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
+    void* const* host_ptr_D,         const float* host_alpha,
+    cudaStream_t stream) {
+    if (!gemm_grouped_nvfp4_smallM_available()) return false;
+    if (n_experts <= 0 || N <= 0 || K <= 0) return false;
+    if ((K % 128) != 0 || (N % 128) != 0) return false;
+
+    // Phase A constraint: only support max_M ≤ 128 (single M-tile per expert).
+    int max_M = 0;
+    for (int e = 0; e < n_experts; ++e) max_M = std::max(max_M, host_M[e]);
+    if (max_M > 128) return false;
+
+    constexpr int TILE_M = 128, TILE_N = 128, TILE_K = 128;
+
+    // Upload pointer arrays + M to device.
+    void** d_A = nullptr;   void** d_SFA = nullptr;
+    void** d_B = nullptr;   void** d_SFB = nullptr;
+    void** d_D = nullptr;   float* d_alpha = nullptr;
+    int*   d_M = nullptr;
+    cudaMallocAsync(&d_A,     sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFA,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_B,     sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_SFB,   sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_D,     sizeof(void*) * n_experts, stream);
+    cudaMallocAsync(&d_alpha, sizeof(float) * n_experts, stream);
+    cudaMallocAsync(&d_M,     sizeof(int)   * n_experts, stream);
+
+    cudaMemcpyAsync(d_A,     host_ptr_A,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFA,   host_ptr_SFA, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_B,     host_ptr_B,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_SFB,   host_ptr_SFB, sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_D,     host_ptr_D,   sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_alpha, host_alpha,   sizeof(float) * n_experts, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_M,     host_M,       sizeof(int)   * n_experts, cudaMemcpyHostToDevice, stream);
+
+    dim3 grid(n_experts, N / TILE_N);
+    dim3 block(256);
+
+    smallM_kernel_swref<TILE_M, TILE_N, TILE_K><<<grid, block, 0, stream>>>(
+        (const void* const*)d_A, (const void* const*)d_SFA,
+        (const void* const*)d_B, (const void* const*)d_SFB,
+        d_D, d_alpha, d_M, N, K);
+
+    cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
+    cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
+    cudaFreeAsync(d_D, stream);   cudaFreeAsync(d_alpha, stream);
+    cudaFreeAsync(d_M, stream);
+    return true;
 }
 
 }  // namespace imp
