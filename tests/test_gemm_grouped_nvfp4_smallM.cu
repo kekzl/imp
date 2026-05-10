@@ -20,6 +20,18 @@
 extern "C" void smallM_smoke_single_mma(float*, const uint32_t*, const uint32_t*,
                                         uint32_t, uint32_t, cudaStream_t);
 
+#ifdef SMALLM_SOFTWARE_REF
+// Debug entry point exposed by gemm_grouped_nvfp4_smallM.cu when built with
+// SMALLM_SOFTWARE_REF defined. Same signature as gemm_grouped_nvfp4_smallM
+// but routes to the software-decode reference kernel.
+extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
+    int n_experts, const int* host_M, int N, int K,
+    const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
+    const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
+    void* const* host_ptr_D,         const float* host_alpha,
+    cudaStream_t stream);
+#endif
+
 namespace {
 
 bool has_sm120() {
@@ -334,5 +346,100 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
     cudaFree(d_off); cudaFree(d_D); cudaFree(d_B_fp16);
     imp::free_nvfp4_result(B_q);
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic cross-check: run the production HW MMA kernel and the software
+// reference kernel on the SAME quantized inputs, then compare element-wise.
+// Compiled only with SMALLM_SOFTWARE_REF — not part of the default suite,
+// purely a debug guard for the layout-mapping work in T1.7b.
+// ---------------------------------------------------------------------------
+#ifdef SMALLM_SOFTWARE_REF
+TEST(SmallMKernel, HwMatchesSoftwareReference) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+
+    const int M = 128, N = 128, K = 128;
+
+    std::mt19937 rng_w(13);
+    std::uniform_real_distribution<float> dist_w(-0.5f, 0.5f);
+    std::vector<__half> h_B_fp16(N * K);
+    for (auto& v : h_B_fp16) v = __float2half(dist_w(rng_w));
+    __half* d_B_fp16 = nullptr;
+    cudaMalloc(&d_B_fp16, N * K * sizeof(__half));
+    cudaMemcpy(d_B_fp16, h_B_fp16.data(), N * K * sizeof(__half), cudaMemcpyHostToDevice);
+    int64_t b_shape[2] = {N, K};
+    imp::Tensor B_t(d_B_fp16, imp::QType::F16, 2, b_shape, true);
+    imp::NvFP4QuantResult B_q;
+    imp::quantize_fp16_to_nvfp4(B_t, B_q, /*stream*/0);
+    cudaStreamSynchronize(0);
+
+    std::mt19937 rng_a(7);
+    std::uniform_real_distribution<float> dist_a(-1.f, 1.f);
+    std::vector<__half> h_A_fp16(M * K);
+    for (auto& v : h_A_fp16) v = __float2half(dist_a(rng_a));
+    __half* d_A_fp16 = nullptr;
+    cudaMalloc(&d_A_fp16, M * K * sizeof(__half));
+    cudaMemcpy(d_A_fp16, h_A_fp16.data(), M * K * sizeof(__half), cudaMemcpyHostToDevice);
+
+    void* d_A_packed = nullptr; void* d_A_sf = nullptr;
+    cudaMalloc(&d_A_packed, M * K / 2);
+    cudaMalloc(&d_A_sf,     M * K / 16);
+    int h_off[2] = {0, M};
+    int* d_off = nullptr; cudaMalloc(&d_off, sizeof(h_off));
+    cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
+    void* h_pp[1] = {d_A_packed}; void* h_sp[1] = {d_A_sf};
+    imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, h_pp, h_sp, d_off, M, K, 1, 0);
+    cudaStreamSynchronize(0);
+
+    float a_absmax = 0.f;
+    for (auto h : h_A_fp16) a_absmax = std::max(a_absmax, std::fabs(__half2float(h)));
+    float a_tensor_scale = (a_absmax == 0.f) ? 1.f : (a_absmax / 6.0f);
+    float combined_alpha = a_tensor_scale * B_q.tensor_scale;
+
+    void* d_D_hw = nullptr; cudaMalloc(&d_D_hw, M * N * sizeof(__half));
+    void* d_D_sw = nullptr; cudaMalloc(&d_D_sw, M * N * sizeof(__half));
+    cudaMemset(d_D_hw, 0, M * N * sizeof(__half));
+    cudaMemset(d_D_sw, 0, M * N * sizeof(__half));
+    int M_per[1] = {M};
+    const void* A_arr[1]   = {d_A_packed};
+    const void* SFA_arr[1] = {d_A_sf};
+    const void* B_arr[1]   = {B_q.packed_data};
+    const void* SFB_arr[1] = {B_q.micro_scales};
+    void* D_arr_hw[1]   = {d_D_hw};
+    void* D_arr_sw[1]   = {d_D_sw};
+    float alpha[1]   = {combined_alpha};
+
+    bool ok_hw = imp::gemm_grouped_nvfp4_smallM(
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_hw, alpha, /*stream*/0);
+    ASSERT_TRUE(ok_hw);
+    bool ok_sw = gemm_grouped_nvfp4_smallM_software_ref(
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_sw, alpha, /*stream*/0);
+    ASSERT_TRUE(ok_sw);
+    cudaError_t err = cudaDeviceSynchronize();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    std::vector<__half> got_hw(M * N), got_sw(M * N);
+    cudaMemcpy(got_hw.data(), d_D_hw, M * N * sizeof(__half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(got_sw.data(), d_D_sw, M * N * sizeof(__half), cudaMemcpyDeviceToHost);
+
+    float max_abs_sw = 0.f;
+    for (auto h : got_sw) max_abs_sw = std::max(max_abs_sw, std::fabs(__half2float(h)));
+    const float floor_v = std::max(max_abs_sw * 1e-3f, 1e-4f);
+    float max_rel = 0.f;
+    int worst = -1;
+    for (int i = 0; i < M * N; ++i) {
+        float h = __half2float(got_hw[i]);
+        float s = __half2float(got_sw[i]);
+        float rel = std::fabs(h - s) / std::max(std::fabs(s), floor_v);
+        if (rel > max_rel) { max_rel = rel; worst = i; }
+    }
+    EXPECT_LT(max_rel, 5e-3f)
+        << "HW vs SW max_rel=" << max_rel << " worst=" << worst
+        << " hw=" << __half2float(got_hw[worst]) << " sw=" << __half2float(got_sw[worst]);
+
+    cudaFree(d_A_fp16); cudaFree(d_A_packed); cudaFree(d_A_sf);
+    cudaFree(d_off); cudaFree(d_D_hw); cudaFree(d_D_sw); cudaFree(d_B_fp16);
+    imp::free_nvfp4_result(B_q);
+}
+#endif  // SMALLM_SOFTWARE_REF
 
 }  // anonymous namespace
