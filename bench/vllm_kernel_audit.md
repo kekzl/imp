@@ -253,12 +253,12 @@ multi-stream MoE pipeline, which would take 2–4 weeks to replicate.
 ## Profile re-run recipe
 
 ```bash
-# From host, with model at /home/kekz/models/Qwen3-Coder-30B-A3B-Instruct-FP4
+# From host, with model at $IMP_MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-FP4
 docker run --rm --gpus all \
   --shm-size=4g \
-  -v /home/kekz/models:/models:ro \
-  -v /home/kekz/github.com/kekzl/imp/bench:/bench:ro \
-  -v /home/kekz/github.com/kekzl/imp/bench/results:/out:rw \
+  -v $IMP_MODELS_DIR:/models:ro \
+  -v $REPO/bench:/bench:ro \
+  -v $REPO/bench/results:/out:rw \
   -v /opt/nvidia/nsight-systems/2025.6.3:/nsys:ro \
   --entrypoint /nsys/bin/nsys \
   vllm/vllm-openai:latest \

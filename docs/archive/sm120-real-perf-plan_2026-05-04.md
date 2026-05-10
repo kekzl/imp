@@ -59,7 +59,7 @@ Add SSM tensors zu `cutlass_nvfp4_cache` separately, **even if** they remain in 
 - [ ] **Step 1: Find where cutlass_nvfp4_cache is populated**
 
 ```bash
-grep -nE "cutlass_nvfp4_cache.*\[|cutlass_nvfp4_cache.*emplace|cutlass_nvfp4_cache.*insert|build_cutlass_nvfp4|populate.*cutlass" /home/kekz/github.com/kekzl/imp/src/graph/executor_pre_dequant.cu
+grep -nE "cutlass_nvfp4_cache.*\[|cutlass_nvfp4_cache.*emplace|cutlass_nvfp4_cache.*insert|build_cutlass_nvfp4|populate.*cutlass" $REPO/src/graph/executor_pre_dequant.cu
 ```
 
 Expected: find the loop that populates the cache from model weights. Note line numbers.
@@ -67,7 +67,7 @@ Expected: find the loop that populates the cache from model weights. Note line n
 - [ ] **Step 2: Map exclusion logic**
 
 ```bash
-grep -n "nvfp4_exclude_ptrs" /home/kekz/github.com/kekzl/imp/src/graph/executor_pre_dequant.cu
+grep -n "nvfp4_exclude_ptrs" $REPO/src/graph/executor_pre_dequant.cu
 ```
 
 Verify: `nvfp4_exclude_ptrs.insert(L.ssm_in.data)` at line ~745, `nvfp4_exclude_ptrs.insert(L.ssm_out.data)` at line ~750, AND check whether the population loop tests against this set.
@@ -112,7 +112,7 @@ Concrete edit (will adjust based on actual code structure — placeholder is the
 - [ ] **Step 3: Build**
 
 ```bash
-cd /home/kekz/github.com/kekzl/imp
+cd $REPO
 docker build -t imp:lever1 . 2>&1 | tail -10
 ```
 
@@ -124,7 +124,7 @@ docker run -d --rm --name imp-nemo-lever1 \
   --network autoflow_default --network-alias llm \
   -e IMP_MODEL=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
   -e IMP_HOST=0.0.0.0 -e IMP_PORT=8080 -e IMP_MODELS_DIR=/models \
-  -v /home/kekz/models:/models --gpus all -p 8080:8080 imp:lever1
+  -v $IMP_MODELS_DIR:/models --gpus all -p 8080:8080 imp:lever1
 until curl -sf http://localhost:8080/health 2>/dev/null | grep -q '"model_loaded":true'; do sleep 5; done
 docker logs imp-nemo-lever1 2>&1 | grep -E "CUTLASS NVFP4|GDN/SSM" | head -5
 ```
@@ -151,9 +151,9 @@ docker logs imp-nemo-lever1 2>&1 | grep -E "slow dequant-to-FP16|completion 1/1"
 - [ ] **Step 6: Smoke validation on Nemotron**
 
 ```bash
-cd /home/kekz/github.com/kekzl/imp
+cd $REPO
 docker stop imp-nemo-lever1
-IMP_DOCKER_IMG=imp:lever1 IMP_MODELS_DIR=/home/kekz/models \
+IMP_DOCKER_IMG=imp:lever1 IMP_MODELS_DIR=$IMP_MODELS_DIR \
   python3 scripts/validate_safetensors.py --smoke --model Nemotron-3-Nano-30B-A3B-NVFP4
 cat MODEL_VALIDATION_SUMMARY.csv
 ```
@@ -163,7 +163,7 @@ cat MODEL_VALIDATION_SUMMARY.csv
 - [ ] **Step 7: Smoke validation on Qwen3.6 (no-regression check)**
 
 ```bash
-IMP_DOCKER_IMG=imp:lever1 IMP_MODELS_DIR=/home/kekz/models \
+IMP_DOCKER_IMG=imp:lever1 IMP_MODELS_DIR=$IMP_MODELS_DIR \
   python3 scripts/validate_safetensors.py --smoke --model Qwen3.6-35B-A3B-NVFP4
 ```
 
@@ -179,13 +179,13 @@ docker tag imp:lever1 imp:latest
 
 ```bash
 docker start autoflow-llm-1
-cd /home/kekz/github.com/kekzl/autoflow && docker compose start worker
+cd $HOME/github.com/kekzl/autoflow && docker compose start worker
 ```
 
 - [ ] **Step 10: Final commit**
 
 ```bash
-cd /home/kekz/github.com/kekzl/imp
+cd $REPO
 git add src/graph/executor_pre_dequant.cu
 git commit -m "fix(nvfp4): populate cutlass_nvfp4_cache for SSM tensors (Mamba2 multi-chunk fix)"
 git tag lever1-ssm-cutlass-cache

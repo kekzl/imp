@@ -3,13 +3,13 @@
 ## Reproduced numbers
 
 ```
-Model:    /home/kekz/models/Qwen3-Coder-30B-A3B-Instruct-FP4 (Modelopt NVFP4 SafeTensors)
+Model:    $IMP_MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-FP4 (Modelopt NVFP4 SafeTensors)
 Build:    imp:test (commit f415f87, branch docs/audit-cleanup-2026-05-10)
 HW:       RTX 5090, sm_120a, CUDA 13.2.1
 Reps:     3 (after 1 warmup), greedy decode (T=0)
 
 Command:
-  docker run --rm --gpus all -v /home/kekz/models:/models:ro imp:test \
+  docker run --rm --gpus all -v $IMP_MODELS_DIR:/models:ro imp:test \
     imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
             --bench --bench-pp 512 --max-tokens 256 --bench-reps 3
 

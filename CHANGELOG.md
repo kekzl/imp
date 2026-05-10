@@ -2,26 +2,199 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] - 2026-05-08
+## [0.9.0] - 2026-05-10
 
-### Fixed
+NVFP4 hits its production stride: prefill goes from 1.2k to 13k tok/s on
+Qwen3-Coder-30B-A3B-NVFP4 (×10.5), NVFP4 KV cache lands as a Klasse-A
+context unlock (16k → 40k tokens same VRAM, ×3.9 compression), and the
+BitDecoding TC paged-decode port reaches FP16 parity. New architectures
+(NemotronH hybrid Mamba2+MoE+Attention, multimodal Qwen3.6-VL NVFP4,
+zero-config SafeTensors auto-detect, native SentencePiece parser) plus
+chunked-prefill correctness across full-attention + hybrid models close
+the long-context cliff. Build target moves to `sm_120a` for the full
+RTX 5090 feature set; CUDA 13.2 modernization (TMA-style memcpy, `add.f32x2`)
+ships. Sixty-plus PRs since v0.8.0.
 
-- **Chunked prefill correctness**: prefill chunks ≥2 now correctly read past chunks' K/V from the paged cache. New `paged_kv_gather_*` kernels + rectangular `attention_cublas_prefill(q_offset)`. Previously, `prefill_chunk_size > 0` produced silently-wrong logits for full-attention models and full degeneration for SWA models like Gemma-4.
-- **Chunked prefill on hybrid GDN+MoE / Mamba2+MoE archs** (Qwen3.5/3.6, Nemotron-H): prompts where `total_input > effective_chunk` were previously rejected with `RequestStatus::CANCELLED`. Two-part fix — Mamba2 plain conv1d kernel now reads trailing context from `conv_state` at the chunk boundary, and `Engine::supports_chunked_prefill_()` carve-out is gated by attention-shape uniformity so HF-loader-populated `n_kv_heads_per_layer` arrays (uniform across attention layers) don't trip the heterogeneous-shape exclusion.
+### Highlights
+
+- **NVFP4 MoE prefill fast-path** (#160) — Qwen3-Coder-30B-A3B-NVFP4 pp512
+  1241 → 13046 tok/s (×10.5). Direct-from-NVFP4 grouped GEMM with cached
+  problem shapes; previously fell through to dequant→cuBLAS per chunk.
+  Cross-model effect: Qwen3.6-NVFP4 / Gemma-4-NVFP4 / Qwen3-30B-A3B-Modelopt
+  prefill all double or better.
+- **NVFP4 KV cache** (#108, #125) — opt-in `--kv-nvfp4` (or
+  `imp.conf:kv_cache.dtype="nvfp4"`); 4 bits/element + per-block scale
+  brings 16k → 40k tokens at the same VRAM, ×3.9 compression vs FP16.
+  Vectorized PTX `cvt.rn.f16x2.e2m1x2` decode path closed the dequant
+  gap (+25.6%, parity with FP16 baseline 147 tok/s on Qwen3-8B Q8).
+- **BitDecoding TC paged decode (Phases 0-3)** (#142, #145, #146, #147,
+  #148, #149) — WMMA Q.K dot dispatch + block-softmax + FP16 residual
+  buffer + multi-seq + splitk path + graph-safe. Final state: parity
+  with FP16 baseline (193 vs 193 tok/s) on Qwen3-4B Q8 NVFP4-KV; was
+  50 tok/s before. Default opt-in (`bitdecoding_residual_tokens=0`) —
+  NVFP4-MoE / dual-head_dim regressions don't justify a flip yet.
+- **NemotronH hybrid Mamba2+MoE+Attention NVFP4** (#104, #109) — new
+  `NemotronHForCausalLM` arch loads end-to-end; 4-file KV-cache-sizing
+  patch fixes the multi-chunk hang on long-context. tg128 42 →
+  319 tok/s (+650%) after dynamic NVFP4 MoE reserve sizing — no env
+  var needed.
+- **`sm_120f` → `sm_120a` build target** (#105) — full RTX 5090 feature
+  set (architecture-specific instructions). Historical C7600 `ptxas`
+  workaround for `sm_120f` is obsolete on CUDA 13.2.1+.
+- **1024 → 4096 prefill cliff closed** (#110) — n≤1024 cap removed,
+  S-matrix buffer 256 → 1024 MiB. Qwen3-4B Q8_0 pp=4096 +28%, Qwen3-8B
+  Q8_0 +18%, Llama-3.2-3B +24%. Cliff now sits at 4096→4112.
+- **Chunked prefill correctness** (#130) — prefill chunks ≥2 now correctly
+  read past chunks' K/V from the paged cache. New `paged_kv_gather_*`
+  kernels + rectangular `attention_cublas_prefill(q_offset)`. Previously,
+  `prefill_chunk_size > 0` produced silently-wrong logits for full-attention
+  models and full degeneration for SWA models like Gemma-4.
+- **Chunked prefill on hybrid GDN+MoE / Mamba2+MoE archs** (#156) —
+  Qwen3.5/3.6, Nemotron-H: prompts where `total_input > effective_chunk`
+  were previously rejected with `RequestStatus::CANCELLED`. Two-part fix —
+  Mamba2 plain conv1d kernel now reads trailing context from `conv_state`
+  at the chunk boundary, and `Engine::supports_chunked_prefill_()` carve-out
+  is gated by attention-shape uniformity so HF-loader-populated
+  `n_kv_heads_per_layer` arrays (uniform across attention layers) don't
+  trip the heterogeneous-shape exclusion.
 
 ### Added
 
-- `Engine::resolve_prefill_chunk_size_()` with sentinel `-1` = "use per-arch default" (512 for full-attention + FP16/FP8 KV, 0 otherwise). Default `Config::prefill_chunk_size` flips from `0` to `-1`.
-- `tests/perf_baseline_chunked.json` — perf baseline for chunked default with looser 5%/8% gates.
-- New unit tests: `test_kv_gather` (3 tests), `test_attention_chunked` (3 tests), `test_chunked_prefill` (5 e2e tests).
-- `make verify-chunked` target — perf gate against the new chunked baseline.
+- **NVFP4 KV cache storage path** (#108) — `kv_cache.dtype="nvfp4"`,
+  paged attention kernel reads block-scaled NVFP4 directly.
+- **NemotronH hybrid arch support** (#104, #109) — Mamba2 + MoE + Attention.
+  Dynamic NVFP4 MoE reserve replaces the static 1 GiB clamp; reserve is
+  computed from the model's attention layout (`per_token_kv × 16K + 256 MiB
+  safety, clamped [256 MiB, 1 GiB]`).
+- **Native SentencePiece (`.model`) parser** (#128) — drops the Python
+  fallback for Mistral-family tokenizers.
+- **Multimodal Qwen3.6-VL NVFP4 loader** (#152) — all HF
+  `Qwen3.6-NVFP4` repos ship VL/Omni base; loader strips the multimodal
+  prefix on text-only weights.
+- **Zero-config SafeTensors auto-detect** (#116) — observability + Phase-2
+  audit follow-throughs; no `--arch` needed for supported repos.
+- **Server: tools + JSON-schema coordination** (#103, #112, #119) —
+  preamble pass-through for reasoning models, schema preamble close,
+  tool-coordination gaps closed.
+- **Server: opt-in `--log-requests` JSONL** (#155) — per-request log line
+  written when the flag is on; off by default.
+- **Native SentencePiece + AWQ acquisition recipe** (#128, #129) —
+  AU2 lit up; AU3 acquisition path documented.
+- **Prom/Grafana stack** (#130) — alongside the chunked-prefill fix.
+- **`Engine::resolve_prefill_chunk_size_()`** with sentinel `-1` =
+  "use per-arch default" (512 for full-attention + FP16/FP8 KV, 0
+  otherwise). Default `Config::prefill_chunk_size` flips from `0` to `-1`.
+- **`tests/perf_baseline_chunked.json`** — perf baseline for chunked default
+  with looser 5%/8% gates.
+- **New unit tests**: `test_kv_gather` (3), `test_attention_chunked` (3),
+  `test_chunked_prefill` (5 e2e), `test_nvfp4_paged_residual` splitk launch.
+- **`make verify-chunked`** target — perf gate against the chunked baseline.
+- **CUDA 13.2 modernization** (#131) — `cudaMemcpyWithAttributesAsync`,
+  `add.f32x2` two-element FP add intrinsic.
+- **`tools/analysis/sass_omma_audit.sh`** + BitDecoding ROI scripts
+  (#139) — re-runnable SASS / OMMA audit harness for sm_120a.
+- **GHCR release pipeline** (#101) — Docker image published on tagged
+  release; manual `workflow_dispatch` available for ad-hoc images.
+- **HAS_GPU_RUNNER repo variable** (#127) — CI Test job gates on the
+  variable rather than a hard-skip.
+- **CI: ccache** + path-aware cache keys + base image bump 13.2.0 →
+  13.2.1 (#122, #127). Auto-merge on owner PRs (#123).
 
 ### Changed
 
-- `attention_cublas_prefill` signature now takes `int q_offset` (0 = square path, byte-equivalent to prior behavior).
-- `causal_softmax_inplace_kernel` and `causal_softmax_fp32_inplace_kernel` generalized to `(S, q_len, kv_len, q_offset, causal)`.
-- `make verify-fast` smoke now pins `--prefill-chunk-size 0` to keep `perf_baseline.json` apples-to-apples.
-- imp-cli `--prefill-chunk-size 0` now correctly forces single-chunk (was silently dropped due to `>0` guard).
+- **Build target is now `sm_120a`** (#105) — was `sm_120f`. Architecture-specific
+  feature set unlocked.
+- **`prefill_chunk_size` default sentinel** (#130) — `-1` = per-arch default.
+  Single-chunk is now default for SWA / Gemma-4 long-context recall (#114,
+  #117); multi-chunk gated on attention-shape uniformity for hybrids.
+- **`attention_cublas_prefill` signature** — now takes `int q_offset` (0 =
+  square path, byte-equivalent to prior behavior).
+- **`causal_softmax_inplace_kernel` / `_fp32_inplace_kernel`** generalized
+  to `(S, q_len, kv_len, q_offset, causal)`.
+- **`make verify-fast` smoke** pins `--prefill-chunk-size 0` to keep
+  `perf_baseline.json` apples-to-apples.
+- **imp-cli `--prefill-chunk-size 0`** now correctly forces single-chunk
+  (was silently dropped due to `>0` guard).
+- **Auto `max_seq_len` for hybrid models** (#157) — corrected; soft-cap
+  default lifted to 16K.
+
+### Performance
+
+- **NVFP4 MoE prefill fast-path** (#160) — see Highlights.
+- **NVFP4 MoE GrpGemm cache** + opt-in gate+up fusion infrastructure
+  (#161) — +4-7% on Qwen3-Coder-30B-A3B-NVFP4 prefill from cache;
+  fusion is opt-in and does not yet beat baseline (NVFP4 prefill
+  landscape memo + investigation log included).
+- **GDN α+β fused GEMV decode** (#153) and **4-way input fusion**
+  (`ssm_in` + `gdn_gate` + α + β, #154) — Qwen3.5 / Qwen3.6 GDN decode
+  speedups end-to-end.
+- **Vectorized FP4 dequant** in paged KV decode (#125) — +25.6% on
+  Qwen3-8B-Q8 with `--kv-nvfp4`; closes the gap to FP16.
+- **nsys-driven prefill/decode wins + MoE `fp32_down` pre-alloc** (#150,
+  #151) — long-context GDN unblocked; cross-model graphs CI gate.
+- **Default mem-pool retain + `cudaGraphExecUpdate` re-capture** (#149)
+  — chunked prefill on NVFP4 KV cache is now graph-safe.
+
+### Fixed
+
+- **`d_pf_block_tables_` undersize** (#134) — sized from `max_blocks`,
+  not `blocks_per_seq`.
+- **Gemma-4 FP8-prefill carve-out** (#137) — corrected reason
+  (perf, not correctness; cuBLASLt FP8 algo is slower at Gemma-4 shapes,
+  not buggy). Output is bit-identical.
+- **`llm-compressor` zero / non-finite tensor_scale + input_scale**
+  (#113) — defensive guard prevents NVFP4 zero-norm collapse on
+  llm-compressor-quantized exports.
+- **MoE NVFP4 expert_gemm uses cached buffer** (#115) — non-gated arch
+  path was bypassing the contiguous per-expert NVFP4 buffer.
+- **Graph-safe `gemm_nvfp4` dequant fallback** (#121) —
+  `set_nvfp4_dequant_workspace()` + capture-guard in
+  `ensure_dequant_buffer`. Stage-1 of spec-decode/MTP prereqs.
+- **Server: drop 512-token prefill chunking default** (#114) — fixed
+  Gemma-4 long-context recall.
+- **Server: single-chunk prefill default** (#117) — Gemma-4 long-context
+  recall pass-rate 4/11 → 11/11 across 128–3000 token doc-length sweep.
+- **NVFP4 chunked prefill on KV cache** (#149) — `attn_scores_` buffer
+  capacity now sized correctly; chunked decode no longer aborts on
+  long context.
+
+### Hardening / audit
+
+- **SafeTensors + NVFP4 audit (F1-F8)** (#126) — F1 model header guard,
+  F2 missing-tensor messaging, F3 NVFP4 tensor_scale finite-check,
+  F4 `input_scale` visibility, F5 multimodal prefix, F6 `arch_norm_offset`,
+  F7 `RMSNorm 1+W`, F8 `A_log → -exp(A_log)` SafeTensors path.
+- **CUDA 13.2 modernization** (#131) — `cudaMemcpyWithAttributesAsync`
+  replaces stream-attribute dance for L2 streaming hints; `add.f32x2`
+  intrinsic for two-element FP adds in inner loops.
+- **CMake: drop stale ptxas C7600 diagnostic comment** (#133) — fixed
+  on CUDA 13.2.1.
+
+### Repository / tooling
+
+- **Skills committed** (#124) — imp-specific Claude Code skills under
+  `.claude/skills/`.
+- **Audit cleanup 2026-05-10** (#159) — closed-out memos archived,
+  open items consolidated.
+- **`docs/performance.md` numbers refreshed** (#158).
+- **`docs/roadmap.md` housekeeping** (#132, #135, #136, #138) — CUDA 13.2
+  modernization items marked shipped, FP8-KV Gemma-4 entry corrected,
+  research-grade KV per-item verdicts.
+
+### Known issues (carry-over)
+
+- **NVFP4 MoE prefill ceiling** at ~16k tok/s warm vs vLLM single-seq
+  18.5k = 1.42× gap. Investigation memo + landscape (#161); next steps
+  documented under `nvfp4_moe_prefill_landscape_2026_05_10`.
+- **Spec-decode / MTP** still off on NVFP4 decode-cache models — graph-safe
+  dequant fallback (#121) is Stage-1; full MTP wiring remains a 2-3 week
+  item.
+- **CUTLASS NVFP4 sm_120 non-determinism** under graph-replay (skip-guard
+  retained for `llm-compressor` exports). User-facing output is OK; only
+  the graph-replay determinism test trips.
+- **Prefill throughput** still shows up to 2.6× variance between
+  container restarts due to cuBLAS autotuning. Compare decode-only for
+  reliable A/B.
 
 ---
 

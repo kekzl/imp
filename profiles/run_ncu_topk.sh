@@ -9,7 +9,7 @@
 # then reboot driver. As a fallback, run with sudo.
 set -euo pipefail
 
-REPO="/home/kekz/github.com/kekzl/imp"
+REPO="$REPO"
 NCU_DIR="${REPO}/profiles/ncu"
 mkdir -p "${NCU_DIR}"
 

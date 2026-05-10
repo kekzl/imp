@@ -372,7 +372,7 @@ EOF
 
 **Goal:** Confirm long prompts on hybrid models (a) no longer get CANCELLED and (b) produce coherent output that survives multi-chunk SSM-state continuation.
 
-**Files:** None modified. This task is gated by external model files in `/home/kekz/models/` and `$REPO/models/`.
+**Files:** None modified. This task is gated by external model files in `$IMP_MODELS_DIR/` and `$REPO/models/`.
 
 - [ ] **Step 4.1: Smoke run — Qwen3.5-4B-Q8_0 long prompt**
 
@@ -405,13 +405,13 @@ If any abort: capture stderr, identify the failing guard, and revisit Task 2/3.
 
 ```bash
 # Skip with explicit log if file missing:
-test -f /home/kekz/models/nemotron-3-nano-30b-a3b-nvfp4/model.safetensors || echo "SKIP: Nemotron-H NVFP4 not local"
+test -f $IMP_MODELS_DIR/nemotron-3-nano-30b-a3b-nvfp4/model.safetensors || echo "SKIP: Nemotron-H NVFP4 not local"
 ```
 
 If present:
 ```bash
 docker run --rm --gpus all \
-    -v /home/kekz/models:/models -v "$PWD":/imp -w /imp imp:test \
+    -v $IMP_MODELS_DIR:/models -v "$PWD":/imp -w /imp imp:test \
     bash -c "./build/tools/imp-cli --model /models/nemotron-3-nano-30b-a3b-nvfp4 \
              --prompt-file <(yes 'Lorem ipsum dolor sit amet. ' | head -40 | tr -d '\n') \
              --max-tokens 32 --temperature 0"
@@ -424,8 +424,8 @@ Expected: coherent output. Specifically validates Task 2's conv_state fix (the o
 Pick the available model(s):
 ```bash
 for m in Qwen3.6-35B-A3B-NVFP4 Nemotron-H-NVFP4; do
-    if [ -d "/home/kekz/models/$m" ]; then
-        IMP_DOCKER_IMG=imp:test IMP_MODELS_DIR=/home/kekz/models \
+    if [ -d "$IMP_MODELS_DIR/$m" ]; then
+        IMP_DOCKER_IMG=imp:test IMP_MODELS_DIR=$IMP_MODELS_DIR \
             python3 scripts/validate_safetensors.py --model "$m" 2>&1 | tail -30
     fi
 done

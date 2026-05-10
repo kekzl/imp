@@ -75,14 +75,14 @@ Status: closed. In-tree wire-format protobuf decoder + ModelProto/TrainerSpec fi
 
 Reason: Two coupled blockers, both fixture-related:
 
-1. **No AWQ checkpoint in the local model fleet.** `find /home/kekz/models /home/kekz/.cache -iname "*awq*"` returns nothing as of 2026-05-08. Implementing the dequant kernel without a real-world checkpoint to integration-test against would ship a synthetic-only-validated kernel — the Quality Gate's "anti-pattern: stubs/mocks/placeholders behind a flag" forbids that even when synthetic tests pass.
+1. **No AWQ checkpoint in the local model fleet.** `find $IMP_MODELS_DIR $HOME/.cache -iname "*awq*"` returns nothing as of 2026-05-08. Implementing the dequant kernel without a real-world checkpoint to integration-test against would ship a synthetic-only-validated kernel — the Quality Gate's "anti-pattern: stubs/mocks/placeholders behind a flag" forbids that even when synthetic tests pass.
 
 2. **AWQ packing convention has subtle differences from GPTQ.** AWQ exports column-pack the INT4 weights with an interleave permutation (qweight[i,j] high/low nibble for sequential rows in a packing block), whereas GPTQ row-packs. Misinterpreting the packing produces output that compiles fine, runs without crash, and silently drifts. Cross-validating against a Python `autoawq` reference is the only way to be sure — that requires a real model file.
 
 Detection is already in place: PR #116 commit `7c0b8c8` parses `awq_config.json` and emits a load-time WARN with bits/group_size. So users get a clear "this model needs work" signal today; they're directed to GPTQ or NVFP4 variants.
 
 **Acquisition path for next session:**
-- Download a small AWQ checkpoint (~2-4 GB), e.g. `TheBloke/Llama-2-7B-Chat-AWQ` (HF Hub) or `casperhansen/llama-3-8b-instruct-awq`. Place under `/home/kekz/models/`.
+- Download a small AWQ checkpoint (~2-4 GB), e.g. `TheBloke/Llama-2-7B-Chat-AWQ` (HF Hub) or `casperhansen/llama-3-8b-instruct-awq`. Place under `$IMP_MODELS_DIR/`.
 - Cross-reference output against Python `autoawq`'s `AutoAWQForCausalLM` on a fixed prompt with `temperature=0`. Use the existing `scripts/validate_safetensors.py` harness pattern.
 - Implement dequant-to-FP16 path first (~150 LoC kernel + cuBLAS dispatch); native AWQ-INT4×FP16 GEMV is a follow-up.
 

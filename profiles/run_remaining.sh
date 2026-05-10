@@ -6,7 +6,7 @@
 # config doesn't kill the whole batch.
 set -uo pipefail
 
-REPO="/home/kekz/github.com/kekzl/imp"
+REPO="$REPO"
 PROFILES="${REPO}/profiles/baselines"
 NSYS=/opt/nvidia/nsight-systems/2025.6.3/target-linux-x64/nsys
 
