@@ -4,7 +4,7 @@ Thanks for taking a look. imp is a single-author / single-target experiment, so 
 
 ## Prerequisites
 
-- An NVIDIA RTX 5090 (Blackwell, `sm_120f`). Other architectures are not supported and will not be added.
+- An NVIDIA RTX 5090 (Blackwell, `sm_120a`). Other architectures are not supported and will not be added.
 - CUDA Toolkit 13.2 or newer.
 - CMake 3.25 or newer.
 - A C++20 host compiler (GCC 12+, Clang 15+).
@@ -103,7 +103,7 @@ Body explains *why*, not *what* — the diff already says what changed.
 - Run `make verify-fast` (or `make verify`) before pushing. CI is the source of truth, but failing local first wastes everyone's time.
 - For release-touching PRs, `scripts/check-release.sh` runs the same gate plus a doc-link / secret / personal-path scan.
 - For perf-sensitive changes, include before/after numbers in the PR description (model, quant, `tg256` and/or `pp512`, hardware).
-- Don't reintroduce SM 8.0 / 9.0 / 10.0 code paths. They were removed deliberately and the build pins `arch=compute_120f`.
+- Don't reintroduce SM 8.0 / 9.0 / 10.0 code paths. They were removed deliberately and the build pins `arch=compute_120a,code=sm_120a` (see CMakeLists.txt:23).
 - Don't break the C API. If a public function in `include/imp/` needs to change, update every caller and call it out in the PR.
 
 ## Filing bugs
