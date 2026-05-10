@@ -27,6 +27,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
+#include "graph/executor_forward_moe_cutlass3x.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -1704,9 +1705,81 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     std::vector<size_t> sfa_offs;
                     std::vector<uint8_t*> sfa_bases;
                     if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
-                        if (!non_gated_experts)
-                            grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs);
-                        grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
+                        // Opt-in fused path: single CUTLASS 3.x dispatch with 2*ne problems.
+                        // IMP_NVFP4_FUSED_GATEUP=1 activates it; default is two-call form.
+                        // Currently flat-perf vs default (GrpGemm cache in 769effe already
+                        // absorbs the per-dispatch overhead). Preserved for future scenarios.
+                        const char* fused_env = ::getenv("IMP_NVFP4_FUSED_GATEUP");
+                        const bool use_fused = !non_gated_experts &&
+                                               fused_env && atoi(fused_env) != 0;
+                        bool used_fused = false;
+
+                        if (use_fused) {
+                            if (layer == 0)
+                                IMP_LOG_INFO("MoE prefill: CUTLASS 3.x gate+up fused (opt-in)");
+
+                            char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
+                            uint8_t* all_sfa_ptr = static_cast<uint8_t*>(moe_.cutlass3x_sf);
+                            std::vector<int> active_M;
+                            std::vector<const void*> hA, hSFA, hB_gate, hSFB_gate, hB_up, hSFB_up;
+                            std::vector<void*> hD_gate, hD_up;
+                            std::vector<float> hAlpha_gate, hAlpha_up;
+                            active_M.reserve(ne);
+                            hA.reserve(ne); hSFA.reserve(ne);
+                            hB_gate.reserve(ne); hSFB_gate.reserve(ne);
+                            hB_up.reserve(ne); hSFB_up.reserve(ne);
+                            hD_gate.reserve(ne); hD_up.reserve(ne);
+                            hAlpha_gate.reserve(ne); hAlpha_up.reserve(ne);
+
+                            for (int e = 0; e < ne; ++e) {
+                                if (M_per[e] == 0)
+                                    continue;
+                                const auto& hg = registry_.handle(ly.expert_gate_ids[e]);
+                                const auto& hu = registry_.handle(ly.expert_up_ids[e]);
+                                active_M.push_back(M_per[e]);
+                                hA.push_back(all_packed + static_cast<size_t>(h_offsets[e]) * d / 2);
+                                hSFA.push_back(all_sfa_ptr + sfa_offs[e]);
+                                hB_gate.push_back(hg.payload.cutlass_nvfp4.weight);
+                                hSFB_gate.push_back(hg.payload.cutlass_nvfp4.sf);
+                                hD_gate.push_back(expert_gate_base +
+                                                  static_cast<size_t>(h_offsets[e]) * eff * sizeof(half));
+                                hAlpha_gate.push_back(hg.payload.cutlass_nvfp4.global_scale
+                                                          ? *hg.payload.cutlass_nvfp4.global_scale
+                                                          : 1.0f);
+                                hB_up.push_back(hu.payload.cutlass_nvfp4.weight);
+                                hSFB_up.push_back(hu.payload.cutlass_nvfp4.sf);
+                                hD_up.push_back(expert_up_base +
+                                                static_cast<size_t>(h_offsets[e]) * eff * sizeof(half));
+                                hAlpha_up.push_back(hu.payload.cutlass_nvfp4.global_scale
+                                                        ? *hu.payload.cutlass_nvfp4.global_scale
+                                                        : 1.0f);
+                            }
+                            const int na = static_cast<int>(active_M.size());
+                            if (na > 0) {
+                                bool ok = imp::dispatch_gate_up_grouped_fused(
+                                    na, active_M.data(), eff, d,
+                                    hA.data(), hSFA.data(),
+                                    hB_gate.data(), hSFB_gate.data(),
+                                    hB_up.data(), hSFB_up.data(),
+                                    hD_gate.data(), hD_up.data(),
+                                    hAlpha_gate.data(), hAlpha_up.data(),
+                                    stream);
+                                if (ok) {
+                                    used_fused = true;
+                                } else {
+                                    IMP_LOG_ERROR(
+                                        "Fused gate+up dispatch failed; falling back to two-call form");
+                                }
+                            } else {
+                                used_fused = true;  // nothing to do, trivially done
+                            }
+                        }
+
+                        if (!used_fused) {
+                            if (!non_gated_experts)
+                                grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs);
+                            grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
+                        }
                     }
 
                     apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
