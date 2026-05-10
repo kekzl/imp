@@ -69,4 +69,24 @@ void compute_moe_alpha_device(
     int n_experts,
     cudaStream_t stream);
 
+// Compute per-expert M_per values from device-resident expert_offsets array.
+// M_per[e] = expert_offsets[e+1] - expert_offsets[e]   (token count routed to expert e)
+//
+// Replaces the host-side  `cudaMemcpyAsync(h_offsets, d_offsets, ...) +
+// cudaStreamSynchronize + for(e) M_per[e]=h_offsets[e+1]-h_offsets[e]`  pattern
+// used in MoE prefill dispatch (executor_forward_moe.cu). Eliminating that D2H
+// sync is the prerequisite for CUDA-graph capture of MoE prefill — the decode
+// fast-path already does no D2H but the prefill path falls back to host-driven
+// dispatch.
+//
+// d_expert_offsets : [n_experts + 1] device int32 — exclusive scan of token counts
+// d_M_per_out      : [n_experts]     device int32 — written by callee
+//
+// Launches a single tiny block; safe inside a captured CUDA graph.
+void compute_M_per_from_offsets_device(
+    const int32_t* d_expert_offsets,
+    int32_t* d_M_per_out,
+    int n_experts,
+    cudaStream_t stream);
+
 }  // namespace imp

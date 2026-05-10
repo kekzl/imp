@@ -344,4 +344,31 @@ void compute_moe_alpha_device(
         d_act_scales, d_weight_scales, d_alpha_out, n_experts);
 }
 
+// ---------------------------------------------------------------------------
+// compute_M_per_from_offsets_device: per-expert token count from offset scan.
+// One thread per expert; single block (n_experts typically ≤ 256).
+// ---------------------------------------------------------------------------
+__global__ void moe_compute_M_per_kernel(
+    const int32_t* __restrict__ d_offsets,
+    int32_t* __restrict__ d_M_per_out,
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < n_experts)
+        d_M_per_out[e] = d_offsets[e + 1] - d_offsets[e];
+}
+
+void compute_M_per_from_offsets_device(
+    const int32_t* d_expert_offsets,
+    int32_t* d_M_per_out,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) return;
+    int threads = std::min(n_experts, 256);
+    int blocks  = (n_experts + threads - 1) / threads;
+    moe_compute_M_per_kernel<<<blocks, threads, 0, stream>>>(
+        d_expert_offsets, d_M_per_out, n_experts);
+}
+
 }  // namespace imp
