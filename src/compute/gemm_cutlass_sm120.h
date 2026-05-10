@@ -15,11 +15,16 @@ struct NvFP4QuantResult;  // forward
 // denormalized range).
 struct CutlassNvFP4Weight {
     const void* data = nullptr;     // borrowed from NvFP4QuantResult::packed_data (not owned)
-    void* scale_factors = nullptr;  // SfAtom layout UE4M3 scale factor bytes (owned)
+    void* scale_factors = nullptr;  // SfAtom layout UE4M3 scale factor bytes
     float tensor_scale = 1.0f;      // deferred global scale (applied as GEMM alpha)
     int64_t N = 0;
     int64_t K = 0;
     size_t sf_bytes = 0;  // total bytes for scale_factors buffer
+    // When true, `scale_factors` points into a shared buffer owned elsewhere
+    // (e.g. MoE per-projection SfAtom buffer in the VRAM allocator). Used so
+    // 128 experts of one projection can share one allocation; cleanup must
+    // skip cudaFree on these entries.
+    bool sf_borrowed = false;
 };
 
 // Convert imp NvFP4QuantResult to CUTLASS block-scaled format.
@@ -31,6 +36,14 @@ void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w);
 // Compute SfAtom buffer size for given dimensions (rows x K).
 // Returns number of bytes (one UE4M3 per scale factor, plus alignment padding).
 size_t cutlass_nvfp4_sf_size(int rows, int K);
+
+// MoE-fused scale conversion: native row-major UE4M3 [ne, N, K/16] →
+// SfAtom layout UE4M3 [ne, cutlass_nvfp4_sf_size(N, K)]. Per-expert strides
+// computed from N, K. Single launch (grid.y = ne) so 128-expert layers do not
+// pay 128× kernel-launch overhead. Caller pre-allocates dst sized
+// `ne * cutlass_nvfp4_sf_size(N, K)` bytes.
+void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N,
+                                        int K, cudaStream_t stream);
 
 // Quantize FP16 activation [M,K] to NVFP4 in CUTLASS block-scaled format.
 // dst_data: pre-allocated [M, K/2] RowMajor packed FP4 bytes

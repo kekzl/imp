@@ -1243,67 +1243,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
                     // Falls through to existing scatter (step 7)
 
-                } else if (ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr &&
-                           (non_gated_experts || ly.nvfp4_moe_gate_ptr != nullptr) &&
-                           moe_.batch_dequant_buf != nullptr &&
-                           moe_.batch_dequant_buf_size >= static_cast<size_t>(ne) * fp16_per_expert &&
-                           moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne) {
-                    // =================================================================
-                    // NVFP4→FP16 BATCH DEQUANT + grouped GEMM (prefill fallback when Q6K freed)
-                    // Dequants NVFP4 expert weights to FP16, then same grouped GEMM as FP16 batch.
-                    // =================================================================
-                    if (layer == 0)
-                        IMP_LOG_INFO("MoE prefill: NVFP4→FP16 batch path (n=%d, expanded=%d)", n, expanded);
-
-                    std::vector<int32_t> h_offsets(ne + 1);
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                                       static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                                       cudaMemcpyDeviceToHost, stream));
-                    cudaStreamSynchronize(stream);
-
-                    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
-                    char* gathered_base = static_cast<char*>(moe_.gathered.data);
-                    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
-                    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
-                    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
-                    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
-
-                    auto nvfp4_batch_dequant_gemm = [&](const NvFP4MoEQuantResult& nvfp4, const char* a_base,
-                                                        char* c_base, int K_dim, int N_dim) {
-                        int64_t rows = nvfp4.N;
-                        int64_t cols = nvfp4.K;
-                        size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
-
-                        // Dequant all experts NVFP4 → FP16
-                        dequantize_nvfp4_moe_to_fp16(nvfp4, buf, stream);
-
-                        std::vector<const void*> b_ptrs(ne);
-                        for (int e = 0; e < ne; ++e)
-                            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
-
-                        gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
-                                         QType::F16, ne, stream, moe_.d_work_ptrs);
-                    };
-
-                    // Gate projection
-                    if (!non_gated_experts)
-                        nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_gate_ptr, gathered_base, expert_gate_base, d,
-                                                 eff);
-
-                    // Up projection
-                    nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_up_ptr, gathered_base, expert_up_base, d, eff);
-
-                    // Activation
-                    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
-                                            moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
-                                            compute_dtype_, cfg.ffn_activation, stream);
-
-                    // Down projection
-                    char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-                    nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_down_ptr, down_act, expert_down_base, eff, d);
-
-                    // Falls through to scatter (step 7)
-
                 } else if (([&] {
                                // Predicate: CUTLASS 3.x NVFP4 grouped path.
                                // Measured on Qwen3-Coder-30B-A3B-FP4:
@@ -1311,6 +1250,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
                                // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
                                // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
+                               // Reordered above the NVFP4→FP16 dequant batch path 2026-05-10:
+                               // SafeTensors NVFP4 prequant models populate both predicates, but the
+                               // dequant→cuBLAS path was 88% of pp512 wall time vs CUTLASS 3.x running
+                               // the GEMM directly on FP4 tensor cores. covers_ids() now passes for
+                               // MoE experts because cache_moe_native_nvfp4 also registers per-expert
+                               // CUTLASS_NVFP4 wcache entries.
                                static const bool force_off = RuntimeConfig::current().moe.no_cutlass3x;
                                if (force_off)
                                    return false;
@@ -1468,6 +1413,69 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
                         grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);
                     }
+
+                    // Falls through to scatter (step 7)
+
+                } else if (ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr &&
+                           (non_gated_experts || ly.nvfp4_moe_gate_ptr != nullptr) &&
+                           moe_.batch_dequant_buf != nullptr &&
+                           moe_.batch_dequant_buf_size >= static_cast<size_t>(ne) * fp16_per_expert &&
+                           moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne) {
+                    // =================================================================
+                    // NVFP4→FP16 BATCH DEQUANT + grouped GEMM (fallback when CUTLASS 3.x
+                    // can't fire — e.g. allocation failed, force_off env var, llm-compressor
+                    // format that goes through the dequant→cuBLAS path for correctness).
+                    // Dequants NVFP4 expert weights to FP16, then same grouped GEMM as FP16 batch.
+                    // =================================================================
+                    if (layer == 0)
+                        IMP_LOG_INFO("MoE prefill: NVFP4→FP16 batch path (n=%d, expanded=%d)", n, expanded);
+
+                    std::vector<int32_t> h_offsets(ne + 1);
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                                       static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                                       cudaMemcpyDeviceToHost, stream));
+                    cudaStreamSynchronize(stream);
+
+                    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+                    char* gathered_base = static_cast<char*>(moe_.gathered.data);
+                    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+                    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+                    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
+                    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+                    auto nvfp4_batch_dequant_gemm = [&](const NvFP4MoEQuantResult& nvfp4, const char* a_base,
+                                                        char* c_base, int K_dim, int N_dim) {
+                        int64_t rows = nvfp4.N;
+                        int64_t cols = nvfp4.K;
+                        size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
+
+                        // Dequant all experts NVFP4 → FP16
+                        dequantize_nvfp4_moe_to_fp16(nvfp4, buf, stream);
+
+                        std::vector<const void*> b_ptrs(ne);
+                        for (int e = 0; e < ne; ++e)
+                            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+
+                        gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
+                                         QType::F16, ne, stream, moe_.d_work_ptrs);
+                    };
+
+                    // Gate projection
+                    if (!non_gated_experts)
+                        nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_gate_ptr, gathered_base, expert_gate_base, d,
+                                                 eff);
+
+                    // Up projection
+                    nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_up_ptr, gathered_base, expert_up_base, d, eff);
+
+                    // Activation
+                    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                            moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
+                                            compute_dtype_, cfg.ffn_activation, stream);
+
+                    // Down projection
+                    char* slow_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+                    nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_down_ptr, slow_down_act, expert_down_base, eff, d);
 
                     // Falls through to scatter (step 7)
 
