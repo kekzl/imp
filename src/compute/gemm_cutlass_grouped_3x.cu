@@ -104,6 +104,17 @@ static size_t s_staging_sz = 0;
 static void* s_workspace = nullptr;
 static size_t s_workspace_sz = 0;
 
+// Persistent CUTLASS adapter — first call uses initialize() to do the
+// (sticky) cudaFuncSetAttribute(MaxDynamicSharedMemorySize) + workspace init;
+// every subsequent call uses the lightweight update() path which only
+// recomputes params_ from new args (per-group pointers/strides), skipping
+// the CUDA driver roundtrip and re-init kernels. Plus a (N,K)-keyed
+// can_implement memo — alignment checks don't depend on per-group M.
+static GrpGemm* s_gemm = nullptr;
+static bool s_gemm_initialized = false;
+static int s_can_impl_N = -1;
+static int s_can_impl_K = -1;
+
 static size_t align128(size_t x) { return (x + 127) & ~size_t(127); }
 
 static void ensure_staging(size_t need) {
@@ -265,24 +276,48 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
                                                 scheduler};
     }
 
-    GrpGemm gemm;
-    cutlass::Status st = gemm.can_implement(arguments);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_WARN("CUTLASS 3x grouped NVFP4: can_implement failed (%d) ne=%d N=%d K=%d", (int)st,
-                     n_experts, N, K);
-        return false;
+    if (s_gemm == nullptr) {
+        s_gemm = new GrpGemm();
+    }
+
+    // can_implement only validates host-side alignment, which depends on N, K,
+    // and the static layout/element types — NOT on per-group M values. Memoize
+    // the result so we pay it once per (N,K) seen in this process.
+    if (N != s_can_impl_N || K != s_can_impl_K) {
+        cutlass::Status st = s_gemm->can_implement(arguments);
+        if (st != cutlass::Status::kSuccess) {
+            IMP_LOG_WARN("CUTLASS 3x grouped NVFP4: can_implement failed (%d) ne=%d N=%d K=%d",
+                         (int)st, n_experts, N, K);
+            return false;
+        }
+        s_can_impl_N = N;
+        s_can_impl_K = K;
     }
 
     size_t needed = GrpGemm::get_workspace_size(arguments);
     ensure_workspace(needed);
 
-    st = gemm.initialize(arguments, s_workspace, stream);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS 3x grouped NVFP4: initialize failed (%d)", (int)st);
-        return false;
+    // First call: full initialize() — sticky cudaFuncSetAttribute on the kernel
+    //             function symbol + (no-op) workspace init + params_ build.
+    // Subsequent: update() — just rebuilds params_ from new args. Skips the
+    //             CUDA driver roundtrip, which is the per-call CPU cost.
+    cutlass::Status st;
+    if (!s_gemm_initialized) {
+        st = s_gemm->initialize(arguments, s_workspace, stream);
+        if (st != cutlass::Status::kSuccess) {
+            IMP_LOG_ERROR("CUTLASS 3x grouped NVFP4: initialize failed (%d)", (int)st);
+            return false;
+        }
+        s_gemm_initialized = true;
+    } else {
+        st = s_gemm->update(arguments, s_workspace);
+        if (st != cutlass::Status::kSuccess) {
+            IMP_LOG_ERROR("CUTLASS 3x grouped NVFP4: update failed (%d)", (int)st);
+            return false;
+        }
     }
 
-    st = gemm.run(stream);
+    st = s_gemm->run(stream);
     if (st != cutlass::Status::kSuccess) {
         IMP_LOG_ERROR("CUTLASS 3x grouped NVFP4: run failed (%d)", (int)st);
         return false;
@@ -302,6 +337,13 @@ void gemm_grouped_3x_nvfp4_cleanup() {
         s_workspace = nullptr;
         s_workspace_sz = 0;
     }
+    if (s_gemm) {
+        delete s_gemm;
+        s_gemm = nullptr;
+    }
+    s_gemm_initialized = false;
+    s_can_impl_N = -1;
+    s_can_impl_K = -1;
 }
 
 // Compile-time verification: kernel type instantiates on SM120.

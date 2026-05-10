@@ -168,6 +168,8 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
@@ -181,6 +183,11 @@ if(IMP_USE_CUTLASS)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_variants_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
+        list(APPEND IMP_COMPUTE_SOURCES src/compute/tma_block_scale_bench.cu)
+    endif()
+    if(IMP_BUILD_TESTS)
+        set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
+            PROPERTIES COMPILE_DEFINITIONS "SMALLM_TEST_HOOKS=1")
     endif()
 endif()
 
@@ -219,6 +226,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_ffn.cu
     src/graph/executor_ssm_gdn.cu
     src/graph/executor_forward_moe.cu
+    src/graph/executor_forward_moe_cutlass3x.cu
     src/graph/expert_cache.cu
     src/graph/weight_handle.cu
     src/graph/moe_workspace.cu
@@ -431,10 +439,13 @@ if(IMP_BUILD_TESTS)
         tests/test_turboquant.cu
         tests/test_cutlass_grouped_3x_nvfp4.cu
         tests/test_cutlass_nvfp4_alpha.cu
+        tests/test_gemm_grouped_nvfp4_smallM.cu
+        tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
         tests/test_mxf4nvf4_mma_variants_bench.cu
         tests/test_mxf4nvf4_qkt_validate.cu
+        tests/test_tma_block_scale_bench.cu
         tests/test_weight_dispatch.cu
     )
 
