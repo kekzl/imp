@@ -16,15 +16,27 @@ find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
 # --- CUDA Architecture ---
-# SM120a only: RTX 5090 (GB202, Blackwell).
-# 'a' suffix = architecture-specific feature set (FP8 MMA .kind::f8f6f4,
-# NVFP4 block-scaled MMA, TMA warp-specialized grouped GEMM tactics).
+# Primary target: sm_120a (RTX 5090, RTX PRO 6000 — GB202).
+# 'a' suffix = architecture-specific (FP8 MMA .kind::f8f6f4, NVFP4 block-scaled
+# MMA, TMA warp-specialized grouped GEMM tactics).
+#
+# Fallback PTX: compute_120f (family-portable). JIT-compiles on load for GB203
+# (RTX 5080, 5070 Ti). Loses TMA-WS grouped GEMM tactics → CUTLASS NVFP4
+# fast-path on Mamba2 shapes is degraded. Set IMP_DISABLE_120F_FALLBACK=ON to
+# strip the PTX entry and shrink the fatbin.
+#
 # CMake < 3.31 doesn't parse the 'a'/'f' suffix in CMAKE_CUDA_ARCHITECTURES,
 # so we pass gencode directly.
+option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
 set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
+if(NOT IMP_DISABLE_120F_FALLBACK)
+    set(IMP_SM120_FLAGS "${IMP_SM120_FLAGS} --generate-code=arch=compute_120f,code=compute_120f")
+    message(STATUS "CUDA architectures: sm_120a (SASS, RTX 5090 / RTX PRO 6000) + compute_120f (PTX, RTX 5080 / 5070 Ti)")
+else()
+    message(STATUS "CUDA architectures: sm_120a (RTX 5090 only — fallback disabled)")
+endif()
 set(CMAKE_CUDA_ARCHITECTURES OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-message(STATUS "CUDA architectures: sm_120a (RTX 5090)")
 
 # --- Options ---
 option(IMP_BUILD_TESTS "Build tests" ON)
