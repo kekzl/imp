@@ -1921,6 +1921,57 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
             moe_logical_avail += freed_bytes;
+
+            // Re-stamp per-expert Tensors to slice into the contiguous packed +
+            // micro-scale buffers and register CUTLASS_NVFP4 entries so the MoE
+            // prefill fast path (executor_forward_moe.cu CUTLASS 3.x grouped
+            // branch) can fire instead of dequant→FP16→cuBLAS. The cleanup loop
+            // above nulled experts[e].data because the original per-expert
+            // source allocs were freed; the executor needs valid slice pointers
+            // for register_tensor() and the per-expert wcache_.cutlass_nvfp4
+            // lookup. Without this block, expert_*_ids[e] = kInvalidTensorID
+            // (because t.data == nullptr) and covers_ids() rejects the fast
+            // path → 88% of prefill time is spent in dequantize_nvfp4_moe_kernel.
+            if (cutlass_sm120_nvfp4_available()) {
+                size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+                size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
+                void* d_sfatom = vram_alloc_force(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom");
+                if (d_sfatom) {
+                    convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
+                                                       static_cast<int>(K), stream);
+                    for (int e = 0; e < ne; ++e) {
+                        auto& w = experts[e];
+                        void* data_slice = static_cast<char*>(d_packed) +
+                                           static_cast<size_t>(e) * expert_packed_bytes;
+                        void* sf_slice = static_cast<char*>(d_sfatom) +
+                                         static_cast<size_t>(e) * sf_per_expert;
+                        w.data = data_slice;
+                        w.scales = static_cast<char*>(d_ms) + static_cast<size_t>(e) * expert_ms_bytes;
+                        w.on_device = true;
+                        w.tensor_scale = h_ts[e];
+                        CutlassNvFP4Weight cw;
+                        cw.data = data_slice;
+                        cw.scale_factors = sf_slice;
+                        cw.tensor_scale = h_ts[e];
+                        cw.N = N;
+                        cw.K = K;
+                        cw.sf_bytes = sf_per_expert;
+                        cw.sf_borrowed = true;  // shared layer-projection SfAtom buffer
+                        wcache_.cutlass_nvfp4[data_slice] = cw;
+                    }
+                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                    wcache_.cutlass_nvfp4_bytes += sfatom_total;
+                    moe_logical_avail = (moe_logical_avail > sfatom_total)
+                                            ? (moe_logical_avail - sfatom_total)
+                                            : 0;
+                } else {
+                    IMP_LOG_WARN(
+                        "MoE NVFP4 SfAtom alloc failed (%.1f MiB for %d experts) "
+                        "— prefill stays on dequant→cuBLAS fallback",
+                        sfatom_total / (1024.0 * 1024.0), ne);
+                }
+            }
+
             return true;
         };
 

@@ -167,6 +167,31 @@ __global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,
     dst_sf[sfatom_offset(n, k_group, n_k_tiles)] = float_to_fp8_e4m3(combined);
 }
 
+// MoE variant: one launch converts SF for all `ne` experts. Source has stride
+// N*K_groups bytes per expert; destination has stride cutlass_nvfp4_sf_size(N,K)
+// bytes per expert. blockIdx.y selects the expert; the inner work is identical
+// to the single-tensor kernel above.
+__global__ void convert_scales_sfatom_moe_kernel(const uint8_t* __restrict__ src_ms,
+                                                 uint8_t* __restrict__ dst_sf, int N, int K,
+                                                 int n_k_tiles, size_t native_stride_per_expert,
+                                                 size_t sfatom_stride_per_expert) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int K_groups = K / kSFVecSize;
+    int total = N * K_groups;
+    if (idx >= total)
+        return;
+
+    int e = blockIdx.y;
+    const uint8_t* src_e = src_ms + static_cast<size_t>(e) * native_stride_per_expert;
+    uint8_t* dst_e = dst_sf + static_cast<size_t>(e) * sfatom_stride_per_expert;
+
+    int n = idx / K_groups;
+    int k_group = idx % K_groups;
+
+    float combined = fabsf(fp8_e4m3_to_float_fast(src_e[idx]));
+    dst_e[sfatom_offset(n, k_group, n_k_tiles)] = float_to_fp8_e4m3(combined);
+}
+
 // ---------------------------------------------------------------------------
 // Activation quantization: FP16 [M, K] → NVFP4 packed + SfAtom UE4M3 scales
 // ---------------------------------------------------------------------------
@@ -353,12 +378,35 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;
-    if (w.scale_factors) {
+    if (w.scale_factors && !w.sf_borrowed) {
         IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors));
-        w.scale_factors = nullptr;
     }
+    w.scale_factors = nullptr;
+    w.sf_borrowed = false;
     w.N = w.K = 0;
     w.sf_bytes = 0;
+}
+
+void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N,
+                                        int K, cudaStream_t stream) {
+    assert(K % kSFVecSize == 0 && "K must be multiple of 16");
+    int K_groups = K / kSFVecSize;
+    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
+    size_t native_stride = static_cast<size_t>(N) * K_groups;
+    size_t sfatom_stride = cutlass_nvfp4_sf_size(N, K);
+
+    // Pre-zero so SfAtom row-tile padding bytes are well-defined (the kernel
+    // writes only valid (n, k_group) positions; padding rows pad up to 128).
+    IMP_CUDA_CHECK_LOG(
+        cudaMemsetAsync(dst_sfatom_sf, 0, static_cast<size_t>(ne) * sfatom_stride, stream));
+
+    int total = N * K_groups;
+    int threads = 256;
+    int blocks_x = (total + threads - 1) / threads;
+    dim3 grid(blocks_x, ne);
+    convert_scales_sfatom_moe_kernel<<<grid, threads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(src_native_ms), reinterpret_cast<uint8_t*>(dst_sfatom_sf), N, K,
+        n_k_tiles, native_stride, sfatom_stride);
 }
 
 void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
