@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <type_traits>
 #include <vector>
 #include <cstdint>
 #include <cstdio>
@@ -229,8 +230,9 @@ __global__ void smallM_kernel_v1(
     const int* __restrict__ d_M_per_expert,
     const CUtensorMap* __restrict__ d_descs,    // 2 descriptors per expert: [A, B]
     int N, int K) {
-    static_assert(TILE_M == 128 && TILE_N == 128,
-                  "smallM_kernel_v1: TILE_M=TILE_N=128 fixed (Phase A)");
+    static_assert(TILE_M == 16 || TILE_M == 32 || TILE_M == 64 || TILE_M == 128,
+                  "smallM_kernel_v1: TILE_M ∈ {16,32,64,128}");
+    static_assert(TILE_N == 128, "smallM_kernel_v1: TILE_N=128 fixed");
     static_assert(TILE_K == 128 || TILE_K == 256,
                   "smallM_kernel_v1: TILE_K must be 128 or 256");
     static_assert(N_STAGES >= 2 && N_STAGES <= 4, "N_STAGES in [2,4]");
@@ -772,7 +774,25 @@ bool gemm_grouped_nvfp4_smallM(
     for (int e = 0; e < n_experts; ++e) max_M = std::max(max_M, host_M[e]);
     if (max_M > 128) return false;
 
-    constexpr int TILE_M = 128, TILE_N = 128;
+    // Pick the smallest TILE_M that fits all experts' M_e — this avoids the
+    // 50-90% padded-row compute waste at typical Qwen3-Coder MoE shapes
+    // (M_e ≈ 32-48 per expert, top-k=8 × 512 prefill / 128 experts).
+    const int TILE_M_rt = detail::pick_m_tile(max_M);
+    {
+        // Log once per (TILE_M_rt, K) pair for diagnostic visibility.
+        static int s_logged_tm[5][2] = {{0}};  // [tile_idx][use_tilek_256]
+        const int tm_log_idx = (TILE_M_rt == 16) ? 0 :
+                               (TILE_M_rt == 32) ? 1 :
+                               (TILE_M_rt == 64) ? 2 : 3;
+        const int tk_log_idx = ((K % 256) == 0) ? 1 : 0;
+        if (!s_logged_tm[tm_log_idx][tk_log_idx]) {
+            s_logged_tm[tm_log_idx][tk_log_idx] = 1;
+            IMP_LOG_INFO(
+                "smallM kernel: dispatch TILE_M=%d (max_M=%d) TILE_K=%d ne=%d N=%d K=%d",
+                TILE_M_rt, max_M, ((K % 256) == 0) ? 256 : 128, n_experts, N, K);
+        }
+    }
+    constexpr int TILE_N = 128;
     // Pick TILE_K=256 when K is divisible by 256 (more bytes per TMA stage,
     // amortizes pipeline overhead). Fall back to TILE_K=128 for K=128, 384,
     // etc. STAGES selected to keep SMEM under sm_120 99 KiB cap.
@@ -798,7 +818,7 @@ bool gemm_grouped_nvfp4_smallM(
         const int M_e = host_M[e];
         if (M_e <= 0) {
             // Dummy descriptor — won't be used.
-            build_tma_2d_u8(&h_descs[2 * e + 0], s_dummy, 16, 16, TILE_M, TILE_K_rt / 2);
+            build_tma_2d_u8(&h_descs[2 * e + 0], s_dummy, 16, 16, TILE_M_rt, TILE_K_rt / 2);
             build_tma_2d_u8(&h_descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
             continue;
         }
@@ -808,7 +828,7 @@ bool gemm_grouped_nvfp4_smallM(
         if (!build_tma_2d_u8(&h_descs[2 * e + 0],
                               const_cast<void*>(host_ptr_A[e]),
                               /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_M, /*box_cols=*/TILE_K_rt / 2)) {
+                              /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
             std::fprintf(stderr, "[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)\n",
                          e, M_e, K);
             return false;
@@ -850,49 +870,69 @@ bool gemm_grouped_nvfp4_smallM(
     dim3 grid(n_experts, N / TILE_N);
     dim3 block(256);
 
-    // SMEM budget per (TILE_K, N_STAGES):
-    //   TILE_K=128, STAGES=3:  3 × (8 + 8 + 1 + 1) KiB + 128 B = ~54 KiB
-    //   TILE_K=256, STAGES=2:  2 × (16 + 16 + 2 + 2) KiB + 128 B = ~72 KiB
-    // Both exceed 48 KiB default static cap → opt-in via cudaFuncSetAttribute.
-    auto smem_bytes_for = [](int TK, int NS) {
-        const int A   = TILE_M * (TK / 2);
+    // SMEM budget per (TILE_M, TILE_K, N_STAGES):
+    //   Per stage: A = TILE_M * TILE_K/2, B = TILE_N * TILE_K/2
+    //              SFA = TILE_M * TILE_K/16, SFB = TILE_N * TILE_K/16
+    // Examples: TILE_M=128, TK=128, NS=3 → ~54 KiB. TILE_M=64, TK=128, NS=3 → ~50 KiB.
+    // All exceed 48 KiB default static cap → opt-in via cudaFuncSetAttribute.
+    auto smem_bytes_for = [](int TM, int TK, int NS) {
+        const int A   = TM * (TK / 2);
         const int B   = TILE_N * (TK / 2);
-        const int SFA = TILE_M * (TK / 16);
+        const int SFA = TM * (TK / 16);
         const int SFB = TILE_N * (TK / 16);
         return NS * (A + B + SFA + SFB) + 128;
     };
 
-    static int s_smem_attr_set_128 = 0;
-    static int s_smem_attr_set_256 = 0;
+    // One static flag per (TILE_M × TILE_K) variant (8 total).
+    static int s_smem_attr_set[2][4] = {{0,0,0,0},{0,0,0,0}};
+    auto tm_idx = [](int tm) {
+        switch (tm) { case 16: return 0; case 32: return 1; case 64: return 2; default: return 3; }
+    };
+
+    // Macro to launch a fully concrete instantiation (compile-time constants).
+    auto launch_for = [&](auto TM_const, auto TK_const, auto NS_const) {
+        constexpr int TM = decltype(TM_const)::value;
+        constexpr int TK = decltype(TK_const)::value;
+        constexpr int NS = decltype(NS_const)::value;
+        const int SMEM_BYTES = smem_bytes_for(TM, TK, NS);
+        const int tk_slot = (TK == 256) ? 1 : 0;
+        const int tm_slot = tm_idx(TM);
+        if (!s_smem_attr_set[tk_slot][tm_slot]) {
+            cudaFuncSetAttribute(
+                (const void*)smallM_kernel_v1<TM, TILE_N, TK, NS>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                SMEM_BYTES);
+            s_smem_attr_set[tk_slot][tm_slot] = 1;
+        }
+        smallM_kernel_v1<TM, TILE_N, TK, NS><<<grid, block, SMEM_BYTES, stream>>>(
+            (const void* const*)d_A, (const void* const*)d_SFA,
+            (const void* const*)d_B, (const void* const*)d_SFB,
+            d_D, dev_alpha, d_M, d_descs, N, K);
+    };
+
+    using IC2  = std::integral_constant<int, 2>;
+    using IC3  = std::integral_constant<int, 3>;
+    using IC128 = std::integral_constant<int, 128>;
+    using IC256 = std::integral_constant<int, 256>;
+    using TM16  = std::integral_constant<int, 16>;
+    using TM32  = std::integral_constant<int, 32>;
+    using TM64  = std::integral_constant<int, 64>;
+    using TM128 = std::integral_constant<int, 128>;
 
     if (use_tilek_256) {
-        constexpr int TK_ = 256, NS_ = 2;
-        const int SMEM_BYTES = smem_bytes_for(TK_, NS_);
-        if (!s_smem_attr_set_256) {
-            cudaFuncSetAttribute(
-                (const void*)smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                SMEM_BYTES);
-            s_smem_attr_set_256 = 1;
+        switch (TILE_M_rt) {
+            case 16:  launch_for(TM16{},  IC256{}, IC2{}); break;
+            case 32:  launch_for(TM32{},  IC256{}, IC2{}); break;
+            case 64:  launch_for(TM64{},  IC256{}, IC2{}); break;
+            default:  launch_for(TM128{}, IC256{}, IC2{}); break;
         }
-        smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_><<<grid, block, SMEM_BYTES, stream>>>(
-            (const void* const*)d_A, (const void* const*)d_SFA,
-            (const void* const*)d_B, (const void* const*)d_SFB,
-            d_D, dev_alpha, d_M, d_descs, N, K);
     } else {
-        constexpr int TK_ = 128, NS_ = 3;
-        const int SMEM_BYTES = smem_bytes_for(TK_, NS_);
-        if (!s_smem_attr_set_128) {
-            cudaFuncSetAttribute(
-                (const void*)smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                SMEM_BYTES);
-            s_smem_attr_set_128 = 1;
+        switch (TILE_M_rt) {
+            case 16:  launch_for(TM16{},  IC128{}, IC3{}); break;
+            case 32:  launch_for(TM32{},  IC128{}, IC3{}); break;
+            case 64:  launch_for(TM64{},  IC128{}, IC3{}); break;
+            default:  launch_for(TM128{}, IC128{}, IC3{}); break;
         }
-        smallM_kernel_v1<TILE_M, TILE_N, TK_, NS_><<<grid, block, SMEM_BYTES, stream>>>(
-            (const void* const*)d_A, (const void* const*)d_SFA,
-            (const void* const*)d_B, (const void* const*)d_SFB,
-            d_D, dev_alpha, d_M, d_descs, N, K);
     }
     (void)TILE_K_rt;
 

@@ -362,6 +362,35 @@ TEST(SmallMKernel, SingleExpert128x128x128) {
 }
 
 // ---------------------------------------------------------------------------
+// Small-TILE_M correctness (Tasks 2.1-2.3).
+// Each test exercises a distinct kernel instantiation by choosing M_e to
+// land in the corresponding pick_m_tile bucket.
+// ---------------------------------------------------------------------------
+TEST(SmallMKernel, SingleExpertM16) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    // M=12 → pick_m_tile = 16.
+    run_smallm_single_expert(/*M=*/12, /*N=*/128, /*K=*/512, /*ctrl_rmse_tol=*/3e-2);
+}
+
+TEST(SmallMKernel, SingleExpertM32) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    // M=28 → pick_m_tile = 32.
+    run_smallm_single_expert(/*M=*/28, /*N=*/128, /*K=*/512, /*ctrl_rmse_tol=*/3e-2);
+}
+
+TEST(SmallMKernel, SingleExpertM64) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    // M=46 → pick_m_tile = 64. This is the typical Qwen3-Coder-30B-A3B per-expert M.
+    run_smallm_single_expert(/*M=*/46, /*N=*/128, /*K=*/2048, /*ctrl_rmse_tol=*/5e-2);
+}
+
+TEST(SmallMKernel, M16BucketK256Mod) {
+    if (!has_sm120()) GTEST_SKIP() << "SM120 required";
+    // M=8, K=2048 (divisible by 256) — exercises TILE_M=16 + TILE_K=256 path.
+    run_smallm_single_expert(/*M=*/8, /*N=*/128, /*K=*/2048, /*ctrl_rmse_tol=*/5e-2);
+}
+
+// ---------------------------------------------------------------------------
 // K-tile loop test (Task 1.8).
 // Single expert, M=N=128, K=2048 (Qwen3-Coder-30B-A3B hidden_dim).
 // Exercises 16 K-tile iterations of the outer loop added in T1.8.
