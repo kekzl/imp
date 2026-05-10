@@ -1,6 +1,6 @@
 # NVFP4 Small-M Grouped GEMM Kernel — Design
 
-**Status**: Approved through brainstorming, awaiting user review-gate before plan writeup.
+**Status**: Phase 0 microbench done (commit `a591dac`); spec revised 2026-05-10 to drop the fused-TMA bandwidth assumption and reorient the validation around per-shape A/B testing + auto-heuristic.
 **Author**: Raphael Friedmann
 **Date**: 2026-05-10
 **Branch**: perf/moe-nvfp4-prefill-fast-path
@@ -8,10 +8,16 @@
 
 ## Goal
 
-Close the remaining ~1.5-1.95× prefill gap between imp and vLLM on NVFP4 MoE
-models, on RTX 5090 (sm_120a). Target: pp512 ≥ 22000 tok/s on
-Qwen3-Coder-30B-A3B-NVFP4, up from current median 16474 tok/s
-(verified 2026-05-10, commit 33858da).
+Close some of the remaining ~1.5-1.95× prefill gap between imp and vLLM on
+NVFP4 MoE models, on RTX 5090 (sm_120a). Target: pp512 ≥ **19000 tok/s
+median** on Qwen3-Coder-30B-A3B-NVFP4 (10 reps, cold-container), up from
+current median 16474 tok/s (verified 2026-05-10, commit 33858da).
+
+Original target was 22k tok/s assuming a +10-20% TMA-fusion bandwidth bonus
+that Phase 0 microbench (commit `a591dac`) measured at 0% — see
+"Phase 0 findings" below. The 19k target is the M-padding-only ceiling
+without TMA bonuses, plus auto-heuristic to avoid CUTLASS-path regression
+at M_e ≥ 64. **Above-19k results are bonus, not commitment.**
 
 Decode performance must not regress (current 270 tok/s on Qwen3-Coder).
 
@@ -48,6 +54,14 @@ tile-rows on padding. The current CUTLASS Sm120 NVFP4 grouped path cannot reduce
 M-tile below 128 because the SfAtom block-scale layout requires it (see
 iteration-2 attempt #1).
 
+**Caveat — this is the *only* root cause we have measurement evidence for.**
+Other plausible bottlenecks (instruction-cache pressure, inadequate SMEM swizzle,
+schedule-overhead amortization across many small problems) cannot be ruled out
+from the nsys data alone. The 20× spread is real but its translation into
+predicted speedup depends on M-distribution per call. Conservative estimate
++15-30% pp; optimistic +50-70%; A/B test at the actual deployment shapes is
+the only way to commit to a number.
+
 SASS audit of imp:test confirms the build is already on the optimal MMA pipe:
 - Symbol: `MainloopSm120ArrayTmaWarpSpecializedBlockScaled` +
   `KernelPtrArrayTmaWarpSpecializedCooperativeBlockScaledSm120` +
@@ -78,6 +92,28 @@ Headroom analysis for Qwen3-Coder-30B-A3B at pp512:
 - Custom kernel improving M-tile utilization 65% → 85% reaches ~22-24k → matches vLLM 25513
 
 **The path is not chasing a phantom — the HW supports the goal.**
+
+## Phase 0 findings (2026-05-10, commits `a591dac`)
+
+**Block-scale-aware TMA microbench result (R-CHECK before kernel work):**
+
+| variant | ms (1024 iters, RTX 5090) | speedup |
+|---|---:|---:|
+| separate (2 `cp.async.bulk.tensor`, mbarrier per-descriptor) | 2.293-2.415 | 1.0× |
+| fused (1 `cp.async.bulk.tensor`, contiguous data+scale layout) | 2.292-2.415 | 0.95-1.05× |
+
+**Verdict: fused-TMA-bandwidth claim REJECTED.** Speedup oscillates within
+measurement noise (5%). Both variants saturate L2 at ~2.5 GB/s effective.
+The spec previously claimed +10-20% from `sm120_real_perf_levers` memory;
+that memory was speculation, not measurement. Cross-reference: CUTLASS's
+own SM120 NVFP4 mainloop (`sm120_blockscaled_mma_tma.hpp:284-311`) uses two
+separate TMA descriptors (TMA_A + TMA_SFA), not a fused descriptor — the
+"fused descriptor" was never actually exposed at the hardware level.
+
+**Implication for kernel design:**
+- Use the **CUTLASS 2-descriptor TMA pattern** (TMA_A + TMA_SFA, separate `cp.async.bulk.tensor` issues + mbarrier per descriptor).
+- The "Bonus-Feature" of native row-major scales (3 GiB VRAM save + skip `convert_scales_sfatom_moe_kernel`) **still applies** — that comes from the layout choice, not from descriptor fusion.
+- Expected pp speedup downgraded from "+30-70%" to "+15-30%" under conservative scenario, "+30-50%" under optimistic. **Auto-heuristic + per-shape A/B is the binding validation**, not a single magic number.
 
 ## Architecture
 
@@ -153,7 +189,7 @@ Device kernel: 170 CTAs (one per SM), each pulls work items via global atomic
 counter. Inside each CTA, runtime dispatch picks the right template
 specialization based on `wi.m_tile_size`.
 
-### Native scale layout (free win)
+### Native scale layout (preserved post-Phase 0)
 
 The existing CUTLASS path requires SfAtom layout (128-row-padded, swizzled).
 `cache_moe_native_nvfp4` already produces native row-major UE4M3 scales in
@@ -252,8 +288,9 @@ if (use_smallM) {
 |---|---|---|
 | Numerical | `‖smallM - CUTLASS‖∞ / ‖CUTLASS‖∞ < 1e-3` per expert | unit test |
 | Decode | tg256 ≥ 268 tok/s on Qwen3-Coder | `make verify-fast` |
-| Prefill (Qwen3-Coder) | pp512 median ≥ 22000 tok/s (10 reps) | `bench/results/smallM_baseline.log` |
-| Prefill cross-model | pp512 +30% on Qwen3.6 + Gemma-4 (8.8k → 11.5k+) | bench sweep |
+| Prefill (Qwen3-Coder) | pp512 median ≥ 19000 tok/s (10 reps) under best-threshold | `bench/results/smallM_baseline.log` |
+| Prefill cross-model | pp512 +15% on ≥3 of 4 models under calibrated heuristic | bench sweep |
+| Per-shape sweep | M-threshold table populated for {pp=128,512,1024,2048} × 4 models | `bench/results/smallM_threshold_calibration.csv` |
 | Determinism | 4/4 graph_replay byte-identical | `validate_safetensors.py --replays=4` |
 | Tests | all 574 GTest pass | `make test-gpu` |
 | Build | sm_120a clean, 0 ptxas warnings | `make build` |
@@ -270,7 +307,7 @@ if (use_smallM) {
 | R5 | Determinism claim wrong — different FP-reduction order than CUTLASS | medium | low | Tile-internal reduction order is fixed → deterministic per call. Cross-call same input = same output. CUTLASS' issue was cross-call; ours not. |
 | R6 | Activation native ↔ SfAtom layout creates inconsistency between prefill (smallM) and decode (existing GEMV) | low | high | `cache_moe_native_nvfp4` already lays out SF native row-major; decode-GEMV reads it directly. We only need to ensure `nvfp4_moe_ms_native` pointer is correctly forwarded (no convert). 1-day audit before kernel work. |
 | R7 | Maintenance burden: custom kernel re-validated on each CUTLASS upgrade | high | low | `docs/sm120_smallM_kernel.md` with re-runnable bench + numerical gate. Audit in `make verify`. |
-| R8 | Best-case +30-70% not realized (e.g. only +10-15%) | medium | medium | Net-positive even at +10% (matches phase-2 fusion target without doing fusion). Reject if ≤ +5% pp net + decode regression. |
+| R8 | Best-case not realized (post-Phase 0: target was downgraded from +30-70% to +15-30%, but even that may not materialize at every M-bin) | high | medium | **Auto-heuristic is now the primary mitigation, not a fallback.** Per-(model × pp_size) A/B in Phase B determines per-shape M-threshold. Reject if no threshold delivers ≥ +5% pp without decode regression — abort the entire branch and re-evaluate fusion-first. |
 | R9 | Decode regresses subtle due to i-cache pressure from new symbol | low | medium | iteration-2 saw -7% on fused gate+up. Mitigation: kernel symbol in separate compilation unit, marked cold-attribute if needed. |
 
 ### Kill switch
@@ -279,30 +316,44 @@ if (use_smallM) {
 back without rebuild. After Phase D default-on, the flip becomes
 `IMP_NVFP4_SMALLM=0` to disable.
 
-### Pre-Wo-1 abort triggers
+### Abort triggers (escalated after Phase 0)
 
 - Phase A numerical gate fails (PTX inline asm bug) → 2-3 days debug; if more,
   abort and evaluate cute-DSL alternative.
-- Phase A bench shows smallM slower than CUTLASS at all M-bins → root-cause
-  hypothesis wrong, abort.
+- Phase A bench shows smallM slower than CUTLASS at *all* M-bins → root-cause
+  hypothesis wrong, abort. **(Was less likely pre-Phase-0; with the TMA-fusion
+  bonus removed, this is the most plausible failure mode.)**
+- **New post-Phase-0 trigger:** Phase B per-shape A/B shows no M-threshold
+  delivers ≥ +5% pp without decode regression on any of the 4 production
+  NVFP4 MoE models → abort, re-evaluate Fusion-First (apsys-blog 5-launch
+  pattern) as the alternative path.
 
-## Roll-out
+## Roll-out (revised post-Phase 0 — auto-heuristic is now first-class)
 
 1. **Phase A** (week 1): kernel + unit tests, opt-in via env, numerical
-   validation only.
-2. **Phase B** (week 2): cross-model perf bench, all 4 NVFP4 MoEs.
-3. **Phase C** (week 2-3): auto-heuristic (`max_M ≤ 64` → enable),
-   determinism validation, decode regression sweep.
-4. **Phase D** (post-merge): 1-2 weeks prod monitoring, then default-on.
+   validation only. **Adds: per-shape micro-bench harness so Phase B can
+   sweep M-thresholds without manual re-runs.**
+2. **Phase B** (week 2): **per-shape A/B sweep, not single-pass cross-model
+   bench.** For each of the 4 NVFP4 MoE models × {pp=128, 512, 1024, 2048}
+   × M-thresholds {16, 32, 48, 64, 80, 96, 128}, measure pp + tg, identify
+   the best per-(model, pp_size) threshold. Output: a calibrated heuristic
+   table.
+3. **Phase C** (week 2-3): bake the per-shape calibration into auto-heuristic
+   dispatch, determinism validation, decode regression sweep. Decision gate:
+   does the calibrated heuristic deliver net-positive on ≥ 3/4 models? If
+   yes, ship; if no, abort.
+4. **Phase D** (post-merge): 1-2 weeks prod monitoring, then default-on
+   (still env-overridable).
 
 ## Dependencies verified pre-Wo-1
 
 - ✓ CUDA 13.2.1 inline-PTX support for mma.sync.mxf4nvf4 — confirmed via
   existing CUTLASS path SASS.
 - ✓ TMA cp.async.bulk.tensor — UTMALDG present in audit (36 instances).
-- ⚠ block_scale-aware TMA (single descriptor for data + scales) — needs a
-  ½-day microbench in week 1 day 1 to verify expected +10-20% bandwidth before
-  full kernel work.
+- ✗ **block_scale-aware fused TMA descriptor — REJECTED** by Phase 0 microbench
+  (commit `a591dac`). Hardware does not expose a fused-descriptor primitive on
+  SM120; CUTLASS's own SM120 NVFP4 path uses two separate descriptors. Kernel
+  design follows the same 2-descriptor pattern.
 - ✓ mbarrier multi-phase — used by CUTLASS templates we already build.
 - ✓ atomicAdd on global counter — CUDA standard.
 
