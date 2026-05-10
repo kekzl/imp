@@ -1,4 +1,9 @@
 // tests/test_gemm_grouped_nvfp4_smallM.cu
+//
+// Note: TMA descriptor builders (build_tma_a/b/sfa/sfb) are file-local
+// templates in gemm_grouped_nvfp4_smallM.cu. They are exercised
+// indirectly by the kernel-level tests in later tasks. This file
+// has no test for them by design.
 #include <gtest/gtest.h>
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include <vector>

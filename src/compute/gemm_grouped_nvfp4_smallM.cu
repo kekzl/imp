@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <vector>
 
+#include "cute/tensor.hpp"
+#include "cute/atom/copy_atom.hpp"
+#include "cute/atom/copy_traits_sm90_tma.hpp"  // SM90_TMA_LOAD / make_tma_copy
+
 namespace imp {
 
 namespace {
@@ -76,6 +80,61 @@ extern "C" void smallM_smoke_single_mma(
 #endif  // SMALLM_TEST_HOOKS
 
 namespace detail {
+
+using namespace cute;
+
+// ---------------------------------------------------------------------------
+// TMA descriptor builders
+//
+// Four separate descriptors per work-item — CUTLASS Sm120 NVFP4 pattern
+// (validated by Phase 0 / commit a591dac): TMA_A + TMA_SFA + TMA_B + TMA_SFB.
+//
+// FP4 data is nibble-packed: a row of K elements occupies K/2 bytes.
+// Block scales are 1 UE4M3 byte per group of 16 FP4 elements: K/16 bytes/row.
+//
+// All builders return `auto`; the return type is only instantiated when the
+// kernel in Task 1.7 calls them with concrete template args.
+// ---------------------------------------------------------------------------
+
+// A matrix: M_e × K FP4, packed → shape (M_e, K/2) in uint8 byte space.
+template <int TILE_M, int TILE_K>
+auto build_tma_a(const void* d_ptr, int M_e, int K) {
+    auto tensor = make_tensor(
+        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
+        make_layout(make_shape(M_e, K / 2), make_stride(K / 2, _1{})));
+    auto smem_layout = make_layout(Shape<Int<TILE_M>, Int<TILE_K / 2>>{});
+    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
+}
+
+// B matrix: N × K FP4, packed → shape (N, K/2) in uint8 byte space.
+template <int TILE_N, int TILE_K>
+auto build_tma_b(const void* d_ptr, int N, int K) {
+    auto tensor = make_tensor(
+        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
+        make_layout(make_shape(N, K / 2), make_stride(K / 2, _1{})));
+    auto smem_layout = make_layout(Shape<Int<TILE_N>, Int<TILE_K / 2>>{});
+    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
+}
+
+// SFA (A block scales): M_e × (K/16) UE4M3 bytes.
+template <int TILE_M, int TILE_K>
+auto build_tma_sfa(const void* d_ptr, int M_e, int K) {
+    auto tensor = make_tensor(
+        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
+        make_layout(make_shape(M_e, K / 16), make_stride(K / 16, _1{})));
+    auto smem_layout = make_layout(Shape<Int<TILE_M>, Int<TILE_K / 16>>{});
+    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
+}
+
+// SFB (B block scales): N × (K/16) UE4M3 bytes.
+template <int TILE_N, int TILE_K>
+auto build_tma_sfb(const void* d_ptr, int N, int K) {
+    auto tensor = make_tensor(
+        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
+        make_layout(make_shape(N, K / 16), make_stride(K / 16, _1{})));
+    auto smem_layout = make_layout(Shape<Int<TILE_N>, Int<TILE_K / 16>>{});
+    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
+}
 
 int pick_m_tile(int M_e) {
     if (M_e <= 16) return 16;
