@@ -1291,6 +1291,131 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // Gated by IMP_CUTLASS3X_MOE=1. Zero dequant overhead vs the nvfp4→FP16
                     // batch path; per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
                     // =========================================================================
+                    //
+                    // Phase 3c-full Step 2b: optional fully device-args dispatch placed
+                    // BEFORE the D2H+sync. When IMP_NVFP4_DEVICE_ARGS=1 and all required
+                    // workspace buffers exist, runs gate / up / activation / down end-
+                    // to-end via device-resident kernels and skips the legacy code path
+                    // below. No host iteration over M_per / h_offsets, no D2H+sync —
+                    // prerequisite for graph capture of the MoE prefill path. Falls
+                    // back to the legacy path on any dispatch failure.
+                    bool device_args_done = false;
+                    {
+                        const char* da_env = ::getenv("IMP_NVFP4_DEVICE_ARGS");
+                        const bool use_device_args =
+                            da_env && std::atoi(da_env) != 0 &&
+                            moe_.d_M_per && moe_.d_M_per_count >= ne &&
+                            moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
+                            moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
+                            moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
+                            moe_.cutlass3x_sfa_ptrs &&
+                            moe_.cutlass3x_sfa_ptrs_count >= ne;
+                        if (use_device_args) {
+                            if (layer == 0)
+                                IMP_LOG_INFO(
+                                    "MoE prefill: CUTLASS 3.x device-args full path "
+                                    "(opt-in via IMP_NVFP4_DEVICE_ARGS=1)");
+                            // Populate device-resident d_M_per (no D2H).
+                            imp::compute_M_per_from_offsets_device(
+                                static_cast<const int32_t*>(routing.expert_offsets.data),
+                                moe_.d_M_per, ne, stream);
+
+                            char* gathered_base    = static_cast<char*>(moe_.gathered.data);
+                            char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+                            char* expert_up_base   = static_cast<char*>(moe_.expert_up.data);
+                            char* expert_swiglu_base =
+                                static_cast<char*>(moe_.expert_swiglu.data);
+                            char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+                            auto quantize_device = [&](const char* a_base, int K_in) {
+                                imp::compute_sfa_offsets_device(
+                                    moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream);
+                                imp::build_sfa_bases_device(
+                                    reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
+                                    moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
+                                // Zero the active SFA region. The padded rows of the
+                                // SfAtom layout must be 0 for clean CUTLASS reads.
+                                // We zero the whole staging buffer — graph-capturable
+                                // alternative to host-computed total_sfa. Cost is ~2 MB
+                                // memset (~3 µs at 1.8 TB/s).
+                                cudaMemsetAsync(moe_.cutlass3x_sf, 0,
+                                                moe_.cutlass3x_sf_size, stream);
+                                imp::quantize_fp16_to_nvfp4_cutlass_moe(
+                                    a_base, moe_.cutlass3x_packed,
+                                    reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                                    static_cast<const int*>(routing.expert_offsets.data),
+                                    expanded, K_in, ne, stream);
+                            };
+
+                            auto dispatch_device =
+                                [&](const std::vector<TensorID>& weight_ids, char* c_base,
+                                    int K_in, int N_out) -> bool {
+                                    std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+                                    std::vector<float> h_alpha(ne);
+                                    for (int e = 0; e < ne; ++e) {
+                                        const auto& h = registry_.handle(weight_ids[e]);
+                                        h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
+                                        h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
+                                        h_alpha[e] =
+                                            h.payload.cutlass_nvfp4.global_scale
+                                                ? *h.payload.cutlass_nvfp4.global_scale
+                                                : 1.0f;
+                                    }
+                                    cudaMemcpyAsync(moe_.d_B_ptrs_cache, h_B_ptrs.data(),
+                                                    ne * sizeof(const void*),
+                                                    cudaMemcpyHostToDevice, stream);
+                                    cudaMemcpyAsync(moe_.d_SFB_ptrs_cache, h_SFB_ptrs.data(),
+                                                    ne * sizeof(const void*),
+                                                    cudaMemcpyHostToDevice, stream);
+                                    cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(),
+                                                    ne * sizeof(float),
+                                                    cudaMemcpyHostToDevice, stream);
+
+                                    imp::GroupedNvfp4DeviceArgs dargs{};
+                                    dargs.d_M_per          = moe_.d_M_per;
+                                    dargs.d_expert_offsets = static_cast<const int32_t*>(
+                                        routing.expert_offsets.data);
+                                    dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
+                                    dargs.d_alpha          = moe_.d_alpha_full;
+                                    dargs.base_A_packed    = moe_.cutlass3x_packed;
+                                    dargs.base_A_sf        = moe_.cutlass3x_sf;
+                                    dargs.d_B_ptrs         = moe_.d_B_ptrs_cache;
+                                    dargs.d_SFB_ptrs       = moe_.d_SFB_ptrs_cache;
+                                    dargs.base_D           = c_base;
+                                    return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
+                                        ne, N_out, K_in, dargs, stream);
+                                };
+
+                            // Gate / Up share input quantization (K_in = d).
+                            quantize_device(gathered_base, d);
+                            bool ok = true;
+                            if (!non_gated_experts)
+                                ok = ok && dispatch_device(ly.expert_gate_ids,
+                                                           expert_gate_base, d, eff);
+                            ok = ok && dispatch_device(ly.expert_up_ids,
+                                                       expert_up_base, d, eff);
+                            if (ok) {
+                                apply_expert_activation(
+                                    moe_.expert_gate.data, moe_.expert_up.data,
+                                    moe_.expert_swiglu.data, non_gated_experts, expanded,
+                                    eff, compute_dtype_, cfg.ffn_activation, stream);
+                                char* down_act =
+                                    non_gated_experts ? expert_up_base : expert_swiglu_base;
+                                quantize_device(down_act, eff);
+                                ok = dispatch_device(ly.expert_down_ids,
+                                                     expert_down_base, eff, d);
+                            }
+                            if (ok) {
+                                device_args_done = true;
+                            } else {
+                                IMP_LOG_ERROR(
+                                    "device-args full path failed; falling back to legacy");
+                            }
+                        }
+                    }
+
+                    if (!device_args_done) {
+                    // Legacy D2H+sync + smallM + non-smallM dispatch path.
                     std::vector<int32_t> h_offsets(ne + 1);
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
@@ -1870,6 +1995,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);
                     }
                     }  // !smallM_done
+                    }  // !device_args_done
 
                     // Falls through to scatter (step 7)
 
