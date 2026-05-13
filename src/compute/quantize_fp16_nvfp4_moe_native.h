@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -138,6 +139,26 @@ void compute_sfa_offsets_device(
     int64_t* d_sfa_offsets_out,
     int n_experts,
     int K,
+    cudaStream_t stream);
+
+// Build a device-resident array of per-expert base pointers into the
+// SfAtom-padded SFA staging slab. Replaces the host-side loop in
+// executor_forward_moe.cu's quantize_once lambda that builds h_sfa_bases
+// and then cudaMemcpyAsync's it to moe_.cutlass3x_sfa_ptrs. Eliminates
+// that H2D from the dispatch path (Phase 3c-full Step 2 prerequisite).
+//
+// Formula: d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e]
+//
+// d_sfa_offsets   : [n_experts+1] device int64 — output of compute_sfa_offsets_device
+// base_sf         : host pointer to the start of the contiguous SFA slab (device addr)
+// d_sfa_bases_out : [n_experts] device uint8_t** — written by callee
+// Single-block 256-thread launch; safe inside a captured CUDA graph.
+// Requires n_experts <= 256.
+void build_sfa_bases_device(
+    uint8_t** d_sfa_bases_out,
+    void* base_sf,
+    const int64_t* d_sfa_offsets,
+    int n_experts,
     cudaStream_t stream);
 
 }  // namespace imp

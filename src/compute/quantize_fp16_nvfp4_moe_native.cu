@@ -505,4 +505,33 @@ void compute_sfa_offsets_device(
         d_M_per, d_sfa_offsets_out, n_experts, K);
 }
 
+// ---------------------------------------------------------------------------
+// build_sfa_bases_device: trivial pointer-arithmetic kernel that writes
+// d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e].  One thread per expert.
+// ---------------------------------------------------------------------------
+__global__ void build_sfa_bases_kernel(
+    uint8_t**      __restrict__ d_sfa_bases_out,
+    uint8_t*       __restrict__ base_sf,
+    const int64_t* __restrict__ d_sfa_offsets,
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < n_experts)
+        d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e];
+}
+
+void build_sfa_bases_device(
+    uint8_t** d_sfa_bases_out,
+    void* base_sf,
+    const int64_t* d_sfa_offsets,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) return;
+    int threads = std::min(n_experts, 256);
+    int blocks  = (n_experts + threads - 1) / threads;
+    build_sfa_bases_kernel<<<blocks, threads, 0, stream>>>(
+        d_sfa_bases_out, static_cast<uint8_t*>(base_sf), d_sfa_offsets, n_experts);
+}
+
 }  // namespace imp

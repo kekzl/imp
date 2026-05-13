@@ -404,6 +404,38 @@ TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
     cudaStreamDestroy(stream);
 }
 
+// build_sfa_bases_device must write base + d_sfa_offsets[e] per expert.
+// Phase 3c-full Step 2a foundation.
+TEST(QuantizeMoeNative, BuildSfaBasesDevice) {
+    const int ne = 4;
+    // Simulate base SFA slab via a known device pointer (any aligned alloc).
+    void* d_base = nullptr;
+    cudaMalloc(&d_base, 65536);  // 64 KiB sentinel buffer (only addresses matter)
+    const int64_t h_offsets[ne + 1] = {0, 512, 1024, 1024, 2560};  // bytes
+    int64_t*  d_offsets = nullptr;
+    uint8_t** d_bases   = nullptr;
+    cudaMalloc(&d_offsets, (ne + 1) * sizeof(int64_t));
+    cudaMalloc(&d_bases,   ne       * sizeof(uint8_t*));
+    cudaMemcpy(d_offsets, h_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::build_sfa_bases_device(d_bases, d_base, d_offsets, ne, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    uint8_t* got[ne] = {};
+    cudaMemcpy(got, d_bases, ne * sizeof(uint8_t*), cudaMemcpyDeviceToHost);
+    for (int e = 0; e < ne; ++e) {
+        uint8_t* expected = static_cast<uint8_t*>(d_base) + h_offsets[e];
+        EXPECT_EQ(got[e], expected) << "base[" << e << "] mismatch";
+    }
+
+    cudaFree(d_base);
+    cudaFree(d_offsets);
+    cudaFree(d_bases);
+    cudaStreamDestroy(stream);
+}
+
 // n_experts == 0: trailing slot 0 must be 0, no kernel work.
 TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceEmpty) {
     int64_t* d_offsets = nullptr;
