@@ -415,6 +415,19 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.d_fp8_scales = nullptr;
             }
 
+            // Per-expert device-resident token-count buffer (n_experts × 4 bytes).
+            // Populated each forward by compute_M_per_from_offsets_device, replacing
+            // the host D2H+sync+loop pattern in the MoE prefill dispatch path.
+            size_t m_per_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(int32_t);
+            err = cudaMalloc(&moe_.d_M_per, m_per_bytes);
+            if (err == cudaSuccess) {
+                moe_.d_M_per_count = cfg.n_experts;
+            } else {
+                IMP_LOG_DEBUG("Optional MoE d_M_per alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_M_per = nullptr;
+                moe_.d_M_per_count = 0;
+            }
+
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);

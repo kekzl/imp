@@ -37,6 +37,12 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         d_fp8_scales = nullptr;
     }
 
+    if (d_M_per) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_M_per));
+        d_M_per = nullptr;
+        d_M_per_count = 0;
+    }
+
     if (d_weight_ptrs) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_weight_ptrs));
         d_weight_ptrs = nullptr;

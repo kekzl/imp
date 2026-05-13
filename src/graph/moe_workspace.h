@@ -50,6 +50,14 @@ struct MoEWorkspace {
     // Per-expert FP8 scale buffer: [n_experts] floats on device.
     float* d_fp8_scales = nullptr;
 
+    // Per-expert token-count buffer: [n_experts] int32 on device.
+    // Populated by compute_M_per_from_offsets_device from routing.expert_offsets.
+    // Replaces the host-side D2H + sync + loop pattern in MoE prefill dispatch
+    // (executor_forward_moe.cu). Prerequisite for CUDA-graph capture of the
+    // prefill path. See plan moe_prefill_graphs_plan_2026_05_10.
+    int32_t* d_M_per = nullptr;
+    int d_M_per_count = 0;
+
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
     int d_weight_ptrs_count = 0;

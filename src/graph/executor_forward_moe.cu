@@ -1295,6 +1295,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
                                                        cudaMemcpyDeviceToHost, stream));
+                    // Populate device-resident d_M_per in parallel with the D2H copy.
+                    // Phase 1 of MoE-prefill-graphs lever: foundation for graph-safe
+                    // dispatch (Phase 2+ migrates host M_per[] uses to this buffer).
+                    if (moe_.d_M_per && moe_.d_M_per_count >= ne) {
+                        imp::compute_M_per_from_offsets_device(
+                            static_cast<const int32_t*>(routing.expert_offsets.data),
+                            moe_.d_M_per, ne, stream);
+                    }
                     cudaStreamSynchronize(stream);
 
                     std::vector<int> M_per(ne);
