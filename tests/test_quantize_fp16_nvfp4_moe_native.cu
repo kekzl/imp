@@ -210,5 +210,48 @@ TEST(QuantizeMoeNative, EmptyExpertNocrash) {
     cudaStreamDestroy(stream);
 }
 
+// ---------------------------------------------------------------------------
+// Test: compute_M_per_from_offsets_device — device-side per-expert token count.
+// Replaces the host-side cudaMemcpyAsync(D2H) + sync + loop pattern in MoE
+// prefill dispatch. Required for CUDA-graph capture (Phase 1 of MoE-prefill-
+// graphs lever, plan moe_prefill_graphs_plan_2026_05_10).
+// ---------------------------------------------------------------------------
+TEST(QuantizeMoeNative, ComputeMPerFromOffsetsDevice) {
+    const int ne = 4;
+    // Offsets: [0, 3, 3, 7, 10] → M_per: [3, 0, 4, 3]
+    const int32_t h_offsets[ne + 1] = {0, 3, 3, 7, 10};
+    const int32_t expected_M[ne]    = {3, 0, 4, 3};
+
+    int32_t* d_offsets = nullptr;
+    int32_t* d_M_per   = nullptr;
+    cudaMalloc(&d_offsets, (ne + 1) * sizeof(int32_t));
+    cudaMalloc(&d_M_per,   ne       * sizeof(int32_t));
+    cudaMemcpy(d_offsets, h_offsets, (ne + 1) * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compute_M_per_from_offsets_device(d_offsets, d_M_per, ne, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int32_t got_M[ne] = {};
+    cudaMemcpy(got_M, d_M_per, ne * sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+    for (int e = 0; e < ne; ++e)
+        EXPECT_EQ(got_M[e], expected_M[e]) << "M_per[" << e << "] mismatch";
+
+    cudaFree(d_offsets);
+    cudaFree(d_M_per);
+    cudaStreamDestroy(stream);
+}
+
+// n_experts == 0 must not launch a kernel and must not segfault.
+TEST(QuantizeMoeNative, ComputeMPerFromOffsetsDeviceEmpty) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compute_M_per_from_offsets_device(nullptr, nullptr, 0, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace
 }  // namespace imp
