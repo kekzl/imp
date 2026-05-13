@@ -444,6 +444,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.d_na = nullptr;
             }
 
+            // SFA byte-offsets prefix sum (Phase 3 staging). n_experts+1 int64
+            // = trivial (<2 KiB for 128 experts).
+            err = cudaMalloc(&moe_.d_sfa_offsets,
+                             static_cast<size_t>(cfg.n_experts + 1) * sizeof(int64_t));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_sfa_offsets alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_sfa_offsets = nullptr;
+            }
+
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);

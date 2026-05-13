@@ -65,6 +65,13 @@ struct MoEWorkspace {
     // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
     int32_t* d_na = nullptr;
 
+    // Per-expert SFA byte-offsets into the CUTLASS 3.x SfAtom-padded staging
+    // buffer (Phase 3 of moe_prefill_graphs_plan_2026_05_10). Exclusive prefix
+    // sum of cutlass_nvfp4_sf_size(M_per[e], K) — populated each forward by
+    // compute_sfa_offsets_device. Replaces the host-side sfa_offsets loop in
+    // executor_forward_moe.cu's quantize_once lambda. [n_experts+1] int64.
+    int64_t* d_sfa_offsets = nullptr;
+
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
     int d_weight_ptrs_count = 0;
