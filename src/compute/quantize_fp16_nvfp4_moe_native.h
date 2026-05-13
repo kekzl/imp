@@ -89,4 +89,32 @@ void compute_M_per_from_offsets_device(
     int n_experts,
     cudaStream_t stream);
 
+// Compact per-expert alpha values to only the active experts (M_per[e] > 0).
+// Reads d_alpha[n_experts] + d_M_per[n_experts]; writes d_alpha_compact[na]
+// and d_na (single int32) with the active-expert count.
+//
+// Replaces the host-side  `D2H d_alpha + cudaStreamSynchronize + for(e) if
+// (M_per[e]>0) compact.push_back(alpha[e]) + cudaMallocAsync + H2D compact`
+// pattern at executor_forward_moe.cu:1492-1514. Eliminating both syncs is the
+// second graph-capture prerequisite for MoE prefill (Phase 2 of
+// moe_prefill_graphs_plan_2026_05_10).
+//
+// d_alpha         : [n_experts] device floats — full per-expert alpha
+// d_M_per         : [n_experts] device int32  — token count per expert
+// d_alpha_compact : [n_experts] device floats — output (first `na` entries valid)
+// d_na_out        : [1]         device int32  — output, active-expert count
+//
+// The compaction order matches the source order (active experts in ascending
+// index), preserving the host-loop semantics that downstream Phase 4 device-
+// built ptr arrays will mirror. Single-block 256-thread launch — safe inside
+// a captured CUDA graph. Requires n_experts <= 256 (production models have
+// up to 128 experts).
+void compact_alpha_active(
+    const float* d_alpha,
+    const int32_t* d_M_per,
+    float* d_alpha_compact,
+    int32_t* d_na_out,
+    int n_experts,
+    cudaStream_t stream);
+
 }  // namespace imp

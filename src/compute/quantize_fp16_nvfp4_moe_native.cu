@@ -20,6 +20,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cfloat>
+#include <cassert>
 
 namespace imp {
 
@@ -369,6 +370,67 @@ void compute_M_per_from_offsets_device(
     int blocks  = (n_experts + threads - 1) / threads;
     moe_compute_M_per_kernel<<<blocks, threads, 0, stream>>>(
         d_expert_offsets, d_M_per_out, n_experts);
+}
+
+// ---------------------------------------------------------------------------
+// compact_alpha_active: order-preserving stream compaction of d_alpha
+// to only the entries where d_M_per[e] > 0. Single block, block-level
+// inclusive prefix sum (Hillis–Steele) in shared memory.
+// n_experts is bounded by 256 (typical 64-128); 8 scan steps total.
+// ---------------------------------------------------------------------------
+__global__ void compact_alpha_active_kernel(
+    const float*   __restrict__ d_alpha,
+    const int32_t* __restrict__ d_M_per,
+    float*         __restrict__ d_alpha_compact,
+    int32_t*       __restrict__ d_na_out,
+    int n_experts)
+{
+    constexpr int MAX_NE = 256;
+    __shared__ int s_scan[MAX_NE];
+
+    int e = threadIdx.x;
+    int active = (e < n_experts && d_M_per[e] > 0) ? 1 : 0;
+    s_scan[e] = active;
+    __syncthreads();
+
+    // Hillis–Steele inclusive prefix sum.
+    for (int off = 1; off < MAX_NE; off <<= 1) {
+        int v = (e >= off) ? s_scan[e - off] : 0;
+        __syncthreads();
+        s_scan[e] += v;
+        __syncthreads();
+    }
+
+    int incl = s_scan[e];
+    if (active) {
+        int excl = incl - 1;          // active=1 → excl = incl - active
+        d_alpha_compact[excl] = d_alpha[e];
+    }
+    if (e == 0) {
+        // The final inclusive total lives at index n_experts-1 (or 0 if ne==0).
+        *d_na_out = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
+    }
+}
+
+void compact_alpha_active(
+    const float* d_alpha,
+    const int32_t* d_M_per,
+    float* d_alpha_compact,
+    int32_t* d_na_out,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) {
+        if (d_na_out)
+            cudaMemsetAsync(d_na_out, 0, sizeof(int32_t), stream);
+        return;
+    }
+    // Single-block kernel uses a fixed 256-thread layout — n_experts must fit.
+    // Production MoE models have ≤ 128 experts; the limit is documented in the
+    // header. Caller is responsible for honoring it.
+    assert(n_experts <= 256);
+    compact_alpha_active_kernel<<<1, 256, 0, stream>>>(
+        d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
 }
 
 }  // namespace imp

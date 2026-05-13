@@ -253,5 +253,132 @@ TEST(QuantizeMoeNative, ComputeMPerFromOffsetsDeviceEmpty) {
     cudaStreamDestroy(stream);
 }
 
+// ---------------------------------------------------------------------------
+// Test: compact_alpha_active — order-preserving stream compaction of d_alpha
+// to active-only experts. Phase 2 of moe_prefill_graphs_plan_2026_05_10.
+// ---------------------------------------------------------------------------
+TEST(QuantizeMoeNative, CompactAlphaActiveBasic) {
+    const int ne = 4;
+    const float    h_alpha[ne]   = {1.0f, 2.0f, 3.0f, 4.0f};
+    const int32_t  h_M_per[ne]   = {5, 0, 3, 0};
+    // Expected: na=2, alpha_compact=[1.0, 3.0] (active experts in source order).
+    const float    expected_compact[2] = {1.0f, 3.0f};
+    const int32_t  expected_na = 2;
+
+    float*   d_alpha   = nullptr;
+    int32_t* d_M_per   = nullptr;
+    float*   d_compact = nullptr;
+    int32_t* d_na      = nullptr;
+    cudaMalloc(&d_alpha,   ne * sizeof(float));
+    cudaMalloc(&d_M_per,   ne * sizeof(int32_t));
+    cudaMalloc(&d_compact, ne * sizeof(float));
+    cudaMalloc(&d_na,           sizeof(int32_t));
+    cudaMemcpy(d_alpha, h_alpha, ne * sizeof(float),   cudaMemcpyHostToDevice);
+    cudaMemcpy(d_M_per, h_M_per, ne * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compact_alpha_active(d_alpha, d_M_per, d_compact, d_na, ne, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int32_t got_na = -1;
+    cudaMemcpy(&got_na, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got_na, expected_na);
+
+    float got_compact[2] = {};
+    cudaMemcpy(got_compact, d_compact, 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    EXPECT_FLOAT_EQ(got_compact[0], expected_compact[0]);
+    EXPECT_FLOAT_EQ(got_compact[1], expected_compact[1]);
+
+    cudaFree(d_alpha); cudaFree(d_M_per);
+    cudaFree(d_compact); cudaFree(d_na);
+    cudaStreamDestroy(stream);
+}
+
+// All experts active: alpha_compact == alpha, na == n_experts.
+TEST(QuantizeMoeNative, CompactAlphaActiveAllActive) {
+    const int ne = 3;
+    const float   h_alpha[ne] = {0.5f, 1.5f, 2.5f};
+    const int32_t h_M[ne]     = {2, 4, 1};
+
+    float*   d_alpha   = nullptr;
+    int32_t* d_M       = nullptr;
+    float*   d_compact = nullptr;
+    int32_t* d_na      = nullptr;
+    cudaMalloc(&d_alpha,   ne * sizeof(float));
+    cudaMalloc(&d_M,       ne * sizeof(int32_t));
+    cudaMalloc(&d_compact, ne * sizeof(float));
+    cudaMalloc(&d_na,           sizeof(int32_t));
+    cudaMemcpy(d_alpha, h_alpha, ne * sizeof(float),   cudaMemcpyHostToDevice);
+    cudaMemcpy(d_M,     h_M,     ne * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compact_alpha_active(d_alpha, d_M, d_compact, d_na, ne, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int32_t got_na = -1;
+    cudaMemcpy(&got_na, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got_na, ne);
+
+    float got[ne] = {};
+    cudaMemcpy(got, d_compact, ne * sizeof(float), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < ne; ++i)
+        EXPECT_FLOAT_EQ(got[i], h_alpha[i]);
+
+    cudaFree(d_alpha); cudaFree(d_M); cudaFree(d_compact); cudaFree(d_na);
+    cudaStreamDestroy(stream);
+}
+
+// No active experts: na=0; compact buffer untouched.
+TEST(QuantizeMoeNative, CompactAlphaActiveNoneActive) {
+    const int ne = 4;
+    const float   h_alpha[ne] = {1.0f, 2.0f, 3.0f, 4.0f};
+    const int32_t h_M[ne]     = {0, 0, 0, 0};
+
+    float*   d_alpha   = nullptr;
+    int32_t* d_M       = nullptr;
+    float*   d_compact = nullptr;
+    int32_t* d_na      = nullptr;
+    cudaMalloc(&d_alpha,   ne * sizeof(float));
+    cudaMalloc(&d_M,       ne * sizeof(int32_t));
+    cudaMalloc(&d_compact, ne * sizeof(float));
+    cudaMalloc(&d_na,           sizeof(int32_t));
+    cudaMemcpy(d_alpha, h_alpha, ne * sizeof(float),   cudaMemcpyHostToDevice);
+    cudaMemcpy(d_M,     h_M,     ne * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compact_alpha_active(d_alpha, d_M, d_compact, d_na, ne, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int32_t got_na = -1;
+    cudaMemcpy(&got_na, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got_na, 0);
+
+    cudaFree(d_alpha); cudaFree(d_M); cudaFree(d_compact); cudaFree(d_na);
+    cudaStreamDestroy(stream);
+}
+
+// n_experts == 0: na written as 0, no kernel launch needed.
+TEST(QuantizeMoeNative, CompactAlphaActiveEmpty) {
+    int32_t* d_na = nullptr;
+    cudaMalloc(&d_na, sizeof(int32_t));
+    int32_t init = 999;
+    cudaMemcpy(d_na, &init, sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compact_alpha_active(nullptr, nullptr, nullptr, d_na, 0, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int32_t got = -1;
+    cudaMemcpy(&got, d_na, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got, 0);
+
+    cudaFree(d_na);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace
 }  // namespace imp
