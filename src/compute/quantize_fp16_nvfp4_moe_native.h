@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -66,6 +67,97 @@ void compute_moe_alpha_device(
     const float* d_act_scales,
     const float* d_weight_scales,
     float* d_alpha_out,
+    int n_experts,
+    cudaStream_t stream);
+
+// Compute per-expert M_per values from device-resident expert_offsets array.
+// M_per[e] = expert_offsets[e+1] - expert_offsets[e]   (token count routed to expert e)
+//
+// Replaces the host-side  `cudaMemcpyAsync(h_offsets, d_offsets, ...) +
+// cudaStreamSynchronize + for(e) M_per[e]=h_offsets[e+1]-h_offsets[e]`  pattern
+// used in MoE prefill dispatch (executor_forward_moe.cu). Eliminating that D2H
+// sync is the prerequisite for CUDA-graph capture of MoE prefill — the decode
+// fast-path already does no D2H but the prefill path falls back to host-driven
+// dispatch.
+//
+// d_expert_offsets : [n_experts + 1] device int32 — exclusive scan of token counts
+// d_M_per_out      : [n_experts]     device int32 — written by callee
+//
+// Launches a single tiny block; safe inside a captured CUDA graph.
+void compute_M_per_from_offsets_device(
+    const int32_t* d_expert_offsets,
+    int32_t* d_M_per_out,
+    int n_experts,
+    cudaStream_t stream);
+
+// Compact per-expert alpha values to only the active experts (M_per[e] > 0).
+// Reads d_alpha[n_experts] + d_M_per[n_experts]; writes d_alpha_compact[na]
+// and d_na (single int32) with the active-expert count.
+//
+// Replaces the host-side  `D2H d_alpha + cudaStreamSynchronize + for(e) if
+// (M_per[e]>0) compact.push_back(alpha[e]) + cudaMallocAsync + H2D compact`
+// pattern at executor_forward_moe.cu:1492-1514. Eliminating both syncs is the
+// second graph-capture prerequisite for MoE prefill (Phase 2 of
+// moe_prefill_graphs_plan_2026_05_10).
+//
+// d_alpha         : [n_experts] device floats — full per-expert alpha
+// d_M_per         : [n_experts] device int32  — token count per expert
+// d_alpha_compact : [n_experts] device floats — output (first `na` entries valid)
+// d_na_out        : [1]         device int32  — output, active-expert count
+//
+// The compaction order matches the source order (active experts in ascending
+// index), preserving the host-loop semantics that downstream Phase 4 device-
+// built ptr arrays will mirror. Single-block 256-thread launch — safe inside
+// a captured CUDA graph. Requires n_experts <= 256 (production models have
+// up to 128 experts).
+void compact_alpha_active(
+    const float* d_alpha,
+    const int32_t* d_M_per,
+    float* d_alpha_compact,
+    int32_t* d_na_out,
+    int n_experts,
+    cudaStream_t stream);
+
+// Compute device-resident per-expert offsets into a SfAtom-padded SFA buffer
+// (Phase 3 of moe_prefill_graphs_plan_2026_05_10). Output is exclusive prefix
+// sum of `cutlass_nvfp4_sf_size(M_per[e], K)` so that
+//   ptr_SFA[e] = base_SFA + d_sfa_offsets_out[e]
+// matches the host-side staging layout used by the existing CUTLASS 3.x
+// grouped NVFP4 wrapper (gemm_cutlass_grouped_3x.cu).
+//
+// Padding math (SfAtom): n_row_tiles = ceil(M_e/128); n_k_tiles = ceil(K/64);
+//                        bytes = n_row_tiles * n_k_tiles * 512
+// (See cutlass_nvfp4_sf_size in gemm_cutlass_sm120.cu for the host version.)
+//
+// d_M_per          : [n_experts]      device int32 — per-expert token count
+// d_sfa_offsets_out: [n_experts + 1]  device int64 — exclusive prefix sum
+// K                : shared K dimension (host int)
+// Single-block 256-thread launch; safe inside a captured CUDA graph.
+// Requires n_experts <= 256.
+void compute_sfa_offsets_device(
+    const int32_t* d_M_per,
+    int64_t* d_sfa_offsets_out,
+    int n_experts,
+    int K,
+    cudaStream_t stream);
+
+// Build a device-resident array of per-expert base pointers into the
+// SfAtom-padded SFA staging slab. Replaces the host-side loop in
+// executor_forward_moe.cu's quantize_once lambda that builds h_sfa_bases
+// and then cudaMemcpyAsync's it to moe_.cutlass3x_sfa_ptrs. Eliminates
+// that H2D from the dispatch path (Phase 3c-full Step 2 prerequisite).
+//
+// Formula: d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e]
+//
+// d_sfa_offsets   : [n_experts+1] device int64 — output of compute_sfa_offsets_device
+// base_sf         : host pointer to the start of the contiguous SFA slab (device addr)
+// d_sfa_bases_out : [n_experts] device uint8_t** — written by callee
+// Single-block 256-thread launch; safe inside a captured CUDA graph.
+// Requires n_experts <= 256.
+void build_sfa_bases_device(
+    uint8_t** d_sfa_bases_out,
+    void* base_sf,
+    const int64_t* d_sfa_offsets,
     int n_experts,
     cudaStream_t stream);
 

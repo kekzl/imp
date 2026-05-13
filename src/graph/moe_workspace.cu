@@ -37,6 +37,50 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         d_fp8_scales = nullptr;
     }
 
+    if (d_M_per) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_M_per));
+        d_M_per = nullptr;
+        d_M_per_count = 0;
+    }
+
+    if (d_alpha_compact) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_alpha_compact));
+        d_alpha_compact = nullptr;
+    }
+
+    if (d_na) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_na));
+        d_na = nullptr;
+    }
+
+    if (d_sfa_offsets) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_sfa_offsets));
+        d_sfa_offsets = nullptr;
+    }
+
+    if (d_B_ptrs_cache) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_B_ptrs_cache));
+        d_B_ptrs_cache = nullptr;
+    }
+    if (d_SFB_ptrs_cache) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_SFB_ptrs_cache));
+        d_SFB_ptrs_cache = nullptr;
+    }
+    if (d_alpha_full) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_alpha_full));
+        d_alpha_full = nullptr;
+    }
+
+    // Phase 3c-full Step 3 per-layer caches.
+    for (auto& c : per_layer_da_cache) {
+        auto cfree = [](void* p) { if (p) IMP_CUDA_CHECK_LOG(cudaFree(p)); };
+        cfree(c.d_gate_B_ptrs);   cfree(c.d_gate_SFB_ptrs);   cfree(c.d_gate_alpha);
+        cfree(c.d_up_B_ptrs);     cfree(c.d_up_SFB_ptrs);     cfree(c.d_up_alpha);
+        cfree(c.d_down_B_ptrs);   cfree(c.d_down_SFB_ptrs);   cfree(c.d_down_alpha);
+        c = {};
+    }
+    per_layer_da_cache.clear();
+
     if (d_weight_ptrs) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_weight_ptrs));
         d_weight_ptrs = nullptr;

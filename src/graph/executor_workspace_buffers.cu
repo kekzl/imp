@@ -415,6 +415,69 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.d_fp8_scales = nullptr;
             }
 
+            // Per-expert device-resident token-count buffer (n_experts × 4 bytes).
+            // Populated each forward by compute_M_per_from_offsets_device, replacing
+            // the host D2H+sync+loop pattern in the MoE prefill dispatch path.
+            size_t m_per_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(int32_t);
+            err = cudaMalloc(&moe_.d_M_per, m_per_bytes);
+            if (err == cudaSuccess) {
+                moe_.d_M_per_count = cfg.n_experts;
+            } else {
+                IMP_LOG_DEBUG("Optional MoE d_M_per alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_M_per = nullptr;
+                moe_.d_M_per_count = 0;
+            }
+
+            // Compact-alpha output buffer + active-expert counter. Populated by
+            // compact_alpha_active. Sized for max n_experts (only first d_na
+            // entries used at dispatch).
+            err = cudaMalloc(&moe_.d_alpha_compact,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(float));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_alpha_compact alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_alpha_compact = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_na, sizeof(int32_t));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_na alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_na = nullptr;
+            }
+
+            // SFA byte-offsets prefix sum (Phase 3 staging). n_experts+1 int64
+            // = trivial (<2 KiB for 128 experts).
+            err = cudaMalloc(&moe_.d_sfa_offsets,
+                             static_cast<size_t>(cfg.n_experts + 1) * sizeof(int64_t));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_sfa_offsets alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_sfa_offsets = nullptr;
+            }
+
+            // Phase 3c-full Step 1 — device-args ptr/alpha caches. n_experts ×
+            // (2 × sizeof(void*) + sizeof(float)) ≈ 2.5 KiB for 128 experts.
+            err = cudaMalloc(&moe_.d_B_ptrs_cache,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(const void*));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_B_ptrs_cache alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_B_ptrs_cache = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_SFB_ptrs_cache,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(const void*));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_SFB_ptrs_cache alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_SFB_ptrs_cache = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_alpha_full,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(float));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_alpha_full alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_alpha_full = nullptr;
+            }
+
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);

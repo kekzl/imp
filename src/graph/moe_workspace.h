@@ -50,6 +50,62 @@ struct MoEWorkspace {
     // Per-expert FP8 scale buffer: [n_experts] floats on device.
     float* d_fp8_scales = nullptr;
 
+    // Per-expert token-count buffer: [n_experts] int32 on device.
+    // Populated by compute_M_per_from_offsets_device from routing.expert_offsets.
+    // Replaces the host-side D2H + sync + loop pattern in MoE prefill dispatch
+    // (executor_forward_moe.cu). Prerequisite for CUDA-graph capture of the
+    // prefill path. See plan moe_prefill_graphs_plan_2026_05_10.
+    int32_t* d_M_per = nullptr;
+    int d_M_per_count = 0;
+
+    // Compact-alpha output buffer: [n_experts] floats on device. Populated by
+    // compact_alpha_active and consumed by the grouped GEMM dispatch when not
+    // all experts are active. First d_na valid entries; rest unused.
+    float* d_alpha_compact = nullptr;
+    // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
+    int32_t* d_na = nullptr;
+
+    // Per-expert SFA byte-offsets into the CUTLASS 3.x SfAtom-padded staging
+    // buffer (Phase 3 of moe_prefill_graphs_plan_2026_05_10). Exclusive prefix
+    // sum of cutlass_nvfp4_sf_size(M_per[e], K) — populated each forward by
+    // compute_sfa_offsets_device. Replaces the host-side sfa_offsets loop in
+    // executor_forward_moe.cu's quantize_once lambda. [n_experts+1] int64.
+    int64_t* d_sfa_offsets = nullptr;
+
+    // Phase 3c-full Step 1 caches for the device-args wrapper:
+    // - d_B_ptrs_cache:   [n_experts] device array of per-expert weight pointers
+    // - d_SFB_ptrs_cache: [n_experts] device array of per-expert SFB pointers
+    // - d_alpha_full:     [n_experts] device floats per-expert alpha
+    // Filled per-call from the registry handles (host) via cudaMemcpyAsync;
+    // shared across all three projections (gate / up / down) inside one
+    // forward layer. Replaces the per-call cudaMallocAsync of the MVP wire.
+    // Superseded by per_layer_da_cache below when da_cache_ready is true —
+    // these stay around for any future per-call fallback path.
+    const void** d_B_ptrs_cache   = nullptr;
+    const void** d_SFB_ptrs_cache = nullptr;
+    float*       d_alpha_full     = nullptr;
+
+    // Phase 3c-full Step 3: per-layer pre-cached device-args ptr arrays.
+    // Built once at model-load time (pre_dequant_weights) when handle payloads
+    // are populated; reused on every forward call with no host iteration and
+    // no per-call H2D. Prerequisite for CUDA-graph capture of the MoE prefill.
+    struct PerLayerNvfp4DeviceArgsCache {
+        const void** d_gate_B_ptrs   = nullptr;
+        const void** d_gate_SFB_ptrs = nullptr;
+        float*       d_gate_alpha    = nullptr;
+        const void** d_up_B_ptrs     = nullptr;
+        const void** d_up_SFB_ptrs   = nullptr;
+        float*       d_up_alpha      = nullptr;
+        const void** d_down_B_ptrs   = nullptr;
+        const void** d_down_SFB_ptrs = nullptr;
+        float*       d_down_alpha    = nullptr;
+        // True if all 9 buffers above are non-null AND populated. Tested in
+        // the device-args dispatch to gate whether the pre-cache fast-path
+        // can fire (otherwise fall back to per-call H2D into d_B_ptrs_cache).
+        bool ready = false;
+    };
+    std::vector<PerLayerNvfp4DeviceArgsCache> per_layer_da_cache;
+
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
     int d_weight_ptrs_count = 0;

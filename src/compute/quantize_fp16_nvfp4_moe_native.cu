@@ -20,6 +20,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cfloat>
+#include <cassert>
 
 namespace imp {
 
@@ -342,6 +343,195 @@ void compute_moe_alpha_device(
     int blocks  = (n_experts + threads - 1) / threads;
     moe_alpha_mul_kernel<<<blocks, threads, 0, stream>>>(
         d_act_scales, d_weight_scales, d_alpha_out, n_experts);
+}
+
+// ---------------------------------------------------------------------------
+// compute_M_per_from_offsets_device: per-expert token count from offset scan.
+// One thread per expert; single block (n_experts typically ≤ 256).
+// ---------------------------------------------------------------------------
+__global__ void moe_compute_M_per_kernel(
+    const int32_t* __restrict__ d_offsets,
+    int32_t* __restrict__ d_M_per_out,
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < n_experts)
+        d_M_per_out[e] = d_offsets[e + 1] - d_offsets[e];
+}
+
+void compute_M_per_from_offsets_device(
+    const int32_t* d_expert_offsets,
+    int32_t* d_M_per_out,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) return;
+    int threads = std::min(n_experts, 256);
+    int blocks  = (n_experts + threads - 1) / threads;
+    moe_compute_M_per_kernel<<<blocks, threads, 0, stream>>>(
+        d_expert_offsets, d_M_per_out, n_experts);
+}
+
+// ---------------------------------------------------------------------------
+// compact_alpha_active: order-preserving stream compaction of d_alpha
+// to only the entries where d_M_per[e] > 0. Single block, block-level
+// inclusive prefix sum (Hillis–Steele) in shared memory.
+// n_experts is bounded by 256 (typical 64-128); 8 scan steps total.
+// ---------------------------------------------------------------------------
+__global__ void compact_alpha_active_kernel(
+    const float*   __restrict__ d_alpha,
+    const int32_t* __restrict__ d_M_per,
+    float*         __restrict__ d_alpha_compact,
+    int32_t*       __restrict__ d_na_out,
+    int n_experts)
+{
+    constexpr int MAX_NE = 256;
+    __shared__ int s_scan[MAX_NE];
+
+    int e = threadIdx.x;
+    int active = (e < n_experts && d_M_per[e] > 0) ? 1 : 0;
+    s_scan[e] = active;
+    __syncthreads();
+
+    // Hillis–Steele inclusive prefix sum.
+    for (int off = 1; off < MAX_NE; off <<= 1) {
+        int v = (e >= off) ? s_scan[e - off] : 0;
+        __syncthreads();
+        s_scan[e] += v;
+        __syncthreads();
+    }
+
+    int incl = s_scan[e];
+    if (active) {
+        int excl = incl - 1;          // active=1 → excl = incl - active
+        d_alpha_compact[excl] = d_alpha[e];
+    }
+    if (e == 0) {
+        // The final inclusive total lives at index n_experts-1 (or 0 if ne==0).
+        *d_na_out = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
+    }
+}
+
+void compact_alpha_active(
+    const float* d_alpha,
+    const int32_t* d_M_per,
+    float* d_alpha_compact,
+    int32_t* d_na_out,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) {
+        if (d_na_out)
+            cudaMemsetAsync(d_na_out, 0, sizeof(int32_t), stream);
+        return;
+    }
+    // Single-block kernel uses a fixed 256-thread layout — n_experts must fit.
+    // Production MoE models have ≤ 128 experts; the limit is documented in the
+    // header. Caller is responsible for honoring it.
+    assert(n_experts <= 256);
+    compact_alpha_active_kernel<<<1, 256, 0, stream>>>(
+        d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
+}
+
+// ---------------------------------------------------------------------------
+// compute_sfa_offsets_device: exclusive prefix sum of cutlass_nvfp4_sf_size
+// (per-expert SfAtom-padded SFA byte size). Single block, Hillis–Steele scan
+// over int64 in shared memory. Phase 3a of MoE-prefill-graphs lever.
+// ---------------------------------------------------------------------------
+//
+// Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize
+// in src/compute/gemm_cutlass_sm120.cu (CUTLASS SfAtom = 128 rows × 64 K-elems
+// × 512 bytes). Kept here as constexpr to avoid a host-only include from a
+// device translation unit.
+namespace {
+constexpr int kSfAtomRows   = 128;
+constexpr int kSfAtomKElems = 64;
+constexpr int kSfAtomSize   = 512;
+}  // anonymous
+
+__global__ void compute_sfa_offsets_kernel(
+    const int32_t* __restrict__ d_M_per,
+    int64_t*       __restrict__ d_sfa_offsets_out,
+    int n_experts,
+    int K)
+{
+    constexpr int MAX_NE = 256;
+    __shared__ int64_t s_scan[MAX_NE];
+
+    int e = threadIdx.x;
+    int n_k_tiles = (K + kSfAtomKElems - 1) / kSfAtomKElems;
+
+    int64_t bytes = 0;
+    if (e < n_experts) {
+        int M_e = d_M_per[e];
+        int n_row_tiles = (M_e + kSfAtomRows - 1) / kSfAtomRows;
+        bytes = static_cast<int64_t>(n_row_tiles) * n_k_tiles * kSfAtomSize;
+    }
+    s_scan[e] = bytes;
+    __syncthreads();
+
+    // Hillis–Steele inclusive prefix sum.
+    for (int off = 1; off < MAX_NE; off <<= 1) {
+        int64_t v = (e >= off) ? s_scan[e - off] : 0;
+        __syncthreads();
+        s_scan[e] += v;
+        __syncthreads();
+    }
+
+    // Output exclusive prefix sum: d_sfa_offsets_out[e] = inclusive - bytes_e
+    if (e < n_experts) {
+        d_sfa_offsets_out[e] = s_scan[e] - bytes;
+    }
+    if (e == n_experts) {
+        // Trailing total at slot ne (inclusive sum of ne-1).
+        d_sfa_offsets_out[n_experts] = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
+    }
+}
+
+void compute_sfa_offsets_device(
+    const int32_t* d_M_per,
+    int64_t* d_sfa_offsets_out,
+    int n_experts,
+    int K,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) {
+        if (d_sfa_offsets_out)
+            cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
+        return;
+    }
+    assert(n_experts <= 256);
+    compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
+        d_M_per, d_sfa_offsets_out, n_experts, K);
+}
+
+// ---------------------------------------------------------------------------
+// build_sfa_bases_device: trivial pointer-arithmetic kernel that writes
+// d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e].  One thread per expert.
+// ---------------------------------------------------------------------------
+__global__ void build_sfa_bases_kernel(
+    uint8_t**      __restrict__ d_sfa_bases_out,
+    uint8_t*       __restrict__ base_sf,
+    const int64_t* __restrict__ d_sfa_offsets,
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < n_experts)
+        d_sfa_bases_out[e] = base_sf + d_sfa_offsets[e];
+}
+
+void build_sfa_bases_device(
+    uint8_t** d_sfa_bases_out,
+    void* base_sf,
+    const int64_t* d_sfa_offsets,
+    int n_experts,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) return;
+    int threads = std::min(n_experts, 256);
+    int blocks  = (n_experts + threads - 1) / threads;
+    build_sfa_bases_kernel<<<blocks, threads, 0, stream>>>(
+        d_sfa_bases_out, static_cast<uint8_t*>(base_sf), d_sfa_offsets, n_experts);
 }
 
 }  // namespace imp
