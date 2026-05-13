@@ -428,6 +428,22 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.d_M_per_count = 0;
             }
 
+            // Compact-alpha output buffer + active-expert counter. Populated by
+            // compact_alpha_active. Sized for max n_experts (only first d_na
+            // entries used at dispatch).
+            err = cudaMalloc(&moe_.d_alpha_compact,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(float));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_alpha_compact alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_alpha_compact = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_na, sizeof(int32_t));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_na alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_na = nullptr;
+            }
+
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);

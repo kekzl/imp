@@ -58,6 +58,13 @@ struct MoEWorkspace {
     int32_t* d_M_per = nullptr;
     int d_M_per_count = 0;
 
+    // Compact-alpha output buffer: [n_experts] floats on device. Populated by
+    // compact_alpha_active and consumed by the grouped GEMM dispatch when not
+    // all experts are active. First d_na valid entries; rest unused.
+    float* d_alpha_compact = nullptr;
+    // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
+    int32_t* d_na = nullptr;
+
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
     int d_weight_ptrs_count = 0;

@@ -43,6 +43,16 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         d_M_per_count = 0;
     }
 
+    if (d_alpha_compact) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_alpha_compact));
+        d_alpha_compact = nullptr;
+    }
+
+    if (d_na) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_na));
+        d_na = nullptr;
+    }
+
     if (d_weight_ptrs) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_weight_ptrs));
         d_weight_ptrs = nullptr;
