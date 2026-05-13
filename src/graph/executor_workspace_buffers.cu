@@ -454,6 +454,30 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.d_sfa_offsets = nullptr;
             }
 
+            // Phase 3c-full Step 1 — device-args ptr/alpha caches. n_experts ×
+            // (2 × sizeof(void*) + sizeof(float)) ≈ 2.5 KiB for 128 experts.
+            err = cudaMalloc(&moe_.d_B_ptrs_cache,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(const void*));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_B_ptrs_cache alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_B_ptrs_cache = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_SFB_ptrs_cache,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(const void*));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_SFB_ptrs_cache alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_SFB_ptrs_cache = nullptr;
+            }
+            err = cudaMalloc(&moe_.d_alpha_full,
+                             static_cast<size_t>(cfg.n_experts) * sizeof(float));
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Optional MoE d_alpha_full alloc failed: %s",
+                              cudaGetErrorString(err));
+                moe_.d_alpha_full = nullptr;
+            }
+
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
             err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);

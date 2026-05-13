@@ -1679,7 +1679,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     const bool use_device_args =
                         device_args_env && std::atoi(device_args_env) != 0 &&
                         moe_.d_M_per && moe_.d_M_per_count >= ne &&
-                        moe_.d_sfa_offsets;
+                        moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
+                        moe_.d_SFB_ptrs_cache && moe_.d_alpha_full;
                     auto grouped_gemm_device = [&](const std::vector<TensorID>& weight_ids,
                                                    char* c_base, int K_in, int N_out) -> bool {
                         // Per-expert host arrays (registry handles). Built for ALL
@@ -1694,21 +1695,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                 ? *h.payload.cutlass_nvfp4.global_scale
                                                 : 1.0f;
                         }
-                        // Per-call device staging for the 3 arrays. Tiny (~3 KB
-                        // total for 128 experts). cudaMallocAsync/FreeAsync are
-                        // graph-safe with the stream-ordered allocator; Phase 3c-
-                        // full will cache these at model-load time.
-                        const void** d_B_ptrs   = nullptr;
-                        const void** d_SFB_ptrs = nullptr;
-                        float*       d_alpha    = nullptr;
-                        cudaMallocAsync(&d_B_ptrs,   ne * sizeof(const void*), stream);
-                        cudaMallocAsync(&d_SFB_ptrs, ne * sizeof(const void*), stream);
-                        cudaMallocAsync(&d_alpha,    ne * sizeof(float),       stream);
-                        cudaMemcpyAsync(d_B_ptrs,   h_B_ptrs.data(),
+                        // Upload host arrays into workspace-cached device
+                        // buffers (Phase 3c-full Step 1). No per-call cudaMalloc.
+                        cudaMemcpyAsync(moe_.d_B_ptrs_cache,   h_B_ptrs.data(),
                                         ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
-                        cudaMemcpyAsync(d_SFB_ptrs, h_SFB_ptrs.data(),
+                        cudaMemcpyAsync(moe_.d_SFB_ptrs_cache, h_SFB_ptrs.data(),
                                         ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
-                        cudaMemcpyAsync(d_alpha,    h_alpha.data(),
+                        cudaMemcpyAsync(moe_.d_alpha_full,     h_alpha.data(),
                                         ne * sizeof(float),       cudaMemcpyHostToDevice, stream);
                         // SFA byte-offset prefix sum on device (Phase 3a kernel).
                         imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets,
@@ -1719,20 +1712,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         dargs.d_expert_offsets =
                             static_cast<const int32_t*>(routing.expert_offsets.data);
                         dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
-                        dargs.d_alpha          = d_alpha;
+                        dargs.d_alpha          = moe_.d_alpha_full;
                         dargs.base_A_packed    = moe_.cutlass3x_packed;
                         dargs.base_A_sf        = moe_.cutlass3x_sf;
-                        dargs.d_B_ptrs         = d_B_ptrs;
-                        dargs.d_SFB_ptrs       = d_SFB_ptrs;
+                        dargs.d_B_ptrs         = moe_.d_B_ptrs_cache;
+                        dargs.d_SFB_ptrs       = moe_.d_SFB_ptrs_cache;
                         dargs.base_D           = c_base;
 
-                        bool ok = imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
+                        return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
                             ne, N_out, K_in, dargs, stream);
-
-                        cudaFreeAsync(d_B_ptrs,   stream);
-                        cudaFreeAsync(d_SFB_ptrs, stream);
-                        cudaFreeAsync(d_alpha,    stream);
-                        return ok;
                     };
 
                     // Dispatch a grouped GEMM given already-quantized activations.

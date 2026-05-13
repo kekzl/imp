@@ -72,6 +72,17 @@ struct MoEWorkspace {
     // executor_forward_moe.cu's quantize_once lambda. [n_experts+1] int64.
     int64_t* d_sfa_offsets = nullptr;
 
+    // Phase 3c-full Step 1 caches for the device-args wrapper:
+    // - d_B_ptrs_cache:   [n_experts] device array of per-expert weight pointers
+    // - d_SFB_ptrs_cache: [n_experts] device array of per-expert SFB pointers
+    // - d_alpha_full:     [n_experts] device floats per-expert alpha
+    // Filled per-call from the registry handles (host) via cudaMemcpyAsync;
+    // shared across all three projections (gate / up / down) inside one
+    // forward layer. Replaces the per-call cudaMallocAsync of the MVP wire.
+    const void** d_B_ptrs_cache   = nullptr;
+    const void** d_SFB_ptrs_cache = nullptr;
+    float*       d_alpha_full     = nullptr;
+
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
     int d_weight_ptrs_count = 0;

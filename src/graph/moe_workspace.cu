@@ -58,6 +58,19 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         d_sfa_offsets = nullptr;
     }
 
+    if (d_B_ptrs_cache) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_B_ptrs_cache));
+        d_B_ptrs_cache = nullptr;
+    }
+    if (d_SFB_ptrs_cache) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_SFB_ptrs_cache));
+        d_SFB_ptrs_cache = nullptr;
+    }
+    if (d_alpha_full) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_alpha_full));
+        d_alpha_full = nullptr;
+    }
+
     if (d_weight_ptrs) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_weight_ptrs));
         d_weight_ptrs = nullptr;
