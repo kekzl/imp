@@ -1666,9 +1666,88 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         return true;
                     };
 
+                    // Opt-in: device-args wrapper path (Phase 3c-MVP wire).
+                    // Uses imp::gemm_grouped_cutlass_3x_nvfp4_device_args, which
+                    // builds the per-expert staging buffer in a device kernel
+                    // from device-resident d_M_per / d_expert_offsets /
+                    // d_sfa_offsets / d_alpha + per-expert ptr arrays. Note:
+                    // upstream of this lambda still does the h_offsets D2H+sync,
+                    // so this MVP does NOT yet enable CUDA-graph capture of the
+                    // prefill path — Phase 3c-full removes that residual sync.
+                    // Enable via IMP_NVFP4_DEVICE_ARGS=1.
+                    const char* device_args_env = ::getenv("IMP_NVFP4_DEVICE_ARGS");
+                    const bool use_device_args =
+                        device_args_env && std::atoi(device_args_env) != 0 &&
+                        moe_.d_M_per && moe_.d_M_per_count >= ne &&
+                        moe_.d_sfa_offsets;
+                    auto grouped_gemm_device = [&](const std::vector<TensorID>& weight_ids,
+                                                   char* c_base, int K_in, int N_out) -> bool {
+                        // Per-expert host arrays (registry handles). Built for ALL
+                        // experts — CUTLASS skips empty groups via M=0 internally.
+                        std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+                        std::vector<float> h_alpha(ne);
+                        for (int e = 0; e < ne; ++e) {
+                            const auto& h = registry_.handle(weight_ids[e]);
+                            h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
+                            h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
+                            h_alpha[e]    = h.payload.cutlass_nvfp4.global_scale
+                                                ? *h.payload.cutlass_nvfp4.global_scale
+                                                : 1.0f;
+                        }
+                        // Per-call device staging for the 3 arrays. Tiny (~3 KB
+                        // total for 128 experts). cudaMallocAsync/FreeAsync are
+                        // graph-safe with the stream-ordered allocator; Phase 3c-
+                        // full will cache these at model-load time.
+                        const void** d_B_ptrs   = nullptr;
+                        const void** d_SFB_ptrs = nullptr;
+                        float*       d_alpha    = nullptr;
+                        cudaMallocAsync(&d_B_ptrs,   ne * sizeof(const void*), stream);
+                        cudaMallocAsync(&d_SFB_ptrs, ne * sizeof(const void*), stream);
+                        cudaMallocAsync(&d_alpha,    ne * sizeof(float),       stream);
+                        cudaMemcpyAsync(d_B_ptrs,   h_B_ptrs.data(),
+                                        ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyAsync(d_SFB_ptrs, h_SFB_ptrs.data(),
+                                        ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyAsync(d_alpha,    h_alpha.data(),
+                                        ne * sizeof(float),       cudaMemcpyHostToDevice, stream);
+                        // SFA byte-offset prefix sum on device (Phase 3a kernel).
+                        imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets,
+                                                        ne, K_in, stream);
+
+                        imp::GroupedNvfp4DeviceArgs dargs{};
+                        dargs.d_M_per          = moe_.d_M_per;
+                        dargs.d_expert_offsets =
+                            static_cast<const int32_t*>(routing.expert_offsets.data);
+                        dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
+                        dargs.d_alpha          = d_alpha;
+                        dargs.base_A_packed    = moe_.cutlass3x_packed;
+                        dargs.base_A_sf        = moe_.cutlass3x_sf;
+                        dargs.d_B_ptrs         = d_B_ptrs;
+                        dargs.d_SFB_ptrs       = d_SFB_ptrs;
+                        dargs.base_D           = c_base;
+
+                        bool ok = imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
+                            ne, N_out, K_in, dargs, stream);
+
+                        cudaFreeAsync(d_B_ptrs,   stream);
+                        cudaFreeAsync(d_SFB_ptrs, stream);
+                        cudaFreeAsync(d_alpha,    stream);
+                        return ok;
+                    };
+
                     // Dispatch a grouped GEMM given already-quantized activations.
                     auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in,
                                             int N_out, const std::vector<size_t>& sfa_offsets) {
+                        if (use_device_args) {
+                            if (layer == 0)
+                                IMP_LOG_INFO(
+                                    "MoE prefill: CUTLASS 3.x device-args path "
+                                    "(opt-in via IMP_NVFP4_DEVICE_ARGS=1)");
+                            if (grouped_gemm_device(weight_ids, c_base, K_in, N_out))
+                                return;
+                            IMP_LOG_ERROR(
+                                "device-args dispatch failed; falling back to host-args");
+                        }
                         char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
                         uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
                         // Active experts only (CUTLASS 3.x wants non-empty groups).
