@@ -14,6 +14,7 @@
 #include "graph/gemm_context.h"
 #include "graph/executor_debug.h"
 #include "runtime/config.h"
+#include <atomic>
 #include "compute/embedding.h"
 #include "compute/gemv_ggml_compat.h"
 #include "compute/ggml_mmvq.h"
@@ -1301,9 +1302,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // back to the legacy path on any dispatch failure.
                     bool device_args_done = false;
                     {
+                        // Default ON since 2026-05-14: 4-model A/B showed +11–39%
+                        // pp512 vs the legacy host-args + smallM dispatch on
+                        // Qwen3-Coder / Qwen3.6 / Qwen3-30B-Modelopt / Gemma-4
+                        // NVFP4 (decode unchanged). Set IMP_NVFP4_DEVICE_ARGS=0
+                        // to force the legacy path for A/B or workarounds.
                         const char* da_env = ::getenv("IMP_NVFP4_DEVICE_ARGS");
+                        const bool da_enabled = !da_env || std::atoi(da_env) != 0;
                         const bool use_device_args =
-                            da_env && std::atoi(da_env) != 0 &&
+                            da_enabled &&
                             moe_.d_M_per && moe_.d_M_per_count >= ne &&
                             moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
                             moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
@@ -1311,10 +1318,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             moe_.cutlass3x_sfa_ptrs &&
                             moe_.cutlass3x_sfa_ptrs_count >= ne;
                         if (use_device_args) {
-                            if (layer == 0)
+                            // Log once per process; layer==0 fires on every
+                            // forward, but only the first ever needs to flag
+                            // the path choice.
+                            static std::atomic<bool> s_da_logged{false};
+                            if (layer == 0 && !s_da_logged.exchange(true))
                                 IMP_LOG_INFO(
                                     "MoE prefill: CUTLASS 3.x device-args full path "
-                                    "(opt-in via IMP_NVFP4_DEVICE_ARGS=1)");
+                                    "(default; set IMP_NVFP4_DEVICE_ARGS=0 to disable)");
                             // Populate device-resident d_M_per (no D2H).
                             imp::compute_M_per_from_offsets_device(
                                 static_cast<const int32_t*>(routing.expert_offsets.data),
