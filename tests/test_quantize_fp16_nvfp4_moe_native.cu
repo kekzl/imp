@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
+#include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (host reference)
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
@@ -357,6 +358,69 @@ TEST(QuantizeMoeNative, CompactAlphaActiveNoneActive) {
     EXPECT_EQ(got_na, 0);
 
     cudaFree(d_alpha); cudaFree(d_M); cudaFree(d_compact); cudaFree(d_na);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
+// Test: compute_sfa_offsets_device — exclusive prefix sum of SfAtom-padded SFA
+// byte sizes must match host cutlass_nvfp4_sf_size formula. Phase 3a of
+// moe_prefill_graphs_plan_2026_05_10.
+// ---------------------------------------------------------------------------
+TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceMatchesHost) {
+    // Mixed M values exercise the ceil(M/128) padding edge: 0, exactly 128,
+    // just-under-tile (127), small (1), and a couple of multi-tile values.
+    const int ne = 6;
+    const int K  = 256;  // n_k_tiles = ceil(256/64) = 4
+    const int32_t h_M[ne] = {0, 1, 127, 128, 129, 256};
+
+    int32_t* d_M = nullptr;
+    int64_t* d_offsets = nullptr;
+    cudaMalloc(&d_M,      ne       * sizeof(int32_t));
+    cudaMalloc(&d_offsets,(ne + 1) * sizeof(int64_t));
+    cudaMemcpy(d_M, h_M, ne * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compute_sfa_offsets_device(d_M, d_offsets, ne, K, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int64_t got[ne + 1] = {};
+    cudaMemcpy(got, d_offsets, (ne + 1) * sizeof(int64_t), cudaMemcpyDeviceToHost);
+
+    // Reference: exclusive prefix sum using host cutlass_nvfp4_sf_size.
+    int64_t expected[ne + 1] = {};
+    for (int e = 0; e < ne; ++e) {
+        expected[e + 1] = expected[e] +
+                          static_cast<int64_t>(imp::cutlass_nvfp4_sf_size(h_M[e], K));
+    }
+
+    for (int e = 0; e <= ne; ++e) {
+        EXPECT_EQ(got[e], expected[e])
+            << "sfa offset[" << e << "] mismatch (M_per=[0,1,127,128,129,256], K=" << K << ")";
+    }
+
+    cudaFree(d_M);
+    cudaFree(d_offsets);
+    cudaStreamDestroy(stream);
+}
+
+// n_experts == 0: trailing slot 0 must be 0, no kernel work.
+TEST(QuantizeMoeNative, ComputeSfaOffsetsDeviceEmpty) {
+    int64_t* d_offsets = nullptr;
+    cudaMalloc(&d_offsets, sizeof(int64_t));
+    int64_t init = 999;
+    cudaMemcpy(d_offsets, &init, sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    imp::compute_sfa_offsets_device(nullptr, d_offsets, 0, 256, stream);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    int64_t got = -1;
+    cudaMemcpy(&got, d_offsets, sizeof(int64_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got, 0);
+
+    cudaFree(d_offsets);
     cudaStreamDestroy(stream);
 }
 

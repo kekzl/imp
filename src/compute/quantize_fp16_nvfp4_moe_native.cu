@@ -433,4 +433,76 @@ void compact_alpha_active(
         d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
 }
 
+// ---------------------------------------------------------------------------
+// compute_sfa_offsets_device: exclusive prefix sum of cutlass_nvfp4_sf_size
+// (per-expert SfAtom-padded SFA byte size). Single block, Hillis–Steele scan
+// over int64 in shared memory. Phase 3a of MoE-prefill-graphs lever.
+// ---------------------------------------------------------------------------
+//
+// Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize
+// in src/compute/gemm_cutlass_sm120.cu (CUTLASS SfAtom = 128 rows × 64 K-elems
+// × 512 bytes). Kept here as constexpr to avoid a host-only include from a
+// device translation unit.
+namespace {
+constexpr int kSfAtomRows   = 128;
+constexpr int kSfAtomKElems = 64;
+constexpr int kSfAtomSize   = 512;
+}  // anonymous
+
+__global__ void compute_sfa_offsets_kernel(
+    const int32_t* __restrict__ d_M_per,
+    int64_t*       __restrict__ d_sfa_offsets_out,
+    int n_experts,
+    int K)
+{
+    constexpr int MAX_NE = 256;
+    __shared__ int64_t s_scan[MAX_NE];
+
+    int e = threadIdx.x;
+    int n_k_tiles = (K + kSfAtomKElems - 1) / kSfAtomKElems;
+
+    int64_t bytes = 0;
+    if (e < n_experts) {
+        int M_e = d_M_per[e];
+        int n_row_tiles = (M_e + kSfAtomRows - 1) / kSfAtomRows;
+        bytes = static_cast<int64_t>(n_row_tiles) * n_k_tiles * kSfAtomSize;
+    }
+    s_scan[e] = bytes;
+    __syncthreads();
+
+    // Hillis–Steele inclusive prefix sum.
+    for (int off = 1; off < MAX_NE; off <<= 1) {
+        int64_t v = (e >= off) ? s_scan[e - off] : 0;
+        __syncthreads();
+        s_scan[e] += v;
+        __syncthreads();
+    }
+
+    // Output exclusive prefix sum: d_sfa_offsets_out[e] = inclusive - bytes_e
+    if (e < n_experts) {
+        d_sfa_offsets_out[e] = s_scan[e] - bytes;
+    }
+    if (e == n_experts) {
+        // Trailing total at slot ne (inclusive sum of ne-1).
+        d_sfa_offsets_out[n_experts] = (n_experts > 0) ? s_scan[n_experts - 1] : 0;
+    }
+}
+
+void compute_sfa_offsets_device(
+    const int32_t* d_M_per,
+    int64_t* d_sfa_offsets_out,
+    int n_experts,
+    int K,
+    cudaStream_t stream)
+{
+    if (n_experts <= 0) {
+        if (d_sfa_offsets_out)
+            cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
+        return;
+    }
+    assert(n_experts <= 256);
+    compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
+        d_M_per, d_sfa_offsets_out, n_experts, K);
+}
+
 }  // namespace imp

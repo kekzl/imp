@@ -117,4 +117,27 @@ void compact_alpha_active(
     int n_experts,
     cudaStream_t stream);
 
+// Compute device-resident per-expert offsets into a SfAtom-padded SFA buffer
+// (Phase 3 of moe_prefill_graphs_plan_2026_05_10). Output is exclusive prefix
+// sum of `cutlass_nvfp4_sf_size(M_per[e], K)` so that
+//   ptr_SFA[e] = base_SFA + d_sfa_offsets_out[e]
+// matches the host-side staging layout used by the existing CUTLASS 3.x
+// grouped NVFP4 wrapper (gemm_cutlass_grouped_3x.cu).
+//
+// Padding math (SfAtom): n_row_tiles = ceil(M_e/128); n_k_tiles = ceil(K/64);
+//                        bytes = n_row_tiles * n_k_tiles * 512
+// (See cutlass_nvfp4_sf_size in gemm_cutlass_sm120.cu for the host version.)
+//
+// d_M_per          : [n_experts]      device int32 — per-expert token count
+// d_sfa_offsets_out: [n_experts + 1]  device int64 — exclusive prefix sum
+// K                : shared K dimension (host int)
+// Single-block 256-thread launch; safe inside a captured CUDA graph.
+// Requires n_experts <= 256.
+void compute_sfa_offsets_device(
+    const int32_t* d_M_per,
+    int64_t* d_sfa_offsets_out,
+    int n_experts,
+    int K,
+    cudaStream_t stream);
+
 }  // namespace imp
