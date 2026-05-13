@@ -60,11 +60,25 @@ struct GroupedNvfp4DeviceArgs {
 
     const void* base_A_packed;        // contiguous activation packed FP4 base
     const void* base_A_sf;            // SfAtom-padded SFA base
-    const void* base_B_packed;        // expert weight packed FP4 base
+
+    // B/SFB storage. Two modes (mutually exclusive — Phase 3c-MVP design):
+    //
+    //   (a) Contiguous slab + per-expert stride. Set base_B_packed + b_expert_stride_packed
+    //       (same for SFB). Set d_B_ptrs = d_SFB_ptrs = nullptr.
+    //       Used by NvFP4MoEQuantResult-style native MoE weights (smallM path).
+    //
+    //   (b) Per-expert device pointer array. Set d_B_ptrs and d_SFB_ptrs to
+    //       [n_experts] device-resident pointer arrays. base_B_*/b_expert_stride_*
+    //       are ignored when these are non-null.
+    //       Used by registry-handle-style per-expert weights (CUTLASS 3.x prefill).
+    const void* base_B_packed;        // mode (a) only
     int64_t     b_expert_stride_packed;
-    const void* base_B_sf;            // expert SFB base
+    const void* base_B_sf;            // mode (a) only
     int64_t     b_expert_stride_sf;
-    void*       base_D;               // FP16 output base
+    const void* const* d_B_ptrs;      // mode (b): [n_experts] device array, or nullptr
+    const void* const* d_SFB_ptrs;    // mode (b): [n_experts] device array, or nullptr
+
+    void* base_D;                     // FP16 output base
 };
 
 bool gemm_grouped_cutlass_3x_nvfp4_device_args(

@@ -397,6 +397,11 @@ __global__ void build_grouped_3x_staging_kernel(
     int64_t     b_expert_stride_packed,
     const void* base_B_sf,
     int64_t     b_expert_stride_sf,
+    // Optional per-expert B/SFB pointer arrays (mode (b)). When non-null,
+    // these override base_B_*/b_expert_stride_* — used by registry-handle
+    // MoE weight layout (CUTLASS 3.x prefill in executor_forward_moe.cu).
+    const void* const* d_B_ptrs,
+    const void* const* d_SFB_ptrs,
     void*       base_D,
     // Shared shape dims.
     int N, int K, int n_experts)
@@ -435,12 +440,17 @@ __global__ void build_grouped_3x_staging_kernel(
     //   SFA: SfAtom-padded slab, byte offset from prefix sum.
     ptrSFA[e] = reinterpret_cast<const GrpElementSF*>(
         static_cast<const char*>(base_A_sf) + sfa_offset_e);
-    //   B weights: per-expert fixed byte stride.
-    ptrB[e] = reinterpret_cast<const imp::DeviceArgsElemB*>(
-        static_cast<const char*>(base_B_packed) + static_cast<int64_t>(e) * b_expert_stride_packed);
-    //   SFB: per-expert fixed byte stride.
-    ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(
-        static_cast<const char*>(base_B_sf) + static_cast<int64_t>(e) * b_expert_stride_sf);
+    //   B weights: mode (b) per-expert pointer array if provided, else mode
+    //   (a) base + per-expert byte stride.
+    if (d_B_ptrs != nullptr) {
+        ptrB[e]   = reinterpret_cast<const imp::DeviceArgsElemB*>(d_B_ptrs[e]);
+        ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(d_SFB_ptrs[e]);
+    } else {
+        ptrB[e]   = reinterpret_cast<const imp::DeviceArgsElemB*>(
+            static_cast<const char*>(base_B_packed) + static_cast<int64_t>(e) * b_expert_stride_packed);
+        ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(
+            static_cast<const char*>(base_B_sf) + static_cast<int64_t>(e) * b_expert_stride_sf);
+    }
     //   C/D outputs alias the FP16 result buffer (beta=0).
     void* dst_e =
         static_cast<char*>(base_D) +
@@ -549,6 +559,7 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
         args.base_A_packed, args.base_A_sf,
         args.base_B_packed, args.b_expert_stride_packed,
         args.base_B_sf,     args.b_expert_stride_sf,
+        args.d_B_ptrs, args.d_SFB_ptrs,
         args.base_D,
         N, K, n_experts);
 

@@ -323,6 +323,7 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
     cudaMemcpy(d_sfa_offsets, h_sfa_offsets.data(), (ne + 1) * sizeof(int64_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_alpha,       hAlpha.data(),        ne * sizeof(float),         cudaMemcpyHostToDevice);
 
+    // Mode (a): contiguous B/SFB slab + per-expert byte stride.
     GroupedNvfp4DeviceArgs dargs{};
     dargs.d_M_per                = d_M_per;
     dargs.d_expert_offsets       = d_offsets;
@@ -334,6 +335,8 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
     dargs.b_expert_stride_packed = static_cast<int64_t>(b_packed_per_expert);
     dargs.base_B_sf              = d_B_sf_slab;
     dargs.b_expert_stride_sf     = static_cast<int64_t>(sfb_per_expert);
+    dargs.d_B_ptrs               = nullptr;  // mode (a) — base + stride
+    dargs.d_SFB_ptrs             = nullptr;
     dargs.base_D                 = d_dev_out;
 
     ASSERT_TRUE(gemm_grouped_cutlass_3x_nvfp4_device_args(ne, N, K, dargs, stream_))
@@ -353,8 +356,55 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
         max_abs_err = std::max<double>(max_abs_err, err);
     }
     EXPECT_EQ(mismatches, 0)
-        << "device-args output differs from host-args (" << mismatches << " / "
+        << "device-args (mode a) output differs from host-args (" << mismatches << " / "
         << ref_out.size() << " mismatches, max_err=" << max_abs_err << ")";
+
+    // ----- Mode (b): per-expert pointer arrays. Builds device-resident ptr
+    //       arrays that point into the SAME slab — both modes must yield the
+    //       same output. -----
+    void* d_dev_out_b = nullptr;
+    cudaMalloc(&d_dev_out_b, static_cast<size_t>(M_total) * N * sizeof(half));
+    cudaMemset(d_dev_out_b, 0, static_cast<size_t>(M_total) * N * sizeof(half));
+
+    std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+    for (int e = 0; e < ne; ++e) {
+        h_B_ptrs[e]   = static_cast<const char*>(d_B_packed_slab) + e * b_packed_per_expert;
+        h_SFB_ptrs[e] = static_cast<const char*>(d_B_sf_slab)     + e * sfb_per_expert;
+    }
+    const void** d_B_ptrs   = nullptr;
+    const void** d_SFB_ptrs = nullptr;
+    cudaMalloc(&d_B_ptrs,   ne * sizeof(const void*));
+    cudaMalloc(&d_SFB_ptrs, ne * sizeof(const void*));
+    cudaMemcpy(d_B_ptrs,   h_B_ptrs.data(),   ne * sizeof(const void*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_SFB_ptrs, h_SFB_ptrs.data(), ne * sizeof(const void*), cudaMemcpyHostToDevice);
+
+    GroupedNvfp4DeviceArgs dargs_b = dargs;
+    dargs_b.base_B_packed          = nullptr;  // ignored when d_B_ptrs set
+    dargs_b.b_expert_stride_packed = 0;
+    dargs_b.base_B_sf              = nullptr;
+    dargs_b.b_expert_stride_sf     = 0;
+    dargs_b.d_B_ptrs               = d_B_ptrs;
+    dargs_b.d_SFB_ptrs             = d_SFB_ptrs;
+    dargs_b.base_D                 = d_dev_out_b;
+
+    ASSERT_TRUE(gemm_grouped_cutlass_3x_nvfp4_device_args(ne, N, K, dargs_b, stream_))
+        << "device-args wrapper (mode b) failed";
+    cudaStreamSynchronize(stream_);
+    std::vector<half> dev_out_b(static_cast<size_t>(M_total) * N);
+    cudaMemcpy(dev_out_b.data(), d_dev_out_b, dev_out_b.size() * sizeof(half), cudaMemcpyDeviceToHost);
+
+    int mismatches_b = 0;
+    double max_abs_err_b = 0.0;
+    for (size_t i = 0; i < ref_out.size(); ++i) {
+        float a = __half2float(ref_out[i]);
+        float b = __half2float(dev_out_b[i]);
+        float err = std::fabs(a - b);
+        if (err > 0.0f) mismatches_b++;
+        max_abs_err_b = std::max<double>(max_abs_err_b, err);
+    }
+    EXPECT_EQ(mismatches_b, 0)
+        << "device-args (mode b) output differs from host-args (" << mismatches_b << " / "
+        << ref_out.size() << " mismatches, max_err=" << max_abs_err_b << ")";
 
     // ----- Cleanup -----
     for (int i = 0; i < ne; ++i) free_expert(experts[i]);
@@ -365,10 +415,13 @@ TEST_F(CutlassGrouped3xNvfp4Test, DeviceArgsMatchesHostArgs) {
     cudaFree(d_B_sf_slab);
     cudaFree(d_ref_out);
     cudaFree(d_dev_out);
+    cudaFree(d_dev_out_b);
     cudaFree(d_M_per);
     cudaFree(d_offsets);
     cudaFree(d_sfa_offsets);
     cudaFree(d_alpha);
+    cudaFree(d_B_ptrs);
+    cudaFree(d_SFB_ptrs);
 }
 
 }  // namespace
