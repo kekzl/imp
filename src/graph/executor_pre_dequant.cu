@@ -2386,6 +2386,87 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             "(GGUF blocks + norms + scratch — bypass the overlay layer)",
             model_->gpu_allocations_.size());
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays.
+    // -----------------------------------------------------------------------
+    // The CUTLASS 3.x device-args dispatch (Phase 3c-full Step 2b, opt-in via
+    // IMP_NVFP4_DEVICE_ARGS=1) consumes per-expert weight pointers as
+    // device-resident arrays. Per-call host iteration + 3× cudaMemcpyAsync
+    // (~3 KiB total) was the residual overhead blocking full CUDA-graph
+    // capture of the MoE prefill. Build the caches once here while the
+    // handle payloads are guaranteed populated; the forward path then uses
+    // the device pointers directly.
+    //
+    // Conditions: model is MoE (ne > 0) and at least one layer has all three
+    // projections backed by CUTLASS NVFP4 handles (post-Phase-3 setup).
+    {
+        const auto& cfg = model_->config();
+        const int ne = cfg.n_experts;
+        const int n_layers = cfg.n_layers;
+        if (ne > 0) {
+        moe_.per_layer_da_cache.assign(n_layers, MoEWorkspace::PerLayerNvfp4DeviceArgsCache{});
+
+        std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+        std::vector<float>       h_alpha(ne);
+        bool any_built = false;
+
+        auto build_proj =
+            [&](const std::vector<TensorID>& ids, const void**& d_B,
+                const void**& d_SFB, float*& d_alpha) -> bool {
+                if (static_cast<int>(ids.size()) != ne)
+                    return false;
+                for (int e = 0; e < ne; ++e) {
+                    if (ids[e] == kInvalidTensorID)
+                        return false;
+                    const auto& h = registry_.handle(ids[e]);
+                    if (!h.payload.cutlass_nvfp4.weight ||
+                        !h.payload.cutlass_nvfp4.sf)
+                        return false;
+                    h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
+                    h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
+                    h_alpha[e]    = h.payload.cutlass_nvfp4.global_scale
+                                        ? *h.payload.cutlass_nvfp4.global_scale
+                                        : 1.0f;
+                }
+                cudaError_t err;
+                err = cudaMalloc(&d_B,   ne * sizeof(const void*)); if (err != cudaSuccess) return false;
+                err = cudaMalloc(&d_SFB, ne * sizeof(const void*)); if (err != cudaSuccess) return false;
+                err = cudaMalloc(&d_alpha, ne * sizeof(float));     if (err != cudaSuccess) return false;
+                cudaMemcpy(const_cast<void**>(d_B),   h_B_ptrs.data(),
+                           ne * sizeof(const void*), cudaMemcpyHostToDevice);
+                cudaMemcpy(const_cast<void**>(d_SFB), h_SFB_ptrs.data(),
+                           ne * sizeof(const void*), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_alpha, h_alpha.data(),
+                           ne * sizeof(float),       cudaMemcpyHostToDevice);
+                return true;
+            };
+
+        for (int li = 0; li < n_layers; ++li) {
+            const auto& L = model_->layer(li);
+            auto& c = moe_.per_layer_da_cache[li];
+            bool g_ok = !L.expert_gate_ids.empty() &&
+                        build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
+                                   c.d_gate_SFB_ptrs, c.d_gate_alpha);
+            bool u_ok = build_proj(L.expert_up_ids, c.d_up_B_ptrs,
+                                   c.d_up_SFB_ptrs, c.d_up_alpha);
+            bool d_ok = build_proj(L.expert_down_ids, c.d_down_B_ptrs,
+                                   c.d_down_SFB_ptrs, c.d_down_alpha);
+            // For non-gated experts (e.g. Gemma-4 SwiGLU absorbing W_gate),
+            // expert_gate_ids may be empty by design — accept up+down only.
+            c.ready = (g_ok || L.expert_gate_ids.empty()) && u_ok && d_ok;
+            any_built = any_built || c.ready;
+        }
+        if (any_built) {
+            IMP_LOG_INFO(
+                "Pre-cached per-layer NVFP4 device-args ptr arrays for "
+                "%d layers × 3 projections × %d experts (~%.1f KiB)",
+                n_layers, ne,
+                (n_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
+                    1024.0);
+        }
+        }  // ne > 0
+    }
 }
 
 }  // namespace imp

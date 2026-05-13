@@ -1347,40 +1347,66 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     expanded, K_in, ne, stream);
                             };
 
+                            // Per-layer pre-cached arrays (Phase 3c-full Step 3).
+                            // When ready, all three projections feed dispatch_device with
+                            // device-resident ptr arrays — no per-call host iteration,
+                            // no H2D. Falls back to the per-call upload via the workspace
+                            // caches from Step 1 when the pre-cache isn't built.
+                            const bool da_cache_ready =
+                                layer < static_cast<int>(moe_.per_layer_da_cache.size()) &&
+                                moe_.per_layer_da_cache[layer].ready;
+                            const auto& da_cache =
+                                da_cache_ready
+                                    ? moe_.per_layer_da_cache[layer]
+                                    : MoEWorkspace::PerLayerNvfp4DeviceArgsCache{};
+
                             auto dispatch_device =
-                                [&](const std::vector<TensorID>& weight_ids, char* c_base,
-                                    int K_in, int N_out) -> bool {
-                                    std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
-                                    std::vector<float> h_alpha(ne);
-                                    for (int e = 0; e < ne; ++e) {
-                                        const auto& h = registry_.handle(weight_ids[e]);
-                                        h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
-                                        h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-                                        h_alpha[e] =
-                                            h.payload.cutlass_nvfp4.global_scale
-                                                ? *h.payload.cutlass_nvfp4.global_scale
-                                                : 1.0f;
+                                [&](const std::vector<TensorID>& weight_ids,
+                                    const void** pre_d_B, const void** pre_d_SFB,
+                                    float* pre_d_alpha, char* c_base, int K_in,
+                                    int N_out) -> bool {
+                                    const void** d_B   = pre_d_B;
+                                    const void** d_SFB = pre_d_SFB;
+                                    float*       d_a   = pre_d_alpha;
+                                    if (!d_B || !d_SFB || !d_a) {
+                                        // Pre-cache miss — fall back to per-call H2D
+                                        // into the workspace caches from Step 1.
+                                        std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+                                        std::vector<float> h_alpha(ne);
+                                        for (int e = 0; e < ne; ++e) {
+                                            const auto& h = registry_.handle(weight_ids[e]);
+                                            h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
+                                            h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
+                                            h_alpha[e] =
+                                                h.payload.cutlass_nvfp4.global_scale
+                                                    ? *h.payload.cutlass_nvfp4.global_scale
+                                                    : 1.0f;
+                                        }
+                                        cudaMemcpyAsync(moe_.d_B_ptrs_cache, h_B_ptrs.data(),
+                                                        ne * sizeof(const void*),
+                                                        cudaMemcpyHostToDevice, stream);
+                                        cudaMemcpyAsync(moe_.d_SFB_ptrs_cache,
+                                                        h_SFB_ptrs.data(),
+                                                        ne * sizeof(const void*),
+                                                        cudaMemcpyHostToDevice, stream);
+                                        cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(),
+                                                        ne * sizeof(float),
+                                                        cudaMemcpyHostToDevice, stream);
+                                        d_B   = moe_.d_B_ptrs_cache;
+                                        d_SFB = moe_.d_SFB_ptrs_cache;
+                                        d_a   = moe_.d_alpha_full;
                                     }
-                                    cudaMemcpyAsync(moe_.d_B_ptrs_cache, h_B_ptrs.data(),
-                                                    ne * sizeof(const void*),
-                                                    cudaMemcpyHostToDevice, stream);
-                                    cudaMemcpyAsync(moe_.d_SFB_ptrs_cache, h_SFB_ptrs.data(),
-                                                    ne * sizeof(const void*),
-                                                    cudaMemcpyHostToDevice, stream);
-                                    cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(),
-                                                    ne * sizeof(float),
-                                                    cudaMemcpyHostToDevice, stream);
 
                                     imp::GroupedNvfp4DeviceArgs dargs{};
                                     dargs.d_M_per          = moe_.d_M_per;
                                     dargs.d_expert_offsets = static_cast<const int32_t*>(
                                         routing.expert_offsets.data);
                                     dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
-                                    dargs.d_alpha          = moe_.d_alpha_full;
+                                    dargs.d_alpha          = d_a;
                                     dargs.base_A_packed    = moe_.cutlass3x_packed;
                                     dargs.base_A_sf        = moe_.cutlass3x_sf;
-                                    dargs.d_B_ptrs         = moe_.d_B_ptrs_cache;
-                                    dargs.d_SFB_ptrs       = moe_.d_SFB_ptrs_cache;
+                                    dargs.d_B_ptrs         = d_B;
+                                    dargs.d_SFB_ptrs       = d_SFB;
                                     dargs.base_D           = c_base;
                                     return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
                                         ne, N_out, K_in, dargs, stream);
@@ -1391,8 +1417,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             bool ok = true;
                             if (!non_gated_experts)
                                 ok = ok && dispatch_device(ly.expert_gate_ids,
+                                                           da_cache.d_gate_B_ptrs,
+                                                           da_cache.d_gate_SFB_ptrs,
+                                                           da_cache.d_gate_alpha,
                                                            expert_gate_base, d, eff);
                             ok = ok && dispatch_device(ly.expert_up_ids,
+                                                       da_cache.d_up_B_ptrs,
+                                                       da_cache.d_up_SFB_ptrs,
+                                                       da_cache.d_up_alpha,
                                                        expert_up_base, d, eff);
                             if (ok) {
                                 apply_expert_activation(
@@ -1403,6 +1435,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     non_gated_experts ? expert_up_base : expert_swiglu_base;
                                 quantize_device(down_act, eff);
                                 ok = dispatch_device(ly.expert_down_ids,
+                                                     da_cache.d_down_B_ptrs,
+                                                     da_cache.d_down_SFB_ptrs,
+                                                     da_cache.d_down_alpha,
                                                      expert_down_base, eff, d);
                             }
                             if (ok) {

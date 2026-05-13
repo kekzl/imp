@@ -79,9 +79,32 @@ struct MoEWorkspace {
     // Filled per-call from the registry handles (host) via cudaMemcpyAsync;
     // shared across all three projections (gate / up / down) inside one
     // forward layer. Replaces the per-call cudaMallocAsync of the MVP wire.
+    // Superseded by per_layer_da_cache below when da_cache_ready is true —
+    // these stay around for any future per-call fallback path.
     const void** d_B_ptrs_cache   = nullptr;
     const void** d_SFB_ptrs_cache = nullptr;
     float*       d_alpha_full     = nullptr;
+
+    // Phase 3c-full Step 3: per-layer pre-cached device-args ptr arrays.
+    // Built once at model-load time (pre_dequant_weights) when handle payloads
+    // are populated; reused on every forward call with no host iteration and
+    // no per-call H2D. Prerequisite for CUDA-graph capture of the MoE prefill.
+    struct PerLayerNvfp4DeviceArgsCache {
+        const void** d_gate_B_ptrs   = nullptr;
+        const void** d_gate_SFB_ptrs = nullptr;
+        float*       d_gate_alpha    = nullptr;
+        const void** d_up_B_ptrs     = nullptr;
+        const void** d_up_SFB_ptrs   = nullptr;
+        float*       d_up_alpha      = nullptr;
+        const void** d_down_B_ptrs   = nullptr;
+        const void** d_down_SFB_ptrs = nullptr;
+        float*       d_down_alpha    = nullptr;
+        // True if all 9 buffers above are non-null AND populated. Tested in
+        // the device-args dispatch to gate whether the pre-cache fast-path
+        // can fire (otherwise fall back to per-call H2D into d_B_ptrs_cache).
+        bool ready = false;
+    };
+    std::vector<PerLayerNvfp4DeviceArgsCache> per_layer_da_cache;
 
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
