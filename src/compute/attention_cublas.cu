@@ -34,6 +34,13 @@ static cublasHandle_t get_attn_cublas_handle() {
     return handle;
 }
 
+void attention_cublas_prewarm() {
+    // Force lazy-init of the static cuBLAS handle. The first
+    // cublasGemmBatchedEx call after this is guaranteed not to trigger
+    // cublasCreate's internal cudaMalloc (illegal under stream capture).
+    (void)get_attn_cublas_handle();
+}
+
 // ---------------------------------------------------------------------------
 // Fused causal softmax FP32 → FP16: reads FP32 S matrix, writes FP16 probs
 // to a separate output buffer. Replaces causal_softmax_fp32_inplace_kernel

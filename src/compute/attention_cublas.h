@@ -20,4 +20,10 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr);
 
+// Force-create the static cuBLAS handle. Safe to call multiple times.
+// Engine init calls this so the first attention_cublas_prefill invocation
+// inside a captured stream can reuse the handle without cublasCreate
+// (which does internal cudaMalloc for workspace and is illegal under capture).
+void attention_cublas_prewarm();
+
 }  // namespace imp
