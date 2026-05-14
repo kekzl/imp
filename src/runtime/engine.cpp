@@ -148,18 +148,23 @@ bool Engine::enable_mtp_spec_decode(int k) {
         mtp_spec_k_ = k;
         return true;
     }
-    const int hidden_dim = model_->config_.d_model;
-    const int vocab_size = model_->config_.vocab_size;
+    const int hidden_dim   = model_->config_.d_model;
+    const int vocab_size   = model_->config_.vocab_size;
+    const int n_experts    = model_->config_.n_experts;
+    const int top_k        = model_->config_.n_experts_active;
+    const int expert_d_ff  = model_->config_.expert_d_ff;
+    const int shared_d_ff  = model_->config_.expert_shared_d_ff;
     auto* ws = new imp::MtpDraftWorkspace();
-    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size)) {
+    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size,
+                                      n_experts, top_k, expert_d_ff, shared_d_ff)) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
-    IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, workspace allocated)",
-                 k, hidden_dim, vocab_size);
+    IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
+                 "d_ff_shared=%d)", k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff);
     return true;
 }
 
@@ -173,7 +178,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
         IMP_LOG_ERROR("mtp_draft_one: MTP head not loaded");
         return false;
     }
-    const auto* ws = static_cast<const imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
     return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_,
                                 model_->tok_emb_, model_->out_proj_,
                                 *ws, hidden_dim, vocab_size, out_token_id,
