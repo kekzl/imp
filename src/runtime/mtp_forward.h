@@ -69,6 +69,14 @@ struct MtpDraftWorkspace {
     void* d_shared_act    = nullptr;  // [shared_d_ff] FP16 (silu(gate)*up)
     void* d_shared_out    = nullptr;  // [hidden_dim] FP16 (shared_down_proj @ act)
 
+    // ---- Phase 2.2.Attn scratch (M=1, no MTP KV cache yet) ----
+    void* d_input_norm    = nullptr;  // [hidden_dim] FP16 — input_layernorm output
+    void* d_q_full        = nullptr;  // [2 * num_heads * head_dim] FP16 — q_proj (incl gate)
+    void* d_k_proj        = nullptr;  // [num_kv_heads * head_dim] FP16
+    void* d_v_proj        = nullptr;  // [num_kv_heads * head_dim] FP16
+    void* d_attn_out      = nullptr;  // [num_heads * head_dim] FP16 (silu(gate)*broadcast(v))
+    void* d_attn_residual = nullptr;  // [hidden_dim] FP16 — o_proj output (added to fc_out)
+
     // Routing buffer pool (n_experts, top_k both known at enable time)
     MoeRoutingBuffers routing_buf;
     // Per-step host-side copies of indices/weights for the M=1 host-side
@@ -83,6 +91,13 @@ struct MtpDraftWorkspace {
     int top_k        = 0;
     int expert_d_ff  = 0;
     int shared_d_ff  = 0;
+
+    // Attention dims (Phase 2.2.Attn). Set to 0 to disable the attention
+    // block (current behavior); set to non-zero to engage the gated single-
+    // token attention path.
+    int num_heads    = 0;
+    int num_kv_heads = 0;
+    int head_dim     = 0;
 };
 
 // One MTP draft step. Returns the draft token id via host out_token_id.
@@ -119,7 +134,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 // (back-compat — Phase 2.1 callers can keep using the 2-arg form below).
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts = 0, int top_k = 0,
-                            int expert_d_ff = 0, int shared_d_ff = 0);
+                            int expert_d_ff = 0, int shared_d_ff = 0,
+                            int num_heads = 0, int num_kv_heads = 0, int head_dim = 0);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 }  // namespace imp

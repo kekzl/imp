@@ -99,10 +99,63 @@ __global__ void mtp_add_shared_kernel(__half* __restrict__ fc_out,
 }
 
 // ---------------------------------------------------------------------------
+// Gated attention output kernel (Phase 2.2.Attn MVP, M=1, no KV history)
+// ---------------------------------------------------------------------------
+// For Qwen3.6 MTP's attn_output_gate=True attention:
+//   q_proj outputs [num_heads * 2 * head_dim], interleaved per-head as
+//   [head_0_q (head_dim), head_0_gate (head_dim), head_1_q (...), ...].
+//   The "q" half feeds Q@K dot-product attention; the "gate" half is
+//   silu'd and elementwise multiplied with the attention output.
+//
+// For M=1 with no MTP KV history, the attention softmax over a single
+// token is identically 1, so attention_out_per_head = V (broadcast from
+// num_kv_heads to num_heads via GQA). Final per-head output is
+// silu(gate) * V_broadcast.
+//
+// This kernel computes: out[h, d] = silu(gate[h, d]) * v[h / group_size, d]
+// where group_size = num_heads / num_kv_heads.
+//
+// q_full layout: [num_heads, 2, head_dim] interpreted as
+//   q_full[h, 0, d] = q[h, d]      (first head_dim per head)
+//   q_full[h, 1, d] = gate[h, d]   (second head_dim per head)
+__global__ void mtp_gated_v_broadcast_kernel(
+    const __half* __restrict__ q_full,    // [num_heads, 2 * head_dim]
+    const __half* __restrict__ v,         // [num_kv_heads, head_dim]
+    __half* __restrict__ out,             // [num_heads * head_dim]
+    int num_heads, int num_kv_heads, int head_dim) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * head_dim;
+    if (t >= total) return;
+    int h = t / head_dim;
+    int d = t % head_dim;
+    int kv_h = h * num_kv_heads / num_heads;  // GQA broadcast
+
+    // gate is the SECOND head_dim slice of q_full[h]
+    int gate_idx = h * (2 * head_dim) + head_dim + d;
+    float g = __half2float(q_full[gate_idx]);
+    // silu(g) = g * sigmoid(g)
+    float silu_g = g * (1.0f / (1.0f + expf(-g)));
+
+    float v_val = __half2float(v[kv_h * head_dim + d]);
+    out[t] = __float2half(silu_g * v_val);
+}
+
+// Elementwise add: fc_out += attn_residual
+__global__ void mtp_add_kernel(__half* __restrict__ fc_out,
+                                const __half* __restrict__ attn_residual,
+                                int hidden_dim) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= hidden_dim) return;
+    float v = __half2float(fc_out[t]) + __half2float(attn_residual[t]);
+    fc_out[t] = __float2half(v);
+}
+
+// ---------------------------------------------------------------------------
 // Workspace alloc/free
 // ---------------------------------------------------------------------------
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                            int n_experts, int top_k, int expert_d_ff, int shared_d_ff) {
+                            int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
+                            int num_heads, int num_kv_heads, int head_dim) {
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
     auto alloc = [](void** p, size_t bytes) {
         return cudaMalloc(p, bytes) == cudaSuccess;
@@ -116,11 +169,26 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_h_final,    hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_logits,     vocab_size * sizeof(__half));
 
-    ws.hidden_dim = hidden_dim;
-    ws.n_experts  = n_experts;
-    ws.top_k      = top_k;
-    ws.expert_d_ff = expert_d_ff;
-    ws.shared_d_ff = shared_d_ff;
+    ws.hidden_dim   = hidden_dim;
+    ws.n_experts    = n_experts;
+    ws.top_k        = top_k;
+    ws.expert_d_ff  = expert_d_ff;
+    ws.shared_d_ff  = shared_d_ff;
+    ws.num_heads    = num_heads;
+    ws.num_kv_heads = num_kv_heads;
+    ws.head_dim     = head_dim;
+
+    // Phase 2.2.Attn buffers (only if attention dims > 0)
+    if (ok && num_heads > 0 && head_dim > 0) {
+        ok &= alloc(&ws.d_input_norm,    hidden_dim * sizeof(__half));
+        ok &= alloc(&ws.d_q_full,        2 * num_heads * head_dim * sizeof(__half));
+        if (num_kv_heads > 0) {
+            ok &= alloc(&ws.d_k_proj,    num_kv_heads * head_dim * sizeof(__half));
+            ok &= alloc(&ws.d_v_proj,    num_kv_heads * head_dim * sizeof(__half));
+        }
+        ok &= alloc(&ws.d_attn_out,      num_heads * head_dim * sizeof(__half));
+        ok &= alloc(&ws.d_attn_residual, hidden_dim * sizeof(__half));
+    }
 
     // Phase 2.2 MoE buffers (only if n_experts > 0)
     if (ok && n_experts > 0 && top_k > 0 && expert_d_ff > 0) {
@@ -177,7 +245,14 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.routing_buf.free();
     if (ws.h_expert_indices) { cudaFreeHost(ws.h_expert_indices); ws.h_expert_indices = nullptr; }
     if (ws.h_expert_weights) { cudaFreeHost(ws.h_expert_weights); ws.h_expert_weights = nullptr; }
+    frfn(ws.d_input_norm);
+    frfn(ws.d_q_full);
+    frfn(ws.d_k_proj);
+    frfn(ws.d_v_proj);
+    frfn(ws.d_attn_out);
+    frfn(ws.d_attn_residual);
     ws.hidden_dim = ws.n_experts = ws.top_k = ws.expert_d_ff = ws.shared_d_ff = 0;
+    ws.num_heads = ws.num_kv_heads = ws.head_dim = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,12 +330,83 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 
     // Step 5: transformer block.
     //
-    // 5.A — Attention (PHASE 2.2.Attn deferred): the MTP layer's q_proj
-    //   outputs 8192 ≠ standard GQA shape for o_proj's 4096 input on
-    //   Qwen3.6, suggesting a non-trivial Q-projection split that needs
-    //   upstream-reference investigation. For now, attention is a pass-
-    //   through (input_layernorm → no-op → o_proj-skipped → residual=identity).
+    // 5.A — Attention (Phase 2.2.Attn MVP): Qwen3.6 MTP uses
+    //   attn_output_gate=True (per upstream vllm `Qwen3NextAttention`):
+    //   q_proj outputs [num_heads, 2*head_dim] per-token, split per-head
+    //   into (q, gate). Standard GQA attention produces out[h] of head_dim,
+    //   then out *= silu(gate) before o_proj reduces to hidden_dim.
     //
+    //   This MVP handles the M=1 first-draft case (no MTP KV history yet):
+    //   the softmax over a single token reduces to identity, so
+    //   attn_out[h] = V[h // GQA_group] (broadcast). The gate-output
+    //   multiplication still fires correctly. K is computed but unused.
+    //
+    //   K>=1 draft steps would attend over prior MTP K cache entries — a
+    //   full KV cache + attention kernel is future work (Phase 2.2.Attn+KV).
+    if (ws.num_heads > 0 && ws.head_dim > 0 &&
+        mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data &&
+        mtp.v_proj.data && mtp.o_proj.data) {
+        const int hd  = hidden_dim;
+        const int nh  = ws.num_heads;
+        const int nkv = ws.num_kv_heads;
+        const int hdh = ws.head_dim;
+
+        // 5.A.1 — input_layernorm(fc_out) → d_input_norm
+        {
+            int64_t hd1[1] = {hd};
+            Tensor fc_out_view (ws.d_fc_out,    QType::F16, 1, hd1, true);
+            Tensor in_view     (ws.d_input_norm,QType::F16, 1, hd1, true);
+            imp::rmsnorm(fc_out_view, mtp.input_layernorm, in_view, 1e-6f, stream);
+        }
+        // 5.A.2 — Q (full, including gate): q_proj @ d_input_norm → [2 * nh * hdh]
+        {
+            int64_t in_shape[2]  = {1, hd};
+            int64_t out_shape[2] = {1, 2 * nh * hdh};
+            Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
+            Tensor out_view(ws.d_q_full,     QType::F16, 2, out_shape, true);
+            imp::gemm(in_view, mtp.q_proj, out_view, 1.0f, 0.0f, stream);
+        }
+        // 5.A.3 — V: v_proj @ d_input_norm → [nkv * hdh]
+        if (ws.d_v_proj && nkv > 0) {
+            int64_t in_shape[2]  = {1, hd};
+            int64_t out_shape[2] = {1, nkv * hdh};
+            Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
+            Tensor out_view(ws.d_v_proj,     QType::F16, 2, out_shape, true);
+            imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
+        }
+        // 5.A.4 — Gated attention (M=1, no history): out[h, d] = silu(gate[h, d]) * V[h/gqa, d]
+        {
+            int block = 256;
+            int grid  = (nh * hdh + block - 1) / block;
+            mtp_gated_v_broadcast_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const __half*>(ws.d_q_full),
+                static_cast<const __half*>(ws.d_v_proj),
+                static_cast<__half*>(ws.d_attn_out),
+                nh, nkv, hdh);
+        }
+        // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
+        {
+            int64_t in_shape[2]  = {1, nh * hdh};
+            int64_t out_shape[2] = {1, hd};
+            Tensor in_view (ws.d_attn_out,      QType::F16, 2, in_shape,  true);
+            Tensor out_view(ws.d_attn_residual, QType::F16, 2, out_shape, true);
+            imp::gemm(in_view, mtp.o_proj, out_view, 1.0f, 0.0f, stream);
+        }
+        // 5.A.6 — residual: fc_out += attn_residual
+        {
+            int block = 256;
+            int grid  = (hd + block - 1) / block;
+            mtp_add_kernel<<<grid, block, 0, stream>>>(
+                static_cast<__half*>(ws.d_fc_out),
+                static_cast<const __half*>(ws.d_attn_residual),
+                hd);
+        }
+        // (K is computed for shape symmetry but unused in the M=1, no-history MVP.)
+        (void)mtp.k_proj;
+        (void)mtp.q_norm;
+        (void)mtp.k_norm;
+    }
+
     // 5.B — MoE (Phase 2.2.MoE, this commit): full 256-expert top-8 MoE
     //   forward + shared-expert with sigmoid gating. Uses the existing
     //   imp::moe_gate_topk_fused / swiglu / shared_expert_gate_scale

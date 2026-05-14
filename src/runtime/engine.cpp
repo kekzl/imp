@@ -154,9 +154,30 @@ bool Engine::enable_mtp_spec_decode(int k) {
     const int top_k        = model_->config_.n_experts_active;
     const int expert_d_ff  = model_->config_.expert_d_ff;
     const int shared_d_ff  = model_->config_.expert_shared_d_ff;
+
+    // MTP attention dims: derived from the MTP head's q_proj / v_proj shapes
+    // because the MTP attention head config differs from the main model
+    // (Qwen3.6 MTP doubles Q output per-head for attn_output_gate).
+    // q_proj shape [2 * num_heads * head_dim, hidden_dim]; v_proj shape
+    // [num_kv_heads * head_dim, hidden_dim]. We use main model's head_dim
+    // as the per-head attention dim and back-compute the MTP head counts.
+    int mtp_num_heads = 0, mtp_num_kv_heads = 0, mtp_head_dim = 0;
+    if (model_->mtp_.has_value() && model_->mtp_->loaded &&
+        model_->mtp_->q_proj.data != nullptr && model_->mtp_->v_proj.data != nullptr) {
+        const int q_out = static_cast<int>(model_->mtp_->q_proj.shape[0]);
+        const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
+        mtp_head_dim     = model_->config_.head_dim;
+        if (mtp_head_dim > 0) {
+            // q_proj outputs 2 × num_heads × head_dim (attn_output_gate=True).
+            mtp_num_heads    = q_out / (2 * mtp_head_dim);
+            mtp_num_kv_heads = v_out / mtp_head_dim;
+        }
+    }
+
     auto* ws = new imp::MtpDraftWorkspace();
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size,
-                                      n_experts, top_k, expert_d_ff, shared_d_ff)) {
+                                      n_experts, top_k, expert_d_ff, shared_d_ff,
+                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim)) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
@@ -164,7 +185,9 @@ bool Engine::enable_mtp_spec_decode(int k) {
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
     IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d)", k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff);
+                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d)",
+                 k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
+                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim);
     return true;
 }
 
