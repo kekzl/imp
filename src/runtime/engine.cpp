@@ -2566,6 +2566,36 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         residual_meta_d_buf_ = nullptr;
     }
 
+    // Phase 3.5 telemetry: measure MTP-draft prediction accuracy without
+    // changing generation. Single-sequence only (batch=1 simplifies hidden-
+    // state addressing). Skipped when MTP is disabled or the workspace was
+    // allocated without attention dims (older callers).
+    if (mtp_spec_decode_enabled() && model_ && model_->mtp_.has_value() &&
+        model_->mtp_->loaded && gpu_batch.n_sequences == 1 && !tokens.empty()) {
+        const int32_t next_token = tokens[0];
+        if (mtp_pending_prediction_ >= 0) {
+            mtp_accuracy_.total++;
+            if (mtp_pending_prediction_ == next_token) mtp_accuracy_.matches++;
+        }
+        // Make a new prediction for next step using THIS step's final hidden
+        // state + the just-emitted token.
+        Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
+        if (h_view.data != nullptr) {
+            int prediction = -1;
+            const int hidden_dim = model_->config_.d_model;
+            const int vocab_size = model_->config_.vocab_size;
+            if (mtp_draft_one(next_token, h_view.data, hidden_dim, vocab_size, &prediction)) {
+                mtp_pending_prediction_ = prediction;
+            } else {
+                mtp_pending_prediction_ = -1;
+            }
+        } else {
+            mtp_pending_prediction_ = -1;
+        }
+    } else {
+        mtp_pending_prediction_ = -1;  // batch>1 or MTP off → clear pending
+    }
+
     // Process outputs: logprobs extraction + token distribution
     step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_json_mode,
                                 needs_schema_mode, dec_stream);

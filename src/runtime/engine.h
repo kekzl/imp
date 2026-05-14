@@ -146,6 +146,24 @@ public:
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id);
 
+    // Phase 3.5 telemetry: tracks "what fraction of decode-step next-tokens
+    // would the MTP head have correctly predicted from the previous step?"
+    // Populated automatically by step_decode when mtp_spec_decode_enabled()
+    // && single-sequence batches. Does NOT change generation — the actual
+    // next_token still comes from the main forward+sample. Provides the
+    // measurement Phase 5.5 needs to decide whether a batched-verify
+    // implementation of Phase 3.5 is ROI-worthy.
+    struct MtpAccuracy {
+        int matches = 0;
+        int total   = 0;
+        float rate() const { return total > 0 ? static_cast<float>(matches) / total : 0.0f; }
+    };
+    MtpAccuracy mtp_accuracy() const noexcept { return mtp_accuracy_; }
+    void mtp_accuracy_reset() noexcept {
+        mtp_accuracy_ = {};
+        mtp_pending_prediction_ = -1;
+    }
+
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
@@ -246,6 +264,14 @@ private:
     // Defined in <runtime/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
     void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
+
+    // Phase 3.5 telemetry: rolling MTP-draft-accuracy across the active session.
+    // mtp_pending_prediction_ is the prediction made at the end of the
+    // PREVIOUS decode step; it gets compared to the actual next_token at the
+    // start of the CURRENT step. -1 = no pending prediction (start of session,
+    // batch>1, prediction call failed, etc).
+    int mtp_pending_prediction_ = -1;
+    MtpAccuracy mtp_accuracy_{};
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;

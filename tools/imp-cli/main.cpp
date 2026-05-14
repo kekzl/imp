@@ -670,6 +670,15 @@ int main(int argc, char** argv) {
                     tg_toks);
             fprintf(stderr, "total   %8.2f ms\n", total_ms);
 
+            // Phase 3.5 telemetry: report MTP draft accuracy if measured.
+            if (imp::Engine* engine = ctx->engine.get(); engine && engine->mtp_spec_decode_enabled()) {
+                auto acc = engine->mtp_accuracy();
+                if (acc.total > 0) {
+                    fprintf(stderr, "mtp     %d / %d drafts matched (%.1f%% accept rate)\n",
+                            acc.matches, acc.total, 100.0f * acc.rate());
+                }
+            }
+
             // Benchmark using Engine::generate() (conditional graph loop) for comparison.
             // This eliminates per-step host overhead — shows true GPU-limited throughput.
             if (imp::RuntimeConfig::current().bench.generate) {
