@@ -180,7 +180,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_kpar_fp32_kernel(
 // Multi-row GEMV: NR rows per block, 256 threads (8 warps).
 // ---------------------------------------------------------------------------
 template <int NR>
-__global__ void __launch_bounds__(kMRThreads, 8) gemv_mxfp4_multirow_kernel(
+__global__ void __launch_bounds__(kMRThreads) gemv_mxfp4_multirow_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ x, half* __restrict__ y, int N, int K) {
     const int block_row_base = blockIdx.x * NR;
@@ -203,7 +203,7 @@ __global__ void __launch_bounds__(kMRThreads, 8) gemv_mxfp4_multirow_kernel(
 }
 
 template <int NR>
-__global__ void __launch_bounds__(kMRThreads, 8) gemv_mxfp4_multirow_fp32_kernel(
+__global__ void __launch_bounds__(kMRThreads) gemv_mxfp4_multirow_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ linear_scales,
     const half* __restrict__ x, float* __restrict__ y, int N, int K) {
     const int block_row_base = blockIdx.x * NR;

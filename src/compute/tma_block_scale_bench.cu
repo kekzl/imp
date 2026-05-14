@@ -33,7 +33,7 @@
 #include <cstdio>
 #include <cstring>
 
-// Resolve cuTensorMapEncodeTiled via cudaGetDriverEntryPoint (runtime API,
+// Resolve cuTensorMapEncodeTiled via cudaGetDriverEntryPointByVersion (runtime API,
 // no DT_NEEDED on libcuda.so.1) to keep test discovery working in CI builders
 // without GPU drivers installed. Same trick CUTLASS uses
 // (cutlass/cuda_host_adapter.hpp).
@@ -242,10 +242,11 @@ static bool make_tma_2d_u8(CUtensorMap* desc, void* gmem, int rows, int cols, in
     if (pfn == nullptr) {
         cudaDriverEntryPointQueryResult q;
         void* p = nullptr;
-        cudaError_t err = cudaGetDriverEntryPoint("cuTensorMapEncodeTiled",
-                                                   &p, cudaEnableDefault, &q);
+        cudaError_t err = cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled",
+                                                            &p, CUDA_VERSION,
+                                                            cudaEnableDefault, &q);
         if (err != cudaSuccess || q != cudaDriverEntryPointSuccess || p == nullptr) {
-            std::fprintf(stderr, "cudaGetDriverEntryPoint(cuTensorMapEncodeTiled) failed (q=%d)\n", (int)q);
+            std::fprintf(stderr, "cudaGetDriverEntryPointByVersion(cuTensorMapEncodeTiled) failed (q=%d)\n", (int)q);
             return false;
         }
         pfn = reinterpret_cast<PFN_cuTensorMapEncodeTiled_t>(p);

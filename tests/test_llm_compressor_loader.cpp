@@ -1,7 +1,19 @@
 #include "model/llm_compressor_loader.h"
 #include <gtest/gtest.h>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <unistd.h>
 
 using namespace imp::llm_compressor;
+
+namespace {
+std::string tmpdir() {
+    const char* t = std::getenv("TMPDIR");
+    return t ? t : "/tmp";
+}
+}  // namespace
 
 TEST(LlmCompressorTranslate, RenamesWeightPacked) {
     TranslationCounters c{};
@@ -171,12 +183,8 @@ TEST(LlmCompressorTranslate, SkipsMultiModalProjector) {
 namespace {
 
 std::string write_temp_recipe(const std::string& content) {
-    std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/recipe_" +
-                       std::to_string(::getpid()) + ".yaml";
-    // Create a temp dir and place recipe.yaml inside it.
-    std::string dir = path + ".d";
-    std::string mkdir_cmd = "mkdir -p '" + dir + "'";
-    std::system(mkdir_cmd.c_str());
+    std::string dir = tmpdir() + "/recipe_" + std::to_string(::getpid()) + ".yaml.d";
+    std::filesystem::create_directories(dir);
     std::ofstream out(dir + "/recipe.yaml");
     out << content;
     out.close();
@@ -184,8 +192,8 @@ std::string write_temp_recipe(const std::string& content) {
 }
 
 void cleanup_temp_recipe(const std::string& dir) {
-    std::string rm = "rm -rf '" + dir + "'";
-    std::system(rm.c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace
@@ -308,9 +316,8 @@ TEST(LlmCompressorRecipe, RejectsConfigGroupsW8A8) {
 }
 
 TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_both_" +
-                      std::to_string(::getpid());
-    std::system(("mkdir -p '" + dir + "'").c_str());
+    std::string dir = tmpdir() + "/fmt_both_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
     std::ofstream(dir + "/hf_quant_config.json") << R"({"quantization":{"quant_algo":"NVFP4"}})";
     std::ofstream(dir + "/recipe.yaml")
         << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n      scheme: NVFP4\n";
@@ -320,12 +327,13 @@ TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
     EXPECT_TRUE(ok);
     EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::MODELOPT);
 
-    std::system(("rm -rf '" + dir + "'").c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 TEST(LlmCompressorFormatDetect, DetectsLlmCompressorByRecipeYaml) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_lc_" + std::to_string(::getpid());
-    std::system(("mkdir -p '" + dir + "'").c_str());
+    std::string dir = tmpdir() + "/fmt_lc_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
     std::ofstream(dir + "/recipe.yaml") << R"(default_stage:
   default_modifiers:
     QuantizationModifier:
@@ -338,16 +346,17 @@ TEST(LlmCompressorFormatDetect, DetectsLlmCompressorByRecipeYaml) {
     EXPECT_TRUE(ok);
     EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
 
-    std::system(("rm -rf '" + dir + "'").c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 TEST(LlmCompressorFormatDetect, ReturnsFalseWhenNoConfigPresent) {
-    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp") + "/fmt_none_" +
-                      std::to_string(::getpid());
-    std::system(("mkdir -p '" + dir + "'").c_str());
+    std::string dir = tmpdir() + "/fmt_none_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
     // Empty dir, no config files.
     imp::HFConfigLoader::NvFP4Config cfg;
     bool ok = imp::HFConfigLoader::load_nvfp4_config(dir, cfg);
     EXPECT_FALSE(ok);
-    std::system(("rm -rf '" + dir + "'").c_str());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

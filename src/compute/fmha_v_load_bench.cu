@@ -197,8 +197,9 @@ static bool build_v_tma_desc(CUtensorMap* desc, void* gmem,
     if (pfn == nullptr) {
         cudaDriverEntryPointQueryResult q;
         void* p = nullptr;
-        cudaError_t err = cudaGetDriverEntryPoint("cuTensorMapEncodeTiled",
-                                                   &p, cudaEnableDefault, &q);
+        cudaError_t err = cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled",
+                                                            &p, CUDA_VERSION,
+                                                            cudaEnableDefault, &q);
         if (err != cudaSuccess || q != cudaDriverEntryPointSuccess || p == nullptr) {
             std::fprintf(stderr, "cuTensorMapEncodeTiled lookup failed\n");
             return false;
