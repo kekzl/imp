@@ -2680,7 +2680,11 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // skipped inside the captured graph — stay on the eager path instead.
         const bool async_compatible = dreq->logit_bias.empty() && dreq->mirostat == 0 &&
                                       dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
-                                      dreq->typical_p >= 1.0f;
+                                      dreq->typical_p >= 1.0f &&
+                                      // Phase 3.5 MTP telemetry hooks the per-step path; the async
+                                      // conditional-graph loop bypasses it. Stay eager when MTP is on
+                                      // so accuracy measurement covers the whole generation.
+                                      !mtp_spec_decode_enabled();
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
         // ship them as added_tokens with special=False, leaving think_end_id_
