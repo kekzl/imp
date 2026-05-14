@@ -10,6 +10,7 @@
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
 #include "compute/attention.h"
+#include "compute/layernorm.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -2692,7 +2693,23 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         const int32_t next_token = tokens[0];
         if (mtp_pending_prediction_ >= 0) {
             mtp_accuracy_.total++;
-            if (mtp_pending_prediction_ == next_token) mtp_accuracy_.matches++;
+            bool match = (mtp_pending_prediction_ == next_token);
+            if (match) mtp_accuracy_.matches++;
+            // Optional verbose log: prints (predicted, actual, match) with
+            // decoded strings so accept patterns can be analyzed offline.
+            static const bool s_pattern_log = []() {
+                const char* e = std::getenv("IMP_MTP_PATTERN_LOG");
+                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
+            }();
+            if (s_pattern_log) {
+                Tokenizer* tok = model_->tokenizer();
+                std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
+                std::string as = tok ? tok->decode_token(next_token) : std::string();
+                IMP_LOG_INFO("MTP-PAT %s pred=%d '%s' actual=%d '%s'",
+                             match ? "+" : "-",
+                             mtp_pending_prediction_, ps.c_str(),
+                             next_token, as.c_str());
+            }
         }
         // Make a new prediction for next step using THIS step's final hidden
         // state + the just-emitted token.
@@ -2701,7 +2718,31 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             int prediction = -1;
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
-            if (mtp_draft_one(next_token, h_view.data, hidden_dim, vocab_size, &prediction)) {
+
+            // Optional: apply the main model's output norm before passing
+            // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
+            // in some MTP variants; gate by env so we can A/B.
+            static const bool s_pre_norm_h = []() {
+                const char* e = std::getenv("IMP_MTP_PRENORM_H");
+                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
+            }();
+            const void* h_for_mtp = h_view.data;
+            // Scratch buffer for the normalized variant (allocated once).
+            static void* s_h_normed = nullptr;
+            if (s_pre_norm_h) {
+                if (s_h_normed == nullptr) {
+                    cudaMalloc(&s_h_normed, hidden_dim * sizeof(__half));
+                }
+                int64_t hd_shape[2] = {1, hidden_dim};
+                Tensor in_view (h_view.data, QType::F16, 2, hd_shape, true);
+                Tensor out_view(s_h_normed,  QType::F16, 2, hd_shape, true);
+                imp::rmsnorm(in_view, model_->output_norm(), out_view,
+                             model_->config_.rms_norm_eps, decode_stream(),
+                             model_->config_.norm_weight_offset);
+                h_for_mtp = s_h_normed;
+            }
+
+            if (mtp_draft_one(next_token, h_for_mtp, hidden_dim, vocab_size, &prediction)) {
                 mtp_pending_prediction_ = prediction;
             } else {
                 mtp_pending_prediction_ = -1;
