@@ -710,8 +710,9 @@ static PFN_cuTensorMapEncodeTiled_t resolve_tensor_map_encode() {
     if (pfn) return pfn;
     cudaDriverEntryPointQueryResult q;
     void* p = nullptr;
-    cudaError_t err = cudaGetDriverEntryPoint("cuTensorMapEncodeTiled",
-                                               &p, cudaEnableDefault, &q);
+    cudaError_t err = cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled",
+                                                        &p, CUDA_VERSION,
+                                                        cudaEnableDefault, &q);
     if (err != cudaSuccess || q != cudaDriverEntryPointSuccess || p == nullptr) {
         return nullptr;
     }

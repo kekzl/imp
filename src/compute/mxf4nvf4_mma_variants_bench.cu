@@ -39,40 +39,25 @@
 namespace imp {
 
 // Helper: stable input registers (different per thread to defeat any
-// constant-folding) plus 0x38 UE4M3 / 0x7f UE8M0 ≈ 1.0 scales.
-#define BENCH_PREAMBLE                                                                 \
-    uint32_t a0 = threadIdx.x * 37u + 1u;                                              \
-    uint32_t a1 = threadIdx.x * 41u + 2u;                                              \
-    uint32_t a2 = threadIdx.x * 43u + 3u;                                              \
-    uint32_t a3 = threadIdx.x * 47u + 4u;                                              \
-    uint32_t b0 = threadIdx.x * 53u + 5u;                                              \
-    uint32_t b1 = threadIdx.x * 59u + 6u;                                              \
-    uint32_t b2 = threadIdx.x * 61u + 7u;                                              \
-    uint32_t b3 = threadIdx.x * 67u + 8u;                                              \
-    uint32_t sfa_e4m3 = 0x38383838u; /* UE4M3 ≈ 1.0 */                               \
-    uint32_t sfb_e4m3 = 0x38383838u;                                                   \
-    uint32_t sfa_e8m0 = 0x7f7f7f7fu; /* UE8M0 = 2^0 = 1.0 */                           \
-    uint32_t sfb_e8m0 = 0x7f7f7f7fu;                                                   \
-    uint32_t metadata = 0x44444444u; /* 2:4 sparse: select positions 0,1 of every 4 */ \
-    float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;                                  \
-    constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;                         \
-    (void)a0;                                                                          \
-    (void)a1;                                                                          \
-    (void)a2;                                                                          \
-    (void)a3;                                                                          \
-    (void)b0;                                                                          \
-    (void)b1;                                                                          \
-    (void)b2;                                                                          \
-    (void)b3;                                                                          \
-    (void)sfa_e4m3;                                                                    \
-    (void)sfb_e4m3;                                                                    \
-    (void)sfa_e8m0;                                                                    \
-    (void)sfb_e8m0;                                                                    \
-    (void)metadata;                                                                    \
-    (void)bidA;                                                                        \
-    (void)tidA;                                                                        \
-    (void)bidB;                                                                        \
-    (void)tidB
+// constant-folding) plus 0x38 UE4M3 / 0x7f UE8M0 ≈ 1.0 scales. Each kernel
+// below references a subset of these; [[maybe_unused]] silences NVCC #550-D
+// for the regs a given variant doesn't consume.
+#define BENCH_PREAMBLE                                                                   \
+    [[maybe_unused]] uint32_t a0 = threadIdx.x * 37u + 1u;                               \
+    [[maybe_unused]] uint32_t a1 = threadIdx.x * 41u + 2u;                               \
+    [[maybe_unused]] uint32_t a2 = threadIdx.x * 43u + 3u;                               \
+    [[maybe_unused]] uint32_t a3 = threadIdx.x * 47u + 4u;                               \
+    [[maybe_unused]] uint32_t b0 = threadIdx.x * 53u + 5u;                               \
+    [[maybe_unused]] uint32_t b1 = threadIdx.x * 59u + 6u;                               \
+    [[maybe_unused]] uint32_t b2 = threadIdx.x * 61u + 7u;                               \
+    [[maybe_unused]] uint32_t b3 = threadIdx.x * 67u + 8u;                               \
+    [[maybe_unused]] uint32_t sfa_e4m3 = 0x38383838u; /* UE4M3 ≈ 1.0 */                  \
+    [[maybe_unused]] uint32_t sfb_e4m3 = 0x38383838u;                                    \
+    [[maybe_unused]] uint32_t sfa_e8m0 = 0x7f7f7f7fu; /* UE8M0 = 2^0 = 1.0 */            \
+    [[maybe_unused]] uint32_t sfb_e8m0 = 0x7f7f7f7fu;                                    \
+    [[maybe_unused]] uint32_t metadata = 0x44444444u; /* 2:4 sparse: positions 0,1 of 4 */ \
+    float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;                                    \
+    [[maybe_unused]] constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0
 
 #define BENCH_SINK_STORE                     \
     if (threadIdx.x == 0 && blockIdx.x == 0) \
