@@ -139,6 +139,7 @@ set(IMP_QUANT_SOURCES
 
 set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
+    src/compute/gemm_capture_fp16_sm120.cu
     src/compute/weight_dispatch.cu
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu

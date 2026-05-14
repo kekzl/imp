@@ -7,6 +7,8 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/gemm.h"
+#include "compute/gemm_capture_fp16_sm120.h"
+#include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/attention_cublas.h"
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
@@ -965,6 +967,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
     gemm_init();
     attention_cublas_prewarm();
+    gemm_grouped_3x_nvfp4_prewarm();
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
 

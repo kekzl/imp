@@ -34,11 +34,51 @@ static cublasHandle_t get_attn_cublas_handle() {
     return handle;
 }
 
+// Forward-decl: definition lower in the file alongside s_attn_d_ptrs.
+static void ensure_attn_ptr_arrays(int n_heads);
+
 void attention_cublas_prewarm() {
-    // Force lazy-init of the static cuBLAS handle. The first
-    // cublasGemmBatchedEx call after this is guaranteed not to trigger
-    // cublasCreate's internal cudaMalloc (illegal under stream capture).
-    (void)get_attn_cublas_handle();
+    // Force lazy-init of the static cuBLAS handle AND issue a dummy
+    // GemmBatchedEx so cuBLAS allocates its internal workspace + selects
+    // an algorithm. Also pre-size the s_attn_d_ptrs device buffer for
+    // the largest n_heads any current model uses (256, matching the host
+    // stack array bound). All cudaMallocs happen eagerly here; subsequent
+    // calls inside captured streams find everything ready and don't
+    // trigger any cudaMalloc (illegal under capture).
+    cublasHandle_t h = get_attn_cublas_handle();
+    ensure_attn_ptr_arrays(/*n_heads=*/256);
+
+    constexpr int kM = 8, kN = 8, kK = 8;
+    half *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+    void *d_ap = nullptr, *d_bp = nullptr, *d_cp = nullptr;
+    if (cudaMalloc(&d_a, kM * kK * sizeof(half)) != cudaSuccess) return;
+    if (cudaMalloc(&d_b, kK * kN * sizeof(half)) != cudaSuccess) { cudaFree(d_a); return; }
+    if (cudaMalloc(&d_c, kM * kN * sizeof(half)) != cudaSuccess) {
+        cudaFree(d_a); cudaFree(d_b); return;
+    }
+    if (cudaMalloc(&d_ap, sizeof(void*)) != cudaSuccess ||
+        cudaMalloc(&d_bp, sizeof(void*)) != cudaSuccess ||
+        cudaMalloc(&d_cp, sizeof(void*)) != cudaSuccess) {
+        if (d_ap) cudaFree(d_ap); if (d_bp) cudaFree(d_bp); if (d_cp) cudaFree(d_cp);
+        cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+        return;
+    }
+    cudaMemset(d_a, 0, kM * kK * sizeof(half));
+    cudaMemset(d_b, 0, kK * kN * sizeof(half));
+    cudaMemcpy(d_ap, &d_a, sizeof(void*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bp, &d_b, sizeof(void*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cp, &d_c, sizeof(void*), cudaMemcpyHostToDevice);
+
+    float alpha = 1.0f, beta = 0.0f;
+    (void)cublasGemmBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, kN, kM, kK, &alpha,
+                              (const void**)d_ap, CUDA_R_16F, kK,
+                              (const void**)d_bp, CUDA_R_16F, kK, &beta,
+                              (void**)d_cp, CUDA_R_16F, kN, 1, CUBLAS_COMPUTE_32F,
+                              CUBLAS_GEMM_DEFAULT);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    cudaFree(d_ap); cudaFree(d_bp); cudaFree(d_cp);
 }
 
 // ---------------------------------------------------------------------------
