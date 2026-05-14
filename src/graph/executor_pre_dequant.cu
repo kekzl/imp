@@ -451,22 +451,25 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // pointer, scales, tensor_scale, shape) so the prefill dispatch
         // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
         //
-        // EXCLUSION (added 2026-05-02): the llm-compressor format produces
-        // wrong output through the CUTLASS NVFP4×NVFP4 path. Layer-0 QKV
-        // gemm output blows up to FP16-saturating values (max=65k, Inf=836)
-        // even though dequant_to_fp16 produces correct weight magnitudes
-        // (max ~0.117). The same dequant→cuBLAS fallback path produces
-        // coherent output ("Your cat is called Whiskers" / "476 AD"
-        // retrievals work). Modelopt-format NVFP4 (`is_llm_compressor=false`)
-        // is unaffected and remains on CUTLASS.
+        // Historical EXCLUSION (added 2026-05-02, REMOVED 2026-05-14):
+        // The llm-compressor NVFP4 format previously triggered a Skip-Guard
+        // that fell back to dequant→cuBLAS because the CUTLASS NVFP4×NVFP4
+        // path produced (a) numerical regressions on borderline tokens
+        // (3/4 phase4 vs 4/4 guard-on baseline) and (b) cross-capture
+        // non-determinism (2/4 graph_replay vs 4/4 guard-on baseline).
+        // Memo `cutlass_nvfp4_sm120_nondeterministic_2026_05_05` extended
+        // this to "universal sm_120 CUTLASS NVFP4 non-determinism" — even
+        // Modelopt format showed 1/4 graph_replay on CUTLASS v4.4.2.
         //
-        // Net effect for llm-compressor: prefill drops from 12k tok/s
-        // (CUTLASS) back to ~280 tok/s (dequant→cuBLAS) but output is
-        // coherent. Decode is unchanged (M=1 GEMV path). Until the
-        // CUTLASS+llm-compressor numerical mismatch is rooted, prefer
-        // correctness over speed.
-        const bool skip_cutlass_for_llm_compressor = cfg.is_llm_compressor_nvfp4;
-        if (cutlass_sm120_nvfp4_available() && !skip_cutlass_for_llm_compressor) {
+        // CUTLASS v4.5.0 (PR #165, 2026-05-13) silently fixed this.
+        // Re-evaluation 2026-05-14 via `scripts/validate_safetensors.py`:
+        //   - Gemma-4-NVFP4 (llm-compressor): graph_replay 4/4, phase4
+        //     parity with guard-on, det3=True, prefill 10.2k → 22.1k tok/s
+        //     (2.18× win at pp=512).
+        //   - Qwen3-30B-A3B-NVFP4-Modelopt: graph_replay 4/4 (was 1/4).
+        // Guard is no longer load-bearing; removing it restores the
+        // CUTLASS fast path for all NVFP4-prequant models uniformly.
+        if (cutlass_sm120_nvfp4_available()) {
             int ct_count = 0;
             size_t ct_total = 0;
             auto register_prequant = [&](const Tensor& w) {
@@ -516,12 +519,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
                              ct_total / (1024.0 * 1024.0));
             }
-        } else if (skip_cutlass_for_llm_compressor) {
-            IMP_LOG_INFO(
-                "CUTLASS sm_120 NVFP4 cache: skipped for llm-compressor "
-                "format (uses dequant→cuBLAS fallback for prefill — "
-                "CUTLASS path produces wrong output, see memory/"
-                "stress_test_safetensors_2026_05_01.md)");
         }
     }
 
