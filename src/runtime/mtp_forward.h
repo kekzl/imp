@@ -111,13 +111,20 @@ struct MtpDraftWorkspace {
     int num_kv_heads = 0;
     int head_dim     = 0;
 
-    // RoPE config (Phase 2.2.Attn+RoPE). When rope_dim > 0, qknorm_rope_fused
-    // is applied to Q (extracted half) and K BEFORE attention scan. Both
-    // tensors get rotated using `mtp_pos` as the position; cached K's were
-    // rotated at their own insertion time.
+    // RoPE config (Phase 2.2.Attn+RoPE). When rope_dim > 0, mrope-aware
+    // Q/K rotation is applied BEFORE the attention scan. Both Q (extracted)
+    // and K (this step's projection) get rotated; cached K's stay rotated
+    // from their own insertion-time position.
     float rope_theta      = 0.0f;
-    int   rope_dim        = 0;   // 0 = disable RoPE
-    bool  rope_neox       = true;
+    int   rope_dim        = 0;     // 0 = disable RoPE
+    bool  rope_neox       = true;  // (currently mtp_mrope_kernel hardcodes neox)
+    // mrope section half-counts (Qwen3-VL multimodal). Sum must equal
+    // rope_dim/2. For Qwen3.6: {11, 11, 10}. For text-only tokens all 3
+    // positions are equal so mrope reduces to standard partial-rope; sec*
+    // fields stay relevant for future multimodal token handling.
+    int   mrope_sec0      = 0;
+    int   mrope_sec1      = 0;
+    int   mrope_sec2      = 0;
     float rms_norm_eps    = 1e-6f;
     float arch_norm_offset = 0.0f;  // for q_norm/k_norm (Qwen3.5/3.6 gamma=1+W)
 };

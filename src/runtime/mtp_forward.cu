@@ -278,6 +278,61 @@ __global__ void mtp_kv_append_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// MTP mrope (Multi-RoPE) — Qwen3-VL-style RoPE with section split
+// ---------------------------------------------------------------------------
+// For Qwen3.6 mrope_section = [11, 11, 10] (half-counts) means the rope_dim/2
+// frequency pairs are split:
+//   pair k ∈ [0, 11):  section 0 (T, temporal)  → uses positions[0]
+//   pair k ∈ [11, 22): section 1 (H, height)    → uses positions[1]
+//   pair k ∈ [22, 32): section 2 (W, width)     → uses positions[2]
+//
+// For text-only tokens positions[0]=positions[1]=positions[2]=mtp_pos,
+// so mrope mathematically reduces to standard partial-rope. The kernel
+// is written generically to support multimodal positions in the future.
+//
+// NeoX style: pair k rotates (x[k], x[k+rope_dim/2]).
+// Frequency: inv_freq[k] = theta^(-2k/rope_dim), shared across sections.
+// Rotation: (x0, x1) → (x0*cos - x1*sin, x0*sin + x1*cos)
+//
+// One CTA per head. Threads handle pairs in strided fashion. Untouched dims
+// ([rope_dim, head_dim)) are unchanged.
+template <bool IsKv>
+__global__ void mtp_mrope_kernel(
+    __half* __restrict__ x,           // Q: [n_heads, head_dim], K: [n_kv_heads, head_dim]
+    int n_heads, int head_dim, int rope_dim, float theta,
+    int sec0, int sec1, int sec2,    // mrope_section half-counts (sec0+sec1+sec2 == rope_dim/2)
+    int pos_t, int pos_h, int pos_w) {
+    int h = blockIdx.x;
+    if (h >= n_heads) return;
+    __half* row = x + static_cast<int64_t>(h) * head_dim;
+    int pairs = rope_dim / 2;
+    int s01 = sec0;
+    int s12 = sec0 + sec1;
+    for (int k = threadIdx.x; k < pairs; k += blockDim.x) {
+        // Determine which section this pair belongs to.
+        int pos;
+        if      (k < s01) pos = pos_t;
+        else if (k < s12) pos = pos_h;
+        else              pos = pos_w;
+        // Frequency: theta^(-2k/rope_dim)
+        float inv_freq = expf(-static_cast<float>(2 * k) / static_cast<float>(rope_dim) * logf(theta));
+        float angle = static_cast<float>(pos) * inv_freq;
+        float c = __cosf(angle);
+        float s = __sinf(angle);
+        // NeoX-style pair: (x[k], x[k + rope_dim/2])
+        int i0 = k;
+        int i1 = k + pairs;
+        float x0 = __half2float(row[i0]);
+        float x1 = __half2float(row[i1]);
+        row[i0] = __float2half(x0 * c - x1 * s);
+        row[i1] = __float2half(x0 * s + x1 * c);
+    }
+    // (void) IsKv — currently unused but reserved for any future per-head
+    // GQA/MQA divergences. Both Q and K paths share the same rotation math.
+    if (false) (void)IsKv;
+}
+
+// ---------------------------------------------------------------------------
 // Workspace alloc/free
 // ---------------------------------------------------------------------------
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
@@ -579,25 +634,28 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 imp::rmsnorm(k_view, mtp.k_norm, k_view, ws.rms_norm_eps, stream,
                              ws.arch_norm_offset);
             }
-            // 5.A.4.rope — Opt-in standard partial-rope (NOT mrope-aware).
-            // Default OFF: Qwen3.6's mrope_section [11, 11, 10] needs a
-            // dedicated kernel; standard partial-rope mismatches training
-            // distribution and empirically hurts acceptance. Set
-            // IMP_MTP_USE_ROPE=1 to experiment.
-            if (ws.rope_dim > 0) {
-                int h_pos = ws.mtp_pos;
-                cudaMemcpyAsync(ws.d_mtp_position, &h_pos, sizeof(int),
-                                cudaMemcpyHostToDevice, stream);
-                // Build views matching rope_forward()'s expected shapes.
-                int64_t q_shape[4] = {1, 1, nh, hdh};
-                int64_t k_shape[4] = {1, 1, nkv, hdh};
-                Tensor q_view(ws.d_q_attn, QType::F16, 4, q_shape, /*on_device=*/true);
-                Tensor k_view(ws.d_k_proj, QType::F16, 4, k_shape, /*on_device=*/true);
-                imp::rope_forward(q_view, k_view, ws.d_mtp_position, hdh,
-                                  ws.rope_theta, /*scaling=*/1.0f, ws.rope_dim,
-                                  ws.rope_neox, /*ext_factor=*/0.0f,
-                                  /*attn_factor=*/1.0f, /*corr_dims=*/nullptr,
-                                  stream, /*longrope_inv_freqs=*/nullptr);
+            // 5.A.4.rope — mrope-aware Q/K rotation. For text-only tokens
+            // the 3 mrope position components are all equal to mtp_pos,
+            // reducing to standard partial-rope mathematically. The kernel
+            // is structured to support distinct T/H/W positions for future
+            // multimodal token handling. NeoX-style pairing only.
+            if (ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
+                const int pos_t = ws.mtp_pos;  // text-only: T=H=W=mtp_pos
+                const int pos_h = ws.mtp_pos;
+                const int pos_w = ws.mtp_pos;
+                const int kBlock = 128;
+                // Q rotation: nh CTAs, each handles head_dim/2 pairs
+                mtp_mrope_kernel<false><<<nh, kBlock, 0, stream>>>(
+                    static_cast<__half*>(ws.d_q_attn),
+                    nh, hdh, ws.rope_dim, ws.rope_theta,
+                    ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2,
+                    pos_t, pos_h, pos_w);
+                // K rotation: nkv CTAs
+                mtp_mrope_kernel<true><<<nkv, kBlock, 0, stream>>>(
+                    static_cast<__half*>(ws.d_k_proj),
+                    nkv, hdh, ws.rope_dim, ws.rope_theta,
+                    ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2,
+                    pos_t, pos_h, pos_w);
             }
             const int pos = ws.mtp_pos;
             // 5.A.4.a — append k_step, v_step into cache at pos

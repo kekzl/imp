@@ -195,15 +195,26 @@ bool Engine::enable_mtp_spec_decode(int k) {
     ws->rope_theta       = model_->config_.rope_theta;
     ws->rope_neox        = model_->config_.rope_neox;
     ws->rms_norm_eps     = model_->config_.rms_norm_eps;
-    // RoPE on MTP attention defaults OFF on Qwen3.5/3.6 because the model
-    // uses multimodal-RoPE (mrope) with section split [11, 11, 10] on the
-    // 64 rope dims — applying standard partial-rope is a frequency-pattern
-    // mismatch versus training and empirically REDUCES acceptance vs no-rope
-    // (29.5% → 19-24% in Phase 5.5 bench). Opt-in via IMP_MTP_USE_ROPE=1
-    // for experiments; proper mrope support is a future enhancement.
-    ws->rope_dim = 0;
-    if (const char* e = std::getenv("IMP_MTP_USE_ROPE"); e && e[0] != '0') {
-        ws->rope_dim = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
+    ws->rope_dim         = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
+    // mrope section split. Qwen3.6 ships mrope_section = [11, 11, 10]
+    // (half-counts; full rope_dim = 64 = 2*(11+11+10)). imp doesn't load
+    // this from config yet — hardcoded here based on the on-disk spec.
+    // For text-only generation all 3 positions are equal, so this is
+    // mathematically equivalent to standard partial-rope; the section
+    // split matters only for true multimodal tokens.
+    if (ws->rope_dim == 64) {
+        ws->mrope_sec0 = 11;
+        ws->mrope_sec1 = 11;
+        ws->mrope_sec2 = 10;
+    } else {
+        // Fall back to even-split: all of rope_dim/2 in section 0.
+        ws->mrope_sec0 = ws->rope_dim / 2;
+        ws->mrope_sec1 = 0;
+        ws->mrope_sec2 = 0;
+    }
+    // Diagnostic env: IMP_MTP_NO_ROPE=1 disables RoPE entirely.
+    if (const char* e = std::getenv("IMP_MTP_NO_ROPE"); e && e[0] != '0') {
+        ws->rope_dim = 0;
     }
     // Runtime weight_offset matches what the main model's rmsnorm calls pass:
     // norm_weight_offset from ModelConfig. For Qwen3.5/3.6 this is 0.0 because
@@ -215,10 +226,12 @@ bool Engine::enable_mtp_spec_decode(int k) {
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
     IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s)",
+                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s, "
+                 "mrope=[%d,%d,%d])",
                  k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
                  mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
-                 ws->rope_theta, ws->rope_dim, ws->rope_neox ? "neox" : "interleaved");
+                 ws->rope_theta, ws->rope_dim, ws->rope_neox ? "neox" : "interleaved",
+                 ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
     return true;
 }
 
