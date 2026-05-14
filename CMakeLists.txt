@@ -488,6 +488,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_registry_preservation.cpp
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
+        tests/test_mtp_forward.cpp
     )
 
     set(IMP_TEST_BINARIES
