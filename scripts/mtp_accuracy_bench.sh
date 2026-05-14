@@ -101,11 +101,18 @@ for class in factual verbose-think code instruction; do
 done
 
 echo
+# Compute mean rate across classes (bash + awk).
+mean=$(awk -v a="${RATES[factual]:-0}" -v b="${RATES[verbose-think]:-0}" \
+            -v c="${RATES[code]:-0}"    -v d="${RATES[instruction]:-0}" \
+            'BEGIN { printf "%.1f", (a + b + c + d) / 4.0 }')
 if [[ $above_60 -ge 3 ]]; then
-    echo "RESULT: ≥ 3/4 prompt classes at ≥ 60% — batched-verify Phase 3.5 ROI-justified"
-elif [[ $above_60 -ge 1 ]]; then
-    echo "RESULT: $above_60/4 prompt classes at ≥ 60% — borderline; investigate dataset-specific behavior"
+    echo "RESULT: ≥ 3/4 prompt classes at ≥ 60% (avg ${mean}%) — batched-verify Phase 3.5 ROI-justified"
+elif awk -v m="$mean" 'BEGIN { exit !(m >= 15) }'; then
+    echo "RESULT: avg ${mean}% accept rate (${above_60}/4 ≥ 60%) — real signal present."
+    echo "         Below the ≥ 60%-on-3/4 default-on threshold, but batched-verify (Phase 3.5)"
+    echo "         could still be a net win if the verify-forward cost is amortized across K drafts."
+    echo "         Improving acceptance: RoPE, Q/K norm, multi-step (K>1) MTP forward chaining."
 else
-    echo "RESULT: 0/4 prompt classes at ≥ 60% — Phase 2.2.Attn+KV (proper MTP attention + KV cache)"
-    echo "         is the prerequisite blocker before Phase 3.5 batched-verify pays off."
+    echo "RESULT: 0/4 prompt classes at ≥ 60% (avg ${mean}%) — Phase 2.2.Attn+KV / RoPE / Q-K-norm"
+    echo "         improvements needed before Phase 3.5 batched-verify pays off."
 fi

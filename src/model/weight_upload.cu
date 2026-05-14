@@ -833,10 +833,28 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
 // All tensors are stored BF16 on disk and run as FP16 on GPU. The MoE expert
 // tensors (3D [n_experts, ...]) are uploaded raw as 3D FP16 — slicing per-
 // expert is the forward kernel's concern (Phase 2 compute).
+//
+// CRITICAL — norm-weight offset: Qwen3.5/3.6 SafeTensors stores RMSNorm
+// gammas as deltas `W` (actual gamma = 1 + W). Without ctx.arch_norm_offset
+// applied during BF16→FP16, MTP norms run with scale ≈ 0 instead of ≈ 1,
+// producing zero output that locks the LM-head argmax to a deterministic
+// noise token. Pass the offset on norm tensors only.
 // ---------------------------------------------------------------------------
 static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     if (!head.loaded) return true;  // nothing to upload
 
+    // Norm uploader: applies arch_norm_offset for Qwen3.5/3.6's `gamma = 1 + W`
+    // convention. Non-norm tensors use the no-offset path.
+    auto up_norm = [&](Tensor& t, const char* name) -> bool {
+        if (t.data == nullptr || t.on_device)
+            return true;
+        if (!upload_weight(t, t.qtype, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
+                           /*raw_quant=*/true, ctx.arch_norm_offset)) {
+            IMP_LOG_ERROR("Failed to upload MTP norm: %s", name);
+            return false;
+        }
+        return true;
+    };
     auto up = [&](Tensor& t, const char* name) -> bool {
         if (t.data == nullptr || t.on_device)
             return true;
@@ -849,17 +867,20 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     };
 
     bool ok = true;
-    ok &= up(head.pre_fc_norm_embedding,    "pre_fc_norm_embedding");
-    ok &= up(head.pre_fc_norm_hidden,       "pre_fc_norm_hidden");
+    // Norm weights — REQUIRE arch_norm_offset for Qwen3.5/3.6
+    ok &= up_norm(head.pre_fc_norm_embedding,    "pre_fc_norm_embedding");
+    ok &= up_norm(head.pre_fc_norm_hidden,       "pre_fc_norm_hidden");
+    ok &= up_norm(head.input_layernorm,          "input_layernorm");
+    ok &= up_norm(head.post_attention_layernorm, "post_attention_layernorm");
+    ok &= up_norm(head.q_norm,                   "q_norm");
+    ok &= up_norm(head.k_norm,                   "k_norm");
+    ok &= up_norm(head.final_norm,               "final_norm");
+    // Projection / MoE weights — no offset
     ok &= up(head.fc,                        "fc");
-    ok &= up(head.input_layernorm,          "input_layernorm");
-    ok &= up(head.post_attention_layernorm, "post_attention_layernorm");
     ok &= up(head.q_proj,                   "q_proj");
     ok &= up(head.k_proj,                   "k_proj");
     ok &= up(head.v_proj,                   "v_proj");
     ok &= up(head.o_proj,                   "o_proj");
-    ok &= up(head.q_norm,                   "q_norm");
-    ok &= up(head.k_norm,                   "k_norm");
     ok &= up(head.router,                   "router");
     ok &= up(head.experts_gate_up_packed,   "experts_gate_up_packed");
     ok &= up(head.experts_down_packed,      "experts_down_packed");
@@ -867,7 +888,6 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     ok &= up(head.shared_expert_up_proj,    "shared_expert_up_proj");
     ok &= up(head.shared_expert_down_proj,  "shared_expert_down_proj");
     ok &= up(head.shared_expert_gate,       "shared_expert_gate");
-    ok &= up(head.final_norm,               "final_norm");
     return ok;
 }
 

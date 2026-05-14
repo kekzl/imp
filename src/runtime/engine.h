@@ -159,10 +159,7 @@ public:
         float rate() const { return total > 0 ? static_cast<float>(matches) / total : 0.0f; }
     };
     MtpAccuracy mtp_accuracy() const noexcept { return mtp_accuracy_; }
-    void mtp_accuracy_reset() noexcept {
-        mtp_accuracy_ = {};
-        mtp_pending_prediction_ = -1;
-    }
+    void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
 
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }

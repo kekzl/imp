@@ -174,10 +174,17 @@ bool Engine::enable_mtp_spec_decode(int k) {
         }
     }
 
+    // MTP KV-cache capacity: cap at the smaller of model's max_seq_len and 16K
+    // (Phase 2.2.Attn+KV budget — ~16 MiB each for K and V at Qwen3.6 dims).
+    constexpr int kMtpKvCap = 16384;
+    int mtp_kv_max = std::min(model_->config_.max_seq_len, kMtpKvCap);
+    if (mtp_kv_max <= 0) mtp_kv_max = kMtpKvCap;
+
     auto* ws = new imp::MtpDraftWorkspace();
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size,
                                       n_experts, top_k, expert_d_ff, shared_d_ff,
-                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim)) {
+                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim,
+                                      mtp_kv_max)) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
@@ -185,10 +192,19 @@ bool Engine::enable_mtp_spec_decode(int k) {
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
     IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d)",
+                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d)",
                  k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim);
+                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max);
     return true;
+}
+
+void Engine::mtp_accuracy_reset() noexcept {
+    mtp_accuracy_ = {};
+    mtp_pending_prediction_ = -1;
+    if (mtp_ws_storage_) {
+        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        imp::mtp_kv_reset(*ws);
+    }
 }
 
 bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
