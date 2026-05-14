@@ -286,6 +286,8 @@ bool Engine::mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidd
 void Engine::mtp_accuracy_reset() noexcept {
     mtp_accuracy_ = {};
     mtp_pending_prediction_ = -1;
+    mtp_pending_chain_.clear();
+    mtp_chain_accept_.clear();
     if (mtp_ws_storage_) {
         auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
         imp::mtp_kv_reset(*ws);
@@ -2711,11 +2713,38 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                              next_token, as.c_str());
             }
         }
-        // Make a new prediction for next step using THIS step's final hidden
-        // state + the just-emitted token.
+        // K-chain measurement: verify pending predictions, then draft fresh.
+        // Current position is the index of the token we just emitted (=
+        // length of input + already-emitted output minus 1).
+        const int cur_pos = valid_decode[0]->context_len() - 1;
+        // Verify any pending predictions whose intended position is cur_pos.
+        if (!mtp_pending_chain_.empty()) {
+            // Drop stale (intended < cur_pos) — shouldn't happen in K=1 path
+            // but possible if the engine skips/restarts mid-chain.
+            mtp_pending_chain_.erase(
+                std::remove_if(mtp_pending_chain_.begin(), mtp_pending_chain_.end(),
+                               [cur_pos](const MtpChainEntry& e) {
+                                   return e.intended_position < cur_pos;
+                               }),
+                mtp_pending_chain_.end());
+            for (auto it = mtp_pending_chain_.begin(); it != mtp_pending_chain_.end();) {
+                if (it->intended_position == cur_pos) {
+                    if (static_cast<int>(mtp_chain_accept_.size()) <= it->lookahead) {
+                        mtp_chain_accept_.resize(it->lookahead + 1);
+                    }
+                    mtp_chain_accept_[it->lookahead].total++;
+                    if (it->prediction == next_token) {
+                        mtp_chain_accept_[it->lookahead].matches++;
+                    }
+                    it = mtp_pending_chain_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
         if (h_view.data != nullptr) {
-            int prediction = -1;
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
 
@@ -2742,11 +2771,38 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 h_for_mtp = s_h_normed;
             }
 
-            if (mtp_draft_one(next_token, h_for_mtp, hidden_dim, vocab_size, &prediction)) {
-                mtp_pending_prediction_ = prediction;
-            } else {
-                mtp_pending_prediction_ = -1;
+            // K-chain draft. K=mtp_spec_k_. For each step k=0..K-1:
+            //   - input: (prev_token_k, h_prev_k)
+            //   - output: prediction_k, ws.d_h_final updated for next iter
+            //   - chain: prev_token_{k+1} = prediction_k, h_prev_{k+1} = d_h_final
+            //
+            // Cache roll-back: each chained call appends to MTP KV cache. Only
+            // the first chain step's append should persist (it represents what
+            // the main model actually does next). Roll back to mtp_pos_saved
+            // after K-1 speculative steps so the real cache stays aligned.
+            auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+            const int K = std::max(1, mtp_spec_k_);
+            const int mtp_pos_before = ws->mtp_pos;
+            int chain_prev_tok = next_token;
+            const void* chain_h_prev = h_for_mtp;
+            for (int k = 0; k < K; ++k) {
+                int prediction = -1;
+                if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size,
+                                    &prediction)) {
+                    break;
+                }
+                mtp_pending_chain_.push_back({prediction, k, cur_pos + 1 + k});
+                // For k=0 only, also feed pending_prediction_ (legacy 1-step
+                // accuracy counter remains in sync with chain_accept_[0]).
+                if (k == 0) mtp_pending_prediction_ = prediction;
+                // Chain: next iter uses this prediction + the MTP's own h_final.
+                chain_prev_tok = prediction;
+                chain_h_prev   = ws->d_h_final;
             }
+            // Roll back the speculative cache writes from K-1 chained steps.
+            // The first chained step (k=0) IS the real "next step" prediction
+            // and matches what would have been drafted in K=1 mode — keep it.
+            ws->mtp_pos = std::min(ws->mtp_pos, mtp_pos_before + 1);
         } else {
             mtp_pending_prediction_ = -1;
         }

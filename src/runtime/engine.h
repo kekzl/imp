@@ -177,6 +177,11 @@ public:
         float rate() const { return total > 0 ? static_cast<float>(matches) / total : 0.0f; }
     };
     MtpAccuracy mtp_accuracy() const noexcept { return mtp_accuracy_; }
+    // Per-lookahead accept rate (Phase 3.5 multi-step diagnostic).
+    // chain_accept_[k] tracks drafts that were the (k+1)-th in a chain at draft
+    // time. chain_accept_[0] == mtp_accuracy_ (next-step prediction).
+    // chain_accept_[1] is the second draft (predicts 2 steps ahead); etc.
+    std::vector<MtpAccuracy> mtp_chain_accept() const noexcept { return mtp_chain_accept_; }
     void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
 
     // Accessors for C API
@@ -287,6 +292,17 @@ private:
     // batch>1, prediction call failed, etc).
     int mtp_pending_prediction_ = -1;
     MtpAccuracy mtp_accuracy_{};
+    // K>1 chain measurement: window of pending predictions. Each entry is
+    // (prediction, lookahead_at_draft, intended_position). When the engine
+    // generates a token at intended_position, the matching entry is verified
+    // and chain_accept_[lookahead] is incremented.
+    struct MtpChainEntry {
+        int prediction;
+        int lookahead;
+        int intended_position;
+    };
+    std::vector<MtpChainEntry> mtp_pending_chain_;
+    std::vector<MtpAccuracy> mtp_chain_accept_;
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;
