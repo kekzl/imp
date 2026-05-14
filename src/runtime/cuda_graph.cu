@@ -5,10 +5,35 @@
 #include "compute/sampling.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
 namespace imp {
+
+// IMP_GRAPH_CAPTURE_MODE = "global" (default) | "relaxed" | "thread_local"
+// Selects the cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and
+// the ConditionalRunner body-graph capture. Probed at first call and cached.
+//
+// Why this exists: CUTLASS 3.x grouped GEMM hangs under cudaStreamCaptureModeGlobal
+// for some NVFP4 MoE configs (see prefill_graph_blockers_2026_05_14). Relaxed
+// drops the cross-thread synchronization constraint and may avoid the deadlock.
+static cudaStreamCaptureMode get_capture_mode() {
+    static cudaStreamCaptureMode cached = []() {
+        const char* env = std::getenv("IMP_GRAPH_CAPTURE_MODE");
+        if (env == nullptr) return cudaStreamCaptureModeGlobal;
+        if (std::strcmp(env, "relaxed") == 0) {
+            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (IMP_GRAPH_CAPTURE_MODE=relaxed)");
+            return cudaStreamCaptureModeRelaxed;
+        }
+        if (std::strcmp(env, "thread_local") == 0) {
+            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeThreadLocal (IMP_GRAPH_CAPTURE_MODE=thread_local)");
+            return cudaStreamCaptureModeThreadLocal;
+        }
+        return cudaStreamCaptureModeGlobal;
+    }();
+    return cached;
+}
 
 // ---------------------------------------------------------------------------
 // apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
@@ -137,7 +162,7 @@ bool CudaGraphCapture::begin_capture(cudaStream_t stream) {
         return false;
     }
 
-    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    cudaError_t err = cudaStreamBeginCapture(stream, get_capture_mode());
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: begin_capture failed: %s", cudaGetErrorString(err));
         return false;
@@ -752,7 +777,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         cudaStreamSynchronize(stream);
 
         err = cudaStreamBeginCaptureToGraph(stream, body_graph, nullptr, nullptr, 0,
-                                            cudaStreamCaptureModeGlobal);
+                                            get_capture_mode());
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
                 "ConditionalRunner: capture failed — falling back to per-step decode "
