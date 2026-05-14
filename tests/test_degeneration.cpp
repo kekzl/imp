@@ -110,6 +110,15 @@ protected:
     ImpModel model_ = nullptr;
     ImpContext ctx_ = nullptr;
 
+    // Set CUBLAS_WORKSPACE_CONFIG=:4096:8 once per test suite. Required for
+    // greedy-deterministic behavior on Blackwell sm_120; harmless on others.
+    // Set before any test creates a cuBLAS handle. setenv is idempotent.
+    static void SetUpTestSuite() {
+        // The 0 (overwrite) means: only set if not already set in env.
+        // Production environments that need a different value can override.
+        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", /*overwrite=*/0);
+    }
+
     void SetUp() override {
         SKIP_IF_NO_MODEL();
 
@@ -182,12 +191,18 @@ TEST_F(DegenerationTest, LongGenerationStability) {
 
 // Test 4: Greedy (temp=0) should be deterministic across calls
 // Greedy (temp=0) should be deterministic across context resets.
-// DISABLED: cuBLAS on Blackwell (sm_120) selects different GEMM algorithms
-// on the second call within the same process, producing different FP16
-// rounding that cascades into completely different greedy output.
-// This is a fundamental cuBLAS behavior, not an imp bug.
-// Fix: set CUBLAS_WORKSPACE_CONFIG=:4096:8 before process start.
-TEST_F(DegenerationTest, DISABLED_GreedyDeterminism) {
+//
+// Fixed 2026-05-14: set CUBLAS_WORKSPACE_CONFIG=:4096:8 in the test process
+// before the cuBLAS handle is created (via setenv in the test body). On
+// Blackwell sm_120 without this, cuBLAS picks different algorithms on
+// successive calls within the same process, producing FP16 rounding drift
+// that cascades into divergent greedy output. The env var pins the
+// workspace size and forces deterministic algo selection.
+//
+// Note: the env var must be set BEFORE any cuBLAS call in this process.
+// Test class SetUp() builds the engine which creates the cuBLAS handle, so
+// setenv must run before that. We use SetUpTestSuite (once per fixture).
+TEST_F(DegenerationTest, GreedyDeterminism) {
     auto gen_greedy = [&](const std::string& prompt) {
         imp_context_reset(ctx_);
         ImpGenerateParams p = imp_generate_params_default();

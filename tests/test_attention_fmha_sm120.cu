@@ -221,8 +221,18 @@ TEST_F(FmhaSm120Test, DispatchSelectsSm120FMHA) {
 }
 
 TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
-    // Manual dispatch test — currently produces zero output for unknown reasons.
-    // The kernel works correctly when called through run_test().
+    // INVESTIGATION 2026-05-14: when called via this manual path, the kernel
+    // produces NaN output even with the IDENTICAL data pattern as run_test()
+    // which works for the same shape (B=1, S=64, NH=4, HD=128, causal). Both
+    // paths route through fmha_sm120_prefill → fmha_sm120_kernel with the
+    // same arguments. Diff is the surrounding setup; likely a CUDA stream /
+    // initialization state issue specific to invoking the kernel from a
+    // top-level TEST_F body rather than the run_test() helper. Reproduced
+    // via gtest_also_run_disabled_tests; debug prints show Q=correct, kernel
+    // returns true, no CUDA error, but O[0..7]=NaN. The kernel works fine
+    // when called via run_test() — see e.g. DispatchSelectsSm120FMHA which
+    // exercises this exact shape and passes.
+    // Leaving DISABLED until someone reproduces under nsys/compute-sanitizer.
     const int B = 1, S = 64, NH = 4, HD = 128;
     size_t bytes = B * S * NH * HD * sizeof(half);
 
@@ -232,13 +242,19 @@ TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
     cudaMalloc(&d_v, bytes);
     cudaMalloc(&d_o, bytes);
 
-    std::vector<half> h_data(B * S * NH * HD);
-    for (size_t i = 0; i < h_data.size(); i++)
-        h_data[i] = __float2half(0.02f * static_cast<float>((i % 7) - 3));
-    cudaMemcpy(d_q, h_data.data(), bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_k, h_data.data(), bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_v, h_data.data(), bytes, cudaMemcpyHostToDevice);
-    cudaMemsetAsync(d_o, 0, bytes, stream_);
+    std::vector<half> h_q(B * S * NH * HD), h_k(B * S * NH * HD), h_v(B * S * NH * HD);
+    for (size_t i = 0; i < h_q.size(); i++) {
+        h_q[i] = __float2half(0.02f * static_cast<float>(((i * 7 + 3) % 13) - 6));
+    }
+    for (size_t i = 0; i < h_k.size(); i++) {
+        h_k[i] = __float2half(0.02f * static_cast<float>(((i * 11 + 5) % 13) - 6));
+        h_v[i] = __float2half(0.02f * static_cast<float>(((i * 13 + 7) % 13) - 6));
+    }
+    cudaMemcpy(d_q, h_q.data(), bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, h_k.data(), bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, h_v.data(), bytes, cudaMemcpyHostToDevice);
+    cudaMemset(d_o, 0, bytes);
+    cudaDeviceSynchronize();
 
     int64_t shape[] = {B, S, NH, HD};
     Tensor Q(d_q, QType::F16, 4, shape, true);
@@ -280,6 +296,12 @@ TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
             q_nonzero++;
     fprintf(stderr, "DEBUG: Q nonzero=%d, O nonzero=%d (of %d)\n", q_nonzero, finite_nonzero,
             B * S * NH * HD);
+    fprintf(stderr, "DEBUG: O[0..7] = %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+            __half2float(h_o[0]), __half2float(h_o[1]), __half2float(h_o[2]), __half2float(h_o[3]),
+            __half2float(h_o[4]), __half2float(h_o[5]), __half2float(h_o[6]), __half2float(h_o[7]));
+    fprintf(stderr, "DEBUG: V[0..7] = %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+            __half2float(h_v[0]), __half2float(h_v[1]), __half2float(h_v[2]), __half2float(h_v[3]),
+            __half2float(h_v[4]), __half2float(h_v[5]), __half2float(h_v[6]), __half2float(h_v[7]));
 
     EXPECT_GT(finite_nonzero, 0)
         << "Dispatch produced all-zero output on sm_120 (expected sm120 FMHA to run)";
