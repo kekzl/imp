@@ -146,6 +146,44 @@ public:
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id);
 
+    // Run MTP forward across all prompt positions to populate the MTP-side
+    // KV cache before decode starts. Without this, MTP enters decode with an
+    // empty KV cache while the main model has the entire prompt context —
+    // a fundamental asymmetry that caps achievable accept rate.
+    //
+    // Inputs:
+    //   prompt_tokens : the full prompt token ids (host array of length n)
+    //   d_hidden      : device buffer [n, hidden_dim] FP16 — main-model hidden
+    //                   states for every prompt position (executor's hidden_
+    //                   buffer right after the prefill forward).
+    //   n             : number of prompt tokens
+    // Side effects:
+    //   - Advances ws.mtp_pos from 0 to n.
+    //   - Stores the LAST position's MTP prediction in mtp_pending_prediction_
+    //     so that the first decode step's accuracy is measured correctly.
+    // Returns false if MTP is disabled or any forward fails (best-effort).
+    bool mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n);
+
+    // Phase 3.5 telemetry: tracks "what fraction of decode-step next-tokens
+    // would the MTP head have correctly predicted from the previous step?"
+    // Populated automatically by step_decode when mtp_spec_decode_enabled()
+    // && single-sequence batches. Does NOT change generation — the actual
+    // next_token still comes from the main forward+sample. Provides the
+    // measurement Phase 5.5 needs to decide whether a batched-verify
+    // implementation of Phase 3.5 is ROI-worthy.
+    struct MtpAccuracy {
+        int matches = 0;
+        int total   = 0;
+        float rate() const { return total > 0 ? static_cast<float>(matches) / total : 0.0f; }
+    };
+    MtpAccuracy mtp_accuracy() const noexcept { return mtp_accuracy_; }
+    // Per-lookahead accept rate (Phase 3.5 multi-step diagnostic).
+    // chain_accept_[k] tracks drafts that were the (k+1)-th in a chain at draft
+    // time. chain_accept_[0] == mtp_accuracy_ (next-step prediction).
+    // chain_accept_[1] is the second draft (predicts 2 steps ahead); etc.
+    std::vector<MtpAccuracy> mtp_chain_accept() const noexcept { return mtp_chain_accept_; }
+    void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
+
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
@@ -246,6 +284,25 @@ private:
     // Defined in <runtime/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
     void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
+
+    // Phase 3.5 telemetry: rolling MTP-draft-accuracy across the active session.
+    // mtp_pending_prediction_ is the prediction made at the end of the
+    // PREVIOUS decode step; it gets compared to the actual next_token at the
+    // start of the CURRENT step. -1 = no pending prediction (start of session,
+    // batch>1, prediction call failed, etc).
+    int mtp_pending_prediction_ = -1;
+    MtpAccuracy mtp_accuracy_{};
+    // K>1 chain measurement: window of pending predictions. Each entry is
+    // (prediction, lookahead_at_draft, intended_position). When the engine
+    // generates a token at intended_position, the matching entry is verified
+    // and chain_accept_[lookahead] is incremented.
+    struct MtpChainEntry {
+        int prediction;
+        int lookahead;
+        int intended_position;
+    };
+    std::vector<MtpChainEntry> mtp_pending_chain_;
+    std::vector<MtpAccuracy> mtp_chain_accept_;
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;

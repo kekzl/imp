@@ -766,6 +766,9 @@ ImpError imp_context_reset(ImpContext ctx) {
     // cause the GPU to read from old KV data.
     ctx->engine->reset_batch_pool_cache();
 
+    // Reset MTP-side KV cache + accuracy telemetry for a clean new session.
+    ctx->engine->mtp_accuracy_reset();
+
     return IMP_SUCCESS;
 }
 

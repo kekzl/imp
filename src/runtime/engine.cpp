@@ -10,6 +10,7 @@
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
 #include "compute/attention.h"
+#include "compute/layernorm.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -154,18 +155,143 @@ bool Engine::enable_mtp_spec_decode(int k) {
     const int top_k        = model_->config_.n_experts_active;
     const int expert_d_ff  = model_->config_.expert_d_ff;
     const int shared_d_ff  = model_->config_.expert_shared_d_ff;
+
+    // MTP attention dims: derived from the MTP head's q_proj / v_proj shapes
+    // because the MTP attention head config differs from the main model
+    // (Qwen3.6 MTP doubles Q output per-head for attn_output_gate).
+    // q_proj shape [2 * num_heads * head_dim, hidden_dim]; v_proj shape
+    // [num_kv_heads * head_dim, hidden_dim]. We use main model's head_dim
+    // as the per-head attention dim and back-compute the MTP head counts.
+    int mtp_num_heads = 0, mtp_num_kv_heads = 0, mtp_head_dim = 0;
+    if (model_->mtp_.has_value() && model_->mtp_->loaded &&
+        model_->mtp_->q_proj.data != nullptr && model_->mtp_->v_proj.data != nullptr) {
+        const int q_out = static_cast<int>(model_->mtp_->q_proj.shape[0]);
+        const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
+        mtp_head_dim     = model_->config_.head_dim;
+        if (mtp_head_dim > 0) {
+            // q_proj outputs 2 × num_heads × head_dim (attn_output_gate=True).
+            mtp_num_heads    = q_out / (2 * mtp_head_dim);
+            mtp_num_kv_heads = v_out / mtp_head_dim;
+        }
+    }
+
+    // MTP KV-cache capacity: cap at the smaller of model's max_seq_len and 16K
+    // (Phase 2.2.Attn+KV budget — ~16 MiB each for K and V at Qwen3.6 dims).
+    constexpr int kMtpKvCap = 16384;
+    int mtp_kv_max = std::min(model_->config_.max_seq_len, kMtpKvCap);
+    if (mtp_kv_max <= 0) mtp_kv_max = kMtpKvCap;
+
     auto* ws = new imp::MtpDraftWorkspace();
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size,
-                                      n_experts, top_k, expert_d_ff, shared_d_ff)) {
+                                      n_experts, top_k, expert_d_ff, shared_d_ff,
+                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim,
+                                      mtp_kv_max)) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
+    // Configure RoPE for the MTP attention (Phase 2.2.Attn+RoPE).
+    // Qwen3.5/3.6 uses partial rope (factor 0.25 → rope_dim=64 of head_dim=256),
+    // theta from config (10M for long-context), NeoX-style.
+    ws->rope_theta       = model_->config_.rope_theta;
+    ws->rope_neox        = model_->config_.rope_neox;
+    ws->rms_norm_eps     = model_->config_.rms_norm_eps;
+    ws->rope_dim         = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
+    // mrope section split. Qwen3.6 ships mrope_section = [11, 11, 10]
+    // (half-counts; full rope_dim = 64 = 2*(11+11+10)). imp doesn't load
+    // this from config yet — hardcoded here based on the on-disk spec.
+    // For text-only generation all 3 positions are equal, so this is
+    // mathematically equivalent to standard partial-rope; the section
+    // split matters only for true multimodal tokens.
+    if (ws->rope_dim == 64) {
+        ws->mrope_sec0 = 11;
+        ws->mrope_sec1 = 11;
+        ws->mrope_sec2 = 10;
+    } else {
+        // Fall back to even-split: all of rope_dim/2 in section 0.
+        ws->mrope_sec0 = ws->rope_dim / 2;
+        ws->mrope_sec1 = 0;
+        ws->mrope_sec2 = 0;
+    }
+    // Diagnostic env: IMP_MTP_NO_ROPE=1 disables RoPE entirely.
+    if (const char* e = std::getenv("IMP_MTP_NO_ROPE"); e && e[0] != '0') {
+        ws->rope_dim = 0;
+    }
+    // Runtime weight_offset matches what the main model's rmsnorm calls pass:
+    // norm_weight_offset from ModelConfig. For Qwen3.5/3.6 this is 0.0 because
+    // the +1 (gamma = 1 + W) was already baked in during weight upload (see
+    // upload_mtp_weights in weight_upload.cu). For Gemma-3 it's 1.0. Don't
+    // double-apply.
+    ws->arch_norm_offset = model_->config_.norm_weight_offset;
+
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
     IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d)", k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff);
+                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s, "
+                 "mrope=[%d,%d,%d])",
+                 k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
+                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
+                 ws->rope_theta, ws->rope_dim, ws->rope_neox ? "neox" : "interleaved",
+                 ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
     return true;
+}
+
+bool Engine::mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n) {
+    if (mtp_ws_storage_ == nullptr) return false;
+    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded) return false;
+    if (n <= 0 || prompt_tokens == nullptr || d_hidden == nullptr) return false;
+
+    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    if (ws->mtp_pos > 0) {
+        IMP_LOG_WARN("mtp_prefill_prompt: cache already populated (pos=%d); skipping", ws->mtp_pos);
+        return false;
+    }
+
+    const int hidden_dim = model_->config_.d_model;
+    const int vocab_size = model_->config_.vocab_size;
+    const __half* hidden = static_cast<const __half*>(d_hidden);
+
+    // For each prompt position i in [0, n): run MTP forward with prev_token =
+    // prompt_tokens[i] and d_h_prev = hidden[i]. Each call appends one row to
+    // the MTP KV cache and advances mtp_pos. The last position's prediction
+    // (i.e., what MTP thinks comes AFTER the prompt) becomes the pending
+    // prediction for accuracy measurement on the first decode step.
+    int last_prediction = -1;
+    for (int i = 0; i < n; ++i) {
+        const void* h_i = hidden + static_cast<int64_t>(i) * hidden_dim;
+        int prediction = -1;
+        bool ok = imp::mtp_draft_step(
+            prompt_tokens[i],
+            h_i,
+            *model_->mtp_,
+            model_->tok_emb_,
+            model_->out_proj_,
+            *ws,
+            hidden_dim, vocab_size,
+            &prediction,
+            decode_stream());
+        if (!ok) {
+            IMP_LOG_WARN("mtp_prefill_prompt: forward failed at position %d/%d — abandoning", i, n);
+            return false;
+        }
+        last_prediction = prediction;
+    }
+
+    mtp_pending_prediction_ = last_prediction;
+    IMP_LOG_INFO("MTP prefill: %d prompt positions cached (mtp_pos=%d), pending prediction=%d",
+                 n, ws->mtp_pos, last_prediction);
+    return true;
+}
+
+void Engine::mtp_accuracy_reset() noexcept {
+    mtp_accuracy_ = {};
+    mtp_pending_prediction_ = -1;
+    mtp_pending_chain_.clear();
+    mtp_chain_accept_.clear();
+    if (mtp_ws_storage_) {
+        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        imp::mtp_kv_reset(*ws);
+    }
 }
 
 bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
@@ -2206,6 +2332,23 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]", (int)req->output_tokens.size(),
                       req->context_len(), next_token, tok->decode_token(next_token).c_str());
 
+        // MTP prefill: populate MTP KV cache with all prompt position hidden
+        // states so the head enters decode with the same context as the main
+        // model. Only the LAST chunk (where we have the complete tail of the
+        // prompt in executor's hidden_ buffer) and only the non-chunked path
+        // for now (chunked prefill would need per-chunk capture). Cost: ~n
+        // extra MTP forwards, one-time per session.
+        if (mtp_spec_decode_enabled() && offset == 0 && req->prefill_offset == 0) {
+            // executor's hidden_ buffer holds [chunk_len, d_model] FP16 right
+            // after forward_logits; that matches the whole prompt when
+            // offset==0 and is_last_chunk==true.
+            const int n_prompt = chunk_len;
+            imp::Tensor h_view = executor_->view_hidden(n_prompt);
+            if (h_view.data != nullptr) {
+                mtp_prefill_prompt(req->input_tokens.data(), h_view.data, n_prompt);
+            }
+        }
+
         // Update constraint FSM
         constraints_.update(next_token);
 
@@ -2543,6 +2686,130 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         residual_meta_d_buf_ = nullptr;
     }
 
+    // Phase 3.5 telemetry: measure MTP-draft prediction accuracy without
+    // changing generation. Single-sequence only (batch=1 simplifies hidden-
+    // state addressing). Skipped when MTP is disabled or the workspace was
+    // allocated without attention dims (older callers).
+    if (mtp_spec_decode_enabled() && model_ && model_->mtp_.has_value() &&
+        model_->mtp_->loaded && gpu_batch.n_sequences == 1 && !tokens.empty()) {
+        const int32_t next_token = tokens[0];
+        if (mtp_pending_prediction_ >= 0) {
+            mtp_accuracy_.total++;
+            bool match = (mtp_pending_prediction_ == next_token);
+            if (match) mtp_accuracy_.matches++;
+            // Optional verbose log: prints (predicted, actual, match) with
+            // decoded strings so accept patterns can be analyzed offline.
+            static const bool s_pattern_log = []() {
+                const char* e = std::getenv("IMP_MTP_PATTERN_LOG");
+                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
+            }();
+            if (s_pattern_log) {
+                Tokenizer* tok = model_->tokenizer();
+                std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
+                std::string as = tok ? tok->decode_token(next_token) : std::string();
+                IMP_LOG_INFO("MTP-PAT %s pred=%d '%s' actual=%d '%s'",
+                             match ? "+" : "-",
+                             mtp_pending_prediction_, ps.c_str(),
+                             next_token, as.c_str());
+            }
+        }
+        // K-chain measurement: verify pending predictions, then draft fresh.
+        // Current position is the index of the token we just emitted (=
+        // length of input + already-emitted output minus 1).
+        const int cur_pos = valid_decode[0]->context_len() - 1;
+        // Verify any pending predictions whose intended position is cur_pos.
+        if (!mtp_pending_chain_.empty()) {
+            // Drop stale (intended < cur_pos) — shouldn't happen in K=1 path
+            // but possible if the engine skips/restarts mid-chain.
+            mtp_pending_chain_.erase(
+                std::remove_if(mtp_pending_chain_.begin(), mtp_pending_chain_.end(),
+                               [cur_pos](const MtpChainEntry& e) {
+                                   return e.intended_position < cur_pos;
+                               }),
+                mtp_pending_chain_.end());
+            for (auto it = mtp_pending_chain_.begin(); it != mtp_pending_chain_.end();) {
+                if (it->intended_position == cur_pos) {
+                    if (static_cast<int>(mtp_chain_accept_.size()) <= it->lookahead) {
+                        mtp_chain_accept_.resize(it->lookahead + 1);
+                    }
+                    mtp_chain_accept_[it->lookahead].total++;
+                    if (it->prediction == next_token) {
+                        mtp_chain_accept_[it->lookahead].matches++;
+                    }
+                    it = mtp_pending_chain_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
+        if (h_view.data != nullptr) {
+            const int hidden_dim = model_->config_.d_model;
+            const int vocab_size = model_->config_.vocab_size;
+
+            // Optional: apply the main model's output norm before passing
+            // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
+            // in some MTP variants; gate by env so we can A/B.
+            static const bool s_pre_norm_h = []() {
+                const char* e = std::getenv("IMP_MTP_PRENORM_H");
+                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
+            }();
+            const void* h_for_mtp = h_view.data;
+            // Scratch buffer for the normalized variant (allocated once).
+            static void* s_h_normed = nullptr;
+            if (s_pre_norm_h) {
+                if (s_h_normed == nullptr) {
+                    cudaMalloc(&s_h_normed, hidden_dim * sizeof(__half));
+                }
+                int64_t hd_shape[2] = {1, hidden_dim};
+                Tensor in_view (h_view.data, QType::F16, 2, hd_shape, true);
+                Tensor out_view(s_h_normed,  QType::F16, 2, hd_shape, true);
+                imp::rmsnorm(in_view, model_->output_norm(), out_view,
+                             model_->config_.rms_norm_eps, decode_stream(),
+                             model_->config_.norm_weight_offset);
+                h_for_mtp = s_h_normed;
+            }
+
+            // K-chain draft. K=mtp_spec_k_. For each step k=0..K-1:
+            //   - input: (prev_token_k, h_prev_k)
+            //   - output: prediction_k, ws.d_h_final updated for next iter
+            //   - chain: prev_token_{k+1} = prediction_k, h_prev_{k+1} = d_h_final
+            //
+            // Cache roll-back: each chained call appends to MTP KV cache. Only
+            // the first chain step's append should persist (it represents what
+            // the main model actually does next). Roll back to mtp_pos_saved
+            // after K-1 speculative steps so the real cache stays aligned.
+            auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+            const int K = std::max(1, mtp_spec_k_);
+            const int mtp_pos_before = ws->mtp_pos;
+            int chain_prev_tok = next_token;
+            const void* chain_h_prev = h_for_mtp;
+            for (int k = 0; k < K; ++k) {
+                int prediction = -1;
+                if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size,
+                                    &prediction)) {
+                    break;
+                }
+                mtp_pending_chain_.push_back({prediction, k, cur_pos + 1 + k});
+                // For k=0 only, also feed pending_prediction_ (legacy 1-step
+                // accuracy counter remains in sync with chain_accept_[0]).
+                if (k == 0) mtp_pending_prediction_ = prediction;
+                // Chain: next iter uses this prediction + the MTP's own h_final.
+                chain_prev_tok = prediction;
+                chain_h_prev   = ws->d_h_final;
+            }
+            // Roll back the speculative cache writes from K-1 chained steps.
+            // The first chained step (k=0) IS the real "next step" prediction
+            // and matches what would have been drafted in K=1 mode — keep it.
+            ws->mtp_pos = std::min(ws->mtp_pos, mtp_pos_before + 1);
+        } else {
+            mtp_pending_prediction_ = -1;
+        }
+    } else {
+        mtp_pending_prediction_ = -1;  // batch>1 or MTP off → clear pending
+    }
+
     // Process outputs: logprobs extraction + token distribution
     step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_json_mode,
                                 needs_schema_mode, dec_stream);
@@ -2627,7 +2894,11 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // skipped inside the captured graph — stay on the eager path instead.
         const bool async_compatible = dreq->logit_bias.empty() && dreq->mirostat == 0 &&
                                       dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
-                                      dreq->typical_p >= 1.0f;
+                                      dreq->typical_p >= 1.0f &&
+                                      // Phase 3.5 MTP telemetry hooks the per-step path; the async
+                                      // conditional-graph loop bypasses it. Stay eager when MTP is on
+                                      // so accuracy measurement covers the whole generation.
+                                      !mtp_spec_decode_enabled();
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
         // ship them as added_tokens with special=False, leaving think_end_id_

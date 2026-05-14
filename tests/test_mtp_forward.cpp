@@ -70,9 +70,23 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
     ASSERT_EQ(expert_d_ff, 512);
     ASSERT_EQ(shared_d_ff, 512);
 
+    // Attention dims: derive from MTP head's q_proj / v_proj shapes (different
+    // from the main model because Qwen3.6 MTP uses attn_output_gate=True).
+    ASSERT_NE(model->mtp_->q_proj.data, nullptr);
+    ASSERT_NE(model->mtp_->v_proj.data, nullptr);
+    const int q_out          = static_cast<int>(model->mtp_->q_proj.shape[0]);
+    const int v_out          = static_cast<int>(model->mtp_->v_proj.shape[0]);
+    const int mtp_head_dim   = model->config_.head_dim;
+    const int mtp_num_heads  = q_out / (2 * mtp_head_dim);
+    const int mtp_num_kv     = v_out / mtp_head_dim;
+    EXPECT_EQ(mtp_head_dim, 256);
+    EXPECT_EQ(mtp_num_heads, 16);
+    EXPECT_EQ(mtp_num_kv, 2);
+
     imp::MtpDraftWorkspace ws{};
     ASSERT_TRUE(imp::mtp_workspace_allocate(ws, hidden_dim, vocab_size,
-                                             n_experts, top_k, expert_d_ff, shared_d_ff));
+                                             n_experts, top_k, expert_d_ff, shared_d_ff,
+                                             mtp_num_heads, mtp_num_kv, mtp_head_dim));
 
     // Build a host-side random FP16 hidden state, upload.
     std::mt19937 rng(42);
