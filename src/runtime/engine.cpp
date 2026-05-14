@@ -7,6 +7,7 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/gemm.h"
+#include "compute/attention_cublas.h"
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
 #include "compute/attention.h"
@@ -963,6 +964,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     gemm_init();
+    attention_cublas_prewarm();
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
 
@@ -2233,7 +2235,32 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->use_workspace(0);
         }
         Tensor logits_out;
-        executor_->forward_logits(state, logits_out, pf_stream);
+
+        // Prefill graph capture (opt-in, Phase 4 of MoE-prefill-graphs work).
+        // Conditions: env-gated, pool path (stable device buffers), and
+        // chunk shape stable (in practice all non-last chunks share chunk_len
+        // = prefill_chunk_size). H2D upload happened above on pf_stream
+        // *before* this wrapper — captured region is forward_logits only,
+        // analogous to the decode graph pattern.
+        static const bool prefill_graph_enabled = (std::getenv("IMP_PREFILL_GRAPH") != nullptr);
+        const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs;
+        if (can_capture) {
+            const int block_count = static_cast<int>(block_table.size());
+            if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {
+                prefill_graph_runner_.invalidate_for_update();
+                last_prefill_chunk_len_ = chunk_len;
+                last_prefill_block_count_ = block_count;
+            }
+            prefill_graph_runner_.set_decode_fn([this, &state, &logits_out](cudaStream_t s) {
+                executor_->forward_logits(state, logits_out, s);
+            });
+            prefill_graph_runner_.execute(pf_stream);
+            if (logits_out.data == nullptr) {
+                logits_out = executor_->get_logits_view(/*n_sequences=*/1);
+            }
+        } else {
+            executor_->forward_logits(state, logits_out, pf_stream);
+        }
 
         if (!pf_pool_used) {
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);

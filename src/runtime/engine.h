@@ -223,6 +223,14 @@ private:
     static constexpr int kMaxGraphPoolSize = 32;
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
+
+    // Prefill graph runner — captures forward_logits for non-last chunks of
+    // chunked prefill. Single runner: in practice chunk_len == prefill_chunk_size
+    // for all non-last chunks, so per-shape variability collapses to one shape.
+    // Opt-in via IMP_PREFILL_GRAPH=1 (Phase 4 of MoE-prefill-graphs work).
+    CudaGraphRunner prefill_graph_runner_;
+    int last_prefill_chunk_len_ = -1;
+    int last_prefill_block_count_ = -1;
     int32_t* h_sample_pinned_ = nullptr;
     // Async conditional graph loop
     CudaGraphConditionalRunner async_graph_runner_;
