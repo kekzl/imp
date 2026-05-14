@@ -235,6 +235,53 @@ bool Engine::enable_mtp_spec_decode(int k) {
     return true;
 }
 
+bool Engine::mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n) {
+    if (mtp_ws_storage_ == nullptr) return false;
+    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded) return false;
+    if (n <= 0 || prompt_tokens == nullptr || d_hidden == nullptr) return false;
+
+    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    if (ws->mtp_pos > 0) {
+        IMP_LOG_WARN("mtp_prefill_prompt: cache already populated (pos=%d); skipping", ws->mtp_pos);
+        return false;
+    }
+
+    const int hidden_dim = model_->config_.d_model;
+    const int vocab_size = model_->config_.vocab_size;
+    const __half* hidden = static_cast<const __half*>(d_hidden);
+
+    // For each prompt position i in [0, n): run MTP forward with prev_token =
+    // prompt_tokens[i] and d_h_prev = hidden[i]. Each call appends one row to
+    // the MTP KV cache and advances mtp_pos. The last position's prediction
+    // (i.e., what MTP thinks comes AFTER the prompt) becomes the pending
+    // prediction for accuracy measurement on the first decode step.
+    int last_prediction = -1;
+    for (int i = 0; i < n; ++i) {
+        const void* h_i = hidden + static_cast<int64_t>(i) * hidden_dim;
+        int prediction = -1;
+        bool ok = imp::mtp_draft_step(
+            prompt_tokens[i],
+            h_i,
+            *model_->mtp_,
+            model_->tok_emb_,
+            model_->out_proj_,
+            *ws,
+            hidden_dim, vocab_size,
+            &prediction,
+            decode_stream());
+        if (!ok) {
+            IMP_LOG_WARN("mtp_prefill_prompt: forward failed at position %d/%d — abandoning", i, n);
+            return false;
+        }
+        last_prediction = prediction;
+    }
+
+    mtp_pending_prediction_ = last_prediction;
+    IMP_LOG_INFO("MTP prefill: %d prompt positions cached (mtp_pos=%d), pending prediction=%d",
+                 n, ws->mtp_pos, last_prediction);
+    return true;
+}
+
 void Engine::mtp_accuracy_reset() noexcept {
     mtp_accuracy_ = {};
     mtp_pending_prediction_ = -1;
@@ -2281,6 +2328,23 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tokenizer* tok = model_->tokenizer();
         IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]", (int)req->output_tokens.size(),
                       req->context_len(), next_token, tok->decode_token(next_token).c_str());
+
+        // MTP prefill: populate MTP KV cache with all prompt position hidden
+        // states so the head enters decode with the same context as the main
+        // model. Only the LAST chunk (where we have the complete tail of the
+        // prompt in executor's hidden_ buffer) and only the non-chunked path
+        // for now (chunked prefill would need per-chunk capture). Cost: ~n
+        // extra MTP forwards, one-time per session.
+        if (mtp_spec_decode_enabled() && offset == 0 && req->prefill_offset == 0) {
+            // executor's hidden_ buffer holds [chunk_len, d_model] FP16 right
+            // after forward_logits; that matches the whole prompt when
+            // offset==0 and is_last_chunk==true.
+            const int n_prompt = chunk_len;
+            imp::Tensor h_view = executor_->view_hidden(n_prompt);
+            if (h_view.data != nullptr) {
+                mtp_prefill_prompt(req->input_tokens.data(), h_view.data, n_prompt);
+            }
+        }
 
         // Update constraint FSM
         constraints_.update(next_token);

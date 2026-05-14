@@ -146,6 +146,24 @@ public:
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id);
 
+    // Run MTP forward across all prompt positions to populate the MTP-side
+    // KV cache before decode starts. Without this, MTP enters decode with an
+    // empty KV cache while the main model has the entire prompt context —
+    // a fundamental asymmetry that caps achievable accept rate.
+    //
+    // Inputs:
+    //   prompt_tokens : the full prompt token ids (host array of length n)
+    //   d_hidden      : device buffer [n, hidden_dim] FP16 — main-model hidden
+    //                   states for every prompt position (executor's hidden_
+    //                   buffer right after the prefill forward).
+    //   n             : number of prompt tokens
+    // Side effects:
+    //   - Advances ws.mtp_pos from 0 to n.
+    //   - Stores the LAST position's MTP prediction in mtp_pending_prediction_
+    //     so that the first decode step's accuracy is measured correctly.
+    // Returns false if MTP is disabled or any forward fails (best-effort).
+    bool mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n);
+
     // Phase 3.5 telemetry: tracks "what fraction of decode-step next-tokens
     // would the MTP head have correctly predicted from the previous step?"
     // Populated automatically by step_decode when mtp_spec_decode_enabled()
