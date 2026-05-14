@@ -769,6 +769,16 @@ ImpError imp_context_reset(ImpContext ctx) {
     return IMP_SUCCESS;
 }
 
+// --- MTP spec-decode (Phase 4) ---
+
+ImpError imp_enable_mtp_spec_decode(ImpContext ctx, int k) {
+    if (!ctx) return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine) return IMP_ERROR_INTERNAL;
+    if (k <= 0) return IMP_ERROR_INVALID_ARG;
+    return ctx->engine->enable_mtp_spec_decode(k) ? IMP_SUCCESS
+                                                  : IMP_ERROR_INVALID_ARG;
+}
+
 // --- Vision (Multimodal) ---
 
 ImpError imp_set_image(ImpContext ctx, const char* image_path) {

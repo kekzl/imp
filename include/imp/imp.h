@@ -117,6 +117,13 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
 // Reset context state (clear KV cache etc.)
 ImpError imp_context_reset(ImpContext ctx);
 
+// Enable MTP-based speculative decoding (DeepSeek-V3-family models, e.g.
+// Qwen3.6 with `model_mtp.safetensors`). k = draft length (1-4 typical).
+// Returns IMP_ERROR_INVALID_ARGUMENT if model has no MTP head loaded.
+// Phase 3 scaffolding: API in place, auto-invocation from decode loop is
+// Phase 4 production work (currently Phase 5 smoke tests use the C++ API).
+ImpError imp_enable_mtp_spec_decode(ImpContext ctx, int k);
+
 // --- Vision (Multimodal) ---
 
 // Set an image for the next generation. Must be called after imp_context_create

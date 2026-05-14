@@ -55,6 +55,7 @@ void print_usage(const char* prog) {
             "deepseek_r1, phi\n"
             "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = single-chunk, default: per-arch)\n"
             "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
+            "  --mtp-spec-decode <k> Enable MTP spec-decode with draft length k (requires model_mtp.safetensors)\n"
             "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
             "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
             "  --prefix-caching      Reuse KV cache blocks for shared token prefixes\n"
@@ -173,6 +174,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.chat_template = argv[++i];
         } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--mtp-spec-decode") == 0 && i + 1 < argc) {
+            args.mtp_spec_decode_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefill-fp8") == 0) {
             args.prefill_fp8 = true;
         } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {

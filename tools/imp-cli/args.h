@@ -54,6 +54,7 @@ struct CliArgs {
     bool no_cuda_graphs = false;         // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
     int prefill_chunk_size = -1;         // --prefill-chunk-size: >=0 = explicit chunk, -1 = use engine default (per-arch)
+    int mtp_spec_decode_k = 0;           // --mtp-spec-decode K: 0 = off, >0 = MTP draft length
     bool prefill_fp8 = false;            // --prefill-fp8: use FP8 E4M3 weight cache for prefill
     int decode_nvfp4 = -1;               // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;          // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill

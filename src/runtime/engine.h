@@ -132,6 +132,20 @@ public:
     bool has_vision() const noexcept { return vision_.is_available(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
 
+    // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
+    // Requires model->mtp_->loaded. Allocates the MTP workspace via the VRAM
+    // allocator. Returns false if MTP head not present or workspace alloc fails.
+    // Phase 3 scaffolding: API in place; actual draft-verify loop integration
+    // is Phase 4 work (auto-invoke from decode path).
+    bool enable_mtp_spec_decode(int k);
+    bool mtp_spec_decode_enabled() const noexcept { return mtp_spec_k_ > 0; }
+    int  mtp_spec_decode_k() const noexcept { return mtp_spec_k_; }
+
+    // One draft step. Public for Phase 5 smoke testing; production callers
+    // should not invoke directly until Phase 4 wires this into the decode loop.
+    bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
+                       int hidden_dim, int vocab_size, int* out_token_id);
+
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
@@ -222,6 +236,16 @@ private:
     std::vector<int> residual_meta_h_widxes_;
     // Last-uploaded slot per batch position; only re-upload when changed.
     std::vector<int> d_kv_slot_last_uploaded_;
+
+    // ── MTP spec-decode (Phase 3 scaffolding) ──────────────────────
+    // Workspace + draft length for MTP-driven speculative decoding. Active
+    // when mtp_spec_k_ > 0 AND the loaded model has model->mtp_->loaded.
+    // Phase 3: API in place (enable_mtp_spec_decode + mtp_draft_step), NOT
+    // yet auto-invoked by the decode loop. Phase 4 wires CLI flag, Phase 5
+    // measures acceptance.
+    // Defined in <runtime/mtp_forward.h>; forward-declared to avoid include.
+    int mtp_spec_k_ = 0;
+    void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;
