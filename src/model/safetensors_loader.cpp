@@ -919,54 +919,95 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
 
     IMP_LOG_INFO("Parsed %zu tensors from SafeTensors", tensor_map.size());
 
-    // Detect MTP head sidecar (DeepSeek-V3-family models, e.g. Qwen3.6).
-    // Phase 1.A: detection + metadata only — tensors are NOT loaded here and
-    // the main weight path continues to skip the `mtp.` prefix in
-    // llm_compressor_loader. Wiring forward+verify is in the design spec
-    // `docs/superpowers/specs/2026-05-14-mtp-wiring-design.md`.
-    std::optional<imp::MtpHeadInfo> mtp_info_local;
+    // Detect + LOAD MTP head sidecar (DeepSeek-V3-family models, e.g. Qwen3.6).
+    // Phase 1.B: actual tensor load into Model::mtp_. The main load path
+    // continues to skip the `mtp.` prefix; this sidecar load builds a separate
+    // host tensor_map keyed by raw `mtp.*` names and dispatches to MtpHead fields.
+    // Mmap is retained via Model::split_mmaps_ so Tensor pointers stay valid.
+    std::optional<imp::MtpHead> mtp_local;
+    std::unordered_map<std::string, Tensor> mtp_tensor_map;
+    ShardInfo mtp_shard{};
     if (!model_dir.empty()) {
         std::string mtp_path = model_dir + "/model_mtp.safetensors";
         std::error_code ec;
         auto sz = fs::file_size(mtp_path, ec);
         if (!ec && sz > 0) {
-            int n_tensors = 0;
-            std::ifstream mtp_ifs(mtp_path, std::ios::binary);
-            if (mtp_ifs.is_open()) {
-                uint64_t header_size = 0;
-                mtp_ifs.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
-                if (mtp_ifs.good() && header_size > 0 && header_size < 64 * 1024 * 1024) {
-                    std::string header_str(static_cast<size_t>(header_size), '\0');
-                    mtp_ifs.read(header_str.data(), static_cast<std::streamsize>(header_size));
-                    if (mtp_ifs.good()) {
-                        JsonParser hp(header_str.data(), header_str.size());
-                        JValue h = hp.parse();
-                        if (hp.ok() && h.type == JType::OBJECT) {
-                            for (const auto& kv : h.obj) {
-                                if (kv.first.rfind("__", 0) != 0)
-                                    n_tensors++;
-                            }
-                        }
-                    }
+            // Load the file as a standalone shard. llm_compressor_format=false
+            // so translate_name() is NOT applied — MTP tensor names need to
+            // stay literal for dispatch.
+            imp::llm_compressor::TranslationCounters mtp_counters{};
+            bool mtp_loaded = load_shard(mtp_path, mtp_tensor_map, mtp_shard,
+                                          /*llm_compressor_format=*/false, mtp_counters);
+            if (mtp_loaded) {
+                imp::MtpHead head;
+                head.info.path       = mtp_path;
+                head.info.file_bytes = static_cast<size_t>(sz);
+                head.info.n_tensors  = static_cast<int>(mtp_tensor_map.size());
+
+                // Dispatch tensors to named fields. Returns true when assigned.
+                auto take = [&](const char* key, Tensor& dst) -> bool {
+                    auto it = mtp_tensor_map.find(key);
+                    if (it == mtp_tensor_map.end()) return false;
+                    dst = it->second;
+                    return true;
+                };
+
+                bool ok = true;
+                ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
+                ok &= take("mtp.pre_fc_norm_hidden.weight",    head.pre_fc_norm_hidden);
+                ok &= take("mtp.fc.weight",                    head.fc);
+                ok &= take("mtp.layers.0.input_layernorm.weight",
+                           head.input_layernorm);
+                ok &= take("mtp.layers.0.post_attention_layernorm.weight",
+                           head.post_attention_layernorm);
+                ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
+                ok &= take("mtp.layers.0.self_attn.k_proj.weight", head.k_proj);
+                ok &= take("mtp.layers.0.self_attn.v_proj.weight", head.v_proj);
+                ok &= take("mtp.layers.0.self_attn.o_proj.weight", head.o_proj);
+                ok &= take("mtp.layers.0.self_attn.q_norm.weight", head.q_norm);
+                ok &= take("mtp.layers.0.self_attn.k_norm.weight", head.k_norm);
+                ok &= take("mtp.layers.0.mlp.gate.weight", head.router);
+                ok &= take("mtp.layers.0.mlp.experts.gate_up_proj",
+                           head.experts_gate_up_packed);
+                ok &= take("mtp.layers.0.mlp.experts.down_proj",
+                           head.experts_down_packed);
+                ok &= take("mtp.layers.0.mlp.shared_expert.gate_proj.weight",
+                           head.shared_expert_gate_proj);
+                ok &= take("mtp.layers.0.mlp.shared_expert.up_proj.weight",
+                           head.shared_expert_up_proj);
+                ok &= take("mtp.layers.0.mlp.shared_expert.down_proj.weight",
+                           head.shared_expert_down_proj);
+                ok &= take("mtp.layers.0.mlp.shared_expert_gate.weight",
+                           head.shared_expert_gate);
+                ok &= take("mtp.norm.weight", head.final_norm);
+
+                head.loaded = ok;
+                if (ok) {
+                    IMP_LOG_INFO("MTP head loaded: %s (%.2f GiB, %d tensors, BF16)",
+                                 mtp_path.c_str(),
+                                 static_cast<double>(sz) / (1024.0 * 1024.0 * 1024.0),
+                                 head.info.n_tensors);
+                } else {
+                    IMP_LOG_WARN("MTP head detected at %s but some expected tensors were "
+                                 "missing; spec-decode disabled for this model",
+                                 mtp_path.c_str());
                 }
+                mtp_local = std::move(head);
+            } else {
+                IMP_LOG_WARN("MTP head file %s present but failed to load", mtp_path.c_str());
             }
-            imp::MtpHeadInfo info;
-            info.path       = mtp_path;
-            info.file_bytes = static_cast<size_t>(sz);
-            info.n_tensors  = n_tensors;
-            IMP_LOG_INFO("MTP head detected: %s (%.2f GiB, %d tensors) — not yet wired (see "
-                         "docs/superpowers/specs/2026-05-14-mtp-wiring-design.md)",
-                         mtp_path.c_str(),
-                         static_cast<double>(sz) / (1024.0 * 1024.0 * 1024.0),
-                         n_tensors);
-            mtp_info_local = std::move(info);
         }
     }
 
     // Create model
     auto model = std::make_unique<Model>();
-    if (mtp_info_local.has_value()) {
-        model->mtp_info_ = std::move(mtp_info_local);
+    if (mtp_local.has_value()) {
+        model->mtp_ = std::move(mtp_local);
+        // Retain MTP mmap so Tensor data pointers stay valid for the lifetime
+        // of the Model. Cleaned up by Model destructor like other shard mmaps.
+        if (mtp_shard.mmap_base != nullptr) {
+            model->split_mmaps_.emplace_back(mtp_shard.mmap_base, mtp_shard.mmap_size);
+        }
     }
 
     // Store mmap info for cleanup

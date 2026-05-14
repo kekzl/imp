@@ -2,6 +2,7 @@
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
+#include "runtime/mtp_forward.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
@@ -116,8 +117,67 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_token_ids_));
         h_pf_token_ids_ = nullptr;
     }
+    // MTP spec-decode workspace cleanup
+    if (mtp_ws_storage_) {
+        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        imp::mtp_workspace_free(*ws);
+        delete ws;
+        mtp_ws_storage_ = nullptr;
+        mtp_spec_k_ = 0;
+    }
     // stream_, prefill_done_, decode_done_ cleaned up by CudaStream/CudaEvent RAII
     // vision_ cleaned up by VisionPipeline RAII
+}
+
+// ── MTP spec-decode API (Phase 3 scaffolding) ─────────────────────────
+bool Engine::enable_mtp_spec_decode(int k) {
+    if (k <= 0) {
+        IMP_LOG_ERROR("enable_mtp_spec_decode: k must be > 0 (got %d)", k);
+        return false;
+    }
+    if (!model_) {
+        IMP_LOG_ERROR("enable_mtp_spec_decode: no model loaded");
+        return false;
+    }
+    if (!model_->mtp_.has_value() || !model_->mtp_->loaded) {
+        IMP_LOG_ERROR("enable_mtp_spec_decode: model has no MTP head loaded");
+        return false;
+    }
+    if (mtp_ws_storage_ != nullptr) {
+        IMP_LOG_WARN("enable_mtp_spec_decode: already enabled, k=%d -> %d", mtp_spec_k_, k);
+        mtp_spec_k_ = k;
+        return true;
+    }
+    const int hidden_dim = model_->config_.d_model;
+    const int vocab_size = model_->config_.vocab_size;
+    auto* ws = new imp::MtpDraftWorkspace();
+    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size)) {
+        delete ws;
+        IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
+        return false;
+    }
+    mtp_ws_storage_ = ws;
+    mtp_spec_k_ = k;
+    IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, workspace allocated)",
+                 k, hidden_dim, vocab_size);
+    return true;
+}
+
+bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
+                           int hidden_dim, int vocab_size, int* out_token_id) {
+    if (mtp_ws_storage_ == nullptr) {
+        IMP_LOG_ERROR("mtp_draft_one: spec-decode not enabled");
+        return false;
+    }
+    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded) {
+        IMP_LOG_ERROR("mtp_draft_one: MTP head not loaded");
+        return false;
+    }
+    const auto* ws = static_cast<const imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_,
+                                model_->tok_emb_, model_->out_proj_,
+                                *ws, hidden_dim, vocab_size, out_token_id,
+                                decode_stream());
 }
 
 // =====================================================================

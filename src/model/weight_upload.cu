@@ -828,6 +828,50 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
 }
 
 // ---------------------------------------------------------------------------
+// upload_mtp_weights: BF16 → FP16 upload of the MTP head (Phase 2 prereq).
+// Walks all 19 named tensors in MtpHead and uploads each via upload_weight().
+// All tensors are stored BF16 on disk and run as FP16 on GPU. The MoE expert
+// tensors (3D [n_experts, ...]) are uploaded raw as 3D FP16 — slicing per-
+// expert is the forward kernel's concern (Phase 2 compute).
+// ---------------------------------------------------------------------------
+static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
+    if (!head.loaded) return true;  // nothing to upload
+
+    auto up = [&](Tensor& t, const char* name) -> bool {
+        if (t.data == nullptr || t.on_device)
+            return true;
+        if (!upload_unquantized_weight(t, t.qtype, ctx.compute_dtype,
+                                       ctx.stream, ctx.gpu_allocs)) {
+            IMP_LOG_ERROR("Failed to upload MTP tensor: %s", name);
+            return false;
+        }
+        return true;
+    };
+
+    bool ok = true;
+    ok &= up(head.pre_fc_norm_embedding,    "pre_fc_norm_embedding");
+    ok &= up(head.pre_fc_norm_hidden,       "pre_fc_norm_hidden");
+    ok &= up(head.fc,                        "fc");
+    ok &= up(head.input_layernorm,          "input_layernorm");
+    ok &= up(head.post_attention_layernorm, "post_attention_layernorm");
+    ok &= up(head.q_proj,                   "q_proj");
+    ok &= up(head.k_proj,                   "k_proj");
+    ok &= up(head.v_proj,                   "v_proj");
+    ok &= up(head.o_proj,                   "o_proj");
+    ok &= up(head.q_norm,                   "q_norm");
+    ok &= up(head.k_norm,                   "k_norm");
+    ok &= up(head.router,                   "router");
+    ok &= up(head.experts_gate_up_packed,   "experts_gate_up_packed");
+    ok &= up(head.experts_down_packed,      "experts_down_packed");
+    ok &= up(head.shared_expert_gate_proj,  "shared_expert_gate_proj");
+    ok &= up(head.shared_expert_up_proj,    "shared_expert_up_proj");
+    ok &= up(head.shared_expert_down_proj,  "shared_expert_down_proj");
+    ok &= up(head.shared_expert_gate,       "shared_expert_gate");
+    ok &= up(head.final_norm,               "final_norm");
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // upload_gptq_weight: dequantize a GPTQ-packed weight to FP16 on GPU.
 // Uploads qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the
 // dequant kernel, then frees the temporaries.  Sets output tensor to point
@@ -1978,6 +2022,24 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         }
         if (scale_count > 0)
             IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
+    }
+
+    // --- MTP head weights (DeepSeek-V3 / Qwen3.6 family, optional sidecar) ---
+    // Phase 2 of MTP wiring: upload the trained MTP head tensors. The forward
+    // path that consumes them is Phase 3+. Loading them here gates VRAM-wise
+    // — if the upload fails (no VRAM), we degrade by disabling MTP rather
+    // than failing the entire model load.
+    if (mtp_.has_value() && mtp_->loaded) {
+        size_t allocs_before = gpu_allocations_.size();
+        if (upload_mtp_weights(*mtp_, ctx)) {
+            IMP_LOG_INFO("MTP head: uploaded to GPU (%zu allocations, %.2f GiB BF16→FP16)",
+                         gpu_allocations_.size() - allocs_before,
+                         static_cast<double>(mtp_->info.file_bytes) /
+                             (1024.0 * 1024.0 * 1024.0));
+        } else {
+            IMP_LOG_WARN("MTP head: GPU upload failed — spec-decode disabled");
+            mtp_->loaded = false;
+        }
     }
 
     // Final sync

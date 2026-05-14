@@ -144,6 +144,13 @@ int main(int argc, char** argv) {
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
+    if (err == IMP_SUCCESS && args.mtp_spec_decode_k > 0) {
+        ImpError mtp_err = imp_enable_mtp_spec_decode(ctx, args.mtp_spec_decode_k);
+        if (mtp_err != IMP_SUCCESS) {
+            fprintf(stderr, "Warning: --mtp-spec-decode %d failed (%s); continuing without spec-decode\n",
+                    args.mtp_spec_decode_k, imp_error_string(mtp_err));
+        }
+    }
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error creating context: %s\n", imp_error_string(err));
         imp_model_free(model);

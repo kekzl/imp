@@ -222,6 +222,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/pdl.cu
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
+    src/runtime/mtp_forward.cu
 )
 
 set(IMP_GRAPH_SOURCES
