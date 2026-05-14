@@ -28,7 +28,6 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
-#include "graph/executor_forward_moe_cutlass3x.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -1293,13 +1292,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // batch path; per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
                     // =========================================================================
                     //
-                    // Phase 3c-full Step 2b: optional fully device-args dispatch placed
-                    // BEFORE the D2H+sync. When IMP_NVFP4_DEVICE_ARGS=1 and all required
-                    // workspace buffers exist, runs gate / up / activation / down end-
-                    // to-end via device-resident kernels and skips the legacy code path
-                    // below. No host iteration over M_per / h_offsets, no D2H+sync —
-                    // prerequisite for graph capture of the MoE prefill path. Falls
-                    // back to the legacy path on any dispatch failure.
+                    // Phase 3c-full Step 2b: fully device-args dispatch placed BEFORE
+                    // the D2H+sync. When workspace buffers exist (the production
+                    // case for NVFP4-prequant models), runs gate / up / activation /
+                    // down end-to-end via device-resident kernels and skips the
+                    // legacy code path below. No host iteration over M_per /
+                    // h_offsets, no D2H+sync — prerequisite for graph capture of
+                    // the MoE prefill path. Falls back to the legacy path on any
+                    // dispatch failure or unpopulated workspace.
                     bool device_args_done = false;
                     {
                         // Default ON since 2026-05-14: 4-model A/B showed +11–39%
@@ -1837,76 +1837,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         return true;
                     };
 
-                    // Opt-in: device-args wrapper path (Phase 3c-MVP wire).
-                    // Uses imp::gemm_grouped_cutlass_3x_nvfp4_device_args, which
-                    // builds the per-expert staging buffer in a device kernel
-                    // from device-resident d_M_per / d_expert_offsets /
-                    // d_sfa_offsets / d_alpha + per-expert ptr arrays. Note:
-                    // upstream of this lambda still does the h_offsets D2H+sync,
-                    // so this MVP does NOT yet enable CUDA-graph capture of the
-                    // prefill path — Phase 3c-full removes that residual sync.
-                    // Enable via IMP_NVFP4_DEVICE_ARGS=1.
-                    const char* device_args_env = ::getenv("IMP_NVFP4_DEVICE_ARGS");
-                    const bool use_device_args =
-                        device_args_env && std::atoi(device_args_env) != 0 &&
-                        moe_.d_M_per && moe_.d_M_per_count >= ne &&
-                        moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
-                        moe_.d_SFB_ptrs_cache && moe_.d_alpha_full;
-                    auto grouped_gemm_device = [&](const std::vector<TensorID>& weight_ids,
-                                                   char* c_base, int K_in, int N_out) -> bool {
-                        // Per-expert host arrays (registry handles). Built for ALL
-                        // experts — CUTLASS skips empty groups via M=0 internally.
-                        std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
-                        std::vector<float> h_alpha(ne);
-                        for (int e = 0; e < ne; ++e) {
-                            const auto& h = registry_.handle(weight_ids[e]);
-                            h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
-                            h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-                            h_alpha[e]    = h.payload.cutlass_nvfp4.global_scale
-                                                ? *h.payload.cutlass_nvfp4.global_scale
-                                                : 1.0f;
-                        }
-                        // Upload host arrays into workspace-cached device
-                        // buffers (Phase 3c-full Step 1). No per-call cudaMalloc.
-                        cudaMemcpyAsync(moe_.d_B_ptrs_cache,   h_B_ptrs.data(),
-                                        ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
-                        cudaMemcpyAsync(moe_.d_SFB_ptrs_cache, h_SFB_ptrs.data(),
-                                        ne * sizeof(const void*), cudaMemcpyHostToDevice, stream);
-                        cudaMemcpyAsync(moe_.d_alpha_full,     h_alpha.data(),
-                                        ne * sizeof(float),       cudaMemcpyHostToDevice, stream);
-                        // SFA byte-offset prefix sum on device (Phase 3a kernel).
-                        imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets,
-                                                        ne, K_in, stream);
-
-                        imp::GroupedNvfp4DeviceArgs dargs{};
-                        dargs.d_M_per          = moe_.d_M_per;
-                        dargs.d_expert_offsets =
-                            static_cast<const int32_t*>(routing.expert_offsets.data);
-                        dargs.d_sfa_offsets    = moe_.d_sfa_offsets;
-                        dargs.d_alpha          = moe_.d_alpha_full;
-                        dargs.base_A_packed    = moe_.cutlass3x_packed;
-                        dargs.base_A_sf        = moe_.cutlass3x_sf;
-                        dargs.d_B_ptrs         = moe_.d_B_ptrs_cache;
-                        dargs.d_SFB_ptrs       = moe_.d_SFB_ptrs_cache;
-                        dargs.base_D           = c_base;
-
-                        return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
-                            ne, N_out, K_in, dargs, stream);
-                    };
-
-                    // Dispatch a grouped GEMM given already-quantized activations.
+                    // Legacy host-args dispatch. Only entered when the default-on
+                    // device-args full path (line ~1310) failed its precondition
+                    // check (workspace buffers not populated). Kept as the safety-
+                    // net fallback path.
                     auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in,
                                             int N_out, const std::vector<size_t>& sfa_offsets) {
-                        if (use_device_args) {
-                            if (layer == 0)
-                                IMP_LOG_INFO(
-                                    "MoE prefill: CUTLASS 3.x device-args path "
-                                    "(opt-in via IMP_NVFP4_DEVICE_ARGS=1)");
-                            if (grouped_gemm_device(weight_ids, c_base, K_in, N_out))
-                                return;
-                            IMP_LOG_ERROR(
-                                "device-args dispatch failed; falling back to host-args");
-                        }
                         char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
                         uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
                         // Active experts only (CUTLASS 3.x wants non-empty groups).
@@ -1951,81 +1887,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     std::vector<size_t> sfa_offs;
                     std::vector<uint8_t*> sfa_bases;
                     if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
-                        // Opt-in fused path: single CUTLASS 3.x dispatch with 2*ne problems.
-                        // IMP_NVFP4_FUSED_GATEUP=1 activates it; default is two-call form.
-                        // Currently flat-perf vs default (GrpGemm cache in 769effe already
-                        // absorbs the per-dispatch overhead). Preserved for future scenarios.
-                        const char* fused_env = ::getenv("IMP_NVFP4_FUSED_GATEUP");
-                        const bool use_fused = !non_gated_experts &&
-                                               fused_env && atoi(fused_env) != 0;
-                        bool used_fused = false;
-
-                        if (use_fused) {
-                            if (layer == 0)
-                                IMP_LOG_INFO("MoE prefill: CUTLASS 3.x gate+up fused (opt-in)");
-
-                            char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
-                            uint8_t* all_sfa_ptr = static_cast<uint8_t*>(moe_.cutlass3x_sf);
-                            std::vector<int> active_M;
-                            std::vector<const void*> hA, hSFA, hB_gate, hSFB_gate, hB_up, hSFB_up;
-                            std::vector<void*> hD_gate, hD_up;
-                            std::vector<float> hAlpha_gate, hAlpha_up;
-                            active_M.reserve(ne);
-                            hA.reserve(ne); hSFA.reserve(ne);
-                            hB_gate.reserve(ne); hSFB_gate.reserve(ne);
-                            hB_up.reserve(ne); hSFB_up.reserve(ne);
-                            hD_gate.reserve(ne); hD_up.reserve(ne);
-                            hAlpha_gate.reserve(ne); hAlpha_up.reserve(ne);
-
-                            for (int e = 0; e < ne; ++e) {
-                                if (M_per[e] == 0)
-                                    continue;
-                                const auto& hg = registry_.handle(ly.expert_gate_ids[e]);
-                                const auto& hu = registry_.handle(ly.expert_up_ids[e]);
-                                active_M.push_back(M_per[e]);
-                                hA.push_back(all_packed + static_cast<size_t>(h_offsets[e]) * d / 2);
-                                hSFA.push_back(all_sfa_ptr + sfa_offs[e]);
-                                hB_gate.push_back(hg.payload.cutlass_nvfp4.weight);
-                                hSFB_gate.push_back(hg.payload.cutlass_nvfp4.sf);
-                                hD_gate.push_back(expert_gate_base +
-                                                  static_cast<size_t>(h_offsets[e]) * eff * sizeof(half));
-                                hAlpha_gate.push_back(hg.payload.cutlass_nvfp4.global_scale
-                                                          ? *hg.payload.cutlass_nvfp4.global_scale
-                                                          : 1.0f);
-                                hB_up.push_back(hu.payload.cutlass_nvfp4.weight);
-                                hSFB_up.push_back(hu.payload.cutlass_nvfp4.sf);
-                                hD_up.push_back(expert_up_base +
-                                                static_cast<size_t>(h_offsets[e]) * eff * sizeof(half));
-                                hAlpha_up.push_back(hu.payload.cutlass_nvfp4.global_scale
-                                                        ? *hu.payload.cutlass_nvfp4.global_scale
-                                                        : 1.0f);
-                            }
-                            const int na = static_cast<int>(active_M.size());
-                            if (na > 0) {
-                                bool ok = imp::dispatch_gate_up_grouped_fused(
-                                    na, active_M.data(), eff, d,
-                                    hA.data(), hSFA.data(),
-                                    hB_gate.data(), hSFB_gate.data(),
-                                    hB_up.data(), hSFB_up.data(),
-                                    hD_gate.data(), hD_up.data(),
-                                    hAlpha_gate.data(), hAlpha_up.data(),
-                                    stream);
-                                if (ok) {
-                                    used_fused = true;
-                                } else {
-                                    IMP_LOG_ERROR(
-                                        "Fused gate+up dispatch failed; falling back to two-call form");
-                                }
-                            } else {
-                                used_fused = true;  // nothing to do, trivially done
-                            }
-                        }
-
-                        if (!used_fused) {
-                            if (!non_gated_experts)
-                                grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs);
-                            grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
-                        }
+                        if (!non_gated_experts)
+                            grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs);
+                        grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
                     }
 
                     apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
