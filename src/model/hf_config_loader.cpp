@@ -388,6 +388,16 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         IMP_LOG_INFO("  GDN config: inner=%d state=%d groups=%d n_heads=%d conv_kernel=%d",
                      cfg.ssm_inner_size, cfg.ssm_state_size, cfg.ssm_group_count, cfg.ssm_dt_rank,
                      cfg.ssm_conv_kernel);
+
+        // Qwen3.5 / 3.6 MoE shared-expert intermediate size. Used by the MTP
+        // forward to size the shared-expert FFN scratch and by diagnostic logs
+        // for the main model. Key name differs from DeepSeek-style configs.
+        int qwen_shared_d_ff = 0;
+        jobj_get_int(eff, "shared_expert_intermediate_size", qwen_shared_d_ff);
+        if (qwen_shared_d_ff == 0)
+            jobj_get_int(eff, "moe_shared_expert_intermediate_size", qwen_shared_d_ff);
+        if (qwen_shared_d_ff > 0)
+            cfg.expert_shared_d_ff = qwen_shared_d_ff;
     }
 
     // Nemotron-H MoE: hybrid Mamba2 + MoE-Expert + Attention. Read the
@@ -427,7 +437,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         int n_routed = 0, n_shared = 0, shared_d_ff = 0;
         jobj_get_int(eff, "n_routed_experts", n_routed);
         jobj_get_int(eff, "n_shared_experts", n_shared);
+        // moe_shared_expert_intermediate_size: DeepSeek / Qwen2-MoE naming.
+        // shared_expert_intermediate_size: Qwen3.5 / 3.6 naming (used by their
+        // shared-expert variant of GroupQuery MoE).
         jobj_get_int(eff, "moe_shared_expert_intermediate_size", shared_d_ff);
+        if (shared_d_ff == 0)
+            jobj_get_int(eff, "shared_expert_intermediate_size", shared_d_ff);
         if (n_routed > 0 && cfg.n_experts == 0)
             cfg.n_experts = n_routed;
         if (n_shared > 0)
