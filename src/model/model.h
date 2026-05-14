@@ -2,7 +2,9 @@
 
 #include "model/hf_config_loader.h"
 #include "model/model_config.h"
+#include "model/mtp_head.h"
 #include "model/tokenizer.h"
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -57,6 +59,12 @@ public:
     TensorID tok_emb_id = kInvalidTensorID;   // registry handle for token embedding
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
+
+    // MTP head metadata, populated when `model_mtp.safetensors` is present
+    // next to the main weights (DeepSeek-V3-family models, e.g. Qwen3.6).
+    // Phase 1.A: detection only — no tensors are loaded yet. Forward+verify
+    // wiring is documented in docs/superpowers/specs/2026-05-14-mtp-wiring-design.md.
+    std::optional<MtpHeadInfo> mtp_info_;
 
     // Load-time scratch for NVFP4 prequant scale tensors.
     // Keys:

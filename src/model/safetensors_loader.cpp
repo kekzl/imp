@@ -919,8 +919,55 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
 
     IMP_LOG_INFO("Parsed %zu tensors from SafeTensors", tensor_map.size());
 
+    // Detect MTP head sidecar (DeepSeek-V3-family models, e.g. Qwen3.6).
+    // Phase 1.A: detection + metadata only — tensors are NOT loaded here and
+    // the main weight path continues to skip the `mtp.` prefix in
+    // llm_compressor_loader. Wiring forward+verify is in the design spec
+    // `docs/superpowers/specs/2026-05-14-mtp-wiring-design.md`.
+    std::optional<imp::MtpHeadInfo> mtp_info_local;
+    if (!model_dir.empty()) {
+        std::string mtp_path = model_dir + "/model_mtp.safetensors";
+        std::error_code ec;
+        auto sz = fs::file_size(mtp_path, ec);
+        if (!ec && sz > 0) {
+            int n_tensors = 0;
+            std::ifstream mtp_ifs(mtp_path, std::ios::binary);
+            if (mtp_ifs.is_open()) {
+                uint64_t header_size = 0;
+                mtp_ifs.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
+                if (mtp_ifs.good() && header_size > 0 && header_size < 64 * 1024 * 1024) {
+                    std::string header_str(static_cast<size_t>(header_size), '\0');
+                    mtp_ifs.read(header_str.data(), static_cast<std::streamsize>(header_size));
+                    if (mtp_ifs.good()) {
+                        JsonParser hp(header_str.data(), header_str.size());
+                        JValue h = hp.parse();
+                        if (hp.ok() && h.type == JType::OBJECT) {
+                            for (const auto& kv : h.obj) {
+                                if (kv.first.rfind("__", 0) != 0)
+                                    n_tensors++;
+                            }
+                        }
+                    }
+                }
+            }
+            imp::MtpHeadInfo info;
+            info.path       = mtp_path;
+            info.file_bytes = static_cast<size_t>(sz);
+            info.n_tensors  = n_tensors;
+            IMP_LOG_INFO("MTP head detected: %s (%.2f GiB, %d tensors) — not yet wired (see "
+                         "docs/superpowers/specs/2026-05-14-mtp-wiring-design.md)",
+                         mtp_path.c_str(),
+                         static_cast<double>(sz) / (1024.0 * 1024.0 * 1024.0),
+                         n_tensors);
+            mtp_info_local = std::move(info);
+        }
+    }
+
     // Create model
     auto model = std::make_unique<Model>();
+    if (mtp_info_local.has_value()) {
+        model->mtp_info_ = std::move(mtp_info_local);
+    }
 
     // Store mmap info for cleanup
     model->mmap_base_ = shards[0].mmap_base;
