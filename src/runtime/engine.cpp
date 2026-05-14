@@ -189,12 +189,36 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
+    // Configure RoPE for the MTP attention (Phase 2.2.Attn+RoPE).
+    // Qwen3.5/3.6 uses partial rope (factor 0.25 → rope_dim=64 of head_dim=256),
+    // theta from config (10M for long-context), NeoX-style.
+    ws->rope_theta       = model_->config_.rope_theta;
+    ws->rope_neox        = model_->config_.rope_neox;
+    ws->rms_norm_eps     = model_->config_.rms_norm_eps;
+    // RoPE on MTP attention defaults OFF on Qwen3.5/3.6 because the model
+    // uses multimodal-RoPE (mrope) with section split [11, 11, 10] on the
+    // 64 rope dims — applying standard partial-rope is a frequency-pattern
+    // mismatch versus training and empirically REDUCES acceptance vs no-rope
+    // (29.5% → 19-24% in Phase 5.5 bench). Opt-in via IMP_MTP_USE_ROPE=1
+    // for experiments; proper mrope support is a future enhancement.
+    ws->rope_dim = 0;
+    if (const char* e = std::getenv("IMP_MTP_USE_ROPE"); e && e[0] != '0') {
+        ws->rope_dim = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
+    }
+    // Runtime weight_offset matches what the main model's rmsnorm calls pass:
+    // norm_weight_offset from ModelConfig. For Qwen3.5/3.6 this is 0.0 because
+    // the +1 (gamma = 1 + W) was already baked in during weight upload (see
+    // upload_mtp_weights in weight_upload.cu). For Gemma-3 it's 1.0. Don't
+    // double-apply.
+    ws->arch_norm_offset = model_->config_.norm_weight_offset;
+
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
     IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d)",
+                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s)",
                  k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max);
+                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
+                 ws->rope_theta, ws->rope_dim, ws->rope_neox ? "neox" : "interleaved");
     return true;
 }
 

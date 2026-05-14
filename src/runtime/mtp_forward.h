@@ -72,10 +72,12 @@ struct MtpDraftWorkspace {
     // ---- Phase 2.2.Attn scratch ----
     void* d_input_norm    = nullptr;  // [hidden_dim] FP16 — input_layernorm output
     void* d_q_full        = nullptr;  // [2 * num_heads * head_dim] FP16 — q_proj (incl gate)
-    void* d_k_proj        = nullptr;  // [num_kv_heads * head_dim] FP16 (current step's k)
+    void* d_q_attn        = nullptr;  // [num_heads * head_dim] FP16 — Q half extracted (post-qknorm+RoPE)
+    void* d_k_proj        = nullptr;  // [num_kv_heads * head_dim] FP16 (current step's k, post-qknorm+RoPE)
     void* d_v_proj        = nullptr;  // [num_kv_heads * head_dim] FP16 (current step's v)
     void* d_attn_out      = nullptr;  // [num_heads * head_dim] FP16
     void* d_attn_residual = nullptr;  // [hidden_dim] FP16 — o_proj output (added to fc_out)
+    int*  d_mtp_position  = nullptr;  // [1] int — current MTP cache position (for RoPE)
 
     // ---- Phase 2.2.Attn+KV — MTP-side KV cache (per-session, M=1 only) ----
     // K and V cache accumulate across MTP draft calls. Each call appends one
@@ -108,6 +110,16 @@ struct MtpDraftWorkspace {
     int num_heads    = 0;
     int num_kv_heads = 0;
     int head_dim     = 0;
+
+    // RoPE config (Phase 2.2.Attn+RoPE). When rope_dim > 0, qknorm_rope_fused
+    // is applied to Q (extracted half) and K BEFORE attention scan. Both
+    // tensors get rotated using `mtp_pos` as the position; cached K's were
+    // rotated at their own insertion time.
+    float rope_theta      = 0.0f;
+    int   rope_dim        = 0;   // 0 = disable RoPE
+    bool  rope_neox       = true;
+    float rms_norm_eps    = 1e-6f;
+    float arch_norm_offset = 0.0f;  // for q_norm/k_norm (Qwen3.5/3.6 gamma=1+W)
 };
 
 // One MTP draft step. Returns the draft token id via host out_token_id.

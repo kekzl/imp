@@ -18,6 +18,7 @@
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
+#include "compute/rope.h"           // qknorm_rope_fused
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -175,8 +176,8 @@ __global__ void mtp_add_kernel(__half* __restrict__ fc_out,
 // the upstream main-model hidden states) but theoretically less precise.
 // RoPE is documented as a follow-on improvement.
 __global__ void mtp_attn_kv_scan_kernel(
-    const __half* __restrict__ q_full,   // [num_heads, 2 * head_dim]
-    const __half* __restrict__ k_cache,  // [seq_len_cap, num_kv_heads, head_dim]
+    const __half* __restrict__ q_attn,   // [num_heads, head_dim] — Q with qk-norm + RoPE applied
+    const __half* __restrict__ k_cache,  // [seq_len_cap, num_kv_heads, head_dim] — RoPE pre-applied
     const __half* __restrict__ v_cache,  // [seq_len_cap, num_kv_heads, head_dim]
     __half* __restrict__ out,            // [num_heads, head_dim]
     int seq_len, int num_heads, int num_kv_heads, int head_dim,
@@ -189,8 +190,8 @@ __global__ void mtp_attn_kv_scan_kernel(
 
     extern __shared__ float s_scores[];  // sized: seq_len * sizeof(float)
 
-    // Q view for this head: read q (first head_dim) only.
-    const __half* q_row = q_full + h * (2 * head_dim);
+    // Q row for this head: contiguous [head_dim] from the rotated Q buffer.
+    const __half* q_row = q_attn + h * head_dim;
 
     // ---- (1) Q · K for each cached t, accumulate into shared mem ----
     // One thread per t (with strip-mining if seq_len > blockDim.x).
@@ -309,12 +310,15 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     if (ok && num_heads > 0 && head_dim > 0) {
         ok &= alloc(&ws.d_input_norm,    hidden_dim * sizeof(__half));
         ok &= alloc(&ws.d_q_full,        2 * num_heads * head_dim * sizeof(__half));
+        ok &= alloc(&ws.d_q_attn,        num_heads * head_dim * sizeof(__half));
         if (num_kv_heads > 0) {
             ok &= alloc(&ws.d_k_proj,    num_kv_heads * head_dim * sizeof(__half));
             ok &= alloc(&ws.d_v_proj,    num_kv_heads * head_dim * sizeof(__half));
         }
         ok &= alloc(&ws.d_attn_out,      num_heads * head_dim * sizeof(__half));
         ok &= alloc(&ws.d_attn_residual, hidden_dim * sizeof(__half));
+        // Device int for RoPE position (single int)
+        ok &= (cudaMalloc(reinterpret_cast<void**>(&ws.d_mtp_position), sizeof(int)) == cudaSuccess);
     }
     // Phase 2.2.Attn+KV buffers (cap max_seq_len)
     if (ok && num_heads > 0 && head_dim > 0 && num_kv_heads > 0 && max_seq_len > 0) {
@@ -382,10 +386,12 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     if (ws.h_expert_weights) { cudaFreeHost(ws.h_expert_weights); ws.h_expert_weights = nullptr; }
     frfn(ws.d_input_norm);
     frfn(ws.d_q_full);
+    frfn(ws.d_q_attn);
     frfn(ws.d_k_proj);
     frfn(ws.d_v_proj);
     frfn(ws.d_attn_out);
     frfn(ws.d_attn_residual);
+    if (ws.d_mtp_position) { cudaFree(ws.d_mtp_position); ws.d_mtp_position = nullptr; }
     frfn(ws.d_k_cache);
     frfn(ws.d_v_cache);
     ws.mtp_pos = 0;
@@ -538,13 +544,61 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         }
 
         // 5.A.4 — Attention path:
-        //   - With KV cache present + max_seq capacity remaining: append k/v to
-        //     cache, run softmax attention scan over positions [0, mtp_pos+1),
-        //     apply silu(gate) elementwise.
+        //   - With KV cache present + max_seq capacity remaining: extract Q
+        //     from q_full per-head, apply fused qk-norm+RoPE on (Q,K),
+        //     append rotated K + V to cache, run softmax attention scan over
+        //     positions [0, mtp_pos+1), apply silu(gate) elementwise.
         //   - Else (cache absent or full): fall back to M=1 broadcast MVP.
         bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr &&
                             ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
         if (use_kv_scan) {
+            // 5.A.4.pre — Extract Q (without gate) from q_full[h, 0..head_dim).
+            // q_full layout per head: [q (head_dim), gate (head_dim)]. We need
+            // a contiguous [num_heads * head_dim] Q-only buffer for per-head norm.
+            cudaMemcpy2DAsync(
+                /*dst=*/ ws.d_q_attn,
+                /*dpitch=*/ static_cast<size_t>(hdh) * sizeof(__half),
+                /*src=*/ ws.d_q_full,
+                /*spitch=*/ static_cast<size_t>(2 * hdh) * sizeof(__half),
+                /*width=*/  static_cast<size_t>(hdh) * sizeof(__half),
+                /*height=*/ static_cast<size_t>(nh),
+                cudaMemcpyDeviceToDevice, stream);
+            // 5.A.4.qknorm — Per-head RMSNorm on Q and K (Qwen3-style).
+            // Reshape to [n_heads, head_dim] and apply rmsnorm with arch_norm_offset
+            // for Qwen3.5/3.6's gamma=1+W convention. Independent of RoPE so
+            // we can ship qk-norm without committing to standard partial-rope.
+            if (mtp.q_norm.data) {
+                int64_t q_shape[2] = {nh, hdh};
+                Tensor q_view(ws.d_q_attn, QType::F16, 2, q_shape, /*on_device=*/true);
+                imp::rmsnorm(q_view, mtp.q_norm, q_view, ws.rms_norm_eps, stream,
+                             ws.arch_norm_offset);
+            }
+            if (mtp.k_norm.data) {
+                int64_t k_shape[2] = {nkv, hdh};
+                Tensor k_view(ws.d_k_proj, QType::F16, 2, k_shape, /*on_device=*/true);
+                imp::rmsnorm(k_view, mtp.k_norm, k_view, ws.rms_norm_eps, stream,
+                             ws.arch_norm_offset);
+            }
+            // 5.A.4.rope — Opt-in standard partial-rope (NOT mrope-aware).
+            // Default OFF: Qwen3.6's mrope_section [11, 11, 10] needs a
+            // dedicated kernel; standard partial-rope mismatches training
+            // distribution and empirically hurts acceptance. Set
+            // IMP_MTP_USE_ROPE=1 to experiment.
+            if (ws.rope_dim > 0) {
+                int h_pos = ws.mtp_pos;
+                cudaMemcpyAsync(ws.d_mtp_position, &h_pos, sizeof(int),
+                                cudaMemcpyHostToDevice, stream);
+                // Build views matching rope_forward()'s expected shapes.
+                int64_t q_shape[4] = {1, 1, nh, hdh};
+                int64_t k_shape[4] = {1, 1, nkv, hdh};
+                Tensor q_view(ws.d_q_attn, QType::F16, 4, q_shape, /*on_device=*/true);
+                Tensor k_view(ws.d_k_proj, QType::F16, 4, k_shape, /*on_device=*/true);
+                imp::rope_forward(q_view, k_view, ws.d_mtp_position, hdh,
+                                  ws.rope_theta, /*scaling=*/1.0f, ws.rope_dim,
+                                  ws.rope_neox, /*ext_factor=*/0.0f,
+                                  /*attn_factor=*/1.0f, /*corr_dims=*/nullptr,
+                                  stream, /*longrope_inv_freqs=*/nullptr);
+            }
             const int pos = ws.mtp_pos;
             // 5.A.4.a — append k_step, v_step into cache at pos
             {
@@ -568,7 +622,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 const size_t shmem_bytes = static_cast<size_t>(seq_len) * sizeof(float);
                 const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
                 mtp_attn_kv_scan_kernel<<<nh, kBlock, shmem_bytes, stream>>>(
-                    static_cast<const __half*>(ws.d_q_full),
+                    static_cast<const __half*>(ws.d_q_attn),
                     static_cast<const __half*>(ws.d_k_cache),
                     static_cast<const __half*>(ws.d_v_cache),
                     static_cast<__half*>(ws.d_attn_out),
