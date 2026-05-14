@@ -717,14 +717,65 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 }
 
 bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
-    // Iterate populated NVFP4 weight cache to find the largest weight matrix.
-    // The gemm_nvfp4 fallback dequantizes one weight at a time to FP16 — the
-    // workspace only needs to fit the LARGEST single weight (N × K × 2 bytes).
+    // Iterate populated NVFP4 weight caches to find the largest single dequant
+    // target. The gemm_nvfp4 fallback dequantizes one weight at a time to FP16
+    // — the workspace only needs to fit the LARGEST single weight (N × K × 2
+    // bytes). MoE caches contribute per-expert weights (callers slice one
+    // expert at a time into a synthetic NvFP4QuantResult before invoking
+    // gemm_nvfp4 — see executor_forward_moe.cu).
     size_t max_bytes = 0;
-    for (const auto& [ptr, qr] : wcache_.nvfp4) {
-        size_t bytes = static_cast<size_t>(qr.N) * qr.K * sizeof(half);
+    auto consider = [&max_bytes](int64_t N, int64_t K) {
+        size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
         if (bytes > max_bytes)
             max_bytes = bytes;
+    };
+    for (const auto& [ptr, qr] : wcache_.nvfp4)
+        consider(qr.N, qr.K);
+    for (const auto& [ptr, moe] : wcache_.nvfp4_moe)
+        consider(moe.N, moe.K);  // single-expert dequant slice
+    for (const auto& [ptr, cw] : wcache_.cutlass_nvfp4)
+        consider(cw.N, cw.K);
+    // SafeTensors NVFP4 prequant: per-tensor and per-expert NVFP4 storage lives
+    // on the Layer struct (qtype=NVFP4 with scales sidecar), not in wcache_.
+    // The gemm_nvfp4 fallback (executor_forward_moe.cu line ~2369 for MoE
+    // experts, and executor_kernels.cu:2052 for dense weights including shared
+    // experts) constructs a synthetic NvFP4QuantResult with N=t.shape[0],
+    // K=t.shape[1]*2 (logical, since shape[1] is FP4-packed bytes). Iterate
+    // every NVFP4 tensor on the layer to find the largest dequant target.
+    if (model_ != nullptr) {
+        const int n_layers = model_->n_layers();
+        for (int li = 0; li < n_layers; ++li) {
+            const auto& L = model_->layer(li);
+            auto consider_t = [&](const Tensor& t) {
+                if (t.qtype != QType::NVFP4 || t.data == nullptr || t.ndim < 2)
+                    return;
+                // 2D dense weight [N, K_packed] → dequant target N × K_logical
+                // 3D MoE packed [n_experts, N, K_packed] → per-expert N × K_logical
+                int64_t N = (t.ndim == 2) ? t.shape[0] : t.shape[1];
+                int64_t K_packed = (t.ndim == 2) ? t.shape[1] : t.shape[2];
+                consider(N, K_packed * 2);
+            };
+            // Attention weights
+            consider_t(L.wq);
+            consider_t(L.wk);
+            consider_t(L.wv);
+            consider_t(L.wo);
+            // Dense MLP (used for shared experts in MoE models like Gemma-4)
+            consider_t(L.w_gate);
+            consider_t(L.w_up);
+            consider_t(L.w_down);
+            consider_t(L.w_gate_shared);
+            consider_t(L.w_up_shared);
+            consider_t(L.w_down_shared);
+            // MoE per-expert vectors
+            for (const auto& t : L.expert_w_gate) consider_t(t);
+            for (const auto& t : L.expert_w_up) consider_t(t);
+            for (const auto& t : L.expert_w_down) consider_t(t);
+            // MoE packed 3D
+            consider_t(L.expert_gate_packed);
+            consider_t(L.expert_up_packed);
+            consider_t(L.expert_down_packed);
+        }
     }
     if (max_bytes == 0) {
         // No NVFP4 weights — nothing to do. The fallback won't fire.
@@ -752,8 +803,12 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     }
     nvfp4_dequant_ws_size_ = max_bytes;
     set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_, nvfp4_dequant_ws_size_);
-    IMP_LOG_INFO("gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback)",
-                 max_bytes / (1024.0 * 1024.0));
+    IMP_LOG_INFO(
+        "gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback; "
+        "covers dense=%zu, moe=%zu, cutlass=%zu cache entries + per-layer "
+        "SafeTensors NVFP4 expert tensors)",
+        max_bytes / (1024.0 * 1024.0), wcache_.nvfp4.size(), wcache_.nvfp4_moe.size(),
+        wcache_.cutlass_nvfp4.size());
     return true;
 }
 
