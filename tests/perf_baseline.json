@@ -3,15 +3,15 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.2",
   "vram_total_mb": 32607,
-  "timestamp": "2026-05-14T21:59:55Z",
+  "timestamp": "2026-05-14T22:45:11Z",
   "reps": 5,
   "metrics": {
     "prefill_tps": {
-      "pp128": 6139.37,
-      "pp512": 14419.79
+      "pp128": 6280.49,
+      "pp512": 13446.47
     },
     "decode_tps": {
-      "tg128": 152.01
+      "tg128": 149.57
     },
     "memory_mb": {
       "model_weights": 8608
