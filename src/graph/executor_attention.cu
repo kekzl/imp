@@ -695,7 +695,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             QType kvt = cache->qtype();
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
             // so this code only runs for FP16 / FP8 / NVFP4 KV.
-            const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4);
+            const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 ||
+                                  kvt == QType::NVFP4 || kvt == QType::INT4);
             // sliding_active and attn_shapes_vary are now both supported:
             //   - cuBLAS softmax accepts a sliding_window argument (PR feat(attn): sw),
             //   - the rectangular cuBLAS path dispatches per-layer with nh/nkv/hd.
@@ -753,7 +754,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 paged_kv_gather_fp8_to_fp16(
                     v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
                     state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
-            } else {  // NVFP4
+            } else if (kvt == QType::NVFP4) {
                 paged_kv_gather_nvfp4_to_fp16(
                     k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                     static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
@@ -761,6 +762,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 paged_kv_gather_nvfp4_to_fp16(
                     v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                     static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+            } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
+                paged_kv_gather_int4_to_fp16(
+                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                    static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_int4_to_fp16(
+                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                    static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             }
 

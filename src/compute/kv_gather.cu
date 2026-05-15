@@ -189,4 +189,70 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
         dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd);
 }
 
+// INT4 → FP16 dequant gather. Symmetric 4-bit, per-head FP16 scale.
+// Packed layout: low nibble = even d, high nibble = odd d (sign-extend 4-bit
+// signed → int8 → multiply by half scale → store FP16). Matches
+// write_kv_cache_int4_kernel / paged_attention_decode_int4.
+__global__ void paged_kv_gather_int4_to_fp16_kernel(
+    half* __restrict__ dst,
+    const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
+    const half* __restrict__ src_scales,     // [block, slot, nkv]
+    const int* __restrict__ block_table,
+    int n_past, int block_size, int nkv, int hd) {
+    const int block_group = blockIdx.x;
+    const int kv_head = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int threads_per_token = blockDim.x / TOKENS_PER_BLOCK;
+    const int token_in_block = tid / threads_per_token;
+    const int d_lane = tid % threads_per_token;
+
+    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    if (pos >= n_past)
+        return;
+
+    const int blk_idx = pos / block_size;
+    const int slot = pos % block_size;
+    const int phys_block = block_table[blk_idx];
+
+    const int kv_block_stride_bytes = block_size * nkv * (hd / 2);
+    const int kv_slot_stride_bytes = nkv * (hd / 2);
+    const int sc_block_stride = block_size * nkv;
+    const int sc_slot_stride = nkv;
+
+    const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
+                                        + (size_t)slot * kv_slot_stride_bytes
+                                        + (size_t)kv_head * (hd / 2);
+    half scale_h = src_scales[(size_t)phys_block * sc_block_stride
+                              + (size_t)slot * sc_slot_stride
+                              + (size_t)kv_head];
+    float scale = __half2float(scale_h);
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+
+    // Each lane writes 2 FP16 values per byte read. We iterate in steps of 2
+    // along head_dim so each thread handles one packed byte.
+    for (int d = d_lane * 2; d < hd; d += threads_per_token * 2) {
+        unsigned char byte =
+            __ldcs(reinterpret_cast<const unsigned char*>(src_row + (d / 2)));
+        // Sign-extend 4-bit signed: low nibble = q0 (d), high nibble = q1 (d+1).
+        int q0 = static_cast<int8_t>(static_cast<int8_t>(byte << 4) >> 4);
+        int q1 = static_cast<int8_t>(static_cast<int8_t>(byte) >> 4);
+        dst_row[d] = __float2half(static_cast<float>(q0) * scale);
+        if (d + 1 < hd)
+            dst_row[d + 1] = __float2half(static_cast<float>(q1) * scale);
+    }
+}
+
+void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
+                                  const half* src_scales, const int* block_table,
+                                  int n_past, int block_size, int nkv, int hd,
+                                  cudaStream_t stream) {
+    if (n_past <= 0 || nkv <= 0 || hd <= 0)
+        return;
+    int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
+    dim3 grid(n_block_groups, nkv);
+    int threads = 256;
+    paged_kv_gather_int4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
+        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd);
+}
+
 }  // namespace imp
