@@ -37,4 +37,13 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
                                    int n_past, int block_size, int nkv, int hd,
                                    cudaStream_t stream);
 
+// INT4 paged → FP16 flat with per-head FP16 scale dequant (symmetric, range [-8,7]).
+// src_packed layout: [num_blocks, block_size, nkv, hd/2] uint8 (low nibble=even d, high=odd d).
+// src_scales layout: [num_blocks, block_size, nkv]      FP16 (one scale per head per token).
+// Matches `write_kv_cache_int4_kernel`. Used by chunked prefill for INT4 KV.
+void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
+                                  const half* src_scales, const int* block_table,
+                                  int n_past, int block_size, int nkv, int hd,
+                                  cudaStream_t stream);
+
 }  // namespace imp

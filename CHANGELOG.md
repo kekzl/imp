@@ -4,6 +4,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## Unreleased
 
+- **Chunked prefill for INT4 KV** (sub-byte gather). New `paged_kv_gather_int4_to_fp16`
+  kernel mirrors the existing FP16/FP8/NVFP4 gather variants: symmetric 4-bit
+  packed nibbles + per-head FP16 scale (matches `write_kv_cache_int4_kernel`).
+  `Engine::supports_chunked_prefill_()` now allows `--kv-int4`. INT4's
+  pre-existing long-context quality regression (-22% decode at 20K ctx;
+  output degenerates on long prompts) is independent of chunked prefill —
+  short-prompt smoke is fine (`The capital of France is` → `Paris.`), long-
+  prompt chunked vs single-chunk produce equivalent (equally-degenerate)
+  output. Closes the INT4 entry in the "Sub-byte KV cache dtypes" out-of-scope
+  list.
 - **Chunked prefill for Gemma-4** (SWA + dual head_dim 256/512). `attention_cublas_prefill`'s
   three softmax kernels now accept a `sliding_window` parameter; the mask zeros
   positions outside `[abs_row - sliding_window + 1, abs_row]`. Gemma-4 SWA layers
