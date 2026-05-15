@@ -16,9 +16,14 @@ namespace imp {
 // q_offset is the absolute position of Q[0] in the full sequence. When causal=true,
 // Q[i] (abs pos = q_offset + i) is masked against K[j] for j > q_offset + i.
 // q_offset=0 reproduces the historic square path exactly.
+//
+// sliding_window > 0 additionally masks K[j] where (abs_pos - j) >= sliding_window,
+// i.e. the visible K window is [abs_pos - sliding_window + 1, abs_pos]. Matches the
+// semantics of naive_attention_prefill's sliding_window parameter. Defaults to 0 (off).
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr);
+                              float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr,
+                              int sliding_window = 0);
 
 // Force-create the static cuBLAS handle. Safe to call multiple times.
 // Engine init calls this so the first attention_cublas_prefill invocation

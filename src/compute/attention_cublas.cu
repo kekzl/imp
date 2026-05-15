@@ -91,7 +91,8 @@ void attention_cublas_prewarm() {
 // ---------------------------------------------------------------------------
 __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_in,
                                                     half* __restrict__ S_out, int q_len,
-                                                    int kv_len, int q_offset, bool causal) {
+                                                    int kv_len, int q_offset, bool causal,
+                                                    int sliding_window) {
     int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
     int warp_id = tid / 32, lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
@@ -99,10 +100,17 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
     const float* row_in = S_in + row_base;
     half* row_out = S_out + row_base;
     int abs_row = q_offset + row;
+    // sliding_window > 0: mask j where (abs_row - j) >= sliding_window
+    // (matches naive_attention_prefill semantics).
+    auto masked = [abs_row, causal, sliding_window](int j) {
+        if (causal && j > abs_row) return true;
+        if (sliding_window > 0 && (abs_row - j) >= sliding_window) return true;
+        return false;
+    };
 
     float max_val = -FLT_MAX;
     for (int j = tid; j < kv_len; j += blockDim.x)
-        max_val = fmaxf(max_val, (causal && j > abs_row) ? -FLT_MAX : row_in[j]);
+        max_val = fmaxf(max_val, masked(j) ? -FLT_MAX : row_in[j]);
 
     __shared__ float s_max[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -121,7 +129,7 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
 
     float sum_val = 0.0f;
     for (int j = tid; j < kv_len; j += blockDim.x)
-        sum_val += (causal && j > abs_row) ? 0.0f : expf(row_in[j] - max_val);
+        sum_val += masked(j) ? 0.0f : expf(row_in[j] - max_val);
 
     __shared__ float s_sum[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -139,7 +147,7 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
     float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
 
     for (int j = tid; j < kv_len; j += blockDim.x) {
-        float v = (causal && j > abs_row) ? 0.0f : expf(row_in[j] - max_val) * inv_sum;
+        float v = masked(j) ? 0.0f : expf(row_in[j] - max_val) * inv_sum;
         row_out[j] = __float2half(v);
     }
 }
@@ -149,16 +157,21 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
 // Used when QK^T scores are stored as FP32 (Gemma-4 with scale=1.0).
 // ---------------------------------------------------------------------------
 __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_len, int kv_len,
-                                                    int q_offset, bool causal) {
+                                                    int q_offset, bool causal, int sliding_window) {
     int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
     int warp_id = tid / 32, lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
     float* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
     int abs_row = q_offset + row;
+    auto masked = [abs_row, causal, sliding_window](int j) {
+        if (causal && j > abs_row) return true;
+        if (sliding_window > 0 && (abs_row - j) >= sliding_window) return true;
+        return false;
+    };
 
     float max_val = -FLT_MAX;
     for (int j = tid; j < kv_len; j += blockDim.x)
-        max_val = fmaxf(max_val, (causal && j > abs_row) ? -FLT_MAX : row_ptr[j]);
+        max_val = fmaxf(max_val, masked(j) ? -FLT_MAX : row_ptr[j]);
 
     __shared__ float s_max[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -177,7 +190,7 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_
 
     float sum_val = 0.0f;
     for (int j = tid; j < kv_len; j += blockDim.x)
-        sum_val += (causal && j > abs_row) ? 0.0f : expf(row_ptr[j] - max_val);
+        sum_val += masked(j) ? 0.0f : expf(row_ptr[j] - max_val);
 
     __shared__ float s_sum[32];
     for (int m = 16; m > 0; m >>= 1)
@@ -195,7 +208,7 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_
     float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
 
     for (int j = tid; j < kv_len; j += blockDim.x)
-        row_ptr[j] = (causal && j > abs_row) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
+        row_ptr[j] = masked(j) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +223,7 @@ __global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_
 // Warp-level reductions for max and sum using __shfl_xor_sync.
 // ---------------------------------------------------------------------------
 __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, int kv_len,
-                                               int q_offset, bool causal) {
+                                               int q_offset, bool causal, int sliding_window) {
     // Each block processes one row: blockIdx.x = row, blockIdx.y = head
     int row = blockIdx.x;
     int head = blockIdx.y;
@@ -221,12 +234,17 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
 
     half* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
     int abs_row = q_offset + row;
+    auto masked = [abs_row, causal, sliding_window](int j) {
+        if (causal && j > abs_row) return true;
+        if (sliding_window > 0 && (abs_row - j) >= sliding_window) return true;
+        return false;
+    };
 
     // Step 1: Find max (for numerical stability)
     float max_val = -FLT_MAX;
     for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > abs_row) {
+        if (masked(j)) {
             val = -FLT_MAX;
         } else {
             val = __half2float(row_ptr[j]);
@@ -259,7 +277,7 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
     float sum_val = 0.0f;
     for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > abs_row) {
+        if (masked(j)) {
             val = 0.0f;
         } else {
             val = expf(__half2float(row_ptr[j]) - max_val);
@@ -290,7 +308,7 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
     // Step 3: Normalize and write back
     for (int j = tid; j < kv_len; j += blockDim.x) {
         float val;
-        if (causal && j > abs_row) {
+        if (masked(j)) {
             val = 0.0f;
         } else {
             val = expf(__half2float(row_ptr[j]) - max_val) * inv_sum;
@@ -379,7 +397,7 @@ static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void
 // ---------------------------------------------------------------------------
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
-                              float softcap, int q_offset, cudaStream_t stream) {
+                              float softcap, int q_offset, cudaStream_t stream, int sliding_window) {
     int q_len = static_cast<int>(Q.shape[0]);
     int kv_len = static_cast<int>(K.shape[0]);
     if (q_len == 0)
@@ -457,9 +475,10 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 // probabilities to S_base directly. Replaces softmax_fp32_inplace
                 // + fp32_to_fp16_kernel pair (saves one full pass over the tensor).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_base, q_len, kv_len, q_offset, causal);
+                    S_f32, S_base, q_len, kv_len, q_offset, causal, sliding_window);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, q_len, kv_len, q_offset, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_base, q_len, kv_len, q_offset, causal, sliding_window);
             }
         }
 
@@ -508,9 +527,10 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             if (use_fp32_s) {
                 // Fused FP32 softmax + downcast (see MHA path above).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_base, q_len, kv_len, q_offset, causal);
+                    S_f32, S_base, q_len, kv_len, q_offset, causal, sliding_window);
             } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, q_len, kv_len, q_offset, causal);
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_base, q_len, kv_len, q_offset, causal, sliding_window);
             }
         }
 
