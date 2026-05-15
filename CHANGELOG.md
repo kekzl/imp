@@ -4,6 +4,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## Unreleased
 
+- **Gemma-4 FP8 prefill carve-out removed** — the 2026-05-09 measurement
+  showing -5..-19% prefill on Gemma-4 vs FP16 has substantially closed
+  with intermediate prefill work (PRs #177, #181). Re-measured 2026-05-15
+  on Q4_K_M: pp128 +1.0%, pp512 -0.9%, pp833 -4.2%, pp2048 **+7.3%** —
+  neutral with long-context advantage. FP8 also halves the activation
+  cache. Coherence bit-exact on chat prompts. Closes the last entry in
+  the "Gemma-4 remaining carve-outs" roadmap section.
 - **Gemma-4 NVFP4 decode cache for Q*_K source weights** — drops the
   "per-layer head_dim not yet supported" carve-out at `engine.cpp:864-866`.
   The per-tensor convert→quantize loop in `executor_pre_dequant.cu` handles
