@@ -829,19 +829,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
         // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.
-        if (config_.use_fp8_prefill) {
-            // FP8 prefill on Gemma-4 is correctness-OK (output matches FP16 path
-            // bit-for-bit on the smoke "capital of France is Paris" prompt) but
-            // ~5-19% slower on prefill (measured 2026-05-09 on Q4_K_M: pp=123 was
-            // 270 vs 334 tok/s, pp=833 was 1086 vs 1141 tok/s — both runs FP8 < FP16).
-            // Likely cause: cuBLASLt FP8 algos for Gemma-4's per-layer head_dim
-            // shape (256/512 split) lose to FP16 cuBLAS at our tile sizes. The
-            // earlier "per-layer head_dim not yet supported" comment was inherited
-            // from the FP8 KV story and inaccurate — the issue is perf, not
-            // correctness. Auto-disable for default-perf.
-            IMP_LOG_INFO("Gemma 4: disabling FP8 prefill (~5-19%% slower than FP16 on this arch)");
-            config_.use_fp8_prefill = 0;
-        }
+        // FP8 prefill carve-out removed 2026-05-15. The 2026-05-09 measurement
+        // showed -5..-19% prefill on Gemma-4 vs FP16; since then (PRs #177, #181)
+        // the gap has closed. Re-measured 2026-05-15 on Q4_K_M:
+        //   pp128:  +1.0%  pp512:  -0.9%  pp833:  -4.2%  pp2048: +7.3%
+        // Net effect is neutral with a long-context advantage. FP8 also halves
+        // the activation cache, which helps VRAM at long context. Users wanting
+        // max prefill at medium pp can opt out via [attention] fp8_prefill = "never".
         if (config_.use_nvfp4_decode) {
             // Prequant SafeTensors NVFP4 weights are already in NVFP4 layout on
             // disk. Phase 3a (Q*_K → NVFP4 conversion) and Phase 3b
