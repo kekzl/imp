@@ -851,20 +851,17 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             // load-bearing — it builds the contiguous per-layer expert buffer
             // that lights up the M=1 decode fast path (gemv_nvfp4_*) and lets
             // CUDA Graphs capture decode without D2H expert_offsets sync.
-            // Disabling it for Gemma-4 prequant forces the legacy FP16
-            // fallback (sm_80 WMMA + per-layer D2H sync), which both
-            // tanks decode tok/s and breaks graph capture. The "per-layer
-            // head_dim" caveat applies to attention CUTLASS paths, not MoE
-            // experts, so leaving the cache enabled is safe for prequant.
-            if (model_->config().is_nvfp4_prequant) {
-                IMP_LOG_INFO(
-                    "Gemma 4 + NVFP4 prequant: keeping use_nvfp4_decode=%d "
-                    "(Phase 3-MoE cache build needed for fast-path decode)",
-                    config_.use_nvfp4_decode);
-            } else {
-                IMP_LOG_INFO("Gemma 4: disabling NVFP4 decode cache (per-layer head_dim not yet supported)");
-                config_.use_nvfp4_decode = 0;
-            }
+            //
+            // For Q*_K source weights the per-tensor convert→quantize loop in
+            // executor_pre_dequant.cu builds wcache_.nvfp4 per tensor; the
+            // per-layer head_dim (256 SWA / 512 global) is uniformly handled
+            // since each entry carries its own (N, K) shape. Verified 2026-05-15
+            // on Q4_K_M + UD-Q4_K_M: tg256 184 → 204 tok/s (+11%), pp512
+            // 1795 → 2347 tok/s (+30%). Coherent on chat prompts; the
+            // pre-existing Q4_K_M code-gen drift (see roadmap) is orthogonal.
+            IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",
+                         config_.use_nvfp4_decode,
+                         (int)model_->config().is_nvfp4_prequant);
         }
         if (config_.dual_path_quant) {
             IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
