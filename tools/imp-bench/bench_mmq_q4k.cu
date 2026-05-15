@@ -89,11 +89,15 @@ void bench_mmq_q4k() {
         return;
     }
 
-    printf("=== mmq_q4k Microbench (tiled vs mmvq) ===\n\n");
-    printf("  %-46s %10s %10s %10s %10s\n", "shape", "mmvq ms", "tiled ms", "speedup",
-           "tiled tok/s");
-    printf("  %-46s %10s %10s %10s %10s\n", "-----", "-------", "--------", "-------",
-           "-----------");
+    printf("=== mmq_q4k Microbench (tile sweep vs mmvq) ===\n");
+    printf("  t0=<32,64,2,4>  t1=<16,32,1,1>  t2=<16,64,1,2>  "
+           "t3=<64,128,4,4>  t4=<64,64,4,4>\n\n");
+
+    const char* tile_labels[] = {
+        "tile0 <32,64,2,4>",  "tile1 <16,32,1,1>", "tile2 <16,64,1,2>",
+        "tile3 <64,128,4,4>", "tile4 <64,64,4,4>",
+    };
+    constexpr int kNumTiles = 5;
 
     for (const auto& sz : kShapes) {
         const int M = sz.M, N = sz.N, K = sz.K;
@@ -124,15 +128,29 @@ void bench_mmq_q4k() {
 
         float mmvq_ms = time_iters(s, e, ggml_mmvq_q4k, W_dev, x_dev, y_dev, M, N, K, scratch,
                                    bytes_scratch);
-        float tiled_ms = time_iters(s, e, mmq_q4k, W_dev, x_dev, y_dev, M, N, K, scratch,
+
+        float tile_ms[kNumTiles] = {0};
+        for (int t = 0; t < kNumTiles; ++t) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", t);
+            setenv("IMP_MMQ_Q4K_TILE", buf, 1);
+            tile_ms[t] = time_iters(s, e, mmq_q4k, W_dev, x_dev, y_dev, M, N, K, scratch,
                                     bytes_scratch);
+        }
 
         cudaEventDestroy(s);
         cudaEventDestroy(e);
 
-        double tiled_toks = (M / (tiled_ms * 1e-3));
-        printf("  %-46s %10.3f %10.3f %9.2fx %10.0f\n", sz.label, mmvq_ms, tiled_ms,
-               mmvq_ms / tiled_ms, tiled_toks);
+        // Find best tile
+        int best = 0;
+        for (int t = 1; t < kNumTiles; ++t)
+            if (tile_ms[t] < tile_ms[best]) best = t;
+        double best_toks = (M / (tile_ms[best] * 1e-3));
+        printf("  %-46s mmvq=%6.3fms", sz.label, mmvq_ms);
+        for (int t = 0; t < kNumTiles; ++t)
+            printf("  t%d=%6.3f", t, tile_ms[t]);
+        printf("  best=%s (%.2fx, %.0f tok/s)\n", tile_labels[best],
+               mmvq_ms / tile_ms[best], best_toks);
 
         cudaFree(W_dev);
         cudaFree(x_dev);

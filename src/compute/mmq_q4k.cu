@@ -10,6 +10,7 @@
 #include "mmq_q4k.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cuda_fp16.h>
 
 namespace imp {
@@ -304,34 +305,62 @@ void mmq_q4k_kernel(const block_q4_K* __restrict__ W,
 // Public dispatch
 // -------------------------------------------------------------------------
 
+// Template dispatch helper — bench can flip configs via env var.
+namespace mmq_q4k_detail {
+
+template <int TILE_M, int TILE_N, int REG_M, int REG_N>
+static void launch_mmq_q4k(const void* W, const block_q8_1* x_q8, half* y,
+                           int M, int N, int K, cudaStream_t stream) {
+    constexpr int THREADS = (TILE_M / REG_M) * (TILE_N / REG_N);
+    static_assert(THREADS == (TILE_M / REG_M) * (TILE_N / REG_N), "");
+    dim3 block(THREADS);
+    dim3 grid((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
+    mmq_q4k_kernel<TILE_M, TILE_N, THREADS, REG_M, REG_N>
+        <<<grid, block, 0, stream>>>(
+            reinterpret_cast<const block_q4_K*>(W), x_q8, y, M, N, K);
+}
+
+}  // namespace mmq_q4k_detail
+
 void mmq_q4k(const void* W, const half* x, half* y, int M, int N, int K,
              void* scratch, size_t scratch_size, cudaStream_t stream) {
     using namespace mmq_q4k_detail;
-
-    constexpr int TILE_M = 32;
-    constexpr int TILE_N = 64;
-    constexpr int THREADS = 256;
-    constexpr int REG_M = 2;
-    constexpr int REG_N = 4;
-    // 16 × 16 = 256 threads ✓
 
     const int x_q8_blocks = M * (K / QK8_1);
     const size_t need = static_cast<size_t>(x_q8_blocks) * sizeof(block_q8_1);
     if (need > scratch_size || K % QK_K != 0) return;
 
     block_q8_1* x_q8 = reinterpret_cast<block_q8_1*>(scratch);
-
     {
         const int threads = 256;
         const int blocks = (x_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_kernel<<<blocks, threads, 0, stream>>>(x, x_q8, M * K);
     }
-    {
-        dim3 block(THREADS);
-        dim3 grid((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
-        mmq_q4k_kernel<TILE_M, TILE_N, THREADS, REG_M, REG_N>
-            <<<grid, block, 0, stream>>>(
-                reinterpret_cast<const block_q4_K*>(W), x_q8, y, M, N, K);
+
+    // Tile sweep on Qwen3-32B Q4_K_M shapes picked <16, 32, 1, 1> as the
+    // winner across the full M=32..512 range (2.0-2.4× mmvq throughout).
+    // Smaller tiles win because the kernel is launch/parallelism-bound, not
+    // SMEM-reuse-bound — more blocks → more wave concurrency on the 170-SM
+    // GB202. IMP_MMQ_Q4K_TILE env var overrides for re-sweeping.
+    const char* tile_env = std::getenv("IMP_MMQ_Q4K_TILE");
+    const int tile = tile_env ? std::atoi(tile_env) : 1;
+    switch (tile) {
+        case 0:  // original Phase A default, large per-thread workload
+            launch_mmq_q4k<32, 64, 2, 4>(W, x_q8, y, M, N, K, stream);  // 256 thr
+            break;
+        case 2:  // medium-wide
+            launch_mmq_q4k<16, 64, 1, 2>(W, x_q8, y, M, N, K, stream);  // 512 thr
+            break;
+        case 3:  // big tile, more reuse
+            launch_mmq_q4k<64, 128, 4, 4>(W, x_q8, y, M, N, K, stream);  // 512 thr
+            break;
+        case 4:  // square big
+            launch_mmq_q4k<64, 64, 4, 4>(W, x_q8, y, M, N, K, stream);  // 256 thr
+            break;
+        case 1:
+        default:
+            launch_mmq_q4k<16, 32, 1, 1>(W, x_q8, y, M, N, K, stream);  // 512 thr
+            break;
     }
 }
 
