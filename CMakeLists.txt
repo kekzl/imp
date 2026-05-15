@@ -419,6 +419,7 @@ if(IMP_BUILD_TESTS)
         tests/test_activation.cu
         tests/test_embedding.cu
         tests/test_gemm.cu
+        tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_dp4a.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
