@@ -135,6 +135,18 @@ static void ensure_workspace(size_t need) {
     s_workspace_sz = need;
 }
 
+void gemm_grouped_3x_nvfp4_prewarm() {
+    if (!cutlass_grouped_3x_nvfp4_available()) return;
+    // Conservative caps: covers any realistic prefill shape so the lazy
+    // cudaMalloc paths inside gemm_grouped_cutlass_3x_nvfp4{_device_args}
+    // never fire — including under stream capture where cudaMalloc is
+    // illegal. Sized for top-end MoE: 512 experts × 8 KiB/expert struct
+    // packing = 1 MiB staging; 512 MiB workspace covers CUTLASS scratch
+    // even for very large grouped problems.
+    ensure_staging(1ULL << 20);     // 1 MiB
+    ensure_workspace(512ULL << 20);  // 512 MiB
+}
+
 bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int K,
                                    const void* const* host_ptr_A, const void* const* host_ptr_SFA,
                                    const void* const* host_ptr_B, const void* const* host_ptr_SFB,

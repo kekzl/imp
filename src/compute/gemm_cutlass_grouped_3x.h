@@ -89,4 +89,12 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
 
 void gemm_grouped_3x_nvfp4_cleanup();
 
+// Pre-allocate the persistent staging + workspace buffers so all
+// subsequent calls under stream capture find them sufficient and skip
+// the lazy cudaMalloc path (illegal under capture). Conservative caps —
+// 1 MiB staging (covers ~512 experts of per-expert layout structs);
+// 512 MiB workspace (covers CUTLASS GemmUniversal scratch for any
+// realistic prefill shape). Call once at engine init.
+void gemm_grouped_3x_nvfp4_prewarm();
+
 }  // namespace imp

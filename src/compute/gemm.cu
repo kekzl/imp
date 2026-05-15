@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "compute/gemm_capture_fp16_sm120.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
 #include "runtime/config.h"
@@ -548,6 +549,21 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.qtype);
+
+    // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR
+    // (status 14) under stream capture on sm_120 — heuristic + workspace
+    // allocation paths aren't graph-safe. Route FP16×FP16→FP16 GEMMs to the
+    // hand-tuned sm_120 WMMA kernel when the stream is in capture mode.
+    if (A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F16) {
+        cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &cap_status) == cudaSuccess &&
+            cap_status == cudaStreamCaptureStatusActive) {
+            if (gemm_capture_fp16_sm120(A.data, B.data, C.data, (int)M, (int)N, (int)K, alpha, beta,
+                                         stream)) {
+                return;
+            }
+        }
+    }
 
     // Mixed-precision output (e.g. FP16×FP16 → FP32 for diagnostic precision
     // probes): bypass cuBLASLt and use cublasGemmEx directly. cuBLASLt's
