@@ -694,41 +694,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             KVCache* cache = state.kv_cache;
             QType kvt = cache->qtype();
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
-            // so this code only runs for FP16 / FP8 / NVFP4 KV without SWA / dual-head_dim.
+            // so this code only runs for FP16 / FP8 / NVFP4 KV.
             const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4);
-            // `per_layer_shapes` (line 196) is true whenever cfg.head_dim_per_layer or
-            // cfg.n_kv_heads_per_layer is populated. HF loaders for hybrid archs
-            // (Qwen3.5/3.6 GDN via layer_types, Nemotron-H via hybrid_override_pattern)
-            // populate n_kv_heads_per_layer with cfg.n_kv_heads on attention layers and
-            // 0 on SSM/GDN/MoE non-attention layers — uniform across attention layers,
-            // safe to chunk. Only Gemma-4 (dual head_dim 256 SWA / 512 global) has
-            // truly heterogeneous attention shapes that the cuBLAS-prefill chunked path
-            // can't handle. Detect "any nonzero entries differ from each other" instead
-            // of "any per-layer array populated".
-            auto first_nonzero_int = [](const std::vector<int>& v) -> int {
-                for (int x : v) if (x > 0) return x;
-                return 0;
-            };
-            auto any_nonzero_differs = [](const std::vector<int>& v, int ref) -> bool {
-                for (int x : v) if (x > 0 && x != ref) return true;
-                return false;
-            };
-            bool attn_shapes_vary = false;
-            if (!cfg.head_dim_per_layer.empty()) {
-                int ref = first_nonzero_int(cfg.head_dim_per_layer);
-                if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref))
-                    attn_shapes_vary = true;
-            }
-            if (!cfg.n_kv_heads_per_layer.empty()) {
-                int ref = first_nonzero_int(cfg.n_kv_heads_per_layer);
-                if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref))
-                    attn_shapes_vary = true;
-            }
-            if (!kvt_ok || sliding_active || attn_shapes_vary) {
+            // sliding_active and attn_shapes_vary are now both supported:
+            //   - cuBLAS softmax accepts a sliding_window argument (PR feat(attn): sw),
+            //   - the rectangular cuBLAS path dispatches per-layer with nh/nkv/hd.
+            // KV dtype remains the only hard gate (the gather kernels are
+            // wired for FP16 / FP8 / NVFP4 only).
+            if (!kvt_ok) {
                 IMP_LOG_ERROR(
-                    "chunked_prefill: unsupported config (kv=%d swa=%d attn_shapes_vary=%d) at L%d — "
-                    "engine should have prevented this",
-                    (int)kvt, (int)sliding_active, (int)attn_shapes_vary, layer);
+                    "chunked_prefill: unsupported KV dtype %d at L%d — engine should have prevented this",
+                    (int)kvt, layer);
                 std::abort();
             }
 
@@ -799,7 +775,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
 
             attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream);
+                                     /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
+                                     layer_sliding_window);
 
             cudaFreeAsync(k_full, stream);
             cudaFreeAsync(v_full, stream);
@@ -819,30 +796,28 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
         const bool use_naive_attn = RuntimeConfig::current().attention.naive;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
-        // Gemma-4 long-context workarounds. Two failure modes at n > 1024:
-        //   (a) SWA layers (hd=256) with sliding_active → FMHA chain emits
-        //       "own owners and" garbage. Root cause not yet isolated.
-        //   (b) Global layers (hd=512) at n > cuBLAS S-matrix capacity
-        //       (attn_scores_.shape[1], typically 2896): cuBLAS gate fails,
-        //       FMHA fallback chain dispatches flash_attention_prefill_tc
-        //       whose ~280 KB static tile exceeds sm_120's 100 KB opt-in
-        //       smem (cudaErrorInvalidValue, stale-error warning).
-        // Workaround: route both cases through naive FP32 reference
-        // attention (smem bound = seq_len*4B; n=8192 → 32 KB). Correct at
-        // any head_dim, supports sliding_window. Bypassable via
+        // Gemma-4 SWA used to need the naive FP32 workaround because the FMHA
+        // chain emitted garbage on hd=256 + sliding and the cuBLAS softmax had
+        // no sliding-window mask. cuBLAS now supports sliding_window directly
+        // (causal_softmax_*_kernel mask `(abs_row - j) >= sliding_window`), so
+        // SWA layers go through the cuBLAS gate below. Naive remains the
+        // fallback for the one remaining failure mode:
+        //   - Gemma-4 GLOBAL layers (hd=512) at n > cublas_cap: the cuBLAS
+        //     gate fails, FMHA fallback dispatches flash_attention_prefill_tc
+        //     whose ~280 KB static tile exceeds sm_120's 100 KB opt-in smem.
+        // Naive's smem bound is seq_len*4B (n=8192 → 32 KB). Bypassable via
         // IMP_NO_NAIVE_SWA=1.
         int cublas_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
-        bool gemma4_swa_broken = (cfg.arch == ModelArch::GEMMA4 && sliding_active);
-        bool gemma4_global_too_long = (cfg.arch == ModelArch::GEMMA4 && !sliding_active && n > cublas_cap);
-        bool use_naive_for_swa = ((gemma4_swa_broken || gemma4_global_too_long) && n <= 8192 &&
+        bool gemma4_overflow_cublas = (cfg.arch == ModelArch::GEMMA4 && n > cublas_cap);
+        bool use_naive_for_swa = (gemma4_overflow_cublas && n <= 8192 &&
                                   !RuntimeConfig::current().attention.no_naive_swa);
         if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
             // Naive reference attention: simple FP32, no optimization.
             if (layer == 0 && use_naive_for_swa && !use_naive_attn)
                 IMP_LOG_INFO(
-                    "Gemma-4 SWA workaround: layer %d using NAIVE attention (n=%d > sw=%d; FMHA chain is "
-                    "incorrect at hd=%d + SWA)",
-                    layer, n, layer_sliding_window, hd);
+                    "Gemma-4 long-context fallback: layer %d using NAIVE attention (n=%d > cublas_cap=%d "
+                    "and FMHA hd=%d tc-tile OOMs)",
+                    layer, n, cublas_cap, hd);
             else if (layer == 0)
                 IMP_LOG_INFO("Using NAIVE reference attention (n=%d, nh=%d, nkv=%d, hd=%d, scale=%.2f)", n,
                              nh, nkv, hd, scale);
@@ -850,7 +825,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                     static_cast<const half*>(vv.data), static_cast<half*>(ao.data), n, nh,
                                     nkv, hd, scale, cfg.attn_logit_softcap, stream, layer_sliding_window);
         } else if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ &&
-                   n <= static_cast<int>(attn_scores_.shape[1]) && !sliding_active) {
+                   n <= static_cast<int>(attn_scores_.shape[1]) &&
+                   (force_cublas_attn || !sliding_active)) {
             // The n<=1024 heuristic below picks Flash Attention for long contexts
             // (O(1) memory) over cuBLAS (O(n^2) S-matrix). Gemma-4 with mixed
             // head_dims (256 SWA / 512 global) MUST stay on cuBLAS for the
@@ -860,13 +836,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // flash_attention_prefill_tc whose ~280 KB static tile exceeds
             // sm_120's 100 KB opt-in dynamic smem, poisoning the stream with
             // cudaErrorInvalidValue. force_cublas_attn (set on per-layer shapes)
-            // therefore overrides the n<=1024 heuristic.
+            // therefore overrides the n<=1024 heuristic AND the !sliding_active
+            // gate — Gemma-4 SWA layers now use the cuBLAS sliding_window mask
+            // instead of falling to naive.
+            // For NON-Gemma-4 SWA models (Qwen with window etc.), keep
+            // `!sliding_active` so they fall to FMHA where SWA is faster than
+            // the materialized S-matrix path.
             // Pass the FULL attn_scores_ tensor (capacity = max seq_len^2) so
             // attention_cublas_prefill can decide whether the FP32 S-matrix
             // fits. Constructing a sub-view with shape=[nh, n, n] hides the
             // real capacity from the FP32-fits check.
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale, /*causal=*/true,
-                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream,
+                                     layer_sliding_window);
         } else {
             // Flash attention: tiled O(n) memory, handles softcap + sliding window.
             // Dispatch chain: CUTLASS FMHA → Blackwell WMMA → Hopper WMMA → scalar.

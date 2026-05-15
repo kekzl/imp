@@ -1909,19 +1909,19 @@ bool Engine::supports_chunked_prefill_() const {
     if (!model_)
         return false;
     const auto& cfg = model_->config();
-    // Out-of-scope archs: SWA / dual-head_dim variants. Hybrid GDN+MoE /
-    // Mamba2+MoE archs (QWEN35*, QWEN36_MOE, NEMOTRON_H_MOE) ARE supported —
-    // their attention layers share one (nkv, hd) geometry, the existing
-    // chunked-attention path handles them, and SSM/GDN/Mamba2 forward kernels
-    // persist state across chunks.
-    if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA (sliding_window_pattern=6)
-    if (cfg.arch == ModelArch::GEMMA4) return false;       // SWA + dual head_dim
+    // Out-of-scope archs. Hybrid GDN+MoE / Mamba2+MoE archs (QWEN35*,
+    // QWEN36_MOE, NEMOTRON_H_MOE) ARE supported. Gemma-4 (SWA + dual
+    // head_dim 256/512) is now supported via:
+    //   - cuBLAS softmax sliding_window param (PR feat(attn): sliding_window),
+    //   - per-layer dispatch through the rectangular cuBLAS prefill path
+    //     (every layer call uses its own nh/nkv/hd from layer-local vars).
+    if (cfg.arch == ModelArch::GEMMA3) return false;       // SWA, no test model
     if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
     // Per-layer attention shape uniformity gate. Hybrid archs (QWEN35*, QWEN36_MOE,
     // NEMOTRON_H_MOE) populate n_kv_heads_per_layer with zeros for non-attention
     // layers — uniformity here means all *nonzero* values agree. Truly heterogeneous
-    // shapes (Gemma-4 dual head_dim 256/512) would have differing nonzero entries
-    // and stay carved out via the arch block above + this defense-in-depth check.
+    // shapes (Gemma-4 dual head_dim 256/512) are now allowed because the chunked
+    // path dispatches per-layer with the correct nh/nkv/hd from layer-local vars.
     auto first_nonzero_int = [](const std::vector<int>& v) -> int {
         for (int x : v) if (x > 0) return x;
         return 0;
@@ -1932,13 +1932,16 @@ bool Engine::supports_chunked_prefill_() const {
     };
     if (!cfg.n_kv_heads_per_layer.empty()) {
         int ref = first_nonzero_int(cfg.n_kv_heads_per_layer);
-        if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref))
-            return false;
+        if (ref > 0 && any_nonzero_differs(cfg.n_kv_heads_per_layer, ref)) {
+            // Allow Gemma-4: per-layer dispatch covers heterogeneous shapes.
+            if (cfg.arch != ModelArch::GEMMA4) return false;
+        }
     }
     if (!cfg.head_dim_per_layer.empty()) {
         int ref = first_nonzero_int(cfg.head_dim_per_layer);
-        if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref))
-            return false;
+        if (ref > 0 && any_nonzero_differs(cfg.head_dim_per_layer, ref)) {
+            if (cfg.arch != ModelArch::GEMMA4) return false;
+        }
     }
     // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4. Others
     // (INT4/INT8/TurboQuant) would need their own gather kernels.

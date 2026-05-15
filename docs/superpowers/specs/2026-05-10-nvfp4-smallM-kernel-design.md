@@ -27,7 +27,7 @@ After commit `bc3bc31` routed NVFP4 prefill through CUTLASS Sm120 grouped GEMM
 (pp512 1241 → 13046 tok/s, ×10.5), four follow-up CUTLASS-level optimizations
 were attempted in iteration-2 and all rejected (smaller M-tile fails to compile,
 larger N-tile loses parallelism, pingpong schedule blocked for FP4, fused
-gate+up regressed decode -7%). See `bench/iteration2_findings.md`.
+gate+up regressed decode -7%). See `docs/archive/bench-2026-05-10/iteration2_findings.md`.
 
 Re-measured baseline 2026-05-10:
 
@@ -371,8 +371,8 @@ back without rebuild. After Phase D default-on, the flip becomes
 ## References
 
 - `bench/iteration2_findings.md` — root-cause analysis of the M-tile constraint
-- `bench/profile_findings.md` — pre-bc3bc31 profile (slow-fallback path)
-- `bench/pp_optimization_report.md` — bc3bc31 win documentation
+- `docs/archive/bench-2026-05-10/profile_findings.md` — pre-bc3bc31 profile (slow-fallback path)
+- `docs/archive/bench-2026-05-10/pp_optimization_report.md` — bc3bc31 win documentation
 - memory `sm120_real_perf_levers_2026_05_04.md` — authoritative SM120 hardware reference
 - memory `sass_audit_120a_no_tcgen05_2026_05_04.md` — SASS-level proof that we're on the peak MMA pipe
 - memory `cutlass_nvfp4_sm120_nondeterministic_2026_05_05.md` — what we want to avoid
