@@ -90,10 +90,12 @@ void bench_mmq_q4k() {
         return;
     }
 
-    printf("=== mmq_q4k Microbench (mmvq vs v1 tile sweep vs v2 HMMA) ===\n");
+    printf("=== mmq_q4k Microbench (v1 dp4a vs v2 scaffold/p3 HMMA) ===\n");
     printf("  v1 tiles: t0=<32,64,2,4>  t1=<16,32,1,1>  t2=<16,64,1,2>  "
            "t3=<64,128,4,4>  t4=<64,64,4,4>\n");
-    printf("  v2:       HMMA <64,64,32> + WMMA m16n16k16 (FP32 acc)\n\n");
+    printf("  v2_scfd:  WMMA m16n16k16 path, Q4 dequant to SMEM sB then load\n");
+    printf("  v2_p3:    mma.sync m16n8k16 + ldmatrix.x4, register-only Q4 "
+           "dequant (no sB)\n\n");
 
     const char* tile_labels[] = {
         "tile0 <32,64,2,4>",  "tile1 <16,32,1,1>", "tile2 <16,64,1,2>",
@@ -151,7 +153,8 @@ void bench_mmq_q4k() {
                                     bytes_scratch);
         }
 
-        // v2 timing — no scratch (no Q8_1 quant), takes precomputed inputs.
+        // v2 Phase 3 (default — register-only dequant)
+        unsetenv("IMP_MMQ_Q4K_V2_SCAFFOLD");
         for (int i = 0; i < kWarmup; ++i)
             mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
         cudaDeviceSynchronize();
@@ -160,9 +163,24 @@ void bench_mmq_q4k() {
             mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
         cudaEventRecord(e);
         cudaEventSynchronize(e);
-        float v2_ms = 0;
-        cudaEventElapsedTime(&v2_ms, s, e);
-        v2_ms /= kTimed;
+        float v2_p3_ms = 0;
+        cudaEventElapsedTime(&v2_p3_ms, s, e);
+        v2_p3_ms /= kTimed;
+
+        // v2 Phase 2 scaffold (env-var fallback path) — for A/B reporting.
+        setenv("IMP_MMQ_Q4K_V2_SCAFFOLD", "1", 1);
+        for (int i = 0; i < kWarmup; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaDeviceSynchronize();
+        cudaEventRecord(s);
+        for (int i = 0; i < kTimed; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaEventRecord(e);
+        cudaEventSynchronize(e);
+        float v2_scfd_ms = 0;
+        cudaEventElapsedTime(&v2_scfd_ms, s, e);
+        v2_scfd_ms /= kTimed;
+        unsetenv("IMP_MMQ_Q4K_V2_SCAFFOLD");
 
         cudaEventDestroy(s);
         cudaEventDestroy(e);
@@ -171,15 +189,18 @@ void bench_mmq_q4k() {
         for (int t = 1; t < kNumTiles; ++t)
             if (tile_ms[t] < tile_ms[best]) best = t;
         const float v1_best_ms = tile_ms[best];
-        const double v2_toks = M / (v2_ms * 1e-3);
         const double v1_toks = M / (v1_best_ms * 1e-3);
+        const double v2_scfd_toks = M / (v2_scfd_ms * 1e-3);
+        const double v2_p3_toks = M / (v2_p3_ms * 1e-3);
 
-        printf("  %-46s mmvq=%6.3fms", sz.label, mmvq_ms);
+        printf("  %-46s mmvq=%6.3f", sz.label, mmvq_ms);
         for (int t = 0; t < kNumTiles; ++t) printf("  t%d=%6.3f", t, tile_ms[t]);
-        printf("  v1_best=%s (%.2fx)  v2=%6.3fms (%.2fx mmvq, %.2fx v1_best)  "
-               "v1=%.0f v2=%.0f tok/s\n",
-               tile_labels[best], mmvq_ms / v1_best_ms, v2_ms, mmvq_ms / v2_ms,
-               v1_best_ms / v2_ms, v1_toks, v2_toks);
+        printf("  v1_best=%s (%.2fx)  scfd=%6.3fms (%.2fx v1)  "
+               "p3=%6.3fms (%.2fx v1, %.2fx scfd)  "
+               "v1=%.0f scfd=%.0f p3=%.0f tok/s\n",
+               tile_labels[best], mmvq_ms / v1_best_ms, v2_scfd_ms,
+               v1_best_ms / v2_scfd_ms, v2_p3_ms, v1_best_ms / v2_p3_ms,
+               v2_scfd_ms / v2_p3_ms, v1_toks, v2_scfd_toks, v2_p3_toks);
 
         cudaFree(W_dev);
         cudaFree(x_dev);
