@@ -3,6 +3,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstddef>
+#include <cstdint>
 
 namespace imp {
 
@@ -56,6 +57,31 @@ void q4k_precompute_eff_scales(
 // Convenience: bytes needed for one eff_scale or eff_min tensor of shape [N, K/32].
 inline size_t q4k_eff_scale_bytes(int N, int K) {
     return static_cast<size_t>(N) * (K / 32) * sizeof(half);
+}
+
+// Permute Q4_K nibbles into the v2 consumer layout.
+//
+// Canonical Q4_K stores qs[128] with 2 sub-blocks sharing 32 bytes:
+//   byte i in qs[32*g..32*g+32] holds sub-block (2*g)'s nibble at low 4 bits
+//   and sub-block (2*g+1)'s nibble at high 4 bits.
+//
+// The v2 kernel wants each sub-block's 32 nibbles packed contiguously and
+// K-major: 16 bytes per sub-block, byte j = (nibble for K=2j) | (nibble for
+// K=2j+1) << 4. Loading is then a single coalesced `int4` per sub-block per
+// output row, with 4 consecutive K values held in 16 bits per thread —
+// matching the m16n8k16 B-fragment layout (4 K-values per thread per N col).
+//
+// Output: eff_q4[N, K/32, 16] uint8 — row-major, 16 bytes per sub-block.
+// Total footprint = N * K / 2 bytes (same nibble count as canonical qs[]).
+void q4k_permute_to_v2_layout(
+    const void* W,        // [N, K/256] block_q4_K bytes
+    uint8_t* eff_q4_out,  // [N, K/32, 16] uint8
+    int N, int K,
+    cudaStream_t stream);
+
+// Convenience: bytes needed for one eff_q4 tensor (N rows × K cols).
+inline size_t q4k_eff_q4_bytes(int N, int K) {
+    return static_cast<size_t>(N) * (K / 32) * 16u;
 }
 
 }  // namespace imp

@@ -98,4 +98,60 @@ void q4k_precompute_eff_scales(const void* W, half* eff_scale_out,
         K_blocks);
 }
 
+namespace mmq_q4k_v2_detail {
+
+// One thread per sub-block. Reads 32 nibbles from canonical qs[] (interleaved
+// with the paired sub-block via low/high nibble) and writes 16 bytes of
+// K-major packed nibbles.
+__global__ void q4k_permute_kernel(const block_q4_K* __restrict__ W,
+                                   uint8_t* __restrict__ eff_q4_out,
+                                   int total_sub_blocks, int K_blocks) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_sub_blocks) return;
+
+    // K_blocks * 8 sub-blocks per row of N.
+    const int subs_per_row = K_blocks * 8;
+    const int n = tid / subs_per_row;
+    const int k_sub_in_row = tid % subs_per_row;
+    const int k_super = k_sub_in_row / 8;
+    const int s = k_sub_in_row % 8;
+
+    const block_q4_K* bq = &W[n * K_blocks + k_super];
+    const uint8_t* qs = bq->qs;
+
+    // Canonical layout: bytes [(s/2)*32 .. (s/2)*32 + 32) contain the 32 nibbles
+    // for sub-block s (low half if s is even, high half if s is odd) AND the 32
+    // nibbles for its partner sub-block s^1 (in the other half).
+    const int byte_base = (s >> 1) * 32;
+    const bool use_high = (s & 1) != 0;
+
+    uint8_t* out_row = &eff_q4_out[static_cast<size_t>(n) * subs_per_row * 16 +
+                                   static_cast<size_t>(k_sub_in_row) * 16];
+
+#pragma unroll
+    for (int j = 0; j < 16; ++j) {
+        const uint8_t b1 = qs[byte_base + 2 * j + 0];
+        const uint8_t b2 = qs[byte_base + 2 * j + 1];
+        const uint8_t n1 = use_high ? ((b1 >> 4) & 0x0F) : (b1 & 0x0F);
+        const uint8_t n2 = use_high ? ((b2 >> 4) & 0x0F) : (b2 & 0x0F);
+        out_row[j] = static_cast<uint8_t>(n1 | (n2 << 4));
+    }
+}
+
+}  // namespace mmq_q4k_v2_detail
+
+void q4k_permute_to_v2_layout(const void* W, uint8_t* eff_q4_out, int N, int K,
+                              cudaStream_t stream) {
+    if (K % 256 != 0) return;
+    using namespace mmq_q4k_v2_detail;
+
+    const int K_blocks = K / 256;
+    const int total_sub = N * K_blocks * 8;
+    const int threads = 256;
+    const int blocks = (total_sub + threads - 1) / threads;
+
+    q4k_permute_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const block_q4_K*>(W), eff_q4_out, total_sub, K_blocks);
+}
+
 }  // namespace imp

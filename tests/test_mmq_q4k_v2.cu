@@ -149,4 +149,94 @@ TEST(MmqQ4KV2Scales, Large_N5120_K5120) { run_check(5120, 5120, 0xb5); }
 TEST(MmqQ4KV2Scales, Pad_N33_K256)    { run_check(33, 256, 0xb6); }
 TEST(MmqQ4KV2Scales, Pad_N100_K1280)  { run_check(100, 1280, 0xb7); }
 
+// ---------------------------------------------------------------------------
+// Phase 1b: layout permutation tests
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Read a Q4 nibble from canonical qs[128] for element index i in [0, 256).
+uint8_t canonical_q4(const uint8_t* qs, int i) {
+    const int qs_byte = (i / 64) * 32 + (i % 32);
+    const int use_high = (i / 32) & 1;
+    const uint8_t packed = qs[qs_byte];
+    return use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
+}
+
+// Read a Q4 nibble from the permuted eff_q4 layout for element index i in
+// [0, 256) within one super-block.
+uint8_t permuted_q4(const uint8_t* eff_q4_super, int i) {
+    const int sub = i / 32;
+    const int pos = i % 32;
+    const int byte_idx = pos / 2;
+    const int high = pos & 1;  // low nibble = even pos, high = odd
+    const uint8_t b = eff_q4_super[sub * 16 + byte_idx];
+    return high ? ((b >> 4) & 0xF) : (b & 0xF);
+}
+
+void run_permute_check(int N, int K, unsigned seed) {
+    ASSERT_EQ(K % 256, 0);
+    auto w_host = make_random_q4k(N, K, seed);
+    void* w_dev = nullptr;
+    cudaMalloc(&w_dev, w_host.size());
+    cudaMemcpy(w_dev, w_host.data(), w_host.size(), cudaMemcpyHostToDevice);
+
+    const size_t out_bytes = q4k_eff_q4_bytes(N, K);
+    uint8_t* eff_q4_dev = nullptr;
+    cudaMalloc(&eff_q4_dev, out_bytes);
+    cudaMemset(eff_q4_dev, 0, out_bytes);
+
+    q4k_permute_to_v2_layout(w_dev, eff_q4_dev, N, K, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<uint8_t> h_eff_q4(out_bytes);
+    cudaMemcpy(h_eff_q4.data(), eff_q4_dev, out_bytes, cudaMemcpyDeviceToHost);
+
+    // Test 1: every quant value reads back identically from both layouts.
+    const int K_blocks = K / 256;
+    int nibble_mismatches = 0;
+    int first_n = -1, first_kbx = -1, first_i = -1;
+    int can_val = 0, perm_val = 0;
+    for (int n = 0; n < N; ++n) {
+        for (int kbx = 0; kbx < K_blocks; ++kbx) {
+            const uint8_t* canon_qs =
+                w_host.data() + (static_cast<size_t>(n) * K_blocks + kbx) * 144 + 16;
+            const uint8_t* perm_super =
+                h_eff_q4.data() + (static_cast<size_t>(n) * K_blocks * 8 + kbx * 8) * 16;
+            for (int i = 0; i < 256; ++i) {
+                uint8_t cv = canonical_q4(canon_qs, i);
+                uint8_t pv = permuted_q4(perm_super, i);
+                if (cv != pv) {
+                    if (nibble_mismatches == 0) {
+                        first_n = n;
+                        first_kbx = kbx;
+                        first_i = i;
+                        can_val = cv;
+                        perm_val = pv;
+                    }
+                    ++nibble_mismatches;
+                }
+            }
+        }
+    }
+    printf("[mmq_q4k_v2 permute N=%d K=%d] nibble_mismatches=%d", N, K, nibble_mismatches);
+    if (nibble_mismatches > 0)
+        printf(" first @ (n=%d kbx=%d i=%d): canon=%d permuted=%d", first_n, first_kbx,
+               first_i, can_val, perm_val);
+    printf("\n");
+    EXPECT_EQ(nibble_mismatches, 0) << "permuted layout does not preserve nibble values";
+
+    cudaFree(w_dev);
+    cudaFree(eff_q4_dev);
+}
+
+}  // namespace
+
+TEST(MmqQ4KV2Permute, Small_N4_K256)   { run_permute_check(4, 256, 0xc1); }
+TEST(MmqQ4KV2Permute, Small_N32_K512)  { run_permute_check(32, 512, 0xc2); }
+TEST(MmqQ4KV2Permute, Mid_N128_K1024)  { run_permute_check(128, 1024, 0xc3); }
+TEST(MmqQ4KV2Permute, Mid_N512_K2560)  { run_permute_check(512, 2560, 0xc4); }
+TEST(MmqQ4KV2Permute, Large_N5120_K5120) { run_permute_check(5120, 5120, 0xc5); }
+TEST(MmqQ4KV2Permute, Pad_N33_K256)    { run_permute_check(33, 256, 0xc6); }
+
 }  // namespace imp
