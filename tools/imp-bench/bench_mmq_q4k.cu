@@ -12,6 +12,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -153,8 +154,9 @@ void bench_mmq_q4k() {
                                     bytes_scratch);
         }
 
-        // v2 Phase 3 (default — register-only dequant)
+        // v2 Phase 3 BN=64
         unsetenv("IMP_MMQ_Q4K_V2_SCAFFOLD");
+        setenv("IMP_MMQ_Q4K_V2_BN", "64", 1);
         for (int i = 0; i < kWarmup; ++i)
             mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
         cudaDeviceSynchronize();
@@ -166,6 +168,21 @@ void bench_mmq_q4k() {
         float v2_p3_ms = 0;
         cudaEventElapsedTime(&v2_p3_ms, s, e);
         v2_p3_ms /= kTimed;
+
+        // v2 Phase 3 BN=128
+        setenv("IMP_MMQ_Q4K_V2_BN", "128", 1);
+        for (int i = 0; i < kWarmup; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaDeviceSynchronize();
+        cudaEventRecord(s);
+        for (int i = 0; i < kTimed; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaEventRecord(e);
+        cudaEventSynchronize(e);
+        float v2_p3_bn128_ms = 0;
+        cudaEventElapsedTime(&v2_p3_bn128_ms, s, e);
+        v2_p3_bn128_ms /= kTimed;
+        unsetenv("IMP_MMQ_Q4K_V2_BN");
 
         // v2 Phase 2 scaffold (env-var fallback path) — for A/B reporting.
         setenv("IMP_MMQ_Q4K_V2_SCAFFOLD", "1", 1);
@@ -193,14 +210,18 @@ void bench_mmq_q4k() {
         const double v2_scfd_toks = M / (v2_scfd_ms * 1e-3);
         const double v2_p3_toks = M / (v2_p3_ms * 1e-3);
 
-        printf("  %-46s mmvq=%6.3f", sz.label, mmvq_ms);
-        for (int t = 0; t < kNumTiles; ++t) printf("  t%d=%6.3f", t, tile_ms[t]);
-        printf("  v1_best=%s (%.2fx)  scfd=%6.3fms (%.2fx v1)  "
-               "p3=%6.3fms (%.2fx v1, %.2fx scfd)  "
-               "v1=%.0f scfd=%.0f p3=%.0f tok/s\n",
-               tile_labels[best], mmvq_ms / v1_best_ms, v2_scfd_ms,
-               v1_best_ms / v2_scfd_ms, v2_p3_ms, v1_best_ms / v2_p3_ms,
-               v2_scfd_ms / v2_p3_ms, v1_toks, v2_scfd_toks, v2_p3_toks);
+        const double v2_p3_bn128_toks = M / (v2_p3_bn128_ms * 1e-3);
+        const float v2_p3_best_ms = std::min(v2_p3_ms, v2_p3_bn128_ms);
+        const bool bn128_wins = v2_p3_bn128_ms < v2_p3_ms;
+
+        printf("  %-46s v1_best=%s (%.2fx mmvq)  scfd=%6.3fms  "
+               "p3_64=%6.3f p3_128=%6.3f best=p3_%s (%.2fx v1, %.2fx scfd)  "
+               "v1=%.0f scfd=%.0f p3_64=%.0f p3_128=%.0f tok/s\n",
+               sz.label, tile_labels[best], mmvq_ms / v1_best_ms, v2_scfd_ms,
+               v2_p3_ms, v2_p3_bn128_ms, bn128_wins ? "128" : "64",
+               v1_best_ms / v2_p3_best_ms, v2_scfd_ms / v2_p3_best_ms, v1_toks,
+               v2_scfd_toks, v2_p3_toks, v2_p3_bn128_toks);
+        (void)mmvq_ms;
 
         cudaFree(W_dev);
         cudaFree(x_dev);

@@ -423,4 +423,15 @@ TEST(MmqQ4KV2HMMA, NonMultipleN_M64_N96_K512)    { run_v2_vs_v1_check(64, 96, 51
 TEST(MmqQ4KV2HMMA, LongK_M64_N64_K2560)          { run_v2_vs_v1_check(64, 64, 2560, 0xd5); }
 TEST(MmqQ4KV2HMMA, Realistic_M256_N512_K1024)    { run_v2_vs_v1_check(256, 512, 1024, 0xd6); }
 
+// Cover the BN=128 dispatch branch — large enough blocks_bn128 to trigger it.
+TEST(MmqQ4KV2HMMA, Bn128_M512_N256_K512) {
+    run_v2_vs_v1_check(512, 256, 512, 0xd7, /*rel_tol=*/0.02f, /*abs_tol=*/0.15f);
+}
+TEST(MmqQ4KV2HMMA, Bn128_M256_N1024_K512) {
+    run_v2_vs_v1_check(256, 1024, 512, 0xd8, 0.02f, 0.15f);
+}
+TEST(MmqQ4KV2HMMA, Bn128_NonMultiple_M200_N300_K768) {
+    run_v2_vs_v1_check(200, 300, 768, 0xd9, 0.02f, 0.15f);
+}
+
 }  // namespace imp
