@@ -262,6 +262,11 @@ bool CudaGraphCapture::end_capture_and_update() {
         return false;
     }
 
+    // Log node composition (gated by diagnostics.graph_diag in imp.conf). Symmetric
+    // with the end_capture() / ConditionalRunner paths so prefill/decode graphs are
+    // comparable. Useful for diagnosing memcpy-density across models.
+    graph_diag::log_kernel_nodes(new_graph, "capture.update");
+
     // PDL edge conversion before update/instantiate so both paths have it.
     if (pdl::is_available()) {
         int converted = apply_pdl_edges(new_graph);
