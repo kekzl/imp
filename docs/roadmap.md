@@ -68,7 +68,15 @@ TurboQuant currently runs ~23% behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 to
 
 ### `pp=512` on large dense models
 
-Qwen3-32B Q4_K_M and Mistral-24B Q6_K sit at ~0.5–0.6× llama.cpp at `pp=512`. Suspected cuBLAS autotuning variance + launch-overhead-bound regime. Output is correct; not gating any user.
+Qwen3-32B Q4_K_M sits at ~0.5–0.6× llama.cpp at `pp=512` (1888 tok/s, RTX 5090). Profiled 2026-05-15 (`tools/analysis/profile_pp512_large_dense.sh`):
+
+- 4.4 % FP16 compute utilization, 3.4 % memory-bandwidth utilization — neither compute- nor memory-bound.
+- **GPU time: 64 % in `cutlass_80` FP16 GEMM kernels, 25 % in `dequant_q4k_kernel`** (1153 invocations × 223 µs avg = 257 ms — the FP16 cache can't fit so every weight tensor is dequant'd per forward).
+- **Host time: 23 % in sync `cudaMalloc` (939 calls) + `cudaFree` (930 calls)** — violates `CLAUDE.md`'s no-cudaMalloc-in-hot-loops rule; likely cuBLAS workspace allocation per problem shape.
+
+Real fix is a **direct Q4_K_M GEMM kernel** (mmq-style, mirroring llama.cpp's `mmq_x_q4_K_q8_1`) — multi-week kernel work, would close most of the gap. Multi-stream dequant↔GEMM overlap is a 1-2 day modest win. Pinning a single cuBLAS workspace might shave the alloc overhead.
+
+Suspected cuBLAS autotuning variance is NOT the cause — `bench-reps=5` median is stable. Output is correct; not gating any user. Full diagnostic at memory `pp512_large_dense_perf_2026_05_15.md`.
 
 ### Speculative decoding — investigated and shelved
 
