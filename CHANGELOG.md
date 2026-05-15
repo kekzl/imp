@@ -2,6 +2,20 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+- **Chunked prefill for Gemma-4** (SWA + dual head_dim 256/512). `attention_cublas_prefill`'s
+  three softmax kernels now accept a `sliding_window` parameter; the mask zeros
+  positions outside `[abs_row - sliding_window + 1, abs_row]`. Gemma-4 SWA layers
+  route through cuBLAS instead of the naive FP32 workaround when the
+  `attn_scores` buffer fits the FP16 S-matrix (naive remains the fallback for
+  hd=512 globals at n > attn_scores cap, where `flash_attention_prefill_tc`'s
+  ~280 KB static tile overflows sm_120's 100 KB opt-in dynamic smem). `Engine::supports_chunked_prefill_()`
+  now allows Gemma-4 (per-layer dispatch covers the heterogeneous shapes
+  correctly). Validated on Gemma-4-26B-A4B-it-Q4_K_M: 2823-token chunked
+  prefill at 1508 tok/s, decode bit-exact to single-chunk; perf gates green
+  (decode -0.35%, prefill +4.65% vs baseline).
+
 ## [0.9.0] - 2026-05-10
 
 NVFP4 hits its production stride: prefill goes from 1.2k to 13k tok/s on
