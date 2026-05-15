@@ -4,6 +4,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## Unreleased
 
+- **Gemma-4 NVFP4 decode cache for Q*_K source weights** — drops the
+  "per-layer head_dim not yet supported" carve-out at `engine.cpp:864-866`.
+  The per-tensor convert→quantize loop in `executor_pre_dequant.cu` handles
+  mixed (N, K) shapes correctly since each `wcache_.nvfp4` entry carries its
+  own dimensions. Gemma-4-26B-A4B-it-Q4_K_M: pp512 1713 → 2394 tok/s (+40%),
+  tg256 176 → 197 tok/s (+12%). Coherent on chat prompts; pre-existing Q4_K_M
+  code-gen drift is orthogonal. `make verify-fast` green.
 - **Chunked prefill for INT4 KV** (sub-byte gather). New `paged_kv_gather_int4_to_fp16`
   kernel mirrors the existing FP16/FP8/NVFP4 gather variants: symmetric 4-bit
   packed nibbles + per-head FP16 scale (matches `write_kv_cache_int4_kernel`).

@@ -6,14 +6,15 @@ This is a single-author single-target experiment, so "roadmap" is more "current 
 
 ## Known limitations
 
-### Gemma-4 remaining carve-outs (FP8 prefill, NVFP4 decode cache)
+### Gemma-4 remaining carve-out (FP8 prefill)
 
-The FP8 *KV cache* carve-out for Gemma-4 was removed in PR #91 (2026-05-01) — `--kv-fp8` works on Q4_K_M / Q5_K_M / NVFP4 Gemma-4. The original "dual head_dim 256/512 needs per-layer-aware kernels" hypothesis turned out to be a red herring; the KV write/read kernels did handle per-layer head_dim correctly via `Q.shape[3]` template dispatch. The actual bugs were (a) FP8 calibration reading the workspace's allocated shape (`max_hd=512`) instead of the live shape (`hd=256` on SWA layers, junk in trailing 256 cols) and (b) warmup-derived absmax poisoning the high-water-mark scale on Gemma-4's `output_norm` outliers (max=588).
+Earlier Gemma-4 carve-outs removed:
+- **FP8 KV cache** — PR #91 (2026-05-01). The "dual head_dim 256/512 needs per-layer-aware kernels" hypothesis was a red herring; the KV write/read kernels handle per-layer head_dim correctly via `Q.shape[3]` template dispatch. Real bugs were (a) FP8 calibration reading the workspace's allocated shape (`max_hd=512`) instead of the live shape (`hd=256` on SWA layers, junk in trailing 256 cols) and (b) warmup-derived absmax poisoning the high-water-mark scale on Gemma-4's `output_norm` outliers (max=588).
+- **NVFP4 decode cache for Q*_K source** — 2026-05-15. The per-tensor convert→quantize loop in `executor_pre_dequant.cu` already handled mixed (N, K) shapes correctly; the disable was overly defensive. Removing it on Q4_K_M / UD-Q4_K_M: pp512 1713 → 2394 tok/s (**+40%**), tg256 176 → 197 tok/s (**+12%**).
 
-Two Gemma-4 carve-outs are still active in `engine.cpp:630-660`:
+One Gemma-4 carve-out remains active in `engine.cpp`:
 
-- **FP8 prefill** (`config_.use_fp8_prefill = 0` for Gemma-4) — different code path from the KV cache; needs investigation whether it's the same calibration-shape class of bug or a real per-layer head_dim stride issue in the activation FP8 quantizer.
-- **NVFP4 decode cache for Q*_K → NVFP4 Gemma-4** (`config_.use_nvfp4_decode = 0` when `is_nvfp4_prequant=false`) — Phase 3-MoE cache build. Prequant SafeTensors NVFP4 weights bypass this path (load-bearing — drives the M=1 decode fast path), so prequant Gemma-4 NVFP4 keeps the cache enabled.
+- **FP8 prefill** (`config_.use_fp8_prefill = 0` for Gemma-4) — different code path from the KV cache. Documented as a *perf* issue (5-19% slower on prefill vs FP16), not a correctness issue; cuBLASLt FP8 algos for Gemma-4's per-layer head_dim shape (256/512 split) lose to FP16 cuBLAS at the standard tile sizes.
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2, and Gemma-4 (post PR #91).
 
