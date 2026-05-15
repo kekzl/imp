@@ -83,6 +83,7 @@ int gguf_blck_size(GgufWireType type) {
         case GgufWireType::IQ4_XS:
             return 256;
         case GgufWireType::MXFP4:
+        case GgufWireType::MXFP4_V2:
             return 32;
         default:
             return 0;
@@ -150,6 +151,7 @@ size_t gguf_type_size(GgufWireType type) {
         case GgufWireType::IQ4_XS:
             return 136;
         case GgufWireType::MXFP4:
+        case GgufWireType::MXFP4_V2:
             return 17;  // 32*4/8 + 1 (UE8M0 scale)
         default:
             return 0;
@@ -199,6 +201,7 @@ QType gguf_type_to_qtype(GgufWireType type) {
         case GgufWireType::Q8_K:
             return QType::Q8_K;
         case GgufWireType::MXFP4:
+        case GgufWireType::MXFP4_V2:
             return QType::MXFP4;
         case GgufWireType::I8:
             return QType::INT8;
@@ -271,6 +274,7 @@ const char* gguf_type_name(GgufWireType type) {
         case GgufWireType::IQ4_XS:
             return "IQ4_XS";
         case GgufWireType::MXFP4:
+        case GgufWireType::MXFP4_V2:
             return "MXFP4";
         default:
             return "UNKNOWN";
@@ -1349,6 +1353,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
         Tensor t(tensor_data, gguf_type_to_qtype(info.type), ndim, shape, /*on_device=*/false);
         t.kind = match_tensor_kind(info.name);
+        if (info.type == GgufWireType::MXFP4_V2) {
+            t.mxfp4_layout_v2 = true;
+        }
 
         if (assign_tensor(*model, info.name, t, info.type)) {
             assigned++;

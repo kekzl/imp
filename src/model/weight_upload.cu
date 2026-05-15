@@ -271,14 +271,25 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
         int total_blocks = static_cast<int>(N) * blocks_per_row;
         size_t data_bytes = static_cast<size_t>(N) * blocks_per_row * 16;  // packed nibbles only
 
-        // CPU-side split: [data_0..data_N | scale_0..scale_N] contiguous layout
+        // CPU-side split: [data_0..data_N | scale_0..scale_N] contiguous layout.
+        // Source block layout depends on the originating GGUF type:
+        //   legacy (type 31): [data (16) | scale (1)] per block
+        //   modern (type 39): [scale (1) | data (16)] per block (llama.cpp standard)
+        // weight.mxfp4_layout_v2 tracks the modern layout (set by gguf_loader).
         size_t scale_bytes = static_cast<size_t>(total_blocks);  // 1 byte per block
         size_t total_bytes = data_bytes + scale_bytes;
         const uint8_t* src = static_cast<const uint8_t*>(weight.data);
         std::vector<uint8_t> h_buf(total_bytes);
-        for (int i = 0; i < total_blocks; i++) {
-            memcpy(h_buf.data() + static_cast<size_t>(i) * 16, src + static_cast<size_t>(i) * 17, 16);
-            h_buf[data_bytes + i] = src[static_cast<size_t>(i) * 17 + 16];
+        if (weight.mxfp4_layout_v2) {
+            for (int i = 0; i < total_blocks; i++) {
+                h_buf[data_bytes + i] = src[static_cast<size_t>(i) * 17];
+                memcpy(h_buf.data() + static_cast<size_t>(i) * 16, src + static_cast<size_t>(i) * 17 + 1, 16);
+            }
+        } else {
+            for (int i = 0; i < total_blocks; i++) {
+                memcpy(h_buf.data() + static_cast<size_t>(i) * 16, src + static_cast<size_t>(i) * 17, 16);
+                h_buf[data_bytes + i] = src[static_cast<size_t>(i) * 17 + 16];
+            }
         }
 
         void* d_data = nullptr;

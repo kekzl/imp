@@ -62,7 +62,9 @@ enum class GgufWireType : uint32_t {
     F64 = 28,
     IQ1_M = 29,
     BF16 = 30,
-    MXFP4 = 31,  // 32 elements: 16 bytes E2M1 + 1 byte UE8M0 scale
+    MXFP4 = 31,  // 32 elements: 16 bytes E2M1 + 1 byte UE8M0 scale (imp legacy)
+    // 32..38 are unused / removed in modern ggml.
+    MXFP4_V2 = 39,  // Modern llama.cpp GGML_TYPE_MXFP4 = 39 — identical 17-byte block layout to MXFP4=31.
 };
 
 // Block size (number of elements per quantization block)

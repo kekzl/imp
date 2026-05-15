@@ -36,6 +36,13 @@ struct Tensor {
     void* scales = nullptr;
     float tensor_scale = 1.0f;
 
+    // GGUF MXFP4 has two on-disk block layouts:
+    //   - imp legacy (GGML type 31): [data (16 bytes) | scale (1 byte)] per block
+    //   - llama.cpp standard (GGML type 39): [scale (1 byte) | data (16 bytes)] per block
+    // When loaded from a type-39 GGUF this flag is true; the weight_upload MXFP4
+    // path swaps the byte offsets so the GPU-side split-layout is identical.
+    bool mxfp4_layout_v2 = false;
+
     Tensor() = default;
 
     // Create a tensor descriptor (does not allocate memory)
