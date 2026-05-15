@@ -7,6 +7,7 @@
 
 #include "compute/ggml_mmvq.h"
 #include "compute/mmq_q4k.h"
+#include "compute/mmq_q4k_v2.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -89,9 +90,10 @@ void bench_mmq_q4k() {
         return;
     }
 
-    printf("=== mmq_q4k Microbench (tile sweep vs mmvq) ===\n");
-    printf("  t0=<32,64,2,4>  t1=<16,32,1,1>  t2=<16,64,1,2>  "
-           "t3=<64,128,4,4>  t4=<64,64,4,4>\n\n");
+    printf("=== mmq_q4k Microbench (mmvq vs v1 tile sweep vs v2 HMMA) ===\n");
+    printf("  v1 tiles: t0=<32,64,2,4>  t1=<16,32,1,1>  t2=<16,64,1,2>  "
+           "t3=<64,128,4,4>  t4=<64,64,4,4>\n");
+    printf("  v2:       HMMA <64,64,32> + WMMA m16n16k16 (FP32 acc)\n\n");
 
     const char* tile_labels[] = {
         "tile0 <32,64,2,4>",  "tile1 <16,32,1,1>", "tile2 <16,64,1,2>",
@@ -111,16 +113,27 @@ void bench_mmq_q4k() {
         half* x_dev = nullptr;
         half* y_dev = nullptr;
         void* scratch = nullptr;
+        uint8_t* eff_q4 = nullptr;
+        half* eff_scale = nullptr;
+        half* eff_min = nullptr;
         cudaMalloc(&W_dev, bytes_W);
         cudaMalloc(&x_dev, bytes_x);
         cudaMalloc(&y_dev, bytes_y);
         cudaMalloc(&scratch, bytes_scratch);
+        cudaMalloc(&eff_q4, q4k_eff_q4_bytes(N, K));
+        cudaMalloc(&eff_scale, q4k_eff_scale_bytes(N, K));
+        cudaMalloc(&eff_min, q4k_eff_scale_bytes(N, K));
 
         auto h_W = make_random_q4k_host(N, K, 0xabcd);
         std::vector<half> h_x(static_cast<size_t>(M) * K);
         fill_random_fp16(h_x, 0xdcba);
         cudaMemcpy(W_dev, h_W.data(), bytes_W, cudaMemcpyHostToDevice);
         cudaMemcpy(x_dev, h_x.data(), bytes_x, cudaMemcpyHostToDevice);
+
+        // One-shot v2 preprocessing — runs once at "model load" in production.
+        q4k_precompute_eff_scales(W_dev, eff_scale, eff_min, N, K, nullptr);
+        q4k_permute_to_v2_layout(W_dev, eff_q4, N, K, nullptr);
+        cudaDeviceSynchronize();
 
         cudaEvent_t s, e;
         cudaEventCreate(&s);
@@ -138,24 +151,43 @@ void bench_mmq_q4k() {
                                     bytes_scratch);
         }
 
+        // v2 timing — no scratch (no Q8_1 quant), takes precomputed inputs.
+        for (int i = 0; i < kWarmup; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaDeviceSynchronize();
+        cudaEventRecord(s);
+        for (int i = 0; i < kTimed; ++i)
+            mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+        cudaEventRecord(e);
+        cudaEventSynchronize(e);
+        float v2_ms = 0;
+        cudaEventElapsedTime(&v2_ms, s, e);
+        v2_ms /= kTimed;
+
         cudaEventDestroy(s);
         cudaEventDestroy(e);
 
-        // Find best tile
         int best = 0;
         for (int t = 1; t < kNumTiles; ++t)
             if (tile_ms[t] < tile_ms[best]) best = t;
-        double best_toks = (M / (tile_ms[best] * 1e-3));
+        const float v1_best_ms = tile_ms[best];
+        const double v2_toks = M / (v2_ms * 1e-3);
+        const double v1_toks = M / (v1_best_ms * 1e-3);
+
         printf("  %-46s mmvq=%6.3fms", sz.label, mmvq_ms);
-        for (int t = 0; t < kNumTiles; ++t)
-            printf("  t%d=%6.3f", t, tile_ms[t]);
-        printf("  best=%s (%.2fx, %.0f tok/s)\n", tile_labels[best],
-               mmvq_ms / tile_ms[best], best_toks);
+        for (int t = 0; t < kNumTiles; ++t) printf("  t%d=%6.3f", t, tile_ms[t]);
+        printf("  v1_best=%s (%.2fx)  v2=%6.3fms (%.2fx mmvq, %.2fx v1_best)  "
+               "v1=%.0f v2=%.0f tok/s\n",
+               tile_labels[best], mmvq_ms / v1_best_ms, v2_ms, mmvq_ms / v2_ms,
+               v1_best_ms / v2_ms, v1_toks, v2_toks);
 
         cudaFree(W_dev);
         cudaFree(x_dev);
         cudaFree(y_dev);
         cudaFree(scratch);
+        cudaFree(eff_q4);
+        cudaFree(eff_scale);
+        cudaFree(eff_min);
     }
     printf("\n");
 }

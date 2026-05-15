@@ -84,4 +84,31 @@ inline size_t q4k_eff_q4_bytes(int N, int K) {
     return static_cast<size_t>(N) * (K / 32) * 16u;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2: HMMA GEMM kernel (mma.sync.m16n8k16.f16/f32 via WMMA).
+//
+// Computes y = x @ W^T where W is Q4_K-quantized weights, given the
+// precomputed v2 inputs from Phase 1a (eff_scale, eff_min) and Phase 1b
+// (eff_q4 — permuted Q4 nibbles). Activations stay in FP16; weights are
+// dequantized into shared memory per K-step (scaffold — Phase 3 will move
+// dequant into registers + add the cp.async triple-buffer pipeline).
+//
+// Tile geometry: BM=64, BN=64, BK=32; 4 warps in 2×2 layout. Each warp
+// produces a 32×32 output region with 2×2×2 = 8 m16n8k16 MMAs per K-step.
+// BK=32 matches the Q4_K sub-block boundary — one outer K-iteration consumes
+// exactly one (eff_scale, eff_min) pair per output row.
+//
+// Constraints:
+//   - K % 32 == 0
+//   - eff_q4 / eff_scale / eff_min must come from the same W with same N, K
+//   - M and N can be arbitrary; out-of-bounds rows/cols are masked.
+void mmq_q4k_v2(
+    const half* x,            // [M, K] FP16 activations (row-major)
+    const uint8_t* eff_q4,    // [N, K/32, 16] permuted Q4 (Phase 1b output)
+    const half* eff_scale,    // [N, K/32] (Phase 1a output)
+    const half* eff_min,      // [N, K/32] (Phase 1a output)
+    half* y,                  // [M, N] FP16 output (row-major)
+    int M, int N, int K,
+    cudaStream_t stream);
+
 }  // namespace imp

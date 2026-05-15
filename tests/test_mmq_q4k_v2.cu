@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 
+#include "compute/mmq_q4k.h"
 #include "compute/mmq_q4k_v2.h"
 
 namespace imp {
@@ -238,5 +239,188 @@ TEST(MmqQ4KV2Permute, Mid_N128_K1024)  { run_permute_check(128, 1024, 0xc3); }
 TEST(MmqQ4KV2Permute, Mid_N512_K2560)  { run_permute_check(512, 2560, 0xc4); }
 TEST(MmqQ4KV2Permute, Large_N5120_K5120) { run_permute_check(5120, 5120, 0xc5); }
 TEST(MmqQ4KV2Permute, Pad_N33_K256)    { run_permute_check(33, 256, 0xc6); }
+
+// ---------------------------------------------------------------------------
+// Phase 2: HMMA kernel correctness test
+//
+// End-to-end check: build a Q4_K W, run Phase 1a + Phase 1b, then the v2 HMMA
+// kernel, and compare against the v1 dp4a tiled kernel which is already
+// validated against ggml_mmvq_q4k. Bit-exact equality is not expected
+// (HMMA FP32 accumulation vs chained dp4a int math takes different rounding
+// paths), so we accept a small relative tolerance.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+void fill_random_fp16(std::vector<half>& v, unsigned seed) {
+    std::srand(seed);
+    for (auto& x : v) {
+        x = __float2half((std::rand() / static_cast<float>(RAND_MAX) - 0.5f) * 2.0f);
+    }
+}
+
+// CPU reference: dequant each Q4_K block on the host and compute
+// y[m, n] = sum_k x[m, k] * W_dequant[n, k] in FP32. Slow but ground truth.
+std::vector<float> cpu_reference_gemm(const std::vector<uint8_t>& h_W,
+                                      const std::vector<half>& h_x, int M, int N,
+                                      int K) {
+    const int K_blocks = K / 256;
+    std::vector<float> y(static_cast<size_t>(M) * N, 0.0f);
+    // Dequant W on host into FP32 [N, K]
+    std::vector<float> W_dq(static_cast<size_t>(N) * K, 0.0f);
+    for (int n = 0; n < N; ++n) {
+        for (int kbx = 0; kbx < K_blocks; ++kbx) {
+            const uint8_t* sb =
+                h_W.data() + (static_cast<size_t>(n) * K_blocks + kbx) * 144;
+            half d, dmin;
+            std::memcpy(&d, sb, 2);
+            std::memcpy(&dmin, sb + 2, 2);
+            uint8_t sc[8], m[8];
+            cpu_unpack_q4k_scales_mins(sb + 4, sc, m);
+            const float df = __half2float(d);
+            const float dmf = __half2float(dmin);
+            const uint8_t* qs = sb + 16;
+            // Sub-block s ∈ [0, 8). qs bytes [(s>>1)*32 .. (s>>1)*32 + 32)
+            // hold sub-block s (low nibbles if s even, high if s odd).
+            for (int s = 0; s < 8; ++s) {
+                const float eff_scale = df * sc[s];
+                const float eff_min = dmf * m[s];
+                const int byte_base = (s >> 1) * 32;
+                const bool use_high = (s & 1) != 0;
+                for (int k_in_sub = 0; k_in_sub < 32; ++k_in_sub) {
+                    uint8_t byte = qs[byte_base + k_in_sub];
+                    uint8_t nib =
+                        use_high ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                    int k_global = kbx * 256 + s * 32 + k_in_sub;
+                    W_dq[(size_t)n * K + k_global] = nib * eff_scale - eff_min;
+                }
+            }
+        }
+    }
+    // Matmul
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                acc += __half2float(h_x[(size_t)m * K + k]) *
+                       W_dq[(size_t)n * K + k];
+            }
+            y[(size_t)m * N + n] = acc;
+        }
+    }
+    return y;
+}
+
+void cmp_to_ref(const char* label, const std::vector<half>& h_y,
+                const std::vector<float>& ref, int M, int N, float abs_tol,
+                float rel_tol, int* mismatches_out, float* max_abs_out,
+                float* max_rel_out) {
+    int mismatches = 0;
+    float max_abs = 0.0f, max_rel = 0.0f;
+    int worst_m = 0, worst_n = 0;
+    for (int i = 0; i < M * N; ++i) {
+        float a = __half2float(h_y[i]);
+        float b = ref[i];
+        float d = std::abs(a - b);
+        float scale = std::max(std::abs(a), std::abs(b)) + 1e-3f;
+        float rel = d / scale;
+        if (d > abs_tol && rel > rel_tol) {
+            ++mismatches;
+            if (d > max_abs) {
+                max_abs = d;
+                worst_m = i / N;
+                worst_n = i % N;
+            }
+        }
+        if (rel > max_rel) max_rel = rel;
+    }
+    printf("  %s vs CPU ref: mismatches=%d max_abs=%.4f max_rel=%.4f "
+           "(worst @ m=%d n=%d)\n",
+           label, mismatches, max_abs, max_rel, worst_m, worst_n);
+    if (mismatches_out) *mismatches_out = mismatches;
+    if (max_abs_out) *max_abs_out = max_abs;
+    if (max_rel_out) *max_rel_out = max_rel;
+}
+
+// Validates v2 HMMA against a CPU FP32 reference. v1 (dp4a) introduces Q8_1
+// quantization error on the activations (per-element abs ~0.5 at K=256) so it
+// is reported for context but not gated.
+void run_v2_vs_v1_check(int M, int N, int K, unsigned seed,
+                        float rel_tol = 0.02f, float abs_tol = 0.15f) {
+    // abs_tol picked to absorb FP16-dequant rounding: the scaffold dequants
+    // weights to FP16 in sB before the MMA, so per-element |W_fp16 - W_fp32|
+    // ≈ |W| · 2^-10. Random-sign accumulation over K elements stays ≲ 0.1.
+    ASSERT_EQ(K % 256, 0);
+    auto h_W = make_random_q4k(N, K, seed);
+    std::vector<half> h_x(static_cast<size_t>(M) * K);
+    fill_random_fp16(h_x, seed ^ 0xa5a5);
+
+    void* W_dev = nullptr;
+    half* x_dev = nullptr;
+    half* y_v1 = nullptr;
+    half* y_v2 = nullptr;
+    void* scratch_v1 = nullptr;
+    uint8_t* eff_q4 = nullptr;
+    half* eff_scale = nullptr;
+    half* eff_min = nullptr;
+    const size_t bytes_y = static_cast<size_t>(M) * N * sizeof(half);
+    const size_t scratch_bytes = mmq_q4k_scratch_bytes(M, K);
+
+    cudaMalloc(&W_dev, h_W.size());
+    cudaMalloc(&x_dev, h_x.size() * sizeof(half));
+    cudaMalloc(&y_v1, bytes_y);
+    cudaMalloc(&y_v2, bytes_y);
+    cudaMalloc(&scratch_v1, scratch_bytes);
+    cudaMalloc(&eff_q4, q4k_eff_q4_bytes(N, K));
+    cudaMalloc(&eff_scale, q4k_eff_scale_bytes(N, K));
+    cudaMalloc(&eff_min, q4k_eff_scale_bytes(N, K));
+
+    cudaMemcpy(W_dev, h_W.data(), h_W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(x_dev, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(y_v1, 0, bytes_y);
+    cudaMemset(y_v2, 0, bytes_y);
+
+    q4k_precompute_eff_scales(W_dev, eff_scale, eff_min, N, K, nullptr);
+    q4k_permute_to_v2_layout(W_dev, eff_q4, N, K, nullptr);
+
+    mmq_q4k(W_dev, x_dev, y_v1, M, N, K, scratch_v1, scratch_bytes, nullptr);
+    mmq_q4k_v2(x_dev, eff_q4, eff_scale, eff_min, y_v2, M, N, K, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<half> h_y1(static_cast<size_t>(M) * N);
+    std::vector<half> h_y2(static_cast<size_t>(M) * N);
+    cudaMemcpy(h_y1.data(), y_v1, bytes_y, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y2.data(), y_v2, bytes_y, cudaMemcpyDeviceToHost);
+
+    auto ref = cpu_reference_gemm(h_W, h_x, M, N, K);
+    printf("[M=%d N=%d K=%d] ref[0,0]=%.4f v1[0,0]=%.4f v2[0,0]=%.4f\n", M, N,
+           K, ref[0], __half2float(h_y1[0]), __half2float(h_y2[0]));
+
+    int m1, m2;
+    float ma1, ma2, mr1, mr2;
+    cmp_to_ref("v1", h_y1, ref, M, N, /*abs_tol=*/2.0f, /*rel_tol=*/0.10f, &m1,
+               &ma1, &mr1);  // v1 carries Q8_1 quant error
+    cmp_to_ref("v2", h_y2, ref, M, N, abs_tol, rel_tol, &m2, &ma2, &mr2);
+
+    EXPECT_EQ(m2, 0) << "v2 HMMA kernel diverges from CPU FP32 reference";
+
+    cudaFree(W_dev);
+    cudaFree(x_dev);
+    cudaFree(y_v1);
+    cudaFree(y_v2);
+    cudaFree(scratch_v1);
+    cudaFree(eff_q4);
+    cudaFree(eff_scale);
+    cudaFree(eff_min);
+}
+
+}  // namespace
+
+TEST(MmqQ4KV2HMMA, AlignedTile_M64_N64_K256)     { run_v2_vs_v1_check(64, 64, 256, 0xd1); }
+TEST(MmqQ4KV2HMMA, MultiTile_M128_N128_K512)     { run_v2_vs_v1_check(128, 128, 512, 0xd2); }
+TEST(MmqQ4KV2HMMA, NonMultipleM_M40_N64_K256)    { run_v2_vs_v1_check(40, 64, 256, 0xd3); }
+TEST(MmqQ4KV2HMMA, NonMultipleN_M64_N96_K512)    { run_v2_vs_v1_check(64, 96, 512, 0xd4); }
+TEST(MmqQ4KV2HMMA, LongK_M64_N64_K2560)          { run_v2_vs_v1_check(64, 64, 2560, 0xd5); }
+TEST(MmqQ4KV2HMMA, Realistic_M256_N512_K1024)    { run_v2_vs_v1_check(256, 512, 1024, 0xd6); }
 
 }  // namespace imp

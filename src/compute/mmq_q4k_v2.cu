@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cuda_fp16.h>
+#include <mma.h>
 
 namespace imp {
 
@@ -152,6 +153,196 @@ void q4k_permute_to_v2_layout(const void* W, uint8_t* eff_q4_out, int N, int K,
 
     q4k_permute_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const block_q4_K*>(W), eff_q4_out, total_sub, K_blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: HMMA GEMM kernel
+//
+// Single-buffered scaffold — Phase 3 will replace the per-K-step
+// __syncthreads-bracketed load+dequant with a cp.async triple-buffer pipeline
+// and move dequant into registers (saves the round-trip through sB).
+//
+// Per K-iteration (one Q4_K sub-block = 32 elements):
+//   1. Cooperative cp-style global → SMEM load of FP16 activations.
+//   2. Cooperative load of (eff_scale, eff_min, eff_q4) and dequant Q4→FP16
+//      into sB. Each thread handles one n_local row × 16 K-positions
+//      (8 packed Q4 bytes) — a single uint64 load per thread.
+//   3. WMMA mma.sync.m16n8k16: 4 acc frags × 2 K-inner-frags = 8 MMAs per warp.
+//   4. Epilogue: store FP32 accumulators as FP16 to y[M, N].
+// ---------------------------------------------------------------------------
+
+namespace mmq_q4k_v2_detail {
+
+using namespace nvcuda;
+
+constexpr int kBM = 64;
+constexpr int kBN = 64;
+constexpr int kBK = 32;
+constexpr int kWmmaM = 16;
+constexpr int kWmmaN = 16;
+constexpr int kWmmaK = 16;
+constexpr int kWarpsM = 2;
+constexpr int kWarpsN = 2;
+constexpr int kWarpsPerBlock = kWarpsM * kWarpsN;        // 4
+constexpr int kThreadsPerBlock = kWarpsPerBlock * 32;    // 128
+constexpr int kWarpM = kBM / kWarpsM;                    // 32
+constexpr int kWarpN = kBN / kWarpsN;                    // 32
+constexpr int kFragsM = kWarpM / kWmmaM;                 // 2
+constexpr int kFragsN = kWarpN / kWmmaN;                 // 2
+constexpr int kFragsK = kBK / kWmmaK;                    // 2
+
+__global__ void mmq_q4k_v2_kernel(
+    const half* __restrict__ A,           // [M, K]
+    const uint8_t* __restrict__ eff_q4,   // [N, K/32, 16]
+    const half* __restrict__ eff_scale,   // [N, K/32]
+    const half* __restrict__ eff_min,     // [N, K/32]
+    half* __restrict__ y,                 // [M, N]
+    int M, int N, int K) {
+    const int block_m = blockIdx.y * kBM;
+    const int block_n = blockIdx.x * kBN;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32;
+    const int lane = tid % 32;
+    const int wm = warp / kWarpsN;
+    const int wn = warp % kWarpsN;
+
+    __shared__ half sA[kBM][kBK];       // 4 KB
+    __shared__ half sB[kBN][kBK];       // 4 KB
+    __shared__ half sScale[kBN];        // 128 B
+    __shared__ half sMin[kBN];          // 128 B
+
+    wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> acc[kFragsM][kFragsN];
+#pragma unroll
+    for (int i = 0; i < kFragsM; ++i)
+#pragma unroll
+        for (int j = 0; j < kFragsN; ++j) wmma::fill_fragment(acc[i][j], 0.0f);
+
+    const int K_subs = K / kBK;
+
+    for (int kbx = 0; kbx < K_subs; ++kbx) {
+        // ---- Load activations sA[BM][BK] (uint4 = 8 halves per chunk). -----
+        // BM*BK = 2048 halves / 128 threads / 8 halves per chunk = 2 chunks/thread.
+        {
+            constexpr int kChunksPerThread = (kBM * kBK) / (8 * kThreadsPerBlock);  // 2
+#pragma unroll
+            for (int c = 0; c < kChunksPerThread; ++c) {
+                int chunk = c * kThreadsPerBlock + tid;  // 0..255
+                int row = chunk >> 2;                    // BK=32 → 4 chunks per row
+                int col = (chunk & 3) << 3;              // 0, 8, 16, 24
+                int g_row = block_m + row;
+                int g_col = kbx * kBK + col;
+                uint4 v = make_uint4(0, 0, 0, 0);
+                if (g_row < M) {
+                    v = *reinterpret_cast<const uint4*>(&A[(int64_t)g_row * K + g_col]);
+                }
+                *reinterpret_cast<uint4*>(&sA[row][col]) = v;
+            }
+        }
+
+        // ---- Load (eff_scale, eff_min) for current sub-block kbx ------------
+        if (tid < kBN) {
+            int n_global = block_n + tid;
+            if (n_global < N) {
+                int64_t off = (int64_t)n_global * K_subs + kbx;
+                sScale[tid] = eff_scale[off];
+                sMin[tid] = eff_min[off];
+            } else {
+                sScale[tid] = __float2half(0.0f);
+                sMin[tid] = __float2half(0.0f);
+            }
+        }
+
+        // ---- Load + dequant Q4 → FP16 into sB[BN][BK] ----------------------
+        // 2 threads cover one (n_local) row × 16 K-positions each (8 packed
+        // bytes = uint64 load). Layout matches Phase 1b output: byte j holds
+        // K=2j (low nibble) and K=2j+1 (high nibble).
+        {
+            int n_local = tid >> 1;                  // 0..63
+            int k_half = tid & 1;                    // 0 or 1
+            int n_global = block_n + n_local;
+            uint64_t packed = 0;
+            if (n_global < N) {
+                int64_t off = ((int64_t)n_global * K_subs + kbx) * 16 + k_half * 8;
+                packed = *reinterpret_cast<const uint64_t*>(eff_q4 + off);
+            }
+            __syncthreads();  // wait for sScale/sMin writes above to be visible
+            half scale = sScale[n_local];
+            half neg_min = __hneg(sMin[n_local]);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                uint8_t b = (uint8_t)(packed >> (j * 8));
+                half qlo = __float2half((float)(b & 0xF));
+                half qhi = __float2half((float)((b >> 4) & 0xF));
+                int k_pos = k_half * 16 + j * 2;
+                sB[n_local][k_pos + 0] = __hfma(qlo, scale, neg_min);
+                sB[n_local][k_pos + 1] = __hfma(qhi, scale, neg_min);
+            }
+        }
+        __syncthreads();
+
+        // ---- WMMA: 2 K-inner steps, 4 acc frags per warp -------------------
+#pragma unroll
+        for (int kk = 0; kk < kFragsK; ++kk) {
+            wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK, half, wmma::row_major> a_frag[kFragsM];
+#pragma unroll
+            for (int i = 0; i < kFragsM; ++i) {
+                int a_row = wm * kWarpM + i * kWmmaM;
+                wmma::load_matrix_sync(a_frag[i], &sA[a_row][kk * kWmmaK], kBK);
+            }
+            wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, half, wmma::col_major> b_frag[kFragsN];
+#pragma unroll
+            for (int j = 0; j < kFragsN; ++j) {
+                int b_row = wn * kWarpN + j * kWmmaN;
+                wmma::load_matrix_sync(b_frag[j], &sB[b_row][kk * kWmmaK], kBK);
+            }
+#pragma unroll
+            for (int i = 0; i < kFragsM; ++i)
+#pragma unroll
+                for (int j = 0; j < kFragsN; ++j)
+                    wmma::mma_sync(acc[i][j], a_frag[i], b_frag[j], acc[i][j]);
+        }
+        __syncthreads();
+    }
+
+    // ---- Epilogue: per-warp SMEM scratch, FP32 → FP16 store ----------------
+    __shared__ float frag_smem[kWarpsPerBlock * kWmmaM * kWmmaN];
+    float* warp_frag = frag_smem + warp * (kWmmaM * kWmmaN);
+    int warp_base_m = block_m + wm * kWarpM;
+    int warp_base_n = block_n + wn * kWarpN;
+
+#pragma unroll
+    for (int i = 0; i < kFragsM; ++i) {
+#pragma unroll
+        for (int j = 0; j < kFragsN; ++j) {
+            wmma::store_matrix_sync(warp_frag, acc[i][j], kWmmaN, wmma::mem_row_major);
+            __syncwarp();
+            int frag_row0 = warp_base_m + i * kWmmaM;
+            int frag_col0 = warp_base_n + j * kWmmaN;
+            for (int t = 0; t < (kWmmaM * kWmmaN) / 32; ++t) {
+                int idx = t * 32 + lane;
+                int r = idx / kWmmaN;
+                int c = idx % kWmmaN;
+                int g_row = frag_row0 + r;
+                int g_col = frag_col0 + c;
+                if (g_row >= M || g_col >= N) continue;
+                y[(int64_t)g_row * N + g_col] = __float2half(warp_frag[idx]);
+            }
+            __syncwarp();
+        }
+    }
+}
+
+}  // namespace mmq_q4k_v2_detail
+
+void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
+                const half* eff_min, half* y, int M, int N, int K,
+                cudaStream_t stream) {
+    using namespace mmq_q4k_v2_detail;
+    if (K % kBK != 0 || M <= 0 || N <= 0) return;
+    dim3 grid((N + kBN - 1) / kBN, (M + kBM - 1) / kBM);
+    dim3 block(kThreadsPerBlock);
+    mmq_q4k_v2_kernel<<<grid, block, 0, stream>>>(x, eff_q4, eff_scale, eff_min,
+                                                  y, M, N, K);
 }
 
 }  // namespace imp
