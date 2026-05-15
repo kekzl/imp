@@ -86,59 +86,85 @@ __global__ void quantize_fp16_to_q8_1_kernel(const half* __restrict__ x,
 
 __device__ __forceinline__ int dp4a_(int a, int b, int c) { return __dp4a(a, b, c); }
 
-__device__ __forceinline__ float vec_dot_q4_K_slice(const block_q4_K& bq4_K,
-                                                    const block_q8_1* bq8_super,
-                                                    int iqs) {
-    int v[2];
-    int u[2 * QR4_K];
-    float d8[QR4_K];
-
-    const int bq8_offset = QR4_K * ((iqs / 2) / (QI8_1 / 2));
-
-    const int* q4 = reinterpret_cast<const int*>(
-        bq4_K.qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
-    v[0] = q4[0];
-    v[1] = q4[4];
-
+// Full-super-block dot product for one (m, n) pair. Processes all 256
+// elements of one Q4_K super-block against the matching 8 Q8_1 sub-blocks.
+//
+// Hoists out of the original 16× kqs loop:
+//   - bq4_K.scales unpack into aux/sc/m (4 unique bq8_offset values, not 16)
+//   - d4, dm4 conversion (once, not 16×)
+//   - d8[i] reads (4× per bo, was 32× per super-block)
+//
+// Chains dp4a accumulators across the 4 (iqs/2)%4 positions instead of
+// summing into FP32 each call. dp4a max value per chain ≈ 256 K, well
+// within int32 — 16 chained dp4a remains safe.
+__device__ __forceinline__ float vec_dot_q4_K_super(const block_q4_K& bq4_K,
+                                                    const block_q8_1* bq8_super) {
     const uint16_t* scales = reinterpret_cast<const uint16_t*>(bq4_K.scales);
-    uint16_t aux[2];
-    const int j = bq8_offset / 2;
-    if (j < 2) {
-        aux[0] = scales[j + 0] & 0x3f3f;
-        aux[1] = scales[j + 2] & 0x3f3f;
-    } else {
-        aux[0] = ((scales[j + 2] >> 0) & 0x0f0f) | ((scales[j - 2] & 0xc0c0) >> 2);
-        aux[1] = ((scales[j + 2] >> 4) & 0x0f0f) | ((scales[j - 0] & 0xc0c0) >> 2);
-    }
-    const uint8_t* sc = reinterpret_cast<const uint8_t*>(aux);
-    const uint8_t* m = sc + 2;
-
-#pragma unroll
-    for (int i = 0; i < QR4_K; ++i) {
-        const block_q8_1* bq8i = bq8_super + bq8_offset + i;
-        d8[i] = __half2float(bq8i->d);
-        const int* q8 = reinterpret_cast<const int*>(bq8i->qs) + ((iqs / 2) % 4);
-        u[2 * i + 0] = q8[0];
-        u[2 * i + 1] = q8[4];
-    }
-
-    float sumf_d = 0.0f;
-    float sumf_m = 0.0f;
-#pragma unroll
-    for (int i = 0; i < QR4_K; ++i) {
-        const int v0i = (v[0] >> (4 * i)) & 0x0F0F0F0F;
-        const int v1i = (v[1] >> (4 * i)) & 0x0F0F0F0F;
-
-        const int dot1 = dp4a_(v1i, u[2 * i + 1], dp4a_(v0i, u[2 * i + 0], 0));
-        const int dot2 = dp4a_(0x01010101, u[2 * i + 1], dp4a_(0x01010101, u[2 * i + 0], 0));
-
-        sumf_d += d8[i] * (dot1 * sc[i]);
-        sumf_m += d8[i] * (dot2 * m[i]);
-    }
-
     const float d4 = __half2float(bq4_K.d);
     const float dm4 = __half2float(bq4_K.dmin);
-    return d4 * sumf_d - dm4 * sumf_m;
+
+    float sumf = 0.0f;
+
+#pragma unroll
+    for (int bo_step = 0; bo_step < 4; ++bo_step) {
+        const int bq8_offset = 2 * bo_step;  // 0, 2, 4, 6
+
+        // ---- Per-bo hoist: aux/sc/m ------------------------------------
+        uint16_t aux[2];
+        const int j = bo_step;  // == bq8_offset / 2
+        if (j < 2) {
+            aux[0] = scales[j + 0] & 0x3f3f;
+            aux[1] = scales[j + 2] & 0x3f3f;
+        } else {
+            aux[0] = ((scales[j + 2] >> 0) & 0x0f0f) | ((scales[j - 2] & 0xc0c0) >> 2);
+            aux[1] = ((scales[j + 2] >> 4) & 0x0f0f) | ((scales[j - 0] & 0xc0c0) >> 2);
+        }
+        const uint8_t* sc = reinterpret_cast<const uint8_t*>(aux);
+        const uint8_t* m = sc + 2;
+
+        // ---- Per-bo hoist: d8 of the two paired Q8_1 sub-blocks --------
+        const block_q8_1* bq8_0 = bq8_super + bq8_offset + 0;
+        const block_q8_1* bq8_1 = bq8_super + bq8_offset + 1;
+        const float d8_0 = __half2float(bq8_0->d);
+        const float d8_1 = __half2float(bq8_1->d);
+
+        const int* q4_base = reinterpret_cast<const int*>(bq4_K.qs + 16 * bq8_offset);
+        const int* q8_0 = reinterpret_cast<const int*>(bq8_0->qs);
+        const int* q8_1 = reinterpret_cast<const int*>(bq8_1->qs);
+
+        // ---- Chain dp4a accumulators over (iqs/2)%4 = 0..3 -------------
+        int s1_0 = 0, s1_1 = 0, s2_0 = 0, s2_1 = 0;
+#pragma unroll
+        for (int qbo = 0; qbo < 4; ++qbo) {
+            const int v0 = q4_base[qbo];          // bytes 16*bo + 4*qbo
+            const int v1 = q4_base[qbo + 4];      // bytes 16*bo + 4*qbo + 16
+            const int u00 = q8_0[qbo];
+            const int u01 = q8_0[qbo + 4];
+            const int u10 = q8_1[qbo];
+            const int u11 = q8_1[qbo + 4];
+
+            const int v0_lo = v0 & 0x0F0F0F0F;
+            const int v1_lo = v1 & 0x0F0F0F0F;
+            const int v0_hi = (v0 >> 4) & 0x0F0F0F0F;
+            const int v1_hi = (v1 >> 4) & 0x0F0F0F0F;
+
+            // i=0 contributions (low nibbles, sub-block bq8_offset+0)
+            s1_0 = dp4a_(v1_lo, u01, dp4a_(v0_lo, u00, s1_0));
+            s2_0 = dp4a_(0x01010101, u01, dp4a_(0x01010101, u00, s2_0));
+            // i=1 contributions (high nibbles, sub-block bq8_offset+1)
+            s1_1 = dp4a_(v1_hi, u11, dp4a_(v0_hi, u10, s1_1));
+            s2_1 = dp4a_(0x01010101, u11, dp4a_(0x01010101, u10, s2_1));
+        }
+
+        // ---- Per-bo FP32 combine ---------------------------------------
+        const float sd0 = static_cast<float>(s1_0) * static_cast<float>(sc[0]);
+        const float sd1 = static_cast<float>(s1_1) * static_cast<float>(sc[1]);
+        const float sm0 = static_cast<float>(s2_0) * static_cast<float>(m[0]);
+        const float sm1 = static_cast<float>(s2_1) * static_cast<float>(m[1]);
+        sumf += d4 * (d8_0 * sd0 + d8_1 * sd1) - dm4 * (d8_0 * sm0 + d8_1 * sm1);
+    }
+
+    return sumf;
 }
 
 // -------------------------------------------------------------------------
@@ -179,8 +205,18 @@ void mmq_q4k_kernel(const block_q4_K* __restrict__ W,
     const int K_blocks = K / QK_K;
     const int x_sub_per_row = K / QK8_1;  // = K_blocks * 8
 
-    __shared__ block_q4_K sW[TILE_N];
+    // SMEM bank-conflict mitigation: sizeof(block_q4_K) = 144 B = 36 ints.
+    // Stride 36 % 32 = 4 banks → 16 threads at varying n_local hit only
+    // 8 unique banks (2-way conflict). Padding to 148 B (37 ints, gcd(37,32)=1)
+    // gives 16 distinct banks for any 16-thread sweep across n_local.
+    // ggml_block_q8_1 = 36 B = 9 ints already coprime-mod-32 → no padding needed.
+    constexpr int W_STRIDE_INTS = (sizeof(block_q4_K) / 4) + 1;  // 37
+    __shared__ int sW_raw[TILE_N * W_STRIDE_INTS];
     __shared__ block_q8_1 sX[TILE_M][Q8_PER_SUPER];
+
+    auto sW_ptr = [&](int n_local) -> const block_q4_K* {
+        return reinterpret_cast<const block_q4_K*>(&sW_raw[n_local * W_STRIDE_INTS]);
+    };
 
     float acc[REG_M][REG_N];
 #pragma unroll
@@ -191,25 +227,26 @@ void mmq_q4k_kernel(const block_q4_K* __restrict__ W,
     // Constants for cooperative copy in 4-byte words.
     constexpr int W_INTS_PER_BLOCK = sizeof(block_q4_K) / 4;        // 36
     constexpr int X_INTS_PER_SUB = sizeof(block_q8_1) / 4;          // 9
-    constexpr int W_TOTAL_INTS = TILE_N * W_INTS_PER_BLOCK;         // 64*36 = 2304
+    constexpr int W_TOTAL_INTS = TILE_N * W_INTS_PER_BLOCK;         // 64*36 = 2304 (source side)
     constexpr int X_TOTAL_INTS = TILE_M * Q8_PER_SUPER * X_INTS_PER_SUB;  // 32*8*9 = 2304
 
     for (int kbx = 0; kbx < K_blocks; ++kbx) {
-        // ---- Load TILE_N weight super-blocks ---------------------------
+        // ---- Load TILE_N weight super-blocks into padded SMEM ----------
+        // dst index = n_row * W_STRIDE_INTS + word (37-int stride, 36-int payload,
+        // 1 int padding skipped per super-block).
         {
-            int* dst = reinterpret_cast<int*>(&sW[0]);
 #pragma unroll
             for (int i = tid; i < W_TOTAL_INTS; i += THREADS) {
                 const int n_row = i / W_INTS_PER_BLOCK;
                 const int word = i % W_INTS_PER_BLOCK;
                 const int n_global = n_block + n_row;
+                int v = 0;
                 if (n_global < N) {
                     const int* src = reinterpret_cast<const int*>(
                         &W[n_global * K_blocks + kbx]);
-                    dst[i] = src[word];
-                } else {
-                    dst[i] = 0;
+                    v = src[word];
                 }
+                sW_raw[n_row * W_STRIDE_INTS + word] = v;
             }
         }
         // ---- Load TILE_M × 8 Q8_1 sub-blocks ---------------------------
@@ -241,14 +278,7 @@ void mmq_q4k_kernel(const block_q4_K* __restrict__ W,
 #pragma unroll
             for (int rn = 0; rn < REG_N; ++rn) {
                 const int n_local = n_thread * REG_N + rn;
-                const block_q4_K& bq4 = sW[n_local];
-                float a = acc[rm][rn];
-#pragma unroll
-                for (int kqs_idx = 0; kqs_idx < 16; ++kqs_idx) {
-                    const int iqs = 2 * kqs_idx;
-                    a += vec_dot_q4_K_slice(bq4, bq8_super, iqs);
-                }
-                acc[rm][rn] = a;
+                acc[rm][rn] += vec_dot_q4_K_super(*sW_ptr(n_local), bq8_super);
             }
         }
         __syncthreads();
