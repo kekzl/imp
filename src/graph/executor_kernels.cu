@@ -14,6 +14,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
+#include "compute/mmq_q4k.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
@@ -2138,6 +2139,47 @@ static void gemm_dispatch_impl(
                     (weight.shape[1] % 32 == 0) && !(no_mmvq_q8_0 && qtype == QType::Q8_0) && !no_mmvq_all;
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
                     !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
+
+    // Direct Q4_K tiled-mmq dispatch (Phase C). Beats mmvq 2.0-2.4x in
+    // isolated microbench, but FP16 TensorCore cuBLAS still wins at M ≥ 32
+    // (TC peak ~838 TFLOPS vs dp4a peak ~50 TFLOPS — kernel can't catch up
+    // until it ports to mma.sync.s8). Effective win zone: M=2..16 where
+    // dequant+cuBLAS overhead dominates and dp4a parallelism wins. M=1 is
+    // owned by use_dp4a. Bypassed for Gemma-4 (force_mmvq), and when
+    // IMP_NO_MMQ_Q4K is set. Override range via IMP_MMQ_Q4K_MIN_M /
+    // IMP_MMQ_Q4K_MAX_M.
+    static const bool no_mmq_q4k = std::getenv("IMP_NO_MMQ_Q4K") != nullptr;
+    static const int mmq_q4k_min_m = []() {
+        const char* e = std::getenv("IMP_MMQ_Q4K_MIN_M");
+        return e ? std::atoi(e) : 2;
+    }();
+    static const int mmq_q4k_max_m = []() {
+        const char* e = std::getenv("IMP_MMQ_Q4K_MAX_M");
+        return e ? std::atoi(e) : 16;
+    }();
+    const int dispatch_M = static_cast<int>(input.shape[0]);
+    bool use_mmq_q4k = !no_mmq_q4k && !use_mmvq && !prefer_fp16_cache &&
+                       input.qtype == QType::F16 && !fp32_output &&
+                       qtype == QType::Q4_K &&
+                       dispatch_M >= mmq_q4k_min_m && dispatch_M <= mmq_q4k_max_m &&
+                       (weight.shape[1] % 256 == 0);
+    if (use_mmq_q4k) {
+        int M = static_cast<int>(input.shape[0]);
+        int N = static_cast<int>(weight.shape[0]);
+        int K = static_cast<int>(weight.shape[1]);
+        const size_t q8_need = static_cast<size_t>(M) * (K / 32) * 36;
+        static void* s_mmq_scratch = nullptr;
+        static size_t s_mmq_scratch_size = 0;
+        if (!s_mmq_scratch || s_mmq_scratch_size < q8_need) {
+            if (s_mmq_scratch) cudaFree(s_mmq_scratch);
+            cudaMalloc(&s_mmq_scratch, q8_need * 2);
+            s_mmq_scratch_size = q8_need * 2;
+        }
+        mmq_q4k(weight.data, static_cast<const half*>(input.data),
+                static_cast<half*>(output.data), M, N, K, s_mmq_scratch,
+                s_mmq_scratch_size, stream);
+        return;
+    }
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
