@@ -146,6 +146,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemv_ggml_compat.cu
     src/compute/ggml_mmvq.cu
     src/compute/mmq_q4k.cu
+    src/compute/mmq_q4k_v2.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
@@ -426,6 +427,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
         tests/test_mmq_q4k.cu
+        tests/test_mmq_q4k_v2.cu
         tests/test_reduce.cu
         tests/test_softmax.cu
         tests/test_sampling.cu
