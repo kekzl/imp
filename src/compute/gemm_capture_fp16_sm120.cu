@@ -137,8 +137,6 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
 #pragma unroll
             for (int j = 0; j < FRAGS_N; ++j) {
                 int b_row = wn * WARP_N + j * WMMA_N;
-                // matrix_b col_major against [BN][BK] smem produces a [K][N] view,
-                // so the b_frag k-axis aligns with B^T's k-axis. Stride is BK.
                 wmma::load_matrix_sync(b_frag[j], smem->B + b_row * BK + kk * WMMA_K, BK);
             }
 #pragma unroll
@@ -207,9 +205,18 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
                               float beta, cudaStream_t stream) {
     if (!capture_gemm_fp16_sm120_available()) return false;
     if (M <= 0 || N <= 0 || K <= 0) return false;
-    // v1 requires tile-aligned shapes. cuBLAS shapes from prefill
-    // (M=512, N=128/512/2048/4096, K=2048/4096) all satisfy this.
-    if (M % BM != 0 || N % BN != 0 || K % WMMA_K != 0) return false;
+    // K must align to WMMA_K (kernel reads full WMMA_K-wide fragments from
+    // smem with no bounds check). Decline shapes where this kernel is
+    // significantly slower than cuBLASLt — small-N shapes (e.g. Qwen3.6 KV
+    // projection N=32) launch only ⌈N/BN⌉=1 block × ⌈M/BM⌉ → too few
+    // blocks to saturate sm_120's 128 SMs, and most MMA frags compute on
+    // zero-padded B → wasted cycles. Caller (gemm.cu) falls through to
+    // cuBLASLt for declined shapes; under stream capture cuBLASLt then
+    // fails with status 14 and the wrapper falls back to eager — same as
+    // baseline, no regression. Future work: BN=32 specialization for
+    // small-N shapes (multi-day kernel engineering).
+    if (K % WMMA_K != 0) return false;
+    if (N < BN || M < BM) return false;
 
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     dim3 block(THREADS_PER_BLOCK);
