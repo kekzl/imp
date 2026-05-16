@@ -1,4 +1,5 @@
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cstring>
 #include <stdexcept>
 #include <sstream>
@@ -7,7 +8,7 @@ namespace imp {
 
 Tensor::Tensor(void* data, QType qtype, int ndim, const int64_t* shape, bool on_device)
     : data(data), qtype(qtype), ndim(ndim), on_device(on_device) {
-    assert(ndim >= 0 && ndim <= kMaxDims);
+    IMP_CHECK(ndim >= 0 && ndim <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", ndim, kMaxDims);
     for (int i = 0; i < ndim; ++i) {
         this->shape[i] = shape[i];
     }
@@ -16,7 +17,7 @@ Tensor::Tensor(void* data, QType qtype, int ndim, const int64_t* shape, bool on_
 
 Tensor::Tensor(void* data, QType qtype, int ndim, const int64_t* shape, const int64_t* stride, bool on_device)
     : data(data), qtype(qtype), ndim(ndim), on_device(on_device) {
-    assert(ndim >= 0 && ndim <= kMaxDims);
+    IMP_CHECK(ndim >= 0 && ndim <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", ndim, kMaxDims);
     for (int i = 0; i < ndim; ++i) {
         this->shape[i] = shape[i];
         this->stride[i] = stride[i];
@@ -87,8 +88,11 @@ Tensor Tensor::reshape(int new_ndim, const int64_t* new_shape) const {
 }
 
 Tensor Tensor::slice(int64_t start, int64_t end) const {
-    assert(ndim > 0);
-    assert(start >= 0 && end <= shape[0] && start < end);
+    IMP_CHECK(ndim > 0, "Tensor::slice: ndim=%d, expected > 0", ndim);
+    IMP_CHECK(start >= 0 && end <= shape[0] && start < end,
+              "Tensor::slice: bad range [%lld, %lld) for shape[0]=%lld",
+              static_cast<long long>(start), static_cast<long long>(end),
+              static_cast<long long>(shape[0]));
 
     Tensor t = *this;
     t.shape[0] = end - start;

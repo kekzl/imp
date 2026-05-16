@@ -1,4 +1,5 @@
 #include "model/tensor_kind_table.h"
+#include "core/logging.h"
 
 #include <array>
 #include <cassert>
@@ -66,7 +67,9 @@ constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> 
 }  // namespace
 
 const KindCapabilities& capabilities_of(TensorKind k) {
-    assert(k != TensorKind::_COUNT && static_cast<size_t>(k) < kKindTable.size());
+    IMP_CHECK(k != TensorKind::_COUNT && static_cast<size_t>(k) < kKindTable.size(),
+              "capabilities_of: invalid TensorKind=%zu (table size=%zu)",
+              static_cast<size_t>(k), kKindTable.size());
     return kKindTable[static_cast<size_t>(k)];
 }
 

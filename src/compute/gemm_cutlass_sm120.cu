@@ -339,7 +339,7 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
 // ---------------------------------------------------------------------------
 
 void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, cudaStream_t stream) {
-    assert(src.packed_data && "source must be quantized");
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_cutlass: src.packed_data is null");
     int64_t N = src.N;
     int64_t K = src.K;
 
@@ -389,7 +389,8 @@ void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
 
 void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N,
                                         int K, cudaStream_t stream) {
-    assert(K % kSFVecSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(K % kSFVecSize == 0, "convert_nvfp4_moe_scales_to_sfatom: K=%d must be multiple of %d",
+              K, kSFVecSize);
     int K_groups = K / kSFVecSize;
     int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     size_t native_stride = static_cast<size_t>(N) * K_groups;
@@ -411,7 +412,8 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
 
 void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {
-    assert(K % kSFVecSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_cutlass: K=%d must be multiple of %d",
+              K, kSFVecSize);
 
     // SfAtom padding bytes are pre-zeroed once at workspace allocation
     // (executor_workspace_buffers.cu). The kernel only writes valid (row, k_group)
@@ -432,7 +434,8 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
                                         const int* d_offsets, int expanded, int K, int ne,
                                         cudaStream_t stream) {
-    assert(K % kSFVecSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(K % kSFVecSize == 0, "quantize_fp16_to_nvfp4_cutlass_moe: K=%d must be multiple of %d",
+              K, kSFVecSize);
     if (expanded == 0)
         return;
 

@@ -1,4 +1,5 @@
 #include "quant/quant_gemm.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -170,17 +171,22 @@ __global__ void quant_gemm_int4_kernel(
 void quant_gemm_int4(const Tensor& A, const Tensor& B_quant, const Tensor& scales, Tensor& C,
                      cudaStream_t stream) {
     // --- Validate dimensions ------------------------------------------------
-    assert(A.ndim == 2 && "A must be 2D [M, K]");
-    assert(B_quant.ndim == 2 && "B_quant must be 2D [N, K/2]");
-    assert(scales.ndim == 2 && "scales must be 2D [N, num_groups]");
-    assert(C.ndim == 2 && "C must be 2D [M, N]");
+    IMP_CHECK(A.ndim == 2, "quant_gemm_int4: A must be 2D [M, K], got ndim=%d", A.ndim);
+    IMP_CHECK(B_quant.ndim == 2, "quant_gemm_int4: B_quant must be 2D [N, K/2], got ndim=%d", B_quant.ndim);
+    IMP_CHECK(scales.ndim == 2, "quant_gemm_int4: scales must be 2D [N, num_groups], got ndim=%d",
+              scales.ndim);
+    IMP_CHECK(C.ndim == 2, "quant_gemm_int4: C must be 2D [M, N], got ndim=%d", C.ndim);
 
     const int M = static_cast<int>(A.shape[0]);
     const int K = static_cast<int>(A.shape[1]);
     const int N = static_cast<int>(B_quant.shape[0]);
 
-    assert(static_cast<int>(B_quant.shape[1]) == K / 2 && "B_quant.shape[1] must be K/2");
-    assert(C.shape[0] == M && C.shape[1] == N);
+    IMP_CHECK(static_cast<int>(B_quant.shape[1]) == K / 2,
+              "quant_gemm_int4: B_quant.shape[1]=%d must equal K/2=%d",
+              static_cast<int>(B_quant.shape[1]), K / 2);
+    IMP_CHECK(C.shape[0] == M && C.shape[1] == N,
+              "quant_gemm_int4: C shape [%lld, %lld] must equal [M=%d, N=%d]",
+              static_cast<long long>(C.shape[0]), static_cast<long long>(C.shape[1]), M, N);
 
     const int num_groups = static_cast<int>(scales.shape[1]);
     const int group_size = (K + num_groups - 1) / num_groups;
