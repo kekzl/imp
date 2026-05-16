@@ -449,101 +449,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                    non_gated_experts, up_qtype, routing,
                                                    fp32_down_active, fp32_down_buf);
                 } else if (can_fp8_batch) {
-                    if (layer == 0)
-                        IMP_LOG_INFO(
-                            "MoE prefill: FP8 batch path (n=%d, expanded=%d, buf=%.1f MiB, need=%.1f MiB)", n,
-                            expanded, moe_.batch_dequant_buf_size / (1024.0 * 1024.0),
-                            fp8_buf_needed / (1024.0 * 1024.0));
-                    // Expert offsets: device-grouped path uses d_offsets directly on GPU.
-                    // Host offsets + sync are deferred to the legacy fallback path only.
-                    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
-
-                    // FP8 batched GEMM lambda: dequant Q6_K→FP8, quantize FP16 acts→FP8, cuBLAS FP8 GEMM→FP16
-                    auto chunked_fp8_gemm = [&](const Tensor& packed, QType qtype, const char* a_base_fp16,
-                                                char* c_base_fp16, int K_dim, int N_dim) {
-                        int64_t rows = packed.shape[1];
-                        int64_t cols = packed.shape[2];
-                        size_t weight_fp8_bytes = static_cast<size_t>(ne) * rows *
-                                                  cols;  // 1 byte per FP8 element
-
-                        // Buffer layout in moe_.batch_dequant_buf:
-                        //   [0 .. weight_fp8_bytes)                     = FP8 weights for all experts
-                        //   [weight_fp8_bytes .. weight_fp8_bytes + act) = FP8 activations
-                        uint8_t* fp8_weights = reinterpret_cast<uint8_t*>(buf);
-                        uint8_t* fp8_acts = fp8_weights + weight_fp8_bytes;
-
-                        // 1. Dequant all experts Q6_K → FP8 E4M3
-                        dequant_gpu_fp8(packed.data, fp8_weights, qtype, ne * static_cast<int>(rows),
-                                        static_cast<int>(cols), stream);
-
-                        // 2. Per-expert FP8 scaling: calibrate absmax per expert, quantize with
-                        //    per-expert scale. Falls back to scale=1.0 if scale buffer unavailable.
-                        const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
-                        if (moe_.d_fp8_scales) {
-                            // Calibrate per-expert: writes scales to moe_.d_fp8_scales
-                            calibrate_fp8_scales_per_expert(a_base_fp16, K_dim, d_offsets, ne,
-                                                            moe_.d_fp8_scales, stream);
-                            // Quantize with per-expert scale
-                            quantize_fp16_to_fp8_e4m3_per_expert(a_base_fp16, fp8_acts, K_dim, d_offsets, ne,
-                                                                 moe_.d_fp8_scales, stream);
-                            // Note: no D2H sync here — device-grouped path uses device-side
-                            // scales directly. Host scales are only needed by the fallback path.
-                        } else {
-                            // Fallback: uniform scale=1.0
-                            quantize_fp16_to_fp8_e4m3_scaled(a_base_fp16, fp8_acts, expanded * K_dim, 1.0f,
-                                                             stream);
-                        }
-
-                        // 3. Build per-expert FP8 weight pointers and dispatch GEMM via
-                        //    cublasGemmGroupedBatchedEx (single call for all experts).
-                        size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
-                        std::vector<int32_t> h_offsets(ne + 1);
-                        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                        static_cast<size_t>(ne + 1) * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                                        stream);
-                        std::vector<float> h_act_scales(ne, 1.0f);
-                        if (moe_.d_fp8_scales) {
-                            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
-                                                               static_cast<size_t>(ne) * sizeof(float),
-                                                               cudaMemcpyDeviceToHost, stream));
-                        }
-                        cudaStreamSynchronize(stream);
-                        std::vector<const void*> weight_ptrs(ne);
-                        for (int e = 0; e < ne; ++e)
-                            weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
-
-                        gemm_moe_batched(fp8_acts, c_base_fp16, h_offsets.data(), weight_ptrs.data(), K_dim,
-                                         N_dim, QType::FP8_E4M3, ne, stream, moe_.d_work_ptrs,
-                                         /*output_dtype=*/QType::F16,
-                                         moe_.d_fp8_scales ? h_act_scales.data() : nullptr);
-                    };
-
-                    char* gathered_base = static_cast<char*>(moe_.gathered.data);
-                    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
-                    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
-                    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
-                    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
-
-                    // Gate projection (gated models only)
-                    if (!non_gated_experts)
-                        chunked_fp8_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype, gathered_base,
-                                         expert_gate_base, d, eff);
-
-                    // Up projection
-                    chunked_fp8_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff);
-
-                    // Activation (FP16 — reuse existing kernels)
-                    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
-                                            moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
-                                            compute_dtype_, cfg.ffn_activation, stream);
-
-                    // Down projection: up buffer for non-gated (relu² in-place), swiglu for gated
-                    char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-                    chunked_fp8_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, fp8_down_act,
-                                     expert_down_base, eff, d);
-
-                    // Falls through to existing scatter (step 7)
-
+                    try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
+                                                  non_gated_experts, up_qtype, routing);
                 } else if (([&] {
                                // Predicate: CUTLASS 3.x NVFP4 grouped path.
                                // Measured on Qwen3-Coder-30B-A3B-FP4:
@@ -1996,6 +1903,80 @@ bool GraphExecutor::try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int 
             ly.expert_down_packed.data, fused_down_act, expert_down_base, d_offsets, d, eff,
             expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
     }
+    return true;
+}
+
+bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream, int n, int d,
+                                                  int eff, int ne, int expanded,
+                                                  bool non_gated_experts, QType up_qtype,
+                                                  const MoeRoutingResult& routing) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    if (layer == 0)
+        IMP_LOG_INFO("MoE prefill: FP8 batch path (n=%d, expanded=%d, buf=%.1f MiB)", n, expanded,
+                     moe_.batch_dequant_buf_size / (1024.0 * 1024.0));
+
+    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+
+    auto chunked_fp8_gemm = [&](const Tensor& packed, QType qtype, const char* a_base_fp16,
+                                char* c_base_fp16, int K_dim, int N_dim) {
+        int64_t rows = packed.shape[1];
+        int64_t cols = packed.shape[2];
+        size_t weight_fp8_bytes = static_cast<size_t>(ne) * rows * cols;
+        uint8_t* fp8_weights = reinterpret_cast<uint8_t*>(buf);
+        uint8_t* fp8_acts = fp8_weights + weight_fp8_bytes;
+
+        dequant_gpu_fp8(packed.data, fp8_weights, qtype, ne * static_cast<int>(rows),
+                        static_cast<int>(cols), stream);
+
+        const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
+        if (moe_.d_fp8_scales) {
+            calibrate_fp8_scales_per_expert(a_base_fp16, K_dim, d_offsets, ne, moe_.d_fp8_scales,
+                                            stream);
+            quantize_fp16_to_fp8_e4m3_per_expert(a_base_fp16, fp8_acts, K_dim, d_offsets, ne,
+                                                 moe_.d_fp8_scales, stream);
+        } else {
+            quantize_fp16_to_fp8_e4m3_scaled(a_base_fp16, fp8_acts, expanded * K_dim, 1.0f, stream);
+        }
+
+        size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
+        std::vector<int32_t> h_offsets(ne + 1);
+        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                        static_cast<size_t>(ne + 1) * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                        stream);
+        std::vector<float> h_act_scales(ne, 1.0f);
+        if (moe_.d_fp8_scales) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
+                                               static_cast<size_t>(ne) * sizeof(float),
+                                               cudaMemcpyDeviceToHost, stream));
+        }
+        cudaStreamSynchronize(stream);
+        std::vector<const void*> weight_ptrs(ne);
+        for (int e = 0; e < ne; ++e)
+            weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
+
+        gemm_moe_batched(fp8_acts, c_base_fp16, h_offsets.data(), weight_ptrs.data(), K_dim, N_dim,
+                         QType::FP8_E4M3, ne, stream, moe_.d_work_ptrs, QType::F16,
+                         moe_.d_fp8_scales ? h_act_scales.data() : nullptr);
+    };
+
+    char* gathered_base = static_cast<char*>(moe_.gathered.data);
+    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
+    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+    if (!non_gated_experts)
+        chunked_fp8_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype, gathered_base,
+                         expert_gate_base, d, eff);
+    chunked_fp8_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff);
+    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                            non_gated_experts, expanded, eff, compute_dtype_, cfg.ffn_activation,
+                            stream);
+    char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+    chunked_fp8_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, fp8_down_act,
+                     expert_down_base, eff, d);
     return true;
 }
 

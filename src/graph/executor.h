@@ -770,6 +770,12 @@ private:
                                         int ne, int expanded, bool non_gated_experts,
                                         QType up_qtype, const MoeRoutingResult& routing,
                                         bool fp32_down_active, void*& fp32_down_buf);
+    // FP8 batch prefill: Q6_K → FP8 dequant, per-expert FP16→FP8 quantize,
+    // cuBLAS FP8 grouped GEMM → FP16. Falls back to FP16 batch when scales
+    // unavailable. Used when FP16 batch buffer can't fit but FP8 can.
+    bool try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                       int ne, int expanded, bool non_gated_experts,
+                                       QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
