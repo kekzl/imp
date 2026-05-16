@@ -231,6 +231,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/graph.cpp
     src/graph/executor.cu
     src/graph/executor_kernels.cu
+    src/graph/gemm_kernel_registry.cu
     src/graph/executor_workspace.cu
     src/graph/executor_workspace_buffers.cu
     src/graph/executor_kv_write.cu
@@ -422,6 +423,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm.cu
         tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_dp4a.cu
+        tests/test_gemm_kernel_registry.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
         tests/test_reduce.cu

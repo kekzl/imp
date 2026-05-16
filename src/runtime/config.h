@@ -121,6 +121,12 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
+        // R5 (review/phase5_synthesis.md §5): opt into the new GemmKernel
+        // registry. Slice 1 has only the FP16 tier wired; remaining tiers
+        // (FP8, NVFP4, CUTLASS_NVFP4, MXFP4) still go through the legacy
+        // gemm_dispatch_impl regardless of this flag. Default OFF until
+        // every tier is migrated.
+        bool use_kernel_registry = false;
     } gemm;
 
     struct Gemma4 {

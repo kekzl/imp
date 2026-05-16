@@ -194,6 +194,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
     else if (eq("gemm.no_mmvq_q8_0"))
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
+    else if (eq("gemm.use_kernel_registry"))
+        cfg.gemm.use_kernel_registry = parse_bool(val, cfg.gemm.use_kernel_registry);
 
     // [gemma4]
     else if (eq("gemma4.fp32_gemm_out"))
