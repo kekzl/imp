@@ -151,6 +151,25 @@ protected:
         cudaFree(d_o);
     }
 
+    // RAII guard for the cluster opt-in flag — same pattern as
+    // test_attention_fmha_sm120.cu. ClusterPath* tests construct one to
+    // exercise the cluster path; the guard restores the previous flag on
+    // exit (default OFF post 2026-05-17).
+    struct ClusterEnableGuard {
+        bool prev;
+        ClusterEnableGuard() {
+            prev = RuntimeConfig::current().attention.no_fmha_cluster;
+            RuntimeConfig cfg = RuntimeConfig::current();
+            cfg.attention.no_fmha_cluster = false;
+            RuntimeConfig::install(cfg);
+        }
+        ~ClusterEnableGuard() {
+            RuntimeConfig cfg = RuntimeConfig::current();
+            cfg.attention.no_fmha_cluster = prev;
+            RuntimeConfig::install(cfg);
+        }
+    };
+
     cudaStream_t stream_ = nullptr;
 };
 
@@ -187,16 +206,17 @@ TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 
 // run_test enforces a 5 % rel tolerance against the CPU reference; the
 // cluster kernel inherits the legacy FP8 quantization noise.
 
-TEST_F(FmhaFP8Test, ClusterPathGQA2Hd128) { run_test(1, 64, 512, 4, 2, 128, true); }
-TEST_F(FmhaFP8Test, ClusterPathGQA4Hd128) { run_test(1, 64, 512, 8, 2, 128, true); }
-TEST_F(FmhaFP8Test, ClusterPathGQA8Hd128) { run_test(1, 64, 512, 16, 2, 128, true); }
-TEST_F(FmhaFP8Test, ClusterPathHd64) { run_test(1, 64, 512, 8, 2, 64, true); }
-TEST_F(FmhaFP8Test, ClusterPathHd256) { run_test(1, 64, 512, 4, 2, 256, true); }
-TEST_F(FmhaFP8Test, ClusterPathLongPrompt) { run_test(1, 128, 1024, 8, 2, 128, true); }
-TEST_F(FmhaFP8Test, ClusterPathSlidingWindow) { run_test(1, 128, 1024, 4, 2, 128, true, /*sw=*/256); }
-TEST_F(FmhaFP8Test, ClusterPathSoftcap) { run_test(1, 128, 1024, 4, 2, 128, true, 0, /*softcap=*/50.0f); }
+TEST_F(FmhaFP8Test, ClusterPathGQA2Hd128) { ClusterEnableGuard g; run_test(1, 64, 512, 4, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathGQA4Hd128) { ClusterEnableGuard g; run_test(1, 64, 512, 8, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathGQA8Hd128) { ClusterEnableGuard g; run_test(1, 64, 512, 16, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathHd64) { ClusterEnableGuard g; run_test(1, 64, 512, 8, 2, 64, true); }
+TEST_F(FmhaFP8Test, ClusterPathHd256) { ClusterEnableGuard g; run_test(1, 64, 512, 4, 2, 256, true); }
+TEST_F(FmhaFP8Test, ClusterPathLongPrompt) { ClusterEnableGuard g; run_test(1, 128, 1024, 8, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathSlidingWindow) { ClusterEnableGuard g; run_test(1, 128, 1024, 4, 2, 128, true, /*sw=*/256); }
+TEST_F(FmhaFP8Test, ClusterPathSoftcap) { ClusterEnableGuard g; run_test(1, 128, 1024, 4, 2, 128, true, 0, /*softcap=*/50.0f); }
 TEST_F(FmhaFP8Test, ClusterPathBypassedForShortKv) {
     // seq_kv < 512 → cluster gate rejects, legacy FP8 kernel runs.
+    ClusterEnableGuard g;
     run_test(1, 64, 256, 8, 2, 128, true);
 }
 
@@ -242,6 +262,9 @@ TEST_F(FmhaFP8Test, ClusterMatchesLegacy) {
     Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
     Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
 
+    // Restore previous flag on exit (default OFF post 2026-05-17).
+    ClusterEnableGuard restore_on_exit;
+
     {
         RuntimeConfig cfg = RuntimeConfig::current();
         cfg.attention.no_fmha_cluster = false;
@@ -259,11 +282,6 @@ TEST_F(FmhaFP8Test, ClusterMatchesLegacy) {
         Tensor Ol(d_o_legacy, QType::F16, 4, q_shape, true);
         ASSERT_TRUE(fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ol, scale, true, 0, 0.0f, stream_));
         cudaStreamSynchronize(stream_);
-    }
-    {
-        RuntimeConfig cfg = RuntimeConfig::current();
-        cfg.attention.no_fmha_cluster = false;
-        RuntimeConfig::install(cfg);
     }
 
     std::vector<half> Oc(q_elems), Ol(q_elems);

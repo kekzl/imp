@@ -79,11 +79,17 @@ struct RuntimeConfig {
         bool splitk_pipe = true;
         bool gate_concat = false;
         // M5 Slice 2: opt-out of the cluster FMHA kernel
-        // (attention_fmha_sm120_cluster.cu). Default OFF — the cluster path
-        // dispatches automatically on eligible GQA configs (n_q_per_kv
-        // ∈ {2,4,8}, HD ∈ {64,96,128,256}, seq_kv ≥ 8*Bkv). Set true via
-        // imp.conf to force the legacy per-head kernel (bisection / A-B).
-        bool no_fmha_cluster = false;
+        // (attention_fmha_sm120_cluster.cu). **Default true** (cluster
+        // DISABLED) — the 2026-05-17 A/B sweep across the four production
+        // NVFP4 MoE models (Qwen3.6-35B, Gemma-4-26B, Qwen3-Coder-30B,
+        // Qwen3-30B-Modelopt) found cluster wins +6-11 % on HD=128 GQA=8
+        // at pp=512 but loses up to -22 % on HD=256 (Qwen3.6 pp=2048,
+        // Gemma-4 pp=512). Net user-facing impact is negative on the
+        // dominant Qwen3.6 model, so cluster path stays opt-in until the
+        // HD=256 regression is root-caused. See
+        // m5_slice2_cluster_refuted_2026_05_17.md memo. Set false via
+        // imp.conf to re-enable for opt-in HD=128 GQA=8 workloads.
+        bool no_fmha_cluster = true;
     } attention;
 
     struct MoE {
