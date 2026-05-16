@@ -8,7 +8,7 @@
 // not enforced as a gate here so we can see all data even on a regression.
 // =============================================================================
 
-#include "compute/fmha_v_load_bench.h"
+#include "bench/fmha_v_load_bench.h"
 #include <gtest/gtest.h>
 #include <cstdio>
 

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "compute/attention_mxf4nvf4_probe.h"
+#include "bench/attention_mxf4nvf4_probe.h"
 #include <cuda_runtime.h>
 
 namespace imp {

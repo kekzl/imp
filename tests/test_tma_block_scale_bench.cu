@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "compute/tma_block_scale_bench.h"
+#include "bench/tma_block_scale_bench.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 

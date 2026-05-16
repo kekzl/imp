@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "compute/mxf4nvf4_mma_bench.h"
+#include "bench/mxf4nvf4_mma_bench.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 
