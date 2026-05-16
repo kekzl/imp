@@ -358,6 +358,45 @@ __device__ __forceinline__ half2 q4_pair_to_half2(uint8_t byte, half scale,
     return __halves2half2(hlo, hhi);
 }
 
+// ---------------------------------------------------------------------------
+// cp.async helpers (Phase 7): GMEM → SMEM transfers that issue async then let
+// the warp continue. Predicated form zero-fills SMEM when src_size=0.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void cp_async_cg_16(void* smem_ptr,
+                                               const void* gmem_ptr,
+                                               bool valid) {
+    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    int src_size = valid ? 16 : 0;
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s),
+        "l"(gmem_ptr), "r"(src_size));
+}
+__device__ __forceinline__ void cp_async_ca_8(void* smem_ptr,
+                                              const void* gmem_ptr,
+                                              bool valid) {
+    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    int src_size = valid ? 8 : 0;
+    asm volatile(
+        "cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(s),
+        "l"(gmem_ptr), "r"(src_size));
+}
+__device__ __forceinline__ void cp_async_ca_4(void* smem_ptr,
+                                              const void* gmem_ptr,
+                                              bool valid) {
+    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    int src_size = valid ? 4 : 0;
+    asm volatile(
+        "cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(s),
+        "l"(gmem_ptr), "r"(src_size));
+}
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;\n");
+}
+template <int N>
+__device__ __forceinline__ void cp_async_wait_group() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+}
+
 template <int kP3BN>
 __global__ void mmq_q4k_v2_kernel_p3_t(
     const half* __restrict__ A,           // [M, K]
@@ -538,19 +577,203 @@ __global__ void mmq_q4k_v2_kernel_p3_t(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7a: cp.async-pipelined Q4_K v2 (2-stage double-buffer)
+//
+// Issues cp.async.cg / cp.async.ca for sA / sQ4 / sScale / sMin into a
+// 2-stage SMEM buffer. Each main-loop iteration:
+//   1. Issue cp.async for stage (kbx+1) % 2 (next K-iter's data).
+//   2. cp.async.commit_group; cp.async.wait_group<1>  (wait for current stage).
+//   3. __syncthreads; MMA compute on stage (kbx % 2).
+//   4. __syncthreads; next iteration.
+//
+// The GMEM load for the NEXT K-iter executes in parallel with the compute on
+// the CURRENT K-iter — eliminates the sync-then-load stall that bounded p3.
+// ---------------------------------------------------------------------------
+template <int kP3BN>
+__global__ void mmq_q4k_v2_kernel_p4_t(
+    const half* __restrict__ A, const uint8_t* __restrict__ eff_q4,
+    const half* __restrict__ eff_scale, const half* __restrict__ eff_min,
+    half* __restrict__ y, int M, int N, int K) {
+    constexpr int kP3WarpN = kP3BN / kWarpsN;
+    constexpr int kP3WRM = kWarpM / 16;
+    constexpr int kP3WRN = kP3WarpN / 8;
+    constexpr int kP3WRK = kBK / 16;
+    constexpr int kStages = 2;
+
+    const int block_m = blockIdx.y * kBM;
+    const int block_n = blockIdx.x * kP3BN;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32;
+    const int lane = tid % 32;
+    const int wm = warp / kWarpsN;
+    const int wn = warp % kWarpsN;
+
+    __shared__ __align__(16) half sA[kStages][kBM * kBK];
+    __shared__ __align__(16) uint8_t sQ4[kStages][kP3BN * (kBK / 2)];
+    __shared__ __align__(16) half sScale[kStages][kP3BN];
+    __shared__ __align__(16) half sMin[kStages][kP3BN];
+
+    float acc[kP3WRM][kP3WRN][4];
+#pragma unroll
+    for (int i = 0; i < kP3WRM; ++i)
+#pragma unroll
+        for (int j = 0; j < kP3WRN; ++j)
+#pragma unroll
+            for (int k = 0; k < 4; ++k) acc[i][j][k] = 0.0f;
+
+    const int K_subs = K / kBK;
+
+#define ISSUE_STAGE_LOAD(buf, kbx_val)                                          \
+    do {                                                                        \
+        constexpr int kAChunks = (kBM * kBK) / (8 * kThreadsPerBlock);          \
+        _Pragma("unroll")                                                       \
+        for (int c = 0; c < kAChunks; ++c) {                                    \
+            int chunk = c * kThreadsPerBlock + tid;                             \
+            int row = chunk >> 2;                                               \
+            int col = (chunk & 3) << 3;                                         \
+            int g_row = block_m + row;                                          \
+            int g_col = (kbx_val) * kBK + col;                                  \
+            const half* gptr = &A[(int64_t)g_row * K + g_col];                  \
+            half* sptr = &sA[buf][row * kBK + col];                             \
+            cp_async_cg_16(sptr, gptr, g_row < M);                              \
+        }                                                                       \
+        constexpr int kSQ4Bytes = kP3BN * (kBK / 2);                            \
+        constexpr int kSQ4Chunks = kSQ4Bytes / (kThreadsPerBlock * 8);          \
+        _Pragma("unroll")                                                       \
+        for (int c = 0; c < kSQ4Chunks; ++c) {                                  \
+            int byte_idx = c * (kThreadsPerBlock * 8) + tid * 8;                \
+            int n_local = byte_idx >> 4;                                        \
+            int byte_within_n = byte_idx & 0xF;                                 \
+            int n_global = block_n + n_local;                                   \
+            int64_t off = ((int64_t)n_global * K_subs + (kbx_val)) * 16 +       \
+                          byte_within_n;                                        \
+            const uint8_t* gptr = eff_q4 + off;                                 \
+            uint8_t* sptr = &sQ4[buf][n_local * 16 + byte_within_n];            \
+            cp_async_ca_8(sptr, gptr, n_global < N);                            \
+        }                                                                       \
+        /* sScale/sMin: strided in GMEM (different N's are K_subs apart), so   \
+         * load synchronously per-thread; cp.async.ca-4 would read into the    \
+         * next N's slot. These are 256-512 bytes total — negligible.          */ \
+        if (tid < kP3BN) {                                                      \
+            int n_global = block_n + tid;                                       \
+            if (n_global < N) {                                                 \
+                int64_t off = (int64_t)n_global * K_subs + (kbx_val);           \
+                sScale[buf][tid] = eff_scale[off];                              \
+                sMin[buf][tid] = eff_min[off];                                  \
+            } else {                                                            \
+                sScale[buf][tid] = __float2half(0.0f);                          \
+                sMin[buf][tid] = __float2half(0.0f);                            \
+            }                                                                   \
+        }                                                                       \
+    } while (0)
+
+    // Prologue: issue stage 0.
+    ISSUE_STAGE_LOAD(0, 0);
+    cp_async_commit();
+
+    for (int kbx = 0; kbx < K_subs; ++kbx) {
+        const int cur = kbx & 1;  // kStages=2
+        if (kbx + 1 < K_subs) {
+            const int next_buf = (kbx + 1) & 1;
+            ISSUE_STAGE_LOAD(next_buf, kbx + 1);
+            cp_async_commit();
+            cp_async_wait_group<1>();
+        } else {
+            cp_async_wait_group<0>();
+        }
+        __syncthreads();
+
+        // ---- MMA on stage `cur` ---------------------------------------
+#pragma unroll
+        for (int kk = 0; kk < kP3WRK; ++kk) {
+            uint32_t a_frag[kP3WRM][4];
+#pragma unroll
+            for (int rm = 0; rm < kP3WRM; ++rm) {
+                int m_start = wm * kWarpM + rm * 16;
+                int k_start = kk * 16;
+                int row = m_start + (lane & 0xF);
+                int col = k_start + ((lane >> 4) << 3);
+                unsigned smem_addr =
+                    __cvta_generic_to_shared(&sA[cur][row * kBK + col]);
+                asm volatile(
+                    "ldmatrix.sync.aligned.x4.m8n8.shared.b16 "
+                    "{%0, %1, %2, %3}, [%4];\n"
+                    : "=r"(a_frag[rm][0]), "=r"(a_frag[rm][1]),
+                      "=r"(a_frag[rm][2]), "=r"(a_frag[rm][3])
+                    : "r"(smem_addr));
+            }
+#pragma unroll
+            for (int rn = 0; rn < kP3WRN; ++rn) {
+                int n_block_local = wn * kP3WarpN + rn * 8 + (lane >> 2);
+                half scale = sScale[cur][n_block_local];
+                half neg_min = __hneg(sMin[cur][n_block_local]);
+                int byte_lo_idx = kk * 8 + (lane & 3);
+                int byte_hi_idx = byte_lo_idx + 4;
+                uint8_t byte_lo = sQ4[cur][n_block_local * 16 + byte_lo_idx];
+                uint8_t byte_hi = sQ4[cur][n_block_local * 16 + byte_hi_idx];
+                half2 b0 = q4_pair_to_half2(byte_lo, scale, neg_min);
+                half2 b1 = q4_pair_to_half2(byte_hi, scale, neg_min);
+                uint32_t b0_reg = *reinterpret_cast<uint32_t*>(&b0);
+                uint32_t b1_reg = *reinterpret_cast<uint32_t*>(&b1);
+#pragma unroll
+                for (int rm = 0; rm < kP3WRM; ++rm) {
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                        "{%0, %1, %2, %3}, "
+                        "{%4, %5, %6, %7}, "
+                        "{%8, %9}, "
+                        "{%0, %1, %2, %3};\n"
+                        : "+f"(acc[rm][rn][0]), "+f"(acc[rm][rn][1]),
+                          "+f"(acc[rm][rn][2]), "+f"(acc[rm][rn][3])
+                        : "r"(a_frag[rm][0]), "r"(a_frag[rm][1]),
+                          "r"(a_frag[rm][2]), "r"(a_frag[rm][3]),
+                          "r"(b0_reg), "r"(b1_reg));
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    // Epilogue (same as p3).
+    const int groupID = lane >> 2;
+    const int lig = lane & 3;
+#pragma unroll
+    for (int rm = 0; rm < kP3WRM; ++rm) {
+        int m_base = block_m + wm * kWarpM + rm * 16;
+#pragma unroll
+        for (int rn = 0; rn < kP3WRN; ++rn) {
+            int n_base = block_n + wn * kP3WarpN + rn * 8;
+            int rows[4] = {groupID, groupID, groupID + 8, groupID + 8};
+            int cols[4] = {lig * 2 + 0, lig * 2 + 1, lig * 2 + 0, lig * 2 + 1};
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                int g_row = m_base + rows[i];
+                int g_col = n_base + cols[i];
+                if (g_row < M && g_col < N) {
+                    y[(int64_t)g_row * N + g_col] = __float2half(acc[rm][rn][i]);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace mmq_q4k_v2_detail
 
-// Tile selection (Phase 4 sweep, RTX 5090 / 170 SMs):
-//   BN=64  wins when grid block count at BN=128 < ~150 (under-fills SMs).
-//   BN=128 wins when blocks_bn128 >= 150 — typically M ≥ 256 at N=5120 or
-//          any M at large N (FFN-up). Doubles A-reuse and amortizes block
-//          setup; cost is fewer total blocks → only worth it once SM array
-//          is saturated.
-// Crossover measured at the production Qwen3-32B Q4_K_M shapes:
-//   M=128 N=5120 (80 blocks)  → BN=64 wins (saturation matters more)
-//   M=256 N=5120 (160 blocks) → BN=128 wins (~9%)
-//   M=512 N=5120 (320 blocks) → BN=128 wins (~32%, the gate shape)
-static constexpr int kP3BlockSaturationThreshold = 150;
+// Tile / pipeline crossover (Phase 4 + Phase 7a sweep, RTX 5090 / 170 SMs):
+//
+//   BN=64 + cp.async (p4)   wins at moderate M and grids ≤ ~250 blocks.
+//                            cp.async hides GMEM load latency that the smaller
+//                            block can't hide otherwise.
+//   BN=128 + sync (p3)      wins at large M (≥ 512) and large N (FFN-up).
+//                            Extra A-reuse amortizes per-block setup once the
+//                            SM array is fully saturated; cp.async adds
+//                            overhead without offsetting gain at this scale.
+//
+// Threshold bumped from 150 → 250 after the Phase 7 sweep: at M=256 N=5120
+// (blocks_bn128=160) the BN=64-p4 path wins by ~12% over BN=128-p3 even
+// though the BN=128 grid is "saturated" — A-reuse doesn't help enough.
+static constexpr int kP3BlockSaturationThreshold = 250;
 
 void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
                 const half* eff_min, half* y, int M, int N, int K,
@@ -572,18 +795,42 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
     const char* bn_env = std::getenv("IMP_MMQ_Q4K_V2_BN");
     int forced_bn = bn_env ? std::atoi(bn_env) : 0;
 
+    // Phase 7a hybrid dispatch:
+    //   BN=64  → p4 (cp.async double-buffer): wins +24-37% at M=32..256 when
+    //            the SM array is under-saturated — overlap with compute hides
+    //            GMEM load latency that p3 had to sync on.
+    //   BN=128 → p3 (sync): wins by +5-10% — at BN=128 the grid is already
+    //            SM-saturated, and the extra 2-stage SMEM + cp.async overhead
+    //            outweigh the (now small) load-stall benefit.
+    // Override the auto choice via IMP_MMQ_Q4K_V2_PIPELINE={0,1} (0 forces p3,
+    // 1 forces p4 — useful for A/B benching).
+    const char* pipeline_env = std::getenv("IMP_MMQ_Q4K_V2_PIPELINE");
+    int forced_pipeline = pipeline_env ? std::atoi(pipeline_env) : -1;
+
     const int blocks_bn128 = ((M + kBM - 1) / kBM) * ((N + 127) / 128);
     const bool use_bn128 = (forced_bn == 128) ||
                            (forced_bn == 0 && N >= 128 &&
                             blocks_bn128 >= kP3BlockSaturationThreshold);
     if (use_bn128) {
         dim3 grid((N + 127) / 128, (M + kBM - 1) / kBM);
-        mmq_q4k_v2_kernel_p3_t<128><<<grid, block, 0, stream>>>(
-            x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        const bool use_p4 = (forced_pipeline == 1);  // default p3 at BN=128
+        if (use_p4) {
+            mmq_q4k_v2_kernel_p4_t<128><<<grid, block, 0, stream>>>(
+                x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        } else {
+            mmq_q4k_v2_kernel_p3_t<128><<<grid, block, 0, stream>>>(
+                x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        }
     } else {
         dim3 grid((N + 63) / 64, (M + kBM - 1) / kBM);
-        mmq_q4k_v2_kernel_p3_t<64><<<grid, block, 0, stream>>>(
-            x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        const bool use_p4 = (forced_pipeline != 0);  // default p4 at BN=64
+        if (use_p4) {
+            mmq_q4k_v2_kernel_p4_t<64><<<grid, block, 0, stream>>>(
+                x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        } else {
+            mmq_q4k_v2_kernel_p3_t<64><<<grid, block, 0, stream>>>(
+                x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        }
     }
 }
 
