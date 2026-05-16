@@ -6,15 +6,13 @@ This is a single-author single-target experiment, so "roadmap" is more "current 
 
 ## Known limitations
 
-### Gemma-4 remaining carve-out (FP8 prefill)
+### ~~Gemma-4 carve-outs~~ — all removed
 
-Earlier Gemma-4 carve-outs removed:
+All three Gemma-4 carve-outs are now gone:
+
 - **FP8 KV cache** — PR #91 (2026-05-01). The "dual head_dim 256/512 needs per-layer-aware kernels" hypothesis was a red herring; the KV write/read kernels handle per-layer head_dim correctly via `Q.shape[3]` template dispatch. Real bugs were (a) FP8 calibration reading the workspace's allocated shape (`max_hd=512`) instead of the live shape (`hd=256` on SWA layers, junk in trailing 256 cols) and (b) warmup-derived absmax poisoning the high-water-mark scale on Gemma-4's `output_norm` outliers (max=588).
-- **NVFP4 decode cache for Q*_K source** — 2026-05-15. The per-tensor convert→quantize loop in `executor_pre_dequant.cu` already handled mixed (N, K) shapes correctly; the disable was overly defensive. Removing it on Q4_K_M / UD-Q4_K_M: pp512 1713 → 2394 tok/s (**+40%**), tg256 176 → 197 tok/s (**+12%**).
-
-One Gemma-4 carve-out remains active in `engine.cpp`:
-
-- **FP8 prefill** (`config_.use_fp8_prefill = 0` for Gemma-4) — different code path from the KV cache. Documented as a *perf* issue (5-19% slower on prefill vs FP16), not a correctness issue; cuBLASLt FP8 algos for Gemma-4's per-layer head_dim shape (256/512 split) lose to FP16 cuBLAS at the standard tile sizes.
+- **NVFP4 decode cache for Q*_K source** — PR #186 (2026-05-15). The per-tensor convert→quantize loop in `executor_pre_dequant.cu` already handled mixed (N, K) shapes correctly; the disable was overly defensive. Removing it on Q4_K_M / UD-Q4_K_M: pp512 1713 → 2394 tok/s (**+40%**), tg256 176 → 197 tok/s (**+12%**).
+- **FP8 prefill** — 2026-05-15. The 2026-05-09 -5..-19% slowdown was real at the time but mostly closed by intermediate prefill work (PRs #177, #181). Re-measured Q4_K_M: pp128 +1.0%, pp512 -0.9%, pp833 -4.2%, pp2048 **+7.3%** — neutral with long-context advantage. FP8 also halves the activation cache size. Users wanting max prefill at medium pp can opt out via `[attention] fp8_prefill = "never"`.
 
 Default KV dtype is FP16; FP8 is opt-in via `--kv-fp8` (or `kv_cache.dtype = "fp8"` in `imp.conf`). Coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2, and Gemma-4 (post PR #91).
 
