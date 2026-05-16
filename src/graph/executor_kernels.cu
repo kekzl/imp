@@ -1,5 +1,6 @@
 #include "graph/executor_kernels.h"
 #include "graph/gemm_context.h"
+#include "graph/gemm_kernel_registry.h"
 #include "graph/executor.h"
 #include "core/logging.h"
 #include "runtime/config.h"
@@ -2364,6 +2365,38 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* nv4 = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
+
+    // R5 Slice 1: when gemm.use_kernel_registry is enabled, try the new
+    // dispatch table first. Only the FP16 tier is wired in Slice 1; other
+    // tiers fall through to the legacy gemm_dispatch_impl below.
+    if (RuntimeConfig::current().gemm.use_kernel_registry) {
+        // The FP16 path is structurally simple — direct cuBLAS via the
+        // fp16 weight cache OR the raw weight when it's already FP16/BF16.
+        // Match the legacy preconditions: prefer the cache, then raw weight.
+        if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &it->second;
+            const int M = static_cast<int>(input.shape[0]);
+            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+        if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &weight;
+            const int M = static_cast<int>(input.shape[0]);
+            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+        // Fall through: registry returned NoMatch for this strategy — use legacy.
+    }
 
     gemm_dispatch_impl(input, weight, Tensor(), qtype, output, qs->dequant, ctx.stream,
                        static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf, fp16, fp8, qs->fp8_act,
