@@ -380,163 +380,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Falls through to scatter (step 7)
         } else if (RuntimeConfig::current().gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
                    ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
-                   ly.expert_down_packed.on_device) {
-            // =========================================================================
-            // GEMMA-4 ggml MMVQ PREFILL: process each token individually using ggml-
-            // compatible Q4_K×Q8_1 dp4a kernels with FP32 norm output, matching llama's
-            // full-precision path (no FP16 truncation at norm output).
-            // =========================================================================
-            if (layer == 0)
-                IMP_LOG_INFO("MoE prefill: ggml MMVQ per-token path (n=%d, top_k=%d)", n, top_k);
-
-            half* gate_buf = static_cast<half*>(moe_.expert_gate.data);
-            half* up_buf = static_cast<half*>(moe_.expert_up.data);
-            half* down_buf = static_cast<half*>(moe_.expert_down.data);
-
-            size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-            size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
-            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
-
-            // Dedicated Q8_1 scratch buffer (persistent, sized for max of gate/up input d and down input eff)
-            static void* s_q8_scratch = nullptr;
-            static size_t s_q8_scratch_size = 0;
-            size_t q8_needed = std::max(static_cast<size_t>((d + 31) / 32) * 36,
-                                        static_cast<size_t>((eff + 31) / 32) * 36);
-            if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
-                if (s_q8_scratch)
-                    cudaFree(s_q8_scratch);
-                cudaMalloc(&s_q8_scratch, q8_needed);
-                s_q8_scratch_size = q8_needed;
-            }
-
-            // FP32 norm output buffer (1 token × d floats, persistent)
-            static float* s_norm_fp32 = nullptr;
-            static int s_norm_fp32_d = 0;
-            if (!s_norm_fp32 || s_norm_fp32_d < d) {
-                if (s_norm_fp32)
-                    cudaFree(s_norm_fp32);
-                cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));
-                s_norm_fp32_d = d;
-            }
-
-            // Process each token
-            for (int t = 0; t < n; t++) {
-                const int32_t* tok_experts = static_cast<const int32_t*>(routing.expert_indices.data) +
-                                             static_cast<int64_t>(t) * top_k;
-                const float* tok_weights = static_cast<const float*>(routing.expert_weights.data) +
-                                           static_cast<int64_t>(t) * top_k;
-
-                // FP32 norm output (FP32 residual → FP32 norm → FP32 Q8_1 quant)
-                const float* tok_norm_f32 = s_norm_fp32;
-                if (fp32_accum_buf_ != nullptr) {
-                    int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
-                    Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
-                                    QType::F32, 2, tok_shape, true);
-                    rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d, eps, stream, norm_w_off_);
-                } else {
-                    tok_norm_f32 = nullptr;
-                }
-
-                // D2H copy expert indices
-                int32_t h_experts[32];
-                cudaMemcpyAsync(h_experts, tok_experts, top_k * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                                stream);
-                cudaStreamSynchronize(stream);
-
-                // Gate + Up projections: dispatch by actual quant type
-                for (int k = 0; k < top_k; k++) {
-                    int32_t eid = h_experts[k];
-                    const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data) +
-                                            static_cast<size_t>(eid) * gate_stride;
-                    const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data) +
-                                          static_cast<size_t>(eid) * up_stride;
-
-                    auto do_mmvq = [&](const uint8_t* w, half* out, QType qt) {
-                        if (tok_norm_f32) {
-                            switch (qt) {
-                                case QType::Q4_K:
-                                    ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch,
-                                                      s_q8_scratch_size, stream);
-                                    break;
-                                default:
-                                    ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch,
-                                                      s_q8_scratch_size, stream);
-                                    break;
-                            }
-                        } else {
-                            const half* tok_norm_fp16 = static_cast<const half*>(no.data) +
-                                                        static_cast<int64_t>(t) * d;
-                            switch (qt) {
-                                case QType::Q4_K:
-                                    ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch,
-                                                  s_q8_scratch_size, stream);
-                                    break;
-                                case QType::Q8_0:
-                                    ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch,
-                                                   s_q8_scratch_size, stream);
-                                    break;
-                                default:
-                                    ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch,
-                                                  s_q8_scratch_size, stream);
-                                    break;
-                            }
-                        }
-                    };
-                    do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff, ly.expert_gate_packed.qtype);
-                    do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype);
-                }
-
-                // Expert activation (GeGLU for Gemma-4)
-                half* swiglu_buf = static_cast<half*>(moe_.expert_swiglu.data);
-                apply_expert_activation(gate_buf, up_buf, swiglu_buf, false /*non_gated*/, top_k, eff,
-                                        compute_dtype_, cfg.ffn_activation, stream);
-
-                // Down projection: dispatch by actual quant type
-                for (int k = 0; k < top_k; k++) {
-                    int32_t eid = h_experts[k];
-                    size_t expert_off = static_cast<size_t>(eid) * down_stride;
-                    const uint8_t* w_down = static_cast<const uint8_t*>(ly.expert_down_packed.data) +
-                                            expert_off;
-                    half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
-                    half* out_k = down_buf + static_cast<int64_t>(k) * d;
-
-                    switch (ly.expert_down_packed.qtype) {
-                        case QType::Q4_K:
-                            ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                          stream);
-                            break;
-                        case QType::Q5_K:
-                            ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                          stream);
-                            break;
-                        case QType::Q8_0:
-                            ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                           stream);
-                            break;
-                        case QType::Q5_1:
-                            ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                           stream);
-                            break;
-                        default:
-                            ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
-                                          stream);
-                            break;
-                    }
-                }
-
-                // Weighted sum for this token → write to h[t]
-                half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
-                bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-                const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
-                                          ? nullptr
-                                          : static_cast<const void*>(static_cast<const half*>(r.data) +
-                                                                     static_cast<int64_t>(t) * d);
-                moe_weighted_sum_residual(down_buf, tok_weights, res_ptr, h_tok, d, top_k, stream);
-            }
-            if (ly.w_up_shared.data == nullptr && !moe_use_fp32_residual)
-                residual_fused = true;
+                   ly.expert_down_packed.on_device &&
+                   try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
+                                                   routing, no, norm_w, h, r,
+                                                   moe_use_fp32_residual, residual_fused)) {
             goto moe_after_experts;
-
         } else {
             // =========================================================================
             // FP16 BATCH or FP8 BATCH PREFILL PATH
@@ -2241,6 +2089,138 @@ bool GraphExecutor::try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int 
             ly.expert_down_packed.data, fused_down_act, expert_down_base, d_offsets, d, eff,
             expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
     }
+    return true;
+}
+
+bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d,
+                                                    int eff, int top_k, QType up_qtype, float eps,
+                                                    const MoeRoutingResult& routing,
+                                                    const Tensor& no, const Tensor& norm_w,
+                                                    Tensor& h, const Tensor& r,
+                                                    bool moe_use_fp32_residual,
+                                                    bool& residual_fused) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    if (layer == 0)
+        IMP_LOG_INFO("MoE prefill: ggml MMVQ per-token path (n=%d, top_k=%d)", n, top_k);
+
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);
+    half* up_buf = static_cast<half*>(moe_.expert_up.data);
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);
+
+    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+    size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
+    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
+
+    // Persistent Q8_1 scratch + FP32 norm scratch (resized lazily).
+    static void* s_q8_scratch = nullptr;
+    static size_t s_q8_scratch_size = 0;
+    size_t q8_needed = std::max(static_cast<size_t>((d + 31) / 32) * 36,
+                                static_cast<size_t>((eff + 31) / 32) * 36);
+    if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
+        if (s_q8_scratch) cudaFree(s_q8_scratch);
+        cudaMalloc(&s_q8_scratch, q8_needed);
+        s_q8_scratch_size = q8_needed;
+    }
+    static float* s_norm_fp32 = nullptr;
+    static int s_norm_fp32_d = 0;
+    if (!s_norm_fp32 || s_norm_fp32_d < d) {
+        if (s_norm_fp32) cudaFree(s_norm_fp32);
+        cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));
+        s_norm_fp32_d = d;
+    }
+
+    for (int t = 0; t < n; t++) {
+        const int32_t* tok_experts = static_cast<const int32_t*>(routing.expert_indices.data) +
+                                     static_cast<int64_t>(t) * top_k;
+        const float* tok_weights = static_cast<const float*>(routing.expert_weights.data) +
+                                   static_cast<int64_t>(t) * top_k;
+
+        const float* tok_norm_f32 = s_norm_fp32;
+        if (fp32_accum_buf_ != nullptr) {
+            int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
+            Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
+                            QType::F32, 2, tok_shape, true);
+            rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d, eps, stream, norm_w_off_);
+        } else {
+            tok_norm_f32 = nullptr;
+        }
+
+        int32_t h_experts[32];
+        cudaMemcpyAsync(h_experts, tok_experts, top_k * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                        stream);
+        cudaStreamSynchronize(stream);
+
+        auto do_mmvq = [&](const uint8_t* w, half* out, QType qt, int rows, int cols) {
+            if (tok_norm_f32) {
+                ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, rows, cols, s_q8_scratch,
+                                  s_q8_scratch_size, stream);
+                return;
+            }
+            const half* tok_norm_fp16 = static_cast<const half*>(no.data) +
+                                        static_cast<int64_t>(t) * d;
+            switch (qt) {
+                case QType::Q8_0:
+                    ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, rows, cols, s_q8_scratch,
+                                   s_q8_scratch_size, stream);
+                    break;
+                case QType::Q4_K:
+                default:
+                    ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, rows, cols, s_q8_scratch,
+                                  s_q8_scratch_size, stream);
+                    break;
+            }
+        };
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data) +
+                                    static_cast<size_t>(eid) * gate_stride;
+            const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data) +
+                                  static_cast<size_t>(eid) * up_stride;
+            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff,
+                    ly.expert_gate_packed.qtype, eff, d);
+            do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype, eff, d);
+        }
+
+        half* swiglu_buf = static_cast<half*>(moe_.expert_swiglu.data);
+        apply_expert_activation(gate_buf, up_buf, swiglu_buf, /*non_gated=*/false, top_k, eff,
+                                compute_dtype_, cfg.ffn_activation, stream);
+
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            const uint8_t* w_down = static_cast<const uint8_t*>(ly.expert_down_packed.data) +
+                                    static_cast<size_t>(eid) * down_stride;
+            half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
+            half* out_k = down_buf + static_cast<int64_t>(k) * d;
+            switch (ly.expert_down_packed.qtype) {
+                case QType::Q5_K:
+                    ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
+                                  stream); break;
+                case QType::Q8_0:
+                    ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
+                                   stream); break;
+                case QType::Q5_1:
+                    ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
+                                   stream); break;
+                case QType::Q4_K:
+                default:
+                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size,
+                                  stream); break;
+            }
+        }
+
+        half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
+        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+        const void* res_ptr =
+            (has_shared_expert || moe_use_fp32_residual)
+                ? nullptr
+                : static_cast<const void*>(static_cast<const half*>(r.data) +
+                                           static_cast<int64_t>(t) * d);
+        moe_weighted_sum_residual(down_buf, tok_weights, res_ptr, h_tok, d, top_k, stream);
+    }
+    if (ly.w_up_shared.data == nullptr && !moe_use_fp32_residual)
+        residual_fused = true;
     return true;
 }
 

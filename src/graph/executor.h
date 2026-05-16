@@ -752,6 +752,15 @@ private:
     bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
+    // Gemma-4 ggml MMVQ per-token prefill: processes tokens individually via
+    // ggml Q4_K×Q8_1 dp4a kernels with FP32 norm output for full-precision
+    // routing. Writes directly to `h` (per-token weighted sum + residual).
+    // Returns true when path was taken; caller jumps to moe_after_experts.
+    bool try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                         int top_k, QType up_qtype, float eps,
+                                         const MoeRoutingResult& routing, const Tensor& no,
+                                         const Tensor& norm_w, Tensor& h, const Tensor& r,
+                                         bool moe_use_fp32_residual, bool& residual_fused);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
