@@ -2526,9 +2526,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 return true;
             };
 
+        int eligible_layers = 0;  // layers that have any MoE expert ptrs
+        int built_layers = 0;
+        std::vector<int> failed_layers;
         for (int li = 0; li < n_layers; ++li) {
             const auto& L = model_->layer(li);
             auto& c = moe_.per_layer_da_cache[li];
+            const bool moe_layer = !L.expert_up_ids.empty() || !L.expert_down_ids.empty() ||
+                                   !L.expert_gate_ids.empty();
+            if (!moe_layer) {
+                // Pure dense layer in a hybrid model (e.g. attention-only layer
+                // alongside MoE layers). Not eligible for the da_cache; skip
+                // without counting against the must-populate gate.
+                continue;
+            }
+            ++eligible_layers;
             bool g_ok = !L.expert_gate_ids.empty() &&
                         build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
                                    c.d_gate_SFB_ptrs, c.d_gate_alpha);
@@ -2539,14 +2551,46 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // For non-gated experts (e.g. Gemma-4 SwiGLU absorbing W_gate),
             // expert_gate_ids may be empty by design — accept up+down only.
             c.ready = (g_ok || L.expert_gate_ids.empty()) && u_ok && d_ok;
-            any_built = any_built || c.ready;
+            if (c.ready) {
+                ++built_layers;
+                any_built = true;
+            } else {
+                failed_layers.push_back(li);
+            }
+        }
+        // QW8 from review/phase5_synthesis.md §2.1: hard-fail (not log-INFO)
+        // when the NVFP4 da_cache populates <100% of MoE-eligible layers.
+        // Partial coverage means the per-layer fallback fires for the missing
+        // layers and decode silently regresses ~5× on Qwen3-Coder / Gemma-4
+        // NVFP4 (per moe_prefill_graphs_plan_2026_05_10 + cuda_graphs_moe_works).
+        // A partial build is almost always a load-time symptom of a
+        // mismatched expert layout or a budget that fell short of needed
+        // device allocations — the right response is to fail loud at init
+        // rather than ship the user a slow build.
+        if (eligible_layers > 0 && built_layers < eligible_layers) {
+            std::string failed_str;
+            for (size_t i = 0; i < failed_layers.size() && i < 16; ++i) {
+                if (!failed_str.empty()) failed_str += ", ";
+                failed_str += std::to_string(failed_layers[i]);
+            }
+            if (failed_layers.size() > 16) failed_str += ", …";
+            IMP_LOG_FATAL(
+                "NVFP4 da_cache: only %d/%d MoE-eligible layers populated. "
+                "Failing layers: [%s]. Partial coverage forces the per-layer "
+                "fallback dispatch (~5× slower decode on NVFP4 MoE models). "
+                "Likely cause: missing expert_*_ids, invalid CutlassNvFP4 "
+                "weight handles, or cudaMalloc failure for the per-layer "
+                "ptr arrays. Aborting before the engine silently ships a "
+                "slow build.",
+                built_layers, eligible_layers, failed_str.c_str());
+            std::abort();
         }
         if (any_built) {
             IMP_LOG_INFO(
                 "Pre-cached per-layer NVFP4 device-args ptr arrays for "
-                "%d layers × 3 projections × %d experts (~%.1f KiB)",
-                n_layers, ne,
-                (n_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
+                "%d/%d layers × 3 projections × %d experts (~%.1f KiB)",
+                built_layers, eligible_layers, ne,
+                (built_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
                     1024.0);
         }
         }  // ne > 0
