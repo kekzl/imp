@@ -12,26 +12,50 @@
 
 namespace imp {
 
-// runtime.graph_capture_mode = "global" (default) | "relaxed" | "thread_local"
+// runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local"
 // (legacy env: IMP_GRAPH_CAPTURE_MODE). Selects the cudaStreamCaptureMode
 // used by CudaGraphCapture::begin_capture and the ConditionalRunner body-graph
 // capture. Probed at first call and cached.
 //
-// Why this exists: CUTLASS 3.x grouped GEMM hangs under cudaStreamCaptureModeGlobal
-// for some NVFP4 MoE configs (see prefill_graph_blockers_2026_05_14). Relaxed
-// drops the cross-thread synchronization constraint and may avoid the deadlock.
+// Why "relaxed" became the default (M3-probe, 2026-05-16): CUTLASS 3.x grouped
+// GEMM was observed to silently HANG under cudaStreamCaptureModeGlobal during
+// NVFP4 MoE prefill capture (Blocker B in prefill_graph_blockers_2026_05_14
+// memo). Relaxed drops the cross-thread synchronization constraint that the
+// CUTLASS collective scheduler is suspected to deadlock on, and is a strict
+// superset of capturable behaviors — the decode fast path that previously
+// worked under "global" continues to work under "relaxed".
 static cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {
-        const std::string& mode = RuntimeConfig::current().runtime.graph_capture_mode;
-        if (mode == "relaxed") {
-            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (runtime.graph_capture_mode=relaxed)");
-            return cudaStreamCaptureModeRelaxed;
+        const auto& cfg = RuntimeConfig::current();
+        const std::string& mode = cfg.runtime.graph_capture_mode;
+        if (mode == "global") {
+            // Warn loudly when the user has both opted into prefill_graph AND
+            // the known-deadlocking strict capture mode — most common cause of
+            // a silent hang at first NVFP4 MoE prefill replay.
+            if (cfg.runtime.prefill_graph) {
+                IMP_LOG_WARN(
+                    "CudaGraphCapture: runtime.graph_capture_mode=\"global\" + "
+                    "runtime.prefill_graph=true is the known-hangy combination "
+                    "(prefill_graph_blockers_2026_05_14 memo Blocker B). "
+                    "Recommended: keep graph_capture_mode=\"relaxed\" (current "
+                    "default) when prefill_graph is enabled.");
+            }
+            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeGlobal");
+            return cudaStreamCaptureModeGlobal;
         }
         if (mode == "thread_local") {
             IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeThreadLocal (runtime.graph_capture_mode=thread_local)");
             return cudaStreamCaptureModeThreadLocal;
         }
-        return cudaStreamCaptureModeGlobal;
+        // Default + "relaxed" branch:
+        if (mode != "relaxed") {
+            IMP_LOG_WARN(
+                "CudaGraphCapture: unknown runtime.graph_capture_mode=\"%s\", "
+                "falling back to \"relaxed\".",
+                mode.c_str());
+        }
+        IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (default for prefill-safe capture)");
+        return cudaStreamCaptureModeRelaxed;
     }();
     return cached;
 }
