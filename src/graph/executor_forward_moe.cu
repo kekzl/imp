@@ -549,13 +549,21 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 imp::build_sfa_bases_device(
                                     reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
                                     moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
-                                // Zero the active SFA region. The padded rows of the
-                                // SfAtom layout must be 0 for clean CUTLASS reads.
-                                // We zero the whole staging buffer — graph-capturable
-                                // alternative to host-computed total_sfa. Cost is ~2 MB
-                                // memset (~3 µs at 1.8 TB/s).
-                                cudaMemsetAsync(moe_.cutlass3x_sf, 0,
-                                                moe_.cutlass3x_sf_size, stream);
+                                // Zero the *active* prefix of the SFA staging buffer.
+                                // Padded rows of the SfAtom layout must be 0 for clean
+                                // CUTLASS reads; for sparse routing the actual total is
+                                // a small fraction of cutlass3x_sf_size (worst case is
+                                // ~16 MiB). QW5 from review/phase5_synthesis.md §2.1
+                                // replaces the full cudaMemsetAsync with a bounded
+                                // device kernel that reads d_sfa_offsets[ne] (already
+                                // computed above) as the byte count, capping at
+                                // cutlass3x_sf_size.
+                                imp::bzero_sfa_active(
+                                    moe_.cutlass3x_sf,
+                                    moe_.d_sfa_offsets,
+                                    ne,
+                                    moe_.cutlass3x_sf_size,
+                                    stream);
                                 imp::quantize_fp16_to_nvfp4_cutlass_moe(
                                     a_base, moe_.cutlass3x_packed,
                                     reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),

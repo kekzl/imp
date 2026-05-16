@@ -161,4 +161,23 @@ void build_sfa_bases_device(
     int n_experts,
     cudaStream_t stream);
 
+// Zero the active prefix of an SFA staging buffer. Replaces a worst-case
+// `cudaMemsetAsync(buf, 0, max_bytes)` with a bounded-prefix wipe that reads
+// the actual total byte count from `d_sfa_offsets[n_experts]` (exclusive
+// prefix sum already computed by compute_sfa_offsets_device).
+//
+// Each thread writes one byte; the kernel is grid-strided and guards against
+// max_bytes to avoid OOB if the offset pre-image is corrupted. Capture-safe.
+//
+// dst             : staging buffer (device)
+// d_sfa_offsets   : [n_experts+1] device int64 — exclusive prefix sum
+// n_experts       : index into d_sfa_offsets that holds the total
+// max_bytes       : hard upper bound on the wipe (= cutlass3x_sf_size)
+void bzero_sfa_active(
+    void* dst,
+    const int64_t* d_sfa_offsets,
+    int n_experts,
+    size_t max_bytes,
+    cudaStream_t stream);
+
 }  // namespace imp

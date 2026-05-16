@@ -536,4 +536,63 @@ void build_sfa_bases_device(
         d_sfa_bases_out, static_cast<uint8_t*>(base_sf), d_sfa_offsets, n_experts);
 }
 
+// ---------------------------------------------------------------------------
+// bzero_sfa_active: bounded-prefix wipe of the SfAtom staging buffer using
+// the device-resident exclusive-prefix-sum's terminal slot as the byte count.
+// Replaces cudaMemsetAsync(dst, 0, max_bytes) — for sparse routing the actual
+// total is often <50% of the worst-case bound (QW5 in P5 §2.1).
+//
+// Strategy: vectorized 16-byte stores via uint4. Grid sized to cover max_bytes
+// at saturation; each thread checks its byte-offset against d_total before
+// writing. Out-of-range threads early-exit (no work).
+// ---------------------------------------------------------------------------
+__global__ void bzero_sfa_active_kernel(
+    uint8_t*       __restrict__ dst,
+    const int64_t* __restrict__ d_sfa_offsets,
+    int            n_experts,
+    int64_t        max_bytes)
+{
+    const int64_t total = (n_experts > 0) ? d_sfa_offsets[n_experts] : 0;
+    const int64_t bound = (total < max_bytes) ? total : max_bytes;
+
+    const int64_t tid     = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+    const int64_t stride  = (int64_t)gridDim.x * blockDim.x;
+
+    // Vectorized 16-byte stores
+    uint4 zero = make_uint4(0u, 0u, 0u, 0u);
+    const int64_t vec_bound = bound >> 4;  // bytes / 16
+    for (int64_t i = tid; i < vec_bound; i += stride) {
+        reinterpret_cast<uint4*>(dst)[i] = zero;
+    }
+    // Tail bytes (< 16) — first thread handles them
+    if (tid == 0) {
+        for (int64_t i = vec_bound << 4; i < bound; ++i)
+            dst[i] = 0;
+    }
+}
+
+void bzero_sfa_active(
+    void* dst,
+    const int64_t* d_sfa_offsets,
+    int n_experts,
+    size_t max_bytes,
+    cudaStream_t stream)
+{
+    if (!dst || max_bytes == 0) return;
+    if (!d_sfa_offsets || n_experts <= 0) {
+        // No offsets known — fall back to full memset (rare path, e.g. cold init).
+        cudaMemsetAsync(dst, 0, max_bytes, stream);
+        return;
+    }
+    // Grid sized for full saturation at max_bytes; each thread does 16 bytes.
+    constexpr int kThreads = 256;
+    const int64_t vec_max = static_cast<int64_t>(max_bytes >> 4);
+    int64_t blocks_needed = (vec_max + kThreads - 1) / kThreads;
+    if (blocks_needed < 1) blocks_needed = 1;
+    if (blocks_needed > 4096) blocks_needed = 4096;  // cap grid
+    bzero_sfa_active_kernel<<<static_cast<int>(blocks_needed), kThreads, 0, stream>>>(
+        static_cast<uint8_t*>(dst), d_sfa_offsets, n_experts,
+        static_cast<int64_t>(max_bytes));
+}
+
 }  // namespace imp
