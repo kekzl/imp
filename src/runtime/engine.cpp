@@ -216,8 +216,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec1 = 0;
         ws->mrope_sec2 = 0;
     }
-    // Diagnostic env: IMP_MTP_NO_ROPE=1 disables RoPE entirely.
-    if (const char* e = std::getenv("IMP_MTP_NO_ROPE"); e && e[0] != '0') {
+    // Diagnostic: generation.mtp_no_rope (legacy IMP_MTP_NO_ROPE=1) disables RoPE entirely.
+    if (RuntimeConfig::current().generation.mtp_no_rope) {
         ws->rope_dim = 0;
     }
     // Runtime weight_offset matches what the main model's rmsnorm calls pass:
@@ -1558,11 +1558,12 @@ bool Engine::init_features() {
 }
 
 void Engine::build_banned_token_list() {
-    // Diagnostic bypass: IMP_NO_BAN=1 disables the ban list. Used to bisect
-    // Mistral-Small-3.2-NVFP4 long-form repetition (ban vs weight quality).
-    if (const char* env = std::getenv("IMP_NO_BAN"); env && env[0] == '1') {
+    // Diagnostic bypass: generation.no_ban (legacy IMP_NO_BAN=1) disables the
+    // ban list. Used to bisect Mistral-Small-3.2-NVFP4 long-form repetition
+    // (ban vs weight quality).
+    if (RuntimeConfig::current().generation.no_ban) {
         banned_token_ids_.clear();
-        IMP_LOG_WARN("IMP_NO_BAN=1: skipping banned-token list (debug)");
+        IMP_LOG_WARN("generation.no_ban=true: skipping banned-token list (debug)");
         return;
     }
     banned_token_ids_.clear();
@@ -2205,7 +2206,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // = prefill_chunk_size). H2D upload happened above on pf_stream
         // *before* this wrapper — captured region is forward_logits only,
         // analogous to the decode graph pattern.
-        static const bool prefill_graph_enabled = (std::getenv("IMP_PREFILL_GRAPH") != nullptr);
+        const bool prefill_graph_enabled = RuntimeConfig::current().runtime.prefill_graph;
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs;
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
@@ -2689,10 +2690,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             if (match) mtp_accuracy_.matches++;
             // Optional verbose log: prints (predicted, actual, match) with
             // decoded strings so accept patterns can be analyzed offline.
-            static const bool s_pattern_log = []() {
-                const char* e = std::getenv("IMP_MTP_PATTERN_LOG");
-                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
-            }();
+            const bool s_pattern_log = RuntimeConfig::current().diagnostics.mtp_pattern_log;
             if (s_pattern_log) {
                 Tokenizer* tok = model_->tokenizer();
                 std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
@@ -2741,10 +2739,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Optional: apply the main model's output norm before passing
             // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
             // in some MTP variants; gate by env so we can A/B.
-            static const bool s_pre_norm_h = []() {
-                const char* e = std::getenv("IMP_MTP_PRENORM_H");
-                return e != nullptr && std::strlen(e) > 0 && e[0] != '0';
-            }();
+            const bool s_pre_norm_h = RuntimeConfig::current().diagnostics.mtp_prenorm_h;
             const void* h_for_mtp = h_view.data;
             // Scratch buffer for the normalized variant (allocated once).
             static void* s_h_normed = nullptr;

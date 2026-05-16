@@ -96,6 +96,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.runtime.debug_raw = parse_bool(val, cfg.runtime.debug_raw);
     else if (eq("runtime.no_vision_graph"))
         cfg.runtime.no_vision_graph = parse_bool(val, cfg.runtime.no_vision_graph);
+    else if (eq("runtime.graph_capture_mode"))
+        cfg.runtime.graph_capture_mode = val;
+    else if (eq("runtime.prefill_graph"))
+        cfg.runtime.prefill_graph = parse_bool(val, cfg.runtime.prefill_graph);
 
     // [kv_cache]
     else if (eq("kv_cache.dtype"))
@@ -106,6 +110,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.kv_cache.fp8_auto_legacy = parse_bool(val, cfg.kv_cache.fp8_auto_legacy);
     else if (eq("kv_cache.bitdecoding_residual_tokens"))
         cfg.kv_cache.bitdecoding_residual_tokens = parse_int(val, cfg.kv_cache.bitdecoding_residual_tokens);
+    else if (eq("kv_cache.bitdecoding_qk"))
+        cfg.kv_cache.bitdecoding_qk = parse_bool(val, cfg.kv_cache.bitdecoding_qk);
 
     // [attention]
     else if (eq("attention.fp8_prefill"))
@@ -154,6 +160,14 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.moe.no_shexp_gate = parse_bool(val, cfg.moe.no_shexp_gate);
     else if (eq("moe.no_cutlass3x"))
         cfg.moe.no_cutlass3x = parse_bool(val, cfg.moe.no_cutlass3x);
+    else if (eq("moe.reserve_mib"))
+        cfg.moe.reserve_mib = parse_int(val, cfg.moe.reserve_mib);
+    else if (eq("moe.nvfp4_device_args"))
+        cfg.moe.nvfp4_device_args = parse_bool(val, cfg.moe.nvfp4_device_args);
+    else if (eq("moe.nvfp4_smallM"))
+        cfg.moe.nvfp4_smallM = parse_bool(val, cfg.moe.nvfp4_smallM);
+    else if (eq("moe.nvfp4_smallM_threshold"))
+        cfg.moe.nvfp4_smallM_threshold = parse_int(val, cfg.moe.nvfp4_smallM_threshold);
 
     // [gdn]
     else if (eq("gdn.fp32_scan"))
@@ -162,6 +176,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gdn.fp32_out = parse_bool(val, cfg.gdn.fp32_out);
     else if (eq("gdn.norm_eps_override"))
         cfg.gdn.norm_eps_override = parse_float(val, cfg.gdn.norm_eps_override);
+    else if (eq("gdn.layout_override"))
+        cfg.gdn.layout_override = val;
     else if (eq("gdn.ref_kernel"))
         cfg.gdn.ref_kernel = parse_bool(val, cfg.gdn.ref_kernel);
     else if (eq("gdn.vhead_reorder"))
@@ -178,6 +194,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
     else if (eq("gemm.no_mmvq_q8_0"))
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
+    else if (eq("gemm.force_q4k_v2"))
+        cfg.gemm.force_q4k_v2 = parse_bool(val, cfg.gemm.force_q4k_v2);
 
     // [gemma4]
     else if (eq("gemma4.fp32_gemm_out"))
@@ -204,6 +222,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.generation.think_budget = parse_int(val, cfg.generation.think_budget);
     else if (eq("generation.force_bos"))
         cfg.generation.force_bos = parse_bool(val, cfg.generation.force_bos);
+    else if (eq("generation.no_ban"))
+        cfg.generation.no_ban = parse_bool(val, cfg.generation.no_ban);
+    else if (eq("generation.mtp_no_rope"))
+        cfg.generation.mtp_no_rope = parse_bool(val, cfg.generation.mtp_no_rope);
 
     // [server]
     else if (eq("server.prefix_cache"))
@@ -240,6 +262,16 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.diagnostics.graph_diag = parse_bool(val, cfg.diagnostics.graph_diag);
     else if (eq("diagnostics.graph_dump_dir"))
         cfg.diagnostics.graph_dump_dir = val;
+    else if (eq("diagnostics.nvfp4_force_dequant"))
+        cfg.diagnostics.nvfp4_force_dequant = parse_bool(val, cfg.diagnostics.nvfp4_force_dequant);
+    else if (eq("diagnostics.log_gemm_algo"))
+        cfg.diagnostics.log_gemm_algo = parse_bool(val, cfg.diagnostics.log_gemm_algo);
+    else if (eq("diagnostics.mtp_pattern_log"))
+        cfg.diagnostics.mtp_pattern_log = parse_bool(val, cfg.diagnostics.mtp_pattern_log);
+    else if (eq("diagnostics.mtp_prenorm_h"))
+        cfg.diagnostics.mtp_prenorm_h = parse_bool(val, cfg.diagnostics.mtp_prenorm_h);
+    else if (eq("diagnostics.audit_nvfp4_scales"))
+        cfg.diagnostics.audit_nvfp4_scales = parse_bool(val, cfg.diagnostics.audit_nvfp4_scales);
 
     else {
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
@@ -259,6 +291,80 @@ std::string home_dir() {
     if (struct passwd* pw = getpwuid(getuid()))
         return pw->pw_dir;
     return {};
+}
+
+// Backward-compat: legacy IMP_* env vars seed the matching RuntimeConfig
+// fields before [imp.conf] file overrides. Semantics preserved exactly
+// per original call-site checks (see review/phase3_maint.md §9.1).
+void seed_from_env(RuntimeConfig& cfg) {
+    // gemm.force_q4k_v2 — IMP_FORCE_Q4K_V2: presence enables (any value).
+    if (std::getenv("IMP_FORCE_Q4K_V2") != nullptr)
+        cfg.gemm.force_q4k_v2 = true;
+
+    // moe.reserve_mib — IMP_MOE_RESERVE_MIB: integer MiB.
+    if (const char* e = std::getenv("IMP_MOE_RESERVE_MIB"))
+        cfg.moe.reserve_mib = parse_int(e, cfg.moe.reserve_mib);
+
+    // kv_cache.bitdecoding_qk — IMP_USE_BITDECODING_QK: '1' enables.
+    if (const char* e = std::getenv("IMP_USE_BITDECODING_QK"))
+        cfg.kv_cache.bitdecoding_qk = (e[0] == '1');
+
+    // moe.nvfp4_device_args — IMP_NVFP4_DEVICE_ARGS: '0' disables, default ON.
+    if (const char* e = std::getenv("IMP_NVFP4_DEVICE_ARGS"))
+        cfg.moe.nvfp4_device_args = (std::atoi(e) != 0);
+
+    // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
+    if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))
+        cfg.moe.nvfp4_smallM = (std::atoi(e) != 0);
+
+    // moe.nvfp4_smallM_threshold — IMP_NVFP4_SMALLM_THRESHOLD: clamped int.
+    if (const char* e = std::getenv("IMP_NVFP4_SMALLM_THRESHOLD")) {
+        int v = std::atoi(e);
+        if (v < 0) v = 0;
+        if (v > 128) v = 128;
+        cfg.moe.nvfp4_smallM_threshold = v;
+    }
+
+    // diagnostics.nvfp4_force_dequant — IMP_NVFP4_FORCE_DEQUANT: '1' only.
+    if (const char* e = std::getenv("IMP_NVFP4_FORCE_DEQUANT"))
+        cfg.diagnostics.nvfp4_force_dequant = (e[0] == '1');
+
+    // diagnostics.log_gemm_algo — IMP_LOG_GEMM_ALGO: '1' only.
+    if (const char* e = std::getenv("IMP_LOG_GEMM_ALGO"))
+        cfg.diagnostics.log_gemm_algo = (e[0] == '1');
+
+    // runtime.graph_capture_mode — IMP_GRAPH_CAPTURE_MODE: string.
+    if (const char* e = std::getenv("IMP_GRAPH_CAPTURE_MODE"))
+        cfg.runtime.graph_capture_mode = e;
+
+    // runtime.prefill_graph — IMP_PREFILL_GRAPH: presence enables.
+    if (std::getenv("IMP_PREFILL_GRAPH") != nullptr)
+        cfg.runtime.prefill_graph = true;
+
+    // generation.no_ban — IMP_NO_BAN: '1' only.
+    if (const char* e = std::getenv("IMP_NO_BAN"))
+        cfg.generation.no_ban = (e[0] == '1');
+
+    // generation.mtp_no_rope — IMP_MTP_NO_ROPE: set AND first char != '0'.
+    // Note: empty string ('\0' != '0') enables. Preserves original behavior.
+    if (const char* e = std::getenv("IMP_MTP_NO_ROPE"))
+        cfg.generation.mtp_no_rope = (e[0] != '0');
+
+    // diagnostics.mtp_pattern_log — IMP_MTP_PATTERN_LOG: non-empty AND first char != '0'.
+    if (const char* e = std::getenv("IMP_MTP_PATTERN_LOG"))
+        cfg.diagnostics.mtp_pattern_log = (std::strlen(e) > 0 && e[0] != '0');
+
+    // diagnostics.mtp_prenorm_h — IMP_MTP_PRENORM_H: same convention.
+    if (const char* e = std::getenv("IMP_MTP_PRENORM_H"))
+        cfg.diagnostics.mtp_prenorm_h = (std::strlen(e) > 0 && e[0] != '0');
+
+    // diagnostics.audit_nvfp4_scales — IMP_AUDIT_NVFP4_SCALES: presence enables.
+    if (std::getenv("IMP_AUDIT_NVFP4_SCALES") != nullptr)
+        cfg.diagnostics.audit_nvfp4_scales = true;
+
+    // gdn.layout_override — IMP_GDN_LAYOUT: string value.
+    if (const char* e = std::getenv("IMP_GDN_LAYOUT"))
+        cfg.gdn.layout_override = e;
 }
 
 }  // anonymous namespace
@@ -343,6 +449,8 @@ void RuntimeConfig::apply_overrides(const std::vector<std::string>& kvs) {
 RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
                                   const std::vector<std::string>& overrides) {
     RuntimeConfig cfg;
+    // Seed legacy IMP_* env vars first; file values + CLI overrides win on top.
+    seed_from_env(cfg);
     std::string path = explicit_path.empty() ? find_default_path() : explicit_path;
     if (!path.empty()) {
         if (cfg.load_from_file(path)) {
@@ -356,10 +464,18 @@ RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
 }
 
 // ---- Process-wide singleton ---------------------------------------------
+//
+// First touch of the singleton seeds from legacy IMP_* env vars. This means
+// tests / library users that never call RuntimeConfig::load() still observe
+// env-based defaults. Subsequent install() calls overwrite the singleton.
 
 namespace {
 RuntimeConfig& mutable_current() {
-    static RuntimeConfig instance;
+    static RuntimeConfig instance = []() {
+        RuntimeConfig cfg;
+        seed_from_env(cfg);
+        return cfg;
+    }();
     return instance;
 }
 }  // anonymous namespace

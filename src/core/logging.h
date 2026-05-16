@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <atomic>
 
 namespace imp {
@@ -46,6 +47,22 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
             ::imp::log_message(::imp::LogLevel::ERROR, __FILE__, __LINE__, __VA_ARGS__); \
     } while (0)
 #define IMP_LOG_FATAL(...) ::imp::log_message(::imp::LogLevel::FATAL, __FILE__, __LINE__, __VA_ARGS__)
+
+// --- Precondition check ---
+// IMP_CHECK is the production-safe replacement for <cassert> assert(). Unlike
+// assert(), it does NOT vanish under NDEBUG. On failure it logs at FATAL and
+// aborts the process, surfacing internal-invariant violations in Release
+// builds the same way they would in Debug.
+//
+// Use for internal-API preconditions where violation = programmer error.
+// Do NOT use for user-input validation — return an ImpError code instead.
+#define IMP_CHECK(cond, ...)                       \
+    do {                                           \
+        if (!(cond)) {                             \
+            IMP_LOG_FATAL(__VA_ARGS__);            \
+            std::abort();                          \
+        }                                          \
+    } while (0)
 
 // --- CUDA error checking macros ---
 // Log-only: reports CUDA errors without affecting control flow.

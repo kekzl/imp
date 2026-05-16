@@ -510,10 +510,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         // Default ON since 2026-05-14: 4-model A/B showed +11–39%
                         // pp512 vs the legacy host-args + smallM dispatch on
                         // Qwen3-Coder / Qwen3.6 / Qwen3-30B-Modelopt / Gemma-4
-                        // NVFP4 (decode unchanged). Set IMP_NVFP4_DEVICE_ARGS=0
-                        // to force the legacy path for A/B or workarounds.
-                        const char* da_env = ::getenv("IMP_NVFP4_DEVICE_ARGS");
-                        const bool da_enabled = !da_env || std::atoi(da_env) != 0;
+                        // NVFP4 (decode unchanged). Set moe.nvfp4_device_args=false
+                        // (legacy IMP_NVFP4_DEVICE_ARGS=0) to force the legacy
+                        // path for A/B or workarounds.
+                        const bool da_enabled = imp::RuntimeConfig::current().moe.nvfp4_device_args;
                         const bool use_device_args =
                             da_enabled &&
                             moe_.d_M_per && moe_.d_M_per_count >= ne &&
@@ -700,12 +700,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // ---------------------------------------------------------------------
                     bool smallM_done = false;
                     {
-                        const char* smallM_env = ::getenv("IMP_NVFP4_SMALLM");
-                        const bool smallM_optin = smallM_env && atoi(smallM_env) != 0;
+                        const auto& moe_cfg = imp::RuntimeConfig::current().moe;
+                        const bool smallM_optin = moe_cfg.nvfp4_smallM;
                         if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
-                            const char* thr_env = ::getenv("IMP_NVFP4_SMALLM_THRESHOLD");
-                            const int smallM_threshold =
-                                thr_env ? std::clamp(atoi(thr_env), 0, 128) : 64;
+                            const int smallM_threshold = moe_cfg.nvfp4_smallM_threshold;
                             int max_M = 0;
                             for (int e = 0; e < ne; ++e)
                                 max_M = std::max(max_M, M_per[e]);

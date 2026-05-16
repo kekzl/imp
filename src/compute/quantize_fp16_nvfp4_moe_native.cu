@@ -428,7 +428,8 @@ void compact_alpha_active(
     // Single-block kernel uses a fixed 256-thread layout — n_experts must fit.
     // Production MoE models have ≤ 128 experts; the limit is documented in the
     // header. Caller is responsible for honoring it.
-    assert(n_experts <= 256);
+    IMP_CHECK(n_experts <= 256, "compact_alpha_active: n_experts=%d exceeds 256-thread block limit",
+              n_experts);
     compact_alpha_active_kernel<<<1, 256, 0, stream>>>(
         d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
 }
@@ -500,7 +501,8 @@ void compute_sfa_offsets_device(
             cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
         return;
     }
-    assert(n_experts <= 256);
+    IMP_CHECK(n_experts <= 256, "compute_sfa_offsets: n_experts=%d exceeds 256-thread block limit",
+              n_experts);
     compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
         d_M_per, d_sfa_offsets_out, n_experts, K);
 }

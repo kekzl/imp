@@ -1154,11 +1154,11 @@ void gemv_nvfp4_moe_swiglu_decode(const NvFP4MoEQuantResult& w, const int32_t* e
 // Tensor-based launcher (existing API, delegates to K-parallel kernel)
 // ---------------------------------------------------------------------------
 void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
-    assert(A.packed_data != nullptr && "A must be quantized");
-    assert(x.on_device && "x must be on device");
-    assert(y.on_device && "y must be on device");
-    assert(x.qtype == QType::F16 && "x must be FP16");
-    assert(y.qtype == QType::F16 && "y must be FP16");
+    IMP_CHECK(A.packed_data != nullptr, "gemv_nvfp4: A.packed_data is null");
+    IMP_CHECK(x.on_device, "gemv_nvfp4: x must be on device");
+    IMP_CHECK(y.on_device, "gemv_nvfp4: y must be on device");
+    IMP_CHECK(x.qtype == QType::F16, "gemv_nvfp4: x must be FP16, got qtype=%d", static_cast<int>(x.qtype));
+    IMP_CHECK(y.qtype == QType::F16, "gemv_nvfp4: y must be FP16, got qtype=%d", static_cast<int>(y.qtype));
 
     int M = static_cast<int>(A.N);
     int K = static_cast<int>(A.K);
@@ -1236,18 +1236,22 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
 }
 
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream) {
-    assert(A.packed_data != nullptr && "A must be quantized");
-    assert(B.on_device && "B (input) must be on device");
-    assert(C.on_device && "C (output) must be on device");
-    assert(B.ndim == 2 && "B (input) must be 2D [M, K]");
-    assert(C.ndim == 2 && "C (output) must be 2D [M, N]");
+    IMP_CHECK(A.packed_data != nullptr, "gemm_nvfp4: A.packed_data is null");
+    IMP_CHECK(B.on_device, "gemm_nvfp4: B (input) must be on device");
+    IMP_CHECK(C.on_device, "gemm_nvfp4: C (output) must be on device");
+    IMP_CHECK(B.ndim == 2, "gemm_nvfp4: B must be 2D [M, K], got ndim=%d", B.ndim);
+    IMP_CHECK(C.ndim == 2, "gemm_nvfp4: C must be 2D [M, N], got ndim=%d", C.ndim);
 
     const int64_t N = A.N;
     const int64_t K = A.K;
     const int64_t M = B.shape[0];
 
-    assert(B.shape[1] == K && "input columns must match weight in_features");
-    assert(C.shape[0] == M && C.shape[1] == N && "output shape must be [M, N]");
+    IMP_CHECK(B.shape[1] == K, "gemm_nvfp4: B.shape[1]=%lld must equal weight K=%lld",
+              static_cast<long long>(B.shape[1]), static_cast<long long>(K));
+    IMP_CHECK(C.shape[0] == M && C.shape[1] == N,
+              "gemm_nvfp4: C shape [%lld, %lld] must equal [M=%lld, N=%lld]",
+              static_cast<long long>(C.shape[0]), static_cast<long long>(C.shape[1]),
+              static_cast<long long>(M), static_cast<long long>(N));
 
     if (M == 1) {
         gemv_nvfp4(A, B, C, stream);

@@ -189,10 +189,11 @@ __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
 
 void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst,
                                     cudaStream_t stream) {
-    assert(src.packed_data && "source must be quantized");
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_mxfp4_cutlass: src.packed_data is null");
     int64_t N = src.N;
     int64_t K = src.K;
-    assert(K % kMxSFVecSize == 0 && "K must be multiple of 32 for MXFP4");
+    IMP_CHECK(K % kMxSFVecSize == 0, "convert_nvfp4_to_mxfp4_cutlass: K=%lld must be multiple of %d",
+              static_cast<long long>(K), kMxSFVecSize);
 
     size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     int K_groups_mx = static_cast<int>(K) / kMxSFVecSize;
@@ -368,11 +369,14 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
 void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst, void* scratch_fp16,
                                      int hadamard_block_size, cudaStream_t stream) {
-    assert(src.packed_data && "source must be quantized");
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_mxfp4_hadamard: src.packed_data is null");
     int64_t N = src.N;
     int64_t K = src.K;
-    assert(K % kMxSFVecSize == 0 && "K must be multiple of 32 for MXFP4");
-    assert(K % hadamard_block_size == 0 && "K must be multiple of hadamard_block_size");
+    IMP_CHECK(K % kMxSFVecSize == 0, "convert_nvfp4_to_mxfp4_hadamard: K=%lld must be multiple of %d",
+              static_cast<long long>(K), kMxSFVecSize);
+    IMP_CHECK(K % hadamard_block_size == 0,
+              "convert_nvfp4_to_mxfp4_hadamard: K=%lld must be multiple of hadamard_block_size=%d",
+              static_cast<long long>(K), hadamard_block_size);
 
     // 1. Dequant NVFP4 → FP16 into scratch
     dequantize_nvfp4_to_fp16(src, scratch_fp16, stream);
@@ -530,7 +534,8 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
 void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {
-    assert(K % kMxSFVecSize == 0 && "K must be multiple of 32 for MXFP4");
+    IMP_CHECK(K % kMxSFVecSize == 0, "quantize_fp16_to_mxfp4_cutlass: K=%d must be multiple of %d",
+              K, kMxSFVecSize);
 
     size_t sf_bytes = cutlass_mxfp4_sf_size(M, K);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));

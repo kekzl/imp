@@ -7,6 +7,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -95,17 +96,14 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             tmp.K = w.shape[1];
 
             int M = static_cast<int>(x.shape[0]);
-            // Diagnostic: IMP_NVFP4_FORCE_DEQUANT=1 routes the M=1 decode path
-            // through gemm_nvfp4 (dequant→cuBLAS GEMV) instead of the native
-            // gemv_nvfp4_kpar kernel. Used to bisect Mistral-Small-3.2-NVFP4
-            // long-form repetition loops — if forcing dequant fixes coherence,
-            // the bug is in gemv_nvfp4_kpar (numerical drift over many decode
-            // steps). Mirrors the Gemma-4 MoE M>1 fallback pattern.
-            static int force_dequant = -1;
-            if (force_dequant < 0) {
-                const char* env = std::getenv("IMP_NVFP4_FORCE_DEQUANT");
-                force_dequant = (env && env[0] == '1') ? 1 : 0;
-            }
+            // Diagnostic: diagnostics.nvfp4_force_dequant (legacy IMP_NVFP4_FORCE_DEQUANT=1)
+            // routes the M=1 decode path through gemm_nvfp4 (dequant→cuBLAS
+            // GEMV) instead of the native gemv_nvfp4_kpar kernel. Used to
+            // bisect Mistral-Small-3.2-NVFP4 long-form repetition loops — if
+            // forcing dequant fixes coherence, the bug is in gemv_nvfp4_kpar
+            // (numerical drift over many decode steps). Mirrors the Gemma-4
+            // MoE M>1 fallback pattern.
+            const bool force_dequant = imp::RuntimeConfig::current().diagnostics.nvfp4_force_dequant;
             if (M == 1 && !force_dequant) {
                 // GEMV path
                 gemv_nvfp4_kpar(tmp, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data),

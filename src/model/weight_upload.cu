@@ -1949,11 +1949,12 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.
     if (config_.is_nvfp4_prequant) {
         int scale_count = 0;
-        // Diagnostic: IMP_AUDIT_NVFP4_SCALES=1 dumps per-slot stats for
-        // weight_scale_2 (tensor-level FP32 scalar) BEFORE upload, so we can
-        // bisect Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges
-        // against a known-good model (e.g. Gemma-4-NVFP4).
-        const bool audit = std::getenv("IMP_AUDIT_NVFP4_SCALES") != nullptr;
+        // Diagnostic: diagnostics.audit_nvfp4_scales (legacy
+        // IMP_AUDIT_NVFP4_SCALES=1) dumps per-slot stats for weight_scale_2
+        // (tensor-level FP32 scalar) BEFORE upload, so we can bisect
+        // Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges against
+        // a known-good model (e.g. Gemma-4-NVFP4).
+        const bool audit = imp::RuntimeConfig::current().diagnostics.audit_nvfp4_scales;
         float ws2_min = 1e30f, ws2_max = -1e30f, ws2_sum = 0.0f;
         int ws2_count = 0, ws2_zero = 0;
         std::vector<std::pair<std::string, float>> ws2_samples;

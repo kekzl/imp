@@ -1021,13 +1021,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (cache_dtype == QType::NVFP4) {
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            // BitDecoding TC dispatch opt-in: IMP_USE_BITDECODING_QK=1 routes to
-            // the WMMA-Q.K variant; default keeps the scalar-FFMA path unchanged.
-            // One-shot env-var read per process via static init.
-            static const bool use_bitdecoding_tc = []() {
-                const char* env = std::getenv("IMP_USE_BITDECODING_QK");
-                return env && env[0] == '1';
-            }();
+            // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk (legacy
+            // IMP_USE_BITDECODING_QK=1) routes to the WMMA-Q.K variant; default
+            // keeps the scalar-FFMA path unchanged.
+            const bool use_bitdecoding_tc = imp::RuntimeConfig::current().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc) {
                 // Phase 3b residual read. Two activation paths:
                 //   (multi-seq) state.d_residual_seq_slots != nullptr: kernel

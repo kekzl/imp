@@ -377,8 +377,9 @@ __global__ void dequantize_nvfp4_kernel(const uint8_t* __restrict__ packed_data,
 // ---------------------------------------------------------------------------
 
 float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_reusable_max) {
-    assert(input.on_device && "input must be on device");
-    assert(input.qtype == QType::F16 && "input must be FP16");
+    IMP_CHECK(input.on_device, "calibrate_nvfp4_scales: input must be on device");
+    IMP_CHECK(input.qtype == QType::F16, "calibrate_nvfp4_scales: input must be FP16, got qtype=%d",
+              static_cast<int>(input.qtype));
 
     int64_t n_elements = input.numel();
 
@@ -418,13 +419,15 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
 }
 
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream) {
-    assert(input.on_device && "input must be on device");
-    assert(input.qtype == QType::F16 && "input must be FP16");
-    assert(input.ndim == 2 && "input must be 2D [N, K]");
+    IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4: input must be on device");
+    IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4: input must be FP16, got qtype=%d",
+              static_cast<int>(input.qtype));
+    IMP_CHECK(input.ndim == 2, "quantize_fp16_to_nvfp4: input must be 2D [N, K], got ndim=%d", input.ndim);
 
     int64_t N = input.shape[0];
     int64_t K = input.shape[1];
-    assert(K % kMicroBlockSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(K % kMicroBlockSize == 0, "quantize_fp16_to_nvfp4: K=%lld must be multiple of %d",
+              static_cast<long long>(K), kMicroBlockSize);
 
     // Step 1: Calibrate tensor scale.
     float tensor_scale = calibrate_nvfp4_scales(input, stream);
@@ -461,13 +464,16 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaS
 
 void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result, float* d_absmax_buf,
                                   float* d_tensor_scale_buf, cudaStream_t stream) {
-    assert(input.on_device && "input must be on device");
-    assert(input.qtype == QType::F16 && "input must be FP16");
-    assert(input.ndim == 2 && "input must be 2D [N, K]");
+    IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4_async: input must be on device");
+    IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4_async: input must be FP16, got qtype=%d",
+              static_cast<int>(input.qtype));
+    IMP_CHECK(input.ndim == 2, "quantize_fp16_to_nvfp4_async: input must be 2D [N, K], got ndim=%d",
+              input.ndim);
 
     int64_t N = input.shape[0];
     int64_t K = input.shape[1];
-    assert(K % kMicroBlockSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(K % kMicroBlockSize == 0, "quantize_fp16_to_nvfp4_async: K=%lld must be multiple of %d",
+              static_cast<long long>(K), kMicroBlockSize);
 
     // Step 1: absmax reduction (async, no host sync)
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_absmax_buf, 0, sizeof(float), stream));
@@ -504,9 +510,9 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
 }
 
 void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant, void* output_fp16, cudaStream_t stream) {
-    assert(quant.packed_data != nullptr && "packed_data must not be null");
-    assert(quant.micro_scales != nullptr && "micro_scales must not be null");
-    assert(output_fp16 != nullptr && "output buffer must not be null");
+    IMP_CHECK(quant.packed_data != nullptr, "dequantize_nvfp4_to_fp16: packed_data is null");
+    IMP_CHECK(quant.micro_scales != nullptr, "dequantize_nvfp4_to_fp16: micro_scales is null");
+    IMP_CHECK(output_fp16 != nullptr, "dequantize_nvfp4_to_fp16: output buffer is null");
 
     int64_t N = quant.N;
     int64_t K = quant.K;
@@ -572,10 +578,10 @@ __global__ void dequantize_nvfp4_moe_kernel(const uint8_t* __restrict__ packed_d
 }
 
 void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* output_fp16, cudaStream_t stream) {
-    assert(result.packed_data != nullptr);
-    assert(result.micro_scales != nullptr);
-    assert(result.tensor_scales != nullptr);
-    assert(output_fp16 != nullptr);
+    IMP_CHECK(result.packed_data != nullptr, "dequantize_nvfp4_moe_to_fp16: packed_data is null");
+    IMP_CHECK(result.micro_scales != nullptr, "dequantize_nvfp4_moe_to_fp16: micro_scales is null");
+    IMP_CHECK(result.tensor_scales != nullptr, "dequantize_nvfp4_moe_to_fp16: tensor_scales is null");
+    IMP_CHECK(output_fp16 != nullptr, "dequantize_nvfp4_moe_to_fp16: output is null");
 
     int64_t mb_per_expert = result.N * (result.K / kMicroBlockSize);
     int64_t total_mb = static_cast<int64_t>(result.n_experts) * mb_per_expert;
@@ -609,9 +615,10 @@ void free_nvfp4_result(NvFP4QuantResult& result) {
 void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype, int n_experts, int eff,
                                       int K, void* dequant_scratch, NvFP4MoEQuantResult& result,
                                       cudaStream_t stream) {
-    assert(packed_ggml_data && "packed expert data must not be null");
-    assert(dequant_scratch && "dequant scratch buffer required");
-    assert(K % kMicroBlockSize == 0 && "K must be multiple of 16");
+    IMP_CHECK(packed_ggml_data != nullptr, "quantize_packed_experts_to_nvfp4: packed_ggml_data is null");
+    IMP_CHECK(dequant_scratch != nullptr, "quantize_packed_experts_to_nvfp4: dequant_scratch is null");
+    IMP_CHECK(K % kMicroBlockSize == 0, "quantize_packed_experts_to_nvfp4: K=%d must be multiple of %d",
+              K, kMicroBlockSize);
 
     // Compute per-expert sizes
     size_t expert_packed_bytes = static_cast<size_t>(eff) * (K / 2);

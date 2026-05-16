@@ -30,6 +30,15 @@ struct RuntimeConfig {
         bool no_pdl = false;
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
+        // cudaStreamCaptureMode passed to begin_capture / conditional bodies:
+        // "global" (default) | "relaxed" | "thread_local". "relaxed" drops the
+        // cross-thread sync constraint and may avoid CUTLASS 3.x grouped-GEMM
+        // hangs (see prefill_graph_blockers_2026_05_14). Legacy env:
+        // IMP_GRAPH_CAPTURE_MODE.
+        std::string graph_capture_mode = "global";
+        // Opt-in: capture prefill into a CUDA graph (in addition to decode).
+        // Legacy env: IMP_PREFILL_GRAPH.
+        bool prefill_graph = false;
     } runtime;
 
     struct KVCache {
@@ -38,8 +47,11 @@ struct RuntimeConfig {
         bool fp8_auto_legacy = false;  // legacy IMP_KV_FP8_AUTO compat
         // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
         // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
-        // Only meaningful with kv_cache.dtype = "nvfp4" + IMP_USE_BITDECODING_QK=1.
+        // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
         int bitdecoding_residual_tokens = 0;
+        // BitDecoding TC path for NVFP4 paged attention QK. Legacy env:
+        // IMP_USE_BITDECODING_QK.
+        bool bitdecoding_qk = false;
     } kv_cache;
 
     struct Attention {
@@ -68,6 +80,19 @@ struct RuntimeConfig {
         bool no_shared_mlp = false;
         bool no_shexp_gate = false;
         bool no_cutlass3x = false;
+        // Per-process MoE workspace reserve override (MiB). 0 = use computed
+        // default. Legacy env: IMP_MOE_RESERVE_MIB.
+        int reserve_mib = 0;
+        // CUTLASS 3.x device-args full path for NVFP4 MoE prefill. Default ON
+        // since 2026-05-14 (+11-39% pp512 on 4-model A/B). Legacy env:
+        // IMP_NVFP4_DEVICE_ARGS (0 disables).
+        bool nvfp4_device_args = true;
+        // Opt-in smallM kernel branch for NVFP4 MoE prefill. Legacy env:
+        // IMP_NVFP4_SMALLM.
+        bool nvfp4_smallM = false;
+        // Threshold M for smallM kernel (clamped to [0,128]). Legacy env:
+        // IMP_NVFP4_SMALLM_THRESHOLD.
+        int nvfp4_smallM_threshold = 64;
     } moe;
 
     struct GDN {
@@ -76,6 +101,8 @@ struct RuntimeConfig {
         float norm_eps_override = 0.0f;  // 0 = use model default
         bool ref_kernel = false;
         bool vhead_reorder = false;
+        // Override gated-DeltaNet weight layout. Legacy env: IMP_GDN_LAYOUT.
+        std::string layout_override;
     } gdn;
 
     struct GEMM {
@@ -84,6 +111,9 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
+        // Populate Q4_K v2 weight cache at model load. Legacy env:
+        // IMP_FORCE_Q4K_V2.
+        bool force_q4k_v2 = false;
     } gemm;
 
     struct Gemma4 {
@@ -101,6 +131,11 @@ struct RuntimeConfig {
         bool lm_dequant_fp16 = false;
         int think_budget = 0;
         bool force_bos = false;
+        // Disable banned-token list (debug). Legacy env: IMP_NO_BAN.
+        bool no_ban = false;
+        // Disable RoPE inside the MTP draft head (diagnostic). Legacy env:
+        // IMP_MTP_NO_ROPE.
+        bool mtp_no_rope = false;
     } generation;
 
     struct Server {
@@ -127,6 +162,22 @@ struct RuntimeConfig {
         bool profile = false;
         bool graph_diag = false;
         std::string graph_dump_dir;
+        // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
+        // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
+        // Legacy env: IMP_NVFP4_FORCE_DEQUANT.
+        bool nvfp4_force_dequant = false;
+        // Log shape + per-candidate algoId/tileId + chosen algo for every
+        // benchmark_and_select_algo call. Legacy env: IMP_LOG_GEMM_ALGO.
+        bool log_gemm_algo = false;
+        // MTP pattern logging (predicted, actual, match per step). Legacy
+        // env: IMP_MTP_PATTERN_LOG.
+        bool mtp_pattern_log = false;
+        // MTP: pass main model's post-RMSNorm hidden to draft head (vLLM
+        // variant). Legacy env: IMP_MTP_PRENORM_H.
+        bool mtp_prenorm_h = false;
+        // Audit NVFP4 weight scales at load time. Legacy env:
+        // IMP_AUDIT_NVFP4_SCALES.
+        bool audit_nvfp4_scales = false;
     } diagnostics;
 
     // ----- Loading -----
