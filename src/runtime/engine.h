@@ -220,7 +220,15 @@ private:
     // ── CUDA Graphs ──────────────────────────────────────────────────
     // Per-batch-size graph pool: avoids re-capture when batch size changes
     // during continuous batching (key = n_sequences).
-    static constexpr int kMaxGraphPoolSize = 32;
+    //
+    // Pool size 64 (was 32 — P5 §2.2 M4): the imp-server's continuous-batching
+    // path can dispatch up to config.max_batch_size sequences per decode step.
+    // Default max_batch_size is 64 in the server profile; with the old pool of
+    // 32 entries any batch beyond 32 sequences fell off the captured fast path
+    // into eager forward, costing ~10× per-step latency. Raising the cap to 64
+    // covers the default deployment without extra VRAM (a CudaGraphRunner is a
+    // few empty pointers until first capture).
+    static constexpr int kMaxGraphPoolSize = 64;
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
 
