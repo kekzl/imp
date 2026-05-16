@@ -543,7 +543,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 static_cast<char*>(moe_.expert_swiglu.data);
                             char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
-                            auto quantize_device = [&](const char* a_base, int K_in) {
+                            // SFA buffer prep — shared by both gate/up quant
+                            // (K_in = d) and the fused down-input quant (K_in = eff).
+                            auto prep_sfa = [&](int K_in) {
                                 imp::compute_sfa_offsets_device(
                                     moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream);
                                 imp::build_sfa_bases_device(
@@ -551,24 +553,45 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
                                 // Zero the *active* prefix of the SFA staging buffer.
                                 // Padded rows of the SfAtom layout must be 0 for clean
-                                // CUTLASS reads; for sparse routing the actual total is
-                                // a small fraction of cutlass3x_sf_size (worst case is
-                                // ~16 MiB). QW5 from review/phase5_synthesis.md §2.1
+                                // CUTLASS reads; QW5 (review/phase5_synthesis.md §2.1)
                                 // replaces the full cudaMemsetAsync with a bounded
-                                // device kernel that reads d_sfa_offsets[ne] (already
-                                // computed above) as the byte count, capping at
-                                // cutlass3x_sf_size.
+                                // device kernel that reads d_sfa_offsets[ne] as the
+                                // byte count, capping at cutlass3x_sf_size.
                                 imp::bzero_sfa_active(
                                     moe_.cutlass3x_sf,
                                     moe_.d_sfa_offsets,
                                     ne,
                                     moe_.cutlass3x_sf_size,
                                     stream);
+                            };
+                            auto quantize_device = [&](const char* a_base, int K_in) {
+                                prep_sfa(K_in);
                                 imp::quantize_fp16_to_nvfp4_cutlass_moe(
                                     a_base, moe_.cutlass3x_packed,
                                     reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
                                     static_cast<const int*>(routing.expert_offsets.data),
                                     expanded, K_in, ne, stream);
+                            };
+                            // Fused activation + quantize for the down-projection input.
+                            // Replaces apply_expert_activation(gate, up -> swiglu_buf) +
+                            // quantize_device(swiglu_buf, eff). Reads gate/up directly,
+                            // computes SwiGLU/GeGLU/ReLU² in registers, writes only the
+                            // packed FP4 + SFA. M1 from review/phase5_synthesis.md §2.2.
+                            //
+                            // For non_gated experts (RELU_SQR): gate is nullptr, kernel
+                            // reads `up` only. `expert_up_base` is left bit-identical
+                            // (the fused kernel does NOT modify the input), whereas the
+                            // legacy path called relu_sqr_inplace which clobbered `up`
+                            // — callers downstream of this fast path do not re-read up.
+                            auto fused_act_quantize_device = [&](const char* gate_base,
+                                                                  const char* up_base, int K_in,
+                                                                  FFNActivation act_type) {
+                                prep_sfa(K_in);
+                                imp::fused_act_quantize_fp16_to_nvfp4_cutlass_moe(
+                                    gate_base, up_base, moe_.cutlass3x_packed,
+                                    reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                                    static_cast<const int*>(routing.expert_offsets.data),
+                                    expanded, K_in, ne, act_type, stream);
                             };
 
                             // Per-layer pre-cached arrays (Phase 3c-full Step 3).
@@ -651,18 +674,22 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                        da_cache.d_up_alpha,
                                                        expert_up_base, d, eff);
                             if (ok) {
-                                apply_expert_activation(
-                                    moe_.expert_gate.data, moe_.expert_up.data,
-                                    moe_.expert_swiglu.data, non_gated_experts, expanded,
-                                    eff, compute_dtype_, cfg.ffn_activation, stream);
-                                char* down_act =
-                                    non_gated_experts ? expert_up_base : expert_swiglu_base;
-                                quantize_device(down_act, eff);
+                                // Fused: activation (SwiGLU/GeGLU/ReLU²) + NVFP4 quant
+                                // for the down-projection input. Saves one HBM
+                                // round-trip of the swiglu intermediate per layer.
+                                const FFNActivation act_type =
+                                    non_gated_experts ? FFNActivation::RELU_SQR : cfg.ffn_activation;
+                                const char* gate_for_fused =
+                                    non_gated_experts ? nullptr : expert_gate_base;
+                                fused_act_quantize_device(gate_for_fused, expert_up_base, eff,
+                                                          act_type);
                                 ok = dispatch_device(ly.expert_down_ids,
                                                      da_cache.d_down_B_ptrs,
                                                      da_cache.d_down_SFB_ptrs,
                                                      da_cache.d_down_alpha,
                                                      expert_down_base, eff, d);
+                                (void)expert_swiglu_base;  // legacy fallback path still
+                                                            // uses moe_.expert_swiglu.data
                             }
                             if (ok) {
                                 device_args_done = true;

@@ -451,6 +451,126 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
 }
 
 // ---------------------------------------------------------------------------
+// Fused activation + NVFP4 CUTLASS quantize — M1 from review/phase5_synthesis §2.2.
+// Reads gate + up from HBM, computes SwiGLU/GeGLU/ReLU² in registers, and writes
+// only the packed FP4 + SFA. Replaces the apply_expert_activation + quantize_..._moe
+// pair in the device-args MoE prefill path; saves one full HBM round-trip of the
+// swiglu intermediate (the activation tensor is never materialized in HBM).
+// ---------------------------------------------------------------------------
+
+// Compile-time activation tag: keeps the inner branch a no-op in PTX.
+template <int kAct>
+__global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
+    const half* __restrict__ gate,           // [expanded, K] or nullptr when kAct == RELU_SQR
+    const half* __restrict__ up,             // [expanded, K]
+    uint8_t* __restrict__ packed_out,        // [expanded, K/2]
+    uint8_t* const* __restrict__ sfa_bases,  // [ne]
+    const int* __restrict__ offsets,         // [ne+1]
+    int expanded, int K, int ne, int n_k_tiles) {
+    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int K_groups = K / kSFVecSize;
+    if (mb_idx >= expanded * K_groups)
+        return;
+
+    int row = mb_idx / K_groups;
+    int k_group = mb_idx % K_groups;
+    int local_row;
+    int expert = moe_find_expert(offsets, ne, row, local_row);
+    uint8_t* sfa = sfa_bases[expert];
+    if (!sfa)
+        return;
+
+    // Compute 16 activation values + their absmax in registers.
+    float vals[kSFVecSize];
+    float local_absmax = 0.0f;
+    const int64_t row_off = static_cast<int64_t>(row) * K + k_group * kSFVecSize;
+    const half2* up_h2 = reinterpret_cast<const half2*>(up + row_off);
+    const half2* gate_h2 = (gate != nullptr) ? reinterpret_cast<const half2*>(gate + row_off) : nullptr;
+
+    constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
+    constexpr float kGeluCoeff = 0.044715f;
+
+#pragma unroll
+    for (int i = 0; i < kSFVecSize / 2; i++) {
+        half2 uh2 = up_h2[i];
+        float u0 = __half2float(uh2.x);
+        float u1 = __half2float(uh2.y);
+        float v0, v1;
+        if (kAct == 0) {  // SWIGLU
+            half2 gh2 = gate_h2[i];
+            float g0 = __half2float(gh2.x);
+            float g1 = __half2float(gh2.y);
+            v0 = (g0 / (1.0f + __expf(-g0))) * u0;
+            v1 = (g1 / (1.0f + __expf(-g1))) * u1;
+        } else if (kAct == 1) {  // GEGLU (Gemma-3 tanh form, FP16-clamped)
+            half2 gh2 = gate_h2[i];
+            float g0 = __half2float(gh2.x);
+            float g1 = __half2float(gh2.y);
+            float gelu0 = g0 * 0.5f *
+                          (1.0f + tanhf(kGeluSqrt2OverPi * (g0 + kGeluCoeff * g0 * g0 * g0)));
+            float gelu1 = g1 * 0.5f *
+                          (1.0f + tanhf(kGeluSqrt2OverPi * (g1 + kGeluCoeff * g1 * g1 * g1)));
+            v0 = fminf(fmaxf(gelu0 * u0, -65504.0f), 65504.0f);
+            v1 = fminf(fmaxf(gelu1 * u1, -65504.0f), 65504.0f);
+        } else {  // RELU_SQR — non_gated experts; gate is nullptr, up holds the input
+            v0 = (u0 > 0.0f) ? (u0 * u0) : 0.0f;
+            v1 = (u1 > 0.0f) ? (u1 * u1) : 0.0f;
+        }
+        vals[i * 2] = v0;
+        vals[i * 2 + 1] = v1;
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(v0), fabsf(v1)));
+    }
+
+    quantize_micro_block_nvfp4_from_vals(
+        vals, local_absmax,
+        packed_out + static_cast<int64_t>(row) * (K / 2), k_group,
+        sfa + sfatom_offset(local_row, k_group, n_k_tiles));
+}
+
+void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
+                                                  void* dst_packed, uint8_t* const* d_sfa_bases,
+                                                  const int* d_offsets, int expanded, int K, int ne,
+                                                  FFNActivation act_type, cudaStream_t stream) {
+    IMP_CHECK(K % kSFVecSize == 0,
+              "fused_act_quantize_fp16_to_nvfp4_cutlass_moe: K=%d must be multiple of %d", K, kSFVecSize);
+    if (expanded == 0)
+        return;
+
+    int K_groups = K / kSFVecSize;
+    int total_mb = expanded * K_groups;
+    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
+
+    int threads = 256;
+    int blocks = (total_mb + threads - 1) / threads;
+
+    auto* gate_p = reinterpret_cast<const half*>(gate_fp16);
+    auto* up_p = reinterpret_cast<const half*>(up_fp16);
+    auto* dst_p = reinterpret_cast<uint8_t*>(dst_packed);
+
+    switch (act_type) {
+        case FFNActivation::SWIGLU:
+            IMP_CHECK(gate_p != nullptr,
+                      "fused_act_quantize: SWIGLU requires a non-null gate tensor");
+            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
+                <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
+                                                 ne, n_k_tiles);
+            break;
+        case FFNActivation::GEGLU:
+            IMP_CHECK(gate_p != nullptr,
+                      "fused_act_quantize: GEGLU requires a non-null gate tensor");
+            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
+                <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
+                                                 ne, n_k_tiles);
+            break;
+        case FFNActivation::RELU_SQR:
+            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<2>
+                <<<blocks, threads, 0, stream>>>(nullptr, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
+                                                 ne, n_k_tiles);
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------
 
