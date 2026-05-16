@@ -326,169 +326,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     MoeRoutingResult routing;
-
-    // Fused gate GEMV + topk is only beneficial when n_experts fits in the
-    // number of warps (8). For high expert counts (e.g., 128 in Qwen3-Coder),
-    // the separate gemv_gate_fp32 (128 parallel blocks) is much faster than
-    // serializing 128/8=16 experts per warp in a single block.
-    constexpr int kMaxFusedExperts = 8;
-    if (fp32_gate_logits_ready) {
-        // Gate logits already computed by FP32 router path above — skip to topk.
-        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
-        // Diagnostic: dump gate logits pre-topk when IMP_DUMP_LOGITS is set.
-        // Compares imp's softmax-input against llama.cpp's ffn_moe_probs-N.
-        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
-            bool dump_all = (dl == "all");
-            if (layer == 29 || dump_all) {
-                int last_tok = n - 1;
-                std::vector<float> h_logits(ne);
-                cudaStreamSynchronize(stream);
-                cudaMemcpy(h_logits.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
-                           ne * sizeof(float), cudaMemcpyDeviceToHost);
-                // Find top-8 by value
-                std::vector<std::pair<float, int>> sorted;
-                sorted.reserve(ne);
-                for (int i = 0; i < ne; ++i)
-                    sorted.emplace_back(h_logits[i], i);
-                std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
-                                  [](auto& a, auto& b) { return a.first > b.first; });
-                fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
-                for (int i = 0; i < 8; ++i)
-                    fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
-                fprintf(stderr, "\n");
-            }
-        }
-        if (moe_.routing_buffers.pool) {
-            moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
-                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
-        } else {
-            moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights,
-                            router_bias_ptr);
-        }
-    } else if (ne <= kMaxFusedExperts && n == 1 && compute_dtype_ == QType::F16 &&
-               ly.moe_gate.qtype == QType::F16 && moe_.routing_buffers.pool && will_decode_fast) {
-        // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)
-        moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
-                            static_cast<const half*>(router_in.data), ne, d, top_k, moe_.routing_buffers,
-                            routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
-    } else {
-        // Separate: gate GEMV → intermediate logits → topk gating
-        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
-
-        if (n == 1 && compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16) {
-            gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
-                           static_cast<const half*>(router_in.data),
-                           static_cast<float*>(gate_logits_f32.data), ne, d, stream);
-        } else {
-            int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
-            Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
-            gemm(router_in, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
-
-            int64_t numel = static_cast<int64_t>(n) * ne;
-            int threads = 256;
-            int blocks = static_cast<int>((numel + threads - 1) / threads);
-            if (compute_dtype_ == QType::F16) {
-                fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(
-                                                                        gate_logits_tmp.data),
-                                                                    static_cast<float*>(gate_logits_f32.data),
-                                                                    numel);
-            } else {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
-                                                   static_cast<size_t>(numel) * sizeof(float),
-                                                   cudaMemcpyDeviceToDevice, stream));
-            }
-        }
-
-        if (debug_forward_enabled() && layer == 0) {
-            // Dump router logits for last token
-            std::vector<float> rl(ne);
-            int last_tok = n - 1;
-            cudaMemcpy(rl.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
-                       ne * sizeof(float), cudaMemcpyDeviceToHost);
-            double rsum = 0;
-            for (auto v : rl)
-                rsum += v;
-            double rss = 0;
-            for (auto v : rl)
-                rss += v * v;
-            fprintf(stderr, "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
-                    last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
-        }
-        // IMP_DUMP_LOGITS=all: dump top-8-by-value of gate logits per layer.
-        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
-            bool dump_all = (dl == "all");
-            if (layer == 29 || dump_all) {
-                int last_tok = n - 1;
-                std::vector<float> h_logits(ne);
-                cudaStreamSynchronize(stream);
-                cudaMemcpy(h_logits.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
-                           ne * sizeof(float), cudaMemcpyDeviceToHost);
-                std::vector<std::pair<float, int>> sorted;
-                sorted.reserve(ne);
-                for (int i = 0; i < ne; ++i)
-                    sorted.emplace_back(h_logits[i], i);
-                std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
-                                  [](auto& a, auto& b) { return a.first > b.first; });
-                fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
-                for (int i = 0; i < 8; ++i)
-                    fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
-                fprintf(stderr, "\n");
-            }
-        }
-        if (moe_.routing_buffers.pool) {
-            moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
-                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
-        } else {
-            moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights,
-                            router_bias_ptr);
-        }
-    }
-
-    // Dump routing for last token. [diagnostics] dump_routing_dir = "<path>"
-    // dumps layer 0 only; dump_routing_dir = "all" dumps every layer.
-    if (const std::string& drv = RuntimeConfig::current().diagnostics.dump_routing_dir; !drv.empty()) {
-        bool dump_all = (drv == "all");
-        if (layer == 0 || dump_all) {
-            int last_tok = n - 1;
-            std::vector<int32_t> h_idx(top_k);
-            std::vector<float> h_wts(top_k);
-            cudaMemcpy(h_idx.data(),
-                       static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
-                       top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_wts.data(),
-                       static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
-                       top_k * sizeof(float), cudaMemcpyDeviceToHost);
-            fprintf(stderr,
-                    "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
-                    "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                    layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6],
-                    h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
-        }
-    }
-    // 4b. Expert weight scaling (Nemotron: scale = 2.5)
-    if (cfg.expert_weights_scale != 1.0f) {
-        int64_t n_weights = static_cast<int64_t>(n) * top_k;
-        int threads_s = 256;
-        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
-        scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<float*>(
-                                                                  routing.expert_weights.data),
-                                                              cfg.expert_weights_scale, n_weights);
-    }
-
-    // 4c. Gemma 4: per-expert output scale. Multiply each token's routing weight
-    // by the scale of its selected expert. Mathematically equivalent to scaling
-    // each expert's down output then summing — saves a separate scatter pass.
-    // (Matches llama.cpp ffn_moe_down_scaled = MUL(ffn_moe_down, repeat(scale)).)
-    if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
-        ly.expert_down_scale.on_device) {
-        int64_t n_weights = static_cast<int64_t>(n) * top_k;
-        int threads_s = 256;
-        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
-        moe_apply_per_expert_scale_kernel<<<blocks_s, threads_s, 0, stream>>>(
-            static_cast<float*>(routing.expert_weights.data),
-            static_cast<const int32_t*>(routing.expert_indices.data),
-            static_cast<const half*>(ly.expert_down_scale.data), static_cast<int>(n_weights));
-    }
+    compute_moe_routing(layer, stream, n, d, ne, top_k, router_in, fp32_gate_logits_ready,
+                        will_decode_fast, router_bias_ptr, use_sigmoid, norm_weights, routing);
 
     // Build per-expert tensor views for grouped GEMM.
     // Two paths:
@@ -2379,6 +2218,148 @@ moe_after_experts:
         IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_weights.data));
         IMP_CUDA_CHECK_LOG(cudaFree(routing.sorted_token_ids.data));
         IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_offsets.data));
+    }
+}
+
+namespace {
+
+// Dump gate logits or routing decisions for diagnostics. Called from
+// compute_moe_routing under the appropriate config gates.
+void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
+    int last_tok = n - 1;
+    std::vector<float> h_logits(ne);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_logits.data(), d_logits + last_tok * ne, ne * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    std::vector<std::pair<float, int>> sorted;
+    sorted.reserve(ne);
+    for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
+    std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
+                      [](auto& a, auto& b) { return a.first > b.first; });
+    fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
+    for (int i = 0; i < 8; ++i)
+        fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
+    fprintf(stderr, "\n");
+}
+
+}  // anonymous namespace
+
+void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
+                                        int top_k, const Tensor& router_in,
+                                        bool fp32_gate_logits_ready, bool will_decode_fast,
+                                        const void* router_bias_ptr, bool use_sigmoid,
+                                        bool norm_weights, MoeRoutingResult& routing) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    auto run_topk = [&](const Tensor& logits_f32) {
+        if (moe_.routing_buffers.pool) {
+            moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
+                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
+        } else {
+            moe_topk_gating(logits_f32, top_k, routing, stream, use_sigmoid, norm_weights,
+                            router_bias_ptr);
+        }
+    };
+
+    // Fused gate GEMV + topk only profitable when n_experts ≤ warps (8).
+    // Higher expert counts (e.g. 128 in Qwen3-Coder) prefer separate
+    // gemv_gate_fp32 (128 parallel blocks).
+    constexpr int kMaxFusedExperts = 8;
+    const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir;
+    bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");
+
+    if (fp32_gate_logits_ready) {
+        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
+        if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
+        run_topk(gate_logits_f32);
+    } else if (ne <= kMaxFusedExperts && n == 1 && compute_dtype_ == QType::F16 &&
+               ly.moe_gate.qtype == QType::F16 && moe_.routing_buffers.pool && will_decode_fast) {
+        // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel
+        moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
+                            static_cast<const half*>(router_in.data), ne, d, top_k,
+                            moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights,
+                            router_bias_ptr);
+    } else {
+        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
+        if (n == 1 && compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16) {
+            gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
+                           static_cast<const half*>(router_in.data),
+                           static_cast<float*>(gate_logits_f32.data), ne, d, stream);
+        } else {
+            int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
+            Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
+            gemm(router_in, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
+            int64_t numel = static_cast<int64_t>(n) * ne;
+            int threads = 256;
+            int blocks = static_cast<int>((numel + threads - 1) / threads);
+            if (compute_dtype_ == QType::F16) {
+                fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
+                    static_cast<const half*>(gate_logits_tmp.data),
+                    static_cast<float*>(gate_logits_f32.data), numel);
+            } else {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
+                                                   static_cast<size_t>(numel) * sizeof(float),
+                                                   cudaMemcpyDeviceToDevice, stream));
+            }
+        }
+
+        if (debug_forward_enabled() && layer == 0) {
+            std::vector<float> rl(ne);
+            int last_tok = n - 1;
+            cudaMemcpy(rl.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
+                       ne * sizeof(float), cudaMemcpyDeviceToHost);
+            double rsum = 0, rss = 0;
+            for (auto v : rl) { rsum += v; rss += v * v; }
+            fprintf(stderr,
+                    "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                    last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
+        }
+        if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
+        run_topk(gate_logits_f32);
+    }
+
+    // Routing decision dump
+    if (const std::string& drv = RuntimeConfig::current().diagnostics.dump_routing_dir; !drv.empty()) {
+        bool dump_all = (drv == "all");
+        if (layer == 0 || dump_all) {
+            int last_tok = n - 1;
+            std::vector<int32_t> h_idx(top_k);
+            std::vector<float> h_wts(top_k);
+            cudaMemcpy(h_idx.data(),
+                       static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
+                       top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_wts.data(),
+                       static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
+                       top_k * sizeof(float), cudaMemcpyDeviceToHost);
+            fprintf(stderr,
+                    "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
+                    "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                    layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5],
+                    h_idx[6], h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5],
+                    h_wts[6], h_wts[7]);
+        }
+    }
+
+    // Per-expert weight scaling (Nemotron: scale = 2.5)
+    if (cfg.expert_weights_scale != 1.0f) {
+        int64_t n_weights = static_cast<int64_t>(n) * top_k;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
+        scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<float*>(routing.expert_weights.data), cfg.expert_weights_scale, n_weights);
+    }
+
+    // Gemma-4: per-expert output scale absorbed into routing weights.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
+        ly.expert_down_scale.on_device) {
+        int64_t n_weights = static_cast<int64_t>(n) * top_k;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
+        moe_apply_per_expert_scale_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<float*>(routing.expert_weights.data),
+            static_cast<const int32_t*>(routing.expert_indices.data),
+            static_cast<const half*>(ly.expert_down_scale.data), static_cast<int>(n_weights));
     }
 }
 

@@ -735,6 +735,15 @@ private:
                              const Tensor& no, Tensor& h, const Tensor& r,
                              bool moe_use_fp32_residual, bool moe_fused_norm_q8,
                              bool will_skip_residual_copy, bool& residual_fused);
+    // Compute MoE routing: gate logits (FP32 router fast-path for Gemma-4
+    // already done by caller — signaled via `fp32_gate_logits_ready`) + topk
+    // gating + per-expert weight scaling (Nemotron, Gemma-4). Caller passes
+    // pre-normalized `router_in` if !fp32_gate_logits_ready.
+    void compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
+                             int top_k, const Tensor& router_in,
+                             bool fp32_gate_logits_ready, bool will_decode_fast,
+                             const void* router_bias_ptr, bool use_sigmoid,
+                             bool norm_weights, MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
