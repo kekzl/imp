@@ -22,10 +22,11 @@
 // reads. Per-block shared-memory footprint grows by one extra Bkv·HD halfs
 // for the split K / V buffers (vs the legacy single KV_tile slot).
 //
-// PR 2.1 dispatches Bq = 64 for every HD ∈ {64, 96, 128, 256}. Bq = 128 is
-// known-good for HD ∈ {96, 128, 256} but produces wrong output specifically
-// for HD = 64 (suspected register-pressure / occupancy interaction —
-// see select_cluster_Bq). PR 2.3 tile-tuning revisits Bq selection.
+// Bq selection (post-A/B investigation 2026-05-17): Bq = 128 for HD ∈
+// {96, 128, 256}, Bq = 64 for HD = 64. The HD = 64 carve-out is a
+// wrong-output bug (see select_cluster_Bq). FP8 variant additionally
+// drops Bq = 128 for HD = 256 (extra K_fp8 slot puts smem over the 228
+// KiB optin limit) so HD = 256 stays on Bq = 64 in FP8.
 //
 // All scheduling decisions match the M5 Slice 1 helper
 // (runtime/cluster_launch.h): GPC-spread policy, power-of-2 cluster check.
@@ -33,6 +34,20 @@
 // The new kernel is bit-identical to fmha_sm120_kernel<Bq, HD> within
 // FP16/FP32 reordering tolerance — see tests/test_attention_fmha_sm120.cu
 // ClusterPath* cases.
+//
+// !! DISABLED BY DEFAULT (2026-05-17) !!
+// RuntimeConfig.attention.no_fmha_cluster defaults to true after an A/B
+// sweep on the four production NVFP4 MoE models showed cluster losing
+// up to -22 % on HD=256 (Qwen3.6-35B pp=2048; Gemma-4-26B pp=512). HD=128
+// GQA=8 wins +6-11 % at pp=512 but is negative at pp=2048. The Spread
+// scheduling policy caps concurrent clusters at the GPC count (12 on
+// RTX 5090) — fewer concurrent blocks than the legacy per-(head, tile)
+// kernel. The DSMEM bandwidth saving doesn't compensate.
+//
+// Cluster code retained for opt-in via `--set attention.no_fmha_cluster=false`
+// and for future tuning passes (relaxed Spread policy, fewer cluster.sync
+// barriers, smaller cluster_x via head fan-in subdivision, …). See
+// m5_slice2_cluster_refuted_2026_05_17.md memo.
 // =============================================================================
 
 #include "compute/attention_fmha_sm120.h"
@@ -429,14 +444,15 @@ __global__ void fmha_sm120_cluster_kernel(
 
 // ----- Launch helpers -------------------------------------------------------
 
-// PR 2.1 ships with Bq=64 only. Bq=128 produces wrong output specifically
-// for HD=64 in the cluster path (validated via FmhaSm120Test.ClusterPathHd64
-// flipping pass↔fail with this gate); HD={96,128,256} run correctly at
-// Bq=128 but the per-HD selection complicates the dispatcher for marginal
-// occupancy gain. PR 2.3 tile-tuning re-evaluates Bq=128 once the HD=64
-// failure is root-caused (suspected register-pressure / occupancy
-// interaction specific to the smaller HD).
+// Bq selection: prefer Bq=128 for HD ∈ {96, 128, 256} (halves the per-attn
+// kernel-launch count vs Bq=64; cluster vs legacy A/B on NVFP4 MoE models
+// showed cluster losing 6-20 % at pp=512 with Bq=64 in part because legacy
+// dispatches HD=128 at Bq=128). HD=64 stays on Bq=64 because Bq=128 +
+// HD=64 produces wrong output in the cluster kernel (see
+// FmhaSm120Test.ClusterPathHd64 — bisected 2026-05-16, suspected
+// register-pressure / occupancy interaction unique to the smaller HD).
 int select_cluster_Bq(int HD, int max_smem) {
+    if (HD != 64 && cluster_smem_bytes(128, CL_Bkv, HD) <= (size_t)max_smem) return 128;
     if (cluster_smem_bytes(64, CL_Bkv, HD) <= (size_t)max_smem) return 64;
     return 0;
 }
@@ -883,7 +899,10 @@ __global__ void fmha_sm120_fp8_cluster_kernel(
 }
 
 int select_cluster_fp8_Bq(int HD, int max_smem) {
-    // Match the FP16 cluster: Bq=64 only in PR 2.2; tile-tuning deferred to 2.3.
+    // Same Bq policy as the FP16 cluster, but: HD=256 at Bq=128 doesn't fit
+    // the FP8 layout (extra Bkv·HD K_fp8 slot) → falls back to Bq=64.
+    // HD=64 stays on Bq=64 by the same wrong-output carve-out.
+    if (HD != 64 && cluster_fp8_smem_bytes(128, CL_Bkv, HD) <= (size_t)max_smem) return 128;
     if (cluster_fp8_smem_bytes(64, CL_Bkv, HD) <= (size_t)max_smem) return 64;
     return 0;
 }
@@ -981,8 +1000,15 @@ bool try_fmha_sm120_cluster_prefill(const Tensor& Q, const Tensor& K, const Tens
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, n_q_per_kv, head_dim, Bq, Bkv, smem, causal,
         sliding_window, softcap);
 
-    // PR 2.1 dispatches Bq=64 only — see select_cluster_Bq for the rationale.
-    (void)Bq;
+    // Bq=128 for HD ∈ {96, 128, 256}, Bq=64 for HD=64. See select_cluster_Bq.
+    if (Bq == 128) {
+        switch (head_dim) {
+            case 96: LAUNCH_CLUSTER(128, 96); return true;
+            case 128: LAUNCH_CLUSTER(128, 128); return true;
+            case 256: LAUNCH_CLUSTER(128, 256); return true;
+            default: break;
+        }
+    }
     switch (head_dim) {
         case 64: LAUNCH_CLUSTER(64, 64); return true;
         case 96: LAUNCH_CLUSTER(64, 96); return true;
@@ -1055,7 +1081,11 @@ bool try_fmha_sm120_fp8_cluster_prefill(const Tensor& Q, const Tensor& K, const 
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, n_q_per_kv, head_dim, Bq, Bkv, smem, causal,
         sliding_window, softcap);
 
-    (void)Bq;
+    // Bq=128 only for HD=128 in the FP8 path (HD=64 carve-out; HD=256 smem).
+    if (Bq == 128 && head_dim == 128) {
+        LAUNCH_FP8_CLUSTER(128, 128);
+        return true;
+    }
     switch (head_dim) {
         case 64: LAUNCH_FP8_CLUSTER(64, 64); return true;
         case 128: LAUNCH_FP8_CLUSTER(64, 128); return true;
