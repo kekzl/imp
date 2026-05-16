@@ -124,6 +124,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     q8_1_sz / 1024.0, d8_sz / 1024.0, max_blocks, max_k, max_moe_down_blocks);
             }
         }
+
+        // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
+        // ggml_mmvq_q*_kernel hot-path in executor_kernels.cu. Sized for the
+        // worst case (max_tokens × max_k) so the hot path never re-allocates
+        // (capture-safe). QW1 from review/phase5_synthesis.md §2.1.
+        if (max_k > 0 && max_tokens_ > 0) {
+            prewarm_mmvq_scratch(max_tokens_, max_k);
+        }
     }
 
     // Split-K paged attention scratch buffer.
