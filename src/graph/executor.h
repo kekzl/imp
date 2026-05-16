@@ -744,6 +744,14 @@ private:
                              bool fp32_gate_logits_ready, bool will_decode_fast,
                              const void* router_bias_ptr, bool use_sigmoid,
                              bool norm_weights, MoeRoutingResult& routing);
+    // Fused Q6_K prefill MoE path: reads Q6_K weights directly (no FP16
+    // dequant scratch), TC variant uses gather-free sorted_token_ids
+    // indirection, scalar variant materializes the gathered buffer.
+    // Fills moe_.expert_{gate,up,swiglu,down} for downstream scatter.
+    // Returns true when path was taken (caller skips general path branches).
+    bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                 int ne, int expanded, bool non_gated_experts, QType up_qtype,
+                                 const MoeRoutingResult& routing, const Tensor& no);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
