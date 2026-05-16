@@ -2,6 +2,7 @@
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
+#include "runtime/cluster_launch.h"
 #include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1453,25 +1454,17 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             dim3 cluster_grid(batch_size * n_q_per_kv, n_kv_heads);
             dim3 cluster_block(BLOCK_THREADS);
 
-            cudaLaunchConfig_t config = {};
-            config.gridDim = cluster_grid;
-            config.blockDim = cluster_block;
-            config.dynamicSmemBytes = cluster_smem;
-            config.stream = stream;
-
             // CUDA 13.2: spread cluster blocks across GPCs (GB202 has 12 GPCs).
             // Default "load-balancing" packs clusters per-GPC, which oversubscribes
             // a single GPC's L1/SMEM/tensor-core resources when only a handful of
             // clusters are live. Spread gives each cluster its own GPC on RTX 5090
             // as long as the grid is small enough, keeping DSMEM traffic local and
             // freeing other GPCs for concurrent decode work on a separate stream.
+            // M5 Slice 1: cluster_launch.h hides the attribute boilerplate.
             cudaLaunchAttribute attrs[2];
-            attrs[0].id = cudaLaunchAttributeClusterDimension;
-            attrs[0].val.clusterDim = {(unsigned int)n_q_per_kv, 1, 1};
-            attrs[1].id = cudaLaunchAttributeClusterSchedulingPolicyPreference;
-            attrs[1].val.clusterSchedulingPolicyPreference = cudaClusterSchedulingPolicySpread;
-            config.attrs = attrs;
-            config.numAttrs = 2;
+            cudaLaunchConfig_t config = cluster::build_cluster_config(
+                cluster_grid, cluster_block, cluster_smem, stream, attrs,
+                /*cluster_x=*/static_cast<unsigned int>(n_q_per_kv));
 
 #define LAUNCH_CLUSTER(HD)                                                                                 \
     cudaLaunchKernelEx(&config, paged_attention_cluster_kernel<HD>, reinterpret_cast<const half*>(Q.data), \
