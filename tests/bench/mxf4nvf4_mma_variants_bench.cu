@@ -31,7 +31,7 @@
 // trade-offs.
 // =============================================================================
 
-#include "compute/mxf4nvf4_mma_variants_bench.h"
+#include "bench/mxf4nvf4_mma_variants_bench.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>

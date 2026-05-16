@@ -188,16 +188,16 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxf4nvf4_sm120.cu)
-    # Bench/probe/validate TUs: only consumed by tests and microbenches, never
-    # by production runtime. Skip in server-only builds to cut ~30-60s nvcc.
+    # Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
+    # Validate/ref TUs that still serve internal call sites stay in src/compute/.
     if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxf4nvf4_probe.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_variants_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/tma_block_scale_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/fmha_v_load_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
     endif()
     if(IMP_BUILD_TESTS)
         set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
@@ -277,6 +277,7 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests  # for tests/bench/ headers (test/bench TUs only)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 
