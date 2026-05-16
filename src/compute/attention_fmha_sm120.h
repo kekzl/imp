@@ -5,9 +5,13 @@
 
 namespace imp {
 
-// Native sm_120 FMHA using WGMMA (Warp Group MMA) for prefill attention.
+// Native sm_120 FMHA for prefill attention.
 //
-// Uses wgmma.mma_async PTX instructions for ~2x tensor core throughput vs WMMA.
+// Uses WMMA HMMA fragments (mma.sync.m16n8k16.f16, mma.sync.m16n8k32.e4m3) —
+// NOT wgmma: wgmma.mma_async / TMEM / tcgen05 are Hopper-and-later (sm_90+/
+// SM100+) and unavailable on Consumer Blackwell (sm_120a). FA4 is therefore
+// permanently incompatible with this target. See review/phase2_perf.md §3.
+//
 // Supports: FP16, causal masking, softcap, sliding window, GQA.
 // Head dims: 64, 96, 128, 256. Falls back for unsupported configs.
 //
