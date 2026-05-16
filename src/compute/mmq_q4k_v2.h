@@ -111,4 +111,54 @@ void mmq_q4k_v2(
     int M, int N, int K,
     cudaStream_t stream);
 
+// ---------------------------------------------------------------------------
+// Phase 6: Q5_K v2 path
+//
+// Q5_K is Q4_K + a 1-bit "high" overlay per quant. Block layout:
+//   d (FP16) | dmin (FP16) | scales[12] (6-bit packed sc + m, SAME as Q4_K)
+//                          | qh[32] (high bits, 1 per quant, byte b covers
+//                            K=8b..8b+7) | qs[128] (low 4 bits, SAME as Q4_K)
+// Total 176 bytes per 256 elements.
+//
+// Per-quant dequant: q5 = qs.nibble | (qh.bit << 4)  in [0, 31]
+//                    w  = q5 · eff_scale - eff_min
+// where eff_scale = d · sc[s] and eff_min = dmin · m[s] — IDENTICAL to Q4_K.
+//
+// Phase 1a (eff_scale + eff_min) is shared with Q4_K, just with a different
+// block_stride argument. Phase 1b for Q5_K writes a packed eff_q5 layout:
+//   per sub-block (32 elements) → 16 bytes of permuted nibbles (SAME packing
+//   as eff_q4) + 4 bytes of qh (sub-block bytes, K-major).
+// Tensor shape: [N, K/32, 20] uint8. Total bytes = N·K·20/32 = 0.625·N·K.
+
+void q5k_precompute_eff_scales(
+    const void* W,        // [N, K/256] block_q5_K bytes
+    half* eff_scale_out,  // [N, K/32]
+    half* eff_min_out,    // [N, K/32]
+    int N, int K,
+    cudaStream_t stream);
+
+void q5k_permute_to_v2_layout(
+    const void* W,        // [N, K/256] block_q5_K bytes
+    uint8_t* eff_q5_ql_out,  // [N, K/32, 16] permuted low nibbles (Q4_K-style)
+    uint8_t* eff_q5_qh_out,  // [N, K/32, 4]  high bits, byte b covers K=8b..8b+7
+    int N, int K,
+    cudaStream_t stream);
+
+inline size_t q5k_eff_ql_bytes(int N, int K) {
+    return static_cast<size_t>(N) * (K / 32) * 16u;
+}
+inline size_t q5k_eff_qh_bytes(int N, int K) {
+    return static_cast<size_t>(N) * (K / 32) * 4u;
+}
+
+void mmq_q5k_v2(
+    const half* x,
+    const uint8_t* eff_q5_ql,
+    const uint8_t* eff_q5_qh,
+    const half* eff_scale,
+    const half* eff_min,
+    half* y,
+    int M, int N, int K,
+    cudaStream_t stream);
+
 }  // namespace imp

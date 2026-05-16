@@ -434,4 +434,145 @@ TEST(MmqQ4KV2HMMA, Bn128_NonMultiple_M200_N300_K768) {
     run_v2_vs_v1_check(200, 300, 768, 0xd9, 0.02f, 0.15f);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6: Q5_K v2 — kernel + Phase 1a/1b correctness vs CPU FP32 reference
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<uint8_t> make_random_q5k(int N, int K, unsigned seed) {
+    const int blocks = K / 256;
+    std::vector<uint8_t> h(static_cast<size_t>(N) * blocks * 176);
+    std::srand(seed);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks; ++b) {
+            uint8_t* bp = h.data() + (static_cast<size_t>(row) * blocks + b) * 176;
+            half d = __float2half(0.005f + 0.01f * (std::rand() % 100) / 100.0f);
+            half dmin = __float2half(0.001f + 0.005f * (std::rand() % 100) / 100.0f);
+            std::memcpy(bp + 0, &d, 2);
+            std::memcpy(bp + 2, &dmin, 2);
+            for (int i = 0; i < 12; ++i) bp[4 + i] = static_cast<uint8_t>(std::rand() & 0xFF);
+            // qh[32] at [16, 48)
+            for (int i = 0; i < 32; ++i) bp[16 + i] = static_cast<uint8_t>(std::rand() & 0xFF);
+            // qs[128] at [48, 176)
+            for (int i = 0; i < 128; ++i) bp[48 + i] = static_cast<uint8_t>(std::rand() & 0xFF);
+        }
+    }
+    return h;
+}
+
+std::vector<float> cpu_reference_q5k_gemm(const std::vector<uint8_t>& h_W,
+                                          const std::vector<half>& h_x, int M,
+                                          int N, int K) {
+    const int K_blocks = K / 256;
+    std::vector<float> y(static_cast<size_t>(M) * N, 0.0f);
+    std::vector<float> W_dq(static_cast<size_t>(N) * K, 0.0f);
+    for (int n = 0; n < N; ++n) {
+        for (int kbx = 0; kbx < K_blocks; ++kbx) {
+            const uint8_t* sb =
+                h_W.data() + (static_cast<size_t>(n) * K_blocks + kbx) * 176;
+            half d, dmin;
+            std::memcpy(&d, sb, 2);
+            std::memcpy(&dmin, sb + 2, 2);
+            uint8_t sc[8], m[8];
+            cpu_unpack_q4k_scales_mins(sb + 4, sc, m);  // Q5_K shares Q4_K scales layout
+            const float df = __half2float(d);
+            const float dmf = __half2float(dmin);
+            const uint8_t* qh = sb + 16;
+            const uint8_t* qs = sb + 48;
+            for (int s = 0; s < 8; ++s) {
+                const float eff_scale = df * sc[s];
+                const float eff_min = dmf * m[s];
+                const int byte_base = (s >> 1) * 32;
+                const bool use_high = (s & 1) != 0;
+                for (int k_in_sub = 0; k_in_sub < 32; ++k_in_sub) {
+                    uint8_t byte = qs[byte_base + k_in_sub];
+                    uint8_t nib = use_high ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                    int k_global_in_super = s * 32 + k_in_sub;
+                    int qh_byte = k_global_in_super / 8;
+                    int qh_bit = k_global_in_super & 7;
+                    int hi = (qh[qh_byte] >> qh_bit) & 1;
+                    int q5 = nib | (hi << 4);
+                    int k_global = kbx * 256 + k_global_in_super;
+                    W_dq[(size_t)n * K + k_global] = q5 * eff_scale - eff_min;
+                }
+            }
+        }
+    }
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                acc += __half2float(h_x[(size_t)m * K + k]) *
+                       W_dq[(size_t)n * K + k];
+            }
+            y[(size_t)m * N + n] = acc;
+        }
+    }
+    return y;
+}
+
+void run_q5k_v2_check(int M, int N, int K, unsigned seed,
+                      float rel_tol = 0.02f, float abs_tol = 0.20f) {
+    ASSERT_EQ(K % 256, 0);
+    auto h_W = make_random_q5k(N, K, seed);
+    std::vector<half> h_x(static_cast<size_t>(M) * K);
+    fill_random_fp16(h_x, seed ^ 0xbeef);
+
+    void* W_dev = nullptr;
+    half* x_dev = nullptr;
+    half* y_dev = nullptr;
+    uint8_t* eff_ql = nullptr;
+    uint8_t* eff_qh = nullptr;
+    half* eff_scale = nullptr;
+    half* eff_min = nullptr;
+    const size_t bytes_y = static_cast<size_t>(M) * N * sizeof(half);
+
+    cudaMalloc(&W_dev, h_W.size());
+    cudaMalloc(&x_dev, h_x.size() * sizeof(half));
+    cudaMalloc(&y_dev, bytes_y);
+    cudaMalloc(&eff_ql, q5k_eff_ql_bytes(N, K));
+    cudaMalloc(&eff_qh, q5k_eff_qh_bytes(N, K));
+    cudaMalloc(&eff_scale, q4k_eff_scale_bytes(N, K));
+    cudaMalloc(&eff_min, q4k_eff_scale_bytes(N, K));
+
+    cudaMemcpy(W_dev, h_W.data(), h_W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(x_dev, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(y_dev, 0, bytes_y);
+
+    q5k_precompute_eff_scales(W_dev, eff_scale, eff_min, N, K, nullptr);
+    q5k_permute_to_v2_layout(W_dev, eff_ql, eff_qh, N, K, nullptr);
+    mmq_q5k_v2(x_dev, eff_ql, eff_qh, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<half> h_y(static_cast<size_t>(M) * N);
+    cudaMemcpy(h_y.data(), y_dev, bytes_y, cudaMemcpyDeviceToHost);
+
+    auto ref = cpu_reference_q5k_gemm(h_W, h_x, M, N, K);
+    printf("[Q5K v2 M=%d N=%d K=%d] ref[0,0]=%.4f gpu[0,0]=%.4f\n", M, N, K,
+           ref[0], __half2float(h_y[0]));
+    int m_cnt;
+    float ma, mr;
+    cmp_to_ref("Q5K_v2", h_y, ref, M, N, abs_tol, rel_tol, &m_cnt, &ma, &mr);
+    EXPECT_EQ(m_cnt, 0) << "Q5_K v2 diverges from CPU FP32 reference";
+
+    cudaFree(W_dev);
+    cudaFree(x_dev);
+    cudaFree(y_dev);
+    cudaFree(eff_ql);
+    cudaFree(eff_qh);
+    cudaFree(eff_scale);
+    cudaFree(eff_min);
+}
+
+}  // namespace
+
+TEST(MmqQ5KV2HMMA, AlignedTile_M64_N64_K256)     { run_q5k_v2_check(64, 64, 256, 0xe1); }
+TEST(MmqQ5KV2HMMA, MultiTile_M128_N128_K512)     { run_q5k_v2_check(128, 128, 512, 0xe2); }
+TEST(MmqQ5KV2HMMA, NonMultipleM_M40_N64_K256)    { run_q5k_v2_check(40, 64, 256, 0xe3); }
+TEST(MmqQ5KV2HMMA, NonMultipleN_M64_N96_K512)    { run_q5k_v2_check(64, 96, 512, 0xe4); }
+TEST(MmqQ5KV2HMMA, LongK_M64_N64_K2560)          { run_q5k_v2_check(64, 64, 2560, 0xe5); }
+TEST(MmqQ5KV2HMMA, Realistic_M256_N512_K1024)    { run_q5k_v2_check(256, 512, 1024, 0xe6); }
+TEST(MmqQ5KV2HMMA, Bn128_M512_N256_K512)         { run_q5k_v2_check(512, 256, 512, 0xe7); }
+
 }  // namespace imp
