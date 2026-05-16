@@ -14,7 +14,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
-#include "compute/mmq_q4k_v2.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
@@ -2078,8 +2077,7 @@ static void gemm_dispatch_impl(
     const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache, void* cutlass_act_data,
     void* cutlass_act_sf, void* cutlass_workspace, size_t cutlass_workspace_size,
     const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache, void* mxfp4_act_sf,
-    void* mxfp4_workspace, size_t mxfp4_workspace_size,
-    const std::unordered_map<const void*, Q4KV2CacheEntry>* q4k_v2_cache, float beta) {
+    void* mxfp4_workspace, size_t mxfp4_workspace_size, float beta) {
     // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
     // below; callers must ensure their preconditions route there.
     // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
@@ -2222,31 +2220,6 @@ static void gemm_dispatch_impl(
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
                     !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
 
-    // Q4_K v2 HMMA path (opt-in, off by default).
-    //
-    // Microbench beats dequant+cuBLAS by 2-4×, but end-to-end on real models
-    // (Gemma-3-12B, Qwen3.6-35B Q4_K_M) the FP16-cache + cuBLAS-FP16-TC
-    // baseline wins by 4-6 % because the FP16 cache absorbs the hot weights.
-    // Frozen as opt-in for VRAM-constrained scenarios where the FP16 cache
-    // can't fit — set IMP_FORCE_Q4K_V2=1 to enable cache population
-    // (executor_pre_dequant.cu) and this dispatch in one step.
-    //
-    // Gating is by cache presence: the cache stays empty unless
-    // IMP_FORCE_Q4K_V2 was set at model load, so the runtime cost here is a
-    // single nullptr/empty-map check on the hot path.
-    if (q4k_v2_cache != nullptr && qtype == QType::Q4_K &&
-        input.qtype == QType::F16 && !fp32_output &&
-        static_cast<int>(input.shape[0]) >= 64) {
-        auto it = q4k_v2_cache->find(weight.data);
-        if (it != q4k_v2_cache->end()) {
-            int M = static_cast<int>(input.shape[0]);
-            mmq_q4k_v2(static_cast<const half*>(input.data), it->second.eff_q4,
-                       it->second.eff_scale, it->second.eff_min,
-                       static_cast<half*>(output.data), M, it->second.N,
-                       it->second.K, stream);
-            return;
-        }
-    }
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
@@ -2391,14 +2364,13 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* nv4 = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
-    const auto* q4k_v2 = (wc->q4k_v2.empty() || ctx.force_fp16) ? nullptr : &wc->q4k_v2;
 
     gemm_dispatch_impl(input, weight, Tensor(), qtype, output, qs->dequant, ctx.stream,
                        static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf, fp16, fp8, qs->fp8_act,
                        qs->d_act_scale, qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid, nv4, ct4,
                        qs->cutlass_act_data, qs->cutlass_act_sf, qs->cutlass_workspace,
                        qs->cutlass_workspace_size, mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace,
-                       qs->mxfp4_workspace_size, q4k_v2, ctx.beta);
+                       qs->mxfp4_workspace_size, ctx.beta);
 }
 
 }  // namespace imp

@@ -111,9 +111,6 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
-        // Populate Q4_K v2 weight cache at model load. Legacy env:
-        // IMP_FORCE_Q4K_V2.
-        bool force_q4k_v2 = false;
     } gemm;
 
     struct Gemma4 {
