@@ -6,6 +6,7 @@
 #include "mmq_q4k_v2.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -775,6 +776,201 @@ __global__ void mmq_q4k_v2_kernel_p4_t(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7e: BM=128 8-warp variant (p5) — bigger block tile, more MMAs/block
+//
+// Closes the gap to cuBLAS-FP16-TC tile sizes. Nsys on Gemma-3 v2 OFF shows
+// cuBLAS using `s16816gemm` (same m16n8k16 MMA we use) at BM=64x256,
+// BM=128x64, BM=256x64, etc. — bigger TILES, same MMA. We're the ones
+// leaving compute on the table by sitting at BM=64 BN=128 with only 4 warps.
+//
+// Geometry: BM_p5 = 128, WARPS_M_p5 = 4, WARPS_N = 2 (8 warps × 32 = 256
+// threads/block). Per-warp tile stays identical to p4 (WRM=2 WRN=BN/16
+// WRK=2) — register pressure same. Block tile DOUBLES → 2× MMAs/block.
+//
+// vs gemm_capture's 8-warp regression: their config was WARPS_N=4 (so each
+// A row read 4× redundantly from the BIG sB FP16 buffer). Ours is WARPS_M=4
+// with sQ4 only 1-2 KB — the SMEM-load redundancy is on the TINY side, not
+// the FP16-cache side, so the tradeoff is different. Empirical test required.
+// ---------------------------------------------------------------------------
+// Phase 7e geometry: BM=128 (2× p4), WARPS_M=2 → WARP_M=64 → WRM=4 (2× p4's
+// per-warp M-fragments). 4 warps × 128 threads. The "8-warp WARPS_M=4"
+// config (which would give the same MMA count via more warps with same WRM)
+// was tested first but failed correctness — keep the bigger-WRM approach.
+constexpr int kBM_p5 = 128;
+constexpr int kWarpsM_p5 = 2;
+constexpr int kWarpsPerBlock_p5 = kWarpsM_p5 * kWarpsN;  // 4
+constexpr int kThreadsPerBlock_p5 = kWarpsPerBlock_p5 * 32;  // 128
+constexpr int kWarpM_p5 = kBM_p5 / kWarpsM_p5;  // 64
+
+template <int kP3BN>
+__global__ void mmq_q4k_v2_kernel_p5_t(
+    const half* __restrict__ A, const uint8_t* __restrict__ eff_q4,
+    const half* __restrict__ eff_scale, const half* __restrict__ eff_min,
+    half* __restrict__ y, int M, int N, int K) {
+    constexpr int kP3WarpN = kP3BN / kWarpsN;
+    constexpr int kP3WRM = kWarpM_p5 / 16;       // 2
+    constexpr int kP3WRN = kP3WarpN / 8;
+    constexpr int kP3WRK = kBK / 16;             // 2
+    constexpr int kStages = 2;
+
+    const int block_m = blockIdx.y * kBM_p5;
+    const int block_n = blockIdx.x * kP3BN;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32;
+    const int lane = tid % 32;
+    const int wm = warp / kWarpsN;
+    const int wn = warp % kWarpsN;
+
+    __shared__ __align__(16) half sA[kStages][kBM_p5 * kBK];     // 2 × 8 KB
+    __shared__ __align__(16) uint8_t sQ4[kStages][kP3BN * (kBK / 2)];
+    __shared__ __align__(16) half sScale[kStages][kP3BN];
+    __shared__ __align__(16) half sMin[kStages][kP3BN];
+
+    float acc[kP3WRM][kP3WRN][4];
+#pragma unroll
+    for (int i = 0; i < kP3WRM; ++i)
+#pragma unroll
+        for (int j = 0; j < kP3WRN; ++j)
+#pragma unroll
+            for (int k = 0; k < 4; ++k) acc[i][j][k] = 0.0f;
+
+    const int K_subs = K / kBK;
+
+#define ISSUE_STAGE_LOAD_P5(buf, kbx_val)                                      \
+    do {                                                                       \
+        /* sA: BM_p5 × BK halves. With 256 threads × 8 halves/chunk = 2048    \
+         * halves/pass; BM_p5*BK = 128*32 = 4096 halves → 2 passes/thread.    */ \
+        constexpr int kAChunks = (kBM_p5 * kBK) / (8 * kThreadsPerBlock_p5);    \
+        _Pragma("unroll")                                                      \
+        for (int c = 0; c < kAChunks; ++c) {                                   \
+            int chunk = c * kThreadsPerBlock_p5 + tid;                         \
+            int row = chunk >> 2;                                              \
+            int col = (chunk & 3) << 3;                                        \
+            int g_row = block_m + row;                                         \
+            int g_col = (kbx_val) * kBK + col;                                 \
+            const half* gptr = &A[(int64_t)g_row * K + g_col];                 \
+            half* sptr = &sA[buf][row * kBK + col];                            \
+            cp_async_cg_16(sptr, gptr, g_row < M);                             \
+        }                                                                      \
+        constexpr int kSQ4Bytes = kP3BN * (kBK / 2);                           \
+        constexpr int kSQ4Chunks = kSQ4Bytes / (kThreadsPerBlock_p5 * 8);      \
+        _Pragma("unroll")                                                      \
+        for (int c = 0; c < kSQ4Chunks; ++c) {                                 \
+            int byte_idx = c * (kThreadsPerBlock_p5 * 8) + tid * 8;            \
+            int n_local = byte_idx >> 4;                                       \
+            int byte_within_n = byte_idx & 0xF;                                \
+            int n_global = block_n + n_local;                                  \
+            int64_t off = ((int64_t)n_global * K_subs + (kbx_val)) * 16 +      \
+                          byte_within_n;                                       \
+            const uint8_t* gptr = eff_q4 + off;                                \
+            uint8_t* sptr = &sQ4[buf][n_local * 16 + byte_within_n];           \
+            cp_async_ca_8(sptr, gptr, n_global < N);                           \
+        }                                                                      \
+        if (tid < kP3BN) {                                                     \
+            int n_global = block_n + tid;                                      \
+            if (n_global < N) {                                                \
+                int64_t off = (int64_t)n_global * K_subs + (kbx_val);          \
+                sScale[buf][tid] = eff_scale[off];                             \
+                sMin[buf][tid] = eff_min[off];                                 \
+            } else {                                                           \
+                sScale[buf][tid] = __float2half(0.0f);                         \
+                sMin[buf][tid] = __float2half(0.0f);                           \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+    ISSUE_STAGE_LOAD_P5(0, 0);
+    cp_async_commit();
+
+    for (int kbx = 0; kbx < K_subs; ++kbx) {
+        const int cur = kbx & 1;
+        if (kbx + 1 < K_subs) {
+            const int next_buf = (kbx + 1) & 1;
+            ISSUE_STAGE_LOAD_P5(next_buf, kbx + 1);
+            cp_async_commit();
+            cp_async_wait_group<1>();
+        } else {
+            cp_async_wait_group<0>();
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int kk = 0; kk < kP3WRK; ++kk) {
+            uint32_t a_frag[kP3WRM][4];
+#pragma unroll
+            for (int rm = 0; rm < kP3WRM; ++rm) {
+                int m_start = wm * kWarpM_p5 + rm * 16;
+                int k_start = kk * 16;
+                int row = m_start + (lane & 0xF);
+                int col = k_start + ((lane >> 4) << 3);
+                unsigned smem_addr =
+                    __cvta_generic_to_shared(&sA[cur][row * kBK + col]);
+                asm volatile(
+                    "ldmatrix.sync.aligned.x4.m8n8.shared.b16 "
+                    "{%0, %1, %2, %3}, [%4];\n"
+                    : "=r"(a_frag[rm][0]), "=r"(a_frag[rm][1]),
+                      "=r"(a_frag[rm][2]), "=r"(a_frag[rm][3])
+                    : "r"(smem_addr));
+            }
+#pragma unroll
+            for (int rn = 0; rn < kP3WRN; ++rn) {
+                int n_block_local = wn * kP3WarpN + rn * 8 + (lane >> 2);
+                half scale = sScale[cur][n_block_local];
+                half neg_min = __hneg(sMin[cur][n_block_local]);
+                half2 scale_pair = __half2half2(scale);
+                half2 neg_min_pair = __half2half2(neg_min);
+                int byte_lo_idx = kk * 8 + (lane & 3);
+                int byte_hi_idx = byte_lo_idx + 4;
+                uint8_t byte_lo = sQ4[cur][n_block_local * 16 + byte_lo_idx];
+                uint8_t byte_hi = sQ4[cur][n_block_local * 16 + byte_hi_idx];
+                half2 b0 = q4_pair_to_half2_v2(byte_lo, scale_pair, neg_min_pair);
+                half2 b1 = q4_pair_to_half2_v2(byte_hi, scale_pair, neg_min_pair);
+                uint32_t b0_reg = *reinterpret_cast<uint32_t*>(&b0);
+                uint32_t b1_reg = *reinterpret_cast<uint32_t*>(&b1);
+#pragma unroll
+                for (int rm = 0; rm < kP3WRM; ++rm) {
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                        "{%0, %1, %2, %3}, "
+                        "{%4, %5, %6, %7}, "
+                        "{%8, %9}, "
+                        "{%0, %1, %2, %3};\n"
+                        : "+f"(acc[rm][rn][0]), "+f"(acc[rm][rn][1]),
+                          "+f"(acc[rm][rn][2]), "+f"(acc[rm][rn][3])
+                        : "r"(a_frag[rm][0]), "r"(a_frag[rm][1]),
+                          "r"(a_frag[rm][2]), "r"(a_frag[rm][3]),
+                          "r"(b0_reg), "r"(b1_reg));
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+#undef ISSUE_STAGE_LOAD_P5
+
+    const int groupID = lane >> 2;
+    const int lig = lane & 3;
+#pragma unroll
+    for (int rm = 0; rm < kP3WRM; ++rm) {
+        int m_base = block_m + wm * kWarpM_p5 + rm * 16;
+#pragma unroll
+        for (int rn = 0; rn < kP3WRN; ++rn) {
+            int n_base = block_n + wn * kP3WarpN + rn * 8;
+            int rows[4] = {groupID, groupID, groupID + 8, groupID + 8};
+            int cols[4] = {lig * 2 + 0, lig * 2 + 1, lig * 2 + 0, lig * 2 + 1};
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                int g_row = m_base + rows[i];
+                int g_col = n_base + cols[i];
+                if (g_row < M && g_col < N) {
+                    y[(int64_t)g_row * N + g_col] = __float2half(acc[rm][rn][i]);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace mmq_q4k_v2_detail
 
 // Tile / pipeline crossover (Phase 4 + Phase 7a sweep, RTX 5090 / 170 SMs):
@@ -822,12 +1018,34 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
     //            hide.) p3 stays as a fallback via IMP_MMQ_Q4K_V2_PIPELINE=0.
     const char* pipeline_env = std::getenv("IMP_MMQ_Q4K_V2_PIPELINE");
     int forced_pipeline = pipeline_env ? std::atoi(pipeline_env) : -1;
-    const bool use_p4 = (forced_pipeline != 0);  // default p4 everywhere
+    const bool use_p4 = (forced_pipeline != 0);  // p4 for BM=64 fallback
+    // Phase 7e: BM=128 WRM=4 bigger-tile path is DEFAULT when M ≥ 128.
+    // +7% pp e2e over p4 (BM=64) on Gemma-3 Q4_K_M. Disable via
+    // IMP_MMQ_Q4K_V2_BIG_TILE=0.
+    const char* big_tile_env = std::getenv("IMP_MMQ_Q4K_V2_BIG_TILE");
+    const bool use_p5 = !(big_tile_env && std::atoi(big_tile_env) == 0);
 
     const int blocks_bn128 = ((M + kBM - 1) / kBM) * ((N + 127) / 128);
     const bool use_bn128 = (forced_bn == 128) ||
                            (forced_bn == 0 && N >= 128 &&
                             blocks_bn128 >= kP3BlockSaturationThreshold);
+
+    if (use_p5 && M >= kBM_p5) {
+        // BM=128 path (only when M ≥ 128).
+        if (use_bn128) {
+            dim3 grid((N + 127) / 128, (M + kBM_p5 - 1) / kBM_p5);
+            mmq_q4k_v2_kernel_p5_t<128>
+                <<<grid, dim3(kThreadsPerBlock_p5), 0, stream>>>(
+                    x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        } else {
+            dim3 grid((N + 63) / 64, (M + kBM_p5 - 1) / kBM_p5);
+            mmq_q4k_v2_kernel_p5_t<64>
+                <<<grid, dim3(kThreadsPerBlock_p5), 0, stream>>>(
+                    x, eff_q4, eff_scale, eff_min, y, M, N, K);
+        }
+        return;
+    }
+
     if (use_bn128) {
         dim3 grid((N + 127) / 128, (M + kBM - 1) / kBM);
         if (use_p4) {
