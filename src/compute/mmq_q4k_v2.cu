@@ -918,4 +918,268 @@ void mmq_q5k_v2(const half* x, const uint8_t* eff_ql, const uint8_t* eff_qh,
     }
 }
 
+// ===========================================================================
+// Phase 6b: Q6_K v2 (BK=16 sub-blocks, signed quants, int8 scales)
+// ===========================================================================
+
+namespace mmq_q4k_v2_detail {
+
+struct block_q6_K {
+    uint8_t ql[128];
+    uint8_t qh[64];
+    int8_t scales[16];
+    half d;
+};
+static_assert(sizeof(block_q6_K) == 210, "block_q6_K must be 210 bytes");
+
+// GGML Q6_K bit decoding — for element i ∈ [0, 256) of a super-block,
+// returns q_unsigned ∈ [0, 63]. Mirrors `dequant_q6k_element` in
+// dequant_gpu.cu (kept here so the kernel doesn't need that include).
+__device__ __forceinline__ int q6k_decode_unsigned(const block_q6_K* bq,
+                                                   int i) {
+    int group = i >> 7;            // 0 or 1
+    int within = i & 127;          // 0..127
+    int quad = within >> 5;        // 0..3
+    int l = within & 31;           // 0..31
+    int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
+    int qh_idx = (group << 5) + l;
+    uint8_t ql_byte = bq->ql[ql_idx];
+    uint8_t low4 =
+        (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
+    uint8_t high2 = (bq->qh[qh_idx] >> (quad * 2)) & 0x3u;
+    return static_cast<int>((high2 << 4) | low4);  // [0, 63]
+}
+
+// One CTA per super-block: 256 threads dequant + write the byte stream,
+// plus 16 threads compute eff_scale/eff_min for the 16 sub-blocks.
+__global__ void q6k_prepare_kernel(const block_q6_K* __restrict__ W,
+                                   uint8_t* __restrict__ eff_q6,
+                                   half* __restrict__ eff_scale,
+                                   half* __restrict__ eff_min, int N,
+                                   int K_blocks) {
+    int n = blockIdx.y;
+    int super = blockIdx.x;
+    int tid = threadIdx.x;
+    const block_q6_K* bq = &W[n * K_blocks + super];
+
+    // Per-element byte expansion.
+    int q = q6k_decode_unsigned(bq, tid);
+    int K_global = super * 256 + tid;
+    eff_q6[(int64_t)n * (K_blocks * 256) + K_global] =
+        static_cast<uint8_t>(q);
+
+    // Per-sub-block scale (16 entries per super-block).
+    if (tid < 16) {
+        float scale = __half2float(bq->d) * static_cast<float>(bq->scales[tid]);
+        half es = __float2half(scale);
+        half em = __float2half(32.0f * scale);
+        int eff_idx = n * (K_blocks * 16) + super * 16 + tid;
+        eff_scale[eff_idx] = es;
+        eff_min[eff_idx] = em;
+    }
+}
+
+constexpr int kQ6BK = 16;   // one Q6_K sub-block per K-iter
+constexpr int kQ6WRK = 1;   // one m16n8k16 per K-step (BK = MMA_K)
+
+template <int kP3BN>
+__global__ void mmq_q6k_v2_kernel_p3_t(
+    const half* __restrict__ A, const uint8_t* __restrict__ eff_q6,
+    const half* __restrict__ eff_scale, const half* __restrict__ eff_min,
+    half* __restrict__ y, int M, int N, int K) {
+    constexpr int kP3WarpN = kP3BN / kWarpsN;
+    constexpr int kP3WRM = kWarpM / 16;     // 2
+    constexpr int kP3WRN = kP3WarpN / 8;    // 4 (BN=64) or 8 (BN=128)
+
+    const int block_m = blockIdx.y * kBM;
+    const int block_n = blockIdx.x * kP3BN;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32;
+    const int lane = tid % 32;
+    const int wm = warp / kWarpsN;
+    const int wn = warp % kWarpsN;
+
+    __shared__ __align__(16) half sA[kBM * kQ6BK];         // 64 × 16 = 2 KB
+    __shared__ __align__(16) uint8_t sQ6[kP3BN * kQ6BK];   // BN=64 → 1 KB
+    __shared__ half sScale[kP3BN];
+    __shared__ half sMin[kP3BN];
+
+    float acc[kP3WRM][kP3WRN][4];
+#pragma unroll
+    for (int i = 0; i < kP3WRM; ++i)
+#pragma unroll
+        for (int j = 0; j < kP3WRN; ++j)
+#pragma unroll
+            for (int k = 0; k < 4; ++k) acc[i][j][k] = 0.0f;
+
+    const int K_subs = K / kQ6BK;
+
+    for (int kbx = 0; kbx < K_subs; ++kbx) {
+        // ---- Load sA (64×16 halves = 1024 halves = 128 uint4 chunks) ----
+        {
+            // 1 chunk/thread.
+            int chunk = tid;
+            int row = chunk >> 1;             // BK=16 → 2 chunks per row
+            int col = (chunk & 1) << 3;       // 0 or 8
+            int g_row = block_m + row;
+            int g_col = kbx * kQ6BK + col;
+            uint4 v = make_uint4(0, 0, 0, 0);
+            if (g_row < M) {
+                v = *reinterpret_cast<const uint4*>(&A[(int64_t)g_row * K + g_col]);
+            }
+            *reinterpret_cast<uint4*>(&sA[row * kQ6BK + col]) = v;
+        }
+        // ---- Load sQ6 (BN × 16 bytes) ----
+        {
+            constexpr int kSQ6Bytes = kP3BN * kQ6BK;
+            constexpr int kSQ6Chunks = kSQ6Bytes / (kThreadsPerBlock * 8);
+#pragma unroll
+            for (int c = 0; c < kSQ6Chunks; ++c) {
+                int byte_idx = c * (kThreadsPerBlock * 8) + tid * 8;
+                int n_local = byte_idx >> 4;
+                int byte_within_n = byte_idx & 0xF;   // 0 or 8
+                int n_global = block_n + n_local;
+                uint64_t packed = 0;
+                if (n_global < N) {
+                    int64_t off =
+                        (int64_t)n_global * K + kbx * kQ6BK + byte_within_n;
+                    packed = *reinterpret_cast<const uint64_t*>(eff_q6 + off);
+                }
+                *reinterpret_cast<uint64_t*>(&sQ6[n_local * kQ6BK + byte_within_n]) =
+                    packed;
+            }
+        }
+        // ---- Load sScale, sMin ------------------------------------------
+        if (tid < kP3BN) {
+            int n_global = block_n + tid;
+            if (n_global < N) {
+                int64_t off = (int64_t)n_global * K_subs + kbx;
+                sScale[tid] = eff_scale[off];
+                sMin[tid] = eff_min[off];
+            } else {
+                sScale[tid] = __float2half(0.0f);
+                sMin[tid] = __float2half(0.0f);
+            }
+        }
+        __syncthreads();
+
+        // ---- One m16n8k16 MMA per K-iter (WRK=1) ------------------------
+        uint32_t a_frag[kP3WRM][4];
+#pragma unroll
+        for (int rm = 0; rm < kP3WRM; ++rm) {
+            int m_start = wm * kWarpM + rm * 16;
+            int row = m_start + (lane & 0xF);
+            int col = ((lane >> 4) << 3);  // 0 or 8
+            unsigned smem_addr =
+                __cvta_generic_to_shared(&sA[row * kQ6BK + col]);
+            asm volatile(
+                "ldmatrix.sync.aligned.x4.m8n8.shared.b16 "
+                "{%0, %1, %2, %3}, [%4];\n"
+                : "=r"(a_frag[rm][0]), "=r"(a_frag[rm][1]),
+                  "=r"(a_frag[rm][2]), "=r"(a_frag[rm][3])
+                : "r"(smem_addr));
+        }
+#pragma unroll
+        for (int rn = 0; rn < kP3WRN; ++rn) {
+            int n_block_local = wn * kP3WarpN + rn * 8 + (lane >> 2);
+            half scale = sScale[n_block_local];
+            half neg_min = __hneg(sMin[n_block_local]);
+            // Thread's 4 K positions within this MMA's K-range [0, 16):
+            //   (lane%4)*2 + {0, 1, 8, 9}
+            int b_off_lo = (lane & 3) * 2;          // K offsets 0, 1
+            int b_off_hi = b_off_lo + 8;            // K offsets 8, 9
+            uint16_t bytes_lo = *reinterpret_cast<uint16_t*>(
+                &sQ6[n_block_local * kQ6BK + b_off_lo]);
+            uint16_t bytes_hi = *reinterpret_cast<uint16_t*>(
+                &sQ6[n_block_local * kQ6BK + b_off_hi]);
+            int q0 = bytes_lo & 0xFF;          // q_unsigned for K offset 0
+            int q1 = (bytes_lo >> 8) & 0xFF;   //                   1
+            int q2 = bytes_hi & 0xFF;          //                   8
+            int q3 = (bytes_hi >> 8) & 0xFF;   //                   9
+            // w = eff_scale · q - eff_min  (eff_min = 32 · eff_scale, so
+            // this absorbs the (q - 32) shift)
+            half h0 = __hfma(__int2half_rn(q0), scale, neg_min);
+            half h1 = __hfma(__int2half_rn(q1), scale, neg_min);
+            half h2 = __hfma(__int2half_rn(q2), scale, neg_min);
+            half h3 = __hfma(__int2half_rn(q3), scale, neg_min);
+            half2 b0 = __halves2half2(h0, h1);
+            half2 b1 = __halves2half2(h2, h3);
+            uint32_t b0_reg = *reinterpret_cast<uint32_t*>(&b0);
+            uint32_t b1_reg = *reinterpret_cast<uint32_t*>(&b1);
+#pragma unroll
+            for (int rm = 0; rm < kP3WRM; ++rm) {
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0, %1, %2, %3}, "
+                    "{%4, %5, %6, %7}, "
+                    "{%8, %9}, "
+                    "{%0, %1, %2, %3};\n"
+                    : "+f"(acc[rm][rn][0]), "+f"(acc[rm][rn][1]),
+                      "+f"(acc[rm][rn][2]), "+f"(acc[rm][rn][3])
+                    : "r"(a_frag[rm][0]), "r"(a_frag[rm][1]),
+                      "r"(a_frag[rm][2]), "r"(a_frag[rm][3]),
+                      "r"(b0_reg), "r"(b1_reg));
+            }
+        }
+        __syncthreads();
+    }
+
+    // ---- Epilogue ----------------------------------------------------------
+    const int groupID = lane >> 2;
+    const int lig = lane & 3;
+#pragma unroll
+    for (int rm = 0; rm < kP3WRM; ++rm) {
+        int m_base = block_m + wm * kWarpM + rm * 16;
+#pragma unroll
+        for (int rn = 0; rn < kP3WRN; ++rn) {
+            int n_base = block_n + wn * kP3WarpN + rn * 8;
+            int rows[4] = {groupID, groupID, groupID + 8, groupID + 8};
+            int cols[4] = {lig * 2 + 0, lig * 2 + 1, lig * 2 + 0, lig * 2 + 1};
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                int g_row = m_base + rows[i];
+                int g_col = n_base + cols[i];
+                if (g_row < M && g_col < N) {
+                    y[(int64_t)g_row * N + g_col] = __float2half(acc[rm][rn][i]);
+                }
+            }
+        }
+    }
+}
+
+}  // namespace mmq_q4k_v2_detail
+
+void q6k_prepare_v2_layout(const void* W, uint8_t* eff_q6_out,
+                           half* eff_scale_out, half* eff_min_out, int N,
+                           int K, cudaStream_t stream) {
+    if (K % 256 != 0) return;
+    using namespace mmq_q4k_v2_detail;
+    const int K_blocks = K / 256;
+    dim3 grid(K_blocks, N);
+    dim3 block(256);   // 256 threads per super-block (one per element)
+    q6k_prepare_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const block_q6_K*>(W), eff_q6_out, eff_scale_out,
+        eff_min_out, N, K_blocks);
+}
+
+void mmq_q6k_v2(const half* x, const uint8_t* eff_q6, const half* eff_scale,
+                const half* eff_min, half* y, int M, int N, int K,
+                cudaStream_t stream) {
+    using namespace mmq_q4k_v2_detail;
+    if (K % kQ6BK != 0 || M <= 0 || N <= 0) return;
+    dim3 block(kThreadsPerBlock);
+    const int blocks_bn128 = ((M + kBM - 1) / kBM) * ((N + 127) / 128);
+    const bool use_bn128 =
+        (N >= 128) && (blocks_bn128 >= kP3BlockSaturationThreshold);
+    if (use_bn128) {
+        dim3 grid((N + 127) / 128, (M + kBM - 1) / kBM);
+        mmq_q6k_v2_kernel_p3_t<128><<<grid, block, 0, stream>>>(
+            x, eff_q6, eff_scale, eff_min, y, M, N, K);
+    } else {
+        dim3 grid((N + 63) / 64, (M + kBM - 1) / kBM);
+        mmq_q6k_v2_kernel_p3_t<64><<<grid, block, 0, stream>>>(
+            x, eff_q6, eff_scale, eff_min, y, M, N, K);
+    }
+}
+
 }  // namespace imp

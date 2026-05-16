@@ -575,4 +575,137 @@ TEST(MmqQ5KV2HMMA, LongK_M64_N64_K2560)          { run_q5k_v2_check(64, 64, 2560
 TEST(MmqQ5KV2HMMA, Realistic_M256_N512_K1024)    { run_q5k_v2_check(256, 512, 1024, 0xe6); }
 TEST(MmqQ5KV2HMMA, Bn128_M512_N256_K512)         { run_q5k_v2_check(512, 256, 512, 0xe7); }
 
+// ---------------------------------------------------------------------------
+// Phase 6b: Q6_K v2 — kernel + Phase 1 (byte expansion + scale precompute)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<uint8_t> make_random_q6k(int N, int K, unsigned seed) {
+    const int blocks = K / 256;
+    std::vector<uint8_t> h(static_cast<size_t>(N) * blocks * 210);
+    std::srand(seed);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks; ++b) {
+            uint8_t* bp = h.data() + (static_cast<size_t>(row) * blocks + b) * 210;
+            for (int i = 0; i < 128; ++i) bp[i] = static_cast<uint8_t>(std::rand() & 0xFF);  // ql
+            for (int i = 0; i < 64; ++i) bp[128 + i] = static_cast<uint8_t>(std::rand() & 0xFF);  // qh
+            for (int i = 0; i < 16; ++i) {
+                int8_t s = static_cast<int8_t>((std::rand() % 121) - 60);  // signed [-60, 60]
+                std::memcpy(bp + 192 + i, &s, 1);
+            }
+            half d = __float2half(0.001f + 0.005f * (std::rand() % 100) / 100.0f);
+            std::memcpy(bp + 208, &d, 2);
+        }
+    }
+    return h;
+}
+
+int cpu_q6k_decode_unsigned(const uint8_t* bp, int i) {
+    int group = i >> 7;
+    int within = i & 127;
+    int quad = within >> 5;
+    int l = within & 31;
+    int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
+    int qh_idx = (group << 5) + l;
+    uint8_t ql_byte = bp[ql_idx];
+    uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xF) : (ql_byte & 0xF);
+    uint8_t high2 = (bp[128 + qh_idx] >> (quad * 2)) & 0x3;
+    return static_cast<int>((high2 << 4) | low4);
+}
+
+std::vector<float> cpu_reference_q6k_gemm(const std::vector<uint8_t>& h_W,
+                                          const std::vector<half>& h_x, int M,
+                                          int N, int K) {
+    const int K_blocks = K / 256;
+    std::vector<float> y(static_cast<size_t>(M) * N, 0.0f);
+    std::vector<float> W_dq(static_cast<size_t>(N) * K, 0.0f);
+    for (int n = 0; n < N; ++n) {
+        for (int kbx = 0; kbx < K_blocks; ++kbx) {
+            const uint8_t* bp = h_W.data() + (static_cast<size_t>(n) * K_blocks + kbx) * 210;
+            const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
+            half d_h;
+            std::memcpy(&d_h, bp + 208, 2);
+            float d = __half2float(d_h);
+            for (int i = 0; i < 256; ++i) {
+                int q_unsigned = cpu_q6k_decode_unsigned(bp, i);
+                int q_signed = q_unsigned - 32;
+                int s = i >> 4;  // sub-block of 16
+                float w = d * static_cast<float>(scales[s]) * static_cast<float>(q_signed);
+                W_dq[(size_t)n * K + kbx * 256 + i] = w;
+            }
+        }
+    }
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                acc += __half2float(h_x[(size_t)m * K + k]) *
+                       W_dq[(size_t)n * K + k];
+            }
+            y[(size_t)m * N + n] = acc;
+        }
+    }
+    return y;
+}
+
+void run_q6k_v2_check(int M, int N, int K, unsigned seed,
+                      float rel_tol = 0.02f, float abs_tol = 0.30f) {
+    ASSERT_EQ(K % 256, 0);
+    auto h_W = make_random_q6k(N, K, seed);
+    std::vector<half> h_x(static_cast<size_t>(M) * K);
+    fill_random_fp16(h_x, seed ^ 0xcafe);
+
+    void* W_dev = nullptr;
+    half* x_dev = nullptr;
+    half* y_dev = nullptr;
+    uint8_t* eff_q6 = nullptr;
+    half* eff_scale = nullptr;
+    half* eff_min = nullptr;
+    const size_t bytes_y = static_cast<size_t>(M) * N * sizeof(half);
+
+    cudaMalloc(&W_dev, h_W.size());
+    cudaMalloc(&x_dev, h_x.size() * sizeof(half));
+    cudaMalloc(&y_dev, bytes_y);
+    cudaMalloc(&eff_q6, q6k_eff_q6_bytes(N, K));
+    cudaMalloc(&eff_scale, q6k_eff_scale_bytes(N, K));
+    cudaMalloc(&eff_min, q6k_eff_scale_bytes(N, K));
+
+    cudaMemcpy(W_dev, h_W.data(), h_W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(x_dev, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(y_dev, 0, bytes_y);
+
+    q6k_prepare_v2_layout(W_dev, eff_q6, eff_scale, eff_min, N, K, nullptr);
+    mmq_q6k_v2(x_dev, eff_q6, eff_scale, eff_min, y_dev, M, N, K, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<half> h_y(static_cast<size_t>(M) * N);
+    cudaMemcpy(h_y.data(), y_dev, bytes_y, cudaMemcpyDeviceToHost);
+
+    auto ref = cpu_reference_q6k_gemm(h_W, h_x, M, N, K);
+    printf("[Q6K v2 M=%d N=%d K=%d] ref[0,0]=%.4f gpu[0,0]=%.4f\n", M, N, K,
+           ref[0], __half2float(h_y[0]));
+    int m_cnt;
+    float ma, mr;
+    cmp_to_ref("Q6K_v2", h_y, ref, M, N, abs_tol, rel_tol, &m_cnt, &ma, &mr);
+    EXPECT_EQ(m_cnt, 0) << "Q6_K v2 diverges from CPU FP32 reference";
+
+    cudaFree(W_dev);
+    cudaFree(x_dev);
+    cudaFree(y_dev);
+    cudaFree(eff_q6);
+    cudaFree(eff_scale);
+    cudaFree(eff_min);
+}
+
+}  // namespace
+
+TEST(MmqQ6KV2HMMA, AlignedTile_M64_N64_K256)     { run_q6k_v2_check(64, 64, 256, 0xf1); }
+TEST(MmqQ6KV2HMMA, MultiTile_M128_N128_K512)     { run_q6k_v2_check(128, 128, 512, 0xf2); }
+TEST(MmqQ6KV2HMMA, NonMultipleM_M40_N64_K256)    { run_q6k_v2_check(40, 64, 256, 0xf3); }
+TEST(MmqQ6KV2HMMA, NonMultipleN_M64_N96_K512)    { run_q6k_v2_check(64, 96, 512, 0xf4); }
+TEST(MmqQ6KV2HMMA, LongK_M64_N64_K2560)          { run_q6k_v2_check(64, 64, 2560, 0xf5); }
+TEST(MmqQ6KV2HMMA, Realistic_M256_N512_K1024)    { run_q6k_v2_check(256, 512, 1024, 0xf6); }
+TEST(MmqQ6KV2HMMA, Bn128_M512_N256_K512)         { run_q6k_v2_check(512, 256, 512, 0xf7); }
+
 }  // namespace imp

@@ -161,4 +161,51 @@ void mmq_q5k_v2(
     int M, int N, int K,
     cudaStream_t stream);
 
+// ---------------------------------------------------------------------------
+// Phase 6b: Q6_K v2 path
+//
+// Q6_K block layout (210 bytes / 256 elements):
+//   ql[128]   : low 4 bits (GGML interleaved layout)
+//   qh[64]    : high 2 bits (GGML interleaved layout)
+//   scales[16]: signed int8, one per 16-element sub-block
+//   d (FP16)  : super-block scale
+//
+// Unlike Q4_K/Q5_K, sub-blocks are **16 elements** (not 32) and the dequant
+// formula uses signed quants centered at zero:
+//   q_unsigned = ql.nibble | (qh.bits << 4)   in [0, 63]
+//   w = d · scales[s] · (q_unsigned - 32)
+// Factorizing:
+//   eff_scale = d · scales[s]   (FP16, signed via int8 scale)
+//   eff_min   = 32 · eff_scale
+//   w = eff_scale · q_unsigned - eff_min
+// → matches Q4_K/Q5_K formula, so the same Phase 3 MMA core applies. Only
+//   differences in this kernel: BK=16 (one sub-block per K-iter), WRK=1
+//   (one m16n8k16 per K-step), and we expand the Q6_K bytes into a clean
+//   1-byte-per-element layout at Phase 1 time to avoid the GGML interleaved
+//   ql/qh bit dance in the hot loop.
+
+void q6k_prepare_v2_layout(
+    const void* W,            // [N, K/256] block_q6_K bytes
+    uint8_t* eff_q6_out,      // [N, K] uint8, each byte = q_unsigned ∈ [0, 63]
+    half* eff_scale_out,      // [N, K/16] (d · scales[s])
+    half* eff_min_out,        // [N, K/16] (32 · eff_scale)
+    int N, int K,
+    cudaStream_t stream);
+
+inline size_t q6k_eff_q6_bytes(int N, int K) {
+    return static_cast<size_t>(N) * K;
+}
+inline size_t q6k_eff_scale_bytes(int N, int K) {
+    return static_cast<size_t>(N) * (K / 16) * sizeof(half);
+}
+
+void mmq_q6k_v2(
+    const half* x,
+    const uint8_t* eff_q6,
+    const half* eff_scale,
+    const half* eff_min,
+    half* y,
+    int M, int N, int K,
+    cudaStream_t stream);
+
 }  // namespace imp
