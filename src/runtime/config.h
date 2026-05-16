@@ -31,11 +31,21 @@ struct RuntimeConfig {
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
         // cudaStreamCaptureMode passed to begin_capture / conditional bodies:
-        // "global" (default) | "relaxed" | "thread_local". "relaxed" drops the
-        // cross-thread sync constraint and may avoid CUTLASS 3.x grouped-GEMM
-        // hangs (see prefill_graph_blockers_2026_05_14). Legacy env:
-        // IMP_GRAPH_CAPTURE_MODE.
-        std::string graph_capture_mode = "global";
+        // "global" | "relaxed" (default) | "thread_local". "relaxed" drops the
+        // cross-thread sync constraint that CUTLASS 3.x grouped-GEMM
+        // collective scheduler is suspected to deadlock on under prefill
+        // capture (Blocker B in prefill_graph_blockers_2026_05_14). Default
+        // flipped to "relaxed" 2026-05-16 as the M3-probe for prefill_graph
+        // unblock — `cudaStreamCaptureModeRelaxed` is a strict superset of
+        // capturable behaviors so the decode fast path that previously
+        // worked under "global" continues to work, while the prefill path
+        // gets a real chance of capturing without hanging.
+        //
+        // Set graph_capture_mode = "global" via imp.conf to opt back into
+        // the legacy strict mode (any decode regression should also be
+        // investigated under "thread_local" before assuming relaxed is the
+        // cause). Legacy env: IMP_GRAPH_CAPTURE_MODE.
+        std::string graph_capture_mode = "relaxed";
         // Opt-in: capture prefill into a CUDA graph (in addition to decode).
         // Legacy env: IMP_PREFILL_GRAPH.
         bool prefill_graph = false;
