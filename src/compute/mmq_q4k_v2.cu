@@ -358,6 +358,19 @@ __device__ __forceinline__ half2 q4_pair_to_half2(uint8_t byte, half scale,
     return __halves2half2(hlo, hhi);
 }
 
+// Phase 7c: vectorized 2-nibble dequant via __hfma2. Same math as
+// q4_pair_to_half2 but cuts the FMA count in half by issuing a single
+// half2 fused-multiply-add per byte. Caller pre-packs `scale_pair` and
+// `neg_min_pair` once per (rn) iteration.
+__device__ __forceinline__ half2 q4_pair_to_half2_v2(uint8_t byte,
+                                                      half2 scale_pair,
+                                                      half2 neg_min_pair) {
+    int lo = byte & 0xF;
+    int hi = (byte >> 4) & 0xF;
+    half2 q = __halves2half2(__int2half_rn(lo), __int2half_rn(hi));
+    return __hfma2(q, scale_pair, neg_min_pair);
+}
+
 // ---------------------------------------------------------------------------
 // cp.async helpers (Phase 7): GMEM → SMEM transfers that issue async then let
 // the warp continue. Predicated form zero-fills SMEM when src_size=0.
@@ -524,12 +537,14 @@ __global__ void mmq_q4k_v2_kernel_p3_t(
                 int n_block_local = wn * kP3WarpN + rn * 8 + (lane >> 2);
                 half scale = sScale[n_block_local];
                 half neg_min = __hneg(sMin[n_block_local]);
+                half2 scale_pair = __half2half2(scale);
+                half2 neg_min_pair = __half2half2(neg_min);
                 int byte_lo_idx = kk * 8 + (lane & 3);
                 int byte_hi_idx = byte_lo_idx + 4;
                 uint8_t byte_lo = sQ4[n_block_local * 16 + byte_lo_idx];
                 uint8_t byte_hi = sQ4[n_block_local * 16 + byte_hi_idx];
-                half2 b0 = q4_pair_to_half2(byte_lo, scale, neg_min);
-                half2 b1 = q4_pair_to_half2(byte_hi, scale, neg_min);
+                half2 b0 = q4_pair_to_half2_v2(byte_lo, scale_pair, neg_min_pair);
+                half2 b1 = q4_pair_to_half2_v2(byte_hi, scale_pair, neg_min_pair);
                 uint32_t b0_reg = *reinterpret_cast<uint32_t*>(&b0);
                 uint32_t b1_reg = *reinterpret_cast<uint32_t*>(&b1);
 #pragma unroll
@@ -708,12 +723,14 @@ __global__ void mmq_q4k_v2_kernel_p4_t(
                 int n_block_local = wn * kP3WarpN + rn * 8 + (lane >> 2);
                 half scale = sScale[cur][n_block_local];
                 half neg_min = __hneg(sMin[cur][n_block_local]);
+                half2 scale_pair = __half2half2(scale);
+                half2 neg_min_pair = __half2half2(neg_min);
                 int byte_lo_idx = kk * 8 + (lane & 3);
                 int byte_hi_idx = byte_lo_idx + 4;
                 uint8_t byte_lo = sQ4[cur][n_block_local * 16 + byte_lo_idx];
                 uint8_t byte_hi = sQ4[cur][n_block_local * 16 + byte_hi_idx];
-                half2 b0 = q4_pair_to_half2(byte_lo, scale, neg_min);
-                half2 b1 = q4_pair_to_half2(byte_hi, scale, neg_min);
+                half2 b0 = q4_pair_to_half2_v2(byte_lo, scale_pair, neg_min_pair);
+                half2 b1 = q4_pair_to_half2_v2(byte_hi, scale_pair, neg_min_pair);
                 uint32_t b0_reg = *reinterpret_cast<uint32_t*>(&b0);
                 uint32_t b1_reg = *reinterpret_cast<uint32_t*>(&b1);
 #pragma unroll
