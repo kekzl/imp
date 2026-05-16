@@ -2134,9 +2134,27 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
         s_norm_fp32_d = d;
     }
 
+    // M2 from review/phase5_synthesis.md §2.2: batch the per-token expert-
+    // index D2H + sync into a single prefetch at function entry. Reduces
+    // 2 * n syncs (one per token, three GEMVs each) down to ONE sync per
+    // layer call. Restores the prefill graph-capture story up to (but not
+    // including) the grouped-mmvq kernel work that would eliminate the
+    // remaining sync — see follow-up: replacing this function with a
+    // device-indexed grouped mmvq lets the whole layer capture cleanly.
+    //
+    // top_k is bounded by FFN active-expert count (max 32 per kernel
+    // launch guard at line ~2154 in the old per-token form). Use a
+    // std::vector since n*top_k can exceed the old 32-entry stack array.
+    std::vector<int32_t> h_all_experts(static_cast<size_t>(n) * top_k);
+    cudaMemcpyAsync(h_all_experts.data(), routing.expert_indices.data,
+                    static_cast<size_t>(n) * top_k * sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
     for (int t = 0; t < n; t++) {
-        const int32_t* tok_experts = static_cast<const int32_t*>(routing.expert_indices.data) +
-                                     static_cast<int64_t>(t) * top_k;
+        const int32_t* tok_experts_dev = static_cast<const int32_t*>(routing.expert_indices.data) +
+                                         static_cast<int64_t>(t) * top_k;
+        (void)tok_experts_dev;  // device pointer kept around for clarity; reads come from host array
         const float* tok_weights = static_cast<const float*>(routing.expert_weights.data) +
                                    static_cast<int64_t>(t) * top_k;
 
@@ -2150,10 +2168,10 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
             tok_norm_f32 = nullptr;
         }
 
-        int32_t h_experts[32];
-        cudaMemcpyAsync(h_experts, tok_experts, top_k * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
+        // Per-token expert IDs: read from the pre-fetched host array (no D2H,
+        // no sync). Old form: stack `int32_t h_experts[32]` + per-token
+        // cudaMemcpyAsync + cudaStreamSynchronize — M2 batched both above.
+        const int32_t* h_experts = h_all_experts.data() + static_cast<size_t>(t) * top_k;
 
         auto do_mmvq = [&](const uint8_t* w, half* out, QType qt, int rows, int cols) {
             if (tok_norm_f32) {
