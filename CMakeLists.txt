@@ -145,7 +145,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_grouped.cu
     src/compute/gemv_ggml_compat.cu
     src/compute/ggml_mmvq.cu
-    src/compute/mmq_q4k_v2.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
@@ -189,16 +188,16 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxf4nvf4_sm120.cu)
-    # Bench/probe/validate TUs: only consumed by tests and microbenches, never
-    # by production runtime. Skip in server-only builds to cut ~30-60s nvcc.
+    # Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
+    # Validate/ref TUs that still serve internal call sites stay in src/compute/.
     if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxf4nvf4_probe.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_variants_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/tma_block_scale_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/fmha_v_load_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
     endif()
     if(IMP_BUILD_TESTS)
         set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
@@ -232,6 +231,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/graph.cpp
     src/graph/executor.cu
     src/graph/executor_kernels.cu
+    src/graph/gemm_kernel_registry.cu
     src/graph/executor_workspace.cu
     src/graph/executor_workspace_buffers.cu
     src/graph/executor_kv_write.cu
@@ -278,6 +278,7 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests  # for tests/bench/ headers (test/bench TUs only)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 
@@ -422,9 +423,10 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm.cu
         tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_dp4a.cu
+        tests/test_gemm_kernel_registry.cu
+        tests/test_cluster_launch.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
-        tests/test_mmq_q4k_v2.cu
         tests/test_reduce.cu
         tests/test_softmax.cu
         tests/test_sampling.cu

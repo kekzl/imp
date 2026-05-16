@@ -31,11 +31,21 @@ struct RuntimeConfig {
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
         // cudaStreamCaptureMode passed to begin_capture / conditional bodies:
-        // "global" (default) | "relaxed" | "thread_local". "relaxed" drops the
-        // cross-thread sync constraint and may avoid CUTLASS 3.x grouped-GEMM
-        // hangs (see prefill_graph_blockers_2026_05_14). Legacy env:
-        // IMP_GRAPH_CAPTURE_MODE.
-        std::string graph_capture_mode = "global";
+        // "global" | "relaxed" (default) | "thread_local". "relaxed" drops the
+        // cross-thread sync constraint that CUTLASS 3.x grouped-GEMM
+        // collective scheduler is suspected to deadlock on under prefill
+        // capture (Blocker B in prefill_graph_blockers_2026_05_14). Default
+        // flipped to "relaxed" 2026-05-16 as the M3-probe for prefill_graph
+        // unblock — `cudaStreamCaptureModeRelaxed` is a strict superset of
+        // capturable behaviors so the decode fast path that previously
+        // worked under "global" continues to work, while the prefill path
+        // gets a real chance of capturing without hanging.
+        //
+        // Set graph_capture_mode = "global" via imp.conf to opt back into
+        // the legacy strict mode (any decode regression should also be
+        // investigated under "thread_local" before assuming relaxed is the
+        // cause). Legacy env: IMP_GRAPH_CAPTURE_MODE.
+        std::string graph_capture_mode = "relaxed";
         // Opt-in: capture prefill into a CUDA graph (in addition to decode).
         // Legacy env: IMP_PREFILL_GRAPH.
         bool prefill_graph = false;
@@ -111,9 +121,12 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
-        // Populate Q4_K v2 weight cache at model load. Legacy env:
-        // IMP_FORCE_Q4K_V2.
-        bool force_q4k_v2 = false;
+        // R5 (review/phase5_synthesis.md §5): opt into the new GemmKernel
+        // registry. Slice 1 has only the FP16 tier wired; remaining tiers
+        // (FP8, NVFP4, CUTLASS_NVFP4, MXFP4) still go through the legacy
+        // gemm_dispatch_impl regardless of this flag. Default OFF until
+        // every tier is migrated.
+        bool use_kernel_registry = false;
     } gemm;
 
     struct Gemma4 {

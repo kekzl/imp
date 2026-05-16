@@ -1,5 +1,7 @@
 #pragma once
 
+#include "model/model_config.h"  // FFNActivation
+
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
@@ -60,6 +62,30 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
                                         const int* d_offsets, int expanded, int K, int ne,
                                         cudaStream_t stream);
+
+// Fused activation + NVFP4 CUTLASS quantize for the MoE down-projection input.
+// Replaces apply_expert_activation(gate, up -> swiglu) + quantize_fp16_to_nvfp4_cutlass_moe(swiglu).
+// Reads gate + up directly from HBM, computes the activation in registers, and
+// writes only the packed FP4 + SFA — saving one full HBM round-trip of the
+// swiglu intermediate per MoE layer prefill call (~188 MiB on Qwen3-Coder
+// NVFP4 at expanded=32k, eff=2880; ~+5-10% pp512 per review/phase5_synthesis
+// §2.2 M1).
+//
+//   gate        : [expanded, K] FP16, OR nullptr when non_gated_experts=true
+//                 (RELU_SQR reads up only).
+//   up          : [expanded, K] FP16
+//   dst_packed  : [expanded, K/2] packed FP4 nibbles
+//   d_sfa_bases : [ne] per-expert SFA base pointers
+//   d_offsets   : [ne+1] cumulative row offsets
+//   act_type    : FFNActivation::SWIGLU / GEGLU / RELU_SQR
+//
+// Behavior is bit-identical to (apply_expert_activation + quantize_..._moe)
+// on the SWIGLU/GEGLU paths because both compute the activation in float
+// before quantization. RELU_SQR is also fused (gate ignored).
+void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
+                                                  void* dst_packed, uint8_t* const* d_sfa_bases,
+                                                  const int* d_offsets, int expanded, int K, int ne,
+                                                  FFNActivation act_type, cudaStream_t stream);
 
 // Run CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM: D = alpha * A x B^T
 //   A (activation): [M, K] NVFP4 RowMajor + SFA scale factors

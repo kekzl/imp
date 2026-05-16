@@ -26,7 +26,7 @@
 // Hardware: RTX 5090 sm_120a, CUDA 13.2.1.
 // =============================================================================
 
-#include "compute/tma_block_scale_bench.h"
+#include "bench/tma_block_scale_bench.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cstdint>

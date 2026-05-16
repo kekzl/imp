@@ -21,7 +21,7 @@
 // memory engines, the same way the FMHA kernel does in practice.
 // =============================================================================
 
-#include "compute/fmha_v_load_bench.h"
+#include "bench/fmha_v_load_bench.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

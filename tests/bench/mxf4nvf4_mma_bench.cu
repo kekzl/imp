@@ -25,7 +25,7 @@
 // effort?" (Project B Stage 4 gate.)
 // =============================================================================
 
-#include "compute/mxf4nvf4_mma_bench.h"
+#include "bench/mxf4nvf4_mma_bench.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>

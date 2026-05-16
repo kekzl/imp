@@ -124,6 +124,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     q8_1_sz / 1024.0, d8_sz / 1024.0, max_blocks, max_k, max_moe_down_blocks);
             }
         }
+
+        // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
+        // ggml_mmvq_q*_kernel hot-path in executor_kernels.cu. Sized for the
+        // worst case (max_tokens × max_k) so the hot path never re-allocates
+        // (capture-safe). QW1 from review/phase5_synthesis.md §2.1.
+        if (max_k > 0 && max_tokens_ > 0) {
+            prewarm_mmvq_scratch(max_tokens_, max_k);
+        }
     }
 
     // Split-K paged attention scratch buffer.
@@ -890,12 +898,6 @@ void GraphExecutor::free_buffers() {
             free_cutlass_mxfp4_weight(mw);
         wcache_.cutlass_mxfp4.clear();
         wcache_.cutlass_mxfp4_bytes = 0;
-        // Q4_K v2 cache (single owning blob per entry: vram_alloc'd as eff_q4 base)
-        for (auto& [ptr, entry] : wcache_.q4k_v2) {
-            if (entry.eff_q4) vram_free(vram_alloc_, entry.eff_q4);
-        }
-        wcache_.q4k_v2.clear();
-        wcache_.q4k_v2_bytes = 0;
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data) {

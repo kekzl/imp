@@ -595,6 +595,20 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                    : nullptr;
     const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
 
+    // L2 streaming hint for the LM head projection (QW3 from review/phase5_synthesis.md §2.1):
+    // output_proj is huge (vocab_size × d_model — ~780 MiB for Qwen3-8B Q8_0) and
+    // touched exactly once per forward, so it pollutes L2 if cached normally. The
+    // streaming policy marks the read as evict-on-touch so the cache stays available
+    // for KV-cache and other reuse-heavy data the next decode step will need.
+    // num_bytes is clamped to cudaDevAttrMaxAccessPolicyWindowSize (128 MiB on 5090)
+    // inside set_l2_streaming; the first 128 MiB of the weight matters most because
+    // mid-decode the vocab logits row exits L2 before it can be re-read anyway.
+    {
+        const Tensor& w = model_->output_proj();
+        if (w.data && w.nbytes() > 0)
+            set_l2_streaming(stream, w.data, w.nbytes());
+    }
+
     if (state.is_prefill && !state.all_logits) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);

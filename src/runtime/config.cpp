@@ -194,8 +194,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
     else if (eq("gemm.no_mmvq_q8_0"))
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
-    else if (eq("gemm.force_q4k_v2"))
-        cfg.gemm.force_q4k_v2 = parse_bool(val, cfg.gemm.force_q4k_v2);
+    else if (eq("gemm.use_kernel_registry"))
+        cfg.gemm.use_kernel_registry = parse_bool(val, cfg.gemm.use_kernel_registry);
 
     // [gemma4]
     else if (eq("gemma4.fp32_gemm_out"))
@@ -297,10 +297,6 @@ std::string home_dir() {
 // fields before [imp.conf] file overrides. Semantics preserved exactly
 // per original call-site checks (see review/phase3_maint.md §9.1).
 void seed_from_env(RuntimeConfig& cfg) {
-    // gemm.force_q4k_v2 — IMP_FORCE_Q4K_V2: presence enables (any value).
-    if (std::getenv("IMP_FORCE_Q4K_V2") != nullptr)
-        cfg.gemm.force_q4k_v2 = true;
-
     // moe.reserve_mib — IMP_MOE_RESERVE_MIB: integer MiB.
     if (const char* e = std::getenv("IMP_MOE_RESERVE_MIB"))
         cfg.moe.reserve_mib = parse_int(e, cfg.moe.reserve_mib);

@@ -3,7 +3,6 @@
 #include "graph/executor_helpers.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/mmq_q4k_v2.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -661,92 +660,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // Deduct Phase 1 allocation from shared budget
     deduct_budget(remaining_budget, total_cache_bytes);
-
-    // --- Phase 1b: Q4_K v2 eff_* cache (opt-in via IMP_FORCE_Q4K_V2=1) ---
-    //
-    // Eagerly runs Phase 1a (eff_scale, eff_min precompute) and Phase 1b
-    // (Q4 byte permutation) per Q4_K weight so the hot path can call
-    // mmq_q4k_v2 directly with cached eff_* pointers — no per-call
-    // cudaMalloc, no per-call Phase 1. Eager precompute keeps the dispatch
-    // graph-capture safe.
-    //
-    // Layout per cache entry: one VRAM blob of N · K/2 + 2 · N · K/16 bytes
-    // (≈ 0.625·N·K, vs the FP16 cache's 2.0·N·K).
-    //
-    // Off by default: end-to-end on real Q4_K_M models (Gemma-3-12B,
-    // Qwen3.6-35B) FP16-cache + cuBLAS-FP16-TC wins by 4-6 % over v2, even
-    // though v2 wins microbench. Enable for VRAM-constrained scenarios
-    // where the FP16 cache can't fit, or to A/B the kernel.
-    if (imp::RuntimeConfig::current().gemm.force_q4k_v2) {
-        size_t q4k_v2_count = 0;
-        size_t q4k_v2_total = 0;
-        bool q4k_v2_exhausted = false;
-        auto add_q4k_v2 = [&](const Tensor& w) {
-            if (q4k_v2_exhausted) return;
-            if (!w.data || w.qtype != QType::Q4_K) return;
-            if (wcache_.q4k_v2.count(w.data)) return;    // already cached
-            if (w.shape[1] % 256 != 0) return;           // K must be Q4_K-aligned
-            int N = static_cast<int>(w.shape[0]);
-            int K = static_cast<int>(w.shape[1]);
-            const size_t eff_q4_bytes =
-                static_cast<size_t>(N) * (K / 32) * 16u;
-            const size_t eff_scale_bytes =
-                static_cast<size_t>(N) * (K / 32) * sizeof(half);
-            const size_t total_bytes = eff_q4_bytes + 2 * eff_scale_bytes;
-            if (q4k_v2_total + total_bytes > remaining_budget) {
-                q4k_v2_exhausted = true;
-                IMP_LOG_INFO(
-                    "Q4_K v2 cache: VRAM budget reached after %zu tensors "
-                    "(%.1f MiB), remaining weights stay on dequant+cuBLAS "
-                    "fallback",
-                    q4k_v2_count, q4k_v2_total / (1024.0 * 1024.0));
-                return;
-            }
-            void* blob = vram_alloc(vram_alloc_, total_bytes, "q4k_v2_eff");
-            if (!blob) {
-                q4k_v2_exhausted = true;
-                IMP_LOG_WARN("Q4_K v2 cache: alloc failed after %zu tensors",
-                             q4k_v2_count);
-                return;
-            }
-            Q4KV2CacheEntry entry;
-            entry.eff_q4 = static_cast<uint8_t*>(blob);
-            entry.eff_scale = reinterpret_cast<half*>(entry.eff_q4 + eff_q4_bytes);
-            entry.eff_min =
-                entry.eff_scale + static_cast<size_t>(N) * (K / 32);
-            entry.N = N;
-            entry.K = K;
-            entry.total_bytes = total_bytes;
-            q4k_precompute_eff_scales(w.data, entry.eff_scale, entry.eff_min,
-                                       N, K, stream);
-            q4k_permute_to_v2_layout(w.data, entry.eff_q4, N, K, stream);
-            wcache_.q4k_v2[w.data] = entry;
-            q4k_v2_total += total_bytes;
-            q4k_v2_count++;
-        };
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            add_q4k_v2(L.wq);
-            add_q4k_v2(L.wk);
-            add_q4k_v2(L.wv);
-            add_q4k_v2(L.wo);
-            add_q4k_v2(L.w_gate);
-            add_q4k_v2(L.w_up);
-            add_q4k_v2(L.w_down);
-            add_q4k_v2(L.w_gate_shared);
-            add_q4k_v2(L.w_up_shared);
-            add_q4k_v2(L.w_down_shared);
-        }
-        add_q4k_v2(model_->out_proj_);
-
-        if (q4k_v2_count > 0) {
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_.q4k_v2_bytes = q4k_v2_total;
-            IMP_LOG_INFO("Q4_K v2 eff cache: %zu tensors, %.2f MiB",
-                         q4k_v2_count, q4k_v2_total / (1024.0 * 1024.0));
-        }
-        deduct_budget(remaining_budget, q4k_v2_total);
-    }
 
     // --- Phase 2: FP8 cache for uncached weights (primary when wcache_.use_fp8) ---
     // When wcache_.use_fp8 is true and Phase 1 was skipped, this is the primary path
@@ -2526,9 +2439,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 return true;
             };
 
+        int eligible_layers = 0;  // layers that have any MoE expert ptrs
+        int built_layers = 0;
+        std::vector<int> failed_layers;
         for (int li = 0; li < n_layers; ++li) {
             const auto& L = model_->layer(li);
             auto& c = moe_.per_layer_da_cache[li];
+            const bool moe_layer = !L.expert_up_ids.empty() || !L.expert_down_ids.empty() ||
+                                   !L.expert_gate_ids.empty();
+            if (!moe_layer) {
+                // Pure dense layer in a hybrid model (e.g. attention-only layer
+                // alongside MoE layers). Not eligible for the da_cache; skip
+                // without counting against the must-populate gate.
+                continue;
+            }
+            ++eligible_layers;
             bool g_ok = !L.expert_gate_ids.empty() &&
                         build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
                                    c.d_gate_SFB_ptrs, c.d_gate_alpha);
@@ -2539,14 +2464,46 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // For non-gated experts (e.g. Gemma-4 SwiGLU absorbing W_gate),
             // expert_gate_ids may be empty by design — accept up+down only.
             c.ready = (g_ok || L.expert_gate_ids.empty()) && u_ok && d_ok;
-            any_built = any_built || c.ready;
+            if (c.ready) {
+                ++built_layers;
+                any_built = true;
+            } else {
+                failed_layers.push_back(li);
+            }
+        }
+        // QW8 from review/phase5_synthesis.md §2.1: hard-fail (not log-INFO)
+        // when the NVFP4 da_cache populates <100% of MoE-eligible layers.
+        // Partial coverage means the per-layer fallback fires for the missing
+        // layers and decode silently regresses ~5× on Qwen3-Coder / Gemma-4
+        // NVFP4 (per moe_prefill_graphs_plan_2026_05_10 + cuda_graphs_moe_works).
+        // A partial build is almost always a load-time symptom of a
+        // mismatched expert layout or a budget that fell short of needed
+        // device allocations — the right response is to fail loud at init
+        // rather than ship the user a slow build.
+        if (eligible_layers > 0 && built_layers < eligible_layers) {
+            std::string failed_str;
+            for (size_t i = 0; i < failed_layers.size() && i < 16; ++i) {
+                if (!failed_str.empty()) failed_str += ", ";
+                failed_str += std::to_string(failed_layers[i]);
+            }
+            if (failed_layers.size() > 16) failed_str += ", …";
+            IMP_LOG_FATAL(
+                "NVFP4 da_cache: only %d/%d MoE-eligible layers populated. "
+                "Failing layers: [%s]. Partial coverage forces the per-layer "
+                "fallback dispatch (~5× slower decode on NVFP4 MoE models). "
+                "Likely cause: missing expert_*_ids, invalid CutlassNvFP4 "
+                "weight handles, or cudaMalloc failure for the per-layer "
+                "ptr arrays. Aborting before the engine silently ships a "
+                "slow build.",
+                built_layers, eligible_layers, failed_str.c_str());
+            std::abort();
         }
         if (any_built) {
             IMP_LOG_INFO(
                 "Pre-cached per-layer NVFP4 device-args ptr arrays for "
-                "%d layers × 3 projections × %d experts (~%.1f KiB)",
-                n_layers, ne,
-                (n_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
+                "%d/%d layers × 3 projections × %d experts (~%.1f KiB)",
+                built_layers, eligible_layers, ne,
+                (built_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
                     1024.0);
         }
         }  // ne > 0

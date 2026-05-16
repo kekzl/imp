@@ -2639,12 +2639,29 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         decode_batch_pool_.is_allocated()) {
         auto& graph_runner = decode_graph_pool_[graph_idx];
 
-        if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
+        // P5 §2.2 M4: pow-2 bucket the max_blocks_per_seq before comparing.
+        // The decode_batch_pool_ padding (engine.cpp:2456-2468) already lifts
+        // batch.max_blocks_per_seq to pool_max, so in practice this comparison
+        // never trips during steady-state decode — but if a future path
+        // bypasses the pool (e.g. spec-decode verify), pow-2 bucketing caps
+        // the re-capture frequency to log2(max_blocks) events per decode
+        // instead of one per 16-token boundary. Re-capture cost is
+        // dominated by the eager forward that builds the new graph
+        // (~5-10 ms on Qwen3-8B Q8_0) so the bucket pays back across long
+        // contexts.
+        auto bucket_pow2 = [](int x) -> int {
+            if (x <= 1) return 1;
+            int b = 1;
+            while (b < x) b <<= 1;
+            return b;
+        };
+        const int bucketed_max_blocks = bucket_pow2(gpu_batch.max_blocks_per_seq);
+        if (bucketed_max_blocks != last_decode_max_blocks_per_graph_[graph_idx]) {
             // Topology stable across max_blocks growth (same kernels, only
             // grid dims / params differ) — cudaGraphExecUpdate handles this
             // without tearing down the exec + graph mem pool.
             graph_runner.invalidate_for_update();
-            last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
+            last_decode_max_blocks_per_graph_[graph_idx] = bucketed_max_blocks;
         }
         // Graph captures ONLY forward_logits — sampling runs eager after
         Tensor logits_out;

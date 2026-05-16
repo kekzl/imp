@@ -1,5 +1,6 @@
 #include "graph/executor_kernels.h"
 #include "graph/gemm_context.h"
+#include "graph/gemm_kernel_registry.h"
 #include "graph/executor.h"
 #include "core/logging.h"
 #include "runtime/config.h"
@@ -14,13 +15,80 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
-#include "compute/mmq_q4k_v2.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
+#include <atomic>
+
 namespace imp {
+
+// ---------------------------------------------------------------------------
+// MMVQ (Q8_1-input GEMV) scratch — file-scope, sized once at workspace init
+// via prewarm_mmvq_scratch(). The hot-path mmvq_scratch_get_or_grow() reads
+// the cached size; the grow branch (cudaFree+cudaMalloc) is the cold-path
+// fallback and capture-unsafe — engine init MUST prewarm to model max dims.
+// ---------------------------------------------------------------------------
+namespace {
+void* g_mmvq_scratch = nullptr;
+size_t g_mmvq_scratch_size = 0;
+}  // namespace
+
+void prewarm_mmvq_scratch(int max_tokens, int max_K) {
+    if (max_tokens <= 0 || max_K <= 0)
+        return;
+    const size_t per_call = static_cast<size_t>(max_tokens) * ((max_K + 31) / 32) * 36;
+    const size_t need = per_call * 2;
+    if (g_mmvq_scratch && g_mmvq_scratch_size >= need)
+        return;
+    if (g_mmvq_scratch)
+        IMP_CUDA_CHECK_LOG(cudaFree(g_mmvq_scratch));
+    cudaError_t err = cudaMalloc(&g_mmvq_scratch, need);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("prewarm_mmvq_scratch: cudaMalloc(%zu) failed: %s",
+                      need, cudaGetErrorString(err));
+        g_mmvq_scratch = nullptr;
+        g_mmvq_scratch_size = 0;
+        return;
+    }
+    g_mmvq_scratch_size = need;
+    IMP_LOG_INFO("MMVQ scratch pre-warmed: %.2f KiB (max_tokens=%d, max_K=%d)",
+                 need / 1024.0, max_tokens, max_K);
+}
+
+static void mmvq_scratch_get_or_grow(size_t need, void** out_buf, size_t* out_size) {
+    if (g_mmvq_scratch && g_mmvq_scratch_size >= need) {
+        *out_buf = g_mmvq_scratch;
+        *out_size = g_mmvq_scratch_size;
+        return;
+    }
+    // Cold path: prewarm missed (or model dim changed mid-run). Re-grow.
+    // Capture-unsafe; emits one ERROR log so the missing prewarm is visible.
+    static std::atomic<bool> s_warned{false};
+    if (!s_warned.exchange(true)) {
+        IMP_LOG_ERROR(
+            "mmvq_scratch_get_or_grow: hot-path grow fired (need=%zu, have=%zu) — "
+            "engine init did not call prewarm_mmvq_scratch() with the model's "
+            "(max_tokens, max_K). cudaMalloc inside graph capture will fail.",
+            need, g_mmvq_scratch_size);
+    }
+    if (g_mmvq_scratch)
+        IMP_CUDA_CHECK_LOG(cudaFree(g_mmvq_scratch));
+    cudaError_t err = cudaMalloc(&g_mmvq_scratch, need * 2);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("mmvq_scratch_get_or_grow: cudaMalloc(%zu) failed: %s",
+                      need * 2, cudaGetErrorString(err));
+        g_mmvq_scratch = nullptr;
+        g_mmvq_scratch_size = 0;
+        *out_buf = nullptr;
+        *out_size = 0;
+        return;
+    }
+    g_mmvq_scratch_size = need * 2;
+    *out_buf = g_mmvq_scratch;
+    *out_size = g_mmvq_scratch_size;
+}
 
 // ---------------------------------------------------------------------------
 // Device helpers for paged KV cache block table lookup
@@ -2010,8 +2078,7 @@ static void gemm_dispatch_impl(
     const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache, void* cutlass_act_data,
     void* cutlass_act_sf, void* cutlass_workspace, size_t cutlass_workspace_size,
     const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache, void* mxfp4_act_sf,
-    void* mxfp4_workspace, size_t mxfp4_workspace_size,
-    const std::unordered_map<const void*, Q4KV2CacheEntry>* q4k_v2_cache, float beta) {
+    void* mxfp4_workspace, size_t mxfp4_workspace_size, float beta) {
     // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
     // below; callers must ensure their preconditions route there.
     // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
@@ -2079,10 +2146,23 @@ static void gemm_dispatch_impl(
                 int N = static_cast<int>(res.N);
                 quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data, cutlass_act_sf, M, K, stream);
 
-                // MXFP4 CUTLASS: UE8M0 scales per 32 elements (alternative to NVFP4)
+                // MXFP4 CUTLASS branch (UE8M0 scales per 32 elements). Fires
+                // only when the SAME weight.data exists in BOTH cutlass_nvfp4
+                // and cutlass_mxfp4 caches — review/phase3_maint.md §5.1
+                // claimed the loader never does this. convert_nvfp4_to_mxfp4_cutlass
+                // (executor_pre_dequant.cu:1518) IS active though, so this
+                // path is plausible. Instrumented (log-once) to confirm
+                // before deletion in a follow-up. See review/phase5_synthesis.md
+                // §7 dead/dormant verdict — needs production trace.
                 if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
                     auto mx_it = mxfp4_cache->find(weight.data);
                     if (mx_it != mxfp4_cache->end()) {
+                        static std::atomic<bool> s_logged{false};
+                        if (!s_logged.exchange(true)) {
+                            IMP_LOG_INFO(
+                                "QW7-probe: dual-cache NVFP4+MXFP4 branch fired "
+                                "(weight=%p M=%d N=%d K=%d) — branch is NOT dead", weight.data, M, N, K);
+                        }
                         quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data, mxfp4_act_sf, M, K,
                                                        stream);
                         bool ok = gemm_mxfp4_cutlass_sm120(cutlass_act_data, mxfp4_act_sf, mx_it->second,
@@ -2141,45 +2221,16 @@ static void gemm_dispatch_impl(
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
                     !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
 
-    // Q4_K v2 HMMA path (opt-in, off by default).
-    //
-    // Microbench beats dequant+cuBLAS by 2-4×, but end-to-end on real models
-    // (Gemma-3-12B, Qwen3.6-35B Q4_K_M) the FP16-cache + cuBLAS-FP16-TC
-    // baseline wins by 4-6 % because the FP16 cache absorbs the hot weights.
-    // Frozen as opt-in for VRAM-constrained scenarios where the FP16 cache
-    // can't fit — set IMP_FORCE_Q4K_V2=1 to enable cache population
-    // (executor_pre_dequant.cu) and this dispatch in one step.
-    //
-    // Gating is by cache presence: the cache stays empty unless
-    // IMP_FORCE_Q4K_V2 was set at model load, so the runtime cost here is a
-    // single nullptr/empty-map check on the hot path.
-    if (q4k_v2_cache != nullptr && qtype == QType::Q4_K &&
-        input.qtype == QType::F16 && !fp32_output &&
-        static_cast<int>(input.shape[0]) >= 64) {
-        auto it = q4k_v2_cache->find(weight.data);
-        if (it != q4k_v2_cache->end()) {
-            int M = static_cast<int>(input.shape[0]);
-            mmq_q4k_v2(static_cast<const half*>(input.data), it->second.eff_q4,
-                       it->second.eff_scale, it->second.eff_min,
-                       static_cast<half*>(output.data), M, it->second.N,
-                       it->second.K, stream);
-            return;
-        }
-    }
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
-        // Allocate scratch for Q8_1 quantization
+        // Pre-warm-or-grow scratch. After workspace init, the hot-path size
+        // check is always false (no alloc, no cudaMalloc inside graph capture).
         size_t q8_need = static_cast<size_t>(M) * ((K + 31) / 32) * 36;
-        static void* s_mmvq_scratch = nullptr;
-        static size_t s_mmvq_scratch_size = 0;
-        if (!s_mmvq_scratch || s_mmvq_scratch_size < q8_need) {
-            if (s_mmvq_scratch)
-                cudaFree(s_mmvq_scratch);
-            cudaMalloc(&s_mmvq_scratch, q8_need * 2);
-            s_mmvq_scratch_size = q8_need * 2;
-        }
+        void* s_mmvq_scratch = nullptr;
+        size_t s_mmvq_scratch_size = 0;
+        mmvq_scratch_get_or_grow(q8_need, &s_mmvq_scratch, &s_mmvq_scratch_size);
         if (qtype == QType::Q4_K)
             ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
                           M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
@@ -2314,14 +2365,45 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* nv4 = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
-    const auto* q4k_v2 = (wc->q4k_v2.empty() || ctx.force_fp16) ? nullptr : &wc->q4k_v2;
+
+    // R5 Slice 1: when gemm.use_kernel_registry is enabled, try the new
+    // dispatch table first. Only the FP16 tier is wired in Slice 1; other
+    // tiers fall through to the legacy gemm_dispatch_impl below.
+    if (RuntimeConfig::current().gemm.use_kernel_registry) {
+        // The FP16 path is structurally simple — direct cuBLAS via the
+        // fp16 weight cache OR the raw weight when it's already FP16/BF16.
+        // Match the legacy preconditions: prefer the cache, then raw weight.
+        if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &it->second;
+            const int M = static_cast<int>(input.shape[0]);
+            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+        if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &weight;
+            const int M = static_cast<int>(input.shape[0]);
+            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+        // Fall through: registry returned NoMatch for this strategy — use legacy.
+    }
 
     gemm_dispatch_impl(input, weight, Tensor(), qtype, output, qs->dequant, ctx.stream,
                        static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf, fp16, fp8, qs->fp8_act,
                        qs->d_act_scale, qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid, nv4, ct4,
                        qs->cutlass_act_data, qs->cutlass_act_sf, qs->cutlass_workspace,
                        qs->cutlass_workspace_size, mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace,
-                       qs->mxfp4_workspace_size, q4k_v2, ctx.beta);
+                       qs->mxfp4_workspace_size, ctx.beta);
 }
 
 }  // namespace imp
