@@ -300,4 +300,13 @@ Tensor slice_rows(const Tensor& buf, int n_tokens);
 struct GemmContext;  // forward decl — defined in gemm_context.h
 void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx);
 
+// ---------------------------------------------------------------------------
+// Pre-warm the MMVQ (Q8_1-input GEMV) scratch buffer so the first call into
+// the ggml_mmvq_q* path inside CUDA stream capture doesn't trigger a
+// cudaMalloc. Call once during workspace allocation with the largest
+// (max_tokens, max_K) the model can dispatch. Idempotent: a re-call with a
+// smaller size is a no-op; a re-call with a larger size grows the buffer.
+// ---------------------------------------------------------------------------
+void prewarm_mmvq_scratch(int max_tokens, int max_K);
+
 }  // namespace imp
