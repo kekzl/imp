@@ -15,6 +15,7 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/mmq_q4k.h"
+#include "compute/mmq_q4k_v2.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
@@ -2179,6 +2180,56 @@ static void gemm_dispatch_impl(
                 static_cast<half*>(output.data), M, N, K, s_mmq_scratch,
                 s_mmq_scratch_size, stream);
         return;
+    }
+
+    // Q4_K v2 (Phase 3 HMMA): kicks in above v1's M=16 cap when no FP16
+    // weight cache is available. Phase 1a/1b preprocessing (eff_scale,
+    // eff_min, eff_q4) runs into a shared scratch buffer per call — ~5 µs
+    // overhead per layer, dwarfed by the GEMM time at M ≥ 32.
+    //
+    // Gate inexpensive checks first; the cache-hit hash lookups go inside the
+    // qtype branch so they don't fire for non-Q4_K dispatches.
+    static const bool no_mmq_q4k_v2 = std::getenv("IMP_NO_MMQ_Q4K_V2") != nullptr;
+    // Default min_M=64: where the microbench shows v2 ≥ v1+cuBLAS. End-to-end
+    // sweep on Qwen3.6-35B-A3B-Q4_K_M shows MIN_M=128 is slightly better (+6%
+    // pp vs v2 off, +4% tg), but 64 already wins on dense shapes.
+    static const int mmq_q4k_v2_min_m = []() {
+        const char* e = std::getenv("IMP_MMQ_Q4K_V2_MIN_M");
+        return e ? std::atoi(e) : 64;
+    }();
+    if (!no_mmq_q4k_v2 && !use_mmq_q4k && !use_mmvq && !use_dp4a &&
+        qtype == QType::Q4_K && input.qtype == QType::F16 && !fp32_output &&
+        dispatch_M >= mmq_q4k_v2_min_m && (weight.shape[1] % 32 == 0)) {
+        const bool fp16_cache_hit =
+            (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0);
+        const bool fp8_cache_hit =
+            (fp8_cache != nullptr && fp8_cache->find(weight.data) != fp8_cache->end());
+        if (!fp16_cache_hit && !fp8_cache_hit) {
+            int M = static_cast<int>(input.shape[0]);
+            int N = static_cast<int>(weight.shape[0]);
+            int K = static_cast<int>(weight.shape[1]);
+            // Scratch: [eff_q4 (N*K/2)] [eff_scale (N*K/16)] [eff_min (N*K/16)].
+            const size_t eff_q4_bytes =
+                static_cast<size_t>(N) * (K / 32) * 16u;
+            const size_t eff_scale_bytes =
+                static_cast<size_t>(N) * (K / 32) * sizeof(half);
+            const size_t total_need = eff_q4_bytes + 2 * eff_scale_bytes;
+            static void* s_v2_eff_scratch = nullptr;
+            static size_t s_v2_eff_scratch_size = 0;
+            if (!s_v2_eff_scratch || s_v2_eff_scratch_size < total_need) {
+                if (s_v2_eff_scratch) cudaFree(s_v2_eff_scratch);
+                cudaMalloc(&s_v2_eff_scratch, total_need);
+                s_v2_eff_scratch_size = total_need;
+            }
+            uint8_t* eff_q4 = static_cast<uint8_t*>(s_v2_eff_scratch);
+            half* eff_scale = reinterpret_cast<half*>(eff_q4 + eff_q4_bytes);
+            half* eff_min = eff_scale + (N * (K / 32));
+            q4k_precompute_eff_scales(weight.data, eff_scale, eff_min, N, K, stream);
+            q4k_permute_to_v2_layout(weight.data, eff_q4, N, K, stream);
+            mmq_q4k_v2(static_cast<const half*>(input.data), eff_q4, eff_scale,
+                       eff_min, static_cast<half*>(output.data), M, N, K, stream);
+            return;
+        }
     }
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
