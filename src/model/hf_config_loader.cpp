@@ -2,6 +2,7 @@
 #include "model/json_util.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -334,19 +335,20 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         //
         // Cross-converted checkpoints (HF → GGUF → HF, or weights re-packed by
         // a third-party tool) can ship in the opposite layout. Override via
-        // `IMP_GDN_LAYOUT=tiled` (default for SafeTensors stays grouped).
+        // gdn.layout_override="tiled" (legacy IMP_GDN_LAYOUT=tiled); default
+        // for SafeTensors stays grouped.
         cfg.gdn_grouped_head_layout = true;
-        if (const char* env = std::getenv("IMP_GDN_LAYOUT")) {
-            std::string v(env);
+        {
+            const std::string& v = RuntimeConfig::current().gdn.layout_override;
             if (v == "tiled" || v == "TILED") {
                 cfg.gdn_grouped_head_layout = false;
-                IMP_LOG_INFO("GDN head layout: forced to TILED via IMP_GDN_LAYOUT=tiled");
+                IMP_LOG_INFO("GDN head layout: forced to TILED via gdn.layout_override=tiled");
             } else if (v == "grouped" || v == "GROUPED") {
                 cfg.gdn_grouped_head_layout = true;
-                IMP_LOG_INFO("GDN head layout: forced to GROUPED via IMP_GDN_LAYOUT=grouped");
-            } else {
-                IMP_LOG_WARN("IMP_GDN_LAYOUT='%s' not recognized (expected 'tiled' or 'grouped')",
-                             env);
+                IMP_LOG_INFO("GDN head layout: forced to GROUPED via gdn.layout_override=grouped");
+            } else if (!v.empty()) {
+                IMP_LOG_WARN("gdn.layout_override='%s' not recognized (expected 'tiled' or 'grouped')",
+                             v.c_str());
             }
         }
 

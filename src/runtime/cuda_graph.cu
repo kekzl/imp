@@ -1,6 +1,7 @@
 #include "runtime/cuda_graph.h"
 #include "runtime/graph_diag.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 #include "graph/executor.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
@@ -11,23 +12,23 @@
 
 namespace imp {
 
-// IMP_GRAPH_CAPTURE_MODE = "global" (default) | "relaxed" | "thread_local"
-// Selects the cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and
-// the ConditionalRunner body-graph capture. Probed at first call and cached.
+// runtime.graph_capture_mode = "global" (default) | "relaxed" | "thread_local"
+// (legacy env: IMP_GRAPH_CAPTURE_MODE). Selects the cudaStreamCaptureMode
+// used by CudaGraphCapture::begin_capture and the ConditionalRunner body-graph
+// capture. Probed at first call and cached.
 //
 // Why this exists: CUTLASS 3.x grouped GEMM hangs under cudaStreamCaptureModeGlobal
 // for some NVFP4 MoE configs (see prefill_graph_blockers_2026_05_14). Relaxed
 // drops the cross-thread synchronization constraint and may avoid the deadlock.
 static cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {
-        const char* env = std::getenv("IMP_GRAPH_CAPTURE_MODE");
-        if (env == nullptr) return cudaStreamCaptureModeGlobal;
-        if (std::strcmp(env, "relaxed") == 0) {
-            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (IMP_GRAPH_CAPTURE_MODE=relaxed)");
+        const std::string& mode = RuntimeConfig::current().runtime.graph_capture_mode;
+        if (mode == "relaxed") {
+            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (runtime.graph_capture_mode=relaxed)");
             return cudaStreamCaptureModeRelaxed;
         }
-        if (std::strcmp(env, "thread_local") == 0) {
-            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeThreadLocal (IMP_GRAPH_CAPTURE_MODE=thread_local)");
+        if (mode == "thread_local") {
+            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeThreadLocal (runtime.graph_capture_mode=thread_local)");
             return cudaStreamCaptureModeThreadLocal;
         }
         return cudaStreamCaptureModeGlobal;

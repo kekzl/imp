@@ -677,7 +677,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // Qwen3.6-35B) FP16-cache + cuBLAS-FP16-TC wins by 4-6 % over v2, even
     // though v2 wins microbench. Enable for VRAM-constrained scenarios
     // where the FP16 cache can't fit, or to A/B the kernel.
-    if (std::getenv("IMP_FORCE_Q4K_V2") != nullptr) {
+    if (imp::RuntimeConfig::current().gemm.force_q4k_v2) {
         size_t q4k_v2_count = 0;
         size_t q4k_v2_total = 0;
         bool q4k_v2_exhausted = false;
@@ -1773,8 +1773,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             constexpr size_t kReserveCap = 1024ULL * 1024 * 1024;
             constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
             size_t kMoeReserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
-            if (const char* env = std::getenv("IMP_MOE_RESERVE_MIB")) {
-                int v = std::atoi(env);
+            {
+                const int v = imp::RuntimeConfig::current().moe.reserve_mib;
                 if (v >= 128 && v <= 4096)
                     kMoeReserve = static_cast<size_t>(v) * 1024ULL * 1024ULL;
             }
