@@ -3,6 +3,7 @@
 #include "graph/executor_helpers.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/mmq_q4k_v2.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -660,6 +661,99 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // Deduct Phase 1 allocation from shared budget
     deduct_budget(remaining_budget, total_cache_bytes);
+
+    // --- Phase 1b: Q4_K v2 eff_* cache for Q4_K weights NOT in FP16 cache ---
+    //
+    // Eagerly runs Phase 1a (eff_scale, eff_min precompute) and Phase 1b
+    // (Q4 byte permutation) per Q4_K weight that the FP16 cache couldn't
+    // cover. The hot path then calls mmq_q4k_v2 directly with the cached
+    // eff_* pointers — no per-call cudaMalloc, no per-call Phase 1.
+    // Critical for graph capture: the original lazy-scratch implementation
+    // failed `cudaStreamBeginCapture` with operation-not-permitted; this
+    // eager path makes the dispatch graph-safe.
+    //
+    // Layout per cache entry: one VRAM blob of
+    //   N · K/2 + 2 · N · K/16 bytes  (≈ 0.625·N·K, vs FP16 cache's 2.0·N·K
+    //                                  and the original Q4_K's ~0.5625·N·K)
+    // — slim enough to populate after FP16 budget exhaustion without
+    // pushing into shared-memory fallback on WSL2.
+    //
+    // Disable via IMP_NO_MMQ_Q4K_V2=1 (matches the dispatch env var).
+    // IMP_FORCE_Q4K_V2=1 inverts the priority — populate v2 cache for ALL
+    // Q4_K weights even if they're in the FP16 cache (useful for benching
+    // the v2 kernel on models that would otherwise be fully FP16-cached).
+    if (std::getenv("IMP_NO_MMQ_Q4K_V2") == nullptr) {
+        const bool force_q4k_v2 = (std::getenv("IMP_FORCE_Q4K_V2") != nullptr);
+        size_t q4k_v2_count = 0;
+        size_t q4k_v2_total = 0;
+        bool q4k_v2_exhausted = false;
+        auto add_q4k_v2 = [&](const Tensor& w) {
+            if (q4k_v2_exhausted) return;
+            if (!w.data || w.qtype != QType::Q4_K) return;
+            if (!force_q4k_v2 && wcache_.fp16.count(w.data)) return;  // FP16 wins
+            if (wcache_.q4k_v2.count(w.data)) return;    // already cached
+            if (w.shape[1] % 256 != 0) return;           // K must be Q4_K-aligned
+            int N = static_cast<int>(w.shape[0]);
+            int K = static_cast<int>(w.shape[1]);
+            const size_t eff_q4_bytes =
+                static_cast<size_t>(N) * (K / 32) * 16u;
+            const size_t eff_scale_bytes =
+                static_cast<size_t>(N) * (K / 32) * sizeof(half);
+            const size_t total_bytes = eff_q4_bytes + 2 * eff_scale_bytes;
+            if (q4k_v2_total + total_bytes > remaining_budget) {
+                q4k_v2_exhausted = true;
+                IMP_LOG_INFO(
+                    "Q4_K v2 cache: VRAM budget reached after %zu tensors "
+                    "(%.1f MiB), remaining weights stay on dequant+cuBLAS "
+                    "fallback",
+                    q4k_v2_count, q4k_v2_total / (1024.0 * 1024.0));
+                return;
+            }
+            void* blob = vram_alloc(vram_alloc_, total_bytes, "q4k_v2_eff");
+            if (!blob) {
+                q4k_v2_exhausted = true;
+                IMP_LOG_WARN("Q4_K v2 cache: alloc failed after %zu tensors",
+                             q4k_v2_count);
+                return;
+            }
+            Q4KV2CacheEntry entry;
+            entry.eff_q4 = static_cast<uint8_t*>(blob);
+            entry.eff_scale = reinterpret_cast<half*>(entry.eff_q4 + eff_q4_bytes);
+            entry.eff_min =
+                entry.eff_scale + static_cast<size_t>(N) * (K / 32);
+            entry.N = N;
+            entry.K = K;
+            entry.total_bytes = total_bytes;
+            q4k_precompute_eff_scales(w.data, entry.eff_scale, entry.eff_min,
+                                       N, K, stream);
+            q4k_permute_to_v2_layout(w.data, entry.eff_q4, N, K, stream);
+            wcache_.q4k_v2[w.data] = entry;
+            q4k_v2_total += total_bytes;
+            q4k_v2_count++;
+        };
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            add_q4k_v2(L.wq);
+            add_q4k_v2(L.wk);
+            add_q4k_v2(L.wv);
+            add_q4k_v2(L.wo);
+            add_q4k_v2(L.w_gate);
+            add_q4k_v2(L.w_up);
+            add_q4k_v2(L.w_down);
+            add_q4k_v2(L.w_gate_shared);
+            add_q4k_v2(L.w_up_shared);
+            add_q4k_v2(L.w_down_shared);
+        }
+        add_q4k_v2(model_->out_proj_);
+
+        if (q4k_v2_count > 0) {
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            wcache_.q4k_v2_bytes = q4k_v2_total;
+            IMP_LOG_INFO("Q4_K v2 eff cache: %zu tensors, %.2f MiB",
+                         q4k_v2_count, q4k_v2_total / (1024.0 * 1024.0));
+        }
+        deduct_budget(remaining_budget, q4k_v2_total);
+    }
 
     // --- Phase 2: FP8 cache for uncached weights (primary when wcache_.use_fp8) ---
     // When wcache_.use_fp8 is true and Phase 1 was skipped, this is the primary path
