@@ -718,6 +718,12 @@ private:
     void run_attention(int layer, const InferenceState& state, cudaStream_t stream);
     void run_ffn(int layer, cudaStream_t stream);
     void run_moe_ffn(int layer, cudaStream_t stream);
+    // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
+    // after routed experts have written into h. Reads `no` (post-norm) and
+    // adds its result back into `h` via elementwise_add. No-op when
+    // ly.w_up_shared is null or the runtime opt-out is set.
+    void run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
+                               float eps, const Tensor& no, Tensor& h);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 

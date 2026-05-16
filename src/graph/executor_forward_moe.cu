@@ -2542,90 +2542,7 @@ moe_after_experts:
         rmsnorm(r, ly.ffn_norm, no, eps, stream, norm_w_off_);
     }
 
-    // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
-    // DIAGNOSTIC: IMP_NO_SHARED_MLP=1 skips this branch (Gemma-4 NVFP4 audit).
-    static const bool s_no_shared_mlp = RuntimeConfig::current().moe.no_shared_mlp;
-    if (ly.w_up_shared.data != nullptr && !s_no_shared_mlp) {
-        int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
-        bool shared_gated = (ly.w_gate_shared.data != nullptr);
-
-        // Reuse moe_.expert_gate, moe_.expert_up, moe_.expert_swiglu as scratch.
-        int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
-        Tensor sh_up(moe_.expert_up.data, compute_dtype_, 2, sh_shape, true);
-        Tensor sh_swiglu(moe_.expert_swiglu.data, compute_dtype_, 2, sh_shape, true);
-
-        // Down projection output: [n, d_model]. Reuse moe_.expert_down.
-        int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-        Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
-
-        // Up projection (dp4a MMVQ for decode)
-        {
-            auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
-            gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
-
-            if (shared_gated) {
-                // Gated: gate + SwiGLU
-                Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-                gemm_dispatch(no, ly.w_gate_shared, sh_gate, ctx);
-                if (cfg.ffn_activation == FFNActivation::GEGLU)
-                    geglu(sh_gate, sh_up, sh_swiglu, stream);
-                else
-                    swiglu(sh_gate, sh_up, sh_swiglu, stream);
-            } else {
-                // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
-                relu_sqr_inplace(sh_up, stream);
-            }
-
-            if (layer == 0) {
-                Tensor sh_gate_raw(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-                debug_tensor_stats_all("L0_sh_up_raw", sh_up, stream);
-                debug_tensor_stats_all("L0_sh_gate_raw", sh_gate_raw, stream);
-                debug_tensor_stats_all("L0_sh_swiglu", sh_swiglu, stream);
-            }
-            // Down projection (reads from sh_up for non-gated since relu² was in-place)
-            Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
-            if (layer == 0)
-                debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
-            gemm_dispatch(sh_act, ly.w_down_shared, sh_down, ctx);
-        }
-
-        if (layer == 0) {
-            debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
-            debug_tensor_rows("L0_sh_down_rows", sh_down, stream);
-            // Also dump shared expert norm input
-            debug_tensor_rows("L0_shared_norm_in", view_tokens(no, n), stream);
-        }
-        // Gemma 4: shared MLP can overflow FP16 at deep layers. Sanitize inf/NaN
-        // to zero before the post-norm so rmsnorm doesn't produce all-zero output.
-        if (cfg.arch == ModelArch::GEMMA4) {
-            sanitize_fp16(static_cast<__half*>(sh_down.data), static_cast<int64_t>(n) * d, stream);
-        }
-        // Gemma 4: apply post_ffw_norm_1 on shared MLP output (sh_down).
-        if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
-            !RuntimeConfig::current().gemma4.no_post_ffw_1) {
-            rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
-        }
-
-        if (layer == 0) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
-            debug_tensor_stats_all(buf, sh_down, stream);
-        }
-        if (debug_forward_enabled() && layer == 0) {
-            debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
-        }
-        // Qwen3-Next / Qwen3.6: per-token sigmoid gate on the shared expert output.
-        //   gate[r] = sigmoid(sum_d no[r,d] * W_gate_inp_shexp[d])
-        //   sh_down[r, :] *= gate[r]
-        // Absent in Qwen3 MoE / Gemma-4 (tensor pointer is null → skip).
-        static const bool skip_shexp_gate = RuntimeConfig::current().moe.no_shexp_gate;
-        if (!skip_shexp_gate && ly.shared_expert_gate_inp.data != nullptr &&
-            ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
-            shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);
-        }
-        // Add shared expert output to hidden (which already has routed expert output)
-        elementwise_add(h, sh_down, stream);
-    }
+    run_shared_expert_ffn(layer, stream, n, d, eps, no, h);
     if (debug_forward_enabled() && layer == 0) {
         debug_tensor_rows("L0_combined", view_tokens(h, n), stream);
     }
@@ -2687,5 +2604,83 @@ moe_after_experts:
     }
 }
 
+void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
+                                          float eps, const Tensor& no, Tensor& h) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    // DIAGNOSTIC: moe.no_shared_mlp config flag (was IMP_NO_SHARED_MLP env).
+    static const bool s_no_shared_mlp = RuntimeConfig::current().moe.no_shared_mlp;
+    if (ly.w_up_shared.data == nullptr || s_no_shared_mlp) return;
+
+    int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
+    bool shared_gated = (ly.w_gate_shared.data != nullptr);
+
+    // Reuse moe_.expert_gate, moe_.expert_up, moe_.expert_swiglu as scratch.
+    int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
+    Tensor sh_up(moe_.expert_up.data, compute_dtype_, 2, sh_shape, true);
+    Tensor sh_swiglu(moe_.expert_swiglu.data, compute_dtype_, 2, sh_shape, true);
+
+    // Down projection output: [n, d_model]. Reuse moe_.expert_down.
+    int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+    Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
+
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
+    gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
+
+    if (shared_gated) {
+        Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+        gemm_dispatch(no, ly.w_gate_shared, sh_gate, ctx);
+        if (cfg.ffn_activation == FFNActivation::GEGLU)
+            geglu(sh_gate, sh_up, sh_swiglu, stream);
+        else
+            swiglu(sh_gate, sh_up, sh_swiglu, stream);
+    } else {
+        // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
+        relu_sqr_inplace(sh_up, stream);
+    }
+
+    if (layer == 0) {
+        Tensor sh_gate_raw(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+        debug_tensor_stats_all("L0_sh_up_raw", sh_up, stream);
+        debug_tensor_stats_all("L0_sh_gate_raw", sh_gate_raw, stream);
+        debug_tensor_stats_all("L0_sh_swiglu", sh_swiglu, stream);
+    }
+    Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
+    if (layer == 0)
+        debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
+    gemm_dispatch(sh_act, ly.w_down_shared, sh_down, ctx);
+
+    if (layer == 0) {
+        debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
+        debug_tensor_rows("L0_sh_down_rows", sh_down, stream);
+        debug_tensor_rows("L0_shared_norm_in", view_tokens(no, n), stream);
+    }
+    // Gemma-4: shared MLP can overflow FP16 at deep layers; sanitize inf/NaN
+    // before post_ffw_norm_1 so rmsnorm doesn't produce all-zero output.
+    if (cfg.arch == ModelArch::GEMMA4) {
+        sanitize_fp16(static_cast<__half*>(sh_down.data), static_cast<int64_t>(n) * d, stream);
+    }
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
+        !RuntimeConfig::current().gemma4.no_post_ffw_1) {
+        rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
+    }
+
+    if (layer == 0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
+        debug_tensor_stats_all(buf, sh_down, stream);
+    }
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
+    }
+    // Qwen3-Next / Qwen3.6: per-token sigmoid gate on shared-expert output.
+    static const bool skip_shexp_gate = RuntimeConfig::current().moe.no_shexp_gate;
+    if (!skip_shexp_gate && ly.shared_expert_gate_inp.data != nullptr &&
+        ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
+        shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);
+    }
+    elementwise_add(h, sh_down, stream);
+}
+
 }  // namespace imp
-// Sun Apr 12 06:27:12 PM CEST 2026
