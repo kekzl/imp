@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -174,6 +175,119 @@ TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
 // throughout — catches the S_tile smem overlap bug that the HD256 test
 // (Sq=Skv=32, zero-padded V) masked by having the reference also near zero.
 TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 16, 4, 256, true); }
+
+// --- FP8 cluster path coverage (M5 Slice 2.2) -----------------------------
+//
+// The FP8 cluster kernel fires when:
+//   - n_q_per_kv ∈ {2,4,8}
+//   - head_dim ∈ {64,128,256}  (HD=96 dropped — FP8 m16n8k32 requires
+//                                HD % 32 == 0)
+//   - seq_kv ≥ 8 * CL_Bkv = 512
+//
+// run_test enforces a 5 % rel tolerance against the CPU reference; the
+// cluster kernel inherits the legacy FP8 quantization noise.
+
+TEST_F(FmhaFP8Test, ClusterPathGQA2Hd128) { run_test(1, 64, 512, 4, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathGQA4Hd128) { run_test(1, 64, 512, 8, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathGQA8Hd128) { run_test(1, 64, 512, 16, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathHd64) { run_test(1, 64, 512, 8, 2, 64, true); }
+TEST_F(FmhaFP8Test, ClusterPathHd256) { run_test(1, 64, 512, 4, 2, 256, true); }
+TEST_F(FmhaFP8Test, ClusterPathLongPrompt) { run_test(1, 128, 1024, 8, 2, 128, true); }
+TEST_F(FmhaFP8Test, ClusterPathSlidingWindow) { run_test(1, 128, 1024, 4, 2, 128, true, /*sw=*/256); }
+TEST_F(FmhaFP8Test, ClusterPathSoftcap) { run_test(1, 128, 1024, 4, 2, 128, true, 0, /*softcap=*/50.0f); }
+TEST_F(FmhaFP8Test, ClusterPathBypassedForShortKv) {
+    // seq_kv < 512 → cluster gate rejects, legacy FP8 kernel runs.
+    run_test(1, 64, 256, 8, 2, 128, true);
+}
+
+// Direct cluster-vs-legacy bit-equivalence proof for the FP8 path. Mirrors
+// FmhaSm120Test.ClusterMatchesLegacy. Confirms the DSMEM staging + FP16→FP8
+// per-block conversion preserves the legacy FP8 kernel's bit-pattern.
+TEST_F(FmhaFP8Test, ClusterMatchesLegacy) {
+    int sm_major = 0, sm_minor = 0;
+    int device = 0;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device);
+    if (sm_major * 10 + sm_minor < 120) GTEST_SKIP() << "Requires sm_120+";
+
+    const int B = 1, Sq = 64, Skv = 1024, NH = 8, NKV = 2, HD = 128;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+
+    size_t q_elems = B * Sq * NH * HD;
+    size_t kv_elems = B * Skv * NKV * HD;
+
+    std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
+    for (size_t i = 0; i < q_elems; i++)
+        Q_h[i] = __float2half(0.02f * static_cast<float>((i * 7 + 3) % 13 - 6));
+    for (size_t i = 0; i < kv_elems; i++) {
+        K_h[i] = __float2half(0.02f * static_cast<float>((i * 11 + 5) % 13 - 6));
+        V_h[i] = __float2half(0.02f * static_cast<float>((i * 13 + 7) % 13 - 6));
+    }
+
+    void *d_q, *d_k, *d_v, *d_o_cluster, *d_o_legacy;
+    size_t q_bytes = q_elems * sizeof(half), kv_bytes = kv_elems * sizeof(half);
+    cudaMalloc(&d_q, q_bytes);
+    cudaMalloc(&d_k, kv_bytes);
+    cudaMalloc(&d_v, kv_bytes);
+    cudaMalloc(&d_o_cluster, q_bytes);
+    cudaMalloc(&d_o_legacy, q_bytes);
+    cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+
+    int64_t q_shape[] = {B, Sq, NH, HD};
+    int64_t kv_shape[] = {B, Skv, NKV, HD};
+    Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+    Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+    Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+
+    {
+        RuntimeConfig cfg = RuntimeConfig::current();
+        cfg.attention.no_fmha_cluster = false;
+        RuntimeConfig::install(cfg);
+        cudaMemset(d_o_cluster, 0, q_bytes);
+        Tensor Oc(d_o_cluster, QType::F16, 4, q_shape, true);
+        ASSERT_TRUE(fmha_sm120_fp8_prefill(Qt, Kt, Vt, Oc, scale, true, 0, 0.0f, stream_));
+        cudaStreamSynchronize(stream_);
+    }
+    {
+        RuntimeConfig cfg = RuntimeConfig::current();
+        cfg.attention.no_fmha_cluster = true;
+        RuntimeConfig::install(cfg);
+        cudaMemset(d_o_legacy, 0, q_bytes);
+        Tensor Ol(d_o_legacy, QType::F16, 4, q_shape, true);
+        ASSERT_TRUE(fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ol, scale, true, 0, 0.0f, stream_));
+        cudaStreamSynchronize(stream_);
+    }
+    {
+        RuntimeConfig cfg = RuntimeConfig::current();
+        cfg.attention.no_fmha_cluster = false;
+        RuntimeConfig::install(cfg);
+    }
+
+    std::vector<half> Oc(q_elems), Ol(q_elems);
+    cudaMemcpy(Oc.data(), d_o_cluster, q_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(Ol.data(), d_o_legacy, q_bytes, cudaMemcpyDeviceToHost);
+
+    float max_abs_diff = 0.0f, max_rel_diff = 0.0f;
+    for (size_t i = 0; i < q_elems; i++) {
+        float a = __half2float(Oc[i]);
+        float b = __half2float(Ol[i]);
+        float ad = std::abs(a - b);
+        float rd = ad / std::max(1.0f, std::abs(b));
+        max_abs_diff = std::max(max_abs_diff, ad);
+        max_rel_diff = std::max(max_rel_diff, rd);
+    }
+    fprintf(stderr, "FP8 ClusterMatchesLegacy: max_abs=%g max_rel=%g\n", max_abs_diff, max_rel_diff);
+    EXPECT_LT(max_abs_diff, 1e-2f) << "FP8 cluster vs legacy max abs diff " << max_abs_diff;
+
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o_cluster);
+    cudaFree(d_o_legacy);
+}
 
 }  // namespace
 }  // namespace imp

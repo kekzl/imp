@@ -45,4 +45,13 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 bool try_fmha_sm120_cluster_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                     bool causal, int sliding_window, float softcap, cudaStream_t stream);
 
+// FP8 variant of the cluster kernel. DSMEM still carries FP16 K so the
+// staging copy stays symmetric with the FP16 cluster path; each block
+// converts its staged FP16 K to FP8 E4M3 once per iter before the
+// m16n8k32 MMA. PV stays FP16 WMMA. Rejects HD % 32 != 0 (FP8 MMA
+// requirement — drops HD=96 from the eligible set).
+bool try_fmha_sm120_fp8_cluster_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
+                                        float scale, bool causal, int sliding_window, float softcap,
+                                        cudaStream_t stream);
+
 }  // namespace imp

@@ -942,6 +942,13 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (Q.qtype != QType::F16)
         return false;
 
+    // M5 Slice 2.2: prefer the FP8 cluster kernel on eligible GQA configs.
+    // Same gate as the FP16 variant plus HD%32==0 (FP8 MMA requirement, so
+    // HD=96 falls through to the legacy per-head kernel).
+    if (try_fmha_sm120_fp8_cluster_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+        return true;
+    }
+
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
