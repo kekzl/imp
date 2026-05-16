@@ -68,15 +68,16 @@ TurboQuant currently runs ~23% behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 to
 
 ### `pp=512` on large dense models
 
-Qwen3-32B Q4_K_M sits at ~0.5–0.6× llama.cpp at `pp=512` (1888 tok/s, RTX 5090). Profiled 2026-05-15 (`tools/analysis/profile_pp512_large_dense.sh`):
+Qwen3-32B Q4_K_M and Mistral-24B Q6_K sit at ~0.5–0.6× llama.cpp at `pp=512` (Qwen3-32B Q4_K_M: 1888 tok/s, RTX 5090). nsys profile (2026-05-15, `tools/analysis/profile_pp512_large_dense.sh`):
+- 4.4 % FP16 compute / 3.4 % memory-bandwidth utilization — launch-overhead + dequant-overhead bound.
+- 25 % GPU time in `dequant_q4k_kernel` (FP16 cache doesn't fit), 64 % in cuBLAS GEMMs.
+- 23 % host time in sync `cudaMalloc`/`cudaFree` (939+930 calls).
 
-- 4.4 % FP16 compute utilization, 3.4 % memory-bandwidth utilization — neither compute- nor memory-bound.
-- **GPU time: 64 % in `cutlass_80` FP16 GEMM kernels, 25 % in `dequant_q4k_kernel`** (1153 invocations × 223 µs avg = 257 ms — the FP16 cache can't fit so every weight tensor is dequant'd per forward).
-- **Host time: 23 % in sync `cudaMalloc` (939 calls) + `cudaFree` (930 calls)** — violates `CLAUDE.md`'s no-cudaMalloc-in-hot-loops rule; likely cuBLAS workspace allocation per problem shape.
+imp already ships a Q4_K × Q8_1 kernel (`src/compute/ggml_mmvq.cu::mmvq_kernel`) but it's a *warp-per-output-element batched-GEMV*, not a tiled GEMM. Measured crossover on Qwen3-32B Q4_K_M (`tools/analysis/bench_q4k_mmvq_crossover.sh`): mmvq wins at M ≤ 16 (e.g. M=8: 92 vs 45 tok/s), cuBLAS wins above M=16 (M=512: 1802 vs 251 tok/s). mmvq saturates at ~250 tok/s regardless of M because each output element gets its own warp with no TILE_M × TILE_N weight/activation reuse.
 
-Real fix is a **direct Q4_K_M GEMM kernel** (mmq-style, mirroring llama.cpp's `mmq_x_q4_K_q8_1`) — multi-week kernel work, would close most of the gap. Multi-stream dequant↔GEMM overlap is a 1-2 day modest win. Pinning a single cuBLAS workspace might shave the alloc overhead.
+A **direct tiled Q4_K_M GEMM kernel** shipped 2026-05-15 in `src/compute/mmq_q4k.cu` (commits `3b49325` → `8dbfdbd`). Microbench beats mmvq by 2.0–2.4× across M=32..512 (tile `<16,32,1,1>`, 512 thr, SMEM bank-conflict-padded). End-to-end on Gemma-3-12B Q4_K_M: **wins +13–56 % at M=2..16**, **loses to FP16-TC cuBLAS at M ≥ 32** — dp4a peak (~50 TFLOPS) vs FP16-TC peak (~838 TFLOPS) is a 16× ceiling gap that tile tuning cannot close. Dispatched in `[2, 16]` only via `executor_kernels.cu`; high-M Q4_K_M still goes through dequant+cuBLAS. Multi-stream dequant↔GEMM overlap was refuted by measurement (GPU busy ratio ≈ 100 %).
 
-Suspected cuBLAS autotuning variance is NOT the cause — `bench-reps=5` median is stable. Output is correct; not gating any user. Full diagnostic at memory `pp512_large_dense_perf_2026_05_15.md`.
+Closing the high-M gap requires porting the inner loop to `mma.sync.aligned.m16n8k32.s32.s8.s8.s32` (consumer Blackwell INT8 Tensor Core, sm_120 supports it) and reordering Q4_K dequant→INT8 to feed the MMA. Multi-week port to mma.sync register layouts. See memo `mmq_q4k_phase_a_2026_05_15.md` for the full sweep and constraints; original plan in `q4k_mmvq_crossover_2026_05_15.md`.
 
 ### Speculative decoding — investigated and shelved
 

@@ -25,14 +25,12 @@ int main(int argc, char** argv) {
     printf("IMP Benchmark Tool\n");
     printf("==================\n\n");
 
-    // Parse arguments
     bool run_gemm = false;
     bool run_attention = false;
     bool run_decode_attn = false;
     bool run_e2e = false;
 
     if (argc <= 1) {
-        // No arguments: run all benchmarks
         run_gemm = true;
         run_attention = true;
         run_decode_attn = true;

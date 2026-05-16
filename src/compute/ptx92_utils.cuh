@@ -48,22 +48,12 @@ __device__ __forceinline__ void cvt_e4m3x4_to_f32x4(uint32_t packed_fp8, float& 
 // ---------------------------------------------------------------------------
 // Packed FP4 E2M1 conversion helpers
 //
-// NOTE: cvt.rn.satfinite.e2m1x2.f16x2 is documented in PTX ISA 9.2 but
-// REJECTED by ptxas in CUDA 13.2.0. The PTX instruction would convert
-// 2 FP16 values to 2 packed FP4 E2M1 nibbles in a single instruction.
-// Once a future CUDA release supports it, enable the #if block below.
-//
-// Until then, the branchless scalar fallback in turboquant_fp4.cuh
-// (tq_fp4_quantize_abs using comparison sums) provides the quantization.
+// NOTE: The FP16→FP4 packed conversion (cvt.rn.satfinite.e2m1x2.f16x2) is in
+// PTX ISA 9.2 but ptxas rejects it on CUDA 13.2. Production paths use the
+// FP32 variant (cvt.rn.satfinite.e2m1x2.f32 — works fine, see e.g.
+// src/quant/nvfp4_quant.cu:148). The FP16x2 variant was never wired up
+// — re-evaluate on the next toolkit bump if a hot FP16→FP4 path appears.
 // ---------------------------------------------------------------------------
-
-#if 0  // BLOCKED: ptxas rejects in CUDA 13.2 — retry with CUDA 13.3+
-__device__ __forceinline__ uint16_t cvt_f16x2_to_e2m1x2(uint32_t f16x2) {
-    uint16_t result;
-    asm("cvt.rn.satfinite.e2m1x2.f16x2 %0, %1;" : "=h"(result) : "r"(f16x2));
-    return result;
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // Blackwell add.f32x2 PTX (sm_120a)

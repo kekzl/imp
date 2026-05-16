@@ -890,6 +890,12 @@ void GraphExecutor::free_buffers() {
             free_cutlass_mxfp4_weight(mw);
         wcache_.cutlass_mxfp4.clear();
         wcache_.cutlass_mxfp4_bytes = 0;
+        // Q4_K v2 cache (single owning blob per entry: vram_alloc'd as eff_q4 base)
+        for (auto& [ptr, entry] : wcache_.q4k_v2) {
+            if (entry.eff_q4) vram_free(vram_alloc_, entry.eff_q4);
+        }
+        wcache_.q4k_v2.clear();
+        wcache_.q4k_v2_bytes = 0;
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data) {

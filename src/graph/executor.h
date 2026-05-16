@@ -257,6 +257,26 @@ struct FP8CacheEntry {
 };
 
 // ---------------------------------------------------------------------------
+// Q4_K v2 weight cache entry (used by WeightCaches::q4k_v2).
+//
+// Eagerly precomputed at model load — Phase 1a (eff_scale, eff_min) and
+// Phase 1b (permuted Q4 nibbles) run ONCE, then the hot path calls
+// mmq_q4k_v2 directly with these pointers. Removes the per-GEMM Phase 1
+// work and the cudaMalloc-in-capture hazard that the original Phase 5
+// dispatch had.
+// Size: ~0.625 · N · K bytes per weight — smaller than the FP16 cache
+// (2.0× original Q4_K) but larger than the canonical Q4_K bytes (~0.5625×).
+// ---------------------------------------------------------------------------
+struct Q4KV2CacheEntry {
+    uint8_t* eff_q4 = nullptr;   // [N, K/32, 16] permuted nibbles
+    half* eff_scale = nullptr;   // [N, K/32]
+    half* eff_min = nullptr;     // [N, K/32]
+    int N = 0;
+    int K = 0;
+    size_t total_bytes = 0;      // owning blob size (vram_alloc'd)
+};
+
+// ---------------------------------------------------------------------------
 // WeightCaches: all pre-quantized weight maps for the inference engine.
 //
 // Replaces the former WeightCacheManager type (Phase 5 cleanup).
@@ -308,6 +328,13 @@ struct WeightCaches {
     std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;
     size_t cutlass_mxfp4_bytes = 0;
     bool use_mxfp4 = false;
+
+    // --- Q4_K v2 (mmq_q4k_v2 fast-path eff_* tensors) ---
+    // Populated during pre_dequant_weights() for Q4_K weights NOT already in
+    // fp16/fp8 caches; consumed in gemm_dispatch_impl. Eager preprocessing
+    // makes the kernel hot path graph-capture safe.
+    std::unordered_map<const void*, Q4KV2CacheEntry> q4k_v2;
+    size_t q4k_v2_bytes = 0;
 
     // Dual-path mode: FP8 attention + NVFP4 FFN
     bool dual_path_quant = false;
@@ -691,6 +718,64 @@ private:
     void run_attention(int layer, const InferenceState& state, cudaStream_t stream);
     void run_ffn(int layer, cudaStream_t stream);
     void run_moe_ffn(int layer, cudaStream_t stream);
+    // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
+    // after routed experts have written into h. Reads `no` (post-norm) and
+    // adds its result back into `h` via elementwise_add. No-op when
+    // ly.w_up_shared is null or the runtime opt-out is set.
+    void run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
+                               float eps, const Tensor& no, Tensor& h);
+    // MoE decode fast-path (n=1, device-resident packed experts):
+    // dispatches all top_k experts in a single kernel per projection. NVFP4
+    // and dp4a/FP16 sub-paths handled internally. Sets `residual_fused`=true
+    // when the weighted sum fused the residual add (no shared expert path
+    // active). Caller invokes only when decode_fast eligibility predicate
+    // returned true.
+    void run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
+                             int top_k, const MoeRoutingResult& routing,
+                             const Tensor& no, Tensor& h, const Tensor& r,
+                             bool moe_use_fp32_residual, bool moe_fused_norm_q8,
+                             bool will_skip_residual_copy, bool& residual_fused);
+    // Compute MoE routing: gate logits (FP32 router fast-path for Gemma-4
+    // already done by caller — signaled via `fp32_gate_logits_ready`) + topk
+    // gating + per-expert weight scaling (Nemotron, Gemma-4). Caller passes
+    // pre-normalized `router_in` if !fp32_gate_logits_ready.
+    void compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
+                             int top_k, const Tensor& router_in,
+                             bool fp32_gate_logits_ready, bool will_decode_fast,
+                             const void* router_bias_ptr, bool use_sigmoid,
+                             bool norm_weights, MoeRoutingResult& routing);
+    // Fused Q6_K prefill MoE path: reads Q6_K weights directly (no FP16
+    // dequant scratch), TC variant uses gather-free sorted_token_ids
+    // indirection, scalar variant materializes the gathered buffer.
+    // Fills moe_.expert_{gate,up,swiglu,down} for downstream scatter.
+    // Returns true when path was taken (caller skips general path branches).
+    bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                 int ne, int expanded, bool non_gated_experts, QType up_qtype,
+                                 const MoeRoutingResult& routing, const Tensor& no);
+    // Gemma-4 ggml MMVQ per-token prefill: processes tokens individually via
+    // ggml Q4_K×Q8_1 dp4a kernels with FP32 norm output for full-precision
+    // routing. Writes directly to `h` (per-token weighted sum + residual).
+    // Returns true when path was taken; caller jumps to moe_after_experts.
+    bool try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                         int top_k, QType up_qtype, float eps,
+                                         const MoeRoutingResult& routing, const Tensor& no,
+                                         const Tensor& norm_w, Tensor& h, const Tensor& r,
+                                         bool moe_use_fp32_residual, bool& residual_fused);
+    // FP16 batch dequant + cublasGemmGroupedBatchedEx prefill: dequants all
+    // experts to FP16 in one shot, runs a single grouped GEMM per projection.
+    // One D2H sync per layer for offsets (unavoidable for grouped GEMM API).
+    // Falls through to scatter (caller's responsibility); returns true when
+    // path was taken.
+    bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                        int ne, int expanded, bool non_gated_experts,
+                                        QType up_qtype, const MoeRoutingResult& routing,
+                                        bool fp32_down_active, void*& fp32_down_buf);
+    // FP8 batch prefill: Q6_K → FP8 dequant, per-expert FP16→FP8 quantize,
+    // cuBLAS FP8 grouped GEMM → FP16. Falls back to FP16 batch when scales
+    // unavailable. Used when FP16 batch buffer can't fit but FP8 can.
+    bool try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                       int ne, int expanded, bool non_gated_experts,
+                                       QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
