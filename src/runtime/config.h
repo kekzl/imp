@@ -78,6 +78,12 @@ struct RuntimeConfig {
         bool no_naive_swa = false;
         bool splitk_pipe = true;
         bool gate_concat = false;
+        // M5 Slice 2: opt-out of the cluster FMHA kernel
+        // (attention_fmha_sm120_cluster.cu). Default OFF — the cluster path
+        // dispatches automatically on eligible GQA configs (n_q_per_kv
+        // ∈ {2,4,8}, HD ∈ {64,96,128,256}, seq_kv ≥ 8*Bkv). Set true via
+        // imp.conf to force the legacy per-head kernel (bisection / A-B).
+        bool no_fmha_cluster = false;
     } attention;
 
     struct MoE {
