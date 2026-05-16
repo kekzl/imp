@@ -29,4 +29,20 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
 bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream);
 
+// Cluster variant: blocks sharing a KV head form a cluster of size n_q_per_kv;
+// block-rank 0 loads K and V into its shared memory, sibling Q-head blocks
+// DSMEM-read the tiles via cluster.map_shared_rank(). Saves
+// n_q_per_kv× global KV bandwidth on GQA configs.
+//
+// Returns false (no kernel launched, fall back to fmha_sm120_prefill) when:
+//   - RuntimeConfig.attention.no_fmha_cluster is set
+//   - n_q_per_kv ∉ {2, 4, 8} (cluster dim must be power-of-2 ≤ 8 on GB202)
+//   - head_dim ∉ {64, 96, 128, 256}
+//   - seq_kv < CL_Bkv * 8 (short prompts — cluster.sync barriers dominate)
+//   - device smem budget can't host the largest selected Bq
+//
+// Sibling kernel of fmha_sm120_prefill — see attention_fmha_sm120_cluster.cu.
+bool try_fmha_sm120_cluster_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                                    bool causal, int sliding_window, float softcap, cudaStream_t stream);
+
 }  // namespace imp

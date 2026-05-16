@@ -405,6 +405,14 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
     if (Q.qtype != QType::F16)
         return false;
 
+    // M5 Slice 2: prefer the cluster kernel on eligible GQA configs — saves
+    // n_q_per_kv× KV global bandwidth. Eligibility (n_q_per_kv ∈ {2,4,8},
+    // HD ∈ {64,96,128,256}, seq_kv ≥ CL_Bkv*8, smem fits) is checked
+    // internally; false return falls through to the legacy per-head kernel.
+    if (try_fmha_sm120_cluster_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+        return true;
+    }
+
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
