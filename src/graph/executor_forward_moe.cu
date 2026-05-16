@@ -515,235 +515,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // =========================================================================
-    // DECODE FAST PATH: n=1, device-resident packed experts, Q6_K or Q8_0.
-    // Skips gather/scatter and D2H sync. All top_k experts dispatched in a
-    // single kernel launch per projection. CUDA-graph capturable.
-    // =========================================================================
-    // decode_fast_path == will_decode_fast (computed earlier before routing).
-    // will_decode_fast already checks packed data + dequant buf + FP16 + on_device + Q6K/Q8_0.
-    bool decode_fast_path = will_decode_fast;
-
-    if (decode_fast_path) {
-        // Device pointers from routing result (no D2H copy needed)
-        const int32_t* expert_indices = static_cast<const int32_t*>(routing.expert_indices.data);
-        const float* expert_weights = static_cast<const float*>(routing.expert_weights.data);
-
-        half* norm_ptr = static_cast<half*>(no.data);
-        half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
-        half* up_buf = static_cast<half*>(moe_.expert_up.data);       // [top_k, eff]
-        half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
-        half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
-
-        // --- NVFP4 MoE path: takes FP16 input directly, no Q8_1 needed ---
-        bool use_nvfp4_moe = (ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr);
-        if (use_nvfp4_moe && !non_gated_experts) {
-            use_nvfp4_moe = (ly.nvfp4_moe_gate_ptr != nullptr);
-        }
-
-        if (use_nvfp4_moe) {
-            // Gate+Up projection: NVFP4 MoE GEMV with FP16 input (norm_ptr)
-            if (!non_gated_experts) {
-                gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
-                                             norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
-            } else {
-                gemv_nvfp4_moe_decode(*ly.nvfp4_moe_up_ptr, expert_indices, norm_ptr, up_buf, eff, d,
-                                      /*x_stride=*/0, top_k, stream);
-            }
-
-            // Down projection (fused SwiGLU+GEMV for gated, separate for non-gated)
-            if (!non_gated_experts) {
-                // Fused: swiglu(gate,up) computed inline during down GEMV
-                gemv_nvfp4_moe_swiglu_decode(*ly.nvfp4_moe_down_ptr, expert_indices, gate_buf, up_buf,
-                                             down_buf, d, eff, /*x_stride=*/eff, top_k, stream);
-            } else {
-                int64_t act_shape[2] = {static_cast<int64_t>(top_k), static_cast<int64_t>(eff)};
-                Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-                gemv_nvfp4_moe_decode(*ly.nvfp4_moe_down_ptr, expert_indices, up_buf, down_buf, d, eff,
-                                      /*x_stride=*/eff, top_k, stream);
-            }
-
-            // Weighted sum + residual
-            {
-                bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-                const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
-                                          ? nullptr
-                                          : (will_skip_residual_copy ? h.data : r.data);
-                moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
-                if (!has_shared_expert && !moe_use_fp32_residual)
-                    residual_fused = true;
-            }
-
-            goto moe_after_experts;
-        }
-
-        // Use dp4a MMVQ path when Q8_1 buffers are available
-        bool use_dp4a = (qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
-
-        if (use_dp4a) {
-            // Q8_1 may already be computed by the fused norm+quant above.
-            // If not (e.g., prefill or non-FP16), quantize norm_out now.
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            if (!moe_fused_norm_q8) {
-                quantize_fp16_to_q8_1(norm_ptr, q8, qscratch_.d8_buf, d, stream);
-            }
-
-            size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
-
-            // 5'+6'. Fused gate+up projection (single kernel launch)
-            if (!non_gated_experts) {
-                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-                if (up_qtype == QType::Q6_K) {
-                    gemv_q6k_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                    expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                    eff, d, gate_stride, up_stride_bytes,
-                                                    /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q4_K) {
-                    gemv_q4_k_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q5_K) {
-                    gemv_q5_k_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q4_0) {
-                    gemv_q4_0_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q2_K) {
-                    gemv_q2_k_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q3_K) {
-                    gemv_q3_k_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else {
-                    gemv_q8_0_q8_1_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                     expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
-                                                     eff, d, gate_stride, up_stride_bytes,
-                                                     /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                }
-            } else {
-                // Non-gated: up projection only
-                auto moe_gemv_dp4a = (up_qtype == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
-                                     : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-                                     : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-                                     : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-                                     : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-                                     : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                                                                 : gemv_q8_0_q8_1_moe_decode;
-                moe_gemv_dp4a(ly.expert_up_packed.data, expert_indices, q8, qscratch_.d8_buf, up_buf, eff, d,
-                              up_stride_bytes,
-                              /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-            }
-        } else {
-            // Fallback: FP16 dequant path
-            size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
-
-            if (!non_gated_experts) {
-                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-                if (up_qtype == QType::Q6_K) {
-                    gemv_q6k_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                               expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
-                                               gate_stride, up_stride_bytes,
-                                               /*x_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q8_0) {
-                    gemv_q8_0_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                                expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
-                                                gate_stride, up_stride_bytes,
-                                                /*x_stride=*/0, top_k, stream);
-                } else {
-                    IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d, skipping GEMV",
-                                  (int)up_qtype);
-                }
-            } else {
-                if (up_qtype == QType::Q6_K) {
-                    gemv_q6k_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
-                                        up_stride_bytes, /*x_stride=*/0, top_k, stream);
-                } else if (up_qtype == QType::Q8_0) {
-                    gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
-                                         up_stride_bytes, /*x_stride=*/0, top_k, stream);
-                } else {
-                    IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d, skipping GEMV",
-                                  (int)up_qtype);
-                }
-            }
-        }
-
-        // 7'+8'. Activation + down projection
-        //
-        // When dp4a is active and experts are gated (SwiGLU), fuse the activation
-        // and Q8_1 quantization into a single kernel, eliminating the intermediate
-        // FP16 act_buf write+read.
-        if (use_dp4a) {
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            int eff_q8_blocks = eff / 32;
-
-            if (!non_gated_experts) {
-                // Fused activation → Q8_1 (1 kernel instead of 2)
-                if (cfg.ffn_activation == FFNActivation::GEGLU) {
-                    if (layer == 0 && RuntimeConfig::current().diagnostics.debug_forward)
-                        fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
-                    geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
-                } else {
-                    swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
-                }
-            } else {
-                // Non-gated (relu²): fused relu² + Q8_1 quantization (1 kernel)
-                relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
-            }
-
-            // Down projection with dp4a GEMV — use down_qtype, NOT up_qtype
-            QType dqt = ly.expert_down_packed.qtype;
-            auto moe_gemv_dp4a_down = (dqt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
-                                      : (dqt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-                                      : (dqt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-                                      : (dqt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-                                      : (dqt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-                                      : (dqt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                                      : (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode
-                                                             : gemv_q8_0_q8_1_moe_decode;
-            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
-            moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices, q8, qscratch_.d8_buf, down_buf, d,
-                               eff, down_stride,
-                               /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
-        } else {
-            // Non-dp4a: separate activation + FP16 down GEMV
-            apply_expert_activation(gate_buf, up_buf, act_buf, non_gated_experts, top_k, eff, compute_dtype_,
-                                    cfg.ffn_activation, stream);
-            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
-            half* down_input = non_gated_experts ? up_buf : act_buf;
-            if (ly.expert_down_packed.qtype == QType::Q6_K) {
-                gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
-                                    down_stride, /*x_stride=*/eff, top_k, stream);
-            } else if (ly.expert_down_packed.qtype == QType::Q8_0) {
-                gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
-                                     down_stride, /*x_stride=*/eff, top_k, stream);
-            } else {
-                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV",
-                              (int)ly.expert_down_packed.qtype);
-            }
-        }
-
-        // 9'. Fused weighted sum + FP16 output (+ residual if no shared expert)
-        {
-            bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-            // Use h.data as residual source when memcpy was skipped
-            const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
-                                      ? nullptr
-                                      : (will_skip_residual_copy ? h.data : r.data);
-            moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
-            if (!has_shared_expert && !moe_use_fp32_residual)
-                residual_fused = true;
-        }
-
+    // Decode fast path (n=1, device-resident packed experts): skips
+    // gather/scatter + D2H sync. NVFP4 and dp4a/FP16 sub-paths handled
+    // internally. Always exits via moe_after_experts.
+    if (will_decode_fast) {
+        run_moe_decode_fast(layer, stream, n, d, eff, top_k, routing, no, h, r,
+                            moe_use_fp32_residual, moe_fused_norm_q8,
+                            will_skip_residual_copy, residual_fused);
         goto moe_after_experts;
     }
 
@@ -2602,6 +2380,174 @@ moe_after_experts:
         IMP_CUDA_CHECK_LOG(cudaFree(routing.sorted_token_ids.data));
         IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_offsets.data));
     }
+}
+
+void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
+                                        int top_k, const MoeRoutingResult& routing,
+                                        const Tensor& no, Tensor& h, const Tensor& r,
+                                        bool moe_use_fp32_residual, bool moe_fused_norm_q8,
+                                        bool will_skip_residual_copy, bool& residual_fused) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    bool non_gated_experts =
+        (ly.expert_gate_packed.data == nullptr &&
+         (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
+    QType up_qtype = ly.expert_up_packed.qtype;
+
+    const int32_t* expert_indices = static_cast<const int32_t*>(routing.expert_indices.data);
+    const float* expert_weights = static_cast<const float*>(routing.expert_weights.data);
+
+    half* norm_ptr = static_cast<half*>(no.data);
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
+    half* up_buf = static_cast<half*>(moe_.expert_up.data);       // [top_k, eff]
+    half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
+
+    // NVFP4 MoE sub-path: takes FP16 input directly, no Q8_1 needed
+    bool use_nvfp4_moe = (ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr);
+    if (use_nvfp4_moe && !non_gated_experts)
+        use_nvfp4_moe = (ly.nvfp4_moe_gate_ptr != nullptr);
+
+    if (use_nvfp4_moe) {
+        if (!non_gated_experts) {
+            gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
+                                         norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
+            gemv_nvfp4_moe_swiglu_decode(*ly.nvfp4_moe_down_ptr, expert_indices, gate_buf, up_buf,
+                                         down_buf, d, eff, /*x_stride=*/eff, top_k, stream);
+        } else {
+            gemv_nvfp4_moe_decode(*ly.nvfp4_moe_up_ptr, expert_indices, norm_ptr, up_buf, eff, d,
+                                  /*x_stride=*/0, top_k, stream);
+            int64_t act_shape[2] = {static_cast<int64_t>(top_k), static_cast<int64_t>(eff)};
+            Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
+            relu_sqr_inplace(up_t, stream);
+            gemv_nvfp4_moe_decode(*ly.nvfp4_moe_down_ptr, expert_indices, up_buf, down_buf, d, eff,
+                                  /*x_stride=*/eff, top_k, stream);
+        }
+        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+        const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
+                                  ? nullptr
+                                  : (will_skip_residual_copy ? h.data : r.data);
+        moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
+        if (!has_shared_expert && !moe_use_fp32_residual)
+            residual_fused = true;
+        return;
+    }
+
+    // dp4a/FP16 sub-path: gate+up projection (fused if gated)
+    bool use_dp4a = (qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
+
+    if (use_dp4a) {
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+        if (!moe_fused_norm_q8)
+            quantize_fp16_to_q8_1(norm_ptr, q8, qscratch_.d8_buf, d, stream);
+
+        size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
+
+        if (!non_gated_experts) {
+            size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+            auto gate_up_fused = (up_qtype == QType::Q6_K) ? gemv_q6k_q8_1_moe_gate_up_fused
+                               : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
+                               : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
+                               : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
+                               : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
+                               : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
+                                                           : gemv_q8_0_q8_1_moe_gate_up_fused;
+            gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data, expert_indices, q8,
+                          qscratch_.d8_buf, gate_buf, up_buf, eff, d, gate_stride, up_stride_bytes,
+                          /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+        } else {
+            auto up_gemv = (up_qtype == QType::Q6_K) ? gemv_q6k_q8_1_moe_decode
+                         : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
+                         : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
+                         : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
+                         : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
+                         : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
+                                                     : gemv_q8_0_q8_1_moe_decode;
+            up_gemv(ly.expert_up_packed.data, expert_indices, q8, qscratch_.d8_buf, up_buf, eff, d,
+                    up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+        }
+    } else {
+        // FP16 dequant fallback — only Q6_K / Q8_0 wired.
+        size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
+        if (!non_gated_experts) {
+            size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+            if (up_qtype == QType::Q6_K) {
+                gemv_q6k_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                                           expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
+                                           gate_stride, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+            } else if (up_qtype == QType::Q8_0) {
+                gemv_q8_0_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                                            expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
+                                            gate_stride, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+            } else {
+                IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d", (int)up_qtype);
+            }
+        } else {
+            if (up_qtype == QType::Q6_K) {
+                gemv_q6k_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
+                                    up_stride_bytes, /*x_stride=*/0, top_k, stream);
+            } else if (up_qtype == QType::Q8_0) {
+                gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
+                                     up_stride_bytes, /*x_stride=*/0, top_k, stream);
+            } else {
+                IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d", (int)up_qtype);
+            }
+        }
+    }
+
+    // Activation + down projection
+    if (use_dp4a) {
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+        int eff_q8_blocks = eff / 32;
+        if (!non_gated_experts) {
+            if (cfg.ffn_activation == FFNActivation::GEGLU) {
+                if (layer == 0 && RuntimeConfig::current().diagnostics.debug_forward)
+                    fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
+                geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
+            } else {
+                swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
+            }
+        } else {
+            relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
+        }
+        QType dqt = ly.expert_down_packed.qtype;
+        auto down_gemv = (dqt == QType::Q6_K) ? gemv_q6k_q8_1_moe_decode
+                       : (dqt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
+                       : (dqt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
+                       : (dqt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
+                       : (dqt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
+                       : (dqt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
+                       : (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode
+                                              : gemv_q8_0_q8_1_moe_decode;
+        size_t down_stride = expert_stride(ly.expert_down_packed, dqt);
+        down_gemv(ly.expert_down_packed.data, expert_indices, q8, qscratch_.d8_buf, down_buf, d, eff,
+                  down_stride, /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
+    } else {
+        apply_expert_activation(gate_buf, up_buf, act_buf, non_gated_experts, top_k, eff, compute_dtype_,
+                                cfg.ffn_activation, stream);
+        size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
+        half* down_input = non_gated_experts ? up_buf : act_buf;
+        if (ly.expert_down_packed.qtype == QType::Q6_K) {
+            gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
+                                down_stride, /*x_stride=*/eff, top_k, stream);
+        } else if (ly.expert_down_packed.qtype == QType::Q8_0) {
+            gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
+                                 down_stride, /*x_stride=*/eff, top_k, stream);
+        } else {
+            IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d",
+                          (int)ly.expert_down_packed.qtype);
+        }
+    }
+
+    // Fused weighted sum + FP16 output (+ residual if no shared expert)
+    bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+    const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
+                              ? nullptr
+                              : (will_skip_residual_copy ? h.data : r.data);
+    moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
+    if (!has_shared_expert && !moe_use_fp32_residual)
+        residual_fused = true;
 }
 
 void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,

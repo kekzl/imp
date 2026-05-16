@@ -724,6 +724,17 @@ private:
     // ly.w_up_shared is null or the runtime opt-out is set.
     void run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
                                float eps, const Tensor& no, Tensor& h);
+    // MoE decode fast-path (n=1, device-resident packed experts):
+    // dispatches all top_k experts in a single kernel per projection. NVFP4
+    // and dp4a/FP16 sub-paths handled internally. Sets `residual_fused`=true
+    // when the weighted sum fused the residual add (no shared expert path
+    // active). Caller invokes only when decode_fast eligibility predicate
+    // returned true.
+    void run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff,
+                             int top_k, const MoeRoutingResult& routing,
+                             const Tensor& no, Tensor& h, const Tensor& r,
+                             bool moe_use_fp32_residual, bool moe_fused_norm_q8,
+                             bool will_skip_residual_copy, bool& residual_fused);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
