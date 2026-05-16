@@ -4,7 +4,6 @@
 
 namespace imp {
 void bench_gemm();
-void bench_mmq_q4k();
 void bench_attention();
 void bench_paged_attention();
 void bench_e2e();
@@ -14,7 +13,6 @@ static void print_usage(const char* prog) {
     printf("Usage: %s [benchmark] [--help]\n\n", prog);
     printf("Available benchmarks:\n");
     printf("  gemm        GEMM micro-benchmark\n");
-    printf("  mmq-q4k     Q4_K tiled MMQ kernel microbench\n");
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
@@ -27,17 +25,13 @@ int main(int argc, char** argv) {
     printf("IMP Benchmark Tool\n");
     printf("==================\n\n");
 
-    // Parse arguments
     bool run_gemm = false;
-    bool run_mmq_q4k = false;
     bool run_attention = false;
     bool run_decode_attn = false;
     bool run_e2e = false;
 
     if (argc <= 1) {
-        // No arguments: run all benchmarks
         run_gemm = true;
-        run_mmq_q4k = true;
         run_attention = true;
         run_decode_attn = true;
         run_e2e = true;
@@ -48,8 +42,6 @@ int main(int argc, char** argv) {
             return 0;
         } else if (strcmp(arg, "gemm") == 0) {
             run_gemm = true;
-        } else if (strcmp(arg, "mmq-q4k") == 0) {
-            run_mmq_q4k = true;
         } else if (strcmp(arg, "attention") == 0) {
             run_attention = true;
         } else if (strcmp(arg, "decode-attn") == 0) {
@@ -58,7 +50,6 @@ int main(int argc, char** argv) {
             run_e2e = true;
         } else if (strcmp(arg, "all") == 0) {
             run_gemm = true;
-            run_mmq_q4k = true;
             run_attention = true;
             run_decode_attn = true;
             run_e2e = true;
@@ -75,10 +66,6 @@ int main(int argc, char** argv) {
 
     if (run_gemm) {
         imp::bench_gemm();
-        ++benchmarks_run;
-    }
-    if (run_mmq_q4k) {
-        imp::bench_mmq_q4k();
         ++benchmarks_run;
     }
     if (run_attention) {

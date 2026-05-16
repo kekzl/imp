@@ -10,18 +10,16 @@ namespace imp {
 // ---------------------------------------------------------------------------
 // mmq_q4k v2 — HMMA Tensor-Core path for Q4_K @ FP16 GEMM.
 //
-// v1 (src/compute/mmq_q4k.cu) uses scalar dp4a (~50 TFLOPS peak) and is
-// capped at M ≤ 16 in dispatch because FP16-TC cuBLAS wins above that.
-// v2 routes the inner GEMM through mma.sync.m16n8k16.f16/f32 (~838 TFLOPS
-// peak), with Q4 weights dequantized to FP16 in registers on the fly.
+// Routes the inner GEMM through mma.sync.m16n8k16.f16/f32 (~838 TFLOPS peak),
+// with Q4 weights dequantized to FP16 in registers on the fly.
+//
+// Frozen as opt-in via IMP_FORCE_Q4K_V2=1: end-to-end on Q4_K_M models, the
+// FP16-cache + cuBLAS-FP16-TC baseline wins by 4-6 % because the FP16 cache
+// absorbs the hot weights. v2 stays available for VRAM-constrained scenarios
+// where the FP16 cache can't fit.
 //
 // Design memo: mmq_q4k_v2_hmma_design_2026_05_15. Blueprint pattern:
 // NVIDIA/tilus examples/quantization/matmul_a16wx.py.
-//
-// Phase 1a (this file, shipped): precompute per-sub-block affine scales.
-// Phase 1b: weight-layout permutation to MMA-fragment order.
-// Phase 2:  HMMA kernel skeleton.
-// Phase 3+: dequant-in-registers, tile tuning, integration.
 // ---------------------------------------------------------------------------
 
 // Precomputes per-sub-block affine constants for a Q4_K weight tensor.
@@ -85,18 +83,12 @@ inline size_t q4k_eff_q4_bytes(int N, int K) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: HMMA GEMM kernel (mma.sync.m16n8k16.f16/f32 via WMMA).
+// HMMA GEMM kernel (mma.sync.m16n8k16.f16/f32 via WMMA).
 //
 // Computes y = x @ W^T where W is Q4_K-quantized weights, given the
-// precomputed v2 inputs from Phase 1a (eff_scale, eff_min) and Phase 1b
-// (eff_q4 — permuted Q4 nibbles). Activations stay in FP16; weights are
-// dequantized into shared memory per K-step (scaffold — Phase 3 will move
-// dequant into registers + add the cp.async triple-buffer pipeline).
-//
-// Tile geometry: BM=64, BN=64, BK=32; 4 warps in 2×2 layout. Each warp
-// produces a 32×32 output region with 2×2×2 = 8 m16n8k16 MMAs per K-step.
-// BK=32 matches the Q4_K sub-block boundary — one outer K-iteration consumes
-// exactly one (eff_scale, eff_min) pair per output row.
+// precomputed v2 inputs (eff_scale, eff_min) + permuted eff_q4 nibbles.
+// Activations stay in FP16; weights are dequantized in registers on the
+// fly with a 2-stage cp.async pipeline.
 //
 // Constraints:
 //   - K % 32 == 0

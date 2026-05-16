@@ -14,7 +14,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
-#include "compute/mmq_q4k.h"
 #include "compute/mmq_q4k_v2.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
@@ -2142,64 +2141,21 @@ static void gemm_dispatch_impl(
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
                     !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
 
-    // Direct Q4_K tiled-mmq dispatch (Phase C). Beats mmvq 2.0-2.4x in
-    // isolated microbench, but FP16 TensorCore cuBLAS still wins at M ≥ 32
-    // (TC peak ~838 TFLOPS vs dp4a peak ~50 TFLOPS — kernel can't catch up
-    // until it ports to mma.sync.s8). Effective win zone: M=2..16 where
-    // dequant+cuBLAS overhead dominates and dp4a parallelism wins. M=1 is
-    // owned by use_dp4a. Bypassed for Gemma-4 (force_mmvq), and when
-    // IMP_NO_MMQ_Q4K is set. Override range via IMP_MMQ_Q4K_MIN_M /
-    // IMP_MMQ_Q4K_MAX_M.
-    static const bool no_mmq_q4k = std::getenv("IMP_NO_MMQ_Q4K") != nullptr;
-    static const int mmq_q4k_min_m = []() {
-        const char* e = std::getenv("IMP_MMQ_Q4K_MIN_M");
-        return e ? std::atoi(e) : 2;
-    }();
-    static const int mmq_q4k_max_m = []() {
-        const char* e = std::getenv("IMP_MMQ_Q4K_MAX_M");
-        return e ? std::atoi(e) : 16;
-    }();
-    const int dispatch_M = static_cast<int>(input.shape[0]);
-    bool use_mmq_q4k = !no_mmq_q4k && !use_mmvq && !prefer_fp16_cache &&
-                       input.qtype == QType::F16 && !fp32_output &&
-                       qtype == QType::Q4_K &&
-                       dispatch_M >= mmq_q4k_min_m && dispatch_M <= mmq_q4k_max_m &&
-                       (weight.shape[1] % 256 == 0);
-    if (use_mmq_q4k) {
-        int M = static_cast<int>(input.shape[0]);
-        int N = static_cast<int>(weight.shape[0]);
-        int K = static_cast<int>(weight.shape[1]);
-        const size_t q8_need = static_cast<size_t>(M) * (K / 32) * 36;
-        static void* s_mmq_scratch = nullptr;
-        static size_t s_mmq_scratch_size = 0;
-        if (!s_mmq_scratch || s_mmq_scratch_size < q8_need) {
-            if (s_mmq_scratch) cudaFree(s_mmq_scratch);
-            cudaMalloc(&s_mmq_scratch, q8_need * 2);
-            s_mmq_scratch_size = q8_need * 2;
-        }
-        mmq_q4k(weight.data, static_cast<const half*>(input.data),
-                static_cast<half*>(output.data), M, N, K, s_mmq_scratch,
-                s_mmq_scratch_size, stream);
-        return;
-    }
-
-    // Q4_K v2 (Phase 3 HMMA + cp.async pipeline): kicks in above v1's M=16 cap
-    // when the weight has a pre-built Q4_K v2 eff_* cache entry (populated at
-    // model-load time by pre_dequant_weights). Direct kernel dispatch — no
-    // per-call cudaMalloc, no per-call Phase 1 preprocessing, fully graph-
-    // capture safe.
+    // Q4_K v2 HMMA path (opt-in, off by default).
     //
-    // The cache lookup is the gating condition: weights without an entry
-    // (e.g. FP16-cache-eligible weights, or weights past the Q4_K v2 VRAM
-    // budget) fall through to the existing dispatch paths.
-    static const bool no_mmq_q4k_v2 = std::getenv("IMP_NO_MMQ_Q4K_V2") != nullptr;
-    static const int mmq_q4k_v2_min_m = []() {
-        const char* e = std::getenv("IMP_MMQ_Q4K_V2_MIN_M");
-        return e ? std::atoi(e) : 64;
-    }();
-    if (!no_mmq_q4k_v2 && !use_mmq_q4k && !use_mmvq && !use_dp4a &&
-        qtype == QType::Q4_K && input.qtype == QType::F16 && !fp32_output &&
-        dispatch_M >= mmq_q4k_v2_min_m && q4k_v2_cache != nullptr) {
+    // Microbench beats dequant+cuBLAS by 2-4×, but end-to-end on real models
+    // (Gemma-3-12B, Qwen3.6-35B Q4_K_M) the FP16-cache + cuBLAS-FP16-TC
+    // baseline wins by 4-6 % because the FP16 cache absorbs the hot weights.
+    // Frozen as opt-in for VRAM-constrained scenarios where the FP16 cache
+    // can't fit — set IMP_FORCE_Q4K_V2=1 to enable cache population
+    // (executor_pre_dequant.cu) and this dispatch in one step.
+    //
+    // Gating is by cache presence: the cache stays empty unless
+    // IMP_FORCE_Q4K_V2 was set at model load, so the runtime cost here is a
+    // single nullptr/empty-map check on the hot path.
+    if (q4k_v2_cache != nullptr && qtype == QType::Q4_K &&
+        input.qtype == QType::F16 && !fp32_output &&
+        static_cast<int>(input.shape[0]) >= 64) {
         auto it = q4k_v2_cache->find(weight.data);
         if (it != q4k_v2_cache->end()) {
             int M = static_cast<int>(input.shape[0]);

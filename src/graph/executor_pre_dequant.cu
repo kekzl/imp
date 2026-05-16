@@ -662,35 +662,28 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // Deduct Phase 1 allocation from shared budget
     deduct_budget(remaining_budget, total_cache_bytes);
 
-    // --- Phase 1b: Q4_K v2 eff_* cache for Q4_K weights NOT in FP16 cache ---
+    // --- Phase 1b: Q4_K v2 eff_* cache (opt-in via IMP_FORCE_Q4K_V2=1) ---
     //
     // Eagerly runs Phase 1a (eff_scale, eff_min precompute) and Phase 1b
-    // (Q4 byte permutation) per Q4_K weight that the FP16 cache couldn't
-    // cover. The hot path then calls mmq_q4k_v2 directly with the cached
-    // eff_* pointers — no per-call cudaMalloc, no per-call Phase 1.
-    // Critical for graph capture: the original lazy-scratch implementation
-    // failed `cudaStreamBeginCapture` with operation-not-permitted; this
-    // eager path makes the dispatch graph-safe.
+    // (Q4 byte permutation) per Q4_K weight so the hot path can call
+    // mmq_q4k_v2 directly with cached eff_* pointers — no per-call
+    // cudaMalloc, no per-call Phase 1. Eager precompute keeps the dispatch
+    // graph-capture safe.
     //
-    // Layout per cache entry: one VRAM blob of
-    //   N · K/2 + 2 · N · K/16 bytes  (≈ 0.625·N·K, vs FP16 cache's 2.0·N·K
-    //                                  and the original Q4_K's ~0.5625·N·K)
-    // — slim enough to populate after FP16 budget exhaustion without
-    // pushing into shared-memory fallback on WSL2.
+    // Layout per cache entry: one VRAM blob of N · K/2 + 2 · N · K/16 bytes
+    // (≈ 0.625·N·K, vs the FP16 cache's 2.0·N·K).
     //
-    // Disable via IMP_NO_MMQ_Q4K_V2=1 (matches the dispatch env var).
-    // IMP_FORCE_Q4K_V2=1 inverts the priority — populate v2 cache for ALL
-    // Q4_K weights even if they're in the FP16 cache (useful for benching
-    // the v2 kernel on models that would otherwise be fully FP16-cached).
-    if (std::getenv("IMP_NO_MMQ_Q4K_V2") == nullptr) {
-        const bool force_q4k_v2 = (std::getenv("IMP_FORCE_Q4K_V2") != nullptr);
+    // Off by default: end-to-end on real Q4_K_M models (Gemma-3-12B,
+    // Qwen3.6-35B) FP16-cache + cuBLAS-FP16-TC wins by 4-6 % over v2, even
+    // though v2 wins microbench. Enable for VRAM-constrained scenarios
+    // where the FP16 cache can't fit, or to A/B the kernel.
+    if (std::getenv("IMP_FORCE_Q4K_V2") != nullptr) {
         size_t q4k_v2_count = 0;
         size_t q4k_v2_total = 0;
         bool q4k_v2_exhausted = false;
         auto add_q4k_v2 = [&](const Tensor& w) {
             if (q4k_v2_exhausted) return;
             if (!w.data || w.qtype != QType::Q4_K) return;
-            if (!force_q4k_v2 && wcache_.fp16.count(w.data)) return;  // FP16 wins
             if (wcache_.q4k_v2.count(w.data)) return;    // already cached
             if (w.shape[1] % 256 != 0) return;           // K must be Q4_K-aligned
             int N = static_cast<int>(w.shape[0]);
