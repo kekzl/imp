@@ -761,6 +761,15 @@ private:
                                          const MoeRoutingResult& routing, const Tensor& no,
                                          const Tensor& norm_w, Tensor& h, const Tensor& r,
                                          bool moe_use_fp32_residual, bool& residual_fused);
+    // FP16 batch dequant + cublasGemmGroupedBatchedEx prefill: dequants all
+    // experts to FP16 in one shot, runs a single grouped GEMM per projection.
+    // One D2H sync per layer for offsets (unavoidable for grouped GEMM API).
+    // Falls through to scatter (caller's responsibility); returns true when
+    // path was taken.
+    bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                        int ne, int expanded, bool non_gated_experts,
+                                        QType up_qtype, const MoeRoutingResult& routing,
+                                        bool fp32_down_active, void*& fp32_down_buf);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 

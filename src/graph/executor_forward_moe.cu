@@ -445,102 +445,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     debug_tensor_stats("L0_moe_norm_out_no", no, stream);
                 }
                 if (can_fp16_batch_nosync) {
-                    // =================================================================
-                    // FP16 BATCH DEQUANT + cublasGemmGroupedBatchedEx
-                    // Dequants all experts Q6_K→FP16 into batch buffer, then runs
-                    // a single cublasGemmGroupedBatchedEx per projection. One D2H
-                    // sync per layer for offsets (unavoidable for grouped GEMM API).
-                    // =================================================================
-                    if (layer == 0)
-                        IMP_LOG_INFO("MoE prefill: FP16 batch + grouped GEMM path (n=%d, expanded=%d)", n,
-                                     expanded);
-
-                    // One D2H sync per layer for expert offsets
-                    std::vector<int32_t> h_offsets(ne + 1);
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                                       static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                                       cudaMemcpyDeviceToHost, stream));
-                    cudaStreamSynchronize(stream);
-
-                    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
-                    char* gathered_base = static_cast<char*>(moe_.gathered.data);
-                    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
-                    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
-                    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
-                    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
-
-                    if (fp32_down_active) {
-                        size_t fp32_bytes = static_cast<size_t>(expanded) * d * sizeof(float);
-                        // Prefer the pre-allocated persistent scratch (avoids per-call
-                        // cudaMallocAsync — see moe_workspace.h::fp32_down_buf).
-                        if (moe_.fp32_down_buf && moe_.fp32_down_buf_size >= fp32_bytes) {
-                            fp32_down_buf = moe_.fp32_down_buf;
-                        } else {
-                            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
-                        }
-                    }
-
-                    auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
-                                                  char* c_base, int K_dim, int N_dim,
-                                                  QType out_dtype = QType::F16) {
-                        int64_t rows = packed.shape[1];
-                        int64_t cols = packed.shape[2];
-                        size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
-
-                        dequant_gpu(static_cast<const uint8_t*>(packed.data), buf, qtype,
-                                    ne * static_cast<int>(rows), static_cast<int>(cols), stream);
-
-                        std::vector<const void*> b_ptrs(ne);
-                        for (int e = 0; e < ne; ++e)
-                            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
-
-                        gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
-                                         QType::F16, ne, stream, moe_.d_work_ptrs, out_dtype);
-                    };
-
-                    // Gate projection
-                    if (!non_gated_experts)
-                        batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype, gathered_base,
-                                           expert_gate_base, d, eff);
-                    if (debug_forward_enabled() && layer == 0) {
-                        int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                        Tensor gv(moe_.expert_gate.data, compute_dtype_, 2, sh, true);
-                        debug_tensor_stats("L0_moe_gate_out", gv, stream);
-                    }
-
-                    // Up projection
-                    batch_dequant_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff);
-                    if (debug_forward_enabled() && layer == 0) {
-                        int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                        Tensor uv(moe_.expert_up.data, compute_dtype_, 2, sh, true);
-                        debug_tensor_stats("L0_moe_up_out", uv, stream);
-                    }
-
-                    // Activation
-                    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
-                                            moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
-                                            compute_dtype_, cfg.ffn_activation, stream);
-                    if (debug_forward_enabled() && layer == 0) {
-                        int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                        Tensor sv(moe_.expert_swiglu.data, compute_dtype_, 2, sh, true);
-                        debug_tensor_stats("L0_moe_swiglu_out", sv, stream);
-                    }
-
-                    // Down projection
-                    char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-                    char* down_target = fp32_down_active ? static_cast<char*>(fp32_down_buf)
-                                                         : expert_down_base;
-                    QType down_out_dtype = fp32_down_active ? QType::F32 : QType::F16;
-                    batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, down_act,
-                                       down_target, eff, d, down_out_dtype);
-                    if (debug_forward_enabled() && layer == 0 && !fp32_down_active) {
-                        int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
-                        Tensor dv(moe_.expert_down.data, compute_dtype_, 2, sh, true);
-                        debug_tensor_stats("L0_moe_down_out", dv, stream);
-                    }
-
-                    // Falls through to scatter (step 7)
-
+                    try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded,
+                                                   non_gated_experts, up_qtype, routing,
+                                                   fp32_down_active, fp32_down_buf);
                 } else if (can_fp8_batch) {
                     if (layer == 0)
                         IMP_LOG_INFO(
@@ -2089,6 +1996,88 @@ bool GraphExecutor::try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int 
             ly.expert_down_packed.data, fused_down_act, expert_down_base, d_offsets, d, eff,
             expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
     }
+    return true;
+}
+
+bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d,
+                                                   int eff, int ne, int expanded,
+                                                   bool non_gated_experts, QType up_qtype,
+                                                   const MoeRoutingResult& routing,
+                                                   bool fp32_down_active, void*& fp32_down_buf) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    if (layer == 0)
+        IMP_LOG_INFO("MoE prefill: FP16 batch + grouped GEMM path (n=%d, expanded=%d)", n,
+                     expanded);
+
+    // One D2H sync per layer for expert offsets
+    std::vector<int32_t> h_offsets(ne + 1);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                       static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                       cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);
+
+    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+    char* gathered_base = static_cast<char*>(moe_.gathered.data);
+    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
+    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+    if (fp32_down_active) {
+        size_t fp32_bytes = static_cast<size_t>(expanded) * d * sizeof(float);
+        // Prefer the pre-allocated persistent scratch (avoids per-call cudaMallocAsync).
+        if (moe_.fp32_down_buf && moe_.fp32_down_buf_size >= fp32_bytes) {
+            fp32_down_buf = moe_.fp32_down_buf;
+        } else {
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
+        }
+    }
+
+    auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
+                                  char* c_base, int K_dim, int N_dim,
+                                  QType out_dtype = QType::F16) {
+        int64_t rows = packed.shape[1];
+        int64_t cols = packed.shape[2];
+        size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
+        dequant_gpu(static_cast<const uint8_t*>(packed.data), buf, qtype,
+                    ne * static_cast<int>(rows), static_cast<int>(cols), stream);
+        std::vector<const void*> b_ptrs(ne);
+        for (int e = 0; e < ne; ++e)
+            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+        gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
+                         QType::F16, ne, stream, moe_.d_work_ptrs, out_dtype);
+    };
+
+    auto debug_dump = [&](const char* name, void* data, int rows, int cols) {
+        if (!debug_forward_enabled() || layer != 0) return;
+        int64_t sh[2] = {rows, cols};
+        Tensor v(data, compute_dtype_, 2, sh, true);
+        debug_tensor_stats(name, v, stream);
+    };
+
+    if (!non_gated_experts)
+        batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype, gathered_base,
+                           expert_gate_base, d, eff);
+    debug_dump("L0_moe_gate_out", moe_.expert_gate.data, expanded, eff);
+
+    batch_dequant_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff);
+    debug_dump("L0_moe_up_out", moe_.expert_up.data, expanded, eff);
+
+    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                            non_gated_experts, expanded, eff, compute_dtype_, cfg.ffn_activation,
+                            stream);
+    debug_dump("L0_moe_swiglu_out", moe_.expert_swiglu.data, expanded, eff);
+
+    char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+    char* down_target =
+        fp32_down_active ? static_cast<char*>(fp32_down_buf) : expert_down_base;
+    QType down_out_dtype = fp32_down_active ? QType::F32 : QType::F16;
+    batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype, down_act, down_target,
+                       eff, d, down_out_dtype);
+    if (!fp32_down_active) debug_dump("L0_moe_down_out", moe_.expert_down.data, expanded, d);
+
     return true;
 }
 
