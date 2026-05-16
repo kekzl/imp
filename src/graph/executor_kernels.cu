@@ -20,6 +20,8 @@
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
+#include <atomic>
+
 namespace imp {
 
 // ---------------------------------------------------------------------------
@@ -2079,10 +2081,23 @@ static void gemm_dispatch_impl(
                 int N = static_cast<int>(res.N);
                 quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data, cutlass_act_sf, M, K, stream);
 
-                // MXFP4 CUTLASS: UE8M0 scales per 32 elements (alternative to NVFP4)
+                // MXFP4 CUTLASS branch (UE8M0 scales per 32 elements). Fires
+                // only when the SAME weight.data exists in BOTH cutlass_nvfp4
+                // and cutlass_mxfp4 caches — review/phase3_maint.md §5.1
+                // claimed the loader never does this. convert_nvfp4_to_mxfp4_cutlass
+                // (executor_pre_dequant.cu:1518) IS active though, so this
+                // path is plausible. Instrumented (log-once) to confirm
+                // before deletion in a follow-up. See review/phase5_synthesis.md
+                // §7 dead/dormant verdict — needs production trace.
                 if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
                     auto mx_it = mxfp4_cache->find(weight.data);
                     if (mx_it != mxfp4_cache->end()) {
+                        static std::atomic<bool> s_logged{false};
+                        if (!s_logged.exchange(true)) {
+                            IMP_LOG_INFO(
+                                "QW7-probe: dual-cache NVFP4+MXFP4 branch fired "
+                                "(weight=%p M=%d N=%d K=%d) — branch is NOT dead", weight.data, M, N, K);
+                        }
                         quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data, mxfp4_act_sf, M, K,
                                                        stream);
                         bool ok = gemm_mxfp4_cutlass_sm120(cutlass_act_data, mxfp4_act_sf, mx_it->second,
