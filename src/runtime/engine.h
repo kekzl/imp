@@ -326,6 +326,13 @@ private:
     bool init_features();
     void warmup();
 
+    // Build banned_token_ids_ — special/control tokens that must never appear
+    // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
+    // for control-tagged tokens (authoritative GGUF token_types) or falls back
+    // to heuristic patterns. Excludes stop/EOS/think/channel tokens. Bypassed
+    // by IMP_NO_BAN=1 for bisecting NVFP4 repetition issues.
+    void build_banned_token_list();
+
     // ── Inference helpers ────────────────────────────────────────────
     bool is_stop_token(int32_t token) const;
 

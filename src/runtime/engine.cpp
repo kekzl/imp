@@ -1517,126 +1517,7 @@ bool Engine::init_features() {
             chat_template_.init(family, *tok, tok->chat_template_str());
     }
 
-    // Build banned token list: special/control tokens that must never appear
-    // in generated output.  If the model emits e.g. <|im_start|> or
-    // <|endoftext|> mid-generation it starts a phantom new turn or hallucinates
-    // a continuation, causing output degeneration.  llama.cpp blocks all
-    // control tokens via llama_token_is_control(); we scan the vocabulary for
-    // tokens matching known special-token patterns.
-    // Diagnostic: IMP_NO_BAN=1 disables the ban list entirely. Used to bisect
-    // whether Mistral-Small-3.2-NVFP4's long-form repetition loop is caused
-    // by an over-aggressive ban (model wants to emit an end-of-turn marker
-    // but it's blocked) vs. NVFP4 weight-quality issue.
-    bool skip_ban = false;
-    if (const char* env = std::getenv("IMP_NO_BAN")) {
-        skip_ban = (env[0] == '1');
-    }
-    if (skip_ban) {
-        banned_token_ids_.clear();
-        IMP_LOG_WARN("IMP_NO_BAN=1: skipping banned-token list (debug)");
-    } else {
-        banned_token_ids_.clear();
-        auto add_if_valid = [this](int32_t id) {
-            if (id >= 0)
-                banned_token_ids_.push_back(id);
-        };
-
-        // Collect IDs that must NOT be banned (stop tokens + EOS + think tokens).
-        // The model must be able to generate these for correct operation.
-        std::vector<int32_t> keep_ids;
-        Tokenizer* tok = model_->tokenizer();
-        if (tok) {
-            for (int32_t eid : tok->eos_ids())
-                keep_ids.push_back(eid);
-        }
-        for (int32_t sid : chat_template_.stop_token_ids())
-            keep_ids.push_back(sid);
-        // Think tokens must not be banned — think models generate these to
-        // enter/exit reasoning mode. Support both Qwen (<think>/<\/think>) and
-        // Gemma-4 (<|think|>/<|/think|>) naming conventions.
-        if (tok) {
-            for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>"}) {
-                int32_t tid = tok->find_token(name);
-                if (tid >= 0)
-                    keep_ids.push_back(tid);
-            }
-        }
-        // Gemma-4 channel markers: the model is trained to wrap its turn in
-        // <|channel>final<channel|> ... structure (and <|channel>thought<channel|>
-        // for reasoning). Banning these forces the model off-distribution and
-        // it produces token-stuck loops or repetition (observed on llm-compressor
-        // NVFP4 server prefill — the natural argmax IS <|channel>). Keep them
-        // and let the server strip the markers from user-facing output via
-        // strip_channel_headers().
-        if (tok) {
-            for (const char* name : {"<|channel>", "<channel|>"}) {
-                int32_t tid = tok->find_token(name);
-                if (tid >= 0)
-                    keep_ids.push_back(tid);
-            }
-        }
-        auto is_kept = [&](int32_t id) {
-            return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
-        };
-
-        // Chat template start-of-turn delimiters (never valid in output)
-        if (!is_kept(chat_template_.im_start_id()))
-            add_if_valid(chat_template_.im_start_id());
-        if (!is_kept(chat_template_.start_header_id()))
-            add_if_valid(chat_template_.start_header_id());
-        if (!is_kept(chat_template_.end_header_id()))
-            add_if_valid(chat_template_.end_header_id());
-
-        // Scan vocab for control tokens, excluding stop/EOS tokens.
-        if (tok) {
-            int vocab_size = tok->vocab_size();
-            if (tok->has_token_types()) {
-                // Authoritative: use token_type metadata from GGUF.
-                // CONTROL=3 tokens are special tokens that should not appear in output.
-                for (int i = 0; i < vocab_size; i++) {
-                    if (is_kept(static_cast<int32_t>(i)))
-                        continue;
-                    if (tok->is_control_token(i)) {
-                        add_if_valid(static_cast<int32_t>(i));
-                    }
-                }
-            } else {
-                // Fallback: heuristic pattern matching for GGUF files without token_type.
-                for (int i = 0; i < vocab_size; i++) {
-                    if (is_kept(static_cast<int32_t>(i)))
-                        continue;
-                    const std::string& t = tok->token_text(i);
-                    if (t.size() < 3 || t[0] != '<' || t.back() != '>')
-                        continue;
-                    if (t.size() >= 4 && t[1] == '|' && t[t.size() - 2] == '|') {
-                        add_if_valid(static_cast<int32_t>(i));
-                        continue;
-                    }
-                    if (t == "<pad>" || t == "<unk>" || t == "<mask>" || t == "<unused0>" ||
-                        t == "<start_of_turn>" || t == "<end_of_turn>" || t == "<start_of_image>" ||
-                        t == "<end_of_image>") {
-                        add_if_valid(static_cast<int32_t>(i));
-                    }
-                }
-            }
-        }
-
-        // Deduplicate
-        std::sort(banned_token_ids_.begin(), banned_token_ids_.end());
-        banned_token_ids_.erase(std::unique(banned_token_ids_.begin(), banned_token_ids_.end()),
-                                banned_token_ids_.end());
-
-        if (!banned_token_ids_.empty()) {
-            IMP_LOG_INFO("Banned %zu special tokens from generation", banned_token_ids_.size());
-            if (tok) {
-                std::string bl;
-                for (int32_t bid : banned_token_ids_) {
-                    bl += std::to_string(bid) + "(" + tok->token_text(bid) + ") ";
-                }
-                IMP_LOG_INFO("  banned: %s", bl.c_str());
-            }
-        }
-    }
+    build_banned_token_list();
 
     // Cache think token IDs for stop-suppression during reasoning.
     // Only treat as think model if <think> is a CONTROL token (from GGUF metadata),
@@ -1680,6 +1561,90 @@ bool Engine::init_features() {
     sampling_preallocate_dry(config_.max_seq_len, decode_stream());
 
     return true;
+}
+
+void Engine::build_banned_token_list() {
+    // Diagnostic bypass: IMP_NO_BAN=1 disables the ban list. Used to bisect
+    // Mistral-Small-3.2-NVFP4 long-form repetition (ban vs weight quality).
+    if (const char* env = std::getenv("IMP_NO_BAN"); env && env[0] == '1') {
+        banned_token_ids_.clear();
+        IMP_LOG_WARN("IMP_NO_BAN=1: skipping banned-token list (debug)");
+        return;
+    }
+    banned_token_ids_.clear();
+    auto add_if_valid = [this](int32_t id) {
+        if (id >= 0) banned_token_ids_.push_back(id);
+    };
+
+    // Collect IDs that must NOT be banned: stop tokens, EOS, think tokens,
+    // and Gemma-4 channel markers (the model is trained to emit them).
+    std::vector<int32_t> keep_ids;
+    Tokenizer* tok = model_->tokenizer();
+    if (tok) {
+        for (int32_t eid : tok->eos_ids()) keep_ids.push_back(eid);
+    }
+    for (int32_t sid : chat_template_.stop_token_ids()) keep_ids.push_back(sid);
+    if (tok) {
+        for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>",
+                                  "<|channel>", "<channel|>"}) {
+            int32_t tid = tok->find_token(name);
+            if (tid >= 0) keep_ids.push_back(tid);
+        }
+    }
+    auto is_kept = [&](int32_t id) {
+        return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
+    };
+
+    // Chat template start-of-turn delimiters (never valid in output)
+    if (!is_kept(chat_template_.im_start_id()))
+        add_if_valid(chat_template_.im_start_id());
+    if (!is_kept(chat_template_.start_header_id()))
+        add_if_valid(chat_template_.start_header_id());
+    if (!is_kept(chat_template_.end_header_id()))
+        add_if_valid(chat_template_.end_header_id());
+
+    // Scan vocab for control tokens. Authoritative path uses GGUF token_type
+    // metadata; fallback uses heuristic pattern matching on legacy GGUFs.
+    if (tok) {
+        int vocab_size = tok->vocab_size();
+        if (tok->has_token_types()) {
+            for (int i = 0; i < vocab_size; i++) {
+                if (is_kept(static_cast<int32_t>(i))) continue;
+                if (tok->is_control_token(i)) add_if_valid(static_cast<int32_t>(i));
+            }
+        } else {
+            for (int i = 0; i < vocab_size; i++) {
+                if (is_kept(static_cast<int32_t>(i))) continue;
+                const std::string& t = tok->token_text(i);
+                if (t.size() < 3 || t[0] != '<' || t.back() != '>') continue;
+                if (t.size() >= 4 && t[1] == '|' && t[t.size() - 2] == '|') {
+                    add_if_valid(static_cast<int32_t>(i));
+                    continue;
+                }
+                if (t == "<pad>" || t == "<unk>" || t == "<mask>" || t == "<unused0>" ||
+                    t == "<start_of_turn>" || t == "<end_of_turn>" ||
+                    t == "<start_of_image>" || t == "<end_of_image>") {
+                    add_if_valid(static_cast<int32_t>(i));
+                }
+            }
+        }
+    }
+
+    // Deduplicate
+    std::sort(banned_token_ids_.begin(), banned_token_ids_.end());
+    banned_token_ids_.erase(std::unique(banned_token_ids_.begin(), banned_token_ids_.end()),
+                            banned_token_ids_.end());
+
+    if (!banned_token_ids_.empty()) {
+        IMP_LOG_INFO("Banned %zu special tokens from generation", banned_token_ids_.size());
+        if (tok) {
+            std::string bl;
+            for (int32_t bid : banned_token_ids_) {
+                bl += std::to_string(bid) + "(" + tok->token_text(bid) + ") ";
+            }
+            IMP_LOG_INFO("  banned: %s", bl.c_str());
+        }
+    }
 }
 
 void Engine::warmup() {
