@@ -668,18 +668,21 @@ __global__ void mmq_q4k_v2_kernel_p4_t(
             uint8_t* sptr = &sQ4[buf][n_local * 16 + byte_within_n];            \
             cp_async_ca_8(sptr, gptr, n_global < N);                            \
         }                                                                       \
-        /* sScale/sMin: strided in GMEM (different N's are K_subs apart), so   \
-         * load synchronously per-thread; cp.async.ca-4 would read into the    \
-         * next N's slot. These are 256-512 bytes total — negligible.          */ \
-        if (tid < kP3BN) {                                                      \
-            int n_global = block_n + tid;                                       \
-            if (n_global < N) {                                                 \
-                int64_t off = (int64_t)n_global * K_subs + (kbx_val);           \
-                sScale[buf][tid] = eff_scale[off];                              \
-                sMin[buf][tid] = eff_min[off];                                  \
-            } else {                                                            \
-                sScale[buf][tid] = __float2half(0.0f);                          \
-                sMin[buf][tid] = __float2half(0.0f);                            \
+        /* sScale/sMin: strided in GMEM. Multi-chunk loop supports BN > threads. */ \
+        constexpr int kScaleChunks = (kP3BN + kThreadsPerBlock - 1) / kThreadsPerBlock;\
+        _Pragma("unroll")                                                       \
+        for (int sc = 0; sc < kScaleChunks; ++sc) {                             \
+            int idx = sc * kThreadsPerBlock + tid;                              \
+            if (idx < kP3BN) {                                                  \
+                int n_global = block_n + idx;                                   \
+                if (n_global < N) {                                             \
+                    int64_t off = (int64_t)n_global * K_subs + (kbx_val);       \
+                    sScale[buf][idx] = eff_scale[off];                          \
+                    sMin[buf][idx] = eff_min[off];                              \
+                } else {                                                        \
+                    sScale[buf][idx] = __float2half(0.0f);                      \
+                    sMin[buf][idx] = __float2half(0.0f);                        \
+                }                                                               \
             }                                                                   \
         }                                                                       \
     } while (0)
@@ -809,9 +812,12 @@ __global__ void mmq_q4k_v2_kernel_p5_t(
     const half* __restrict__ eff_scale, const half* __restrict__ eff_min,
     half* __restrict__ y, int M, int N, int K) {
     constexpr int kP3WarpN = kP3BN / kWarpsN;
-    constexpr int kP3WRM = kWarpM_p5 / 16;       // 2
+    constexpr int kP3WRM = kWarpM_p5 / 16;       // 2 (or 4 if BM=128 WARPS_M=2)
     constexpr int kP3WRN = kP3WarpN / 8;
     constexpr int kP3WRK = kBK / 16;             // 2
+    // Phase 7g experiment: 3-stage cp.async was tested — produced 3402 tok/s
+    // vs 2-stage's 3406 (within noise). Extra SMEM (16→24 KB sA) cuts
+    // blocks/SM without measurable pipeline gain on this workload. Reverted.
     constexpr int kStages = 2;
 
     const int block_m = blockIdx.y * kBM_p5;
@@ -822,7 +828,7 @@ __global__ void mmq_q4k_v2_kernel_p5_t(
     const int wm = warp / kWarpsN;
     const int wn = warp % kWarpsN;
 
-    __shared__ __align__(16) half sA[kStages][kBM_p5 * kBK];     // 2 × 8 KB
+    __shared__ __align__(16) half sA[kStages][kBM_p5 * kBK];
     __shared__ __align__(16) uint8_t sQ4[kStages][kP3BN * (kBK / 2)];
     __shared__ __align__(16) half sScale[kStages][kP3BN];
     __shared__ __align__(16) half sMin[kStages][kP3BN];
@@ -867,15 +873,21 @@ __global__ void mmq_q4k_v2_kernel_p5_t(
             uint8_t* sptr = &sQ4[buf][n_local * 16 + byte_within_n];           \
             cp_async_ca_8(sptr, gptr, n_global < N);                           \
         }                                                                      \
-        if (tid < kP3BN) {                                                     \
-            int n_global = block_n + tid;                                      \
-            if (n_global < N) {                                                \
-                int64_t off = (int64_t)n_global * K_subs + (kbx_val);          \
-                sScale[buf][tid] = eff_scale[off];                             \
-                sMin[buf][tid] = eff_min[off];                                 \
-            } else {                                                           \
-                sScale[buf][tid] = __float2half(0.0f);                         \
-                sMin[buf][tid] = __float2half(0.0f);                           \
+        constexpr int kScaleChunks =                                           \
+            (kP3BN + kThreadsPerBlock_p5 - 1) / kThreadsPerBlock_p5;            \
+        _Pragma("unroll")                                                      \
+        for (int sc = 0; sc < kScaleChunks; ++sc) {                            \
+            int idx = sc * kThreadsPerBlock_p5 + tid;                          \
+            if (idx < kP3BN) {                                                 \
+                int n_global = block_n + idx;                                  \
+                if (n_global < N) {                                            \
+                    int64_t off = (int64_t)n_global * K_subs + (kbx_val);      \
+                    sScale[buf][idx] = eff_scale[off];                         \
+                    sMin[buf][idx] = eff_min[off];                             \
+                } else {                                                       \
+                    sScale[buf][idx] = __float2half(0.0f);                     \
+                    sMin[buf][idx] = __float2half(0.0f);                       \
+                }                                                              \
             }                                                                  \
         }                                                                      \
     } while (0)
@@ -1025,6 +1037,11 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
     const char* big_tile_env = std::getenv("IMP_MMQ_Q4K_V2_BIG_TILE");
     const bool use_p5 = !(big_tile_env && std::atoi(big_tile_env) == 0);
 
+    // Tile size pick: BN=128 when blocks_bn128 ≥ 250, BN=64 otherwise.
+    // BN=256 was tried (Phase 7f attempt) — REGRESSED -9% vs BN=128 on
+    // Gemma-3 FFN-up despite matching cuBLAS's `64x256` tile name. Likely
+    // SMEM bank conflicts on the wider sQ4 row, or worse register
+    // scheduling with WRN=16. Kept the BN=128 winner.
     const int blocks_bn128 = ((M + kBM - 1) / kBM) * ((N + 127) / 128);
     const bool use_bn128 = (forced_bn == 128) ||
                            (forced_bn == 0 && N >= 128 &&
