@@ -812,17 +812,17 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
     const char* bn_env = std::getenv("IMP_MMQ_Q4K_V2_BN");
     int forced_bn = bn_env ? std::atoi(bn_env) : 0;
 
-    // Phase 7a hybrid dispatch:
-    //   BN=64  → p4 (cp.async double-buffer): wins +24-37% at M=32..256 when
-    //            the SM array is under-saturated — overlap with compute hides
-    //            GMEM load latency that p3 had to sync on.
-    //   BN=128 → p3 (sync): wins by +5-10% — at BN=128 the grid is already
-    //            SM-saturated, and the extra 2-stage SMEM + cp.async overhead
-    //            outweigh the (now small) load-stall benefit.
-    // Override the auto choice via IMP_MMQ_Q4K_V2_PIPELINE={0,1} (0 forces p3,
-    // 1 forces p4 — useful for A/B benching).
+    // Phase 7a/7e hybrid dispatch:
+    //   BN=64  → p4 (cp.async double-buffer): wins +24-37% at M=32..256
+    //   BN=128 → p4 (cp.async double-buffer): wins +10% on Gemma-3-12B
+    //            FFN-up (N=22000) prefill. (The earlier "BN=128 prefers
+    //            sync" call was based on a Qwen3-32B N=5120 microbench
+    //            which doesn't generalize — large-N FFN shapes have a
+    //            longer GMEM critical path that cp.async overlap helps
+    //            hide.) p3 stays as a fallback via IMP_MMQ_Q4K_V2_PIPELINE=0.
     const char* pipeline_env = std::getenv("IMP_MMQ_Q4K_V2_PIPELINE");
     int forced_pipeline = pipeline_env ? std::atoi(pipeline_env) : -1;
+    const bool use_p4 = (forced_pipeline != 0);  // default p4 everywhere
 
     const int blocks_bn128 = ((M + kBM - 1) / kBM) * ((N + 127) / 128);
     const bool use_bn128 = (forced_bn == 128) ||
@@ -830,7 +830,6 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
                             blocks_bn128 >= kP3BlockSaturationThreshold);
     if (use_bn128) {
         dim3 grid((N + 127) / 128, (M + kBM - 1) / kBM);
-        const bool use_p4 = (forced_pipeline == 1);  // default p3 at BN=128
         if (use_p4) {
             mmq_q4k_v2_kernel_p4_t<128><<<grid, block, 0, stream>>>(
                 x, eff_q4, eff_scale, eff_min, y, M, N, K);
@@ -840,7 +839,6 @@ void mmq_q4k_v2(const half* x, const uint8_t* eff_q4, const half* eff_scale,
         }
     } else {
         dim3 grid((N + 63) / 64, (M + kBM - 1) / kBM);
-        const bool use_p4 = (forced_pipeline != 0);  // default p4 at BN=64
         if (use_p4) {
             mmq_q4k_v2_kernel_p4_t<64><<<grid, block, 0, stream>>>(
                 x, eff_q4, eff_scale, eff_min, y, M, N, K);
