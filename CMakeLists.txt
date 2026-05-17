@@ -234,6 +234,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_kernels.cu
     src/graph/gemm_kernel_registry.cu
     src/graph/gemm_kernel_fp8.cu
+    src/graph/gemm_kernel_nvfp4_gemv.cu
     src/graph/executor_workspace.cu
     src/graph/executor_workspace_buffers.cu
     src/graph/executor_kv_write.cu

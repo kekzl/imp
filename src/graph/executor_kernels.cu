@@ -2366,13 +2366,18 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1+2: when gemm.use_kernel_registry is enabled, try the new
-    // dispatch table first. Slices 1 (FP16) and 2 (FP8 prefill) are wired;
-    // other tiers fall through to the legacy gemm_dispatch_impl below.
+    // R5 Slice 1+2+3: when gemm.use_kernel_registry is enabled, try the new
+    // dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), and 3 (NVFP4
+    // decode GEMV) are wired; other tiers fall through to the legacy
+    // gemm_dispatch_impl below.
     //
     // Tier order mirrors gemm_dispatch_impl precedence: FP8 is tried before
     // FP16 because the legacy path picks FP8 when M>1 + the weight is in the
-    // FP8 cache, even if an FP16 cache entry also exists.
+    // FP8 cache, even if an FP16 cache entry also exists. NVFP4 sits between
+    // FP8 and FP16 — the legacy dispatch evaluates NVFP4 before falling
+    // through to dp4a/fp16 cache paths, and NVFP4 weights are stored either
+    // as Tensor sidecars (qtype=NVFP4 directly on the weight) or in the
+    // separate nv4 cache; both must be checked.
     if (RuntimeConfig::current().gemm.use_kernel_registry) {
         const int M = static_cast<int>(input.shape[0]);
         // FP8 prefill: M>1 only, requires FP8 cache hit + activation scratch.
@@ -2392,6 +2397,39 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                 args.d_fp8_absmax = qs->d_fp8_absmax;
                 args.fp8_max_grid = qs->fp8_max_grid;
                 GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                    return;
+            }
+        }
+        // NVFP4 decode GEMV (M==1). Build the NvFP4QuantResult view exactly
+        // like gemm_dispatch_impl:2114-2133 — prequant Tensor sidecars take
+        // precedence over the nv4 cache. The temp is heap-allocated here only
+        // when the view comes from sidecars; cache lookups return a pointer
+        // into the long-lived cache map. (Slice 4 will add the M>1 NVFP4
+        // GEMM strategy.)
+        if (M == 1 && input.qtype == QType::F16) {
+            NvFP4QuantResult nvfp4_tmp;
+            const NvFP4QuantResult* nvfp4_view = nullptr;
+            if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
+                nvfp4_tmp.packed_data = weight.data;
+                nvfp4_tmp.micro_scales = weight.scales;
+                nvfp4_tmp.tensor_scale = weight.tensor_scale;
+                nvfp4_tmp.N = weight.shape[0];
+                nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
+                nvfp4_view = &nvfp4_tmp;
+            } else if (nv4 != nullptr) {
+                auto it = nv4->find(weight.data);
+                if (it != nv4->end())
+                    nvfp4_view = &it->second;
+            }
+            if (nvfp4_view != nullptr) {
+                GemmKernelArgs args{};
+                args.input = &input;
+                args.output = &output;
+                args.stream = ctx.stream;
+                args.beta = ctx.beta;
+                args.weight_payload = nvfp4_view;
+                GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
                 if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                     return;
             }
