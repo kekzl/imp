@@ -5,6 +5,7 @@
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "graph/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv, block_q8_1
+#include "graph/gemm_scratch.h"  // mmvq_scratch_get_or_grow (Slice 8.6 hoist)
 #include "runtime/config.h"
 
 #include <cuda_fp16.h>
@@ -93,10 +94,10 @@ namespace imp {
 // returns NoMatch / PreconditionFail. Slice 8 retires the legacy switch.
 // ---------------------------------------------------------------------------
 
-// Forward declarations — single-global mmvq scratch lives in
-// executor_kernels.cu. Calling it via prototype keeps the invariant
-// without widening the public header surface in this slice.
-void mmvq_scratch_get_or_grow(size_t need, void** out_buf, size_t* out_size);
+// `mmvq_scratch_get_or_grow` lives in graph/gemm_scratch.h since Slice 8.6
+// (TU hoist). Engine init MUST call `prewarm_mmvq_scratch` from
+// `executor_workspace_buffers.cu` with the model's largest dims before the
+// hot path fires — see gemm_scratch.h.
 
 // ---------------------------------------------------------------------------
 // Backend helpers — small, qtype-parameterised. Both backends are M==1 only

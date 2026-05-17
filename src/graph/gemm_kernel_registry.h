@@ -83,6 +83,16 @@ struct GemmKernelArgs {
     void* mxfp4_act_sf = nullptr;
     void* mxfp4_workspace = nullptr;
     size_t mxfp4_workspace_size = 0;
+    // R5 Slice 8.6 — QW7 dual-cache CUTLASS MXFP4 hand-off. When the
+    // CUTLASS_NVFP4 strategy fires AND the same `weight.data` is also present
+    // in the `cutlass_mxfp4` cache (only happens when `--mxfp4-prefill` is on,
+    // because executor_pre_dequant.cu builds the mxfp4 cache by iterating
+    // every NVFP4 entry), the dispatch site forwards the MXFP4 payload here
+    // so the handler can try the MXFP4 CUTLASS GEMM before falling back to
+    // the NVFP4 CUTLASS GEMM. nullptr = no dual-cache hit, take the NVFP4
+    // path directly. See cutlass_nvfp4_gemm_kernel in
+    // gemm_kernel_cutlass_nvfp4.cu for the branching logic.
+    const void* mxfp4_payload = nullptr;
     void* fp8_act_buf = nullptr;
     float* d_act_scale = nullptr;
     float* d_fp8_block_maxes = nullptr;

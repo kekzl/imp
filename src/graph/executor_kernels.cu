@@ -20,79 +20,7 @@
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
-#include <atomic>
-
 namespace imp {
-
-// ---------------------------------------------------------------------------
-// MMVQ (Q8_1-input GEMV) scratch — file-scope, sized once at workspace init
-// via prewarm_mmvq_scratch(). The hot-path mmvq_scratch_get_or_grow() reads
-// the cached size; the grow branch (cudaFree+cudaMalloc) is the cold-path
-// fallback and capture-unsafe — engine init MUST prewarm to model max dims.
-// ---------------------------------------------------------------------------
-namespace {
-void* g_mmvq_scratch = nullptr;
-size_t g_mmvq_scratch_size = 0;
-}  // namespace
-
-void prewarm_mmvq_scratch(int max_tokens, int max_K) {
-    if (max_tokens <= 0 || max_K <= 0)
-        return;
-    const size_t per_call = static_cast<size_t>(max_tokens) * ((max_K + 31) / 32) * 36;
-    const size_t need = per_call * 2;
-    if (g_mmvq_scratch && g_mmvq_scratch_size >= need)
-        return;
-    if (g_mmvq_scratch)
-        IMP_CUDA_CHECK_LOG(cudaFree(g_mmvq_scratch));
-    cudaError_t err = cudaMalloc(&g_mmvq_scratch, need);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("prewarm_mmvq_scratch: cudaMalloc(%zu) failed: %s",
-                      need, cudaGetErrorString(err));
-        g_mmvq_scratch = nullptr;
-        g_mmvq_scratch_size = 0;
-        return;
-    }
-    g_mmvq_scratch_size = need;
-    IMP_LOG_INFO("MMVQ scratch pre-warmed: %.2f KiB (max_tokens=%d, max_K=%d)",
-                 need / 1024.0, max_tokens, max_K);
-}
-
-// R5 Slice 7: the mmvq adapter in `gemm_kernel_gguf.cu` re-uses this single
-// global via a forward declaration there — internal linkage would force the
-// new TU to duplicate the scratch state. Kept namespace-local (no public
-// header declaration) to limit exposure.
-void mmvq_scratch_get_or_grow(size_t need, void** out_buf, size_t* out_size) {
-    if (g_mmvq_scratch && g_mmvq_scratch_size >= need) {
-        *out_buf = g_mmvq_scratch;
-        *out_size = g_mmvq_scratch_size;
-        return;
-    }
-    // Cold path: prewarm missed (or model dim changed mid-run). Re-grow.
-    // Capture-unsafe; emits one ERROR log so the missing prewarm is visible.
-    static std::atomic<bool> s_warned{false};
-    if (!s_warned.exchange(true)) {
-        IMP_LOG_ERROR(
-            "mmvq_scratch_get_or_grow: hot-path grow fired (need=%zu, have=%zu) — "
-            "engine init did not call prewarm_mmvq_scratch() with the model's "
-            "(max_tokens, max_K). cudaMalloc inside graph capture will fail.",
-            need, g_mmvq_scratch_size);
-    }
-    if (g_mmvq_scratch)
-        IMP_CUDA_CHECK_LOG(cudaFree(g_mmvq_scratch));
-    cudaError_t err = cudaMalloc(&g_mmvq_scratch, need * 2);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("mmvq_scratch_get_or_grow: cudaMalloc(%zu) failed: %s",
-                      need * 2, cudaGetErrorString(err));
-        g_mmvq_scratch = nullptr;
-        g_mmvq_scratch_size = 0;
-        *out_buf = nullptr;
-        *out_size = 0;
-        return;
-    }
-    g_mmvq_scratch_size = need * 2;
-    *out_buf = g_mmvq_scratch;
-    *out_size = g_mmvq_scratch_size;
-}
 
 // ---------------------------------------------------------------------------
 // Device helpers for paged KV cache block table lookup
@@ -2063,258 +1991,20 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
     return buf.slice(0, n_tokens);
 }
 
-// File-scope helper: the original multi-path GEMM dispatcher. Kept as a private
-// body inside the translation unit; the public API is the GemmContext-based
-// overload below, which forwards into this helper.
-//
-// - Q8_0/Q6_K (with dequant_scratch): dequant into scratch, then cuBLAS gemm.
-// - NONE/FP16/BF16: standard cuBLAS gemm.
-// - dp4a MMVQ path (M=1 + q8_1_buf/d8_buf): pre-quantize input to Q8_1, dot
-//   products via native INT8 SIMD (~2x faster than FP16 dequant for Q6_K/Q8_0).
-static void gemm_dispatch_impl(
-    const Tensor& input, const Tensor& weight, const Tensor& scales, QType qtype, Tensor& output,
-    void* dequant_scratch, cudaStream_t stream, block_q8_1* q8_1_buf, float* d8_buf,
-    const std::unordered_map<const void*, Tensor>* fp16_cache,
-    const std::unordered_map<const void*, FP8CacheEntry>* fp8_cache, void* fp8_act_buf, float* d_act_scale,
-    float* d_fp8_block_maxes, float* d_fp8_absmax, int fp8_max_grid,
-    const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache,
-    const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache, void* cutlass_act_data,
-    void* cutlass_act_sf, void* cutlass_workspace, size_t cutlass_workspace_size,
-    const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache, void* mxfp4_act_sf,
-    void* mxfp4_workspace, size_t mxfp4_workspace_size, float beta) {
-    // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
-    // below; callers must ensure their preconditions route there.
-    // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
-    if (mxfp4_cache != nullptr && input.qtype == QType::F16) {
-        auto mx_it = mxfp4_cache->find(weight.data);
-        if (mx_it != mxfp4_cache->end() && mx_it->second.linear_scales) {
-            if (input.shape[0] == 1) {
-                // MXFP4 GEMV decode — apply Hadamard online rotation if needed
-                int hbs = mx_it->second.hadamard_bs;
-                if (hbs > 0 && hadamard_block_size_valid(hbs)) {
-                    int K = static_cast<int>(mx_it->second.K);
-                    hadamard_transform_fp16(reinterpret_cast<const half*>(input.data),
-                                            reinterpret_cast<half*>(input.data),  // in-place
-                                            1, K, hbs, stream);
-                }
-                gemv_mxfp4_kpar(mx_it->second, reinterpret_cast<const half*>(input.data),
-                                reinterpret_cast<half*>(output.data), static_cast<int>(mx_it->second.N),
-                                static_cast<int>(mx_it->second.K), stream);
-                return;
-            } else if (dequant_scratch != nullptr) {
-                // MXFP4 prefill (M>1): dequant to FP16 scratch → cuBLAS GEMM
-                int N = static_cast<int>(mx_it->second.N);
-                int K = static_cast<int>(mx_it->second.K);
-                size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
-                dequant_mxfp4_to_fp16(mx_it->second.data, N, K, dequant_scratch, stream);
-                int64_t w_shape[2] = {N, K};
-                Tensor w_fp16(dequant_scratch, QType::F16, 2, w_shape, true);
-                gemm(input, w_fp16, output, 1.0f, beta, stream);
-                return;
-            }
-        }
-    }
-    // NVFP4 dispatch: Tensor sidecars (prequant load path, qtype=NVFP4 set
-    // directly on the weight) take precedence over the legacy nvfp4_cache
-    // (decode-cache path, FP16/Q*_K weights converted on-the-fly during init).
-    // Build NvFP4QuantResult on-the-fly when the sidecars are populated;
-    // otherwise fall through to the cache lookup.
-    NvFP4QuantResult nvfp4_tmp;
-    const NvFP4QuantResult* nvfp4_view = nullptr;
-    if (input.qtype == QType::F16 && weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
-        nvfp4_tmp.packed_data = weight.data;
-        nvfp4_tmp.micro_scales = weight.scales;
-        nvfp4_tmp.tensor_scale = weight.tensor_scale;
-        nvfp4_tmp.N = weight.shape[0];
-        // shape[1] holds packed K/2 for FP4 → kernel needs logical K
-        nvfp4_tmp.K = weight.shape[1] * 2;
-        nvfp4_view = &nvfp4_tmp;
-    } else if (nvfp4_cache != nullptr && input.qtype == QType::F16) {
-        auto it = nvfp4_cache->find(weight.data);
-        if (it != nvfp4_cache->end())
-            nvfp4_view = &it->second;
-    }
-    if (nvfp4_view != nullptr) {
-        const NvFP4QuantResult& res = *nvfp4_view;
-        if (input.shape[0] == 1) {
-            gemv_nvfp4_kpar(res, reinterpret_cast<const half*>(input.data),
-                            reinterpret_cast<half*>(output.data), static_cast<int>(res.N),
-                            static_cast<int>(res.K), stream);
-        } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
-            // Native FP4 GEMM: try cuBLASLt first, then CUTLASS sm_120
-            auto ct_it = cutlass_nvfp4_cache->find(weight.data);
-            if (ct_it != cutlass_nvfp4_cache->end()) {
-                int M = static_cast<int>(input.shape[0]);
-                int K = static_cast<int>(input.shape[1]);
-                int N = static_cast<int>(res.N);
-                quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data, cutlass_act_sf, M, K, stream);
-
-                // MXFP4 CUTLASS branch (UE8M0 scales per 32 elements). Fires
-                // only when the SAME weight.data exists in BOTH cutlass_nvfp4
-                // and cutlass_mxfp4 caches — review/phase3_maint.md §5.1
-                // claimed the loader never does this. convert_nvfp4_to_mxfp4_cutlass
-                // (executor_pre_dequant.cu:1518) IS active though, so this
-                // path is plausible. Instrumented (log-once) to confirm
-                // before deletion in a follow-up. See review/phase5_synthesis.md
-                // §7 dead/dormant verdict — needs production trace.
-                if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
-                    auto mx_it = mxfp4_cache->find(weight.data);
-                    if (mx_it != mxfp4_cache->end()) {
-                        static std::atomic<bool> s_logged{false};
-                        if (!s_logged.exchange(true)) {
-                            IMP_LOG_INFO(
-                                "QW7-probe: dual-cache NVFP4+MXFP4 branch fired "
-                                "(weight=%p M=%d N=%d K=%d) — branch is NOT dead", weight.data, M, N, K);
-                        }
-                        quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data, mxfp4_act_sf, M, K,
-                                                       stream);
-                        bool ok = gemm_mxfp4_cutlass_sm120(cutlass_act_data, mxfp4_act_sf, mx_it->second,
-                                                           output.data, M, N, K, mxfp4_workspace,
-                                                           mxfp4_workspace_size, stream);
-                        if (ok)
-                            return;
-                    }
-                }
-
-                // CUTLASS sm_120 block-scaled NVFP4 kernel. (cuBLASLt NVFP4
-                // was an alternate path but NVIDIA ships no FP4 kernels for
-                // consumer Blackwell (sm_120); deleted in favor of CUTLASS.)
-                bool ok = gemm_nvfp4_cutlass_sm120(cutlass_act_data, cutlass_act_sf, ct_it->second,
-                                                   output.data, M, N, K, cutlass_workspace,
-                                                   cutlass_workspace_size, stream);
-                if (ok)
-                    return;
-            }
-        }
-        if (input.shape[0] > 1) {
-            gemm_nvfp4(res, input, output, stream);
-        }
-        return;
-    }
-    // Gemma 4: if FP16 cache has the weight, use it (dp4a dispatch has issues
-    // with non-standard strides from per-layer narrow tensors).
-    bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
-                              input.stride[0] != weight.shape[1]);  // non-contiguous input
-    if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch) {
-        fprintf(stderr,
-                "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
-                "in_fp16_cache=%d in_fp8_cache=%d dp4a_ok=%d has_dequant=%d\n",
-                weight.data, (int)qtype, (long long)input.shape[0], (long long)weight.shape[0],
-                (long long)weight.shape[1], (int)prefer_fp16_cache,
-                (fp16_cache && fp16_cache->count(weight.data) > 0),
-                (fp8_cache && fp8_cache->count(weight.data) > 0),
-                (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf), (int)(dequant_scratch != nullptr));
-    }
-    const bool no_dp4a_gemv = RuntimeConfig::current().gemm.no_dp4a_gemv;
-    // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
-    // Auto-enabled for Gemma-4 via engine.cpp setenv. Non-static to pick up
-    // env var set during engine init (after static init of other flags).
-    // IMP_NO_MMVQ_Q8_0 / IMP_NO_MMVQ: debug bypass for suspected Q8_0 MMVQ bug.
-    const bool no_mmvq_q8_0 = RuntimeConfig::current().gemm.no_mmvq_q8_0;
-    const bool no_mmvq_all = RuntimeConfig::current().gemm.no_mmvq;
-    // FP16-only fast paths (mmvq, dp4a, gemv_q6k, gemv_q8_0) write directly to
-    // half* — must skip when caller requested FP32 output, otherwise the FP16
-    // bytes get interpreted as FP32 and produce billions-magnitude garbage.
-    const bool fp32_output = (output.qtype == QType::F32);
-    bool use_mmvq = RuntimeConfig::current().gemma4.force_mmvq && !prefer_fp16_cache &&
-                    input.qtype == QType::F16 && !fp32_output &&
-                    (qtype == QType::Q4_K || qtype == QType::Q5_K || qtype == QType::Q5_1 ||
-                     qtype == QType::Q8_0) &&
-                    (weight.shape[1] % 32 == 0) && !(no_mmvq_q8_0 && qtype == QType::Q8_0) && !no_mmvq_all;
-    bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
-                    !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
-
-    if (use_mmvq) {
-        int M = static_cast<int>(input.shape[0]);
-        int N = static_cast<int>(weight.shape[0]);
-        int K = static_cast<int>(weight.shape[1]);
-        // Pre-warm-or-grow scratch. After workspace init, the hot-path size
-        // check is always false (no alloc, no cudaMalloc inside graph capture).
-        size_t q8_need = static_cast<size_t>(M) * ((K + 31) / 32) * 36;
-        void* s_mmvq_scratch = nullptr;
-        size_t s_mmvq_scratch_size = 0;
-        mmvq_scratch_get_or_grow(q8_need, &s_mmvq_scratch, &s_mmvq_scratch_size);
-        if (qtype == QType::Q4_K)
-            ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                          M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == QType::Q5_K)
-            ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                          M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == QType::Q5_1)
-            ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                           M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == QType::Q8_0)
-            ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                           M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
-    } else if (use_dp4a) {
-        int N = static_cast<int>(weight.shape[0]);
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8_1_buf, d8_buf, K, stream);
-        dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf, static_cast<half*>(output.data), N, K,
-                           stream);
-    } else if (input.shape[0] == 1 && input.qtype == QType::F16 && dequant_scratch != nullptr &&
-               qtype == QType::Q6_K) {
-        // Fallback: Fused Q6_K GEMV (FP16 dequant path)
-        gemv_q6k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                 static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
-    } else if (input.shape[0] == 1 && input.qtype == QType::F16 && dequant_scratch != nullptr &&
-               qtype == QType::Q8_0) {
-        // Fallback: Fused Q8_0 GEMV (FP16 dequant path)
-        gemv_q8_0(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
-                  static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
-    } else if (fp8_cache != nullptr && input.shape[0] > 1 && fp8_act_buf != nullptr &&
-               d_act_scale != nullptr) {
-        // FP8 cache: quantize activation → FP8, then FP8×FP8 cuBLASLt GEMM (2x throughput on sm_120)
-        auto it = fp8_cache->find(weight.data);
-        if (it != fp8_cache->end()) {
-            Tensor fp8_act(fp8_act_buf, QType::FP8_E4M3, input.ndim, input.shape, true);
-            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream, d_fp8_block_maxes, d_fp8_absmax,
-                                      fp8_max_grid);
-            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, beta, d_act_scale, it->second.d_scale,
-                          stream);
-        } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
-            int rows = static_cast<int>(weight.shape[0]);
-            int cols = static_cast<int>(weight.shape[1]);
-            dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-            Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
-            gemm(input, w_fp16, output, 1.0f, beta, stream);
-        } else {
-            gemm(input, weight, output, 1.0f, beta, stream);
-        }
-    } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == QType::MXFP4)) {
-        // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
-        auto it = fp16_cache->find(weight.data);
-        if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch)
-            fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
-        if (it != fp16_cache->end()) {
-            gemm(input, it->second, output, 1.0f, beta, stream);
-        } else if (dequant_scratch != nullptr && qtype != QType::MXFP4) {
-            // Cache miss (shouldn't happen) — fall back to on-the-fly dequant
-            int rows = static_cast<int>(weight.shape[0]);
-            int cols = static_cast<int>(weight.shape[1]);
-            dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-            Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
-            gemm(input, w_fp16, output, 1.0f, beta, stream);
-        } else {
-            gemm(input, weight, output, 1.0f, beta, stream);
-        }
-    } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
-        // Raw quantized bytes on GPU — dequant into scratch, then GEMM
-        int rows = static_cast<int>(weight.shape[0]);
-        int cols = static_cast<int>(weight.shape[1]);
-        dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-        Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
-        gemm(input, w_fp16, output, 1.0f, beta, stream);
-    } else {
-        // Standard FP16/BF16 GEMM
-        gemm(input, weight, output, 1.0f, beta, stream);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// GemmContext-based dispatch: reads the weight's qtype directly off the
-// tensor (no separate parameter needed) and delegates to the file-private
-// gemm_dispatch_impl helper.
+// gemm_dispatch — single entry point that walks the GemmKernel registry in
+// tier-priority order. R5 Slice 8.6 closes the cross-axis refactor: the
+// legacy 21-parameter `gemm_dispatch_impl` switch (~250 LOC) is retired and
+// the registry is now the unconditional path. Every tier registers its
+// adapter from its own .cu file at static-init time (see
+// gemm_kernel_*.cu); adding a new qtype/quantization tier is a one-file
+// change.
+//
+// Tier order (MXFP4 GGUF → FP8 → NVFP4 GEMV → CUTLASS_NVFP4 → NVFP4 GEMM →
+// FP16 cache/raw → small-M GGUF → generic-dequant catch-all) mirrors the
+// historical legacy precedence and is the same as Slice 8 documented; it is
+// observed-equivalent to the production behaviour from when Slice 8 flipped
+// the registry default ON.
 // ---------------------------------------------------------------------------
 void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
@@ -2358,257 +2048,48 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1+2+3+4+5+6+7: when gemm.use_kernel_registry is enabled, try
-    // the new dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3
-    // (NVFP4 decode GEMV), 4 (NVFP4 prefill GEMM dequant), 5 (CUTLASS_NVFP4
-    // prefill GEMM, preferred native FP4 path), 6 (MXFP4 native GGUF — GEMV +
-    // dequant→cuBLAS GEMM) and 7 (GGUF small-M mmvq + dp4a — 8 qtypes) are
-    // wired; the M>1 dequant+cuBLAS large-M fallback still falls through to
-    // the legacy gemm_dispatch_impl below (slice 8.5 retires it).
-    //
-    // Tier order mirrors gemm_dispatch_impl precedence: MXFP4 GGUF is the
-    // top-priority branch in legacy (executor_kernels.cu:2085-2113) and is
-    // tried first here too. FP8 is tried before FP16 because the legacy path
-    // picks FP8 when M>1 + the weight is in the FP8 cache, even if an FP16
-    // cache entry also exists. NVFP4 sits between FP8 and FP16 — the legacy
-    // dispatch evaluates NVFP4 before falling through to dp4a/fp16 cache
-    // paths, and NVFP4 weights are stored either as Tensor sidecars
-    // (qtype=NVFP4 directly on the weight) or in the separate nv4 cache;
-    // both must be checked.
-    if (RuntimeConfig::current().gemm.use_kernel_registry) {
-        const int M = static_cast<int>(input.shape[0]);
-        // MXFP4 native GGUF (top priority — matches legacy precedence at
-        // gemm_dispatch_impl:2085). Cache hit + linear_scales gate apply
-        // identically. The kernel adapter further gates on linear_scales !=
-        // null and returns PreconditionFail on miss so we fall through. The
-        // dual-cache CUTLASS MXFP4 branch (legacy line 2149-2174) is NOT
-        // migrated here — it lives inside the NVFP4 path with a QW7 probe;
-        // see src/graph/gemm_kernel_mxfp4.cu header.
-        if (mx4 != nullptr && input.qtype == QType::F16) {
-            auto mx_it = mx4->find(weight.data);
-            if (mx_it != mx4->end() && mx_it->second.linear_scales != nullptr) {
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = &mx_it->second;
-                args.dequant_scratch = qs->dequant;  // only consumed by M>1 path
-                GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/(M == 1)};
-                auto rc = GemmKernelRegistry::instance().dispatch(strat, args);
-                if (rc == GemmDispatchResult::Ok)
-                    return;
-                // PreconditionFail (missing dequant scratch for M>1) — fall
-                // through to legacy, mirroring the legacy `else if (dequant_
-                // scratch != nullptr)` skip.
-            }
-        }
-        // FP8 prefill: M>1 only, requires FP8 cache hit + activation scratch.
-        // Matches the guard in gemm_dispatch_impl (M>1 branch). Slice 8.1
-        // adds the cache-MISS dequant fallback under the same outer gate —
-        // when the FP8 path is "active" (cache present, scratch present, M>1)
-        // but the specific weight isn't in the cache, dequant the raw quant
-        // bytes to FP16 and run cuBLAS. The raw FP16/BF16 weight case (legacy
-        // line 2294) falls through to the FP16 strategy below; no extra
-        // dispatch is needed here for it.
-        if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
-            auto it = fp8->find(weight.data);
-            if (it != fp8->end()) {
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = &it->second;
-                args.fp8_act_buf = qs->fp8_act;
-                args.d_act_scale = qs->d_act_scale;
-                args.d_fp8_block_maxes = qs->d_fp8_block_maxes;
-                args.d_fp8_absmax = qs->d_fp8_absmax;
-                args.fp8_max_grid = qs->fp8_max_grid;
-                GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
-                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                    return;
-            } else {
-                // Cache miss — try dequant fallback (Slice 8.1). The handler
-                // checks `dequant_gpu_supported(weight.qtype)` + scratch
-                // availability and returns PreconditionFail otherwise. On
-                // fail we drop through to the FP16 strategy lookup below,
-                // which handles the raw-FP16/BF16-weight case.
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = &weight;
-                args.dequant_scratch = qs->dequant;
-                GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
-                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                    return;
-            }
-        }
-        // NVFP4 decode GEMV (M==1). Build the NvFP4QuantResult view exactly
-        // like gemm_dispatch_impl:2114-2133 — prequant Tensor sidecars take
-        // precedence over the nv4 cache. The temp is heap-allocated here only
-        // when the view comes from sidecars; cache lookups return a pointer
-        // into the long-lived cache map. Slice 4 adds the M>1 NVFP4 GEMM
-        // strategy immediately below.
-        if (M == 1 && input.qtype == QType::F16) {
-            NvFP4QuantResult nvfp4_tmp;
-            const NvFP4QuantResult* nvfp4_view = nullptr;
-            if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
-                nvfp4_tmp.packed_data = weight.data;
-                nvfp4_tmp.micro_scales = weight.scales;
-                nvfp4_tmp.tensor_scale = weight.tensor_scale;
-                nvfp4_tmp.N = weight.shape[0];
-                nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
-                nvfp4_view = &nvfp4_tmp;
-            } else if (nv4 != nullptr) {
-                auto it = nv4->find(weight.data);
-                if (it != nv4->end())
-                    nvfp4_view = &it->second;
-            }
-            if (nvfp4_view != nullptr) {
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = nvfp4_view;
-                GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
-                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                    return;
-            }
-        }
-        // CUTLASS_NVFP4 prefill GEMM (M>1, native sm_120 block-scaled FP4 —
-        // the preferred path when eligible). Mirror gemm_dispatch_impl:2140-
-        // 2184: requires (ct4 cache + ct4 hit + cutlass_act_data scratch).
-        // When all three are present, the registry kernel quantizes the FP16
-        // activation and calls gemm_nvfp4_cutlass_sm120. If the CUTLASS call
-        // returns false (kernel can't handle dims) the kernel returns
-        // PreconditionFail and we fall through to Slice 4's dequant GEMM
-        // below — same drop-through semantics as the legacy `if (ok) return;`.
-        if (M > 1 && input.qtype == QType::F16 && ct4 != nullptr &&
-            qs->cutlass_act_data != nullptr) {
-            auto ct_it = ct4->find(weight.data);
-            if (ct_it != ct4->end()) {
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = &ct_it->second;
-                args.cutlass_act_data = qs->cutlass_act_data;
-                args.cutlass_act_sf = qs->cutlass_act_sf;
-                args.cutlass_workspace = qs->cutlass_workspace;
-                args.cutlass_workspace_size = qs->cutlass_workspace_size;
-                GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
-                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                    return;
-                // PreconditionFail (missing workspace or CUTLASS returned
-                // false) — fall through to the dequant GEMM below.
-            }
-        }
-        // NVFP4 prefill GEMM (M>1, dequant→cuBLAS fallback). Mirror
-        // gemm_dispatch_impl:2186-2188. Slice 5 above already handled the
-        // CUTLASS-eligible case; this branch is the fallback when CUTLASS
-        // isn't available (no ct4 cache, no ct4 hit, missing scratch) or the
-        // CUTLASS run returned PreconditionFail. The earlier `!cutlass_path_
-        // eligible` guard is gone now that Slice 5 owns the preferred path.
-        if (M > 1 && input.qtype == QType::F16) {
-            NvFP4QuantResult nvfp4_tmp;
-            const NvFP4QuantResult* nvfp4_view = nullptr;
-            if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
-                nvfp4_tmp.packed_data = weight.data;
-                nvfp4_tmp.micro_scales = weight.scales;
-                nvfp4_tmp.tensor_scale = weight.tensor_scale;
-                nvfp4_tmp.N = weight.shape[0];
-                nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
-                nvfp4_view = &nvfp4_tmp;
-            } else if (nv4 != nullptr) {
-                auto it = nv4->find(weight.data);
-                if (it != nv4->end())
-                    nvfp4_view = &it->second;
-            }
-            if (nvfp4_view != nullptr) {
-                GemmKernelArgs args{};
-                args.input = &input;
-                args.output = &output;
-                args.stream = ctx.stream;
-                args.beta = ctx.beta;
-                args.weight_payload = nvfp4_view;
-                GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
-                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                    return;
-            }
-        }
-        // The FP16 path is structurally simple — direct cuBLAS via the
-        // fp16 weight cache OR the raw weight when it's already FP16/BF16.
-        // Match the legacy preconditions: prefer the cache, then raw weight.
-        if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.weight_payload = &it->second;
-            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-        if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.weight_payload = &weight;
-            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-        // Slice 7 + Slice 8.2 — GGUF small-M (mmvq / dp4a / fused-gemv)
-        // dispatch. Only fires for M==1 with FP16 input and a non-FP32
-        // output, mirroring the legacy mmvq + dp4a gates at
-        // gemm_dispatch_impl:2216-2222 and the fused-gemv fallback at lines
-        // 2267-2276. Per-qtype strategies (Option 2 scope decision — see
-        // gemm_kernel_gguf.cu header) and the handler internally selects
-        // mmvq vs dp4a vs fused-gemv based on the same RuntimeConfig fields
-        // and workspace sentinels the legacy switch reads.
-        // `prefer_fp16_cache` remains a dispatch-site gate because it
-        // depends on `fp16` cache membership + stride, which isn't part of
-        // GemmKernelArgs. `dequant_scratch` is passed as an engine-ready
-        // sentinel for Slice 8.2's fused-gemv branch (the legacy gate at
-        // line 2267/2272 checks the same pointer).
-        const bool fp32_output = (output.qtype == QType::F32);
-        const bool prefer_fp16_cache =
-            (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
-        if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache) {
+    const int M = static_cast<int>(input.shape[0]);
+
+    // MXFP4 native GGUF (top priority). The kernel adapter gates internally
+    // on `linear_scales != nullptr`; cache miss + dequant_scratch nullptr at
+    // M>1 returns PreconditionFail so we fall through to the rest of the
+    // table — same as the legacy `else if (dequant_scratch != nullptr)` skip.
+    if (mx4 != nullptr && input.qtype == QType::F16) {
+        auto mx_it = mx4->find(weight.data);
+        if (mx_it != mx4->end() && mx_it->second.linear_scales != nullptr) {
             GemmKernelArgs args{};
             args.input = &input;
             args.output = &output;
             args.stream = ctx.stream;
             args.beta = ctx.beta;
-            args.weight_payload = &weight;
-            args.q8_1_buf = qs->q8_1_buf;
-            args.d8_buf = qs->d8_buf;
-            args.dequant_scratch = qs->dequant;  // Slice 8.2 fused-gemv readiness sentinel
-            GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
-            auto rc = GemmKernelRegistry::instance().dispatch(strat, args);
-            if (rc == GemmDispatchResult::Ok)
+            args.weight_payload = &mx_it->second;
+            args.dequant_scratch = qs->dequant;  // only consumed by M>1 path
+            GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/(M == 1)};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
-            // NoMatch (qtype not in slice 7/8.2 set) or PreconditionFail (no
-            // backend matched — neither mmvq nor dp4a nor fused-gemv) —
-            // fall through to legacy. Same semantics as the legacy `else if`
-            // chain continuing past the mmvq/dp4a/fused-gemv branches.
         }
-        // Slice 8.5 — qtype-agnostic generic-dequant catch-all (M>1 prefill).
-        // Mirrors the legacy fallback at gemm_dispatch_impl:2313-2319: when no
-        // tier-specific dispatcher matched and the weight qtype is dequantable
-        // via `dequant_gpu`, dequant the raw bytes into the FP16 scratch and
-        // run cuBLAS. Strategy key (FP16, NONE, m_is_one=false) is qtype-
-        // agnostic — the handler reads weight.qtype off the Tensor and
-        // switches via `dequant_gpu_supported`. PreconditionFail (missing
-        // scratch or unsupported qtype) drops through to legacy, which has a
-        // final raw `gemm()` arm for the FP16/BF16 case at line 2322.
-        if (M > 1 && input.qtype == QType::F16) {
+    }
+    // FP8 prefill (M>1): cache hit → FP8xFP8 cuBLASLt; cache miss with
+    // dequant-supported qtype → dequant→FP16 cuBLAS (Slice 8.1). Raw FP16
+    // weights drop to the FP16 strategy below.
+    if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
+        auto it = fp8->find(weight.data);
+        if (it != fp8->end()) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = &it->second;
+            args.fp8_act_buf = qs->fp8_act;
+            args.d_act_scale = qs->d_act_scale;
+            args.d_fp8_block_maxes = qs->d_fp8_block_maxes;
+            args.d_fp8_absmax = qs->d_fp8_absmax;
+            args.fp8_max_grid = qs->fp8_max_grid;
+            GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        } else {
             GemmKernelArgs args{};
             args.input = &input;
             args.output = &output;
@@ -2616,19 +2097,167 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             args.beta = ctx.beta;
             args.weight_payload = &weight;
             args.dequant_scratch = qs->dequant;
-            GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+            GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
         }
-        // Fall through: registry returned NoMatch for this strategy — use legacy.
     }
-
-    gemm_dispatch_impl(input, weight, Tensor(), qtype, output, qs->dequant, ctx.stream,
-                       static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf, fp16, fp8, qs->fp8_act,
-                       qs->d_act_scale, qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid, nv4, ct4,
-                       qs->cutlass_act_data, qs->cutlass_act_sf, qs->cutlass_workspace,
-                       qs->cutlass_workspace_size, mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace,
-                       qs->mxfp4_workspace_size, ctx.beta);
+    // NVFP4 decode GEMV (M==1). Prequant Tensor sidecars (qtype=NVFP4 on the
+    // weight) take precedence over the nv4 cache; the temp NvFP4QuantResult
+    // is constructed here when sidecars are present.
+    if (M == 1 && input.qtype == QType::F16) {
+        NvFP4QuantResult nvfp4_tmp;
+        const NvFP4QuantResult* nvfp4_view = nullptr;
+        if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
+            nvfp4_tmp.packed_data = weight.data;
+            nvfp4_tmp.micro_scales = weight.scales;
+            nvfp4_tmp.tensor_scale = weight.tensor_scale;
+            nvfp4_tmp.N = weight.shape[0];
+            nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
+            nvfp4_view = &nvfp4_tmp;
+        } else if (nv4 != nullptr) {
+            auto it = nv4->find(weight.data);
+            if (it != nv4->end())
+                nvfp4_view = &it->second;
+        }
+        if (nvfp4_view != nullptr) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = nvfp4_view;
+            GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+    }
+    // CUTLASS_NVFP4 prefill GEMM (M>1, native sm_120 block-scaled FP4 —
+    // preferred path). Slice 8.6 — QW7 dual-cache MXFP4 hand-off. When
+    // `--mxfp4-prefill` is on, executor_pre_dequant.cu populates
+    // `cutlass_mxfp4` by iterating every NVFP4 entry: cache membership is a
+    // superset of cutlass_nvfp4. We forward the MXFP4 payload + scratch
+    // through `args.mxfp4_payload` so the handler can try the MXFP4 CUTLASS
+    // GEMM first and fall back to NVFP4 CUTLASS on failure (mirrors the
+    // retired legacy QW7 probe).
+    if (M > 1 && input.qtype == QType::F16 && ct4 != nullptr &&
+        qs->cutlass_act_data != nullptr) {
+        auto ct_it = ct4->find(weight.data);
+        if (ct_it != ct4->end()) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = &ct_it->second;
+            args.cutlass_act_data = qs->cutlass_act_data;
+            args.cutlass_act_sf = qs->cutlass_act_sf;
+            args.cutlass_workspace = qs->cutlass_workspace;
+            args.cutlass_workspace_size = qs->cutlass_workspace_size;
+            if (mx4 != nullptr && qs->mxfp4_act_sf != nullptr) {
+                auto mx_it = mx4->find(weight.data);
+                if (mx_it != mx4->end()) {
+                    args.mxfp4_payload = &mx_it->second;
+                    args.mxfp4_act_sf = qs->mxfp4_act_sf;
+                    args.mxfp4_workspace = qs->mxfp4_workspace;
+                    args.mxfp4_workspace_size = qs->mxfp4_workspace_size;
+                }
+            }
+            GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+    }
+    // NVFP4 prefill GEMM (M>1, dequant→cuBLAS fallback) — fires when the
+    // CUTLASS path is unavailable or returned PreconditionFail.
+    if (M > 1 && input.qtype == QType::F16) {
+        NvFP4QuantResult nvfp4_tmp;
+        const NvFP4QuantResult* nvfp4_view = nullptr;
+        if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
+            nvfp4_tmp.packed_data = weight.data;
+            nvfp4_tmp.micro_scales = weight.scales;
+            nvfp4_tmp.tensor_scale = weight.tensor_scale;
+            nvfp4_tmp.N = weight.shape[0];
+            nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
+            nvfp4_view = &nvfp4_tmp;
+        } else if (nv4 != nullptr) {
+            auto it = nv4->find(weight.data);
+            if (it != nv4->end())
+                nvfp4_view = &it->second;
+        }
+        if (nvfp4_view != nullptr) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = nvfp4_view;
+            GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+    }
+    // FP16 cache hit OR raw FP16/BF16-source weight (BF16 source is always
+    // converted to F16 at upload; weight.qtype is F16 here).
+    if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
+        GemmKernelArgs args{};
+        args.input = &input;
+        args.output = &output;
+        args.stream = ctx.stream;
+        args.weight_payload = &it->second;
+        GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            return;
+    }
+    if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
+        GemmKernelArgs args{};
+        args.input = &input;
+        args.output = &output;
+        args.stream = ctx.stream;
+        args.weight_payload = &weight;
+        GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            return;
+    }
+    // GGUF small-M (mmvq / dp4a / fused-gemv): M==1, FP16 input, non-FP32
+    // output. `prefer_fp16_cache` keeps the cache-vs-raw decision at the
+    // dispatch site because it depends on cache membership + stride — not
+    // expressible via GemmKernelArgs alone.
+    const bool fp32_output = (output.qtype == QType::F32);
+    const bool prefer_fp16_cache =
+        (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
+    if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache) {
+        GemmKernelArgs args{};
+        args.input = &input;
+        args.output = &output;
+        args.stream = ctx.stream;
+        args.beta = ctx.beta;
+        args.weight_payload = &weight;
+        args.q8_1_buf = qs->q8_1_buf;
+        args.d8_buf = qs->d8_buf;
+        args.dequant_scratch = qs->dequant;  // fused-gemv readiness sentinel
+        GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
+        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            return;
+    }
+    // Qtype-agnostic generic-dequant catch-all (M>1 prefill). Handler reads
+    // weight.qtype off the Tensor and switches via `dequant_gpu_supported`.
+    if (M > 1 && input.qtype == QType::F16) {
+        GemmKernelArgs args{};
+        args.input = &input;
+        args.output = &output;
+        args.stream = ctx.stream;
+        args.beta = ctx.beta;
+        args.weight_payload = &weight;
+        args.dequant_scratch = qs->dequant;
+        GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            return;
+    }
+    // Final fallback: raw FP16/BF16 cuBLAS. Reached only when none of the
+    // tiers above match — typically a raw FP16/BF16 weight at a shape no
+    // cache covered. Matches the legacy `else { gemm(...); }` arm.
+    gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
 }  // namespace imp
