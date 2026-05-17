@@ -282,6 +282,13 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.diagnostics.mtp_prenorm_h = parse_bool(val, cfg.diagnostics.mtp_prenorm_h);
     else if (eq("diagnostics.audit_nvfp4_scales"))
         cfg.diagnostics.audit_nvfp4_scales = parse_bool(val, cfg.diagnostics.audit_nvfp4_scales);
+
+    // [ffn]
+    else if (eq("ffn.sparsity_probe"))
+        cfg.ffn.sparsity_probe = parse_bool(val, cfg.ffn.sparsity_probe);
+    else if (eq("ffn.sparsity_threshold"))
+        cfg.ffn.sparsity_threshold = parse_float(val, cfg.ffn.sparsity_threshold);
+
     else {
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
     }
@@ -370,6 +377,14 @@ void seed_from_env(RuntimeConfig& cfg) {
     // gdn.layout_override — IMP_GDN_LAYOUT: string value.
     if (const char* e = std::getenv("IMP_GDN_LAYOUT"))
         cfg.gdn.layout_override = e;
+
+    // ffn.sparsity_probe — IMP_FFN_SPARSITY_PROBE: '1' enables.
+    if (const char* e = std::getenv("IMP_FFN_SPARSITY_PROBE"))
+        cfg.ffn.sparsity_probe = (e[0] == '1');
+
+    // ffn.sparsity_threshold — IMP_FFN_SPARSITY_THRESHOLD: float.
+    if (const char* e = std::getenv("IMP_FFN_SPARSITY_THRESHOLD"))
+        cfg.ffn.sparsity_threshold = parse_float(e, cfg.ffn.sparsity_threshold);
 }
 
 }  // anonymous namespace

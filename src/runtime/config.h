@@ -222,6 +222,31 @@ struct RuntimeConfig {
         std::string mmproj;
     } paths;
 
+    struct FFN {
+        // SwiGLU/GeGLU sparsity probe (instrumentation-only — no skipping).
+        // When enabled, every dense-FFN decode step runs a reduce kernel
+        // that counts, for each of 5 hard-coded thresholds {0.005, 0.01,
+        // 0.02, 0.05, 0.1}, the number of intermediate-dim rows i with
+        // |silu(gate[i]) * up[i]| < t. Per-layer counters accumulate
+        // across all generations of the process and are flushed via
+        // imp::flush_ffn_sparsity_probe_log() (engine destruction or
+        // explicit call). Purpose: measure the upside of contextual FFN
+        // sparsity on this model class before writing a single gather
+        // kernel. ~1 µs overhead per layer per token when on; zero when
+        // off. Default off.
+        bool sparsity_probe = false;
+
+        // Phase 2 — actual FFN row-skipping in down_proj via per-block mask.
+        // For each Q8_0-block of K (=32 elements) compute amax of
+        // |silu(gate)*up|; if amax < threshold the whole 34-byte Q8_0
+        // weight block is skipped (no HBM load) in the down_proj GEMV.
+        // 0.0 = disabled = bit-identical to baseline. Recommended range
+        // 0.005..0.05; per-layer sparsity see ffn_sparsity_probe data.
+        // Only active for Q8_0 down_proj decode (n=1) today; other dtypes
+        // fall through to the unmasked dispatch automatically.
+        float sparsity_threshold = 0.0f;
+    } ffn;
+
     struct Diagnostics {
         bool debug_forward = false;
         bool debug_gemm_dispatch = false;

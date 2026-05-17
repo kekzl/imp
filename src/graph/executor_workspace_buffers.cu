@@ -126,6 +126,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
+        // FFN sparsity mask (Phase 2): one bit per Q8 block, packed uint32.
+        if (qscratch_.q8_1_max_blocks > 0) {
+            int mask_words = (qscratch_.q8_1_max_blocks + 31) / 32;
+            size_t mask_sz = static_cast<size_t>(mask_words) * sizeof(uint32_t);
+            cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&qscratch_.ffn_block_mask), mask_sz);
+            if (err != cudaSuccess) {
+                IMP_LOG_WARN("Failed to allocate FFN sparsity mask buffer (%zu bytes): %s",
+                             mask_sz, cudaGetErrorString(err));
+                qscratch_.ffn_block_mask = nullptr;
+                qscratch_.ffn_block_mask_words = 0;
+            } else {
+                qscratch_.ffn_block_mask_words = mask_words;
+            }
+        }
+
         // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
         // ggml_mmvq_q*_kernel hot-path in executor_kernels.cu. Sized for the
         // worst case (max_tokens × max_k) so the hot path never re-allocates
