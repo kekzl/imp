@@ -46,9 +46,21 @@ struct RuntimeConfig {
         // investigated under "thread_local" before assuming relaxed is the
         // cause). Legacy env: IMP_GRAPH_CAPTURE_MODE.
         std::string graph_capture_mode = "relaxed";
-        // Opt-in: capture prefill into a CUDA graph (in addition to decode).
-        // Legacy env: IMP_PREFILL_GRAPH.
-        bool prefill_graph = false;
+        // Capture prefill into a CUDA graph (in addition to decode). Default
+        // flipped 2026-05-17 after the M3 Phase 4 A/B sweep across
+        // Gemma-4-26B-NVFP4 / Qwen3.6-35B-NVFP4 / Qwen3-Coder-30B-FP4
+        // (3 trials × 4 capture modes each, harness at
+        // /tmp/imp-bench-results/run_bench.sh): no hang on any
+        // (model, capture_mode) combination — Blocker B
+        // (`prefill_graph_blockers_2026_05_14.md`) is gone now that
+        // `graph_capture_mode = "relaxed"` is the default. Decode tg
+        // is flat ±1-2% across all four capture-mode configs for every
+        // model; prefill pp is variance-dominated (cuBLAS algo-selection
+        // noise documented in CLAUDE.md) but the candidate (relaxed)
+        // never regressed below baseline. Opt out via
+        // `--set runtime.prefill_graph=false` or imp.conf if a model
+        // regresses. Legacy env: IMP_PREFILL_GRAPH.
+        bool prefill_graph = true;
     } runtime;
 
     struct KVCache {
