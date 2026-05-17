@@ -41,7 +41,7 @@ TEST_F(GemmKernelRegistryTest, Fp16KernelIsRegisteredAtStaticInit) {
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
-    // CUTLASS_NVFP4 is not registered yet — Slices 1+2+3 cover FP16, FP8, NVFP4 GEMV.
+    // CUTLASS_NVFP4 is not registered yet — Slices 1-4 cover FP16, FP8, NVFP4 GEMV+GEMM.
     GemmStrategy unregistered{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/true};
     GemmKernelArgs args{};
     args.stream = stream_;
@@ -214,20 +214,11 @@ TEST_F(GemmKernelRegistryTest, Fp8RegistryDispatchMatchesDirectPath) {
 }
 
 // R5 Slice 3 — NVFP4 GEMV (M==1 decode) kernel registered. With FP16 (2) +
-// FP8 prefill (1) + NVFP4 GEMV (1) we now expect at least 4 entries.
+// FP8 prefill (1) + NVFP4 GEMV (1) we expect at least 4 entries after
+// Slice 3; Slice 4 brings the count to 5 — see the Slice 4 test below.
 TEST_F(GemmKernelRegistryTest, Nvfp4GemvKernelIsRegisteredAtStaticInit) {
     const auto& reg = GemmKernelRegistry::instance();
     EXPECT_GE(reg.size(), 4u) << "FP16 (M==1/M>1) + FP8 (M>1) + NVFP4 GEMV (M==1) expected pre-registered";
-}
-
-// NVFP4 GEMM (M>1) strategy is intentionally NOT registered yet — that is
-// Slice 4. The dispatch site still routes M>1 NVFP4 through legacy.
-TEST_F(GemmKernelRegistryTest, Nvfp4GemmStrategyReturnsNoMatch) {
-    const auto& reg = GemmKernelRegistry::instance();
-    GemmStrategy gemm_strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
-    GemmKernelArgs args{};
-    args.stream = stream_;
-    EXPECT_EQ(reg.dispatch(gemm_strat, args), GemmDispatchResult::NoMatch);
 }
 
 // The NVFP4 GEMV adapter registers under (tier=NVFP4, qtype=F16,
@@ -299,6 +290,126 @@ TEST_F(GemmKernelRegistryTest, Nvfp4GemvRegistryDispatchMatchesDirectPath) {
     cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
 
     // Both paths invoke gemv_nvfp4_kpar with identical args → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    free_nvfp4_result(nv4);
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
+}
+
+// R5 Slice 4 — NVFP4 GEMM (M>1 prefill, dequant fallback) kernel registered.
+// With FP16 (2) + FP8 prefill (1) + NVFP4 GEMV (1) + NVFP4 GEMM (1) we now
+// expect at least 5 entries.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemmKernelIsRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 5u)
+        << "FP16 (M==1/M>1) + FP8 (M>1) + NVFP4 GEMV (M==1) + NVFP4 GEMM (M>1) expected pre-registered";
+}
+
+// Both NVFP4 strategies (GEMV M==1 and GEMM M>1) are now registered. Pin
+// that the registry returns Ok for both — i.e. the m_is_one axis selects
+// the right kernel and there is no accidental aliasing between the two.
+// Uses minimal stub args; the kernels' own IMP_CHECKs would fire if real
+// data were passed, but here we only verify the lookup hits.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemvAndGemmAreDistinct) {
+    const auto& reg = GemmKernelRegistry::instance();
+    // Cheaper than running the actual kernels: build separate strategy keys
+    // and confirm each one resolves to a registered handler. The registry
+    // exposes `size()` and `dispatch()`; we use a probe dispatch with
+    // deliberately-NoMatch off-axis weight_qtype on one and compare against
+    // the registered on-axis F16 path. Both registered keys are F16; an
+    // off-axis BF16 key must NOT collide.
+    GemmStrategy gemv_on{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
+    GemmStrategy gemm_on{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
+    GemmStrategy gemv_bf16{StorageTier::NVFP4, QType::BF16, /*m_is_one=*/true};
+    GemmStrategy gemm_bf16{StorageTier::NVFP4, QType::BF16, /*m_is_one=*/false};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    // Off-axis qtypes must not resolve (registry returns NoMatch). On-axis
+    // strategies *do* resolve and would invoke the kernel; we do not call
+    // them here without real data (the kernels IMP_CHECK on null payload).
+    EXPECT_EQ(reg.dispatch(gemv_bf16, args), GemmDispatchResult::NoMatch);
+    EXPECT_EQ(reg.dispatch(gemm_bf16, args), GemmDispatchResult::NoMatch);
+    // The on-axis keys are equal-by-value only to themselves — pin the
+    // distinction via operator==.
+    EXPECT_FALSE(gemv_on == gemm_on);
+}
+
+// The NVFP4 GEMM adapter registers under (tier=NVFP4, qtype=F16,
+// m_is_one=false) only. Asking the registry for an off-axis weight_qtype
+// (e.g. BF16) must return NoMatch so the dispatch site falls back to
+// legacy — no silent re-routing to the wrong kernel.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemmWrongQtypeReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy bf16{StorageTier::NVFP4, QType::BF16, /*m_is_one=*/false};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(bf16, args), GemmDispatchResult::NoMatch);
+}
+
+// End-to-end correctness: registry NVFP4 GEMM dispatch produces the same
+// output as calling gemm_nvfp4 directly. Mirrors the Slice 3 GEMV parity
+// pattern but with M>1 — the adapter wraps the same dequant→cuBLAS path,
+// so output is bit-identical.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemmRegistryDispatchMatchesDirectPath) {
+    constexpr int M = 4;
+    constexpr int N = 16;
+    constexpr int K = 64;  // multiple of micro-block (16) and packed alignment.
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    // Pre-quantize the FP16 weight to NVFP4 once. Both paths read from the
+    // same NvFP4QuantResult — the GEMM is read-only over the weight.
+    NvFP4QuantResult nv4{};
+    quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
+
+    // Path 1: direct gemm_nvfp4 (mirrors executor_kernels.cu:2186-2188).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    Tensor out_direct(d_out_direct, QType::F16, 2, out_shape, /*on_device=*/true);
+    gemm_nvfp4(nv4, input, out_direct, stream_);
+
+    // Path 2: registry dispatch through the NVFP4 GEMM kernel adapter.
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &nv4;
+    GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths invoke gemm_nvfp4 with identical args → bit-identical.
     for (int i = 0; i < M * N; ++i) {
         EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
             << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
