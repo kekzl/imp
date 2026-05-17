@@ -4,15 +4,21 @@
 
 namespace imp {
 
-// Resolve a model identifier to a local directory path.
-// If `model_id` is already a local path, returns it as-is.
-// If it looks like a HF repo ID (contains '/'), tries to download via huggingface-cli.
+// Resolve a model identifier to a local path.
+// If `model_id` is already a valid local path, returns it as-is.
+// If it looks like a HF repo ID (contains '/'), checks the HF cache
+// (`$HUGGINGFACE_HUB_CACHE` / `$HF_HOME/hub` / `$HOME/.cache/huggingface/hub`)
+// for a matching `models--<org>--<name>/snapshots/<latest>` directory.
 // Returns empty string on failure.
-// Optional: revision can be "main", a branch name, or a commit hash.
+//
+// **Does not fetch.** imp's clean-host policy keeps Python tooling
+// (huggingface-cli, etc.) off the host and the build container. A model
+// that isn't already cached must be staged by the user (typically via
+// `git clone https://huggingface.co/<org>/<name>` or by copying a cache
+// directory from another machine). The `revision` argument is accepted
+// for API compatibility but only the most recent cached snapshot is
+// returned — pre-stage the revision you want.
 std::string resolve_model_path(const std::string& model_id, const std::string& revision = "");
-
-// Check if huggingface-cli is available on the system.
-bool hf_cli_available();
 
 // Find a single .gguf file in a directory. Returns its full path.
 // If multiple .gguf files exist, returns the largest one.
