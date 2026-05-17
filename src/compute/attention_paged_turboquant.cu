@@ -40,7 +40,7 @@ __device__ __forceinline__ int tq_unpack_int4_hi(uint8_t packed) {
 // QJL correction weight (from TurboQuant paper)
 static constexpr float kQJLLambda = 0.1f;
 
-template <int HEAD_DIM, bool USE_MXFP4 = false>
+template <int HEAD_DIM, bool USE_MXFP4 = false, bool SKIP_QJL = false>
 __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kernel(
     const half* __restrict__ Q,               // [batch, n_heads, HEAD_DIM]
     const uint8_t* __restrict__ K_dir_cache,  // INT4 or FP4 E2M1 packed normalized directions
@@ -102,38 +102,40 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq);
     float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));  // align to 4
 
-    // Initialize Q sketch to zero
-    for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
-        q_sketch[i] = 0;
-    __syncthreads();
+    if constexpr (!SKIP_QJL) {
+        // Initialize Q sketch to zero
+        for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
+            q_sketch[i] = 0;
+        __syncthreads();
 
-    // Warp-cooperative Q sketch: each warp computes one sketch row
-    {
-        const int bytes_per_qjl_row = HEAD_DIM / 8;
-        for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
-            const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
+        // Warp-cooperative Q sketch: each warp computes one sketch row
+        {
+            const int bytes_per_qjl_row = HEAD_DIM / 8;
+            for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
 
-            // Each lane computes partial dot over ELEMS elements it owns
-            float partial_dot = 0.0f;
+                // Each lane computes partial dot over ELEMS elements it owns
+                float partial_dot = 0.0f;
 #pragma unroll
-            for (int i = 0; i < ELEMS; i++) {
-                int d = lane_id * ELEMS + i;
-                uint8_t r_byte = __ldg(&R_row[d / 8]);
-                float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
-                partial_dot += r_sign * q_reg[i];
-            }
-            float dot = warp_reduce_sum(partial_dot);
+                for (int i = 0; i < ELEMS; i++) {
+                    int d = lane_id * ELEMS + i;
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
+                    partial_dot += r_sign * q_reg[i];
+                }
+                float dot = warp_reduce_sum(partial_dot);
 
-            // Lane 0 writes the bit — atomicOr still needed across warps sharing a word
-            if (lane_id == 0 && dot >= 0.0f) {
-                int byte_idx = sr / 8;
-                int bit_idx = sr % 8;
-                atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
-                         1u << (bit_idx + 8 * (byte_idx & 3u)));
+                // Lane 0 writes the bit — atomicOr still needed across warps sharing a word
+                if (lane_id == 0 && dot >= 0.0f) {
+                    int byte_idx = sr / 8;
+                    int bit_idx = sr % 8;
+                    atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
+                             1u << (bit_idx + 8 * (byte_idx & 3u)));
+                }
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_head_bytes = HEAD_DIM / 2;  // bytes per head per token (INT4/FP4 packed)
@@ -230,25 +232,30 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // QJL correction: warp-parallel XNOR+popcount
-            float dot_qjl;
-            {
-                const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
-                const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
-                const int n_words = sketch_bytes / 4;
-                int local_match = 0;
-                for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
-                    uint32_t k_word;
-                    memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
-                    local_match += __popc(~(q_sketch32[sb] ^ k_word));
+            float dot;
+            if constexpr (SKIP_QJL) {
+                dot = dot_polar;
+            } else {
+                // QJL correction: warp-parallel XNOR+popcount
+                float dot_qjl;
+                {
+                    const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
+                    const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
+                    const int n_words = sketch_bytes / 4;
+                    int local_match = 0;
+                    for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
+                        uint32_t k_word;
+                        memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
+                        local_match += __popc(~(q_sketch32[sb] ^ k_word));
+                    }
+                    // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                    int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
+                    dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
                 }
-                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
-                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
-                dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
-            }
 
-            // Combined estimate with QJL correction
-            float dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+                // Combined estimate with QJL correction
+                dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+            }
 
             dot *= scale;
             dot = apply_softcap(dot, softcap);
@@ -282,7 +289,7 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
 // Split-K Phase 1: TurboQuant variant
 // ---------------------------------------------------------------------------
 
-template <int HEAD_DIM, bool USE_MXFP4 = false>
+template <int HEAD_DIM, bool USE_MXFP4 = false, bool SKIP_QJL = false>
 __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_dir_cache, const uint8_t* __restrict__ V_cache,
     const half* __restrict__ K_norms, const half* __restrict__ V_scales,
@@ -335,33 +342,35 @@ __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kern
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq_sk);
     float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
 
-    for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
-        q_sketch[i] = 0;
-    __syncthreads();
+    if constexpr (!SKIP_QJL) {
+        for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
+            q_sketch[i] = 0;
+        __syncthreads();
 
-    // Warp-cooperative Q sketch: each warp computes one sketch row
-    {
-        const int bytes_per_qjl_row = HEAD_DIM / 8;
-        for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
-            const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
-            float partial_dot = 0.0f;
+        // Warp-cooperative Q sketch: each warp computes one sketch row
+        {
+            const int bytes_per_qjl_row = HEAD_DIM / 8;
+            for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
+                float partial_dot = 0.0f;
 #pragma unroll
-            for (int i = 0; i < ELEMS; i++) {
-                int d = lane_id * ELEMS + i;
-                uint8_t r_byte = __ldg(&R_row[d / 8]);
-                float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
-                partial_dot += r_sign * q_reg[i];
-            }
-            float dot = warp_reduce_sum(partial_dot);
-            if (lane_id == 0 && dot >= 0.0f) {
-                int byte_idx = sr / 8;
-                int bit_idx = sr % 8;
-                atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
-                         1u << (bit_idx + 8 * (byte_idx & 3u)));
+                for (int i = 0; i < ELEMS; i++) {
+                    int d = lane_id * ELEMS + i;
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
+                    partial_dot += r_sign * q_reg[i];
+                }
+                float dot = warp_reduce_sum(partial_dot);
+                if (lane_id == 0 && dot >= 0.0f) {
+                    int byte_idx = sr / 8;
+                    int bit_idx = sr % 8;
+                    atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
+                             1u << (bit_idx + 8 * (byte_idx & 3u)));
+                }
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_head_bytes = HEAD_DIM / 2;
@@ -465,24 +474,29 @@ __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kern
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // QJL correction: warp-parallel XNOR+popcount
-            float dot_qjl;
-            {
-                const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
-                const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
-                const int n_words = sketch_bytes / 4;
-                int local_match = 0;
-                for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
-                    uint32_t k_word;
-                    memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
-                    local_match += __popc(~(q_sketch32[sb] ^ k_word));
+            float dot;
+            if constexpr (SKIP_QJL) {
+                dot = dot_polar;
+            } else {
+                // QJL correction: warp-parallel XNOR+popcount
+                float dot_qjl;
+                {
+                    const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
+                    const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
+                    const int n_words = sketch_bytes / 4;
+                    int local_match = 0;
+                    for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
+                        uint32_t k_word;
+                        memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
+                        local_match += __popc(~(q_sketch32[sb] ^ k_word));
+                    }
+                    // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                    int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
+                    dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
                 }
-                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
-                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
-                dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
-            }
 
-            float dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+                dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+            }
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
