@@ -147,6 +147,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(shared_workspace_max_tokens_);
 
+    // Phase 4 (MoE host-offload async prefetch). The cache is only initialised
+    // when some experts are host-resident; n_slots_ > 0 is therefore the
+    // gate. Order matters: drain this layer's pending prefetch before
+    // reading the cache, then queue the next layer's prefetch so the
+    // prefetch stream gets compute-time overlap.
+    if (expert_cache_.n_slots_ > 0) {
+        const int top_k_prefetch = RuntimeConfig::current().moe.prefetch_top_k;
+        if (top_k_prefetch > 0) {
+            expert_cache_.await_prefetch(layer, stream);
+            const int next_layer = layer + 1;
+            if (next_layer < model_->config().n_layers) {
+                expert_cache_.prefetch_layer(next_layer, top_k_prefetch,
+                                             expert_cache_.slot_size_);
+            }
+        }
+    }
+
     // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
     // legacy-serial-fallback uninit reads become deterministic zero reads.
     // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).

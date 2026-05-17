@@ -51,8 +51,11 @@ class ExpertCachePhase3Test : public ::testing::Test {
     }
 
     // Returns the layer-relative slot_idx at the (layer, proj, expert) cell,
-    // or -1 if not cached.
+    // or -1 if not cached. Syncs prefetch_stream_ first so Phase 4
+    // asynchronous mirror writes are visible to the readback.
     int read_mirror_cell(int layer, int proj, int expert) {
+        if (cache_.prefetch_stream_)
+            cudaStreamSynchronize(cache_.prefetch_stream_);
         size_t off = (static_cast<size_t>(layer) * kExpertProjCount + proj) * kNExperts + expert;
         int slot_idx = 0;
         cudaMemcpyAsync(&slot_idx, cache_.d_lookup_ + off, sizeof(int), cudaMemcpyDeviceToHost,
@@ -204,6 +207,95 @@ TEST_F(ExpertCachePhase3Test, SlotPtrAgreesWithGpuPtr) {
     int slot_in_layer = read_mirror_cell(2, static_cast<int>(ExpertProj::Up), 5);
     ASSERT_GE(slot_in_layer, 0);
     EXPECT_EQ(cache_.slot_ptr(2, slot_in_layer), p);
+}
+
+// =========================================================================
+// Phase 4 — async prefetch
+// =========================================================================
+
+// Sub-class so the test surface for prefetch APIs stays focused. Re-uses the
+// Phase 3 SetUp/TearDown (with debug_parity=true) so every prefetch test
+// also checks that the mirror stays in sync after async H2Ds.
+class ExpertCachePhase4Test : public ExpertCachePhase3Test {
+   protected:
+    // Drive a "previous token" pattern so per_layer_history_[layer] has
+    // recorded ring entries before prefetch_layer is called. Each call
+    // takes a different src_host so host_expert_addrs_ stamps distinctly.
+    void* load_with_src(int layer, ExpertProj proj, int expert, void* src) {
+        ExpertCacheKey key{fake_packed_ptr(layer, static_cast<int>(proj)), expert};
+        return cache_.get_or_load(layer, proj, key, src, kSlotBytes, stream_);
+    }
+};
+
+TEST_F(ExpertCachePhase4Test, PrefetchOnEmptyHistoryIsNoOp) {
+    EXPECT_EQ(cache_.prefetch_layer(0, /*top_k=*/4, kSlotBytes), 0);
+    EXPECT_EQ(cache_.prefetch_h2ds_, 0);
+}
+
+TEST_F(ExpertCachePhase4Test, PrefetchHitsAlreadyCachedSkipsH2D) {
+    // Touch (proj=Gate, expert=0) in layer 0 → recorded in ring + cached.
+    load(0, ExpertProj::Gate, 0);
+    int issued = cache_.prefetch_layer(0, /*top_k=*/4, kSlotBytes);
+    // The ring entry IS already cached → skip the H2D, bump the
+    // "skipped_cached" counter, return 0 issued.
+    EXPECT_EQ(issued, 0);
+    EXPECT_EQ(cache_.prefetch_skipped_cached_, 1);
+    EXPECT_EQ(cache_.prefetch_h2ds_, 0);
+}
+
+TEST_F(ExpertCachePhase4Test, PrefetchAfterEvictionReloads) {
+    // Fill layer 0 (2 slots), then evict slot 0 by inserting a 3rd entry.
+    load(0, ExpertProj::Gate, 0);  // slot 0
+    load(0, ExpertProj::Up, 1);    // slot 1
+    load(0, ExpertProj::Down, 2);  // evicts slot 0 → Gate/0 is now uncached
+    EXPECT_EQ(read_mirror_cell(0, static_cast<int>(ExpertProj::Gate), 0), -1);
+
+    // History ring still has Gate/0 (recorded on the earlier load). Prefetch
+    // should re-stage Gate/0 into the LRU slot.
+    int issued = cache_.prefetch_layer(0, /*top_k=*/8, kSlotBytes);
+    EXPECT_GE(issued, 1);
+    EXPECT_EQ(cache_.prefetch_h2ds_, issued);
+    // Gate/0 should now be cached again (somewhere in layer 0's pool).
+    EXPECT_GE(read_mirror_cell(0, static_cast<int>(ExpertProj::Gate), 0), 0);
+    EXPECT_TRUE(cache_.check_parity(stream_));
+}
+
+TEST_F(ExpertCachePhase4Test, AwaitPrefetchIsNoOpWithoutIssue) {
+    // prefetch_layer never called → await_prefetch must not block / abort.
+    cache_.await_prefetch(0, stream_);
+    EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+}
+
+TEST_F(ExpertCachePhase4Test, AwaitPrefetchAfterIssueIsSafe) {
+    // Set up history then prefetch, then await. The compute stream should
+    // serialise behind the prefetch stream's recorded event.
+    load(0, ExpertProj::Gate, 0);
+    load(0, ExpertProj::Up, 1);
+    load(0, ExpertProj::Down, 2);  // evicts slot 0
+    int issued = cache_.prefetch_layer(0, /*top_k=*/8, kSlotBytes);
+    ASSERT_GE(issued, 1);
+    cache_.await_prefetch(0, stream_);
+    // After await the issued flag should be cleared (idempotent).
+    cache_.await_prefetch(0, stream_);
+    EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+}
+
+TEST_F(ExpertCachePhase4Test, PrefetchTopKBoundsIssuedCount) {
+    // Spam the history ring with several unique evicted entries, then
+    // prefetch with top_k=1. Only one should be re-issued.
+    load(0, ExpertProj::Gate, 0);  // slot 0
+    load(0, ExpertProj::Up, 1);    // slot 1
+    load(0, ExpertProj::Down, 2);  // evict slot 0 → Gate/0 gone
+    load(0, ExpertProj::Gate, 3);  // evict slot 1 → Up/1 gone (slot 1 now Gate/3)
+    int issued = cache_.prefetch_layer(0, /*top_k=*/1, kSlotBytes);
+    EXPECT_EQ(issued, 1);
+}
+
+TEST_F(ExpertCachePhase4Test, PrefetchHonorsPerLayerIsolation) {
+    // Drive layer 0's history, prefetch layer 1 — should issue 0 (layer 1
+    // ring is empty).
+    load(0, ExpertProj::Gate, 0);
+    EXPECT_EQ(cache_.prefetch_layer(1, /*top_k=*/4, kSlotBytes), 0);
 }
 
 }  // namespace
