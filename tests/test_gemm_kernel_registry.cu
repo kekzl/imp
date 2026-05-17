@@ -1312,6 +1312,229 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     cudaFree(d_out);
 }
 
+// ---------------------------------------------------------------------------
+// R5 Slice 8.2 — fused gemv Q6_K/Q8_0 fallback (3rd branch inside the
+// existing Slice 7 handlers).
+//
+// When mmvq is disabled AND dp4a scratch is unavailable, Q6_K and Q8_0 now
+// route to the fused-dequant-and-dot kernel (`gemv_q6k` / `gemv_q8_0`) via
+// the same {FP16, <qtype>, m_is_one=true} strategy key Slice 7 registered.
+// `dequant_scratch != nullptr` is the engine-ready sentinel matching legacy
+// gemm_dispatch_impl:2267 / :2272 (the fused kernel itself does not consume
+// the scratch).
+// ---------------------------------------------------------------------------
+
+// Q8_0 fused-gemv parity: with force_mmvq=false and dp4a scratch absent, the
+// handler MUST take the fused-gemv branch and produce bit-identical output
+// to calling gemv_q8_0 directly (the legacy code path at executor_kernels.cu
+// :2275-2276).
+TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
+    constexpr int M = 1;
+    constexpr int N = 32;
+    constexpr int K = 128;
+
+    // Host-quantize an FP16 weight to Q8_0 layout. Per 32-element block:
+    // FP16 scale `d = max(|x|)/127`, then 32 int8 quantized values.
+    const int blocks_per_row = K / 32;
+    std::vector<__half> h_weight_fp16(N * K);
+    std::vector<__half> h_input(M * K);
+    for (int i = 0; i < N * K; ++i)
+        h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+    for (int i = 0; i < M * K; ++i)
+        h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+
+    std::vector<uint8_t> h_weight_q8_0(static_cast<size_t>(N) * blocks_per_row * 34);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks_per_row; ++b) {
+            float absmax = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                absmax = std::max(absmax, std::fabs(v));
+            }
+            float d = absmax / 127.0f;
+            float inv_d = (d > 0.0f) ? 1.0f / d : 0.0f;
+            uint8_t* blk = h_weight_q8_0.data() +
+                           (static_cast<size_t>(row) * blocks_per_row + b) * 34;
+            __half d_h = __float2half(d);
+            std::memcpy(blk, &d_h, sizeof(__half));
+            int8_t* qs = reinterpret_cast<int8_t*>(blk + 2);
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                int q = static_cast<int>(std::lrintf(v * inv_d));
+                qs[j] = static_cast<int8_t>(std::max(-127, std::min(127, q)));
+            }
+        }
+    }
+
+    void* d_weight = nullptr;
+    __half* d_input = nullptr;
+    cudaMalloc(&d_weight, h_weight_q8_0.size());
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMemcpy(d_weight, h_weight_q8_0.data(), h_weight_q8_0.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight, QType::Q8_0, 2, w_shape, /*on_device=*/true);
+
+    // Path 1: direct gemv_q8_0 invocation (mirrors legacy line 2275).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    gemv_q8_0(d_weight, static_cast<const half*>(d_input), reinterpret_cast<half*>(d_out_direct), N, K,
+              stream_);
+
+    // Path 2: registry dispatch with mmvq disabled, dp4a scratch null,
+    // dequant_scratch non-null. Force the handler into the third branch.
+    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
+    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
+    mut_cfg.gemma4.force_mmvq = false;
+
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // Engine-ready sentinel — the kernel does not dereference this pointer,
+    // it only checks for nullptr (matching legacy line 2272's gate).
+    uint8_t dummy_scratch_sentinel = 0;
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    // q8_1_buf / d8_buf intentionally null — dp4a branch must not fire.
+    args.dequant_scratch = &dummy_scratch_sentinel;
+
+    GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths run the identical gemv_q8_0 kernel → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i;
+    }
+
+    cudaFree(d_weight);
+    cudaFree(d_input);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
+}
+
+// Q6_K fused-gemv parity: same shape as the Q8_0 test, but Q6_K has a more
+// complex block layout (256 elements / block, 16 sub-blocks with 6-bit
+// quants). We can't trivially host-quantize Q6_K, so this test focuses on
+// dispatch-correctness only: build a zeroed Q6_K weight, run both paths,
+// and check that registry result matches direct path. With zero weight,
+// both paths produce zero output → bit-identical "noop" check that the
+// handler actually invoked the right branch (an mmvq/dp4a path would also
+// produce zero, so we additionally instrument with a non-null
+// dequant_scratch and zero scratch, then verify Ok was returned).
+TEST_F(GemmKernelRegistryTest, GgufQ6kFusedGemvFallbackReturnsOk) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 256;  // one Q6_K block
+
+    // Q6_K block layout (256 elements / 210 bytes): for this dispatch test
+    // we just need a non-null device buffer of the correct size; we don't
+    // verify numerical output.
+    const size_t block_bytes = 210;
+    void* d_weight = nullptr;
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_weight, static_cast<size_t>(N) * block_bytes);
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemset(d_weight, 0, static_cast<size_t>(N) * block_bytes);
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+    cudaMemset(d_out, 0, sizeof(__half) * M * N);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight, QType::Q6_K, 2, w_shape, /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // Force the fused-gemv branch: no mmvq backend for Q6_K + dp4a scratch null
+    // + dequant_scratch non-null.
+    uint8_t dummy_scratch_sentinel = 0;
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    args.dequant_scratch = &dummy_scratch_sentinel;
+
+    // Clear any sticky CUDA error from earlier tests in this binary; we
+    // want this check to reflect only the gemv_q6k launch.
+    cudaGetLastError();
+
+    GemmStrategy strat{StorageTier::FP16, QType::Q6_K, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+    cudaStreamSynchronize(stream_);
+
+    // With a zeroed weight and zeroed input, the dequant-and-dot path
+    // produces zero output. Confirm the kernel ran (no kernel-launch error
+    // and output is all zero / valid FP16).
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "gemv_q6k launch failed";
+    std::vector<__half> h_out(M * N);
+    cudaMemcpy(h_out.data(), d_out, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out[i]), __half_as_ushort(__float2half(0.0f)))
+            << "Expected zero output for zero weight × zero input, got "
+            << __half2float(h_out[i]) << " at i=" << i;
+    }
+
+    cudaFree(d_weight);
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
+// Negative case: without `dequant_scratch` AND without dp4a scratch AND with
+// mmvq disabled, Q6_K must return PreconditionFail (no branch fires). This
+// pins the engine-ready sentinel gate added in Slice 8.2.
+TEST_F(GemmKernelRegistryTest, GgufQ6kFusedGemvRequiresDequantScratchSentinel) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 256;
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(reinterpret_cast<void*>(static_cast<uintptr_t>(0xDEAD)), QType::Q6_K, 2, w_shape,
+                  /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    // q8_1_buf / d8_buf / dequant_scratch all null — no branch can fire.
+
+    GemmStrategy strat{StorageTier::FP16, QType::Q6_K, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
 // Pin the GemmStrategy operator== contract — used by the linear-scan
 // lookup in dispatch().
 TEST(GemmStrategy, EqualityIsByValue) {

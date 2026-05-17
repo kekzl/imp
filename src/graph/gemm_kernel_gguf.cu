@@ -12,11 +12,19 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// GGUF small-M tier — R5 Slice 7.
+// GGUF small-M tier — R5 Slice 7 + Slice 8.2.
 //
-// Migrates the legacy mmvq + dp4a small-M GGUF branches (gemm_dispatch_impl
-// at executor_kernels.cu:2216-2251) to the GemmKernel registry. The legacy
-// dispatch evaluates two parallel gates at M==1:
+// Slice 7 migrated the legacy mmvq + dp4a small-M GGUF branches
+// (gemm_dispatch_impl at executor_kernels.cu:2216-2251). Slice 8.2 extends
+// the Q6_K and Q8_0 handlers with a *third* internal branch: the fused-
+// gemv fallback that legacy reaches at gemm_dispatch_impl:2267-2276 when
+// both mmvq and dp4a are out (force_mmvq=false + no dp4a scratch / dp4a
+// disabled). That branch calls `gemv_q6k` / `gemv_q8_0` from compute/gemm —
+// the "dequant-and-dot in one pass" kernel — and only requires that the
+// engine is initialised (dequant_scratch != nullptr as a readiness sentinel,
+// even though the fused kernel itself doesn't consume the scratch).
+//
+// The legacy dispatch evaluates two parallel gates at M==1:
 //
 //   use_mmvq = gemma4.force_mmvq && qtype ∈ {Q4_K, Q5_K, Q5_1, Q8_0}
 //              && weight.shape[1] % 32 == 0 && !no_mmvq && !no_mmvq_q8_0(Q8_0)
@@ -30,13 +38,23 @@ namespace imp {
 // backends overlap on Q4_K / Q5_K / Q8_0; the dispatch site emits a single
 // (FP16, <qtype>, m_is_one=true) strategy key per qtype and the registered
 // handler internally re-evaluates `force_mmvq`/`no_mmvq`/etc. and picks the
-// backend — same conditions, same precedence as legacy. PreconditionFail
-// when neither backend can run (e.g. dp4a scratch missing, mmvq disabled),
-// surfacing the same fall-through to legacy that the legacy `else if` chain
-// produces today.
+// backend — same conditions, same precedence as legacy.
+//
+// Slice 8.2: when neither mmvq nor dp4a can run AND the qtype has a fused
+// gemv kernel (Q6_K or Q8_0) AND `dequant_scratch != nullptr` (engine-ready
+// sentinel matching legacy line 2267/2272), the handler invokes the fused
+// gemv kernel directly. For the other qtypes the third branch is absent and
+// the handler still returns PreconditionFail so the dispatch site falls
+// through to the legacy switch (which handles dequant+cuBLAS fallbacks for
+// Q4_K / Q5_K / etc.).
 //
 // Scope decision — Option 2 trimmed (per-qtype, M==1 only), with internal
-// backend selection inside each handler.
+// backend selection inside each handler. Slice 8.2 keeps the same shape:
+// it extends the existing Q6_K / Q8_0 handlers with a third branch instead
+// of adding new strategies, because the strategy key {FP16, Q6_K, M==1} (and
+// the Q8_0 analog) already routes to one handler — having THAT handler do
+// all three branches matches what the legacy switch did. New strategies
+// would multiply entries without changing the dispatch axis.
 //
 // Why this shape:
 //   - Option 1 (one strategy + giant switch) buries the qtype axis inside
@@ -69,7 +87,6 @@ namespace imp {
 // Out of scope (stays on legacy for now):
 //   - Q4_1 quant_gemm_int4 (also a small-M path but neither mmvq nor dp4a).
 //   - M>1 dequant+cuBLAS fallback (the "large-M path" in the slice 7 prompt).
-//   - Fused Q6_K/Q8_0 GEMV (the `else if` fallback below dp4a in legacy).
 //   - prefer_fp16_cache decision (stays on dispatch site — strictly upstream).
 //   - FP32-output paths (write directly to half*, so legacy stays in charge).
 // All of these continue through `gemm_dispatch_impl` when the registry
@@ -113,12 +130,31 @@ static void run_dp4a_backend(const GemmKernelArgs& args, const Tensor& weight, Q
                        static_cast<half*>(args.output->data), N, K, args.stream);
 }
 
-// Per-qtype dispatcher — internally picks mmvq vs dp4a based on RuntimeConfig
-// + workspace availability. `mmvq_eligible` flags qtypes mmvq supports; the
-// dp4a check uses is_dp4a_qtype(). When neither backend matches, returns
-// PreconditionFail so the dispatch site falls back to the legacy switch.
-template <void (*MmvqLauncher)(const void*, const half*, half*, int, int, int, void*, size_t, cudaStream_t)>
-static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtype, bool mmvq_eligible) {
+// Fused-gemv backend (Slice 8.2): runs the dequant-and-dot kernel
+// (`gemv_q6k` / `gemv_q8_0` from compute/gemm.cu). Signature matches both
+// kernels: (W, x, y, N, K, stream). The kernel performs the dequantization
+// inside the GEMV — no scratch buffer is read or written. Mirrors legacy
+// lines 2269-2271 (Q6_K) / 2274-2276 (Q8_0).
+template <void (*Launcher)(const void*, const half*, half*, int, int, cudaStream_t)>
+static void run_fused_gemv_backend(const GemmKernelArgs& args, const Tensor& weight) {
+    const int N = static_cast<int>(weight.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    Launcher(weight.data, static_cast<const half*>(args.input->data),
+             static_cast<half*>(args.output->data), N, K, args.stream);
+}
+
+// Per-qtype dispatcher — internally picks mmvq → dp4a → fused gemv based on
+// RuntimeConfig + workspace availability. `mmvq_eligible` flags qtypes mmvq
+// supports; the dp4a check uses is_dp4a_qtype(). `FusedGemvLauncher` is set
+// to a real fused kernel only for Q6_K (`gemv_q6k`) and Q8_0 (`gemv_q8_0`)
+// per Slice 8.2; other qtypes bind to `no_op_fused_gemv_launcher` and the
+// third branch is skipped at compile time. When no branch matches, returns
+// PreconditionFail so the dispatch site falls back to the legacy switch
+// (which handles the remaining cases like dequant+cuBLAS for Q4_K / Q5_K).
+template <void (*MmvqLauncher)(const void*, const half*, half*, int, int, int, void*, size_t, cudaStream_t),
+          void (*FusedGemvLauncher)(const void*, const half*, half*, int, int, cudaStream_t)>
+static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtype, bool mmvq_eligible,
+                                          bool fused_gemv_eligible) {
     IMP_CHECK(args.input != nullptr, "gguf_smallm: input is null");
     IMP_CHECK(args.output != nullptr, "gguf_smallm: output is null");
     IMP_CHECK(args.weight_payload != nullptr, "gguf_smallm: weight_payload is null");
@@ -143,6 +179,12 @@ static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtyp
     const bool use_dp4a = !no_dp4a_gemv && args.q8_1_buf != nullptr && args.d8_buf != nullptr &&
                           is_dp4a_qtype(qtype);
 
+    // Fused-gemv fallback (Slice 8.2 — legacy lines 2267-2276): only Q6_K and
+    // Q8_0 have a fused-dequant-and-dot kernel. `dequant_scratch != nullptr`
+    // matches the legacy gate at lines 2267 / 2272 (engine-ready sentinel —
+    // the fused kernel itself doesn't read the scratch).
+    const bool use_fused_gemv = fused_gemv_eligible && args.dequant_scratch != nullptr;
+
     if (use_mmvq) {
         run_mmvq_backend<MmvqLauncher>(args, weight);
         return GemmDispatchResult::Ok;
@@ -151,8 +193,13 @@ static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtyp
         run_dp4a_backend(args, weight, qtype);
         return GemmDispatchResult::Ok;
     }
-    // Neither backend matches — fall back to legacy (e.g. fused Q6_K/Q8_0
-    // GEMV at executor_kernels.cu:2263-2272, dequant+cuBLAS, etc.).
+    if (use_fused_gemv) {
+        run_fused_gemv_backend<FusedGemvLauncher>(args, weight);
+        return GemmDispatchResult::Ok;
+    }
+    // No backend matches — fall back to legacy (e.g. dequant+cuBLAS for
+    // qtypes without a fused-gemv kernel, or Q6_K/Q8_0 when the engine
+    // hasn't allocated the dequant_scratch sentinel).
     return GemmDispatchResult::PreconditionFail;
 }
 
@@ -165,41 +212,58 @@ static void no_op_mmvq_launcher(const void*, const half*, half*, int, int, int, 
     // qtype, which is false for the qtypes that bind to this launcher.
 }
 
+// Same idea for the fused-gemv slot: only Q6_K / Q8_0 bind to real kernels
+// in Slice 8.2; the other six qtypes bind to this no-op (the third branch
+// is guarded by `fused_gemv_eligible=false`, never invoked at runtime).
+static void no_op_fused_gemv_launcher(const void*, const half*, half*, int, int, cudaStream_t) {
+    // Intentionally empty — see no_op_mmvq_launcher.
+}
+
 // ---------------------------------------------------------------------------
 // Per-qtype handler functions (8 total, one per supported qtype).
 // ---------------------------------------------------------------------------
 
 static GemmDispatchResult gguf_q4k_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&ggml_mmvq_q4k>(args, QType::Q4_K, /*mmvq_eligible=*/true);
+    return run_gguf_smallm<&ggml_mmvq_q4k, &no_op_fused_gemv_launcher>(
+        args, QType::Q4_K, /*mmvq_eligible=*/true, /*fused_gemv_eligible=*/false);
 }
 
 static GemmDispatchResult gguf_q5k_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&ggml_mmvq_q5k>(args, QType::Q5_K, /*mmvq_eligible=*/true);
+    return run_gguf_smallm<&ggml_mmvq_q5k, &no_op_fused_gemv_launcher>(
+        args, QType::Q5_K, /*mmvq_eligible=*/true, /*fused_gemv_eligible=*/false);
 }
 
 static GemmDispatchResult gguf_q5_1_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&ggml_mmvq_q5_1>(args, QType::Q5_1, /*mmvq_eligible=*/true);
+    return run_gguf_smallm<&ggml_mmvq_q5_1, &no_op_fused_gemv_launcher>(
+        args, QType::Q5_1, /*mmvq_eligible=*/true, /*fused_gemv_eligible=*/false);
 }
 
+// Slice 8.2: Q8_0 gains a fused-gemv fallback (`gemv_q8_0` in compute/gemm.cu).
 static GemmDispatchResult gguf_q8_0_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&ggml_mmvq_q8_0>(args, QType::Q8_0, /*mmvq_eligible=*/true);
+    return run_gguf_smallm<&ggml_mmvq_q8_0, &gemv_q8_0>(
+        args, QType::Q8_0, /*mmvq_eligible=*/true, /*fused_gemv_eligible=*/true);
 }
 
 // dp4a-only qtypes (no mmvq backend).
+// Slice 8.2: Q6_K gains a fused-gemv fallback (`gemv_q6k`).
 static GemmDispatchResult gguf_q6k_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&no_op_mmvq_launcher>(args, QType::Q6_K, /*mmvq_eligible=*/false);
+    return run_gguf_smallm<&no_op_mmvq_launcher, &gemv_q6k>(
+        args, QType::Q6_K, /*mmvq_eligible=*/false, /*fused_gemv_eligible=*/true);
 }
 
 static GemmDispatchResult gguf_q4_0_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&no_op_mmvq_launcher>(args, QType::Q4_0, /*mmvq_eligible=*/false);
+    return run_gguf_smallm<&no_op_mmvq_launcher, &no_op_fused_gemv_launcher>(
+        args, QType::Q4_0, /*mmvq_eligible=*/false, /*fused_gemv_eligible=*/false);
 }
 
 static GemmDispatchResult gguf_q2k_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&no_op_mmvq_launcher>(args, QType::Q2_K, /*mmvq_eligible=*/false);
+    return run_gguf_smallm<&no_op_mmvq_launcher, &no_op_fused_gemv_launcher>(
+        args, QType::Q2_K, /*mmvq_eligible=*/false, /*fused_gemv_eligible=*/false);
 }
 
 static GemmDispatchResult gguf_q3k_kernel(const GemmKernelArgs& args) {
-    return run_gguf_smallm<&no_op_mmvq_launcher>(args, QType::Q3_K, /*mmvq_eligible=*/false);
+    return run_gguf_smallm<&no_op_mmvq_launcher, &no_op_fused_gemv_launcher>(
+        args, QType::Q3_K, /*mmvq_eligible=*/false, /*fused_gemv_eligible=*/false);
 }
 
 namespace {

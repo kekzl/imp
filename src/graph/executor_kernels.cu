@@ -2577,14 +2577,19 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
         }
-        // Slice 7 — GGUF small-M (mmvq / dp4a) dispatch. Only fires for M==1
-        // with FP16 input and a non-FP32 output, mirroring the legacy mmvq +
-        // dp4a gates at gemm_dispatch_impl:2216-2222. Per-qtype strategies
-        // (Option 2 scope decision — see gemm_kernel_gguf.cu header) and the
-        // handler internally selects mmvq vs dp4a based on the same
-        // RuntimeConfig fields the legacy switch reads. `prefer_fp16_cache`
-        // remains a dispatch-site gate because it depends on `fp16` cache
-        // membership + stride, which isn't part of GemmKernelArgs.
+        // Slice 7 + Slice 8.2 — GGUF small-M (mmvq / dp4a / fused-gemv)
+        // dispatch. Only fires for M==1 with FP16 input and a non-FP32
+        // output, mirroring the legacy mmvq + dp4a gates at
+        // gemm_dispatch_impl:2216-2222 and the fused-gemv fallback at lines
+        // 2267-2276. Per-qtype strategies (Option 2 scope decision — see
+        // gemm_kernel_gguf.cu header) and the handler internally selects
+        // mmvq vs dp4a vs fused-gemv based on the same RuntimeConfig fields
+        // and workspace sentinels the legacy switch reads.
+        // `prefer_fp16_cache` remains a dispatch-site gate because it
+        // depends on `fp16` cache membership + stride, which isn't part of
+        // GemmKernelArgs. `dequant_scratch` is passed as an engine-ready
+        // sentinel for Slice 8.2's fused-gemv branch (the legacy gate at
+        // line 2267/2272 checks the same pointer).
         const bool fp32_output = (output.qtype == QType::F32);
         const bool prefer_fp16_cache =
             (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
@@ -2597,14 +2602,15 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             args.weight_payload = &weight;
             args.q8_1_buf = qs->q8_1_buf;
             args.d8_buf = qs->d8_buf;
+            args.dequant_scratch = qs->dequant;  // Slice 8.2 fused-gemv readiness sentinel
             GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
             auto rc = GemmKernelRegistry::instance().dispatch(strat, args);
             if (rc == GemmDispatchResult::Ok)
                 return;
-            // NoMatch (qtype not in slice 7 set) or PreconditionFail (neither
-            // mmvq nor dp4a backend matched) — fall through to legacy. Same
-            // semantics as the legacy `else if` chain continuing past the
-            // mmvq/dp4a branches.
+            // NoMatch (qtype not in slice 7/8.2 set) or PreconditionFail (no
+            // backend matched — neither mmvq nor dp4a nor fused-gemv) —
+            // fall through to legacy. Same semantics as the legacy `else if`
+            // chain continuing past the mmvq/dp4a/fused-gemv branches.
         }
         // Fall through: registry returned NoMatch for this strategy — use legacy.
     }
