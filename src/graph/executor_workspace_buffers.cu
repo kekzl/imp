@@ -5,6 +5,7 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
+#include "graph/gemm_scratch.h"  // prewarm_mmvq_scratch
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/sampling.h"

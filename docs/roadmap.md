@@ -92,9 +92,9 @@ EAGLE-3, self-speculative, DFlash, PPM-based TurboDraft, and n-gram speculation 
 
 A Blackwell-style cluster-launch variant of the FMHA prefill kernel (DSMEM K-broadcast across a 2-CTA cluster, modelled after `paged_attention_cluster_kernel<HD>`) was implemented across three slices in May 2026: Slice 1 helper (#198), Slice 2 FP16 cluster kernel + dispatch (#200), Slice 2.2 FP8 variant (#202). End-to-end A/B across 4 NVFP4 MoE models (Qwen3.6-35B, Coder-30B, Gemma-4-26B, Qwen3-30B-Modelopt) on 2026-05-17 found the perf signal **noise-dominated**: ±20% same shape, opposite signs across re-runs of the same config; cuBLAS / thermal / scheduler variance drowned any cluster effect. Cluster output is **bit-identical to legacy** (`ClusterMatchesLegacy*` tests: max_abs = 0), so the kernel is sound; the maintainability cost (a parallel kernel + dispatch + dual test files) doesn't pay back. Default flipped OFF in #204 via `attention.no_fmha_cluster=true`; code retained as opt-in for future hardware where the signal might emerge. Memo: `m5_slice2_cluster_refuted_2026_05_17.md`.
 
-### GEMM dispatch unification (R5)
+### GEMM dispatch unification (R5) — DONE
 
-The 21-parameter `gemm_dispatch_impl` god-dispatcher has been replaced by a strategy-keyed `GemmKernel` registry. Slice 1 (PR #197) shipped the interface (`src/graph/gemm_kernel_registry.h`); Slices 2-7 migrated each tier behind a `gemm.use_kernel_registry` feature flag (default OFF for those slices); Slice 8 (#215) flipped the default to ON. The registry is now the **primary dispatch path** in production. The legacy `gemm_dispatch_impl` switch is retained as fallback for a handful of branches Slices 1-7 did not target — these are queued as Slice 8.1+.
+The 21-parameter `gemm_dispatch_impl` god-dispatcher has been **retired**. The strategy-keyed `GemmKernel` registry (`src/graph/gemm_kernel_registry.h`) is the unconditional dispatch path. Slice 8.6 (final) closed the cross-axis refactor by migrating the QW7 dual-cache CUTLASS MXFP4 probe into the CUTLASS_NVFP4 handler, deleting the legacy switch (~247 LOC), and hoisting `mmvq_scratch_get_or_grow` into its own TU (`src/graph/gemm_scratch.{h,cu}`).
 
 | Slice | Tier / scope | Status |
 |---|---|---|
@@ -106,19 +106,16 @@ The 21-parameter `gemm_dispatch_impl` god-dispatcher has been replaced by a stra
 | 6 | MXFP4 (GEMV + GEMM) | shipped (#213) |
 | 7 | GGUF dp4a/mmvq, M==1 (8 qtypes) | shipped (#214) |
 | 8 | Flip default ON + coverage audit | shipped (#215) |
+| 8.1 | FP8 cache-miss → dequant fallback | shipped (#217) |
+| 8.2 | Fused gemv fallback for Q6_K, Q8_0 | shipped (#220) |
+| 8.3 | Q4_1 dead-code purge | shipped (#221) |
+| 8.4 | `fp16_cache` for non-F16 weights (covered by Slice 1, no-op) | shipped (#225) |
+| 8.5 | Raw-quant large-M dequant→cuBLAS catch-all | shipped (#225) |
+| 8.6 | QW7 dual-cache CUTLASS MXFP4 migration + final `gemm_dispatch_impl` delete + `mmvq_scratch` TU hoist + flag retired | shipped |
 
-**Deferred follow-ups** (the 8 branches Slice 8's audit found uncovered — `gemm_dispatch_impl` still owns them on the registry's `NoMatch` fallback):
+QW7 decision: the dual-cache CUTLASS MXFP4 probe was **migrated, not deleted**. It only fires under explicit `--mxfp4-prefill` opt-in (off by default; documented in `docs/performance.md`), so production-trace evidence wasn't available; deleting would silently break the opt-in path. The probe now lives inside the CUTLASS_NVFP4 handler — when both `cutlass_nvfp4` and `cutlass_mxfp4` caches hit the same `weight.data`, the handler tries MXFP4 CUTLASS first and falls back to NVFP4 CUTLASS on `gemm_mxfp4_cutlass_sm120` failure. Same drop-through semantics as the legacy switch.
 
-| Slice | Branch |
-|---|---|
-| 8.1 | FP8 cache miss → dequant fallback (high-impact: every FP8 model not in cache) |
-| 8.2 | Fused gemv fallbacks for Q6_K, Q8_0 (Qwen3-Coder Q6_K hits this) |
-| 8.3 | Q4_1 paths (rare qtype) |
-| 8.4 | `fp16_cache` for non-F16 weights (convert-and-cache-as-FP16 flow) |
-| 8.5 | Raw-quant large-M dequant→cuBLAS (catch-all for anything Slices 1-7 missed) |
-| 8.6 | QW7 dual-cache CUTLASS MXFP4 probe (waiting on production trace to confirm dead) + final `gemm_dispatch_impl` delete + `mmvq_scratch_get_or_grow` header hoist |
-
-Each is a small mechanical migration. Coverage table from Slice 8 audit is in PR #215 description. Once 8.1-8.6 land, the legacy switch + the `gemm.use_kernel_registry` flag can be retired entirely.
+`gemm.use_kernel_registry` config field deleted (was an escape hatch during Slice 1-7 migration; redundant once the legacy path is gone).
 
 ### MoE prefill graph capture (M3 Phase 4)
 
