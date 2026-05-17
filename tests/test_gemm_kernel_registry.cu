@@ -4,16 +4,19 @@
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
 #include "core/tensor.h"
 #include "graph/executor.h"  // FP8CacheEntry
+#include "graph/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
 #include "quant/fp8_quant.h"
 #include "quant/mxfp4_gemm.h"  // gemv_mxfp4_kpar
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
+#include "runtime/config.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
 #include <cmath>
+#include <cstring>
 
 using namespace imp;
 
@@ -825,6 +828,282 @@ TEST_F(GemmKernelRegistryTest, Mxfp4GemvRegistryDispatchMatchesDirectPath) {
     cudaFree(d_weight_fp16);
     cudaFree(d_out_direct);
     cudaFree(d_out_registry);
+}
+
+// R5 Slice 7 — GGUF small-M (mmvq + dp4a) kernels registered. 8 qtypes
+// covered (Q4_K, Q5_K, Q5_1, Q8_0, Q6_K, Q4_0, Q2_K, Q3_K) — one strategy
+// per qtype, all under (StorageTier::FP16, <qtype>, m_is_one=true). With
+// Slices 1-6 contributing 8 entries, Slice 7 brings the total to 16.
+TEST_F(GemmKernelRegistryTest, GgufSmallmKernelsAreRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 16u)
+        << "Slices 1-6 (8 entries) + Slice 7 GGUF small-M (8 qtypes) expected pre-registered";
+}
+
+// Off-axis m_is_one (M>1 prefill) must NoMatch — Slice 7 only registers the
+// M==1 decode side. The dispatch site shouldn't accidentally pick up GGUF
+// strategies on the prefill path.
+TEST_F(GemmKernelRegistryTest, GgufWrongMIsOneReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy m_gt_one{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/false};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(m_gt_one, args), GemmDispatchResult::NoMatch);
+}
+
+// An unsupported qtype (Q4_1 stays on legacy quant_gemm_int4, IQ4_NL/XS not
+// in slice 7) must NoMatch so the dispatch site falls back.
+TEST_F(GemmKernelRegistryTest, GgufUnsupportedQtypeReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy q4_1{StorageTier::FP16, QType::Q4_1, /*m_is_one=*/true};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(q4_1, args), GemmDispatchResult::NoMatch);
+}
+
+// When neither backend can run (mmvq disabled via force_mmvq=false AND dp4a
+// scratch missing), the handler returns PreconditionFail so the dispatch
+// site falls back to legacy. Q6_K is dp4a-only (no mmvq backend) — with
+// q8_1_buf/d8_buf null and force_mmvq=false, neither path matches.
+TEST_F(GemmKernelRegistryTest, GgufQ6kRejectsMissingDp4aScratch) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 256;  // Q6_K block = 256 elements
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+    // Dummy weight — never dereferenced because the handler returns
+    // PreconditionFail before touching the bytes.
+    Tensor weight(reinterpret_cast<void*>(static_cast<uintptr_t>(0xDEAD)), QType::Q6_K, 2, w_shape,
+                  /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    // q8_1_buf / d8_buf intentionally null — dp4a backend can't run.
+
+    GemmStrategy strat{StorageTier::FP16, QType::Q6_K, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
+// dp4a backend smoke: provide q8_1_buf + d8_buf, build a real Q8_0 weight,
+// and verify the registry dispatch produces the same output as calling
+// quantize_fp16_to_q8_1 + dispatch_dp4a_gemv directly (the legacy code path
+// at executor_kernels.cu:2249-2251). Q8_0 is the simplest qtype to set up:
+// the block layout is `block_q8_0 { half d; int8_t qs[32]; }` = 34 bytes,
+// and we can quantize an FP16 tensor on the host.
+TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
+    constexpr int M = 1;
+    constexpr int N = 32;
+    constexpr int K = 128;  // multiple of 32 (Q8_0 block size)
+    constexpr int blocks_per_row = K / 32;
+
+    // Build a deterministic FP16 weight + activation.
+    std::vector<__half> h_weight_fp16(N * K);
+    std::vector<__half> h_input(M * K);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+
+    // Host-quantize the FP16 weight to Q8_0 layout: per 32-element block,
+    // store FP16 scale `d` (= max(|x|)/127), then 32 int8 quantized values.
+    constexpr int kQ8_0_BlockBytes = 2 + 32;  // half + 32 * int8
+    std::vector<uint8_t> h_weight_q8_0(static_cast<size_t>(N) * blocks_per_row * kQ8_0_BlockBytes);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks_per_row; ++b) {
+            float absmax = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                absmax = std::max(absmax, std::fabs(v));
+            }
+            float d = absmax / 127.0f;
+            float inv_d = (d > 0.0f) ? 1.0f / d : 0.0f;
+            uint8_t* blk = h_weight_q8_0.data() +
+                           (static_cast<size_t>(row) * blocks_per_row + b) * kQ8_0_BlockBytes;
+            __half d_h = __float2half(d);
+            std::memcpy(blk, &d_h, sizeof(__half));
+            int8_t* qs = reinterpret_cast<int8_t*>(blk + 2);
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                int q = static_cast<int>(std::lrintf(v * inv_d));
+                qs[j] = static_cast<int8_t>(std::max(-127, std::min(127, q)));
+            }
+        }
+    }
+
+    // Upload weight + input.
+    void* d_weight = nullptr;
+    __half* d_input = nullptr;
+    cudaMalloc(&d_weight, h_weight_q8_0.size());
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMemcpy(d_weight, h_weight_q8_0.data(), h_weight_q8_0.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+
+    // dp4a scratch: q8_1_buf is `block_q8_1[K/32]` (36 bytes/block), d8_buf
+    // is `float[K/32]`.
+    void* d_q8_1 = nullptr;
+    float* d_d8 = nullptr;
+    cudaMalloc(&d_q8_1, sizeof(block_q8_1) * blocks_per_row);
+    cudaMalloc(&d_d8, sizeof(float) * blocks_per_row);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight, QType::Q8_0, 2, w_shape, /*on_device=*/true);
+
+    // Path 1: direct legacy invocation (mirrors gemm_dispatch_impl:2249-2251).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    quantize_fp16_to_q8_1(static_cast<const half*>(d_input), static_cast<block_q8_1*>(d_q8_1), d_d8, K,
+                          stream_);
+    dispatch_dp4a_gemv(QType::Q8_0, d_weight, static_cast<const block_q8_1*>(d_q8_1), d_d8,
+                       reinterpret_cast<half*>(d_out_direct), N, K, stream_);
+
+    // Path 2: registry dispatch through the GGUF Q8_0 kernel adapter. We
+    // must temporarily disable force_mmvq so the handler picks the dp4a
+    // backend (legacy precedence: mmvq wins when both eligible).
+    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
+    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
+    mut_cfg.gemma4.force_mmvq = false;
+
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    args.q8_1_buf = d_q8_1;
+    args.d8_buf = d_d8;
+    GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths run the identical quantize + dp4a sequence → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    cudaFree(d_weight);
+    cudaFree(d_input);
+    cudaFree(d_q8_1);
+    cudaFree(d_d8);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
+}
+
+// mmvq backend smoke: provide weight + scratch + force_mmvq=true, verify
+// the registry handler picks mmvq (not dp4a) and produces a non-zero
+// output. We don't do bit-identical parity here because the mmvq scratch
+// is single-global and re-used between paths, which mucks with synchronous
+// invocation expectations; the dp4a parity test above is enough to pin
+// the args plumbing. This test only checks "Ok + non-zero output".
+TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
+    constexpr int M = 1;
+    constexpr int N = 32;
+    constexpr int K = 128;  // multiple of 32
+    constexpr int blocks_per_row = K / 32;
+
+    std::vector<__half> h_weight_fp16(N * K);
+    std::vector<__half> h_input(M * K);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+
+    constexpr int kQ8_0_BlockBytes = 34;
+    std::vector<uint8_t> h_weight_q8_0(static_cast<size_t>(N) * blocks_per_row * kQ8_0_BlockBytes);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks_per_row; ++b) {
+            float absmax = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                absmax = std::max(absmax, std::fabs(v));
+            }
+            float d = absmax / 127.0f;
+            float inv_d = (d > 0.0f) ? 1.0f / d : 0.0f;
+            uint8_t* blk = h_weight_q8_0.data() +
+                           (static_cast<size_t>(row) * blocks_per_row + b) * kQ8_0_BlockBytes;
+            __half d_h = __float2half(d);
+            std::memcpy(blk, &d_h, sizeof(__half));
+            int8_t* qs = reinterpret_cast<int8_t*>(blk + 2);
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                int q = static_cast<int>(std::lrintf(v * inv_d));
+                qs[j] = static_cast<int8_t>(std::max(-127, std::min(127, q)));
+            }
+        }
+    }
+
+    void* d_weight = nullptr;
+    __half* d_input = nullptr;
+    cudaMalloc(&d_weight, h_weight_q8_0.size());
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMemcpy(d_weight, h_weight_q8_0.data(), h_weight_q8_0.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight, QType::Q8_0, 2, w_shape, /*on_device=*/true);
+
+    // Enable force_mmvq so the handler picks mmvq (precedence over dp4a).
+    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
+    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
+    mut_cfg.gemma4.force_mmvq = true;
+
+    __half* d_out = nullptr;
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemsetAsync(d_out, 0, sizeof(__half) * M * N, stream_);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    // q8_1_buf / d8_buf intentionally NOT supplied — mmvq has its own
+    // file-scope scratch and should win the gate.
+
+    GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out(M * N);
+    cudaMemcpy(h_out.data(), d_out, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    int nonzero_count = 0;
+    for (int i = 0; i < M * N; ++i) {
+        if (__half_as_ushort(h_out[i]) != 0) ++nonzero_count;
+    }
+    EXPECT_GT(nonzero_count, 0) << "mmvq Q8_0 registry dispatch wrote all-zero output";
+
+    cudaFree(d_weight);
+    cudaFree(d_input);
+    cudaFree(d_out);
 }
 
 // Pin the GemmStrategy operator== contract — used by the linear-scan

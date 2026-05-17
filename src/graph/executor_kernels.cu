@@ -57,7 +57,11 @@ void prewarm_mmvq_scratch(int max_tokens, int max_K) {
                  need / 1024.0, max_tokens, max_K);
 }
 
-static void mmvq_scratch_get_or_grow(size_t need, void** out_buf, size_t* out_size) {
+// R5 Slice 7: the mmvq adapter in `gemm_kernel_gguf.cu` re-uses this single
+// global via a forward declaration there — internal linkage would force the
+// new TU to duplicate the scratch state. Kept namespace-local (no public
+// header declaration) to limit exposure.
+void mmvq_scratch_get_or_grow(size_t need, void** out_buf, size_t* out_size) {
     if (g_mmvq_scratch && g_mmvq_scratch_size >= need) {
         *out_buf = g_mmvq_scratch;
         *out_size = g_mmvq_scratch_size;
@@ -2366,12 +2370,14 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1+2+3+4+5+6: when gemm.use_kernel_registry is enabled, try the
-    // new dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3 (NVFP4
-    // decode GEMV), 4 (NVFP4 prefill GEMM dequant), 5 (CUTLASS_NVFP4 prefill
-    // GEMM, preferred native FP4 path) and 6 (MXFP4 native GGUF — GEMV +
-    // dequant→cuBLAS GEMM) are wired; remaining tiers (dp4a/q8 — Slice 7)
-    // fall through to the legacy gemm_dispatch_impl below.
+    // R5 Slice 1+2+3+4+5+6+7: when gemm.use_kernel_registry is enabled, try
+    // the new dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3
+    // (NVFP4 decode GEMV), 4 (NVFP4 prefill GEMM dequant), 5 (CUTLASS_NVFP4
+    // prefill GEMM, preferred native FP4 path), 6 (MXFP4 native GGUF — GEMV +
+    // dequant→cuBLAS GEMM) and 7 (GGUF small-M mmvq + dp4a — 8 qtypes) are
+    // wired; the M>1 dequant+cuBLAS large-M fallback and Q4_1 quant_gemm_int4
+    // still fall through to the legacy gemm_dispatch_impl below (slice 8
+    // retires the legacy switch).
     //
     // Tier order mirrors gemm_dispatch_impl precedence: MXFP4 GGUF is the
     // top-priority branch in legacy (executor_kernels.cu:2085-2113) and is
@@ -2548,6 +2554,35 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
+        }
+        // Slice 7 — GGUF small-M (mmvq / dp4a) dispatch. Only fires for M==1
+        // with FP16 input and a non-FP32 output, mirroring the legacy mmvq +
+        // dp4a gates at gemm_dispatch_impl:2216-2222. Per-qtype strategies
+        // (Option 2 scope decision — see gemm_kernel_gguf.cu header) and the
+        // handler internally selects mmvq vs dp4a based on the same
+        // RuntimeConfig fields the legacy switch reads. `prefer_fp16_cache`
+        // remains a dispatch-site gate because it depends on `fp16` cache
+        // membership + stride, which isn't part of GemmKernelArgs.
+        const bool fp32_output = (output.qtype == QType::F32);
+        const bool prefer_fp16_cache =
+            (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
+        if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = &weight;
+            args.q8_1_buf = qs->q8_1_buf;
+            args.d8_buf = qs->d8_buf;
+            GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
+            auto rc = GemmKernelRegistry::instance().dispatch(strat, args);
+            if (rc == GemmDispatchResult::Ok)
+                return;
+            // NoMatch (qtype not in slice 7 set) or PreconditionFail (neither
+            // mmvq nor dp4a backend matched) — fall through to legacy. Same
+            // semantics as the legacy `else if` chain continuing past the
+            // mmvq/dp4a branches.
         }
         // Fall through: registry returned NoMatch for this strategy — use legacy.
     }

@@ -88,6 +88,18 @@ struct GemmKernelArgs {
     float* d_fp8_block_maxes = nullptr;
     float* d_fp8_absmax = nullptr;
     int fp8_max_grid = 0;
+
+    // dp4a / Q8_1 activation quantization scratch (slice 7 — GGUF dp4a tier).
+    // Same role as fp8_act_buf + d_act_scale above: a per-call activation
+    // scratch pre-sized by engine init (QuantScratch::q8_1_buf / d8_buf).
+    // The dp4a kernels quantize the FP16 activation into `q8_1_buf` then run
+    // dispatch_dp4a_gemv with the block scales in `d8_buf`. nullptr means the
+    // caller did not supply scratch and the kernel must PreconditionFail so
+    // the dispatch site can fall back to legacy. Typed as void* / float* to
+    // mirror the legacy gemm_dispatch_impl signature; the kernel reinterpret-
+    // casts to block_q8_1*.
+    void* q8_1_buf = nullptr;
+    float* d8_buf = nullptr;
 };
 
 // Result of a dispatch attempt.
@@ -139,7 +151,11 @@ private:
         GemmStrategy strategy;
         GemmKernelFn fn;
     };
-    Entry entries_[16] = {};
+    // Capacity sized for Slice 7: 8 entries through Slice 6 + 11 new GGUF
+    // strategies (4 mmvq qtypes + 7 dp4a qtypes) = 19; bumped to 32 for
+    // headroom (next slices may register additional GGUF qtype/backend
+    // combinations or the remaining Q4_1 / IQ4 paths).
+    Entry entries_[32] = {};
     std::size_t count_ = 0;
 };
 

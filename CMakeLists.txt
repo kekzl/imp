@@ -238,6 +238,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/gemm_kernel_nvfp4_gemm.cu
     src/graph/gemm_kernel_cutlass_nvfp4.cu
     src/graph/gemm_kernel_mxfp4.cu
+    src/graph/gemm_kernel_gguf.cu
     src/graph/executor_workspace.cu
     src/graph/executor_workspace_buffers.cu
     src/graph/executor_kv_write.cu
