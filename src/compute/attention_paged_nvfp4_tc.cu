@@ -288,7 +288,6 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         // for m_local / l_local so EVERY lane sees the same scalar (the
         // sQ_w fill below has lanes 16..31 also reading weights[col], so
         // they need consistent l_inv).
-        float* dots_smem_p = reinterpret_cast<float*>(sK_w) + 16 * 16 / 2;  // alias unused half region
         // Use the front of sFV_w for dots/weights — sFV_w is per-warp (1024B
         // floats = 256 entries) and only used after this for V WMMA store.
         float* dots_smem = sFV_w;
@@ -324,7 +323,6 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         for (int off = 16; off > 0; off >>= 1) {
             l_local += __shfl_xor_sync(0xffffffff, l_local, off);
         }
-        (void)dots_smem_p;  // alias not used; keep dots in sFV_w for clarity
 
         float l_new = exp_diff * l_w + l_local;
         // Normalized rescale: (exp_diff * l_w_old) / l_new — same role as

@@ -297,13 +297,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
-        size_t es_loc = dtype_size(compute_dtype_);
         int total_out = packed_conv_channels + packed_inner + 2 * packed_n_heads;
         int64_t fused_shape[2] = {1, total_out};
         Tensor fused_out(gdn_fused_proj_buf_.data, compute_dtype_, 2, fused_shape, true);
         gemm_dispatch(no, ly.gdn_input_packed, fused_out, ctx);
         proj = Tensor(gdn_fused_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        (void)es_loc;
     } else {
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].

@@ -724,12 +724,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 // ============================================================================
 
 void moe_gather(const Tensor& input, const MoeRoutingResult& routing, Tensor& gathered, cudaStream_t stream) {
-    const int n_tokens_orig = static_cast<int>(input.shape[0]);
     const int d_model = static_cast<int>(input.shape[1]);
     const int total_tokens = static_cast<int>(routing.sorted_token_ids.shape[0]);
     const int32_t* d_sorted = static_cast<const int32_t*>(routing.sorted_token_ids.data);
-
-    (void)n_tokens_orig;
 
     if (input.qtype == QType::F16) {
         const half* d_input = static_cast<const half*>(input.data);
