@@ -1225,7 +1225,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         // Uses slot 0 always -- safe because all ops are on the same stream, so the previous
                         // GEMM reading from slot 0 completes before the next dequant writes to it.
                         auto dequant_expert = [&](const Tensor& packed, QType qtype,
-                                                  int expert_idx) -> Tensor {
+                                                  int expert_idx, ExpertProj proj) -> Tensor {
                             int64_t rows = packed.shape[1];
                             int64_t cols = packed.shape[2];
                             size_t row_bytes = qtype_row_bytes(qtype, cols);
@@ -1260,8 +1260,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 const char* host_ptr = static_cast<const char*>(packed.data) + offset;
                                 if (expert_cache_.n_slots_ > 0) {
                                     ExpertCacheKey ck{packed.data, expert_idx};
-                                    void* cached = expert_cache_.get_or_load(ck, host_ptr, expert_raw,
-                                                                             stream);
+                                    void* cached = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
+                                                                             expert_raw, stream);
                                     src = static_cast<const char*>(cached);
                                 } else if (moe_.raw_staging_buf) {
                                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr,
@@ -1292,7 +1292,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         // eliminates separate dequant_gpu + cuBLAS gemm overhead.
                         auto expert_gemm = [&](const Tensor& a, Tensor& c, const Tensor& packed, QType qtype,
                                                const std::vector<Tensor>& fallback,
-                                               const std::vector<TensorID>& fallback_ids, int eidx) {
+                                               const std::vector<TensorID>& fallback_ids, int eidx,
+                                               ExpertProj proj) {
                             // NVFP4 MoE batch cache path (Nemotron-H non-gated, and any
                             // NVFP4 MoE model when batch_dequant_buf is too small to fire
                             // the NVFP4→FP16 batch path). After cache_moe_native_nvfp4
@@ -1417,7 +1418,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     const char* host_ptr = static_cast<const char*>(packed.data) + offset;
                                     if (expert_cache_.n_slots_ > 0) {
                                         ExpertCacheKey ck{packed.data, eidx};
-                                        w = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
+                                        w = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
+                                                                       expert_raw, stream);
                                     } else if (moe_.raw_staging_buf && expert_raw <= moe_.raw_staging_size) {
                                         cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
                                                         cudaMemcpyHostToDevice, stream);
@@ -1434,7 +1436,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             }
                             // Fallback: separate dequant + cuBLAS GEMM
                             {
-                                Tensor b = use_packed_dequant ? dequant_expert(packed, qtype, eidx)
+                                Tensor b = use_packed_dequant ? dequant_expert(packed, qtype, eidx, proj)
                                                               : fallback[eidx];
                                 if (!b.data)
                                     return;  // dequant_expert failed (OOB or buffer too small)
@@ -1504,7 +1506,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                         const std::vector<Tensor>& fallback,
                                                         const std::vector<TensorID>& fallback_ids,
                                                         const char* a_base, char* c_base, int K_dim,
-                                                        int N_dim) {
+                                                        int N_dim, ExpertProj proj) {
                             int64_t rows = packed.shape[1];
                             int64_t cols = packed.shape[2];
                             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -1525,7 +1527,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     int64_t c_shape[2] = {count64, static_cast<int64_t>(N_dim)};
                                     Tensor c_view(c_base + static_cast<size_t>(start) * N_dim * es,
                                                   compute_dtype_, 2, c_shape, true);
-                                    expert_gemm(a_view, c_view, packed, qtype, fallback, fallback_ids, e);
+                                    expert_gemm(a_view, c_view, packed, qtype, fallback, fallback_ids, e,
+                                                proj);
                                 }
                                 return;
                             }
@@ -1612,10 +1615,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             if (!non_gated_experts)
                                 chunked_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
                                                      ly.expert_w_gate, ly.expert_gate_ids, gathered_base,
-                                                     expert_gate_base, d, eff);
+                                                     expert_gate_base, d, eff, ExpertProj::Gate);
                             chunked_dequant_gemm(ly.expert_up_packed, ly.expert_up_packed.qtype,
                                                  ly.expert_w_up, ly.expert_up_ids, gathered_base,
-                                                 expert_up_base, d, eff);
+                                                 expert_up_base, d, eff, ExpertProj::Up);
 
                             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                                     moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
@@ -1626,7 +1629,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                                            : expert_swiglu_base;
                                 chunked_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype,
                                                      ly.expert_w_down, ly.expert_down_ids, dequant_down_act,
-                                                     expert_down_base, eff, d);
+                                                     expert_down_base, eff, d, ExpertProj::Down);
                             }
 
                         } else {
@@ -1649,7 +1652,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                   compute_dtype_, 2, c_shape, true);
                                     expert_gemm(a_view, c_view, ly.expert_gate_packed,
                                                 ly.expert_gate_packed.qtype, ly.expert_w_gate,
-                                                ly.expert_gate_ids, e);
+                                                ly.expert_gate_ids, e, ExpertProj::Gate);
                                 }
 
                                 {
@@ -1658,7 +1661,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                   compute_dtype_, 2, c_shape, true);
                                     expert_gemm(a_view, c_view, ly.expert_up_packed,
                                                 ly.expert_up_packed.qtype, ly.expert_w_up, ly.expert_up_ids,
-                                                e);
+                                                e, ExpertProj::Up);
                                 }
                             }
 
@@ -1685,7 +1688,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                               compute_dtype_, 2, c_shape, true);
                                 expert_gemm(a_view, c_view, ly.expert_down_packed,
                                             ly.expert_down_packed.qtype, ly.expert_w_down, ly.expert_down_ids,
-                                            e);
+                                            e, ExpertProj::Down);
                             }
                         }
                     }

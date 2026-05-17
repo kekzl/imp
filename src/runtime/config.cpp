@@ -154,6 +154,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.moe.force_fp16_sync = parse_bool(val, cfg.moe.force_fp16_sync);
     else if (eq("moe.no_expert_cache"))
         cfg.moe.no_expert_cache = parse_bool(val, cfg.moe.no_expert_cache);
+    else if (eq("moe.expert_cache_debug_parity"))
+        cfg.moe.expert_cache_debug_parity = parse_bool(val, cfg.moe.expert_cache_debug_parity);
     else if (eq("moe.zero_workspace"))
         cfg.moe.zero_workspace = parse_bool(val, cfg.moe.zero_workspace);
     else if (eq("moe.no_shared_mlp"))

@@ -110,6 +110,12 @@ struct RuntimeConfig {
         bool skip = false;
         bool force_fp16_sync = false;
         bool no_expert_cache = false;
+        // Phase 2 (MoE host-offload Graphs design): assert device-side mirror
+        // == host-side LRU state after every cache mutation. Off by default;
+        // turn on via `moe.expert_cache_debug_parity = true` in imp.conf for
+        // CI / regression diagnosis. Has a meaningful cost (D2H readback of
+        // ~120 KiB per cache update) — never enable in perf runs.
+        bool expert_cache_debug_parity = false;
         bool zero_workspace = false;
         bool no_shared_mlp = false;
         bool no_shexp_gate = false;

@@ -48,6 +48,13 @@ struct ExpertCacheKeyHash {
     }
 };
 
+// MoE projection enum — every layer has up to three: gate, up, down.
+// Used to index the per-layer × per-projection × per-expert device-side
+// lookup mirror (Phase 2 of the MoE host-offload + CUDA Graphs design,
+// see docs/plans/moe_host_offload_graphs_design_2026_05_17.md §3a).
+enum class ExpertProj { Gate = 0, Up = 1, Down = 2 };
+inline constexpr int kExpertProjCount = 3;
+
 struct ExpertLRUCache {
     // Each slot holds one expert's raw quantized bytes on GPU.
     // Slots are fixed-size (max_expert_raw bytes each).
@@ -55,6 +62,11 @@ struct ExpertLRUCache {
         void* gpu_ptr = nullptr;  // points into pool_
         ExpertCacheKey key = {};
         bool occupied = false;
+        // Mirror coords — set on get_or_load, used to invalidate the device
+        // lookup cell on eviction.
+        int layer = -1;
+        int proj = -1;   // ExpertProj
+        int expert = -1;
     };
 
     void* pool_ = nullptr;     // contiguous GPU allocation for all slots
@@ -73,16 +85,32 @@ struct ExpertLRUCache {
 
     VRAMAllocator* alloc_ = nullptr;
 
-    // Initialize: allocate n_slots * slot_size bytes on GPU.
+    // Device-side lookup mirror (Phase 2). Sized [n_layers × 3 × n_experts]
+    // int32 cells; cell value = slot_idx or -1 if not cached. Read pattern in
+    // Phase 3+: `d_lookup_[layer * 3 * n_experts_ + proj * n_experts_ + expert]`.
+    // Today (Phase 2) the mirror is write-only — kept in sync with the host
+    // LRU so Phase 3 can drop the kernel onto a known-good device-side table.
+    int* d_lookup_ = nullptr;
+    int n_layers_ = 0;
+    int n_experts_ = 0;
+    bool debug_parity_ = false;
+    mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()
+
+    // Initialize: allocate n_slots * slot_size bytes on GPU + n_layers × 3 ×
+    // n_experts int32 cells for the device-side lookup mirror.
     // Returns false if GPU allocation fails (cache disabled).
-    bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc = nullptr);
+    bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
+              int n_layers, int n_experts, bool debug_parity = false);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry if needed.
     // src_host = host pointer to this expert's raw bytes.
-    void* get_or_load(ExpertCacheKey key, const void* src_host, size_t expert_bytes, cudaStream_t stream);
+    // `layer` + `proj` identify the mirror cell to update; the cache key
+    // remains (packed_ptr, expert_idx) so the host-side LRU is unchanged.
+    void* get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
+                      const void* src_host, size_t expert_bytes, cudaStream_t stream);
 
-    // Check if expert is cached (no insertion).
+    // Check if expert is cached (no insertion). Updates LRU recency.
     void* find(ExpertCacheKey key);
 
     void destroy();
@@ -91,6 +119,13 @@ struct ExpertLRUCache {
         int64_t total = hits_ + misses_;
         return total > 0 ? static_cast<float>(hits_) / total : 0.0f;
     }
+
+    // Phase 2 debug helper: copy the device lookup mirror back to host and
+    // assert every cell matches the host-side LRU state. Returns true on
+    // match. When `debug_parity_` is enabled, get_or_load() runs this after
+    // every cache mutation and bumps `parity_checks_ok_` on success / aborts
+    // (via IMP_LOG_FATAL) on mismatch. Tests can call it directly.
+    bool check_parity(cudaStream_t stream) const;
 };
 
 // VRAM budget for weight cache allocation (computed by Engine::plan_vram_budget).
