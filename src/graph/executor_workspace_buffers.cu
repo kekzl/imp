@@ -273,7 +273,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 budget = static_cast<size_t>(budget * 0.15);  // 15% of available
-                if (expert_cache_.init(max_expert_raw, budget, vram_alloc_)) {
+                const auto& mcfg = model_->config();
+                bool debug_parity = RuntimeConfig::current().moe.expert_cache_debug_parity;
+                if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
+                                       mcfg.n_experts, debug_parity)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),

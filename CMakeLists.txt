@@ -488,6 +488,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-moe-gdn SOURCES
         tests/test_moe.cu
         tests/test_moe_executor.cu
+        tests/test_expert_cache.cu
         tests/test_gdn.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
