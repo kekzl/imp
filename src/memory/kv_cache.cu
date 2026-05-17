@@ -42,8 +42,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
       use_mxfp4_(use_mxfp4),
       dtype_(dtype),
       alloc_(alloc),
-      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::TURBOQUANT ||
-                    dtype == QType::TURBOQUANT_LITE)
+      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV ||
+                    dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE)
                        ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
                        : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim * dtype_size(dtype))) {
     bool lite = (dtype == QType::TURBOQUANT_LITE);
@@ -79,9 +79,10 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
     //   INT8/INT4/TURBOQUANT/TURBOQUANT_LITE: 1 half (FP16) per head per token slot.
     //   NVFP4:                                1 UE4M3 byte per kNVFP4Group=16 FP4 elems along head_dim.
     bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 || dtype == QType::NVFP4 ||
-                         dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE);
+                         dtype == QType::MXFP4_KV || dtype == QType::TURBOQUANT ||
+                         dtype == QType::TURBOQUANT_LITE);
     if (needs_scales) {
-        if (dtype == QType::NVFP4) {
+        if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
             if (head_dim % kNVFP4Group != 0) {
                 throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
             }
@@ -200,7 +201,7 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         throw std::runtime_error("KVCache per-layer shape: TurboQuant variants not supported");
     }
 
-    bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4);
+    bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
     size_t elem_size = packed_4bit ? 0  // 4-bit modes use /2 below
                                    : dtype_size(dtype);
 
@@ -262,10 +263,12 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
     }
 
-    // NVFP4 per-layer scales: each layer's scale-block-bytes derived from its own
+    // NVFP4 / MXFP4_KV per-layer scales: each layer's scale-block-bytes derived from its own
     // (nkv * hd / kNVFP4Group) so that layers with different head_dim (Gemma 4
     // SWA vs full-attention layers) get correctly-sized scale storage.
-    if (dtype == QType::NVFP4) {
+    // MXFP4_KV uses identical layout — same per-16-element group size; only the
+    // scale byte semantics differ (UE8M0 vs E4M3), which is transparent here.
+    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
         layer_scale_block_bytes_.resize(n_layers_);
         layer_k_scale_offset_.resize(n_layers_);
         layer_v_scale_offset_.resize(n_layers_);

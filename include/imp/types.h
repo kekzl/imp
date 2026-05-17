@@ -19,6 +19,7 @@ typedef enum {
     IMP_DTYPE_TURBOQUANT = 9,        // TurboQuant: PolarQuant INT4 K + QJL sketch + INT4 V
     IMP_DTYPE_TURBOQUANT_LITE = 10,  // TurboQuant Lite: QJL sketch-only K (no INT4 dirs) + INT4 V
     IMP_DTYPE_NVFP4 = 11,            // NVFP4 KV cache: packed FP4 + UE4M3 per-group_of_16 scales
+    IMP_DTYPE_MXFP4_KV = 12,        // MXFP4-KV cache: packed FP4 + UE8M0 per-group_of_16 scales (Path A retirement target)
 } ImpDType;
 
 typedef enum {

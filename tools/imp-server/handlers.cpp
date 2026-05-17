@@ -236,6 +236,7 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path, co
     bool kv_int8 = overrides.value("kv_int8", args.kv_int8);
     bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
     bool kv_nvfp4 = overrides.value("kv_nvfp4", args.kv_nvfp4);
+    bool kv_mxfp4 = overrides.value("kv_mxfp4", args.kv_mxfp4);
     bool kv_turboquant = overrides.value("kv_turboquant", args.kv_turboquant);
     bool kv_turboquant_lite = overrides.value("kv_turboquant_lite", args.kv_turboquant_lite);
     if (kv_fp8)
@@ -246,6 +247,8 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path, co
         config.kv_cache_dtype = IMP_DTYPE_INT4;
     if (kv_nvfp4)
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
+    if (kv_mxfp4)
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
     if (kv_turboquant)
         config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
     if (kv_turboquant_lite) {

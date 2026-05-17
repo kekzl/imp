@@ -77,7 +77,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t single_block_bytes;
     bool is_tq = (config.kv_cache_dtype == QType::TURBOQUANT);
     bool is_tql = (config.kv_cache_dtype == QType::TURBOQUANT_LITE);
-    if (config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
+    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::MXFP4_KV ||
+        is_tq || is_tql) {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim / 2;
     } else {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
@@ -89,6 +90,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
         per_block_total += scale_per_block * 2 * n_kv_layers;  // K norms + V scales (always 2x)
+    }
+    // NVFP4 / MXFP4_KV: 1 scale byte per 16 elems per head per token, K+V (2x).
+    if (config.kv_cache_dtype == QType::NVFP4 || config.kv_cache_dtype == QType::MXFP4_KV) {
+        size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 16);
+        per_block_total += scale_per_block * 2 * n_kv_layers;
     }
     if (is_tq || is_tql) {
         // QJL sketch pool: only for K (1x, not 2x)

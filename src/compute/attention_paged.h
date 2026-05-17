@@ -71,6 +71,20 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   int sliding_window = 0, float softcap = 0.0f,
                                   cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0);
 
+// MXFP4-KV paged attention for decode: same layout as NVFP4 but scales are
+// UE8M0 bytes instead of E4M3. Structurally identical to NVFP4 per design
+// memo §3.1.2 — only the scale byte semantics differ.
+// Q: [batch, 1, n_heads, head_dim] FP16
+// K_cache/V_cache: [num_blocks, block_size, n_kv_heads, head_dim/2] packed uint8
+// K_scales/V_scales: [num_blocks, block_size, n_kv_heads, head_dim/16] UE8M0 bytes
+// O: [batch, 1, n_heads, head_dim] FP16
+void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                     const uint8_t* K_scales, const uint8_t* V_scales,
+                                     const int* block_tables, const int* context_lens, int block_size,
+                                     float scale, int max_context_len, int sliding_window = 0,
+                                     float softcap = 0.0f, cudaStream_t stream = nullptr,
+                                     int max_blocks_per_seq = 0, int n_sinks = 0);
+
 // BitDecoding-style TC variant: same signature + semantics as
 // paged_attention_decode_nvfp4 but routes the inner Q.K dot through
 // nvcuda::wmma 16×16×16 Tensor Core MMA.

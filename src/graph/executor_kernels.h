@@ -108,6 +108,19 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
     int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
 
+// MXFP4-KV write: identical layout to NVFP4 but encodes scales as UE8M0 bytes
+// (pure-exponent, 2^(bits-127)) instead of E4M3. Matches paged_attention_decode_mxfp4_kv reader.
+__global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_cache_base,        // [block, slot, head, head_dim/2] packed FP4
+    uint8_t* __restrict__ v_cache_base,        // same shape
+    uint8_t* __restrict__ k_scale_base,        // [block, slot, head, head_dim/16] UE8M0
+    uint8_t* __restrict__ v_scale_base,        // same shape
+    int block_stride,                          // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
+    int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
+
 // BitDecoding Phase 3c residual write — copies one (K, V) FP16 row pair per
 // token into the per-(seq, layer) residual ring slot. Replaces a pair of
 // `cudaMemcpyAsync` we used to launch per layer; the device-to-device copy

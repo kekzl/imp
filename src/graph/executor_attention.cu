@@ -694,9 +694,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             KVCache* cache = state.kv_cache;
             QType kvt = cache->qtype();
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
-            // so this code only runs for FP16 / FP8 / NVFP4 KV.
+            // so this code only runs for FP16 / FP8 / NVFP4 / MXFP4_KV KV.
             const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 ||
-                                  kvt == QType::NVFP4 || kvt == QType::INT4);
+                                  kvt == QType::NVFP4 || kvt == QType::MXFP4_KV ||
+                                  kvt == QType::INT4);
             // sliding_active and attn_shapes_vary are now both supported:
             //   - cuBLAS softmax accepts a sliding_window argument (PR feat(attn): sw),
             //   - the rectangular cuBLAS path dispatches per-layer with nh/nkv/hd.
@@ -760,6 +761,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                     static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
                 paged_kv_gather_nvfp4_to_fp16(
+                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                    static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+            } else if (kvt == QType::MXFP4_KV) {
+                paged_kv_gather_mxfp4_kv_to_fp16(
+                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                    static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_mxfp4_kv_to_fp16(
                     v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                     static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
@@ -1096,6 +1106,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                              state.max_context_len, layer_sliding_window,
                                              cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
             }
+        } else if (cache_dtype == QType::MXFP4_KV) {
+            // MXFP4-KV paged attention: same kernel as NVFP4 but with UE8M0 scale decode.
+            // BitDecoding TC path not supported for MXFP4_KV in Slice 2 — always scalar.
+            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
+                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                             state.block_tables, state.context_lens, kv_bs, scale,
+                                             state.max_context_len, layer_sliding_window,
+                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);

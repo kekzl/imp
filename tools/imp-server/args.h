@@ -23,6 +23,7 @@ struct ServerArgs {
     bool kv_int8 = false;
     bool kv_int4 = false;
     bool kv_nvfp4 = false;
+    bool kv_mxfp4 = false;
     bool kv_turboquant = false;
     bool kv_turboquant_lite = false;
     int turboquant_sketch_mult = 2;

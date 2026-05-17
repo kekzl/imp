@@ -668,6 +668,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
             config_.use_fp8_prefill = 0;
         }
+    } else if (config_.kv_cache_dtype == QType::MXFP4_KV) {
+        // MXFP4-KV: same FP4 E2M1 byte layout + per-16-element grouping as NVFP4,
+        // but UE8M0 scale bytes (pure-exponent, ~3.6× compression identical to NVFP4).
+        // This is the Path A retirement target per design memo §3.1.2.
+        IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
+        if (config_.use_fp8_prefill) {
+            IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
+            config_.use_fp8_prefill = 0;
+        }
     }
 
     // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic
@@ -1921,12 +1930,12 @@ bool Engine::supports_chunked_prefill_() const {
             if (cfg.arch != ModelArch::GEMMA4) return false;
         }
     }
-    // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4, INT4.
+    // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4, MXFP4_KV, INT4.
     // INT8 and TurboQuant variants would need their own gather kernels.
     if (kv_cache_raw_) {
         QType kvt = kv_cache_raw_->qtype();
         if (kvt != QType::F16 && kvt != QType::FP8_E4M3 &&
-            kvt != QType::NVFP4 && kvt != QType::INT4)
+            kvt != QType::NVFP4 && kvt != QType::MXFP4_KV && kvt != QType::INT4)
             return false;
     }
     return true;
