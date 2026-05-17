@@ -2441,6 +2441,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
         int eligible_layers = 0;  // layers that have any MoE expert ptrs
         int built_layers = 0;
+        int host_resident_layers = 0;  // intentionally not built (force_host or budget offload)
         std::vector<int> failed_layers;
         for (int li = 0; li < n_layers; ++li) {
             const auto& L = model_->layer(li);
@@ -2451,6 +2452,23 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 // Pure dense layer in a hybrid model (e.g. attention-only layer
                 // alongside MoE layers). Not eligible for the da_cache; skip
                 // without counting against the must-populate gate.
+                continue;
+            }
+            // Host-resident layers (host-offload / force_host_experts) by
+            // design have no CUTLASS NVFP4 weight payload — the per-layer
+            // fallback dispatch is the intended path. Don't count these as
+            // QW8 build failures. Detect via either packed-tensor (GGUF Path A)
+            // or per-expert tensor (SafeTensors Path B) staying on host.
+            const bool packed_host = (L.expert_up_packed.data && !L.expert_up_packed.on_device);
+            bool per_expert_host = false;
+            if (!packed_host && !L.expert_w_up.empty()) {
+                // Any per-expert weight on host => layer is host-resident.
+                for (const auto& w : L.expert_w_up) {
+                    if (w.data && !w.on_device) { per_expert_host = true; break; }
+                }
+            }
+            if (packed_host || per_expert_host) {
+                ++host_resident_layers;
                 continue;
             }
             ++eligible_layers;
@@ -2480,7 +2498,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // mismatched expert layout or a budget that fell short of needed
         // device allocations — the right response is to fail loud at init
         // rather than ship the user a slow build.
-        if (eligible_layers > 0 && built_layers < eligible_layers) {
+        // Only abort on *partial* coverage of device-resident MoE layers
+        // (the genuine "silent 5× regression" case). If nothing built at
+        // all, this model isn't going through the NVFP4 MoE da_cache path
+        // at runtime — log INFO and continue (covers --no-nvfp4 on GGUF
+        // MoE, Q4_K_M / Q6_K MoE without prequant scales, and synthetic
+        // force_host_experts spikes).
+        if (eligible_layers > 0 && built_layers > 0 && built_layers < eligible_layers) {
             std::string failed_str;
             for (size_t i = 0; i < failed_layers.size() && i < 16; ++i) {
                 if (!failed_str.empty()) failed_str += ", ";
@@ -2505,6 +2529,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 built_layers, eligible_layers, ne,
                 (built_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
                     1024.0);
+        }
+        if (host_resident_layers > 0) {
+            IMP_LOG_INFO(
+                "NVFP4 da_cache: skipped %d host-resident MoE layer(s) "
+                "(per-layer fallback / H2D staging is the intended path).",
+                host_resident_layers);
         }
         }  // ne > 0
     }
