@@ -1,6 +1,7 @@
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
+#include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -35,6 +36,29 @@ __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
     return static_cast<float>(v);
 }
 
+// Scale dtype tag for the NVFP4 paged attention kernels. Default E4M3 is the
+// existing NVFP4 path; UE8M0 reserves the second template arm for the
+// upcoming MXFP4-KV variant (design memo `docs/plans/turboquant_fp8_gap_design_2026_05_17.md`
+// §5 Phase 3). This Slice 1 commit only adds the template parameter; the
+// UE8M0 branch is implemented in Slice 2.
+enum class ScaleDtype : int { E4M3 = 0, UE8M0 = 1 };
+
+// Decode one packed scale byte into a float, dispatching on SCALE_DTYPE at
+// compile time. E4M3 path uses the existing ue4m3_decode helper. UE8M0 path
+// uses tq_fp4_ue8m0_to_float from src/quant/turboquant_fp4.cuh.
+template <ScaleDtype S>
+__device__ __forceinline__ float decode_kv_scale(uint8_t bits);
+
+template <>
+__device__ __forceinline__ float decode_kv_scale<ScaleDtype::E4M3>(uint8_t bits) {
+    return ue4m3_decode(bits);
+}
+
+template <>
+__device__ __forceinline__ float decode_kv_scale<ScaleDtype::UE8M0>(uint8_t bits) {
+    return tq_fp4_ue8m0_to_float(bits);
+}
+
 // Decode one packed FP4 byte (low nibble = .x, high nibble = .y) → half2.
 // Single PTX `cvt.rn.f16x2.e2m1x2` (sm_120+, CUDA 13.2+). Replaces the prior
 // per-nibble 8-entry magnitude LUT + sign branch (~12 ops/byte → 1).
@@ -49,7 +73,7 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 // Non-Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
-template <int HEAD_DIM>
+template <int HEAD_DIM, ScaleDtype SCALE_DTYPE = ScaleDtype::E4M3>
 __global__ void paged_attention_decode_nvfp4_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ K_cache,    // packed FP4 pairs
@@ -131,9 +155,9 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
 
             // Per-lane scale (one group covers all ELEMS for this lane)
-            float k_scale = ue4m3_decode(
+            float k_scale = decode_kv_scale<SCALE_DTYPE>(
                 K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
-            float v_scale = ue4m3_decode(
+            float v_scale = decode_kv_scale<SCALE_DTYPE>(
                 V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
@@ -182,7 +206,7 @@ __global__ void paged_attention_decode_nvfp4_kernel(
 // Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
 
-template <int HEAD_DIM>
+template <int HEAD_DIM, ScaleDtype SCALE_DTYPE = ScaleDtype::E4M3>
 __global__ void paged_attention_splitk_nvfp4_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
     const uint8_t* __restrict__ K_scales, const uint8_t* __restrict__ V_scales,
@@ -273,9 +297,9 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
             const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * kv_head_bytes;
             const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
 
-            float k_scale = ue4m3_decode(
+            float k_scale = decode_kv_scale<SCALE_DTYPE>(
                 K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
-            float v_scale = ue4m3_decode(
+            float v_scale = decode_kv_scale<SCALE_DTYPE>(
                 V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
