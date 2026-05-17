@@ -3,6 +3,7 @@
 #include "compute/attention.h"
 #include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -280,6 +281,11 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
         }
     }
 
+    // Guard smem reuse: under SKIP_QJL=true the Q-sketch precompute (and
+    // its trailing __syncthreads) is compiled out; this barrier brings the
+    // decode kernel into parity with the splitk variant before the reduce
+    // overwrites the same smem region.
+    __syncthreads();
     // Cross-warp reduction
     crosswarp_reduce_and_write<HEAD_DIM>(smem_red_base, m_w, l_w, o_reg, warp_id, lane_id, lane_offset, O,
                                          batch_idx, n_heads, head_idx);
@@ -557,12 +563,50 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
                                            &scratch_ptr);
 
     const bool use_mxfp4 = (K_mscales != nullptr);
+    const bool skip_qjl = RuntimeConfig::current().diagnostics.tq_skip_qjl;
 
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
+        if (skip_qjl) {
+// Macro for dispatching split-K kernel with SKIP_QJL=true
+#define LAUNCH_SPLITK_TQ_SKIP(HD, MX)                                                                       \
+    paged_attention_splitk_turboquant_kernel<HD, MX, /*SKIP_QJL=*/true><<<grid1, block1, smem_bytes,        \
+                                                                           stream>>>(                        \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),          \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_norms, V_scales, K_sketches, qjl_matrix,          \
+        K_mscales, partial, block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, \
+        sketch_dim, max_num_blocks, num_splits, sliding_window, softcap)
+
+#define DISPATCH_SPLITK_TQ_SKIP(HD)       \
+    if (use_mxfp4) {                      \
+        LAUNCH_SPLITK_TQ_SKIP(HD, true);  \
+    } else {                              \
+        LAUNCH_SPLITK_TQ_SKIP(HD, false); \
+    }
+
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_SPLITK_TQ_SKIP(64);
+                    break;
+                case 96:
+                    DISPATCH_SPLITK_TQ_SKIP(96);
+                    break;
+                case 128:
+                    DISPATCH_SPLITK_TQ_SKIP(128);
+                    break;
+                case 256:
+                    DISPATCH_SPLITK_TQ_SKIP(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
+#undef DISPATCH_SPLITK_TQ_SKIP
+#undef LAUNCH_SPLITK_TQ_SKIP
+        } else {
 // Macro for dispatching split-K kernel with optional MXFP4 template
 #define LAUNCH_SPLITK_TQ(HD, MX)                                                                            \
     paged_attention_splitk_turboquant_kernel<HD, MX><<<grid1, block1, smem_bytes, stream>>>(                \
@@ -578,25 +622,26 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         LAUNCH_SPLITK_TQ(HD, false); \
     }
 
-        switch (head_dim) {
-            case 64:
-                DISPATCH_SPLITK_TQ(64);
-                break;
-            case 96:
-                DISPATCH_SPLITK_TQ(96);
-                break;
-            case 128:
-                DISPATCH_SPLITK_TQ(128);
-                break;
-            case 256:
-                DISPATCH_SPLITK_TQ(256);
-                break;
-            default:
-                IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
-                return;
-        }
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_SPLITK_TQ(64);
+                    break;
+                case 96:
+                    DISPATCH_SPLITK_TQ(96);
+                    break;
+                case 128:
+                    DISPATCH_SPLITK_TQ(128);
+                    break;
+                case 256:
+                    DISPATCH_SPLITK_TQ(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
 #undef DISPATCH_SPLITK_TQ
 #undef LAUNCH_SPLITK_TQ
+        }
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
                                       num_splits, stream);
@@ -604,6 +649,42 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
+        if (skip_qjl) {
+#define LAUNCH_TQ_SKIP(HD, MX)                                                                       \
+    paged_attention_decode_turboquant_kernel<HD, MX, /*SKIP_QJL=*/true><<<grid, block, smem_bytes,   \
+                                                                           stream>>>(                 \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),   \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_norms, V_scales, K_sketches, qjl_matrix,   \
+        K_mscales, reinterpret_cast<half*>(O.data), block_tables, context_lens, batch_size, n_heads, \
+        n_kv_heads, block_size, scale, sketch_dim, max_context_len, max_num_blocks, sliding_window, softcap)
+
+#define DISPATCH_TQ_SKIP(HD)       \
+    if (use_mxfp4) {               \
+        LAUNCH_TQ_SKIP(HD, true);  \
+    } else {                       \
+        LAUNCH_TQ_SKIP(HD, false); \
+    }
+
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_TQ_SKIP(64);
+                    break;
+                case 96:
+                    DISPATCH_TQ_SKIP(96);
+                    break;
+                case 128:
+                    DISPATCH_TQ_SKIP(128);
+                    break;
+                case 256:
+                    DISPATCH_TQ_SKIP(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
+#undef DISPATCH_TQ_SKIP
+#undef LAUNCH_TQ_SKIP
+        } else {
 #define LAUNCH_TQ(HD, MX)                                                                            \
     paged_attention_decode_turboquant_kernel<HD, MX><<<grid, block, smem_bytes, stream>>>(           \
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),   \
@@ -618,25 +699,26 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         LAUNCH_TQ(HD, false); \
     }
 
-        switch (head_dim) {
-            case 64:
-                DISPATCH_TQ(64);
-                break;
-            case 96:
-                DISPATCH_TQ(96);
-                break;
-            case 128:
-                DISPATCH_TQ(128);
-                break;
-            case 256:
-                DISPATCH_TQ(256);
-                break;
-            default:
-                IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
-                return;
-        }
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_TQ(64);
+                    break;
+                case 96:
+                    DISPATCH_TQ(96);
+                    break;
+                case 128:
+                    DISPATCH_TQ(128);
+                    break;
+                case 256:
+                    DISPATCH_TQ(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
 #undef DISPATCH_TQ
 #undef LAUNCH_TQ
+        }
     }
 }
 
