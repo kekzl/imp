@@ -1156,12 +1156,33 @@ bool Engine::init_weights() {
             }
         }
         if (experts_on_host_ && config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
-            IMP_LOG_INFO(
-                "  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
-                "(default 30) to upload ALL experts and re-enable CUDA graphs "
-                "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
-            config_.use_cuda_graphs = false;
+            // Phase 5: the opt-in `moe.allow_graphs_under_offload` flag skips
+            // this guard so the user can experiment with captured decode
+            // under host-offload. Correctness is conditional on prefetch
+            // coverage matching router selection — captured cudaMemcpyAsync
+            // nodes have fixed (src host ptr, dst slot) pairs that don't
+            // adapt to per-token routing changes. See config.h doc for the
+            // architectural caveat; Phase 5.1+ refactors dispatch kernels
+            // to read the device mirror at runtime so the captured graph
+            // adapts correctly.
+            if (RuntimeConfig::current().moe.allow_graphs_under_offload) {
+                IMP_LOG_WARN(
+                    "CUDA graphs ENABLED under host-offload "
+                    "(moe.allow_graphs_under_offload=true). EXPERIMENTAL: output "
+                    "correctness depends on prefetch coverage matching router "
+                    "selection. Set moe.prefetch_top_k high enough that the "
+                    "captured top-K covers the router's hot set.");
+            } else {
+                IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
+                IMP_LOG_INFO(
+                    "  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
+                    "(default 30) to upload ALL experts and re-enable CUDA graphs "
+                    "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
+                IMP_LOG_INFO(
+                    "  Or set moe.allow_graphs_under_offload=true (experimental) "
+                    "to opt into captured decode under host-offload.");
+                config_.use_cuda_graphs = false;
+            }
         }
         if (RuntimeConfig::current().runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: runtime.cuda_graphs=never");

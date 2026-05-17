@@ -158,6 +158,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.moe.expert_cache_debug_parity = parse_bool(val, cfg.moe.expert_cache_debug_parity);
     else if (eq("moe.prefetch_top_k"))
         cfg.moe.prefetch_top_k = parse_int(val, cfg.moe.prefetch_top_k);
+    else if (eq("moe.allow_graphs_under_offload"))
+        cfg.moe.allow_graphs_under_offload = parse_bool(val, cfg.moe.allow_graphs_under_offload);
     else if (eq("moe.zero_workspace"))
         cfg.moe.zero_workspace = parse_bool(val, cfg.moe.zero_workspace);
     else if (eq("moe.no_shared_mlp"))
