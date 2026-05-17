@@ -1467,8 +1467,17 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
             float v = __half2float(src[base_elem + i]);
             amax = fmaxf(amax, fabsf(v));
         }
-        float sc = amax / 6.0f;
-        float inv_sc = (sc > 1e-30f) ? (1.0f / sc) : 0.0f;
+        float sc_exact = amax / 6.0f;
+        // Round-trip-consistent scale: quantize to UE8M0 first, then use the
+        // ACTUAL decoded scale for nibble quantization. The NVFP4 write kernel
+        // gets away with using sc_exact directly because E4M3's mantissa keeps
+        // the rounding error ~1.5%, but UE8M0 is power-of-2 only (up to 2x
+        // rounding error per group) — a mismatch between encoder/decoder
+        // scales compounds catastrophically over 32 layers (degenerate output
+        // observed in Phase 2 NIAH re-run, 0% retrieval even at 4K context).
+        uint8_t sc_byte = tq_float_to_ue8m0(sc_exact);
+        float sc_actual = tq_ue8m0_to_float(sc_byte);
+        float inv_sc = (sc_actual > 1e-30f) ? (1.0f / sc_actual) : 0.0f;
 
         // pack 16 nibbles → 8 bytes
         int dst_byte_off = h * (head_dim / 2) + gh * (kGroup / 2);
@@ -1481,8 +1490,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
             dst[dst_byte_off + p] = static_cast<uint8_t>(q0 | (q1 << 4));
         }
 
-        // store UE8M0 scale (pure-exponent, 2^(bits-127))
-        scale_dst[h * n_groups_per_head + gh] = tq_float_to_ue8m0(sc);
+        scale_dst[h * n_groups_per_head + gh] = sc_byte;
     }
 }
 
