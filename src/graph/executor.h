@@ -55,15 +55,25 @@ struct ExpertCacheKeyHash {
 enum class ExpertProj { Gate = 0, Up = 1, Down = 2 };
 inline constexpr int kExpertProjCount = 3;
 
+// Per-layer LRU state — Phase 3 partitions the global pool so layer L's
+// cache state can't be evicted by layer M's misses. Each layer has its own
+// recency list + key→slot map; slot indices are layer-relative.
+struct PerLayerLRU {
+    std::list<int> lru_order;  // slot indices WITHIN this layer (0..slots_per_layer-1)
+    using LRUIter = std::list<int>::iterator;
+    std::unordered_map<ExpertCacheKey, std::pair<int, LRUIter>, ExpertCacheKeyHash> lookup;
+};
+
 struct ExpertLRUCache {
-    // Each slot holds one expert's raw quantized bytes on GPU.
-    // Slots are fixed-size (max_expert_raw bytes each).
+    // Each slot holds one expert's raw quantized bytes on GPU. Slots are
+    // partitioned per-layer (Phase 3): `slots_[layer * slots_per_layer_ +
+    // slot_idx_within_layer]`. GPU pointer = `pool_ + flat_index * slot_size_`.
     struct Slot {
         void* gpu_ptr = nullptr;  // points into pool_
         ExpertCacheKey key = {};
         bool occupied = false;
         // Mirror coords — set on get_or_load, used to invalidate the device
-        // lookup cell on eviction.
+        // lookup cell on eviction. `layer` matches the flat-index layer.
         int layer = -1;
         int proj = -1;   // ExpertProj
         int expert = -1;
@@ -71,53 +81,77 @@ struct ExpertLRUCache {
 
     void* pool_ = nullptr;     // contiguous GPU allocation for all slots
     size_t slot_size_ = 0;     // bytes per slot (max expert raw size)
-    int n_slots_ = 0;          // number of slots
-    std::vector<Slot> slots_;  // slot metadata
+    int slots_per_layer_ = 0;  // S — uniform per-layer pool depth (Phase 3)
+    int n_slots_ = 0;          // = n_layers_ * slots_per_layer_ (total)
+    std::vector<Slot> slots_;  // flat array, layer-major (size = n_slots_)
 
-    // LRU tracking: front = most recently used, back = least recently used
-    std::list<int> lru_order_;  // slot indices in LRU order
-    // Map from cache key to (slot_index, lru_iterator)
-    using LRUIter = std::list<int>::iterator;
-    std::unordered_map<ExpertCacheKey, std::pair<int, LRUIter>, ExpertCacheKeyHash> lookup_;
+    // Per-layer LRU state (Phase 3). `per_layer_lru_[layer]` holds layer L's
+    // recency list + key→slot map. Slot indices are layer-relative (0..S-1).
+    std::vector<PerLayerLRU> per_layer_lru_;
+    using LRUIter = PerLayerLRU::LRUIter;
+
+    // Phase 3: pre-computed host source pointers for capture-safe memcpy.
+    // host_expert_addrs_[layer][proj * n_experts + expert] = packed.data +
+    // expert_idx * expert_raw. Populated lazily on first get_or_load per
+    // cell — the value is stable for the lifetime of the model load (packed
+    // tensors don't move on host). Phase 5 will use these as the fixed
+    // `src` argument of cudaGraphAddMemcpyNode so the graph can replay
+    // without recomputing host pointers each iteration.
+    std::vector<std::vector<const void*>> host_expert_addrs_;
 
     int64_t hits_ = 0;
     int64_t misses_ = 0;
 
     VRAMAllocator* alloc_ = nullptr;
 
-    // Device-side lookup mirror (Phase 2). Sized [n_layers × 3 × n_experts]
-    // int32 cells; cell value = slot_idx or -1 if not cached. Read pattern in
-    // Phase 3+: `d_lookup_[layer * 3 * n_experts_ + proj * n_experts_ + expert]`.
-    // Today (Phase 2) the mirror is write-only — kept in sync with the host
-    // LRU so Phase 3 can drop the kernel onto a known-good device-side table.
+    // Device-side lookup mirror (Phase 2 → Phase 3). Sized [n_layers × 3 ×
+    // n_experts] int32 cells; cell value = **layer-relative** slot_idx
+    // (0..slots_per_layer-1) or -1 if not cached. Read pattern (Phase 5 will
+    // do this from inside dispatch kernels):
+    //   slot = d_lookup_[layer * 3 * n_experts + proj * n_experts + expert];
+    //   if (slot >= 0) src = pool_ + (layer * slots_per_layer + slot) * slot_size;
     int* d_lookup_ = nullptr;
     int n_layers_ = 0;
     int n_experts_ = 0;
     bool debug_parity_ = false;
     mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()
 
-    // Initialize: allocate n_slots * slot_size bytes on GPU + n_layers × 3 ×
-    // n_experts int32 cells for the device-side lookup mirror.
-    // Returns false if GPU allocation fails (cache disabled).
+    // Initialize: allocate the slot pool (partitioned per-layer) + the
+    // device mirror + the host source-pointer table. Returns false if GPU
+    // allocation fails (cache disabled).
     bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
               int n_layers, int n_experts, bool debug_parity = false);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
-    // If cache miss: copies from host, evicts LRU entry if needed.
-    // src_host = host pointer to this expert's raw bytes.
-    // `layer` + `proj` identify the mirror cell to update; the cache key
-    // remains (packed_ptr, expert_idx) so the host-side LRU is unchanged.
+    // If cache miss: copies from host, evicts LRU entry within the layer's
+    // pool if needed.
+    // src_host = host pointer to this expert's raw bytes. The first call per
+    // (layer, proj, expert) records src_host into host_expert_addrs_;
+    // subsequent calls reuse the stored pointer (the cache key disambiguates).
     void* get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
                       const void* src_host, size_t expert_bytes, cudaStream_t stream);
 
-    // Check if expert is cached (no insertion). Updates LRU recency.
-    void* find(ExpertCacheKey key);
+    // Check if (layer, expert) is cached (no insertion). Updates LRU recency
+    // within the layer.
+    void* find(int layer, ExpertCacheKey key);
 
     void destroy();
 
     float hit_rate() const {
         int64_t total = hits_ + misses_;
         return total > 0 ? static_cast<float>(hits_) / total : 0.0f;
+    }
+
+    // Returns the device pointer for layer L, slot_idx_within_layer s, or
+    // nullptr if the slot is not occupied. Used by Phase 3 tests and as the
+    // future Phase 5 kernel-side resolve helper. Phase 5 will inline this
+    // logic into the dispatch kernels.
+    void* slot_ptr(int layer, int slot_idx_within_layer) const {
+        if (!pool_ || slot_idx_within_layer < 0 ||
+            slot_idx_within_layer >= slots_per_layer_)
+            return nullptr;
+        size_t flat = static_cast<size_t>(layer) * slots_per_layer_ + slot_idx_within_layer;
+        return static_cast<char*>(pool_) + flat * slot_size_;
     }
 
     // Phase 2 debug helper: copy the device lookup mirror back to host and
