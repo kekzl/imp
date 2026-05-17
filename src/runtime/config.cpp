@@ -280,9 +280,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.diagnostics.mtp_prenorm_h = parse_bool(val, cfg.diagnostics.mtp_prenorm_h);
     else if (eq("diagnostics.audit_nvfp4_scales"))
         cfg.diagnostics.audit_nvfp4_scales = parse_bool(val, cfg.diagnostics.audit_nvfp4_scales);
-    else if (eq("diagnostics.tq_skip_qjl"))
-        cfg.diagnostics.tq_skip_qjl = parse_bool(val, cfg.diagnostics.tq_skip_qjl);
-
     else {
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
     }
@@ -367,10 +364,6 @@ void seed_from_env(RuntimeConfig& cfg) {
     // diagnostics.audit_nvfp4_scales — IMP_AUDIT_NVFP4_SCALES: presence enables.
     if (std::getenv("IMP_AUDIT_NVFP4_SCALES") != nullptr)
         cfg.diagnostics.audit_nvfp4_scales = true;
-
-    // diagnostics.tq_skip_qjl — IMP_TQ_SKIP_QJL: '1' only.
-    if (const char* e = std::getenv("IMP_TQ_SKIP_QJL"))
-        cfg.diagnostics.tq_skip_qjl = (e[0] == '1');
 
     // gdn.layout_override — IMP_GDN_LAYOUT: string value.
     if (const char* e = std::getenv("IMP_GDN_LAYOUT"))

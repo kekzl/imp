@@ -40,8 +40,9 @@ enum class QType : uint16_t {
     FP4_E2M1 = 70,
     NVFP4 = 71,
     MXFP4_KV = 72,
-    TURBOQUANT = 80,
-    TURBOQUANT_LITE = 81,
+    // Values 80 and 81 (TURBOQUANT / TURBOQUANT_LITE) were removed in Phase 5
+    // (2026-05-17). The C-API constants IMP_DTYPE_TURBOQUANT(_LITE) are kept
+    // for ABI compatibility but map to MXFP4_KV at the imp_api.cpp boundary.
 };
 
 // True for block-quantised disk formats (Q*_K, Q*_0, Q*_1, MXFP4, NVFP4).

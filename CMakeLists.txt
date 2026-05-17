@@ -133,7 +133,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
     src/quant/mxfp4_gemm.cu
-    src/quant/turboquant.cu
+    # src/quant/turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/quant/dequant_gptq.cu
 )
 
@@ -155,7 +155,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu
     src/compute/attention_paged_nvfp4_tc.cu
-    src/compute/attention_paged_turboquant.cu
+    # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
@@ -465,7 +465,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_compressed_tensors_ref.cu
         tests/test_nvfp4_gemv_kpar_loop.cu
         tests/test_nvfp4_gemm_graph_capture.cu
-        tests/test_turboquant.cu
+        # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_cutlass_grouped_3x_nvfp4.cu
         tests/test_cutlass_nvfp4_alpha.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu

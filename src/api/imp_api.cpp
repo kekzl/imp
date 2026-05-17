@@ -137,9 +137,29 @@ static imp::QType map_dtype(ImpDType dt) {
         case IMP_DTYPE_FP4_E2M1:
             return imp::QType::FP4_E2M1;
         case IMP_DTYPE_TURBOQUANT:
-            return imp::QType::TURBOQUANT;
+            // DEPRECATED: TurboQuant retired. IMP_DTYPE_TURBOQUANT is kept for ABI
+            // compatibility and silently maps to MXFP4_KV. Callers should switch to
+            // IMP_DTYPE_MXFP4_KV. A one-shot warning is printed the first time.
+            {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN("IMP_DTYPE_TURBOQUANT is deprecated (TurboQuant retired). "
+                                 "Using IMP_DTYPE_MXFP4_KV instead.");
+                }
+            }
+            return imp::QType::MXFP4_KV;
         case IMP_DTYPE_TURBOQUANT_LITE:
-            return imp::QType::TURBOQUANT_LITE;
+            // DEPRECATED: TurboQuant Lite retired. Maps to MXFP4_KV.
+            {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN("IMP_DTYPE_TURBOQUANT_LITE is deprecated (TurboQuant retired). "
+                                 "Using IMP_DTYPE_MXFP4_KV instead.");
+                }
+            }
+            return imp::QType::MXFP4_KV;
         case IMP_DTYPE_NVFP4:
             return imp::QType::NVFP4;
         case IMP_DTYPE_MXFP4_KV:

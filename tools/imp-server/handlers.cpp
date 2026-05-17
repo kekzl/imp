@@ -249,11 +249,25 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path, co
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
     if (kv_mxfp4)
         config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
-    if (kv_turboquant)
-        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
+    if (kv_turboquant) {
+        // DEPRECATED: TurboQuant retired — falls back to MXFP4-KV
+        static bool warned_tq = false;
+        if (!warned_tq) {
+            fprintf(stderr, "[IMP WARN] --kv-turboquant is deprecated; TurboQuant has been retired. "
+                            "Using --kv-mxfp4 instead.\n");
+            warned_tq = true;
+        }
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
+    }
     if (kv_turboquant_lite) {
-        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT_LITE;
-        config.turboquant_sketch_multiplier = overrides.value("tq_sketch_mult", args.turboquant_sketch_mult);
+        // DEPRECATED: TurboQuant Lite retired — falls back to MXFP4-KV
+        static bool warned_tql = false;
+        if (!warned_tql) {
+            fprintf(stderr, "[IMP WARN] --kv-turboquant-lite is deprecated; TurboQuant has been retired. "
+                            "Using --kv-mxfp4 instead.\n");
+            warned_tql = true;
+        }
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
     }
 
     int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);

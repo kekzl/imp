@@ -1,4 +1,8 @@
 #!/bin/bash
+# DEPRECATED: TurboQuant was retired in Phase 5 (2026-05-17). TQ engine code has
+# been deleted. This script is kept as an audit trail for the Phase 1 methodology.
+# See docs/plans/turboquant_fp8_gap_design_2026_05_17.md for findings.
+#
 # Phase 1 of the TurboQuant–FP8 gap design memo.
 # Captures nsys + ncu for {TQ-full, TQ-stripped, FP8, NVFP4} on Qwen3-8B Q8_0
 # at pp=512 and pp=4096 with tg=256, and reports the per-token kernel-time

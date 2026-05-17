@@ -55,66 +55,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     bool use_int4 = (cache->qtype() == QType::INT4);
     bool use_nvfp4 = (cache->qtype() == QType::NVFP4);
     bool use_mxfp4_kv = (cache->qtype() == QType::MXFP4_KV);
-    bool use_turboquant = (cache->qtype() == QType::TURBOQUANT);
-    bool use_turboquant_lite = (cache->qtype() == QType::TURBOQUANT_LITE);
-
-    if (use_turboquant_lite) {
-        // TurboQuant Lite: QJL sketch-only K + INT4 V
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;
-        int scale_block_stride_tql = kv_block_size * nkv;
-        int sketch_dim = qjl_proj_.sketch_dim;
-        int sketch_block_stride = kv_block_size * nkv * (sketch_dim / 8);
-        dim3 grid_tql(n, 2);
-        write_kv_cache_turboquant_lite_kernel<<<grid_tql, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-            static_cast<const uint8_t*>(qjl_proj_.matrix), int4_block_stride, scale_block_stride_tql,
-            sketch_block_stride, nkv, hd, sketch_dim, kv_block_size, n, state.max_blocks_per_seq,
-            state.n_sequences);
-    } else if (use_turboquant) {
-        // TurboQuant KV cache write: PolarQuant directions + QJL sketch for K, INT4 for V
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;
-        int scale_block_stride_tq = kv_block_size * nkv;
-        int sketch_dim = qjl_proj_.sketch_dim;
-        int sketch_block_stride = kv_block_size * nkv * (sketch_dim / 8);
-        dim3 grid_tq(n, 2);
-
-        if (cache->use_mxfp4()) {
-            // MXFP4 path: FP4 E2M1 directions + UE8M0 per-32-element micro-scales
-            int n_groups = hd / 32;
-            int mscale_block_stride = kv_block_size * nkv * n_groups;
-            write_kv_cache_turboquant_mxfp4_kernel<<<grid_tq, 256, 0, stream>>>(
-                static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-                state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_mscale_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(qjl_proj_.matrix), int4_block_stride, scale_block_stride_tq,
-                sketch_block_stride, mscale_block_stride, nkv, hd, sketch_dim, kv_block_size, n,
-                state.max_blocks_per_seq, state.n_sequences);
-        } else {
-            // INT4 uniform path
-            write_kv_cache_turboquant_kernel<<<grid_tq, 256, 0, stream>>>(
-                static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-                state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(qjl_proj_.matrix), int4_block_stride, scale_block_stride_tq,
-                sketch_block_stride, nkv, hd, sketch_dim, kv_block_size, n, state.max_blocks_per_seq,
-                state.n_sequences);
-        }
-    } else if (use_nvfp4) {
+    if (use_nvfp4) {
         // NVFP4 quantized KV cache write — 2 FP4 values packed per byte, UE4M3 scale per group of 16
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);

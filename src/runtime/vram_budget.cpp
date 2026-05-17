@@ -75,45 +75,28 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
     size_t single_block_bytes;
-    bool is_tq = (config.kv_cache_dtype == QType::TURBOQUANT);
-    bool is_tql = (config.kv_cache_dtype == QType::TURBOQUANT_LITE);
-    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::MXFP4_KV ||
-        is_tq || is_tql) {
+    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed).
+    // NVFP4 was historically missing from this OR-chain — fell through to the
+    // dtype_size() fallback which returns 0 for QType::NVFP4, silently zeroing
+    // out NVFP4's KV-cache budget contribution. Pre-existing pre-MXFP4-KV; the
+    // Slice 2 spec reviewer flagged it during the MXFP4-KV scope review.
+    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::NVFP4 ||
+        config.kv_cache_dtype == QType::MXFP4_KV) {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim / 2;
     } else {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
                              dtype_size(config.kv_cache_dtype);
     }
-    // TURBOQUANT_LITE: V-only pool (1x), all others: K+V (2x)
-    size_t pool_multiplier = is_tql ? 1 : 2;
-    size_t per_block_total = single_block_bytes * pool_multiplier * n_kv_layers;
-    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
+    // K+V (2x) for all supported dtypes.
+    size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
+    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
-        per_block_total += scale_per_block * 2 * n_kv_layers;  // K norms + V scales (always 2x)
+        per_block_total += scale_per_block * 2 * n_kv_layers;  // K scales + V scales (always 2x)
     }
     // NVFP4 / MXFP4_KV: 1 scale byte per 16 elems per head per token, K+V (2x).
     if (config.kv_cache_dtype == QType::NVFP4 || config.kv_cache_dtype == QType::MXFP4_KV) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 16);
         per_block_total += scale_per_block * 2 * n_kv_layers;
-    }
-    if (is_tq || is_tql) {
-        // QJL sketch pool: only for K (1x, not 2x)
-        int sketch_dim = head_dim;
-        if (is_tql) {
-            int mult = config.turboquant_sketch_multiplier;
-            if (mult <= 0)
-                mult = 2;
-            sketch_dim = head_dim * mult;
-        }
-        size_t sketch_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (sketch_dim / 8);
-        per_block_total += sketch_per_block * n_kv_layers;
-    }
-    // MXFP4 micro-scale pool for TurboQuant K directions (sm_120 auto-detected at runtime).
-    // Budget conservatively: always include for TURBOQUANT if head_dim % 32 == 0.
-    if (is_tq && (head_dim % 32 == 0)) {
-        int n_groups = head_dim / 32;
-        size_t mscale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * n_groups;
-        per_block_total += mscale_per_block * n_kv_layers;
     }
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;

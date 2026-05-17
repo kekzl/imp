@@ -844,9 +844,6 @@ void GraphExecutor::free_buffers() {
         }
     };
 
-    // Free TurboQuant QJL projection
-    qjl_destroy(qjl_proj_);
-
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {
         IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
