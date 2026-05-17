@@ -77,11 +77,41 @@ imp already ships a Q4_K × Q8_1 kernel (`src/compute/ggml_mmvq.cu::mmvq_kernel`
 
 A **direct tiled Q4_K_M GEMM kernel** shipped 2026-05-15 in `src/compute/mmq_q4k.cu` (commits `3b49325` → `8dbfdbd`). Microbench beats mmvq by 2.0–2.4× across M=32..512 (tile `<16,32,1,1>`, 512 thr, SMEM bank-conflict-padded). End-to-end on Gemma-3-12B Q4_K_M: **wins +13–56 % at M=2..16**, **loses to FP16-TC cuBLAS at M ≥ 32** — dp4a peak (~50 TFLOPS) vs FP16-TC peak (~838 TFLOPS) is a 16× ceiling gap that tile tuning cannot close. Dispatched in `[2, 16]` only via `executor_kernels.cu`; high-M Q4_K_M still goes through dequant+cuBLAS. Multi-stream dequant↔GEMM overlap was refuted by measurement (GPU busy ratio ≈ 100 %).
 
-Closing the high-M gap requires porting the inner loop to `mma.sync.aligned.m16n8k32.s32.s8.s8.s32` (consumer Blackwell INT8 Tensor Core, sm_120 supports it) and reordering Q4_K dequant→INT8 to feed the MMA. Multi-week port to mma.sync register layouts. See memo `mmq_q4k_phase_a_2026_05_15.md` for the full sweep and constraints; original plan in `q4k_mmvq_crossover_2026_05_15.md`.
+Closing the high-M gap requires porting the inner loop to a Tensor-Core MMA. Two paths exist on sm_120:
+
+1. **FP16 HMMA** (`mma.sync.m16n8k16.f16`) with on-the-fly Q4→FP16 dequant. **Attempted and retired**: shipped across 7 phases as `src/compute/mmq_q4k_v2.cu` on a feature branch, microbench reached **4.87× v1 dp4a** at M=512 (kernel-only). End-to-end on Qwen3.6-35B Q4_K_M was **-4% pp** in production because MoE keeps experts under the `MIN_M=64` v2 threshold, the FP16 weight cache (`wcache_.fp16`) hits skip v2 entirely, and Phase 1 dispatch overhead is paid per call. Retired in PR #193. Re-eval pending a dense Q4_K_M model that bypasses both the MoE-min-M and the fp16_cache hot path. Memo: `mmq_q4k_v2_phase2_shipped_2026_05_16.md`.
+2. **INT8 IMMA** (`mma.sync.m16n8k32.s32.s8.s8.s32`, ~838 TOPS) with Q4_K dequant→INT8 reordering. Untried — 16× ceiling vs current dp4a, but requires a Q4→INT8 staging pass and a different MMA register layout than v2's HMMA path.
+
+Memos: `mmq_q4k_phase_a_2026_05_15.md` (v1 dp4a sweep), `mmq_q4k_v2_hmma_design_2026_05_15.md` (v2 blueprint), `q4k_mmvq_crossover_2026_05_15.md` (original mmvq-vs-cuBLAS measurement).
 
 ### Speculative decoding — investigated and shelved
 
 EAGLE-3, self-speculative, DFlash, PPM-based TurboDraft, and n-gram speculation were all investigated. None paid off on a single RTX 5090: decode is bandwidth-bound, and the variants tested either failed to amortise weight reads (EAGLE-3, self-spec at 56–50% of baseline) or had unacceptable acceptance rates (PPM 0% on real text). Spec-decode CLI flags were removed in `7380ea8`.
+
+### FMHA cluster-launch — investigated and shelved (M5)
+
+A Blackwell-style cluster-launch variant of the FMHA prefill kernel (DSMEM K-broadcast across a 2-CTA cluster, modelled after `paged_attention_cluster_kernel<HD>`) was implemented across three slices in May 2026: Slice 1 helper (#198), Slice 2 FP16 cluster kernel + dispatch (#200), Slice 2.2 FP8 variant (#202). End-to-end A/B across 4 NVFP4 MoE models (Qwen3.6-35B, Coder-30B, Gemma-4-26B, Qwen3-30B-Modelopt) on 2026-05-17 found the perf signal **noise-dominated**: ±20% same shape, opposite signs across re-runs of the same config; cuBLAS / thermal / scheduler variance drowned any cluster effect. Cluster output is **bit-identical to legacy** (`ClusterMatchesLegacy*` tests: max_abs = 0), so the kernel is sound; the maintainability cost (a parallel kernel + dispatch + dual test files) doesn't pay back. Default flipped OFF in #204 via `attention.no_fmha_cluster=true`; code retained as opt-in for future hardware where the signal might emerge. Memo: `m5_slice2_cluster_refuted_2026_05_17.md`.
+
+### GEMM dispatch unification (R5)
+
+The 21-parameter `gemm_dispatch_impl` god-dispatcher is being replaced by a strategy-keyed `GemmKernel` registry. Slice 1 (PR #197) shipped the interface (`src/graph/gemm_kernel_registry.h`) + an FP16 kernel as proof-of-concept; live dispatch tries the registry first when `gemm.use_kernel_registry=true` (default OFF) and falls back to the legacy switch for unmigrated tiers. Per-tier slices, one PR each off main:
+
+| Slice | Tier | Status |
+|---|---|---|
+| 1 | FP16 interface + proof | shipped (#197) |
+| 2 | FP8 | in flight |
+| 3 | NVFP4 GEMV (M==1) | pending |
+| 4 | NVFP4 GEMM (M>1) | pending |
+| 5 | CUTLASS_NVFP4 | pending |
+| 6 | MXFP4 | pending |
+| 7 | dp4a / mmvq | pending |
+| 8 | Delete legacy switch, flip default ON | pending |
+
+Once all migrated, adding a new qtype becomes a single-file change instead of a 21-parameter dispatcher edit. Cross-axis maintainability win per review `phase5_synthesis.md §5`.
+
+### MoE prefill graph capture (M3 Phase 4)
+
+Decode-side CUDA Graphs default-on (#114-ish) gives +180-234% on NVFP4 MoE decode. The prefill-side equivalent is blocked on **Blocker B**: CUTLASS 3.x grouped-GEMM silently hangs under `cudaStreamCaptureModeGlobal`. PR #196 flipped the default `runtime.graph_capture_mode = "relaxed"` as the cheapest probe (relaxed mode permits more synchronization patterns inside the captured graph). Empirical A/B with `runtime.prefill_graph=true` under relaxed-mode capture is the next step; results pending. If relaxed unblocks, M3 Phase 4 can default-on. If not, options are (a) file a CUTLASS issue upstream, (b) a workaround in our capture code, or (c) carve out the grouped GEMM into a graph-external sub-stream. Memos: `prefill_graph_blockers_2026_05_14.md`, `prefill_graph_cublaslt_blocker_2026_05_15.md`.
 
 ## Research interest
 
