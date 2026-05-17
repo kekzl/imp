@@ -95,9 +95,30 @@ Path B (per-token QJL tuning) **shelved** — its 3-5 % recovery ceiling vs QJL'
 
 The 16 K engine limit is itself a Phase 2 finding: **TurboQuant cannot reach long context on the current engine.** Path A (drop QJL, retire TQ to NVFP4-KV-with-INT4-V shape) inherits chunked prefill from NVFP4 — so Path A is the *unblocker*, not a regressor, for long-context TQ workloads. Combined with Phase 1's perf finding, both phases point at the same conclusion: **retire TurboQuant in favor of NVFP4-KV, don't optimise it**.
 
-**Decision: PROCEED to Phase 3** (production wire-up of MXFP4-KV — multi-week per design memo §5 Phase 3). Re-run the Phase 2 NIAH harness against the real MXFP4-KV kernel once it lands to lock in the quality verdict before any default-flip discussion. Do NOT default-flip `--kv-turboquant → --kv-mxfp4` until that follow-up A/B passes.
+**Phase 3 shipped end-to-end:** Slice 1 (PR #248, `ScaleDtype` template scaffolding), Slice 2 (PR #249, `--kv-mxfp4` end-to-end wiring), Slice 3 (this branch, NIAH re-run + bugfix).
 
-**Bench infrastructure for the eventual re-run:** `tools/eval/niah/niah_bench.py` + `tools/eval/niah/data/filler.txt` + the `IMP_TQ_SKIP_QJL=1` quality proxy from Phase 1.
+**Slice 3 NIAH re-run (2026-05-17, `docs/superpowers/plans/2026-05-17-mxfp4-kv-slice3-findings.md`):**
+- First run found MXFP4-KV producing **degenerate "the the the" loops, 0 % NIAH retrieval at 4K**. Looked like a Path A dead end.
+- Root cause: encoder-decoder scale mismatch in `write_kv_cache_mxfp4_kv_kernel` — nibbles quantized with `inv_sc = 1/sc_exact`, scale stored as UE8M0-rounded `sc_byte`. For E4M3 the mismatch is ~1.5 % (NVFP4 tolerates it); for UE8M0 (power-of-2 only) it's up to 2 × per group, compounded over 32 layers ⇒ doom.
+- 5-LOC fix: quantize to UE8M0 first, derive `inv_sc` from the UE8M0-decoded scale, then quantize nibbles round-trip-consistently. TurboQuant's MXFP4 K write kernel already did this pattern correctly (`executor_kernels.cu:1187-1191`); Slice 2 missed the precedent.
+- Post-fix 180-prompt matrix on Qwen3-8B Q8_0:
+
+| Config       | 4 K          | 16 K        | vs NVFP4 (16K) |
+|---           | ---:         | ---:        | ---:           |
+| FP16 (gold)  | 100.0 %      | 60.0 %      | −6.7 pp |
+| FP8          | 100.0 %      | 60.0 %      | −6.7 pp |
+| **NVFP4**    | **100.0 %**  | **66.7 %**  | 0 anchor |
+| **MXFP4-KV** | **100.0 %**  | **60.0 %**  | **−6.7 pp** (1/15 prompts; per-depth identical except d=0.75) |
+| TQ (QJL on/off) | 100.0 %   | 0.0 %       | engine limit (Phase 2) |
+
+Δ = -6.7 pp is single-prompt-of-15 variance, not a systematic regression. **Path A's "MXFP4-KV as thin variant of NVFP4" framing validated.**
+
+**Decision: PROCEED to Phase 5** (TurboQuant retirement, ~−2000 LOC per design memo §5 Phase 5):
+1. Deprecate `--kv-turboquant` → alias to `--kv-mxfp4` (or `--kv-nvfp4`) with one-shot `IMP_LOG_WARN`.
+2. Remove `--kv-turboquant-lite` with `IMP_LOG_ERROR` + fallback.
+3. After one release: delete `src/quant/turboquant.{h,cu}`, `src/compute/attention_paged_turboquant.cu` (1108 LOC), the three TQ KV-write kernels in `executor_kernels.cu`, the sketch_pool path in `kv_cache.cu`, and `tests/test_turboquant.cu`.
+
+Slice 4 (two-level scaling on MXFP4-KV) was planned as a precision reserve but the Slice 3 bugfix made it unnecessary for correctness — defer indefinitely unless a future workload demands it.
 
 ### `pp=512` on large dense models
 
