@@ -2366,22 +2366,50 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1+2+3+4+5: when gemm.use_kernel_registry is enabled, try the
+    // R5 Slice 1+2+3+4+5+6: when gemm.use_kernel_registry is enabled, try the
     // new dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3 (NVFP4
-    // decode GEMV), 4 (NVFP4 prefill GEMM dequant) and 5 (CUTLASS_NVFP4
-    // prefill GEMM, preferred native FP4 path) are wired; remaining tiers
-    // (MXFP4 — Slice 6, dp4a/q8 — Slice 7) fall through to the legacy
-    // gemm_dispatch_impl below.
+    // decode GEMV), 4 (NVFP4 prefill GEMM dequant), 5 (CUTLASS_NVFP4 prefill
+    // GEMM, preferred native FP4 path) and 6 (MXFP4 native GGUF — GEMV +
+    // dequant→cuBLAS GEMM) are wired; remaining tiers (dp4a/q8 — Slice 7)
+    // fall through to the legacy gemm_dispatch_impl below.
     //
-    // Tier order mirrors gemm_dispatch_impl precedence: FP8 is tried before
-    // FP16 because the legacy path picks FP8 when M>1 + the weight is in the
-    // FP8 cache, even if an FP16 cache entry also exists. NVFP4 sits between
-    // FP8 and FP16 — the legacy dispatch evaluates NVFP4 before falling
-    // through to dp4a/fp16 cache paths, and NVFP4 weights are stored either
-    // as Tensor sidecars (qtype=NVFP4 directly on the weight) or in the
-    // separate nv4 cache; both must be checked.
+    // Tier order mirrors gemm_dispatch_impl precedence: MXFP4 GGUF is the
+    // top-priority branch in legacy (executor_kernels.cu:2085-2113) and is
+    // tried first here too. FP8 is tried before FP16 because the legacy path
+    // picks FP8 when M>1 + the weight is in the FP8 cache, even if an FP16
+    // cache entry also exists. NVFP4 sits between FP8 and FP16 — the legacy
+    // dispatch evaluates NVFP4 before falling through to dp4a/fp16 cache
+    // paths, and NVFP4 weights are stored either as Tensor sidecars
+    // (qtype=NVFP4 directly on the weight) or in the separate nv4 cache;
+    // both must be checked.
     if (RuntimeConfig::current().gemm.use_kernel_registry) {
         const int M = static_cast<int>(input.shape[0]);
+        // MXFP4 native GGUF (top priority — matches legacy precedence at
+        // gemm_dispatch_impl:2085). Cache hit + linear_scales gate apply
+        // identically. The kernel adapter further gates on linear_scales !=
+        // null and returns PreconditionFail on miss so we fall through. The
+        // dual-cache CUTLASS MXFP4 branch (legacy line 2149-2174) is NOT
+        // migrated here — it lives inside the NVFP4 path with a QW7 probe;
+        // see src/graph/gemm_kernel_mxfp4.cu header.
+        if (mx4 != nullptr && input.qtype == QType::F16) {
+            auto mx_it = mx4->find(weight.data);
+            if (mx_it != mx4->end() && mx_it->second.linear_scales != nullptr) {
+                GemmKernelArgs args{};
+                args.input = &input;
+                args.output = &output;
+                args.stream = ctx.stream;
+                args.beta = ctx.beta;
+                args.weight_payload = &mx_it->second;
+                args.dequant_scratch = qs->dequant;  // only consumed by M>1 path
+                GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/(M == 1)};
+                auto rc = GemmKernelRegistry::instance().dispatch(strat, args);
+                if (rc == GemmDispatchResult::Ok)
+                    return;
+                // PreconditionFail (missing dequant scratch for M>1) — fall
+                // through to legacy, mirroring the legacy `else if (dequant_
+                // scratch != nullptr)` skip.
+            }
+        }
         // FP8 prefill: M>1 only, requires FP8 cache hit + activation scratch.
         // Matches the guard in gemm_dispatch_impl (M>1 branch).
         if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
