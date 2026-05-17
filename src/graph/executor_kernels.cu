@@ -2599,6 +2599,27 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             // fall through to legacy. Same semantics as the legacy `else if`
             // chain continuing past the mmvq/dp4a/fused-gemv branches.
         }
+        // Slice 8.5 — qtype-agnostic generic-dequant catch-all (M>1 prefill).
+        // Mirrors the legacy fallback at gemm_dispatch_impl:2313-2319: when no
+        // tier-specific dispatcher matched and the weight qtype is dequantable
+        // via `dequant_gpu`, dequant the raw bytes into the FP16 scratch and
+        // run cuBLAS. Strategy key (FP16, NONE, m_is_one=false) is qtype-
+        // agnostic — the handler reads weight.qtype off the Tensor and
+        // switches via `dequant_gpu_supported`. PreconditionFail (missing
+        // scratch or unsupported qtype) drops through to legacy, which has a
+        // final raw `gemm()` arm for the FP16/BF16 case at line 2322.
+        if (M > 1 && input.qtype == QType::F16) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.beta = ctx.beta;
+            args.weight_payload = &weight;
+            args.dequant_scratch = qs->dequant;
+            GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
         // Fall through: registry returned NoMatch for this strategy — use legacy.
     }
 
