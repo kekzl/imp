@@ -46,6 +46,8 @@ CONFIGS = {
     # name           CLI flags                              extra env
     "fp16":         (["--kv-fp16"],                          {}),
     "fp8":          (["--kv-fp8"],                           {}),
+    "nvfp4":        (["--kv-nvfp4"],                         {}),
+    "mxfp4_kv":     (["--kv-mxfp4"],                         {}),
     "tq_qjl_on":    (["--kv-turboquant"],                    {}),
     "tq_qjl_off":   (["--kv-turboquant"],                    {"IMP_TQ_SKIP_QJL": "1"}),
 }
@@ -137,6 +139,7 @@ def run_prompt(prompt: Prompt, model_path: str, host_models_dir: str) -> Result:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=PER_PROMPT_TIMEOUT_S, check=False,
+            errors="replace",  # MXFP4-KV degenerate output can emit invalid UTF-8 bytes
         )
         wall = time.time() - t0
         # imp-cli --prompt mode does NOT echo the prompt to stdout — only
@@ -186,24 +189,40 @@ def write_summary(results: list[Result], out_path: Path) -> None:
         ss = by_cell.get((cfg, ctx), [])
         return 100 * sum(ss) / len(ss) if ss else float("nan")
 
-    if 16384 in ctxs and ("tq_qjl_on", 16384) in by_cell and ("tq_qjl_off", 16384) in by_cell:
-        tq_qjl_on  = cell_pct("tq_qjl_on",  16384)
-        tq_qjl_off = cell_pct("tq_qjl_off", 16384)
-        delta_pp = tq_qjl_off - tq_qjl_on
+    # Slice 3 re-run: with the real MXFP4-KV kernel shipped in PR #249, the
+    # design memo's actual quality question becomes nvfp4 vs mxfp4_kv (does
+    # UE8M0 vs E4M3 scale encoding affect retrieval quality?). The original
+    # Phase 2 tq_qjl_on/off block stays for comparison if those configs ran.
+    if 16384 in ctxs and ("nvfp4", 16384) in by_cell and ("mxfp4_kv", 16384) in by_cell:
+        nvfp4_pct    = cell_pct("nvfp4",    16384)
+        mxfp4_kv_pct = cell_pct("mxfp4_kv", 16384)
+        delta_pp = mxfp4_kv_pct - nvfp4_pct
         if abs(delta_pp) <= 5:
             verdict = "✅ **PASS** — Path A green-light (Δ within ±5 pp)"
         elif abs(delta_pp) <= 10:
             verdict = "🟡 **PASS WITH CAVEAT** — investigate per-depth pattern (Δ 5-10 pp)"
         else:
-            verdict = "❌ **FAIL** — Path A refuted (Δ > 10 pp; QJL is doing real retrieval work)"
+            verdict = "❌ **FAIL** — Path A refuted (Δ > 10 pp; UE8M0 scale encoding regresses retrieval)"
         lines += [
             "",
-            "## Phase 2 verdict (16K context)",
-            f"- tq_qjl_on:  {tq_qjl_on:.1f}%",
-            f"- tq_qjl_off: {tq_qjl_off:.1f}%",
+            "## Path A verdict (16K context, nvfp4 vs mxfp4_kv)",
+            f"- nvfp4:    {nvfp4_pct:.1f}%",
+            f"- mxfp4_kv: {mxfp4_kv_pct:.1f}%",
             f"- Δ = {delta_pp:+.1f} pp",
             "",
             verdict,
+        ]
+
+    if 16384 in ctxs and ("tq_qjl_on", 16384) in by_cell and ("tq_qjl_off", 16384) in by_cell:
+        tq_qjl_on  = cell_pct("tq_qjl_on",  16384)
+        tq_qjl_off = cell_pct("tq_qjl_off", 16384)
+        delta_pp = tq_qjl_off - tq_qjl_on
+        lines += [
+            "",
+            "## QJL-stripping (TQ) verdict (16K context, kept for comparison)",
+            f"- tq_qjl_on:  {tq_qjl_on:.1f}% (typically 0%: TQ engine-limited to ~4K BPE tokens, see Phase 2 findings)",
+            f"- tq_qjl_off: {tq_qjl_off:.1f}%",
+            f"- Δ = {delta_pp:+.1f} pp",
         ]
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
