@@ -89,7 +89,15 @@ Path A is bottleneck-targeted (QJL XNOR+popcount + Q-side sketch precompute is t
 
 Path B (per-token QJL tuning) **shelved** — its 3-5 % recovery ceiling vs QJL's actual 54-60 % dominant cost makes it the wrong shape. `--kv-turboquant-lite` remains retirable as part of Path A.
 
-**Next gate:** Phase 2 — NIAH retrieval-quality A/B at 4K + 16K context (Qwen3-8B Q8_0, comparing FP16 / FP8 / TQ-with-QJL / synthetic-MXFP4-K-via-`IMP_TQ_SKIP_QJL=1`). Acceptance per design memo §5: MXFP4-K NIAH within 5pp of TQ → green-light Path A; >10pp regression → shelve. **Bench infrastructure for this phase shipped:** `diagnostics.tq_skip_qjl` runtime flag + `SKIP_QJL` template parameter + `tools/analysis/bench_turboquant_components.sh`.
+**Phase 2 NIAH ran (2026-05-17, `docs/superpowers/plans/2026-05-17-turboquant-phase2-findings.md`):**
+- **4 K context, all 4 configs (FP16 / FP8 / TQ-QJL-on / TQ-QJL-off via `IMP_TQ_SKIP_QJL=1`):** 100 % retrieval. Δ(TQ_off − TQ_on) = 0 pp → formally PASS by the design memo's ±5 pp threshold, but vacuous signal (Qwen3-8B aces NIAH at 4 K regardless of KV dtype).
+- **16 K context, FP16 / FP8:** 53 % / 67 %. **Both TQ configs:** 0 % — the engine rejects 15 547-token prompts with `Prefill error: out of memory` because TurboQuant has no chunked-prefill support (single-chunk cap = 4096 BPE tokens, `src/runtime/engine.cpp:1997`).
+
+The 16 K engine limit is itself a Phase 2 finding: **TurboQuant cannot reach long context on the current engine.** Path A (drop QJL, retire TQ to NVFP4-KV-with-INT4-V shape) inherits chunked prefill from NVFP4 — so Path A is the *unblocker*, not a regressor, for long-context TQ workloads. Combined with Phase 1's perf finding, both phases point at the same conclusion: **retire TurboQuant in favor of NVFP4-KV, don't optimise it**.
+
+**Decision: PROCEED to Phase 3** (production wire-up of MXFP4-KV — multi-week per design memo §5 Phase 3). Re-run the Phase 2 NIAH harness against the real MXFP4-KV kernel once it lands to lock in the quality verdict before any default-flip discussion. Do NOT default-flip `--kv-turboquant → --kv-mxfp4` until that follow-up A/B passes.
+
+**Bench infrastructure for the eventual re-run:** `tools/eval/niah/niah_bench.py` + `tools/eval/niah/data/filler.txt` + the `IMP_TQ_SKIP_QJL=1` quality proxy from Phase 1.
 
 ### `pp=512` on large dense models
 
