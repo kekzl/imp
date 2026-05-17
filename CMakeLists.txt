@@ -175,6 +175,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm.cu
     src/compute/gdn.cu
     src/compute/hadamard.cu
+    src/compute/mmq_q4k_imma_layout.cu
 )
 
 if(IMP_USE_CUTLASS)
@@ -443,6 +444,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sampling.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
+        tests/test_mmq_q4k_imma_layout.cu
     )
 
     imp_add_test_module(test-attention SOURCES
