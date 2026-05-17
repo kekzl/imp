@@ -258,8 +258,6 @@ __global__ void smallM_kernel_v1(
     constexpr int SFA_TILE_BYTES = TILE_M * SFA_BYTES_ROW;  // 1 KiB
     constexpr int SFB_TILE_BYTES = TILE_N * SFB_BYTES_ROW;  // 1 KiB
     constexpr int TMA_BYTES_PER_STAGE = A_TILE_BYTES + B_TILE_BYTES;  // 16 KiB
-    constexpr int CPASYNC_BYTES_PER_STAGE = SFA_TILE_BYTES + SFB_TILE_BYTES;  // 2 KiB
-    (void)CPASYNC_BYTES_PER_STAGE;
 
     const int K_groups   = K / 16;
     const int n_base     = n_tile * TILE_N;
@@ -935,7 +933,6 @@ bool gemm_grouped_nvfp4_smallM(
             default:  launch_for(TM128{}, IC128{}, IC3{}); break;
         }
     }
-    (void)TILE_K_rt;
 
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
