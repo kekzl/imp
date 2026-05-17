@@ -1,9 +1,11 @@
 #include "graph/gemm_kernel_registry.h"
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, convert_nvfp4_to_mxfp4_cutlass
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
 #include "core/tensor.h"
 #include "graph/executor.h"  // FP8CacheEntry
 #include "quant/fp8_quant.h"
+#include "quant/mxfp4_gemm.h"  // gemv_mxfp4_kpar
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 
@@ -42,9 +44,11 @@ TEST_F(GemmKernelRegistryTest, Fp16KernelIsRegisteredAtStaticInit) {
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
-    // MXFP4 is not registered yet — Slices 1-5 cover FP16, FP8, NVFP4 GEMV+GEMM,
-    // CUTLASS_NVFP4 prefill GEMM. MXFP4 is Slice 6 territory.
-    GemmStrategy unregistered{StorageTier::MXFP4, QType::F16, /*m_is_one=*/true};
+    // Off-axis weight_qtype on an otherwise-registered tier (MXFP4 GEMV is
+    // registered under qtype=F16; BF16 must not resolve). Slices 1-6 now
+    // cover FP16, FP8, NVFP4 GEMV+GEMM, CUTLASS_NVFP4 prefill GEMM, MXFP4
+    // GEMV+GEMM. Q4_0/Q4_1 (dp4a/q8) is Slice 7 territory.
+    GemmStrategy unregistered{StorageTier::MXFP4, QType::BF16, /*m_is_one=*/true};
     GemmKernelArgs args{};
     args.stream = stream_;
     EXPECT_EQ(reg.dispatch(unregistered, args), GemmDispatchResult::NoMatch);
@@ -636,6 +640,191 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     cudaFree(d_input);
     cudaFree(d_weight_fp16);
     cudaFree(d_out);
+}
+
+// R5 Slice 6 — MXFP4 native GGUF kernels registered. With FP16 (2) + FP8
+// prefill (1) + NVFP4 GEMV (1) + NVFP4 GEMM (1) + CUTLASS_NVFP4 GEMM (1) +
+// MXFP4 GEMV (1) + MXFP4 GEMM (1) we now expect at least 8 entries. The
+// dual-cache CUTLASS MXFP4 branch (legacy line 2149-2174) is intentionally
+// NOT migrated — see src/graph/gemm_kernel_mxfp4.cu header.
+TEST_F(GemmKernelRegistryTest, Mxfp4KernelsAreRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 8u)
+        << "FP16 (M==1/M>1) + FP8 (M>1) + NVFP4 GEMV (M==1) + NVFP4 GEMM (M>1) + "
+           "CUTLASS_NVFP4 GEMM (M>1) + MXFP4 GEMV (M==1) + MXFP4 GEMM (M>1) expected pre-registered";
+}
+
+// The MXFP4 adapters register only under (tier=MXFP4, qtype=F16). Off-axis
+// weight_qtype must NoMatch so the dispatch site falls back to legacy.
+TEST_F(GemmKernelRegistryTest, Mxfp4WrongQtypeReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy bf16_gemv{StorageTier::MXFP4, QType::BF16, /*m_is_one=*/true};
+    GemmStrategy bf16_gemm{StorageTier::MXFP4, QType::BF16, /*m_is_one=*/false};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(bf16_gemv, args), GemmDispatchResult::NoMatch);
+    EXPECT_EQ(reg.dispatch(bf16_gemm, args), GemmDispatchResult::NoMatch);
+}
+
+// The MXFP4 GEMM adapter requires the dequant scratch (legacy line 2101). A
+// null scratch returns PreconditionFail so the dispatch site can fall back
+// to legacy. Mirrors the FP8 missing-scratch test (Slice 2 pattern).
+TEST_F(GemmKernelRegistryTest, Mxfp4GemmRejectsMissingDequantScratch) {
+    constexpr int M = 4;
+    constexpr int N = 16;
+    constexpr int K = 64;
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // Build a dummy CutlassMxFP4Weight with linear_scales != null so the
+    // gate at the top of the kernel passes, but leave dequant_scratch null.
+    // The kernel returns PreconditionFail before dereferencing weight bytes.
+    uint8_t dummy_scale = 0;
+    CutlassMxFP4Weight dummy{};
+    dummy.N = N;
+    dummy.K = K;
+    dummy.linear_scales = &dummy_scale;  // non-null is sufficient — never dereferenced
+    dummy.data = &dummy_scale;           // ditto
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &dummy;
+    // Intentionally leave dequant_scratch null.
+
+    GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
+// Both adapters gate on linear_scales != null (legacy line 2087). When the
+// gate fails, both return PreconditionFail so the dispatch site falls back
+// to legacy. Use the GEMV slot because it has no other workspace requirement.
+TEST_F(GemmKernelRegistryTest, Mxfp4GemvRejectsMissingLinearScales) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 64;
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // linear_scales is null by default in the value-initialized struct —
+    // mirrors the case where the loader did not populate linear scales for
+    // this weight (e.g. CUTLASS-only conversion).
+    CutlassMxFP4Weight dummy{};
+    dummy.N = N;
+    dummy.K = K;
+    // dummy.linear_scales stays null.
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &dummy;
+
+    GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
+// End-to-end correctness: registry MXFP4 GEMV dispatch produces the same
+// output as calling gemv_mxfp4_kpar directly. Build the CutlassMxFP4Weight
+// via the NVFP4 → MXFP4 conversion path (same approach as
+// tests/test_weight_dispatch.cu), then compare bit-identical outputs.
+TEST_F(GemmKernelRegistryTest, Mxfp4GemvRegistryDispatchMatchesDirectPath) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 64;  // multiple of 32 (MXFP4 group size)
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    // Build the MXFP4 weight via FP16 → NVFP4 → MXFP4 conversion. The
+    // resulting CutlassMxFP4Weight has linear_scales populated (UE8M0 per 32)
+    // and hadamard_bs == 0 (no rotation), which is what gemv_mxfp4_kpar
+    // consumes. Both paths read the same struct so the GEMV is read-only.
+    NvFP4QuantResult nv4{};
+    quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
+    CutlassMxFP4Weight mw{};
+    convert_nvfp4_to_mxfp4_cutlass(nv4, mw, stream_);
+    ASSERT_NE(mw.linear_scales, nullptr)
+        << "convert_nvfp4_to_mxfp4_cutlass did not populate linear_scales";
+    cudaStreamSynchronize(stream_);
+
+    // Path 1: direct gemv_mxfp4_kpar (mirrors executor_kernels.cu:2097-2099).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    gemv_mxfp4_kpar(mw, reinterpret_cast<const half*>(d_input), reinterpret_cast<half*>(d_out_direct),
+                    static_cast<int>(mw.N), static_cast<int>(mw.K), stream_);
+
+    // Path 2: registry dispatch through the MXFP4 GEMV kernel adapter.
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &mw;
+    GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths invoke gemv_mxfp4_kpar with identical args → bit-identical.
+    // (Hadamard rotation is disabled here because mw.hadamard_bs == 0, so the
+    // input is not mutated.)
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    free_cutlass_mxfp4_weight(mw);
+    free_nvfp4_result(nv4);
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
 }
 
 // Pin the GemmStrategy operator== contract — used by the linear-scan
