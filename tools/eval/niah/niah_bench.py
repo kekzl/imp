@@ -56,8 +56,11 @@ DEFAULT_MODEL   = "/m/Qwen3-8B-Q8_0.gguf"  # path inside container
 DEFAULT_HOST_MODELS_DIR = "/home/kekz/models"
 DOCKER_IMAGE    = "imp:test"
 CHARS_PER_TOKEN = 4  # Qwen3 BPE rough approximation; safe upper bound for English prose
-MAX_GEN_TOKENS  = 64
-PER_PROMPT_TIMEOUT_S = 60
+# Qwen3-8B is a reasoning model — it emits <think>...</think> before the
+# final answer, typically 100-200 tokens of "thinking" preamble. 384 gives
+# enough headroom for the reasoning preamble plus a complete answer.
+MAX_GEN_TOKENS  = 384
+PER_PROMPT_TIMEOUT_S = 90
 
 
 @dataclasses.dataclass
@@ -136,14 +139,16 @@ def run_prompt(prompt: Prompt, model_path: str, host_models_dir: str) -> Result:
             timeout=PER_PROMPT_TIMEOUT_S, check=False,
         )
         wall = time.time() - t0
-        out = proc.stdout + "\n" + proc.stderr
-        gen = ""
-        m = re.search(r"Answer:\s*(.*?)(?:\n\[|\nInit:|\Z)", out, re.DOTALL)
-        if m:
-            gen = m.group(1).strip()
-        else:
-            gen = proc.stdout[-MAX_GEN_TOKENS * CHARS_PER_TOKEN:].strip()
-        score = 1 if ANSWER_KEY in gen.lower() else 0
+        # imp-cli --prompt mode does NOT echo the prompt to stdout — only
+        # the model's generation (with some interleaved log lines). The
+        # needle "Dolores Park" appears in the prompt but never in stdout
+        # unless the model retrieves it. Score on the full stdout: this
+        # catches the needle whether the model surfaces it in <think>
+        # reasoning or in the final answer.
+        score = 1 if ANSWER_KEY in proc.stdout.lower() else 0
+        # For the JSON record's human-readable generated field, keep the
+        # tail of stdout (last ~2 KB) so reviewers can spot-check.
+        gen = proc.stdout[-2048:].strip()
         return Result(
             config=prompt.config, ctx_tokens=prompt.ctx_tokens,
             depth_pct=prompt.depth_pct, seed=prompt.seed,
