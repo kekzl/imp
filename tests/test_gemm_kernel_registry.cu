@@ -1535,6 +1535,205 @@ TEST_F(GemmKernelRegistryTest, GgufQ6kFusedGemvRequiresDequantScratchSentinel) {
     cudaFree(d_out);
 }
 
+// R5 Slice 8.5 — qtype-agnostic generic-dequant catch-all registered
+// under (tier=FP16, qtype=NONE, m_is_one=false). Slices 1-6 contribute 8
+// entries, Slice 7 adds 8 GGUF small-M qtypes, Slice 8.1 adds 1 FP8
+// cache-miss adapter, Slice 8.5 adds 1 generic-dequant catch-all → 18.
+TEST_F(GemmKernelRegistryTest, GenericDequantCatchAllIsRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 18u)
+        << "Slices 1-6 (8 entries) + Slice 7 GGUF small-M (8 qtypes) + Slice 8.1 FP8 "
+           "cache-miss dequant fallback (1 entry) + Slice 8.5 generic-dequant catch-all "
+           "(1 entry) expected pre-registered";
+}
+
+// The generic-dequant handler refuses loud when the dequant scratch is
+// missing. The dispatch site provides `qs->dequant`; without it the kernel
+// cannot stage the FP16 weight and must PreconditionFail so the caller
+// falls through to legacy `gemm_dispatch_impl`.
+TEST_F(GemmKernelRegistryTest, GenericDequantRejectsMissingScratch) {
+    constexpr int M = 4;
+    constexpr int N = 8;
+    constexpr int K = 128;  // multiple of 32 for Q8_0 blocks
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    void* d_weight_q8_0 = nullptr;
+    constexpr int kQ8_0_BlockBytes = 34;
+    const size_t weight_bytes = static_cast<size_t>(N) * (K / 32) * kQ8_0_BlockBytes;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMalloc(&d_weight_q8_0, weight_bytes);
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+    cudaMemset(d_weight_q8_0, 0, weight_bytes);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight_q8_0, QType::Q8_0, 2, w_shape, /*on_device=*/true);
+    Tensor out(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    // dequant_scratch deliberately nullptr — the handler must refuse.
+
+    GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+    cudaFree(d_weight_q8_0);
+}
+
+// Off-axis qtype (a qtype that `dequant_gpu_supported` rejects, e.g. raw
+// F16/BF16 which are not block-quantized) must surface as PreconditionFail
+// — the dispatch site falls back to legacy `gemm_dispatch_impl`, which has
+// a final raw `gemm()` arm for the FP16/BF16-no-dequant case.
+TEST_F(GemmKernelRegistryTest, GenericDequantRejectsUnsupportedQtype) {
+    constexpr int M = 4;
+    constexpr int N = 8;
+    constexpr int K = 16;
+
+    __half* d_input = nullptr;
+    __half* d_weight = nullptr;
+    __half* d_out = nullptr;
+    void* d_scratch = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight, sizeof(__half) * N * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMalloc(&d_scratch, sizeof(__half) * N * K);
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+    cudaMemset(d_weight, 0, sizeof(__half) * N * K);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    // F16 weight — dequant_gpu_supported(F16) is false, so the handler
+    // must refuse rather than dequant a non-block-quant tensor.
+    Tensor weight(d_weight, QType::F16, 2, w_shape, /*on_device=*/true);
+    Tensor out(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out;
+    args.stream = stream_;
+    args.weight_payload = &weight;
+    args.dequant_scratch = d_scratch;  // provided; the qtype check fails.
+
+    GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_weight);
+    cudaFree(d_out);
+    cudaFree(d_scratch);
+}
+
+// End-to-end parity: registry generic-dequant dispatch produces the same
+// output as the legacy `dequant_gpu → gemm` sequence for a Q8_0 weight.
+// Mirrors the Slice 8.1 FP8 cache-miss parity test — both adapters share
+// the same dequant_gpu + cuBLAS gemm sequence; only the strategy key and
+// the outer registration differ.
+TEST_F(GemmKernelRegistryTest, GenericDequantMatchesDirectPath) {
+    constexpr int M = 8;
+    constexpr int N = 16;
+    constexpr int K = 128;  // multiple of 32 for Q8_0
+    constexpr int blocks_per_row = K / 32;
+    constexpr int kQ8_0_BlockBytes = 34;
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    std::vector<uint8_t> h_weight_q8_0(static_cast<size_t>(N) * blocks_per_row * kQ8_0_BlockBytes);
+    for (int row = 0; row < N; ++row) {
+        for (int b = 0; b < blocks_per_row; ++b) {
+            float absmax = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                absmax = std::max(absmax, std::fabs(v));
+            }
+            float d = absmax / 127.0f;
+            float inv_d = (d > 0.0f) ? 1.0f / d : 0.0f;
+            uint8_t* blk = h_weight_q8_0.data() +
+                           (static_cast<size_t>(row) * blocks_per_row + b) * kQ8_0_BlockBytes;
+            __half d_h = __float2half(d);
+            std::memcpy(blk, &d_h, sizeof(__half));
+            int8_t* qs = reinterpret_cast<int8_t*>(blk + 2);
+            for (int j = 0; j < 32; ++j) {
+                float v = __half2float(h_weight_fp16[row * K + b * 32 + j]);
+                int q = static_cast<int>(std::lrintf(v * inv_d));
+                qs[j] = static_cast<int8_t>(std::max(-127, std::min(127, q)));
+            }
+        }
+    }
+
+    __half* d_input = nullptr;
+    void* d_weight = nullptr;
+    void* d_scratch_direct = nullptr;
+    void* d_scratch_registry = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight, h_weight_q8_0.size());
+    cudaMalloc(&d_scratch_direct, sizeof(__half) * N * K);
+    cudaMalloc(&d_scratch_registry, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight, h_weight_q8_0.data(), h_weight_q8_0.size(), cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight(d_weight, QType::Q8_0, 2, w_shape, /*on_device=*/true);
+
+    // Path 1: direct (mirror executor_kernels.cu legacy generic catch-all).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    Tensor out_direct(d_out_direct, QType::F16, 2, out_shape, /*on_device=*/true);
+    dequant_gpu(weight.data, d_scratch_direct, weight.qtype, N, K, stream_);
+    Tensor w_fp16_direct(d_scratch_direct, QType::F16, 2, w_shape, /*on_device=*/true);
+    gemm(input, w_fp16_direct, out_direct, /*alpha=*/1.0f, /*beta=*/0.0f, stream_);
+
+    // Path 2: registry dispatch through the generic-dequant adapter.
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &weight;
+    args.dequant_scratch = d_scratch_registry;
+    GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths run an identical `dequant_gpu` + `gemm` sequence → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    cudaFree(d_input);
+    cudaFree(d_weight);
+    cudaFree(d_scratch_direct);
+    cudaFree(d_scratch_registry);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
+}
+
 // Pin the GemmStrategy operator== contract — used by the linear-scan
 // lookup in dispatch().
 TEST(GemmStrategy, EqualityIsByValue) {
