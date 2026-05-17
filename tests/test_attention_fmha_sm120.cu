@@ -79,6 +79,25 @@ protected:
         }
     }
 
+    // RAII guard for the cluster opt-in flag. Default is OFF (no_fmha_cluster=true)
+    // post 2026-05-17 A/B refute; ClusterPath* tests need it ON to exercise
+    // the cluster kernel. Restores the previous value on destruction so a
+    // failing test doesn't leak state into the next.
+    struct ClusterEnableGuard {
+        bool prev;
+        ClusterEnableGuard() {
+            prev = RuntimeConfig::current().attention.no_fmha_cluster;
+            RuntimeConfig cfg = RuntimeConfig::current();
+            cfg.attention.no_fmha_cluster = false;
+            RuntimeConfig::install(cfg);
+        }
+        ~ClusterEnableGuard() {
+            RuntimeConfig cfg = RuntimeConfig::current();
+            cfg.attention.no_fmha_cluster = prev;
+            RuntimeConfig::install(cfg);
+        }
+    };
+
     void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sliding_window = 0,
                   float softcap = 0.0f, float tol = 1e-2f) {
         if (sm_ < 90) {
@@ -228,45 +247,55 @@ TEST_F(FmhaSm120Test, DispatchSelectsSm120FMHA) {
 //   - head_dim ∈ {64,96,128,256}
 //   - seq_kv ≥ 8 * CL_Bkv = 512  (short-prompt sync-barrier gate)
 //
-// These tests exercise the GQA fan-out for each supported ratio and
-// head_dim, and verify bit-equivalence vs the CPU reference and vs the
-// legacy per-head kernel (the latter via attention.no_fmha_cluster).
+// Cluster is DISABLED by default since 2026-05-17 (A/B refute), so each
+// ClusterPath* test opts in via ClusterEnableGuard before dispatching.
+// The guard restores the previous flag on test exit so a failing case
+// doesn't leak state into the next.
 
 TEST_F(FmhaSm120Test, ClusterPathGQA2Hd128) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 4, 2, 128, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathGQA4Hd128) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 8, 2, 128, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathGQA8Hd128) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 16, 2, 128, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathHd64) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 8, 2, 64, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathHd96) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 8, 2, 96, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathHd256) {
+    ClusterEnableGuard g;
     run_test(1, 64, 512, 4, 2, 256, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathLongPrompt) {
     // 8 KV tiles × 64 = 512 KV tokens — exactly the gate threshold; the
     // longer 1024 form exercises the prefetch-of-K[j+1] branch repeatedly.
+    ClusterEnableGuard g;
     run_test(1, 128, 1024, 8, 2, 128, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathSlidingWindow) {
+    ClusterEnableGuard g;
     run_test(1, 128, 1024, 4, 2, 128, true, /*sw=*/256, 0.0f, /*tol=*/2e-2f);
 }
 
 TEST_F(FmhaSm120Test, ClusterPathSoftcap) {
+    ClusterEnableGuard g;
     run_test(1, 128, 1024, 4, 2, 128, true, /*sw=*/0, /*softcap=*/50.0f, /*tol=*/2e-2f);
 }
 
@@ -280,6 +309,7 @@ TEST_F(FmhaSm120Test, ClusterPathNonAligned) {
     // kernel is bit-identical to the legacy per-head kernel on this shape
     // — see ClusterMatchesLegacyNonAligned below for proof — so a tight
     // CPU-ref comparison is testing FP16 rounding noise, not correctness.
+    ClusterEnableGuard g;
     run_test(1, 100, 520, 8, 2, 128, true, 0, 0.0f, /*tol=*/0.1f);
 }
 
@@ -321,6 +351,9 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacyNonAligned) {
     Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
     Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
 
+    // Restore previous flag on exit (default is OFF post 2026-05-17).
+    ClusterEnableGuard restore_on_exit;
+
     {
         RuntimeConfig cfg = RuntimeConfig::current();
         cfg.attention.no_fmha_cluster = false;
@@ -338,11 +371,6 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacyNonAligned) {
         Tensor Ol(d_o_legacy, QType::F16, 4, q_shape, true);
         ASSERT_TRUE(fmha_sm120_prefill(Qt, Kt, Vt, Ol, scale, true, 0, 0.0f, stream_));
         cudaStreamSynchronize(stream_);
-    }
-    {
-        RuntimeConfig cfg = RuntimeConfig::current();
-        cfg.attention.no_fmha_cluster = false;
-        RuntimeConfig::install(cfg);
     }
 
     std::vector<half> Oc(q_elems), Ol(q_elems);
@@ -373,7 +401,9 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacyNonAligned) {
 
 TEST_F(FmhaSm120Test, ClusterPathBypassedForShortKv) {
     // seq_kv < 512 → cluster gate rejects, legacy per-head kernel runs.
-    // Same correctness check, just verifies the dispatch fallback is sane.
+    // ClusterEnableGuard ensures the seq_kv gate is what rejects (not the
+    // default-off opt-out, which would short-circuit before reaching it).
+    ClusterEnableGuard g;
     run_test(1, 64, 256, 8, 2, 128, true, 0, 0.0f, /*tol=*/2e-2f);
 }
 
@@ -416,7 +446,10 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacy) {
     Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
     Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
 
-    // Cluster path — default config.
+    // Restore previous flag on exit (default is OFF post 2026-05-17).
+    ClusterEnableGuard restore_on_exit;
+
+    // Cluster path (explicit opt-in).
     {
         RuntimeConfig cfg = RuntimeConfig::current();
         cfg.attention.no_fmha_cluster = false;
@@ -426,7 +459,7 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacy) {
         ASSERT_TRUE(fmha_sm120_prefill(Qt, Kt, Vt, Oc, scale, true, 0, 0.0f, stream_));
         cudaStreamSynchronize(stream_);
     }
-    // Legacy per-head — same call, just with the cluster path opted out.
+    // Legacy per-head — same call, cluster opted out.
     {
         RuntimeConfig cfg = RuntimeConfig::current();
         cfg.attention.no_fmha_cluster = true;
@@ -435,12 +468,6 @@ TEST_F(FmhaSm120Test, ClusterMatchesLegacy) {
         Tensor Ol(d_o_legacy, QType::F16, 4, q_shape, true);
         ASSERT_TRUE(fmha_sm120_prefill(Qt, Kt, Vt, Ol, scale, true, 0, 0.0f, stream_));
         cudaStreamSynchronize(stream_);
-    }
-    // Restore default.
-    {
-        RuntimeConfig cfg = RuntimeConfig::current();
-        cfg.attention.no_fmha_cluster = false;
-        RuntimeConfig::install(cfg);
     }
 
     std::vector<half> Oc(q_elems), Ol(q_elems);
