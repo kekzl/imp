@@ -1,6 +1,8 @@
 #include "graph/gemm_kernel_registry.h"
 #include "compute/gemm.h"
 #include "core/tensor.h"
+#include "graph/executor.h"  // FP8CacheEntry
+#include "quant/fp8_quant.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -37,11 +39,176 @@ TEST_F(GemmKernelRegistryTest, Fp16KernelIsRegisteredAtStaticInit) {
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
-    // CUTLASS_NVFP4 is not registered yet — Slice 1 has only FP16.
+    // CUTLASS_NVFP4 is not registered yet — Slices 1+2 only cover FP16 + FP8.
     GemmStrategy unregistered{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/true};
     GemmKernelArgs args{};
     args.stream = stream_;
     EXPECT_EQ(reg.dispatch(unregistered, args), GemmDispatchResult::NoMatch);
+}
+
+// R5 Slice 2 — FP8 prefill kernel registered (M>1 only). With FP16 (2) +
+// FP8 prefill (1) we now expect at least 3 entries.
+TEST_F(GemmKernelRegistryTest, Fp8PrefillKernelIsRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 3u) << "FP16 (M==1/M>1) + FP8 (M>1) expected to be pre-registered";
+}
+
+// FP8 decode (M=1) strategy is intentionally NOT registered — decode uses
+// GEMV fast paths upstream, not this dispatch.
+TEST_F(GemmKernelRegistryTest, Fp8DecodeStrategyReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy decode{StorageTier::FP8, QType::F16, /*m_is_one=*/true};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(decode, args), GemmDispatchResult::NoMatch);
+}
+
+// FP8 kernel rejects loud when activation scratch is missing — refuses to
+// silently fall through to legacy.
+TEST_F(GemmKernelRegistryTest, Fp8KernelRejectsMissingScratch) {
+    constexpr int M = 4;
+    constexpr int N = 8;
+    constexpr int K = 16;
+
+    __half* d_input = nullptr;
+    int8_t* d_weight_fp8 = nullptr;
+    __half* d_out = nullptr;
+    float* d_w_scale = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp8, sizeof(int8_t) * N * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMalloc(&d_w_scale, sizeof(float));
+    cudaMemset(d_input, 0, sizeof(__half) * M * K);
+    cudaMemset(d_weight_fp8, 0, sizeof(int8_t) * N * K);
+    float h_w_scale = 1.0f;
+    cudaMemcpy(d_w_scale, &h_w_scale, sizeof(float), cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor out(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+    FP8CacheEntry entry{};
+    entry.weight = Tensor(d_weight_fp8, QType::FP8_E4M3, 2, w_shape, /*on_device=*/true);
+    entry.host_scale = 1.0f;
+    entry.d_scale = d_w_scale;
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out;
+    args.stream = stream_;
+    args.weight_payload = &entry;
+    // Deliberately leave fp8_act_buf / d_act_scale null — kernel must refuse.
+
+    GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_weight_fp8);
+    cudaFree(d_out);
+    cudaFree(d_w_scale);
+}
+
+// End-to-end correctness: registry FP8 dispatch produces the same output as
+// calling quantize_fp16_to_fp8_e4m3 + gemm_cublaslt directly. Mirrors the
+// FP16 parity test pattern.
+TEST_F(GemmKernelRegistryTest, Fp8RegistryDispatchMatchesDirectPath) {
+    constexpr int M = 8;
+    constexpr int N = 16;
+    constexpr int K = 32;
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    // Pre-quantize weight to FP8 once (matches the load-time flow that fills
+    // WeightCaches::fp8). Two copies so the direct + registry paths each get
+    // their own — the FP8 weight buffer is read-only post-quant, so sharing
+    // would also work, but separate buffers keep the two paths isolated.
+    void *d_weight_fp8 = nullptr, *d_weight_fp8_b = nullptr;
+    cudaMalloc(&d_weight_fp8, sizeof(int8_t) * N * K);
+    cudaMalloc(&d_weight_fp8_b, sizeof(int8_t) * N * K);
+    float* d_w_scale = nullptr;
+    cudaMalloc(&d_w_scale, sizeof(float));
+    Tensor weight_fp8_a(d_weight_fp8, QType::FP8_E4M3, 2, w_shape, /*on_device=*/true);
+    quantize_fp16_to_fp8_e4m3(weight_fp16, weight_fp8_a, d_w_scale, stream_);
+    cudaMemcpyAsync(d_weight_fp8_b, d_weight_fp8, sizeof(int8_t) * N * K, cudaMemcpyDeviceToDevice, stream_);
+
+    // FP8 activation scratch — shared shape with the input.
+    void* d_fp8_act = nullptr;
+    float *d_act_scale = nullptr, *d_block_maxes = nullptr, *d_absmax = nullptr;
+    cudaMalloc(&d_fp8_act, sizeof(int8_t) * M * K);
+    cudaMalloc(&d_act_scale, sizeof(float));
+    cudaMalloc(&d_block_maxes, sizeof(float) * 256);
+    cudaMalloc(&d_absmax, sizeof(float));
+
+    // Path 1: direct (mirror executor_kernels.cu legacy branch verbatim).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    Tensor out_direct(d_out_direct, QType::F16, 2, out_shape, /*on_device=*/true);
+    Tensor fp8_act_direct(d_fp8_act, QType::FP8_E4M3, 2, in_shape, /*on_device=*/true);
+    quantize_fp16_to_fp8_e4m3(input, fp8_act_direct, d_act_scale, stream_, d_block_maxes, d_absmax, 256);
+    gemm_cublaslt(fp8_act_direct, weight_fp8_a, out_direct, 1.0f, 0.0f, d_act_scale, d_w_scale, stream_);
+
+    // Path 2: registry dispatch through the FP8 kernel adapter.
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    FP8CacheEntry entry{};
+    entry.weight = Tensor(d_weight_fp8_b, QType::FP8_E4M3, 2, w_shape, /*on_device=*/true);
+    entry.host_scale = 1.0f;
+    entry.d_scale = d_w_scale;
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &entry;
+    args.fp8_act_buf = d_fp8_act;
+    args.d_act_scale = d_act_scale;
+    args.d_fp8_block_maxes = d_block_maxes;
+    args.d_fp8_absmax = d_absmax;
+    args.fp8_max_grid = 256;
+    GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths run the identical quant+cuBLASLt sequence → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
+    cudaFree(d_weight_fp8);
+    cudaFree(d_weight_fp8_b);
+    cudaFree(d_w_scale);
+    cudaFree(d_fp8_act);
+    cudaFree(d_act_scale);
+    cudaFree(d_block_maxes);
+    cudaFree(d_absmax);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
 }
 
 // End-to-end correctness: register-then-dispatch produces the same output
