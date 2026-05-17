@@ -1521,11 +1521,55 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 // Dequant MXFP4 → FP16 for decode (only when MXFP4 GEMV not available).
                 // Single bulk allocation to avoid CUDA heap fragmentation.
+                //
+                // Phase A2 (`docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`):
+                // when attention.mxfp4_fp16_cache_policy == "pruned", skip
+                // tensor slots that aren't read on the dispatch hot path —
+                // MoE expert_*_packed (consumed only by executor_forward_moe.cu's
+                // pre-cached FP16 path, which the MXFP4 batch-dequant route
+                // bypasses) and the LM head out_proj_ (routed through
+                // generic-dequant). For Qwen3.5-27B MXFP4 this shrinks
+                // the FP16 fallback from ~48 GiB to ~8-12 GiB and unblocks
+                // load on 32 GiB VRAM.
+                std::unordered_set<const void*> pruned_skip_ptrs;
+                const bool pruned_policy =
+                    (RuntimeConfig::current().attention.mxfp4_fp16_cache_policy == "pruned");
+                if (pruned_policy) {
+                    for (int li = 0; li < cfg.n_layers; ++li) {
+                        const auto& L = model_->layer(li);
+                        if (L.expert_gate_packed.data)
+                            pruned_skip_ptrs.insert(L.expert_gate_packed.data);
+                        if (L.expert_up_packed.data)
+                            pruned_skip_ptrs.insert(L.expert_up_packed.data);
+                        if (L.expert_down_packed.data)
+                            pruned_skip_ptrs.insert(L.expert_down_packed.data);
+                    }
+                    if (model_->output_proj().data)
+                        pruned_skip_ptrs.insert(model_->output_proj().data);
+                }
+                size_t pruned_skipped_bytes = 0;
+                int pruned_skipped_count = 0;
+
                 size_t fp16_total = 0;
                 if (!mxfp4_gemv_available) {
-                    for (auto& [p, m] : wcache_.cutlass_mxfp4)
-                        if (!wcache_.fp16.count(p))
-                            fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
+                    for (auto& [p, m] : wcache_.cutlass_mxfp4) {
+                        if (wcache_.fp16.count(p))
+                            continue;
+                        size_t b = static_cast<size_t>(m.N) * m.K * sizeof(half);
+                        if (pruned_policy && pruned_skip_ptrs.count(p)) {
+                            pruned_skipped_bytes += b;
+                            pruned_skipped_count++;
+                            continue;
+                        }
+                        fp16_total += b;
+                    }
+                    if (pruned_policy && pruned_skipped_count > 0) {
+                        IMP_LOG_INFO(
+                            "MXFP4 FP16 cache pruning: skipping %d MoE/LM-head tensors "
+                            "(%.2f GiB saved)",
+                            pruned_skipped_count,
+                            pruned_skipped_bytes / (1024.0 * 1024.0 * 1024.0));
+                    }
                 }
 
                 void* d_fp16_bulk = nullptr;
@@ -1585,6 +1629,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     size_t offset = 0;
                     for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) {
                         if (wcache_.fp16.count(ptr))
+                            continue;
+                        // Honor the same pruning filter the fp16_total compute
+                        // pass used; otherwise the offset accounting drifts.
+                        if (pruned_policy && pruned_skip_ptrs.count(ptr))
                             continue;
                         size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
                         void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
