@@ -82,6 +82,18 @@ struct RuntimeConfig {
         std::string fmha_sm120 = "auto";
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
+        // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
+        // for every MXFP4 tensor. "pruned" skips MoE expert_*_packed and
+        // LM head (out_proj_) — those slots are either not read on the
+        // dispatch hot path (MoE expert FP16 cache is only consumed by
+        // executor_forward_moe.cu's pre-cached FP16 fallback, which is
+        // bypassed by the more efficient batch-dequant path for MXFP4)
+        // or routed through generic-dequant (LM head). Pruning is the
+        // Phase A1+A2 path from
+        // docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md —
+        // unlocks Qwen3.5-27B MXFP4 load on 32 GiB VRAM by shrinking the
+        // ~48 GiB FP16 fallback to ~8-12 GiB.
+        std::string mxfp4_fp16_cache_policy = "legacy";
         std::string fmha_blockscale = "auto";
         bool naive = false;
         bool no_cublas = false;
