@@ -539,8 +539,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             char* gathered_base    = static_cast<char*>(moe_.gathered.data);
                             char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
                             char* expert_up_base   = static_cast<char*>(moe_.expert_up.data);
-                            char* expert_swiglu_base =
-                                static_cast<char*>(moe_.expert_swiglu.data);
                             char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
                             // SFA buffer prep — shared by both gate/up quant
@@ -688,8 +686,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                      da_cache.d_down_SFB_ptrs,
                                                      da_cache.d_down_alpha,
                                                      expert_down_base, eff, d);
-                                (void)expert_swiglu_base;  // legacy fallback path still
-                                                            // uses moe_.expert_swiglu.data
                             }
                             if (ok) {
                                 device_args_done = true;
@@ -2152,9 +2148,6 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
     cudaStreamSynchronize(stream);
 
     for (int t = 0; t < n; t++) {
-        const int32_t* tok_experts_dev = static_cast<const int32_t*>(routing.expert_indices.data) +
-                                         static_cast<int64_t>(t) * top_k;
-        (void)tok_experts_dev;  // device pointer kept around for clarity; reads come from host array
         const float* tok_weights = static_cast<const float*>(routing.expert_weights.data) +
                                    static_cast<int64_t>(t) * top_k;
 
