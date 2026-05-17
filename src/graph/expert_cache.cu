@@ -131,6 +131,10 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         // Canonical packed_ptr per (layer, proj) — Phase 4 needs this to
         // rebuild cache keys that match dispatch's get_or_load calls.
         host_packed_ptrs_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, nullptr);
+        // Per-(layer, proj) expert byte size — Phase 5 prereq. Avoids
+        // overflowing pinned host regions when projections have different
+        // sizes (e.g. Qwen3.6 gate < down).
+        host_expert_bytes_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, 0);
     }
 
     IMP_LOG_INFO("Expert LRU cache: %d layers × %d slots × %.2f MiB = %.2f MiB GPU memory%s%s",
@@ -207,6 +211,13 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
         if (pp_off < host_packed_ptrs_.size())
             host_packed_ptrs_[pp_off] = key.packed_ptr;
     }
+    // Stamp the per-(layer, proj) expert byte size — prefetch must use this
+    // (not slot_size_) to avoid reading past the pinned host region.
+    if (!host_expert_bytes_.empty()) {
+        size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
+        if (pp_off < host_expert_bytes_.size() && expert_bytes > 0)
+            host_expert_bytes_[pp_off] = expert_bytes;
+    }
 
     // Phase 4: record the access into the per-layer history ring (regardless
     // of hit/miss). The prefetcher consults this on subsequent layers.
@@ -274,7 +285,7 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
     return slot.gpu_ptr;
 }
 
-int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes) {
+int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback) {
     if (!prefetch_stream_ || top_k <= 0 || layer < 0 || layer >= n_layers_)
         return 0;
     if (per_layer_history_.empty() || history_capacity_ <= 0)
@@ -363,7 +374,16 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes) {
 
         const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
         Slot& slot = slots_[flat];
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes,
+        // Prefer the per-(layer, proj) byte size — using slot_size_ as the
+        // fallback overflows for smaller projections and produces a CUDA
+        // "invalid argument" on pinned-but-narrower host regions.
+        size_t copy_bytes = expert_bytes_fallback;
+        if (!host_expert_bytes_.empty()) {
+            size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj;
+            if (pp_off < host_expert_bytes_.size() && host_expert_bytes_[pp_off] > 0)
+                copy_bytes = host_expert_bytes_[pp_off];
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, copy_bytes,
                                            cudaMemcpyHostToDevice, prefetch_stream_));
         slot.key = key;
         slot.occupied = true;
@@ -489,6 +509,7 @@ void ExpertLRUCache::destroy() {
     per_layer_lru_.clear();
     host_expert_addrs_.clear();
     host_packed_ptrs_.clear();
+    host_expert_bytes_.clear();
     per_layer_history_.clear();
     prefetch_issued_.clear();
     n_slots_ = 0;

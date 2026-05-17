@@ -133,6 +133,14 @@ struct ExpertLRUCache {
     // populated on first get_or_load per (layer, proj).
     std::vector<const void*> host_packed_ptrs_;
 
+    // Phase 5: per-(layer, proj) expert byte size. The prefetch path can't
+    // reuse the global slot_size_ (max across projs) because smaller
+    // projections — e.g. Qwen3.6 gate @ 144 MiB vs down @ 176 MiB — would
+    // overflow the pinned host region during cudaMemcpyAsync and fail with
+    // "invalid argument". Populated on first get_or_load per (layer, proj)
+    // when the caller passes the actual per-expert byte size.
+    std::vector<size_t> host_expert_bytes_;
+
     int64_t hits_ = 0;
     int64_t misses_ = 0;
 
