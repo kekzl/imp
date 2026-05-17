@@ -3,6 +3,8 @@
 #include "core/tensor.h"
 #include "graph/executor.h"  // FP8CacheEntry
 #include "quant/fp8_quant.h"
+#include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -39,7 +41,7 @@ TEST_F(GemmKernelRegistryTest, Fp16KernelIsRegisteredAtStaticInit) {
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
-    // CUTLASS_NVFP4 is not registered yet — Slices 1+2 only cover FP16 + FP8.
+    // CUTLASS_NVFP4 is not registered yet — Slices 1+2+3 cover FP16, FP8, NVFP4 GEMV.
     GemmStrategy unregistered{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/true};
     GemmKernelArgs args{};
     args.stream = stream_;
@@ -207,6 +209,105 @@ TEST_F(GemmKernelRegistryTest, Fp8RegistryDispatchMatchesDirectPath) {
     cudaFree(d_act_scale);
     cudaFree(d_block_maxes);
     cudaFree(d_absmax);
+    cudaFree(d_out_direct);
+    cudaFree(d_out_registry);
+}
+
+// R5 Slice 3 — NVFP4 GEMV (M==1 decode) kernel registered. With FP16 (2) +
+// FP8 prefill (1) + NVFP4 GEMV (1) we now expect at least 4 entries.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemvKernelIsRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 4u) << "FP16 (M==1/M>1) + FP8 (M>1) + NVFP4 GEMV (M==1) expected pre-registered";
+}
+
+// NVFP4 GEMM (M>1) strategy is intentionally NOT registered yet — that is
+// Slice 4. The dispatch site still routes M>1 NVFP4 through legacy.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemmStrategyReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy gemm_strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(gemm_strat, args), GemmDispatchResult::NoMatch);
+}
+
+// The NVFP4 GEMV adapter registers under (tier=NVFP4, qtype=F16,
+// m_is_one=true) only. Asking the registry for an off-axis weight_qtype
+// (e.g. BF16) must return NoMatch so the dispatch site falls back to
+// legacy — no silent re-routing to the wrong kernel.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemvWrongQtypeReturnsNoMatch) {
+    const auto& reg = GemmKernelRegistry::instance();
+    GemmStrategy bf16{StorageTier::NVFP4, QType::BF16, /*m_is_one=*/true};
+    GemmKernelArgs args{};
+    args.stream = stream_;
+    EXPECT_EQ(reg.dispatch(bf16, args), GemmDispatchResult::NoMatch);
+}
+
+// End-to-end correctness: registry NVFP4 GEMV dispatch produces the same
+// output as calling gemv_nvfp4_kpar directly. Mirrors the FP8 parity test
+// pattern — pre-quantize an FP16 weight to NVFP4 once, run both paths,
+// compare bit-identical (both paths invoke the same GEMV backend).
+TEST_F(GemmKernelRegistryTest, Nvfp4GemvRegistryDispatchMatchesDirectPath) {
+    constexpr int M = 1;
+    constexpr int N = 16;
+    constexpr int K = 64;  // multiple of micro-block (16) and packed alignment.
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    // Pre-quantize the FP16 weight to NVFP4 once. Both paths read from the
+    // same NvFP4QuantResult — the GEMV is read-only.
+    NvFP4QuantResult nv4{};
+    quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
+
+    // Path 1: direct gemv_nvfp4_kpar (mirrors executor_kernels.cu:2137-2139).
+    __half* d_out_direct = nullptr;
+    cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    gemv_nvfp4_kpar(nv4, reinterpret_cast<const half*>(d_input), reinterpret_cast<half*>(d_out_direct),
+                    static_cast<int>(nv4.N), static_cast<int>(nv4.K), stream_);
+
+    // Path 2: registry dispatch through the NVFP4 GEMV kernel adapter.
+    __half* d_out_registry = nullptr;
+    cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out_registry;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &nv4;
+    GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
+    cudaMemcpy(h_out_direct.data(), d_out_direct, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_registry.data(), d_out_registry, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    // Both paths invoke gemv_nvfp4_kpar with identical args → bit-identical.
+    for (int i = 0; i < M * N; ++i) {
+        EXPECT_EQ(__half_as_ushort(h_out_direct[i]), __half_as_ushort(h_out_registry[i]))
+            << "Mismatch at i=" << i << " (direct=" << __half2float(h_out_direct[i])
+            << " registry=" << __half2float(h_out_registry[i]) << ")";
+    }
+
+    free_nvfp4_result(nv4);
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
     cudaFree(d_out_direct);
     cudaFree(d_out_registry);
 }
