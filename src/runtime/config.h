@@ -116,6 +116,12 @@ struct RuntimeConfig {
         // CI / regression diagnosis. Has a meaningful cost (D2H readback of
         // ~120 KiB per cache update) — never enable in perf runs.
         bool expert_cache_debug_parity = false;
+        // Phase 4 (async prefetch): at the start of layer L, issue async
+        // H2D for up to this many of layer L+1's most-recent (proj, expert)
+        // pairs that aren't currently cached. 0 disables the prefetcher
+        // (default — safety first, Phase 4 perf gains depend on workload
+        // and need per-model measurement). Sensible values: 3..16.
+        int prefetch_top_k = 0;
         bool zero_workspace = false;
         bool no_shared_mlp = false;
         bool no_shexp_gate = false;
