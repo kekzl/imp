@@ -83,15 +83,6 @@ services:
       imp-server:
         condition: service_healthy
 
-  imp-pull:
-    image: python:3.13-slim
-    volumes:
-      - ${IMP_MODELS_DIR:-./models}:/models
-      - .:/app
-    working_dir: /app/scripts
-    entrypoint: ["/bin/sh", "-c", "pip install -q huggingface_hub && python3 imp-pull.py \"$@\"", "--"]
-    profiles: ["tools"]
-
   prometheus:
     image: prom/prometheus:latest
     restart: unless-stopped

@@ -1,5 +1,8 @@
 #!/bin/bash
-# imp — Helper script for model management and Docker Compose control
+# imp — Helper script for Docker Compose control + selecting the active model
+# from already-staged .gguf files. Model downloads are not handled here —
+# stage files into ./models/ manually (e.g. `git clone https://huggingface.co/<repo>`
+# or the HF hub CLI on another machine + copy across).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,11 +14,8 @@ usage() {
     cat <<'EOF'
 Usage: ./imp <command> [args]
 
-Model management:
-  list                  Show all models and download status
-  pull <id>             Download a model from HuggingFace
-  delete <id>           Delete a downloaded model
-  use <id>              Set model in .env and restart imp container
+Model selection (stage files into ./models/ manually first):
+  use <id>              Set IMP_MODEL in .env and restart imp container
 
 Docker control:
   logs                  Show imp-server container logs (follow)
@@ -24,25 +24,6 @@ Docker control:
   down                  Stop all services
   build                 Build the imp Docker image
 EOF
-}
-
-ensure_models_dir() {
-    mkdir -p "$SCRIPT_DIR/models"
-}
-
-cmd_list() {
-    ensure_models_dir
-    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull list
-}
-
-cmd_pull() {
-    ensure_models_dir
-    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull pull "$1"
-}
-
-cmd_delete() {
-    ensure_models_dir
-    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull delete "$1"
 }
 
 cmd_use() {
@@ -69,7 +50,9 @@ cmd_use() {
 
     if [ -z "$model_file" ]; then
         echo "Error: No .gguf file matching '$model_id' found in models/"
-        echo "Run: ./imp pull $model_id"
+        echo "Stage the .gguf into ./models/ first (e.g. git clone the HF repo"
+        echo "or copy the file from your HF cache) and rerun:"
+        echo "  ls models/"
         exit 1
     fi
 
@@ -112,9 +95,6 @@ if [ $# -lt 1 ]; then
 fi
 
 case "$1" in
-    list)       cmd_list ;;
-    pull)       [ $# -lt 2 ] && { echo "Usage: ./imp pull <model-id>"; exit 1; }; cmd_pull "$2" ;;
-    delete)     [ $# -lt 2 ] && { echo "Usage: ./imp delete <model-id>"; exit 1; }; cmd_delete "$2" ;;
     use)        [ $# -lt 2 ] && { echo "Usage: ./imp use <model-id>"; exit 1; }; cmd_use "$2" ;;
     logs)       cmd_logs ;;
     status)     cmd_status ;;
