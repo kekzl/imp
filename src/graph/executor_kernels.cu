@@ -2067,7 +2067,6 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
 // body inside the translation unit; the public API is the GemmContext-based
 // overload below, which forwards into this helper.
 //
-// - Q4_0/Q4_1: fused quant_gemm_int4 with packed nibbles + scales.
 // - Q8_0/Q6_K (with dequant_scratch): dequant into scratch, then cuBLAS gemm.
 // - NONE/FP16/BF16: standard cuBLAS gemm.
 // - dp4a MMVQ path (M=1 + q8_1_buf/d8_buf): pre-quantize input to Q8_1, dot
@@ -2253,17 +2252,6 @@ static void gemm_dispatch_impl(
         quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8_1_buf, d8_buf, K, stream);
         dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf, static_cast<half*>(output.data), N, K,
                            stream);
-    } else if (qtype == QType::Q4_1 && fp16_cache != nullptr) {
-        // Prefer pre-dequantized FP16 cache (P3 optimization)
-        auto it = fp16_cache->find(weight.data);
-        if (it != fp16_cache->end()) {
-            gemm(input, it->second, output, 1.0f, beta, stream);
-        } else {
-            quant_gemm_int4(input, weight, scales, output, stream);
-        }
-    } else if (qtype == QType::Q4_1) {
-        // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
-        quant_gemm_int4(input, weight, scales, output, stream);
     } else if (input.shape[0] == 1 && input.qtype == QType::F16 && dequant_scratch != nullptr &&
                qtype == QType::Q6_K) {
         // Fallback: Fused Q6_K GEMV (FP16 dequant path)
@@ -2375,9 +2363,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     // (NVFP4 decode GEMV), 4 (NVFP4 prefill GEMM dequant), 5 (CUTLASS_NVFP4
     // prefill GEMM, preferred native FP4 path), 6 (MXFP4 native GGUF — GEMV +
     // dequant→cuBLAS GEMM) and 7 (GGUF small-M mmvq + dp4a — 8 qtypes) are
-    // wired; the M>1 dequant+cuBLAS large-M fallback and Q4_1 quant_gemm_int4
-    // still fall through to the legacy gemm_dispatch_impl below (slice 8
-    // retires the legacy switch).
+    // wired; the M>1 dequant+cuBLAS large-M fallback still falls through to
+    // the legacy gemm_dispatch_impl below (slice 8.5 retires it).
     //
     // Tier order mirrors gemm_dispatch_impl precedence: MXFP4 GGUF is the
     // top-priority branch in legacy (executor_kernels.cu:2085-2113) and is
