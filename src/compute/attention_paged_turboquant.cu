@@ -3,6 +3,7 @@
 #include "compute/attention.h"
 #include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -40,7 +41,7 @@ __device__ __forceinline__ int tq_unpack_int4_hi(uint8_t packed) {
 // QJL correction weight (from TurboQuant paper)
 static constexpr float kQJLLambda = 0.1f;
 
-template <int HEAD_DIM, bool USE_MXFP4 = false>
+template <int HEAD_DIM, bool USE_MXFP4 = false, bool SKIP_QJL = false>
 __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kernel(
     const half* __restrict__ Q,               // [batch, n_heads, HEAD_DIM]
     const uint8_t* __restrict__ K_dir_cache,  // INT4 or FP4 E2M1 packed normalized directions
@@ -102,38 +103,40 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq);
     float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));  // align to 4
 
-    // Initialize Q sketch to zero
-    for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
-        q_sketch[i] = 0;
-    __syncthreads();
+    if constexpr (!SKIP_QJL) {
+        // Initialize Q sketch to zero
+        for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
+            q_sketch[i] = 0;
+        __syncthreads();
 
-    // Warp-cooperative Q sketch: each warp computes one sketch row
-    {
-        const int bytes_per_qjl_row = HEAD_DIM / 8;
-        for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
-            const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
+        // Warp-cooperative Q sketch: each warp computes one sketch row
+        {
+            const int bytes_per_qjl_row = HEAD_DIM / 8;
+            for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
 
-            // Each lane computes partial dot over ELEMS elements it owns
-            float partial_dot = 0.0f;
+                // Each lane computes partial dot over ELEMS elements it owns
+                float partial_dot = 0.0f;
 #pragma unroll
-            for (int i = 0; i < ELEMS; i++) {
-                int d = lane_id * ELEMS + i;
-                uint8_t r_byte = __ldg(&R_row[d / 8]);
-                float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
-                partial_dot += r_sign * q_reg[i];
-            }
-            float dot = warp_reduce_sum(partial_dot);
+                for (int i = 0; i < ELEMS; i++) {
+                    int d = lane_id * ELEMS + i;
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
+                    partial_dot += r_sign * q_reg[i];
+                }
+                float dot = warp_reduce_sum(partial_dot);
 
-            // Lane 0 writes the bit — atomicOr still needed across warps sharing a word
-            if (lane_id == 0 && dot >= 0.0f) {
-                int byte_idx = sr / 8;
-                int bit_idx = sr % 8;
-                atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
-                         1u << (bit_idx + 8 * (byte_idx & 3u)));
+                // Lane 0 writes the bit — atomicOr still needed across warps sharing a word
+                if (lane_id == 0 && dot >= 0.0f) {
+                    int byte_idx = sr / 8;
+                    int bit_idx = sr % 8;
+                    atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
+                             1u << (bit_idx + 8 * (byte_idx & 3u)));
+                }
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_head_bytes = HEAD_DIM / 2;  // bytes per head per token (INT4/FP4 packed)
@@ -230,25 +233,30 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // QJL correction: warp-parallel XNOR+popcount
-            float dot_qjl;
-            {
-                const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
-                const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
-                const int n_words = sketch_bytes / 4;
-                int local_match = 0;
-                for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
-                    uint32_t k_word;
-                    memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
-                    local_match += __popc(~(q_sketch32[sb] ^ k_word));
+            float dot;
+            if constexpr (SKIP_QJL) {
+                dot = dot_polar;
+            } else {
+                // QJL correction: warp-parallel XNOR+popcount
+                float dot_qjl;
+                {
+                    const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
+                    const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
+                    const int n_words = sketch_bytes / 4;
+                    int local_match = 0;
+                    for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
+                        uint32_t k_word;
+                        memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
+                        local_match += __popc(~(q_sketch32[sb] ^ k_word));
+                    }
+                    // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                    int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
+                    dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
                 }
-                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
-                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
-                dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
-            }
 
-            // Combined estimate with QJL correction
-            float dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+                // Combined estimate with QJL correction
+                dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+            }
 
             dot *= scale;
             dot = apply_softcap(dot, softcap);
@@ -273,6 +281,11 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
         }
     }
 
+    // Guard smem reuse: under SKIP_QJL=true the Q-sketch precompute (and
+    // its trailing __syncthreads) is compiled out; this barrier brings the
+    // decode kernel into parity with the splitk variant before the reduce
+    // overwrites the same smem region.
+    __syncthreads();
     // Cross-warp reduction
     crosswarp_reduce_and_write<HEAD_DIM>(smem_red_base, m_w, l_w, o_reg, warp_id, lane_id, lane_offset, O,
                                          batch_idx, n_heads, head_idx);
@@ -282,7 +295,7 @@ __global__ void __launch_bounds__(256, 2) paged_attention_decode_turboquant_kern
 // Split-K Phase 1: TurboQuant variant
 // ---------------------------------------------------------------------------
 
-template <int HEAD_DIM, bool USE_MXFP4 = false>
+template <int HEAD_DIM, bool USE_MXFP4 = false, bool SKIP_QJL = false>
 __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_dir_cache, const uint8_t* __restrict__ V_cache,
     const half* __restrict__ K_norms, const half* __restrict__ V_scales,
@@ -335,33 +348,35 @@ __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kern
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq_sk);
     float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
 
-    for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
-        q_sketch[i] = 0;
-    __syncthreads();
+    if constexpr (!SKIP_QJL) {
+        for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
+            q_sketch[i] = 0;
+        __syncthreads();
 
-    // Warp-cooperative Q sketch: each warp computes one sketch row
-    {
-        const int bytes_per_qjl_row = HEAD_DIM / 8;
-        for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
-            const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
-            float partial_dot = 0.0f;
+        // Warp-cooperative Q sketch: each warp computes one sketch row
+        {
+            const int bytes_per_qjl_row = HEAD_DIM / 8;
+            for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
+                float partial_dot = 0.0f;
 #pragma unroll
-            for (int i = 0; i < ELEMS; i++) {
-                int d = lane_id * ELEMS + i;
-                uint8_t r_byte = __ldg(&R_row[d / 8]);
-                float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
-                partial_dot += r_sign * q_reg[i];
-            }
-            float dot = warp_reduce_sum(partial_dot);
-            if (lane_id == 0 && dot >= 0.0f) {
-                int byte_idx = sr / 8;
-                int bit_idx = sr % 8;
-                atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
-                         1u << (bit_idx + 8 * (byte_idx & 3u)));
+                for (int i = 0; i < ELEMS; i++) {
+                    int d = lane_id * ELEMS + i;
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    float r_sign = (r_byte & (1u << (d % 8))) ? 1.0f : -1.0f;
+                    partial_dot += r_sign * q_reg[i];
+                }
+                float dot = warp_reduce_sum(partial_dot);
+                if (lane_id == 0 && dot >= 0.0f) {
+                    int byte_idx = sr / 8;
+                    int bit_idx = sr % 8;
+                    atomicOr(reinterpret_cast<unsigned int*>(&q_sketch[byte_idx & ~3u]),
+                             1u << (bit_idx + 8 * (byte_idx & 3u)));
+                }
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_head_bytes = HEAD_DIM / 2;
@@ -465,24 +480,29 @@ __global__ void __launch_bounds__(256, 2) paged_attention_splitk_turboquant_kern
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // QJL correction: warp-parallel XNOR+popcount
-            float dot_qjl;
-            {
-                const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
-                const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
-                const int n_words = sketch_bytes / 4;
-                int local_match = 0;
-                for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
-                    uint32_t k_word;
-                    memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
-                    local_match += __popc(~(q_sketch32[sb] ^ k_word));
+            float dot;
+            if constexpr (SKIP_QJL) {
+                dot = dot_polar;
+            } else {
+                // QJL correction: warp-parallel XNOR+popcount
+                float dot_qjl;
+                {
+                    const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
+                    const uint32_t* q_sketch32 = reinterpret_cast<const uint32_t*>(q_sketch);
+                    const int n_words = sketch_bytes / 4;
+                    int local_match = 0;
+                    for (int sb = lane_id; sb < n_words; sb += WARP_SIZE) {
+                        uint32_t k_word;
+                        memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
+                        local_match += __popc(~(q_sketch32[sb] ^ k_word));
+                    }
+                    // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                    int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
+                    dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
                 }
-                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
-                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
-                dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) * inv_sketch_dim;
-            }
 
-            float dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+                dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
+            }
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
@@ -543,12 +563,50 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
                                            &scratch_ptr);
 
     const bool use_mxfp4 = (K_mscales != nullptr);
+    const bool skip_qjl = RuntimeConfig::current().diagnostics.tq_skip_qjl;
 
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
+        if (skip_qjl) {
+// Macro for dispatching split-K kernel with SKIP_QJL=true
+#define LAUNCH_SPLITK_TQ_SKIP(HD, MX)                                                                       \
+    paged_attention_splitk_turboquant_kernel<HD, MX, /*SKIP_QJL=*/true><<<grid1, block1, smem_bytes,        \
+                                                                           stream>>>(                        \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),          \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_norms, V_scales, K_sketches, qjl_matrix,          \
+        K_mscales, partial, block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, \
+        sketch_dim, max_num_blocks, num_splits, sliding_window, softcap)
+
+#define DISPATCH_SPLITK_TQ_SKIP(HD)       \
+    if (use_mxfp4) {                      \
+        LAUNCH_SPLITK_TQ_SKIP(HD, true);  \
+    } else {                              \
+        LAUNCH_SPLITK_TQ_SKIP(HD, false); \
+    }
+
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_SPLITK_TQ_SKIP(64);
+                    break;
+                case 96:
+                    DISPATCH_SPLITK_TQ_SKIP(96);
+                    break;
+                case 128:
+                    DISPATCH_SPLITK_TQ_SKIP(128);
+                    break;
+                case 256:
+                    DISPATCH_SPLITK_TQ_SKIP(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
+#undef DISPATCH_SPLITK_TQ_SKIP
+#undef LAUNCH_SPLITK_TQ_SKIP
+        } else {
 // Macro for dispatching split-K kernel with optional MXFP4 template
 #define LAUNCH_SPLITK_TQ(HD, MX)                                                                            \
     paged_attention_splitk_turboquant_kernel<HD, MX><<<grid1, block1, smem_bytes, stream>>>(                \
@@ -564,25 +622,26 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         LAUNCH_SPLITK_TQ(HD, false); \
     }
 
-        switch (head_dim) {
-            case 64:
-                DISPATCH_SPLITK_TQ(64);
-                break;
-            case 96:
-                DISPATCH_SPLITK_TQ(96);
-                break;
-            case 128:
-                DISPATCH_SPLITK_TQ(128);
-                break;
-            case 256:
-                DISPATCH_SPLITK_TQ(256);
-                break;
-            default:
-                IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
-                return;
-        }
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_SPLITK_TQ(64);
+                    break;
+                case 96:
+                    DISPATCH_SPLITK_TQ(96);
+                    break;
+                case 128:
+                    DISPATCH_SPLITK_TQ(128);
+                    break;
+                case 256:
+                    DISPATCH_SPLITK_TQ(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
 #undef DISPATCH_SPLITK_TQ
 #undef LAUNCH_SPLITK_TQ
+        }
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
                                       num_splits, stream);
@@ -590,6 +649,42 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
+        if (skip_qjl) {
+#define LAUNCH_TQ_SKIP(HD, MX)                                                                       \
+    paged_attention_decode_turboquant_kernel<HD, MX, /*SKIP_QJL=*/true><<<grid, block, smem_bytes,   \
+                                                                           stream>>>(                 \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),   \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_norms, V_scales, K_sketches, qjl_matrix,   \
+        K_mscales, reinterpret_cast<half*>(O.data), block_tables, context_lens, batch_size, n_heads, \
+        n_kv_heads, block_size, scale, sketch_dim, max_context_len, max_num_blocks, sliding_window, softcap)
+
+#define DISPATCH_TQ_SKIP(HD)       \
+    if (use_mxfp4) {               \
+        LAUNCH_TQ_SKIP(HD, true);  \
+    } else {                       \
+        LAUNCH_TQ_SKIP(HD, false); \
+    }
+
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_TQ_SKIP(64);
+                    break;
+                case 96:
+                    DISPATCH_TQ_SKIP(96);
+                    break;
+                case 128:
+                    DISPATCH_TQ_SKIP(128);
+                    break;
+                case 256:
+                    DISPATCH_TQ_SKIP(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
+#undef DISPATCH_TQ_SKIP
+#undef LAUNCH_TQ_SKIP
+        } else {
 #define LAUNCH_TQ(HD, MX)                                                                            \
     paged_attention_decode_turboquant_kernel<HD, MX><<<grid, block, smem_bytes, stream>>>(           \
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_dir_cache.data),   \
@@ -604,25 +699,26 @@ void paged_attention_decode_turboquant(const Tensor& Q, const Tensor& K_dir_cach
         LAUNCH_TQ(HD, false); \
     }
 
-        switch (head_dim) {
-            case 64:
-                DISPATCH_TQ(64);
-                break;
-            case 96:
-                DISPATCH_TQ(96);
-                break;
-            case 128:
-                DISPATCH_TQ(128);
-                break;
-            case 256:
-                DISPATCH_TQ(256);
-                break;
-            default:
-                IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
-                return;
-        }
+            switch (head_dim) {
+                case 64:
+                    DISPATCH_TQ(64);
+                    break;
+                case 96:
+                    DISPATCH_TQ(96);
+                    break;
+                case 128:
+                    DISPATCH_TQ(128);
+                    break;
+                case 256:
+                    DISPATCH_TQ(256);
+                    break;
+                default:
+                    IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
+                    return;
+            }
 #undef DISPATCH_TQ
 #undef LAUNCH_TQ
+        }
     }
 }
 

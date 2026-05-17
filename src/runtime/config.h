@@ -243,6 +243,14 @@ struct RuntimeConfig {
         // Audit NVFP4 weight scales at load time. Legacy env:
         // IMP_AUDIT_NVFP4_SCALES.
         bool audit_nvfp4_scales = false;
+        // Bench-only: when true, the TurboQuant decode kernels skip the QJL
+        // XNOR+popcount correction and the Q-side QJL sketch precompute; the
+        // per-token dot collapses to dot_polar (PolarQuant FP4 dequant dot
+        // alone, with kQJLLambda forced to 0). Used by Phase 1 microbench to
+        // isolate per-token QJL cost from total kernel time. Output is NOT
+        // bit-equivalent to the QJL-on path; this is a perf-isolation tool,
+        // not a quality flag. Legacy env: IMP_TQ_SKIP_QJL=1.
+        bool tq_skip_qjl = false;
     } diagnostics;
 
     // ----- Loading -----

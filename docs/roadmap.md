@@ -74,9 +74,22 @@ When a request sets both `tools` and `response_format=json_schema`/`json_object`
 
 ## Performance work
 
-### Closing the TurboQuant–FP8 gap
+### Closing the TurboQuant–FP8 gap — Phase 1 PROCEED-WITH-CAVEAT
 
-TurboQuant currently runs ~23% behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s). The gap is algorithm-inherent — QJL sketch computation adds per-token overhead. Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales. **Design memo:** `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` (651 lines). Recommendation: ship a 3-5 day Phase 1 microbench first to verify QJL is actually the bottleneck (not yet measured at nsys level); Path A is structurally a -2000 LOC code retirement (TurboQuant attention file becomes a thin shim over the NVFP4 paged kernel). Bonus: `--kv-turboquant-lite` may also be retirable.
+TurboQuant currently runs ~23 % behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s) end-to-end — but the kernel-level gap is **3.3-4.1× FP8 per attention call**, much larger than the end-to-end number suggests (weight-bandwidth-boundedness compresses the visible gap). Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales. **Design memo:** `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` (651 lines).
+
+**Phase 1 microbench complete (2026-05-17, `docs/superpowers/plans/2026-05-17-turboquant-phase1-findings.md`):**
+
+| Metric | pp=512 | pp=4096 | Threshold (§5) | Verdict |
+|---|---:|---:|---:|---|
+| QJL fraction of TQ kernel time | **54.7 %** | **60.3 %** | ≥ 15 % | ✅ PASS by >3× |
+| NVFP4 vs FP8 ceiling gap        | **20.5 %** | **26.8 %** | ≤ 5 %  | ❌ FAIL by ~5× |
+
+Path A is bottleneck-targeted (QJL XNOR+popcount + Q-side sketch precompute is the dominant cost, not the marginal 6-10 % the design memo §2.3 bracketed) but it **won't reach FP8 parity** — even after rewriting TurboQuant as NVFP4-KV-with-INT4-V, the path inherits NVFP4's ~20-27 % residual gap to FP8 from the K-norm extra FP16 load + INT4 V dequant + scale-pool indirection. The right framing is **"retire TurboQuant in favour of NVFP4-KV, not optimise it"** — the big win is the −2000 LOC code retirement, not headline perf parity with FP8. End-to-end decode tok/s improvement is bounded by weight-bandwidth-boundedness per `bitdecoding_long_context_eval_2026_05_14.md`; the 23 % roadmap gap likely closes to ~8-12 %, not zero.
+
+Path B (per-token QJL tuning) **shelved** — its 3-5 % recovery ceiling vs QJL's actual 54-60 % dominant cost makes it the wrong shape. `--kv-turboquant-lite` remains retirable as part of Path A.
+
+**Next gate:** Phase 2 — NIAH retrieval-quality A/B at 4K + 16K context (Qwen3-8B Q8_0, comparing FP16 / FP8 / TQ-with-QJL / synthetic-MXFP4-K-via-`IMP_TQ_SKIP_QJL=1`). Acceptance per design memo §5: MXFP4-K NIAH within 5pp of TQ → green-light Path A; >10pp regression → shelve. **Bench infrastructure for this phase shipped:** `diagnostics.tq_skip_qjl` runtime flag + `SKIP_QJL` template parameter + `tools/analysis/bench_turboquant_components.sh`.
 
 ### `pp=512` on large dense models
 
