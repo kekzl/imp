@@ -133,12 +133,16 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
-        // R5 (review/phase5_synthesis.md §5): opt into the new GemmKernel
-        // registry. Slice 1 has only the FP16 tier wired; remaining tiers
-        // (FP8, NVFP4, CUTLASS_NVFP4, MXFP4) still go through the legacy
-        // gemm_dispatch_impl regardless of this flag. Default OFF until
-        // every tier is migrated.
-        bool use_kernel_registry = false;
+        // R5 (review/phase5_synthesis.md §5): the GemmKernel registry handles
+        // the migrated tiers (FP16, FP8 prefill, NVFP4 GEMV+GEMM, CUTLASS_NVFP4,
+        // MXFP4 GEMV+GEMM, GGUF small-M mmvq/dp4a for 8 qtypes). Slice 8 flips
+        // the default ON — production now reaches the registry first and falls
+        // through to the legacy `gemm_dispatch_impl` for the remaining uncovered
+        // cases (QW7 dual-cache MXFP4 probe, Q4_1 quant_gemm_int4, fused
+        // Q6_K/Q8_0 GEMV fallback when mmvq/dp4a skip, M>1 dequant+cuBLAS
+        // large-M fallback, FP8 cache-miss fallback). Setting this OFF still
+        // works as an escape hatch — every dispatch goes straight to legacy.
+        bool use_kernel_registry = true;
     } gemm;
 
     struct Gemma4 {
