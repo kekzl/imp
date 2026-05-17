@@ -2366,10 +2366,36 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1: when gemm.use_kernel_registry is enabled, try the new
-    // dispatch table first. Only the FP16 tier is wired in Slice 1; other
-    // tiers fall through to the legacy gemm_dispatch_impl below.
+    // R5 Slice 1+2: when gemm.use_kernel_registry is enabled, try the new
+    // dispatch table first. Slices 1 (FP16) and 2 (FP8 prefill) are wired;
+    // other tiers fall through to the legacy gemm_dispatch_impl below.
+    //
+    // Tier order mirrors gemm_dispatch_impl precedence: FP8 is tried before
+    // FP16 because the legacy path picks FP8 when M>1 + the weight is in the
+    // FP8 cache, even if an FP16 cache entry also exists.
     if (RuntimeConfig::current().gemm.use_kernel_registry) {
+        const int M = static_cast<int>(input.shape[0]);
+        // FP8 prefill: M>1 only, requires FP8 cache hit + activation scratch.
+        // Matches the guard in gemm_dispatch_impl (M>1 branch).
+        if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
+            auto it = fp8->find(weight.data);
+            if (it != fp8->end()) {
+                GemmKernelArgs args{};
+                args.input = &input;
+                args.output = &output;
+                args.stream = ctx.stream;
+                args.beta = ctx.beta;
+                args.weight_payload = &it->second;
+                args.fp8_act_buf = qs->fp8_act;
+                args.d_act_scale = qs->d_act_scale;
+                args.d_fp8_block_maxes = qs->d_fp8_block_maxes;
+                args.d_fp8_absmax = qs->d_fp8_absmax;
+                args.fp8_max_grid = qs->fp8_max_grid;
+                GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                    return;
+            }
+        }
         // The FP16 path is structurally simple — direct cuBLAS via the
         // fp16 weight cache OR the raw weight when it's already FP16/BF16.
         // Match the legacy preconditions: prefer the cache, then raw weight.
@@ -2379,7 +2405,6 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             args.output = &output;
             args.stream = ctx.stream;
             args.weight_payload = &it->second;
-            const int M = static_cast<int>(input.shape[0]);
             GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
@@ -2390,7 +2415,6 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             args.output = &output;
             args.stream = ctx.stream;
             args.weight_payload = &weight;
-            const int M = static_cast<int>(input.shape[0]);
             GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
             if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                 return;
