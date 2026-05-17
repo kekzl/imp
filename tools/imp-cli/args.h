@@ -47,6 +47,7 @@ struct CliArgs {
     bool kv_int8 = false;                // Use INT8 KV cache with dp4a attention
     bool kv_int4 = false;                // Use INT4 KV cache (quarter size)
     bool kv_nvfp4 = false;               // Use NVFP4 KV cache (quarter size, FP4 E2M1 + UE4M3 scales)
+    bool kv_mxfp4 = false;              // Use MXFP4-KV cache (packed FP4 + UE8M0 scales)
     bool kv_turboquant = false;          // Use TurboQuant KV cache (PolarQuant INT4 K + QJL + INT4 V)
     bool kv_turboquant_lite = false;     // Use TurboQuant Lite (QJL sketch-only K + INT4 V)
     int turboquant_sketch_mult = 2;      // sketch_dim = mult * head_dim (for TQ Lite)

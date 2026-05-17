@@ -67,6 +67,7 @@ size_t qtype_row_bytes(QType q, int64_t cols) {
         case QType::MXFP4:
             return static_cast<size_t>((cols + 1) / 2);
         case QType::NVFP4:
+        case QType::MXFP4_KV:
             return static_cast<size_t>((cols + 1) / 2);  // packed; scales separate
         case QType::FP8_E4M3:
         case QType::FP8_E5M2:
@@ -129,6 +130,8 @@ const char* qtype_name(QType q) {
             return "FP4_E2M1";
         case QType::NVFP4:
             return "NVFP4";
+        case QType::MXFP4_KV:
+            return "MXFP4_KV";
         case QType::TURBOQUANT:
             return "TURBOQUANT";
         case QType::TURBOQUANT_LITE:

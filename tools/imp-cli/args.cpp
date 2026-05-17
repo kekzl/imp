@@ -45,6 +45,8 @@ void print_usage(const char* prog) {
             "                        path (fixes DeepSeek-R1 Q6_K garbage output).\n"
             "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
             "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
+            "  --kv-nvfp4            Use NVFP4 KV cache (quarters KV memory; FP4 + E4M3 scales)\n"
+            "  --kv-mxfp4            Use MXFP4-KV cache (quarters KV memory; FP4 + UE8M0 scales)\n"
             "  --kv-turboquant       Use TurboQuant KV cache (PolarQuant + QJL, ~3x K reduction)\n"
             "  --kv-turboquant-lite  Use TurboQuant Lite (QJL sketch-only K, ~3 bits/elem avg)\n"
             "  --tq-sketch-mult <n>  TQ Lite sketch multiplier (default: 2, sketch_dim = n*head_dim)\n"
@@ -158,6 +160,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.kv_int4 = true;
         } else if (std::strcmp(arg, "--kv-nvfp4") == 0) {
             args.kv_nvfp4 = true;
+        } else if (std::strcmp(arg, "--kv-mxfp4") == 0) {
+            args.kv_mxfp4 = true;
         } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
             args.kv_turboquant = true;
         } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {

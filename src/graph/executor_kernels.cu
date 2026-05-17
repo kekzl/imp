@@ -1412,6 +1412,80 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// MXFP4-KV write kernel: same layout as NVFP4 but stores UE8M0 scale bytes.
+//
+// The only difference from write_kv_cache_nvfp4_kernel is the scale encoding:
+//   NVFP4:    `__nv_fp8_e4m3 ue4m3(sc); scale_dst[...] = reinterpret_cast<uint8_t>(&ue4m3);`
+//   MXFP4_KV: `scale_dst[...] = tq_float_to_ue8m0(sc);`   (pure-exponent 8-bit)
+//
+// All other fields (block_stride, scale_block_stride, FP4 packing, group size)
+// are identical. The tq_float_to_ue8m0 alias is defined at line 1084.
+// ---------------------------------------------------------------------------
+__global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, uint8_t* __restrict__ k_cache_base,
+    uint8_t* __restrict__ v_cache_base, uint8_t* __restrict__ k_scale_base,
+    uint8_t* __restrict__ v_scale_base, int block_stride, int scale_block_stride, int n_kv_heads,
+    int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    constexpr int kGroup = 16;
+
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens)
+        return;
+
+    const int pos = positions[token_idx];
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
+
+    const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
+    uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
+    uint8_t* scale_base = (blockIdx.y == 0) ? k_scale_base : v_scale_base;
+
+    const int row_elems = n_kv_heads * head_dim;
+    const int row_bytes = row_elems / 2;
+    const int row_scale_bytes = n_kv_heads * (head_dim / kGroup);
+    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
+    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                   static_cast<int64_t>(slot_in_block) * row_bytes;
+    uint8_t* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                         static_cast<int64_t>(slot_in_block) * row_scale_bytes;
+
+    const int n_groups_per_head = head_dim / kGroup;
+    const int total_groups = n_kv_heads * n_groups_per_head;
+
+    for (int g = threadIdx.x; g < total_groups; g += blockDim.x) {
+        int h = g / n_groups_per_head;
+        int gh = g % n_groups_per_head;
+        int base_elem = h * head_dim + gh * kGroup;
+
+        // absmax
+        float amax = 0.0f;
+#pragma unroll
+        for (int i = 0; i < kGroup; i++) {
+            float v = __half2float(src[base_elem + i]);
+            amax = fmaxf(amax, fabsf(v));
+        }
+        float sc = amax / 6.0f;
+        float inv_sc = (sc > 1e-30f) ? (1.0f / sc) : 0.0f;
+
+        // pack 16 nibbles → 8 bytes
+        int dst_byte_off = h * (head_dim / 2) + gh * (kGroup / 2);
+#pragma unroll
+        for (int p = 0; p < kGroup / 2; p++) {
+            float v0 = __half2float(src[base_elem + 2 * p]);
+            float v1 = __half2float(src[base_elem + 2 * p + 1]);
+            uint8_t q0 = e2m1_quantize(v0, inv_sc);
+            uint8_t q1 = e2m1_quantize(v1, inv_sc);
+            dst[dst_byte_off + p] = static_cast<uint8_t>(q0 | (q1 << 4));
+        }
+
+        // store UE8M0 scale (pure-exponent, 2^(bits-127))
+        scale_dst[h * n_groups_per_head + gh] = tq_float_to_ue8m0(sc);
+    }
+}
+
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.

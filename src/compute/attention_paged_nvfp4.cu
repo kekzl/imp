@@ -445,4 +445,98 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     }
 }
 
+// ---------------------------------------------------------------------------
+// MXFP4-KV launcher — same kernel as NVFP4 but with UE8M0 scale decode.
+// Pool layout and scale grouping are identical to NVFP4 (per design memo
+// §3.1.2); only the scale byte semantics differ (UE8M0 vs E4M3).
+// ---------------------------------------------------------------------------
+
+void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                     const uint8_t* K_scales, const uint8_t* V_scales,
+                                     const int* block_tables, const int* context_lens, int block_size,
+                                     float scale, int max_context_len, int sliding_window, float softcap,
+                                     cudaStream_t stream, int max_blocks_per_seq, int n_sinks) {
+    (void)n_sinks;  // streaming not yet wired
+    const int batch_size = static_cast<int>(Q.shape[0]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
+
+    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
+                                                        : (max_context_len + block_size - 1) / block_size;
+
+    size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
+                        NUM_WARPS * head_dim * sizeof(float);
+
+    void* scratch_ptr = nullptr;
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+                                           &scratch_ptr);
+
+    if (num_splits > 1) {
+        float* partial = static_cast<float*>(scratch_ptr);
+        dim3 grid1(batch_size, n_heads, num_splits);
+        dim3 block1(BLOCK_THREADS);
+
+#define LAUNCH_SPLITK_MXFP4KV(HD)                                                                          \
+    paged_attention_splitk_nvfp4_kernel<HD, ScaleDtype::UE8M0>                                             \
+        <<<grid1, block1, smem_bytes, stream>>>(reinterpret_cast<const half*>(Q.data),                     \
+                                                reinterpret_cast<const uint8_t*>(K_cache.data),            \
+                                                reinterpret_cast<const uint8_t*>(V_cache.data), K_scales,  \
+                                                V_scales, partial, block_tables, context_lens, batch_size, \
+                                                n_heads, n_kv_heads, block_size, scale, max_num_blocks,    \
+                                                num_splits, sliding_window, softcap)
+
+        switch (head_dim) {
+            case 64:
+                LAUNCH_SPLITK_MXFP4KV(64);
+                break;
+            case 128:
+                LAUNCH_SPLITK_MXFP4KV(128);
+                break;
+            case 256:
+                LAUNCH_SPLITK_MXFP4KV(256);
+                break;
+            case 512:
+                LAUNCH_SPLITK_MXFP4KV(512);
+                break;
+            default:
+                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv splitk: unsupported head_dim %d", head_dim);
+                return;
+        }
+#undef LAUNCH_SPLITK_MXFP4KV
+
+        paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
+                                      num_splits, stream);
+    } else {
+        dim3 grid(batch_size, n_heads);
+        dim3 block(BLOCK_THREADS);
+
+#define LAUNCH_MXFP4KV(HD)                                                                                   \
+    paged_attention_decode_nvfp4_kernel<HD, ScaleDtype::UE8M0><<<grid, block, smem_bytes, stream>>>(         \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),               \
+        reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
+        block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,     \
+        max_num_blocks, sliding_window, softcap)
+
+        switch (head_dim) {
+            case 64:
+                LAUNCH_MXFP4KV(64);
+                break;
+            case 128:
+                LAUNCH_MXFP4KV(128);
+                break;
+            case 256:
+                LAUNCH_MXFP4KV(256);
+                break;
+            case 512:
+                LAUNCH_MXFP4KV(512);
+                break;
+            default:
+                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv: unsupported head_dim %d", head_dim);
+                return;
+        }
+#undef LAUNCH_MXFP4KV
+    }
+}
+
 }  // namespace imp

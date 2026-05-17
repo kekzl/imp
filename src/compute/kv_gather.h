@@ -37,6 +37,14 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
                                    int n_past, int block_size, int nkv, int hd,
                                    cudaStream_t stream);
 
+// MXFP4-KV paged → FP16 flat with per-group-of-16 UE8M0 scale dequant.
+// Layout identical to NVFP4; only the scale byte semantics differ (UE8M0 vs UE4M3).
+// Matches `write_kv_cache_mxfp4_kv_kernel` / `paged_attention_decode_mxfp4_kv`.
+void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
+                                       const uint8_t* src_scales, const int* block_table,
+                                       int n_past, int block_size, int nkv, int hd,
+                                       cudaStream_t stream);
+
 // INT4 paged → FP16 flat with per-head FP16 scale dequant (symmetric, range [-8,7]).
 // src_packed layout: [num_blocks, block_size, nkv, hd/2] uint8 (low nibble=even d, high=odd d).
 // src_scales layout: [num_blocks, block_size, nkv]      FP16 (one scale per head per token).

@@ -22,7 +22,8 @@ void print_server_usage(const char* prog) {
             "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
             "  --kv-int8             Use INT8 KV cache with dp4a attention\n"
             "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
-            "  --kv-nvfp4            Use NVFP4 KV cache (quarters KV memory; long-ctx unlock)\n"
+            "  --kv-nvfp4            Use NVFP4 KV cache (quarters KV memory; FP4 + E4M3 scales)\n"
+            "  --kv-mxfp4            Use MXFP4-KV cache (quarters KV memory; FP4 + UE8M0 scales)\n"
             "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = no chunking)\n"
             "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
             "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
@@ -83,6 +84,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.kv_int4 = true;
         } else if (std::strcmp(arg, "--kv-nvfp4") == 0) {
             args.kv_nvfp4 = true;
+        } else if (std::strcmp(arg, "--kv-mxfp4") == 0) {
+            args.kv_mxfp4 = true;
         } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
             args.kv_turboquant = true;
         } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {

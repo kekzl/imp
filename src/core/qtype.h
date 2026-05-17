@@ -39,6 +39,7 @@ enum class QType : uint16_t {
     INT32 = 69,
     FP4_E2M1 = 70,
     NVFP4 = 71,
+    MXFP4_KV = 72,
     TURBOQUANT = 80,
     TURBOQUANT_LITE = 81,
 };

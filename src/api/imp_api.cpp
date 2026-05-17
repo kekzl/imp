@@ -142,6 +142,8 @@ static imp::QType map_dtype(ImpDType dt) {
             return imp::QType::TURBOQUANT_LITE;
         case IMP_DTYPE_NVFP4:
             return imp::QType::NVFP4;
+        case IMP_DTYPE_MXFP4_KV:
+            return imp::QType::MXFP4_KV;
         default:
             return imp::QType::F16;
     }

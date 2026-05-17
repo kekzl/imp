@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
         config.kv_cache_dtype = IMP_DTYPE_INT4;
     if (args.kv_nvfp4)
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
+    if (args.kv_mxfp4)
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
     if (args.kv_turboquant)
         config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
     if (args.kv_turboquant_lite) {
