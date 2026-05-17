@@ -75,7 +75,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
     size_t single_block_bytes;
-    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::MXFP4_KV) {
+    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed).
+    // NVFP4 was historically missing from this OR-chain — fell through to the
+    // dtype_size() fallback which returns 0 for QType::NVFP4, silently zeroing
+    // out NVFP4's KV-cache budget contribution. Pre-existing pre-MXFP4-KV; the
+    // Slice 2 spec reviewer flagged it during the MXFP4-KV scope review.
+    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::NVFP4 ||
+        config.kv_cache_dtype == QType::MXFP4_KV) {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim / 2;
     } else {
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
