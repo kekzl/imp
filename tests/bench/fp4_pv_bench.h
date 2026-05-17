@@ -74,4 +74,47 @@ Fp4PvAccuracyResult bench_fp4_pv_accuracy(int n_rows, int K, int head_dim,
 Fp4PvThroughputResult bench_fp4_pv_throughput(int warps, int iterations,
                                               cudaStream_t stream);
 
+// Phase 3b: two-level accumulator simulation.
+//
+// O_2L = P_coarse_fp4 @ V_fp4 + (P - P_coarse_fp4) @ V_fp16
+//      = P_lossy @ V_lossy + P_residual @ V_orig
+//
+// The residual MMA uses FP16 P (the residual) and FP16 V (unquantised).
+// Mathematically equivalent for 2L-A (sparse residual exploiting
+// structural near-zero entries) and 2L-B (full HMMA residual) — they
+// only differ in WALL TIME, not in numerical result. This function
+// answers the accuracy half ("does the residual recover the long tail
+// FP4 truncates?"); throughput is the separate question Phase 3b's gate
+// uses bench_fp4_pv_2level_throughput_estimate for.
+//
+// Returns the same struct as the Phase 3a single-level accuracy bench
+// so percentile-by-percentile A/B is direct.
+Fp4PvAccuracyResult bench_fp4_pv_accuracy_2level(int n_rows, int K, int head_dim,
+                                                 unsigned seed);
+
+struct Fp4PvTwoLevelThroughputEstimate {
+    float coarse_ms;         // mxf4nvf4 m16n8k64 alone — same as throughput.blockscale_ms
+    float residual_full_ms;  // HMMA m16n8k16 alone — same as throughput.hmma_ms
+    // 2L-A (structural-sparse residual): the SageAttention3 paper claims
+    // ~10 % of full HMMA cost for the sparse path because P_residual is
+    // mostly near-zero after FP4 quant. THIS IS A PAPER PROJECTION, not
+    // a measurement — implementing the sparse residual is itself a real
+    // research item. The microbench reports the projection so Phase 3c
+    // decisions are based on a known number, not a guess.
+    float estimated_2l_a_ms;
+    // 2L-B (full HMMA on residual): the FP4 + HMMA can overlap on
+    // independent MMA pipes, so combined wall time ≈ max(coarse, residual),
+    // not coarse + residual. This is the easier-to-implement variant.
+    float estimated_2l_b_ms;
+    // Throughput ratio vs HMMA-alone baseline (today's PV path).
+    double speedup_2l_a;
+    double speedup_2l_b;
+};
+
+// Throughput estimate for the two-level paths. Uses the same per-kernel
+// timings as bench_fp4_pv_throughput plus model coefficients for the
+// sparse residual cost.
+Fp4PvTwoLevelThroughputEstimate bench_fp4_pv_2level_throughput_estimate(
+    const Fp4PvThroughputResult& single);
+
 }  // namespace imp

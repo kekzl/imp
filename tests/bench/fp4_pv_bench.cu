@@ -307,6 +307,145 @@ static float run_kernel_bench(void (*kernel)(int, float*), int warps, int iterat
     return total / NUM_REPS;
 }
 
+// -----------------------------------------------------------------------------
+// Phase 3b: two-level accumulator simulation
+// -----------------------------------------------------------------------------
+//
+// Numerical model: the coarse MMA computes P_lossy @ V_lossy. The residual
+// MMA adds (P - P_lossy) @ V_orig (V kept at FP16 precision). Sum is the
+// 2-level output. Mathematically:
+//
+//   O_2L = P_lossy @ V_lossy + (P - P_lossy) @ V
+//        = P @ V + P_lossy @ (V_lossy - V)
+//
+// So the remaining error after 2-level is `P_lossy @ delta_V` where
+// delta_V is V's FP4 quantisation error. For post-softmax P (mostly
+// near-zero with a spike), this should be much smaller than the
+// single-level error which was `P @ V - P_lossy @ V_lossy` (dominated by
+// long-tail truncation in P_lossy).
+
+Fp4PvAccuracyResult bench_fp4_pv_accuracy_2level(int n_rows, int K, int head_dim,
+                                                 unsigned seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> v_dist(0.0f, 1.0f);
+
+    std::vector<float> V(static_cast<size_t>(K) * head_dim);
+    for (auto& x : V) x = v_dist(rng);
+
+    // Pre-quantise V columns (V_lossy is what the coarse MMA sees).
+    std::vector<std::vector<float>> V_lossy(head_dim);
+    for (int n = 0; n < head_dim; ++n) {
+        std::vector<float> col(static_cast<size_t>(K));
+        for (int k = 0; k < K; ++k)
+            col[k] = V[static_cast<size_t>(k) * head_dim + n];
+        std::vector<uint8_t> v_codes, v_scales;
+        quantise_row_fp4(col.data(), K, v_codes, v_scales);
+        dequantise_row_fp4(v_codes, v_scales, K, V_lossy[n]);
+    }
+
+    std::vector<float> abs_errs;
+    std::vector<float> rel_errs;
+    abs_errs.reserve(static_cast<size_t>(n_rows) * head_dim);
+    rel_errs.reserve(static_cast<size_t>(n_rows) * head_dim);
+    int catastrophic = 0;
+
+    for (int r = 0; r < n_rows; ++r) {
+        std::vector<float> P(static_cast<size_t>(K));
+        generate_postsoftmax_row(P.data(), K, rng);
+
+        std::vector<uint8_t> P_fp4, P_scales;
+        quantise_row_fp4(P.data(), K, P_fp4, P_scales);
+        std::vector<float> P_lossy;
+        dequantise_row_fp4(P_fp4, P_scales, K, P_lossy);
+
+        // Two-level: P_lossy @ V_lossy + (P - P_lossy) @ V_orig
+        for (int n = 0; n < head_dim; ++n) {
+            double ref = 0.0;
+            double coarse = 0.0;
+            double residual = 0.0;
+            for (int k = 0; k < K; ++k) {
+                float V_kn = V[static_cast<size_t>(k) * head_dim + n];
+                ref += static_cast<double>(P[k]) * static_cast<double>(V_kn);
+                coarse += static_cast<double>(P_lossy[k]) *
+                          static_cast<double>(V_lossy[n][k]);
+                residual += static_cast<double>(P[k] - P_lossy[k]) *
+                            static_cast<double>(V_kn);
+            }
+            double out_2l = coarse + residual;
+            float abs_e = static_cast<float>(std::fabs(out_2l - ref));
+            float rel_e = abs_e / static_cast<float>(std::fabs(ref) + 1e-9);
+            abs_errs.push_back(abs_e);
+            rel_errs.push_back(rel_e);
+            if (rel_e > 0.5f) ++catastrophic;
+        }
+    }
+
+    auto pct = [](std::vector<float>& v, double p) -> float {
+        size_t idx = std::min(v.size() - 1, static_cast<size_t>(v.size() * p));
+        std::nth_element(v.begin(), v.begin() + idx, v.end());
+        return v[idx];
+    };
+
+    Fp4PvAccuracyResult r{};
+    r.n_rows = n_rows;
+    r.K = K;
+    r.head_dim = head_dim;
+    r.abs_err_median = pct(abs_errs, 0.5);
+    r.abs_err_p99 = pct(abs_errs, 0.99);
+    r.abs_err_max = pct(abs_errs, 0.999999);
+    r.rel_err_median = pct(rel_errs, 0.5);
+    r.rel_err_p90 = pct(rel_errs, 0.90);
+    r.rel_err_p99 = pct(rel_errs, 0.99);
+    r.rel_err_max = pct(rel_errs, 0.999999);
+    r.frac_rel_err_above_50pct =
+        static_cast<float>(catastrophic) / static_cast<float>(rel_errs.size());
+    return r;
+}
+
+Fp4PvTwoLevelThroughputEstimate bench_fp4_pv_2level_throughput_estimate(
+    const Fp4PvThroughputResult& single) {
+    Fp4PvTwoLevelThroughputEstimate e{};
+    e.coarse_ms = single.blockscale_ms;
+    e.residual_full_ms = single.hmma_ms;
+
+    // Throughput math is on PER-OP basis, not per-instruction:
+    //   HMMA m16n8k16 covers   4096 ops/instr  → tops = blockscale_tops / 4
+    //   mxf4nvf4 m16n8k64 cov. 16384 ops/instr → tops = 4 × HMMA per instr
+    // The Fp4PvThroughputResult already encodes this in TOPS — work
+    // exclusively with TOPS here.
+    //
+    // For a fixed PV work payload of W ops, the wall time on each pipe is
+    //   T_coarse_full      = W / blockscale_tops
+    //   T_residual_full    = W / hmma_tops
+    //   T_residual_sparse  = 0.1 · W / hmma_tops   (SageAttention3 projection)
+    //
+    // Coarse MMA + residual MMA run on independent pipes (FP4 MMA pipe vs
+    // HMMA pipe) so combined wall time = max(coarse, residual). Speedup vs
+    // HMMA-alone baseline is hmma_tops / combined_tops, equivalently
+    // T_hmma_alone / T_combined.
+
+    constexpr double kSparseFrac = 0.10;
+
+    // Per-op times in TOPS-equivalent — taking the worst of the two pipes.
+    const double t_coarse = 1.0 / single.blockscale_tops;
+    const double t_residual_full = 1.0 / single.hmma_tops;
+    const double t_residual_sparse = kSparseFrac / single.hmma_tops;
+
+    const double t_2l_a = std::max(t_coarse, t_residual_sparse);
+    const double t_2l_b = std::max(t_coarse, t_residual_full);
+    const double t_hmma_alone = t_residual_full;
+
+    // Scale to the same convention as the input (single-instruction wall ms,
+    // for printout consistency). Per-instruction wall time of the dominant
+    // pipe gives the answer: the bench just uses these as a "shape" for the
+    // display — the speedup ratio is the load-bearing number.
+    e.estimated_2l_a_ms = static_cast<float>(t_2l_a / t_hmma_alone * single.hmma_ms);
+    e.estimated_2l_b_ms = static_cast<float>(t_2l_b / t_hmma_alone * single.hmma_ms);
+    e.speedup_2l_a = t_hmma_alone / t_2l_a;
+    e.speedup_2l_b = t_hmma_alone / t_2l_b;
+    return e;
+}
+
 Fp4PvThroughputResult bench_fp4_pv_throughput(int warps, int iterations,
                                               cudaStream_t stream) {
     Fp4PvThroughputResult r{};
