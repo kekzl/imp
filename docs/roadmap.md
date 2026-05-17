@@ -94,20 +94,31 @@ A Blackwell-style cluster-launch variant of the FMHA prefill kernel (DSMEM K-bro
 
 ### GEMM dispatch unification (R5)
 
-The 21-parameter `gemm_dispatch_impl` god-dispatcher is being replaced by a strategy-keyed `GemmKernel` registry. Slice 1 (PR #197) shipped the interface (`src/graph/gemm_kernel_registry.h`) + an FP16 kernel as proof-of-concept; live dispatch tries the registry first when `gemm.use_kernel_registry=true` (default OFF) and falls back to the legacy switch for unmigrated tiers. Per-tier slices, one PR each off main:
+The 21-parameter `gemm_dispatch_impl` god-dispatcher has been replaced by a strategy-keyed `GemmKernel` registry. Slice 1 (PR #197) shipped the interface (`src/graph/gemm_kernel_registry.h`); Slices 2-7 migrated each tier behind a `gemm.use_kernel_registry` feature flag (default OFF for those slices); Slice 8 (#215) flipped the default to ON. The registry is now the **primary dispatch path** in production. The legacy `gemm_dispatch_impl` switch is retained as fallback for a handful of branches Slices 1-7 did not target — these are queued as Slice 8.1+.
 
-| Slice | Tier | Status |
+| Slice | Tier / scope | Status |
 |---|---|---|
 | 1 | FP16 interface + proof | shipped (#197) |
-| 2 | FP8 | in flight |
-| 3 | NVFP4 GEMV (M==1) | pending |
-| 4 | NVFP4 GEMM (M>1) | pending |
-| 5 | CUTLASS_NVFP4 | pending |
-| 6 | MXFP4 | pending |
-| 7 | dp4a / mmvq | pending |
-| 8 | Delete legacy switch, flip default ON | pending |
+| 2 | FP8 prefill cache hit, M>1 | shipped (#209) |
+| 3 | NVFP4 GEMV (M==1) | shipped (#210) |
+| 4 | NVFP4 GEMM dequant fallback (M>1) | shipped (#211) |
+| 5 | CUTLASS_NVFP4 dense | shipped (#212) |
+| 6 | MXFP4 (GEMV + GEMM) | shipped (#213) |
+| 7 | GGUF dp4a/mmvq, M==1 (8 qtypes) | shipped (#214) |
+| 8 | Flip default ON + coverage audit | shipped (#215) |
 
-Once all migrated, adding a new qtype becomes a single-file change instead of a 21-parameter dispatcher edit. Cross-axis maintainability win per review `phase5_synthesis.md §5`.
+**Deferred follow-ups** (the 8 branches Slice 8's audit found uncovered — `gemm_dispatch_impl` still owns them on the registry's `NoMatch` fallback):
+
+| Slice | Branch |
+|---|---|
+| 8.1 | FP8 cache miss → dequant fallback (high-impact: every FP8 model not in cache) |
+| 8.2 | Fused gemv fallbacks for Q6_K, Q8_0 (Qwen3-Coder Q6_K hits this) |
+| 8.3 | Q4_1 paths (rare qtype) |
+| 8.4 | `fp16_cache` for non-F16 weights (convert-and-cache-as-FP16 flow) |
+| 8.5 | Raw-quant large-M dequant→cuBLAS (catch-all for anything Slices 1-7 missed) |
+| 8.6 | QW7 dual-cache CUTLASS MXFP4 probe (waiting on production trace to confirm dead) + final `gemm_dispatch_impl` delete + `mmvq_scratch_get_or_grow` header hoist |
+
+Each is a small mechanical migration. Coverage table from Slice 8 audit is in PR #215 description. Once 8.1-8.6 land, the legacy switch + the `gemm.use_kernel_registry` flag can be retired entirely.
 
 ### MoE prefill graph capture (M3 Phase 4)
 
