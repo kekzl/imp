@@ -1,5 +1,6 @@
 #include "graph/gemm_kernel_registry.h"
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
 #include "core/tensor.h"
 #include "graph/executor.h"  // FP8CacheEntry
 #include "quant/fp8_quant.h"
@@ -41,8 +42,9 @@ TEST_F(GemmKernelRegistryTest, Fp16KernelIsRegisteredAtStaticInit) {
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
-    // CUTLASS_NVFP4 is not registered yet — Slices 1-4 cover FP16, FP8, NVFP4 GEMV+GEMM.
-    GemmStrategy unregistered{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/true};
+    // MXFP4 is not registered yet — Slices 1-5 cover FP16, FP8, NVFP4 GEMV+GEMM,
+    // CUTLASS_NVFP4 prefill GEMM. MXFP4 is Slice 6 territory.
+    GemmStrategy unregistered{StorageTier::MXFP4, QType::F16, /*m_is_one=*/true};
     GemmKernelArgs args{};
     args.stream = stream_;
     EXPECT_EQ(reg.dispatch(unregistered, args), GemmDispatchResult::NoMatch);
@@ -481,6 +483,159 @@ TEST_F(GemmKernelRegistryTest, Fp16RegistryDispatchMatchesDirectGemm) {
     cudaFree(d_weight);
     cudaFree(d_out_direct);
     cudaFree(d_out_registry);
+}
+
+// R5 Slice 5 — CUTLASS_NVFP4 prefill GEMM kernel registered. With FP16 (2) +
+// FP8 prefill (1) + NVFP4 GEMV (1) + NVFP4 GEMM (1) + CUTLASS_NVFP4 GEMM (1)
+// we now expect at least 6 entries.
+TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelIsRegisteredAtStaticInit) {
+    const auto& reg = GemmKernelRegistry::instance();
+    EXPECT_GE(reg.size(), 6u)
+        << "FP16 (M==1/M>1) + FP8 (M>1) + NVFP4 GEMV (M==1) + NVFP4 GEMM (M>1) + "
+           "CUTLASS_NVFP4 GEMM (M>1) expected pre-registered";
+}
+
+// The CUTLASS_NVFP4 adapter rejects loud when the activation scratch is
+// missing — refuses to silently fall through to legacy. Mirrors the FP8
+// missing-scratch test (Slice 2 pattern). Returns PreconditionFail so the
+// dispatch site can fall back to the Slice 4 dequant kernel. Note: the
+// GEMM workspace (cutlass_workspace) is intentionally NOT a precondition —
+// gemm_nvfp4_cutlass_sm120 has its own static-fallback alloc — so this
+// test specifically exercises the act_data null path.
+TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
+    constexpr int M = 4;
+    constexpr int N = 16;
+    constexpr int K = 64;
+
+    __half* d_input = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // Build a dummy CutlassNvFP4Weight — payload pointer is non-null but the
+    // kernel returns PreconditionFail before dereferencing it (workspace
+    // check fires first). We never invoke gemm_nvfp4_cutlass_sm120 here so
+    // the dummy payload is safe.
+    CutlassNvFP4Weight dummy{};
+    dummy.N = N;
+    dummy.K = K;
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.weight_payload = &dummy;
+    // Intentionally leave cutlass_act_data / cutlass_act_sf / cutlass_workspace
+    // null. Kernel must return PreconditionFail.
+
+    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
+
+    cudaFree(d_input);
+    cudaFree(d_out);
+}
+
+// End-to-end smoke: registry CUTLASS_NVFP4 GEMM dispatch runs to Ok and
+// produces non-zero output for a small toy problem. We deliberately do NOT
+// do a back-to-back direct-vs-registry parity comparison the way the FP16 /
+// FP8 / NVFP4-dequant slices do, because gemm_nvfp4_cutlass_sm120 bails out
+// (returns false) on any sticky CUDA error from a prior call in the same
+// test process — meaning the second invocation in a parity test
+// PreconditionFails not on its own merits but on the residue of Path 1. The
+// adapter is a verbatim wrap of `quantize_fp16_to_nvfp4_cutlass` +
+// `gemm_nvfp4_cutlass_sm120` (executor_kernels.cu:2147 + 2179-2181); parity
+// is enforced structurally by the wrap, and the dispatch-site call site is
+// covered by the existing engine smoke tests (verify-fast). A single
+// invocation here is sufficient to pin that the adapter wires through to a
+// successful CUTLASS run.
+TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
+    constexpr int M = 128;
+    constexpr int N = 128;
+    constexpr int K = 128;  // CUTLASS NVFP4 tile is 128x128x128 — match for can_implement.
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half((i % 5) * 0.0625f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half((i % 7) * 0.0625f - 0.1875f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    // Quantize weight to NVFP4, then convert to CUTLASS block-scaled layout
+    // (SfAtom). The adapter consumes the CutlassNvFP4Weight verbatim.
+    NvFP4QuantResult nv4{};
+    quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
+    CutlassNvFP4Weight cw{};
+    convert_nvfp4_to_cutlass(nv4, cw, stream_);
+
+    // Allocate activation quantization scratch + GEMM workspace.
+    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t ws_bytes = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    void *d_act_data = nullptr, *d_act_sf = nullptr, *d_ws = nullptr;
+    cudaMalloc(&d_act_data, static_cast<size_t>(M) * K / 2);  // packed FP4 [M, K/2]
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    if (ws_bytes > 0) cudaMalloc(&d_ws, ws_bytes);
+    cudaMemsetAsync(d_act_sf, 0, act_sf_bytes, stream_);  // zero-init padding
+
+    __half* d_out = nullptr;
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemsetAsync(d_out, 0, sizeof(__half) * M * N, stream_);
+    Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+
+    // Drain sticky CUDA errors from setup (quantize/convert/cudaMalloc). The
+    // CUTLASS kernel bails on any prior cudaGetLastError() != cudaSuccess.
+    cudaStreamSynchronize(stream_);
+    cudaError_t pre = cudaGetLastError();
+    ASSERT_EQ(pre, cudaSuccess) << "Pre-dispatch sticky CUDA error: " << cudaGetErrorString(pre);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = stream_;
+    args.beta = 0.0f;
+    args.weight_payload = &cw;
+    args.cutlass_act_data = d_act_data;
+    args.cutlass_act_sf = d_act_sf;
+    args.cutlass_workspace = d_ws;
+    args.cutlass_workspace_size = ws_bytes;
+    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+
+    cudaStreamSynchronize(stream_);
+
+    // Non-zero output check: the GEMM must have written *something*. The
+    // hand-crafted inputs both have nonzero values so the dot product is
+    // certainly not identically zero across all 64 output cells.
+    std::vector<__half> h_out(M * N);
+    cudaMemcpy(h_out.data(), d_out, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    int nonzero_count = 0;
+    for (int i = 0; i < M * N; ++i) {
+        if (__half_as_ushort(h_out[i]) != 0) ++nonzero_count;
+    }
+    EXPECT_GT(nonzero_count, 0) << "Registry CUTLASS_NVFP4 dispatch wrote all-zero output";
+
+    free_cutlass_nvfp4_weight(cw);
+    free_nvfp4_result(nv4);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    if (d_ws) cudaFree(d_ws);
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
+    cudaFree(d_out);
 }
 
 // Pin the GemmStrategy operator== contract — used by the linear-scan

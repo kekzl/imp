@@ -2366,11 +2366,12 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    // R5 Slice 1+2+3+4: when gemm.use_kernel_registry is enabled, try the new
-    // dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3 (NVFP4
-    // decode GEMV) and 4 (NVFP4 prefill GEMM dequant) are wired; other tiers
-    // (CUTLASS_NVFP4 — Slice 5, MXFP4 — Slice 6, dp4a/q8 — Slice 7) fall
-    // through to the legacy gemm_dispatch_impl below.
+    // R5 Slice 1+2+3+4+5: when gemm.use_kernel_registry is enabled, try the
+    // new dispatch table first. Slices 1 (FP16), 2 (FP8 prefill), 3 (NVFP4
+    // decode GEMV), 4 (NVFP4 prefill GEMM dequant) and 5 (CUTLASS_NVFP4
+    // prefill GEMM, preferred native FP4 path) are wired; remaining tiers
+    // (MXFP4 — Slice 6, dp4a/q8 — Slice 7) fall through to the legacy
+    // gemm_dispatch_impl below.
     //
     // Tier order mirrors gemm_dispatch_impl precedence: FP8 is tried before
     // FP16 because the legacy path picks FP8 when M>1 + the weight is in the
@@ -2435,14 +2436,41 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                     return;
             }
         }
+        // CUTLASS_NVFP4 prefill GEMM (M>1, native sm_120 block-scaled FP4 —
+        // the preferred path when eligible). Mirror gemm_dispatch_impl:2140-
+        // 2184: requires (ct4 cache + ct4 hit + cutlass_act_data scratch).
+        // When all three are present, the registry kernel quantizes the FP16
+        // activation and calls gemm_nvfp4_cutlass_sm120. If the CUTLASS call
+        // returns false (kernel can't handle dims) the kernel returns
+        // PreconditionFail and we fall through to Slice 4's dequant GEMM
+        // below — same drop-through semantics as the legacy `if (ok) return;`.
+        if (M > 1 && input.qtype == QType::F16 && ct4 != nullptr &&
+            qs->cutlass_act_data != nullptr) {
+            auto ct_it = ct4->find(weight.data);
+            if (ct_it != ct4->end()) {
+                GemmKernelArgs args{};
+                args.input = &input;
+                args.output = &output;
+                args.stream = ctx.stream;
+                args.beta = ctx.beta;
+                args.weight_payload = &ct_it->second;
+                args.cutlass_act_data = qs->cutlass_act_data;
+                args.cutlass_act_sf = qs->cutlass_act_sf;
+                args.cutlass_workspace = qs->cutlass_workspace;
+                args.cutlass_workspace_size = qs->cutlass_workspace_size;
+                GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                    return;
+                // PreconditionFail (missing workspace or CUTLASS returned
+                // false) — fall through to the dequant GEMM below.
+            }
+        }
         // NVFP4 prefill GEMM (M>1, dequant→cuBLAS fallback). Mirror
-        // gemm_dispatch_impl:2186-2188 — fires only when the CUTLASS sm_120
-        // native FP4 path (Slice 5 territory) would NOT have fired. Legacy
-        // precedence: try CUTLASS_NVFP4 first if (ct4 + cutlass_act_data
-        // available + ct4 hit), else fall through to dequant->cuBLAS GEMM.
-        // Here we route to the registry only when the CUTLASS path is
-        // unavailable; otherwise fall through to legacy gemm_dispatch_impl
-        // which still owns the CUTLASS branch (migrated in Slice 5).
+        // gemm_dispatch_impl:2186-2188. Slice 5 above already handled the
+        // CUTLASS-eligible case; this branch is the fallback when CUTLASS
+        // isn't available (no ct4 cache, no ct4 hit, missing scratch) or the
+        // CUTLASS run returned PreconditionFail. The earlier `!cutlass_path_
+        // eligible` guard is gone now that Slice 5 owns the preferred path.
         if (M > 1 && input.qtype == QType::F16) {
             NvFP4QuantResult nvfp4_tmp;
             const NvFP4QuantResult* nvfp4_view = nullptr;
@@ -2458,15 +2486,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                 if (it != nv4->end())
                     nvfp4_view = &it->second;
             }
-            // Only dispatch the dequant fallback when the CUTLASS native FP4
-            // path would NOT have been chosen by legacy. The CUTLASS branch
-            // owns its weight (ct4 hit) AND its activation scratch — when
-            // either is missing, legacy falls through to gemm_nvfp4 (the
-            // dequant path) which is what this slice migrates.
-            const bool cutlass_path_eligible =
-                (ct4 != nullptr) && (qs->cutlass_act_data != nullptr) &&
-                (ct4->find(weight.data) != ct4->end());
-            if (nvfp4_view != nullptr && !cutlass_path_eligible) {
+            if (nvfp4_view != nullptr) {
                 GemmKernelArgs args{};
                 args.input = &input;
                 args.output = &output;
