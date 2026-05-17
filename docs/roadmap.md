@@ -74,7 +74,13 @@ When a request sets both `tools` and `response_format=json_schema`/`json_object`
 
 ## Performance work
 
-### Closing the TurboQuant–FP8 gap — Phase 1 PROCEED-WITH-CAVEAT
+### ~~Closing the TurboQuant–FP8 gap~~ — RETIRED 2026-05-17 (Phase 5, PR #251)
+
+**TurboQuant retired in favor of `--kv-mxfp4` (MXFP4-KV) per the design memo's Path A endgame.** Net deletion: **−2828 LOC across 33 files** (PR #251). `--kv-turboquant` / `--kv-turboquant-lite` remain as deprecated CLI aliases that emit a one-shot `IMP_LOG_WARN` and fall back to MXFP4-KV. `IMP_DTYPE_TURBOQUANT(_LITE)` C-API enumerators are preserved as ABI-stable aliases routing to `QType::MXFP4_KV`. `src/quant/turboquant_fp4.cuh` (UE8M0/FP4 helpers) is kept — MXFP4-KV depends on it.
+
+The full historical narrative below is preserved as audit trail.
+
+---
 
 TurboQuant currently runs ~23 % behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s) end-to-end — but the kernel-level gap is **3.3-4.1× FP8 per attention call**, much larger than the end-to-end number suggests (weight-bandwidth-boundedness compresses the visible gap). Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales. **Design memo:** `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` (651 lines).
 
