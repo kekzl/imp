@@ -80,10 +80,12 @@ imp-cli --model gemma-3-12b-it.gguf --mmproj mmproj.gguf \
         --image photo.jpg --prompt "Describe"
 ```
 
-The `imp` helper script at the repo root downloads from a presets list:
+The `imp` helper script at the repo root picks the active model from
+already-staged `.gguf` files in `./models/`. imp does not download
+weights — stage them yourself (e.g. `git clone https://huggingface.co/<repo>`
+or copy from a populated HF cache on another machine):
 
 ```bash
-./imp list
-./imp pull qwen3-8b-q8_0
-./imp use qwen3-8b-q8_0   # set in .env, restart the server
+ls models/                  # confirm the .gguf is present
+./imp use qwen3-8b-q8_0     # set IMP_MODEL in .env, restart the server
 ```
