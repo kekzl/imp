@@ -2417,7 +2417,13 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             }
         }
         // FP8 prefill: M>1 only, requires FP8 cache hit + activation scratch.
-        // Matches the guard in gemm_dispatch_impl (M>1 branch).
+        // Matches the guard in gemm_dispatch_impl (M>1 branch). Slice 8.1
+        // adds the cache-MISS dequant fallback under the same outer gate —
+        // when the FP8 path is "active" (cache present, scratch present, M>1)
+        // but the specific weight isn't in the cache, dequant the raw quant
+        // bytes to FP16 and run cuBLAS. The raw FP16/BF16 weight case (legacy
+        // line 2294) falls through to the FP16 strategy below; no extra
+        // dispatch is needed here for it.
         if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
             auto it = fp8->find(weight.data);
             if (it != fp8->end()) {
@@ -2433,6 +2439,22 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                 args.d_fp8_absmax = qs->d_fp8_absmax;
                 args.fp8_max_grid = qs->fp8_max_grid;
                 GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
+                if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                    return;
+            } else {
+                // Cache miss — try dequant fallback (Slice 8.1). The handler
+                // checks `dequant_gpu_supported(weight.qtype)` + scratch
+                // availability and returns PreconditionFail otherwise. On
+                // fail we drop through to the FP16 strategy lookup below,
+                // which handles the raw-FP16/BF16-weight case.
+                GemmKernelArgs args{};
+                args.input = &input;
+                args.output = &output;
+                args.stream = ctx.stream;
+                args.beta = ctx.beta;
+                args.weight_payload = &weight;
+                args.dequant_scratch = qs->dequant;
+                GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
                 if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
                     return;
             }
