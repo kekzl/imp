@@ -936,7 +936,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
         // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
         auto kv = config_.kv_cache_dtype;
-        bool packed_int4 = (kv == QType::INT4 || kv == QType::TURBOQUANT || kv == QType::TURBOQUANT_LITE);
+        bool packed_int4 = (kv == QType::INT4);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
         size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
@@ -1261,29 +1261,10 @@ bool Engine::init_kv_cache() {
             mcfg.n_layers, mcfg.n_kv_heads, head_dim, kv_bs);
     }
 
-    // Compute sketch_dim for TurboQuant / TurboQuant Lite (0 for other modes)
-    int kv_sketch_dim = 0;
-    if (config_.kv_cache_dtype == QType::TURBOQUANT) {
-        kv_sketch_dim = head_dim;
-    } else if (config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
-        int mult = config_.turboquant_sketch_multiplier;
-        if (mult <= 0)
-            mult = 2;
-        kv_sketch_dim = head_dim * mult;
-    }
-
-    // MXFP4 TurboQuant: FP4 E2M1 + UE8M0 micro-scales (requires head_dim % 32 == 0)
-    bool tq_use_mxfp4 = false;
-    if (config_.kv_cache_dtype == QType::TURBOQUANT && (head_dim % 32 == 0)) {
-        tq_use_mxfp4 = true;
-        IMP_LOG_INFO("TurboQuant: using MXFP4 FP4 E2M1 + UE8M0 for K directions");
-    }
-
     // Per-layer KV shape path (Gemma 4 dual attention geometry): build per-layer
     // nkv/hd arrays restricted to attention layers (hybrid models may have non-attn layers).
     std::unique_ptr<KVCache> kv_cache;
-    if (!mcfg.head_dim_per_layer.empty() && config_.kv_cache_dtype != QType::TURBOQUANT &&
-        config_.kv_cache_dtype != QType::TURBOQUANT_LITE && config_.kv_cache_dtype != QType::INT8 &&
+    if (!mcfg.head_dim_per_layer.empty() && config_.kv_cache_dtype != QType::INT8 &&
         config_.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
         std::vector<int> per_layer_hd(n_kv_layers, 0);
@@ -1303,7 +1284,7 @@ bool Engine::init_kv_cache() {
                                              max_blocks, kv_bs, &vram_alloc_);
     } else {
         kv_cache = std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, head_dim, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &vram_alloc_, kv_sketch_dim, tq_use_mxfp4);
+                                             max_blocks, kv_bs, &vram_alloc_);
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -1352,25 +1333,6 @@ bool Engine::init_kv_cache() {
     }
 
     executor_->set_kv_layer_map(std::move(kv_layer_map));
-
-    // Initialize QJL projection for TurboQuant / TurboQuant Lite KV cache
-    if (config_.kv_cache_dtype == QType::TURBOQUANT || config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
-        auto& qjl = executor_->qjl_projection();
-        int sketch_dim;
-        if (config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
-            int mult = config_.turboquant_sketch_multiplier;
-            if (mult <= 0)
-                mult = 2;
-            sketch_dim = head_dim * mult;
-            IMP_LOG_INFO("TurboQuant Lite: sketch_dim=%d (mult=%d, head_dim=%d)", sketch_dim, mult, head_dim);
-        } else {
-            sketch_dim = head_dim;  // standard TurboQuant: sketch_dim = head_dim
-        }
-        if (!qjl_init(qjl, head_dim, sketch_dim, /*seed=*/42, stream_)) {
-            IMP_LOG_ERROR("Failed to initialize QJL projection for %s", dtype_name(config_.kv_cache_dtype));
-            return false;
-        }
-    }
 
     if (offload_mgr_)
         executor_->set_offload_manager(offload_mgr_.get());

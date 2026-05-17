@@ -58,11 +58,7 @@ else
 fi
 
 echo ""
-echo "[5/6] TurboQuant tests..."
-run_test "TurboQuant suite" imp-tests --gtest_filter="TurboQuant*"
-
-echo ""
-echo "[6/6] Full test suite..."
+echo "[5/6] Full test suite..."
 FULL=$(imp-tests 2>&1 | tail -3)
 TOTAL=$(echo "$FULL" | grep "PASSED" | grep -oP '\d+' | head -1)
 FAILED=$(echo "$FULL" | grep "FAILED" | grep -oP '\d+' | head -1 || echo 0)

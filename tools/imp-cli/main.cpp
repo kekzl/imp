@@ -104,11 +104,23 @@ int main(int argc, char** argv) {
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
     if (args.kv_mxfp4)
         config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
-    if (args.kv_turboquant)
-        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT;
+    if (args.kv_turboquant) {
+        static bool warned_tq = false;
+        if (!warned_tq) {
+            fprintf(stderr, "[IMP WARN] --kv-turboquant is deprecated; TurboQuant has been retired. "
+                            "Using --kv-mxfp4 instead.\n");
+            warned_tq = true;
+        }
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
+    }
     if (args.kv_turboquant_lite) {
-        config.kv_cache_dtype = IMP_DTYPE_TURBOQUANT_LITE;
-        config.turboquant_sketch_multiplier = args.turboquant_sketch_mult;
+        static bool warned_tql = false;
+        if (!warned_tql) {
+            fprintf(stderr, "[IMP WARN] --kv-turboquant-lite is deprecated; TurboQuant has been retired. "
+                            "Using --kv-mxfp4 instead.\n");
+            warned_tql = true;
+        }
+        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
     }
     if (args.ssm_fp16)
         config.ssm_state_dtype = IMP_DTYPE_FP16;

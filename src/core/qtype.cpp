@@ -22,10 +22,6 @@ size_t qtype_elem_bytes(QType q) {
             return 4;
         case QType::FP4_E2M1:
             return 1;  // 2 elems/byte
-        case QType::TURBOQUANT:
-            return 1;
-        case QType::TURBOQUANT_LITE:
-            return 1;
         default:
             return 0;
     }
@@ -132,10 +128,6 @@ const char* qtype_name(QType q) {
             return "NVFP4";
         case QType::MXFP4_KV:
             return "MXFP4_KV";
-        case QType::TURBOQUANT:
-            return "TURBOQUANT";
-        case QType::TURBOQUANT_LITE:
-            return "TURBOQUANT_LITE";
     }
     return "UNKNOWN";
 }

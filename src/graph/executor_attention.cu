@@ -993,33 +993,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // RTX 5090 has 96 MB L2 — enough for ~3K tokens of KV at FP8.
         set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
 
-        if (cache_dtype == QType::TURBOQUANT_LITE) {
-            // TurboQuant Lite paged attention: QJL sketch-only K + INT4 V (Split-K enabled)
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode_turboquant_lite(
-                q4, v_c, o4, static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(qjl_proj_.matrix), state.block_tables, state.context_lens, kv_bs,
-                scale, qjl_proj_.sketch_dim, state.max_context_len, layer_sliding_window,
-                cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
-        } else if (cache_dtype == QType::TURBOQUANT) {
-            // TurboQuant paged attention: PolarQuant K + QJL correction + INT4 V (Split-K enabled)
-            // K_mscales: non-null if MXFP4 path (FP4 E2M1 + UE8M0), null for uniform INT4
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            const uint8_t* k_mscales = cache->use_mxfp4()
-                                           ? static_cast<const uint8_t*>(cache->k_mscale_ptr(kv_layer, 0))
-                                           : nullptr;
-            paged_attention_decode_turboquant(q4, k_c, v_c, o4,
-                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                                              static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                              static_cast<const uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                                              static_cast<const uint8_t*>(qjl_proj_.matrix),
-                                              state.block_tables, state.context_lens, kv_bs, scale,
-                                              qjl_proj_.sketch_dim, state.max_context_len,
-                                              layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                              state.max_blocks_per_seq, k_mscales);
-        } else if (cache_dtype == QType::INT4) {
+        if (cache_dtype == QType::INT4) {
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int4(q4, k_c, v_c, o4,

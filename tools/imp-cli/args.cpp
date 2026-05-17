@@ -47,9 +47,9 @@ void print_usage(const char* prog) {
             "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
             "  --kv-nvfp4            Use NVFP4 KV cache (quarters KV memory; FP4 + E4M3 scales)\n"
             "  --kv-mxfp4            Use MXFP4-KV cache (quarters KV memory; FP4 + UE8M0 scales)\n"
-            "  --kv-turboquant       Use TurboQuant KV cache (PolarQuant + QJL, ~3x K reduction)\n"
-            "  --kv-turboquant-lite  Use TurboQuant Lite (QJL sketch-only K, ~3 bits/elem avg)\n"
-            "  --tq-sketch-mult <n>  TQ Lite sketch multiplier (default: 2, sketch_dim = n*head_dim)\n"
+            "  --kv-turboquant       [DEPRECATED] Alias for --kv-mxfp4\n"
+            "  --kv-turboquant-lite  [DEPRECATED] Alias for --kv-mxfp4\n"
+            "  --tq-sketch-mult <n>  [DEPRECATED, ignored]\n"
             "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
             "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
@@ -163,11 +163,11 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--kv-mxfp4") == 0) {
             args.kv_mxfp4 = true;
         } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
-            args.kv_turboquant = true;
+            args.kv_turboquant = true;  // deprecated alias → kv_mxfp4
         } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {
-            args.kv_turboquant_lite = true;
+            args.kv_turboquant_lite = true;  // deprecated alias → kv_mxfp4
         } else if (std::strcmp(arg, "--tq-sketch-mult") == 0 && i + 1 < argc) {
-            args.turboquant_sketch_mult = std::atoi(argv[++i]);
+            ++i;  // consume the argument; flag is deprecated and ignored
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
             args.ssm_fp16 = true;
         } else if (std::strcmp(arg, "--cuda-graphs") == 0) {

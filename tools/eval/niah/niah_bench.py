@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""NIAH retrieval-quality bench for TurboQuant Phase 2.
+"""NIAH retrieval-quality bench for KV cache dtypes.
 
-Runs 4 KV-cache configs × 2 contexts × 5 depths × 3 seeds = 120 prompts on
-Qwen3-8B Q8_0, comparing FP16 / FP8 / TurboQuant (QJL on) / TurboQuant (QJL
-off, via IMP_TQ_SKIP_QJL=1). Reports per-(config, ctx) accuracy and a
-ship/no-ship verdict against the Phase 2 design-memo thresholds.
+Runs KV-cache configs × contexts × depths × seeds on Qwen3-8B Q8_0,
+comparing FP16 / FP8 / NVFP4 / MXFP4-KV. Reports per-(config, ctx) accuracy.
 
 Per-prompt invocation: spawns `docker run imp:test imp-cli ... --prompt <P>
 --max-tokens 64 --temperature 0 --seed 42`. Scores by substring match on
@@ -15,9 +13,9 @@ Usage:
   tools/eval/niah/niah_bench.py [--model PATH] [--out DIR] [--smoke] \\
       [--config NAME ...] [--ctx N ...] [--depth PCT ...] [--seed N ...]
 
-Acceptance per docs/plans/turboquant_fp8_gap_design_2026_05_17.md §5
-Phase 2: MXFP4-K (= tq_qjl_off in this script) NIAH accuracy at 16K within
-5 pp of TurboQuant (tq_qjl_on) → green-light Path A.
+Note: TurboQuant (tq_qjl_on / tq_qjl_off) configs were removed in Phase 5
+(2026-05-17) when TurboQuant was retired. Historical findings are documented in
+docs/plans/turboquant_fp8_gap_design_2026_05_17.md §5.
 """
 
 from __future__ import annotations
@@ -48,8 +46,7 @@ CONFIGS = {
     "fp8":          (["--kv-fp8"],                           {}),
     "nvfp4":        (["--kv-nvfp4"],                         {}),
     "mxfp4_kv":     (["--kv-mxfp4"],                         {}),
-    "tq_qjl_on":    (["--kv-turboquant"],                    {}),
-    "tq_qjl_off":   (["--kv-turboquant"],                    {"IMP_TQ_SKIP_QJL": "1"}),
+    # tq_qjl_on / tq_qjl_off removed: TurboQuant retired Phase 5 (2026-05-17)
 }
 DEFAULT_CTX     = [4096, 16384]
 DEFAULT_DEPTHS  = [0.0, 0.25, 0.50, 0.75, 0.95]
@@ -190,9 +187,8 @@ def write_summary(results: list[Result], out_path: Path) -> None:
         return 100 * sum(ss) / len(ss) if ss else float("nan")
 
     # Slice 3 re-run: with the real MXFP4-KV kernel shipped in PR #249, the
-    # design memo's actual quality question becomes nvfp4 vs mxfp4_kv (does
-    # UE8M0 vs E4M3 scale encoding affect retrieval quality?). The original
-    # Phase 2 tq_qjl_on/off block stays for comparison if those configs ran.
+    # Key quality question: nvfp4 vs mxfp4_kv (does UE8M0 vs E4M3 scale
+    # encoding affect retrieval quality?). TurboQuant configs removed Phase 5.
     if 16384 in ctxs and ("nvfp4", 16384) in by_cell and ("mxfp4_kv", 16384) in by_cell:
         nvfp4_pct    = cell_pct("nvfp4",    16384)
         mxfp4_kv_pct = cell_pct("mxfp4_kv", 16384)
@@ -213,17 +209,6 @@ def write_summary(results: list[Result], out_path: Path) -> None:
             verdict,
         ]
 
-    if 16384 in ctxs and ("tq_qjl_on", 16384) in by_cell and ("tq_qjl_off", 16384) in by_cell:
-        tq_qjl_on  = cell_pct("tq_qjl_on",  16384)
-        tq_qjl_off = cell_pct("tq_qjl_off", 16384)
-        delta_pp = tq_qjl_off - tq_qjl_on
-        lines += [
-            "",
-            "## QJL-stripping (TQ) verdict (16K context, kept for comparison)",
-            f"- tq_qjl_on:  {tq_qjl_on:.1f}% (typically 0%: TQ engine-limited to ~4K BPE tokens, see Phase 2 findings)",
-            f"- tq_qjl_off: {tq_qjl_off:.1f}%",
-            f"- Δ = {delta_pp:+.1f} pp",
-        ]
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -239,7 +224,7 @@ def main() -> int:
     ap.add_argument("--depth", type=float, action="append", default=None)
     ap.add_argument("--seed", type=int, action="append", default=None)
     ap.add_argument("--smoke", action="store_true",
-                    help="Run 1 prompt (tq_qjl_on, 4K, depth=0.5, seed=0)")
+                    help="Run 1 prompt (mxfp4_kv, 4K, depth=0.5, seed=0)")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -248,7 +233,7 @@ def main() -> int:
 
     if args.smoke:
         prompts = [
-            Prompt(config="tq_qjl_on", ctx_tokens=4096, depth_pct=0.5, seed=0,
+            Prompt(config="mxfp4_kv", ctx_tokens=4096, depth_pct=0.5, seed=0,
                    text=build_prompt(filler, 4096, 0.5, 0))
         ]
     else:

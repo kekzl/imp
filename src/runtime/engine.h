@@ -42,7 +42,7 @@ struct EngineConfig {
     // KV cache dtype: FP16 (default) or FP8_E4M3 for ~50% KV VRAM savings
     QType kv_cache_dtype = QType::F16;
 
-    // TurboQuant Lite: sketch_dim = turboquant_sketch_multiplier * head_dim
+    // [DEPRECATED] TurboQuant sketch multiplier — retained for ABI compat, not used.
     int turboquant_sketch_multiplier = 2;
 
     // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
