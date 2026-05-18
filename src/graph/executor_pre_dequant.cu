@@ -240,6 +240,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // --- Phase 3c (standalone): Native MXFP4 GGUF when NVFP4 decode is disabled (extracted) ---
     pre_dequant_phase3c_standalone_mxfp4_(cfg, stream);
 
+    // --- Phase 4: tensor registry + overlay diagnostic + NVFP4 device-args (extracted) ---
+    pre_dequant_phase4_tensor_registry_(cfg, stream);
+}
+
+void GraphExecutor::pre_dequant_phase4_tensor_registry_(
+    const ModelConfig& cfg, cudaStream_t stream) {
+    (void)stream;  // unused but kept for signature consistency
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
     registry_.clear();
     // Explicit kind overrides t.kind which is UNKNOWN after weight_upload.cu
@@ -474,7 +481,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // Conditions: model is MoE (ne > 0) and at least one layer has all three
     // projections backed by CUTLASS NVFP4 handles (post-Phase-3 setup).
     {
-        const auto& cfg = model_->config();
         const int ne = cfg.n_experts;
         const int n_layers = cfg.n_layers;
         if (ne > 0) {
