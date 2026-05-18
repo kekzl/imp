@@ -204,6 +204,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
     else if (eq("gemm.no_mmvq_q8_0"))
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
+    else if (eq("gemm.q4k_imma_enabled"))
+        cfg.gemm.q4k_imma_enabled = parse_bool(val, cfg.gemm.q4k_imma_enabled);
 
     // [gemma4]
     else if (eq("gemma4.fp32_gemm_out"))
