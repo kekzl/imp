@@ -647,7 +647,7 @@ private:
     void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                         size_t& remaining_budget, cudaStream_t stream);
-    void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg,
+    void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                        size_t& remaining_budget, cudaStream_t stream);
     void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
                                           size_t& remaining_budget, cudaStream_t stream);
