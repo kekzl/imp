@@ -202,6 +202,7 @@ if(IMP_USE_CUTLASS)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_tile_bench.cu)
     endif()
     if(IMP_BUILD_TESTS)
         set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
@@ -481,6 +482,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tma_block_scale_bench.cu
         tests/test_fmha_v_load_bench.cu
         tests/test_mmq_q4k_imma_bench.cu
+        tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_weight_dispatch.cu
     )
 
