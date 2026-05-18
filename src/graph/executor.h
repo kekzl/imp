@@ -640,6 +640,20 @@ public:
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
 private:
+    // Phases of pre_dequant_weights(), extracted for readability.
+    // Cross-phase state: remaining_budget is reduced by each FP16/FP8/NVFP4
+    // pass; cfg is const reference to model config.
+    void pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream);
+    void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
+    void pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                        size_t& remaining_budget, cudaStream_t stream);
+    void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                       size_t& remaining_budget, cudaStream_t stream);
+    void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                          size_t& remaining_budget, cudaStream_t stream);
+    void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
+    void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
+
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
     int streaming_window_ = 0;
