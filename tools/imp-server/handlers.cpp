@@ -1099,6 +1099,151 @@ static bool snapshot_state_and_tokenize_(
     return true;
 }
 
+// Vision-request blocking decode path: prefill via C API, sample tokens in a
+// blocking loop until EOS/stop/max_tokens, build a non-streaming JSON response
+// (vision doesn't support SSE — state is per-engine, not per-request).
+// Caller must hold no lock on entry. Returns after sending the response.
+static void handle_vision_chat_blocking_(
+    httplib::Response& res,
+    ServerState& state,
+    ChatRequestContext& ctx,
+    std::shared_ptr<imp::Request> imp_req)
+{
+    // Vision path: use blocking C API (batching engine is stopped)
+    ImpError err = imp_context_reset(state.ctx);
+    if (err != IMP_SUCCESS) {
+        state.ctx->engine->clear_image();
+        state.batching->start(state.ctx);
+        res.status = 500;
+        json error = {{"error",
+                       {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
+                        {"type", "server_error"}}}};
+        res.set_content(error.dump(), "application/json");
+        return;
+    }
+
+    // Build params now so prefill's first-token sample also honours them
+    ImpGenerateParams prefill_params = imp_generate_params_default();
+    prefill_params.temperature = ctx.params.temperature;
+    prefill_params.top_p = ctx.params.top_p;
+    prefill_params.top_k = ctx.params.top_k;
+    prefill_params.seed = ctx.params.seed;
+    err = imp_prefill_with_params(state.ctx, imp_req->input_tokens.data(), ctx.snap.n_prompt_tokens,
+                                  &prefill_params);
+    if (err != IMP_SUCCESS) {
+        state.ctx->engine->clear_image();
+        state.batching->start(state.ctx);
+        res.status = 500;
+        json error = {{"error",
+                       {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
+                        {"type", "server_error"}}}};
+        res.set_content(error.dump(), "application/json");
+        return;
+    }
+
+    // After prefill, clear vision and restart batching engine
+    // The rest of generation will use the old blocking decode path
+    // (via imp_decode_step, which calls engine->step() directly)
+    // This is safe because batching engine is stopped.
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.temperature = ctx.params.temperature;
+    params.top_p = ctx.params.top_p;
+    params.top_k = ctx.params.top_k;
+    params.max_tokens = ctx.params.max_tokens;
+    params.seed = ctx.params.seed;
+    params.min_p = ctx.params.min_p;
+    params.typical_p = ctx.params.typical_p;
+    params.repetition_penalty = ctx.params.repetition_penalty;
+    params.frequency_penalty = ctx.params.frequency_penalty;
+    params.presence_penalty = ctx.params.presence_penalty;
+    params.repeat_last_n = ctx.params.repeat_last_n;
+    params.dry_multiplier = ctx.params.dry_multiplier;
+    params.dry_base = ctx.params.dry_base;
+    params.dry_allowed_length = ctx.params.dry_allowed_length;
+    params.dry_penalty_last_n = ctx.params.dry_penalty_last_n;
+    params.mirostat = ctx.params.mirostat;
+    params.mirostat_tau = ctx.params.mirostat_tau;
+    params.mirostat_eta = ctx.params.mirostat_eta;
+    params.logprobs = ctx.params.req_logprobs ? 1 : 0;
+    params.top_logprobs = ctx.params.top_logprobs;
+    params.json_mode = ctx.params.json_mode ? 1 : 0;
+
+    // Blocking decode loop for vision requests
+    std::vector<int32_t> output_ids;
+    int32_t prefill_token = -1;
+    if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
+        prefill_token = state.ctx->active_request->output_tokens.back();
+    }
+
+    for (int step = -1; step < ctx.params.max_tokens; step++) {
+        int32_t token = 0;
+        if (step == -1) {
+            if (prefill_token < 0)
+                continue;
+            token = prefill_token;
+        } else {
+            err = imp_decode_step(state.ctx, &params, &token);
+            if (err != IMP_SUCCESS)
+                break;
+        }
+        if (token == ctx.snap.tok->eos_id())
+            break;
+        if (ctx.snap.have_template) {
+            bool is_stop = false;
+            for (int32_t stop_id : ctx.snap.stop_token_ids) {
+                if (token == stop_id) {
+                    is_stop = true;
+                    break;
+                }
+            }
+            if (is_stop)
+                break;
+        }
+        output_ids.push_back(token);
+    }
+
+    state.ctx->engine->clear_image();
+    state.batching->start(state.ctx);
+
+    // Build simple non-streaming response for vision
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
+    int n_output_tokens = static_cast<int>(output_ids.size());
+    std::string content = ctx.snap.tok->decode(output_ids);
+
+    fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n", ctx.req_id.c_str(),
+            ctx.snap.n_prompt_tokens, n_output_tokens, ms);
+    state.metrics.requests_total++;
+    state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
+    state.metrics.tokens_completion_total += n_output_tokens;
+    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+
+    json response_for_log = {{"id", ctx.req_id},
+                             {"object", "chat.completion"},
+                             {"model", ctx.snap.model_name},
+                             {"choices", json::array({{{"index", 0},
+                                                        {"message", {{"role", "assistant"},
+                                                                     {"content", content}}},
+                                                        {"finish_reason", "stop"}}})}};
+    log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, ctx.req_id, ctx.log_endpoint,
+                      ctx.log_client_ip, ctx.log_raw_body, ms,
+                      ctx.snap.n_prompt_tokens, n_output_tokens, "stop", response_for_log);
+
+    json response = {{"id", ctx.req_id},
+                     {"object", "chat.completion"},
+                     {"created", unix_timestamp()},
+                     {"model", ctx.snap.model_name},
+                     {"choices", json::array({{{"index", 0},
+                                               {"message", {{"role", "assistant"}, {"content", content}}},
+                                               {"finish_reason", "stop"}}})},
+                     {"usage",
+                      {{"prompt_tokens", ctx.snap.n_prompt_tokens},
+                       {"completion_tokens", n_output_tokens},
+                       {"total_tokens", ctx.snap.n_prompt_tokens + n_output_tokens}}}};
+    res.set_content(response.dump(), "application/json");
+}
+
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     ChatRequestContext ctx;
     if (!parse_chat_request_params(req, res, state, ctx))
@@ -1153,139 +1298,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // For vision requests, fall back to blocking mode since vision state
     // is per-engine (not per-request). Use the old C API path.
     if (ctx.snap.has_vision_request) {
-        // Vision path: use blocking C API (batching engine is stopped)
-        ImpError err = imp_context_reset(state.ctx);
-        if (err != IMP_SUCCESS) {
-            state.ctx->engine->clear_image();
-            state.batching->start(state.ctx);
-            res.status = 500;
-            json error = {{"error",
-                           {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
-                            {"type", "server_error"}}}};
-            res.set_content(error.dump(), "application/json");
-            return;
-        }
-
-        // Build params now so prefill's first-token sample also honours them
-        ImpGenerateParams prefill_params = imp_generate_params_default();
-        prefill_params.temperature = ctx.params.temperature;
-        prefill_params.top_p = ctx.params.top_p;
-        prefill_params.top_k = ctx.params.top_k;
-        prefill_params.seed = ctx.params.seed;
-        err = imp_prefill_with_params(state.ctx, imp_req->input_tokens.data(), ctx.snap.n_prompt_tokens,
-                                      &prefill_params);
-        if (err != IMP_SUCCESS) {
-            state.ctx->engine->clear_image();
-            state.batching->start(state.ctx);
-            res.status = 500;
-            json error = {{"error",
-                           {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
-                            {"type", "server_error"}}}};
-            res.set_content(error.dump(), "application/json");
-            return;
-        }
-
-        // After prefill, clear vision and restart batching engine
-        // The rest of generation will use the old blocking decode path
-        // (via imp_decode_step, which calls engine->step() directly)
-        // This is safe because batching engine is stopped.
-
-        ImpGenerateParams params = imp_generate_params_default();
-        params.temperature = ctx.params.temperature;
-        params.top_p = ctx.params.top_p;
-        params.top_k = ctx.params.top_k;
-        params.max_tokens = ctx.params.max_tokens;
-        params.seed = ctx.params.seed;
-        params.min_p = ctx.params.min_p;
-        params.typical_p = ctx.params.typical_p;
-        params.repetition_penalty = ctx.params.repetition_penalty;
-        params.frequency_penalty = ctx.params.frequency_penalty;
-        params.presence_penalty = ctx.params.presence_penalty;
-        params.repeat_last_n = ctx.params.repeat_last_n;
-        params.dry_multiplier = ctx.params.dry_multiplier;
-        params.dry_base = ctx.params.dry_base;
-        params.dry_allowed_length = ctx.params.dry_allowed_length;
-        params.dry_penalty_last_n = ctx.params.dry_penalty_last_n;
-        params.mirostat = ctx.params.mirostat;
-        params.mirostat_tau = ctx.params.mirostat_tau;
-        params.mirostat_eta = ctx.params.mirostat_eta;
-        params.logprobs = ctx.params.req_logprobs ? 1 : 0;
-        params.top_logprobs = ctx.params.top_logprobs;
-        params.json_mode = ctx.params.json_mode ? 1 : 0;
-
-        // Blocking decode loop for vision requests
-        std::vector<int32_t> output_ids;
-        int32_t prefill_token = -1;
-        if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
-            prefill_token = state.ctx->active_request->output_tokens.back();
-        }
-
-        for (int step = -1; step < ctx.params.max_tokens; step++) {
-            int32_t token = 0;
-            if (step == -1) {
-                if (prefill_token < 0)
-                    continue;
-                token = prefill_token;
-            } else {
-                err = imp_decode_step(state.ctx, &params, &token);
-                if (err != IMP_SUCCESS)
-                    break;
-            }
-            if (token == ctx.snap.tok->eos_id())
-                break;
-            if (ctx.snap.have_template) {
-                bool is_stop = false;
-                for (int32_t stop_id : ctx.snap.stop_token_ids) {
-                    if (token == stop_id) {
-                        is_stop = true;
-                        break;
-                    }
-                }
-                if (is_stop)
-                    break;
-            }
-            output_ids.push_back(token);
-        }
-
-        state.ctx->engine->clear_image();
-        state.batching->start(state.ctx);
-
-        // Build simple non-streaming response for vision
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
-        int n_output_tokens = static_cast<int>(output_ids.size());
-        std::string content = ctx.snap.tok->decode(output_ids);
-
-        fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n", ctx.req_id.c_str(),
-                ctx.snap.n_prompt_tokens, n_output_tokens, ms);
-        state.metrics.requests_total++;
-        state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
-        state.metrics.tokens_completion_total += n_output_tokens;
-        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-
-        json response_for_log = {{"id", ctx.req_id},
-                                 {"object", "chat.completion"},
-                                 {"model", ctx.snap.model_name},
-                                 {"choices", json::array({{{"index", 0},
-                                                            {"message", {{"role", "assistant"},
-                                                                         {"content", content}}},
-                                                            {"finish_reason", "stop"}}})}};
-        log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, ctx.req_id, ctx.log_endpoint,
-                          ctx.log_client_ip, ctx.log_raw_body, ms,
-                          ctx.snap.n_prompt_tokens, n_output_tokens, "stop", response_for_log);
-
-        json response = {{"id", ctx.req_id},
-                         {"object", "chat.completion"},
-                         {"created", unix_timestamp()},
-                         {"model", ctx.snap.model_name},
-                         {"choices", json::array({{{"index", 0},
-                                                   {"message", {{"role", "assistant"}, {"content", content}}},
-                                                   {"finish_reason", "stop"}}})},
-                         {"usage",
-                          {{"prompt_tokens", ctx.snap.n_prompt_tokens},
-                           {"completion_tokens", n_output_tokens},
-                           {"total_tokens", ctx.snap.n_prompt_tokens + n_output_tokens}}}};
-        res.set_content(response.dump(), "application/json");
+        handle_vision_chat_blocking_(res, state, ctx, imp_req);
         return;
     }
 
