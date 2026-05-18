@@ -34,7 +34,7 @@ When a single prompt exceeds `max_seq_len`, the engine's pre-allocated device bu
 
 ### ~~NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)~~ — RETIRED 2026-05-18
 
-Phase 1 diagnostic (full findings: `docs/superpowers/plans/2026-05-18-nvfp4-smoothquant-phase1-findings.md`) closed this roadmap item on **all relevant NVFP4 checkpoints**, including the one the design memo gated on.
+Phase 1 diagnostic (full findings: `docs/archive/superpowers-2026-05/plans/2026-05-18-nvfp4-smoothquant-phase1-findings.md`) closed this roadmap item on **all relevant NVFP4 checkpoints**, including the one the design memo gated on.
 
 **Local corpus** — 6 NVFP4 models scanned via SafeTensors header + engine audit-log run. `input_scale` is **100 % scalar (numel=1)** on every Linear of every checkpoint; none of the 6 recipe.yamls ships a `SmoothQuantModifier` (all are pure `QuantizationModifier: scheme: NVFP4`). The per-Linear scalar is llm-compressor's `input_global_scale` activation-absmax anchor, not a SmoothQuant `1/s` carrier — engine's existing "intentionally NOT applied" stance at `executor_pre_dequant.cu:431` is the correct behavior. The 2026-05-07 DIVIDE/MULTIPLY refutation on Gemma-4-NVFP4 is now structurally explained (no SmoothQuant correction existed to apply, since no SmoothQuant was calibrated into the model).
 
@@ -159,7 +159,7 @@ A **direct tiled Q4_K_M GEMM kernel** (`src/compute/mmq_q4k.cu`, Phase A dp4a) w
 Closing the high-M gap requires porting the inner loop to a Tensor-Core MMA. Two paths exist on sm_120:
 
 1. **FP16 HMMA** (`mma.sync.m16n8k16.f16`) with on-the-fly Q4→FP16 dequant. **Attempted and retired**: shipped across 7 phases as `src/compute/mmq_q4k_v2.cu` on a feature branch, microbench reached **4.87× v1 dp4a** at M=512 (kernel-only). End-to-end on Qwen3.6-35B Q4_K_M was **-4% pp** in production because MoE keeps experts under the `MIN_M=64` v2 threshold, the FP16 weight cache (`wcache_.fp16`) hits skip v2 entirely, and Phase 1 dispatch overhead is paid per call. Retired in PR #193. Re-eval pending a dense Q4_K_M model that bypasses both the MoE-min-M and the fp16_cache hot path. Memo: `mmq_q4k_v2_phase2_shipped_2026_05_16.md`.
-2. **INT8 IMMA** (`mma.sync.m16n8k32.s32.s8.s8.s32`, ~838 TOPS) with Q4_K dequant→INT8 reordering — **explored across PRs #254–#269 and DEFERRED 2026-05-18.** Wrap-up memos: `docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md`, `docs/superpowers/plans/2026-05-18-q4k-imma-phase3-refuted.md`.
+2. **INT8 IMMA** (`mma.sync.m16n8k32.s32.s8.s8.s32`, ~838 TOPS) with Q4_K dequant→INT8 reordering — **explored across PRs #254–#269 and DEFERRED 2026-05-18.** Wrap-up memos: `docs/archive/superpowers-2026-05/plans/2026-05-18-q4k-imma-phase2b-ceiling.md`, `docs/archive/superpowers-2026-05/plans/2026-05-18-q4k-imma-phase3-refuted.md`.
 
    - **Phase 1** (PR #254): raw MMA microbench confirmed **931 TOPS** on sm_120a (3.82× FP16 HMMA), no throttle.
    - **Phase 2A** (PR #255): Q4_K → symmetric-s8 reorder kernel.
@@ -173,7 +173,7 @@ Closing the high-M gap requires porting the inner loop to a Tensor-Core MMA. Two
    - A workload where dequant→cuBLAS isn't reachable (fp16_cache disabled + dequant_scratch unavailable — rare)
    - Activation-quant cost fuseable into the prior layer's epilogue
 
-Memos: `mmq_q4k_phase_a_2026_05_15.md` (v1 dp4a sweep), `mmq_q4k_v2_hmma_design_2026_05_15.md` (v2 HMMA blueprint), `q4k_mmvq_crossover_2026_05_15.md` (original mmvq-vs-cuBLAS measurement), `docs/plans/q4k_imma_design_2026_05_17.md` (INT8 IMMA design), `docs/superpowers/plans/2026-05-18-q4k-imma-phase1-findings.md` (Phase 1 PROCEED), `docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md` (Phase 2B 40 TOPS ceiling), `docs/superpowers/plans/2026-05-18-q4k-imma-phase3-refuted.md` (Phase 3 e2e refuted).
+Memos: `mmq_q4k_phase_a_2026_05_15.md` (v1 dp4a sweep), `mmq_q4k_v2_hmma_design_2026_05_15.md` (v2 HMMA blueprint), `q4k_mmvq_crossover_2026_05_15.md` (original mmvq-vs-cuBLAS measurement), `docs/plans/q4k_imma_design_2026_05_17.md` (INT8 IMMA design), `docs/archive/superpowers-2026-05/plans/2026-05-18-q4k-imma-phase1-findings.md` (Phase 1 PROCEED), `docs/archive/superpowers-2026-05/plans/2026-05-18-q4k-imma-phase2b-ceiling.md` (Phase 2B 40 TOPS ceiling), `docs/archive/superpowers-2026-05/plans/2026-05-18-q4k-imma-phase3-refuted.md` (Phase 3 e2e refuted).
 
 ### Speculative decoding — investigated and shelved
 
