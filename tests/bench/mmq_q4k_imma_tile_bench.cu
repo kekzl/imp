@@ -159,27 +159,54 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
         __syncthreads();
 
         // -------- 4 MMAs per warp per K-block: wrm × wrn = 2 × 2 --------
+        // ldmatrix.x4 / x2 (.b16 mode) replaces the 4-uint32 / 2-uint32 SMEM
+        // loads with one PTX call per fragment — much lower SMEM bandwidth.
+        // Address mapping per PTX ISA 8.5 §9.7.13.6:
+        //   .x4: lanes 0..7 → matrix 0 rows, 8..15 → matrix 1, 16..23 → matrix 2,
+        //        24..31 → matrix 3. Each lane provides one row address.
+        //   .x2: lanes 0..7 → matrix 0, 8..15 → matrix 1, 16..31 inactive.
+        const int la = lane & 7;        // lane within 8-thread group
+        const int matrix_id = lane >> 3; // 0..3 (.x4) or 0..1 (.x2, 2..3 inactive)
+        const int a_row_off = (matrix_id & 1) ? 8 : 0;
+        const int a_k_off = (matrix_id & 2) ? 16 : 0;
+        const int b_n_off = la;
+        const int b_k_off = (matrix_id & 1) ? 16 : 0;  // .x2: matrix 0/1 only
+
 #pragma unroll
         for (int wrm = 0; wrm < kWRM; ++wrm) {
             const int sub_origin_m = warp_origin_m + wrm * 16;
-            const int a_row_lo = sub_origin_m + (lane >> 2);
-            const int a_row_hi = a_row_lo + 8;
-            const int a_col_base = (lane & 3) * 4;
-            uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_lo][a_col_base]);
-            uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_hi][a_col_base]);
-            uint32_t a2 =
-                *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_lo][a_col_base + 16]);
-            uint32_t a3 =
-                *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_hi][a_col_base + 16]);
+            uint32_t a0, a1, a2, a3;
+            {
+                const int8_t* p =
+                    &sA[stage][sub_origin_m + la + a_row_off][a_k_off];
+                uint32_t s_addr =
+                    static_cast<uint32_t>(__cvta_generic_to_shared(p));
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
+                    "{%0, %1, %2, %3}, [%4];\n"
+                    : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
+                    : "r"(s_addr));
+            }
 
 #pragma unroll
             for (int wrn = 0; wrn < kWRN; ++wrn) {
                 const int sub_origin_n = warp_origin_n + wrn * 8;
-                const int b_col = sub_origin_n + (lane >> 2);
-                const int b_k_base = (lane & 3) * 4;
-                uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base]);
-                uint32_t b1 =
-                    *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base + 16]);
+                uint32_t b0, b1;
+                {
+                    // For .x2 only lanes 0..15 provide addresses; 16..31 are
+                    // inactive but still receive (b0, b1) values via PTX-spec
+                    // broadcast. We provide a valid address from every lane
+                    // for safety (the address from inactive lanes is ignored).
+                    const int8_t* p =
+                        &sB[stage][sub_origin_n + b_n_off][b_k_off];
+                    uint32_t s_addr =
+                        static_cast<uint32_t>(__cvta_generic_to_shared(p));
+                    asm volatile(
+                        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 "
+                        "{%0, %1}, [%2];\n"
+                        : "=r"(b0), "=r"(b1)
+                        : "r"(s_addr));
+                }
 
                 int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
 #if __CUDA_ARCH__ >= 750
