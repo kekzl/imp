@@ -899,6 +899,9 @@ private:
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);
     void moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    void moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    void moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
     // after routed experts have written into h. Reads `no` (post-norm) and
     // adds its result back into `h` via elementwise_add. No-op when
