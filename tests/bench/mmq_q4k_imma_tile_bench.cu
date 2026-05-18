@@ -41,7 +41,7 @@ namespace {
 constexpr int kBlockM = 64;
 constexpr int kBlockN = 32;
 constexpr int kBlockK = 32;
-constexpr int kNumStages = 2;
+constexpr int kNumStages = 3;  // 3-stage cp.async pipeline (Phase 2B.4)
 constexpr int kNumWarps = 4;
 constexpr int kThreadsPerCTA = kNumWarps * 32;  // 128
 constexpr int kWRM = 2;  // M-tiles per warp
@@ -109,7 +109,7 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
     const int warp_m = warp_id >> 1;    // 0..1
     const int warp_n = warp_id & 1;     // 0..1
 
-    // SMEM: sA[2][64][32] + sB[2][32][32] = 4096 + 2048 = 6144 bytes per CTA.
+    // SMEM (3-stage): sA[3][64][32] + sB[3][32][32] = 6144 + 3072 = 9216 bytes per CTA.
     __shared__ int8_t sA[kNumStages][kBlockM][kBlockK];
     __shared__ int8_t sB[kNumStages][kBlockN][kBlockK];
 
@@ -129,22 +129,31 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
     const int warp_origin_m = warp_m * 32;
     const int warp_origin_n = warp_n * 16;
 
-    // -------- Prologue --------
+    // -------- Prologue: issue kb=0 and kb=1 loads (3-stage pipeline) --------
     if (subs_per_K > 0) {
         async_load_tile_mw(tid, X_s8, W_s8, sA[0], sB[0], base_m, base_n, 0, K);
         cp_async_commit();
     }
+    if (subs_per_K > 1) {
+        async_load_tile_mw(tid, X_s8, W_s8, sA[1], sB[1], base_m, base_n, kBlockK, K);
+        cp_async_commit();
+    }
 
     for (int kb = 0; kb < subs_per_K; ++kb) {
-        const int stage = kb & 1;
-        const int next_kb = kb + 1;
-        if (next_kb < subs_per_K) {
-            const int next_stage = next_kb & 1;
-            async_load_tile_mw(tid, X_s8, W_s8, sA[next_stage], sB[next_stage], base_m, base_n,
-                               next_kb * kBlockK, K);
+        const int stage = kb % kNumStages;
+        if (kb + 2 < subs_per_K) {
+            // Prefetch kb+2 into its stage slot, then wait for kb's data.
+            // In-flight after commit: 3 groups (kb, kb+1, kb+2) ⇒ wait_group<2>.
+            const int prefetch_stage = (kb + 2) % kNumStages;
+            async_load_tile_mw(tid, X_s8, W_s8, sA[prefetch_stage], sB[prefetch_stage], base_m,
+                               base_n, (kb + 2) * kBlockK, K);
             cp_async_commit();
+            cp_async_wait_group<2>();
+        } else if (kb + 1 < subs_per_K) {
+            // No new prefetch; 2 groups remain (kb, kb+1) ⇒ wait_group<1>.
             cp_async_wait_group<1>();
         } else {
+            // Last iter, only kb's group remains ⇒ wait_group<0>.
             cp_async_wait_group<0>();
         }
         __syncthreads();

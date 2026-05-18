@@ -217,8 +217,8 @@ TEST(MmqQ4kImmaTile, BenchSweep) {
     };
 
     std::fprintf(stderr,
-                 "\n[q4k-imma-tile Phase 2B.3 bench, 4 warps/CTA × WRM·WRN=2·2 "
-                 "(64×32 output), 2-stage cp.async]\n");
+                 "\n[q4k-imma-tile Phase 2B.4 bench, 4 warps/CTA × WRM·WRN=2·2 "
+                 "(64×32 output), 3-stage cp.async]\n");
     std::fprintf(stderr, "  %4s %4s %5s  %10s  %10s\n", "M", "N", "K", "ms/rep", "TOPS");
 
     for (auto sh : shapes) {
