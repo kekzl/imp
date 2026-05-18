@@ -1218,31 +1218,23 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
 }
 
 
-void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
-    const ModelConfig& cfg, const VRAMBudget& budget,
-    size_t& remaining_budget, cudaStream_t stream) {
-    if (wcache_.nvfp4_decode_mode <= 0)
-        return;
-    const char* mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
-
-    // Build exclusion sets for weights that should NOT get NVFP4 quantization.
-    std::unordered_set<const void*> nvfp4_exclude_ptrs;
-
+void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
+                                                     Nvfp4DecodeContext& dctx) {
     // Dual-path mode: attention weights stay at FP8 for quality.
     if (wcache_.dual_path_quant) {
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             if (L.wq.data)
-                nvfp4_exclude_ptrs.insert(L.wq.data);
+                dctx.exclude_ptrs.insert(L.wq.data);
             if (L.wk.data)
-                nvfp4_exclude_ptrs.insert(L.wk.data);
+                dctx.exclude_ptrs.insert(L.wk.data);
             if (L.wv.data)
-                nvfp4_exclude_ptrs.insert(L.wv.data);
+                dctx.exclude_ptrs.insert(L.wv.data);
             if (L.wo.data)
-                nvfp4_exclude_ptrs.insert(L.wo.data);
+                dctx.exclude_ptrs.insert(L.wo.data);
         }
         IMP_LOG_INFO("Dual-path quant: excluding %zu attention weights from NVFP4 cache",
-                     nvfp4_exclude_ptrs.size());
+                     dctx.exclude_ptrs.size());
     }
 
     // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4.
@@ -1253,26 +1245,17 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             if (L.ssm_in.data) {
-                nvfp4_exclude_ptrs.insert(L.ssm_in.data);
+                dctx.exclude_ptrs.insert(L.ssm_in.data);
                 n_ssm_excluded++;
             }
             if (L.ssm_out.data) {
-                nvfp4_exclude_ptrs.insert(L.ssm_out.data);
+                dctx.exclude_ptrs.insert(L.ssm_out.data);
                 n_ssm_excluded++;
             }
         }
         if (n_ssm_excluded > 0)
             IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
     }
-
-    // Collect eligible weights first, then process.
-    struct NvFP4Entry {
-        const void* orig_ptr;
-        Tensor weight;
-        QType qtype;
-        bool from_scratch;
-    };
-    std::vector<NvFP4Entry> nvfp4_entries;
 
     auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
         if (!w.data)
@@ -1282,7 +1265,7 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         if (wcache_.nvfp4.count(w.data))
             return;
         // Skip excluded weights (dual-path attention, GDN/SSM recurrent projections)
-        if (nvfp4_exclude_ptrs.count(w.data))
+        if (dctx.exclude_ptrs.count(w.data))
             return;
 
         int cols = static_cast<int>(w.shape[1]);
@@ -1292,7 +1275,7 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         bool from_scratch = (wcache_.fp16.find(w.data) == wcache_.fp16.end());
         if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_.dequant))
             return;
-        nvfp4_entries.push_back({w.data, w, qtype, from_scratch});
+        dctx.entries.push_back({w.data, w, qtype, from_scratch});
     };
 
     // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
@@ -1300,6 +1283,23 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
 
     // Dense attention + FFN: every tensor benefits every decode step.
     for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
+}
+
+void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
+    const ModelConfig& cfg, const VRAMBudget& budget,
+    size_t& remaining_budget, cudaStream_t stream) {
+    if (wcache_.nvfp4_decode_mode <= 0)
+        return;
+
+    Nvfp4DecodeContext dctx;
+    dctx.mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
+
+    nvfp4_decode_collect_candidates_(cfg, dctx);
+
+    // Aliases keep the body that hasn't been extracted yet readable.
+    const char* mode_str = dctx.mode_str;
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    std::vector<NvFP4Entry>& nvfp4_entries = dctx.entries;
 
     if (wcache_.nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
         // Mode 2 incremental: process FP16-cached entries first (each conversion
