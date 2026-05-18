@@ -910,6 +910,10 @@ private:
     // pre-cached-FP16 dispatch). Unconditional — caller selects when no
     // other path matched.
     void run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // CUTLASS 3.x NVFP4 BlockScaled grouped GEMM MoE prefill (device-args
+    // / smallM / legacy host-args sub-variants). Predicate is checked
+    // internally; returns true if the path ran.
+    bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
     // after routed experts have written into h. Reads `no` (post-norm) and
     // adds its result back into `h` via elementwise_add. No-op when
