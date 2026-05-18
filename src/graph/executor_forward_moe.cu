@@ -143,7 +143,7 @@ static size_t expert_stride(const Tensor& packed, QType qtype) {
 
 }  // anonymous namespace
 
-void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
+void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(shared_workspace_max_tokens_);
 
@@ -174,23 +174,25 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream);
         cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream);
     }
+}
 
+void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
-    int n = cur_n_tokens_;
-    int d = cfg.d_model;
-    int ne = cfg.n_experts;
-    int top_k = cfg.n_experts_active;
-    int eff = max_expert_eff_;
-    float eps = cfg.rms_norm_eps;
-    size_t es = dtype_size(compute_dtype_);
-    int expanded = n * top_k;
+    // Populate per-call context. Subsequent phase helpers read ctx directly.
+    ctx.n        = cur_n_tokens_;
+    ctx.d        = cfg.d_model;
+    ctx.ne       = cfg.n_experts;
+    ctx.top_k    = cfg.n_experts_active;
+    ctx.eff      = max_expert_eff_;
+    ctx.eps      = cfg.rms_norm_eps;
+    ctx.es       = dtype_size(compute_dtype_);
+    ctx.expanded = ctx.n * ctx.top_k;
 
-    Tensor h = view_tokens(hidden_, n);
-    Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
-    bool residual_fused = false;  // set true if decode fast path fuses residual add
+    ctx.h  = view_tokens(hidden_, ctx.n);
+    ctx.r  = view_tokens(residual_, ctx.n);
+    ctx.no = view_tokens(norm_out_, ctx.n);
 
     // 1. Save residual (skip if decode fast path will handle it —
     //    h.data is never written before the final weighted_sum_residual).
@@ -209,69 +211,101 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     // Pre-check: does NVFP4 MoE cache cover all expert tensors for this layer?
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
-    bool nvfp4_covers_layer = false;
-    if (n == 1 && compute_dtype_ == QType::F16) {
+    if (ctx.n == 1 && compute_dtype_ == QType::F16) {
         bool has_up = (ly.nvfp4_moe_up_ptr != nullptr);
         bool has_down = (ly.nvfp4_moe_down_ptr != nullptr);
-        nvfp4_covers_layer = has_up && has_down;
-        if (nvfp4_covers_layer && ly.expert_gate_packed.data != nullptr) {
-            nvfp4_covers_layer = (ly.nvfp4_moe_gate_ptr != nullptr);
+        ctx.nvfp4_covers_layer = has_up && has_down;
+        if (ctx.nvfp4_covers_layer && ly.expert_gate_packed.data != nullptr) {
+            ctx.nvfp4_covers_layer = (ly.nvfp4_moe_gate_ptr != nullptr);
         }
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
-    bool will_skip_residual_copy = can_decode_fast(n, ly.expert_up_packed, ly.expert_up_packed.qtype,
-                                                   moe_.dequant_buf, compute_dtype_) &&
-                                   ly.w_up_shared.data ==
-                                       nullptr;  // must not have shared expert for full residual fusion
+    ctx.will_skip_residual_copy = can_decode_fast(ctx.n, ly.expert_up_packed, ly.expert_up_packed.qtype,
+                                                  moe_.dequant_buf, compute_dtype_) &&
+                                  ly.w_up_shared.data ==
+                                      nullptr;  // must not have shared expert for full residual fusion
 
-    if (!will_skip_residual_copy) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+    if (!ctx.will_skip_residual_copy) {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ctx.r.data, ctx.h.data, ctx.h.nbytes(),
+                                           cudaMemcpyDeviceToDevice, stream));
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
     // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
     // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
     // compounds catastrophically through the 128-expert top-8 MoE routing.
-    bool gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
+    ctx.gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
     // When FP32 residual accumulator is active AND post_ffn_norm exists, defer the
     // residual add to rmsnorm_fp32_accum_to_fp16_kernel (which keeps fp32_hidden_ in
     // sync + applies overflow scaling). Without this, moe_weighted_sum_residual
     // adds residual in FP16 and the shadow goes stale — measured ~7% drift at L3
     // that compounds to 260% by L29 vs llama.cpp (docs/gemma4_layer_diff.md).
-    bool moe_use_fp32_residual = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr &&
-                                  ly.post_ffn_norm.data != nullptr);
+    ctx.moe_use_fp32_residual = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr &&
+                                 ly.post_ffn_norm.data != nullptr);
     // Diagnostic: keep MoE down-projection output in FP32 (no FP16 truncation
     // at GEMM output) to isolate precision drift. Allocated below in the FP16
     // batch path; freed at moe_after_experts. Other prefill paths ignore this.
-    const bool fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
-                                   RuntimeConfig::current().gemma4.fp32_expert_down);
-    void* fp32_down_buf = nullptr;
-    bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                              h.qtype == QType::F16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
-    if (moe_fused_norm_q8) {
+    ctx.fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
+                            RuntimeConfig::current().gemma4.fp32_expert_down);
+    ctx.fp32_down_buf = nullptr;
+    ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
+                             ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
+                             !ctx.gemma4_fp32_norm);
+    if (ctx.moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
-        rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(norm_w.data),
+        rmsnorm_quantize_q8_1(static_cast<const half*>(ctx.h.data),
+                              static_cast<const half*>(norm_w.data),
                               static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf,
-                              static_cast<half*>(no.data), d, eps, stream, norm_w_off_);
+                              static_cast<half*>(ctx.no.data), ctx.d, ctx.eps, stream, norm_w_off_);
     } else {
         // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
-        if (gemma4_fp32_norm) {
-            Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            rmsnorm_fp32_to_fp16(fp32_h, norm_w, no, eps, stream, norm_w_off_);
+        if (ctx.gemma4_fp32_norm) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
+            rmsnorm_fp32_to_fp16(fp32_h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
             // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
-            if (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
-                quantize_fp16_to_q8_1(static_cast<const half*>(no.data),
-                                      static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, d,
-                                      stream);
+            if (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
+                quantize_fp16_to_q8_1(static_cast<const half*>(ctx.no.data),
+                                      static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf,
+                                      ctx.d, stream);
             }
         } else {
-            rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
+            rmsnorm(ctx.h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
         }
     }
+}
+
+void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
+    MoeFfnContext ctx;
+
+    moe_ffn_phase1_setup_(layer, stream);
+    moe_ffn_phase2_state_and_norm_(layer, stream, ctx);
+
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    // Local references into ctx so the remaining body reads unchanged.
+    int&     n        = ctx.n;
+    int&     d        = ctx.d;
+    int&     ne       = ctx.ne;
+    int&     top_k    = ctx.top_k;
+    int&     eff      = ctx.eff;
+    float&   eps      = ctx.eps;
+    size_t&  es       = ctx.es;
+    int&     expanded = ctx.expanded;
+    Tensor&  h        = ctx.h;
+    Tensor&  r        = ctx.r;
+    Tensor&  no       = ctx.no;
+    bool&    residual_fused          = ctx.residual_fused;
+    bool&    nvfp4_covers_layer      = ctx.nvfp4_covers_layer;
+    bool&    will_skip_residual_copy = ctx.will_skip_residual_copy;
+    bool&    moe_fused_norm_q8       = ctx.moe_fused_norm_q8;
+    bool&    moe_use_fp32_residual   = ctx.moe_use_fp32_residual;
+    void*&   fp32_down_buf           = ctx.fp32_down_buf;
+    const bool& fp32_down_active     = ctx.fp32_down_active;
 
     // 3. Gate logits + top-k routing
     Tensor router_in = no;
-    bool fp32_gate_logits_ready = false;  // true when FP32 gate logits computed directly
+    bool& fp32_gate_logits_ready = ctx.fp32_gate_logits_ready;  // true when FP32 gate logits computed directly
     // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * (1/sqrt(d)) * gate_inp_scale)
     // This matches llama.cpp's gemma4-iswa.cpp:151-155.
     // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
@@ -332,9 +366,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool use_sigmoid = cfg.moe_sigmoid_gating;
     bool norm_weights = cfg.expert_weights_norm;
 
-    QType up_qtype = ly.expert_up_packed.qtype;
-    bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype, moe_.dequant_buf,
-                                            compute_dtype_);
+    ctx.up_qtype = ly.expert_up_packed.qtype;
+    QType& up_qtype = ctx.up_qtype;
+    ctx.will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype, moe_.dequant_buf,
+                                           compute_dtype_);
+    bool& will_decode_fast = ctx.will_decode_fast;
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
@@ -342,7 +378,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         will_decode_fast = false;
     }
 
-    MoeRoutingResult routing;
+    MoeRoutingResult& routing = ctx.routing;
     compute_moe_routing(layer, stream, n, d, ne, top_k, router_in, fp32_gate_logits_ready,
                         will_decode_fast, router_bias_ptr, use_sigmoid, norm_weights, routing);
 
@@ -350,13 +386,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Two paths:
     // - Pre-dequanted: expert_w_gate[e] etc. are FP16 on GPU (legacy / unquantized packed)
     // - On-the-fly dequant: expert_*_packed is raw Q6_K/Q8_0/Q4_0 on GPU, dequant per GEMM
-    bool use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr);
+    ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr);
+    bool& use_packed_dequant = ctx.use_packed_dequant;
 
     // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
     // Note: can't use expert_w_gate.empty() because loader pre-allocates the vector for all layers.
     // Instead check if gate data is actually present (packed or first unpacked entry).
-    bool non_gated_experts = (ly.expert_gate_packed.data == nullptr &&
-                              (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
+    ctx.non_gated_experts = (ly.expert_gate_packed.data == nullptr &&
+                             (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
+    bool& non_gated_experts = ctx.non_gated_experts;
 
     // Validate expert_d_ff matches packed tensor shapes (critical for buffer offsets)
     if (use_packed_dequant) {
@@ -370,6 +408,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             eff = static_cast<int>(ref_eff);
         }
     }
+
+    // Recompute the FFN-input norm weight (same selection as phase 2). Only the
+    // Gemma-4 ggml_prefill path consumes it from here; the RMSNorm itself
+    // already ran inside moe_ffn_phase2_state_and_norm_. Declared BEFORE the
+    // will_decode_fast goto so the jump does not bypass its initialization.
+    const Tensor& norm_w = (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
+                               ? ly.ffn_pre_norm_2
+                           : (ly.ffn_norm.data != nullptr)       ? ly.ffn_norm
+                           : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
+                                                                 : ly.attn_norm;
 
     // Decode fast path (n=1, device-resident packed experts): skips
     // gather/scatter + D2H sync. NVFP4 and dp4a/FP16 sub-paths handled
