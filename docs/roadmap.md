@@ -140,16 +140,21 @@ A **direct tiled Q4_K_M GEMM kernel** (`src/compute/mmq_q4k.cu`, Phase A dp4a) w
 Closing the high-M gap requires porting the inner loop to a Tensor-Core MMA. Two paths exist on sm_120:
 
 1. **FP16 HMMA** (`mma.sync.m16n8k16.f16`) with on-the-fly Q4→FP16 dequant. **Attempted and retired**: shipped across 7 phases as `src/compute/mmq_q4k_v2.cu` on a feature branch, microbench reached **4.87× v1 dp4a** at M=512 (kernel-only). End-to-end on Qwen3.6-35B Q4_K_M was **-4% pp** in production because MoE keeps experts under the `MIN_M=64` v2 threshold, the FP16 weight cache (`wcache_.fp16`) hits skip v2 entirely, and Phase 1 dispatch overhead is paid per call. Retired in PR #193. Re-eval pending a dense Q4_K_M model that bypasses both the MoE-min-M and the fp16_cache hot path. Memo: `mmq_q4k_v2_phase2_shipped_2026_05_16.md`.
-2. **INT8 IMMA** (`mma.sync.m16n8k32.s32.s8.s8.s32`, ~838 TOPS) with Q4_K dequant→INT8 reordering. **Phase 1 microbench complete (2026-05-18, memo `docs/superpowers/plans/2026-05-18-q4k-imma-phase1-findings.md`): PROCEED.** Raw-MMA throughput at 1360 warps × 32 768 iterations:
-   - INT8 IMMA `s32.s8.s8.s32`: **931 TOPS** (matches/exceeds the ~838 TOPS advertised peak — sm_120a is *not* throttled like the SM100-only `tcgen05.*` family).
-   - FP16 HMMA `f32.f16.f16.f32` (k=16) baseline: 244 TFLOPS.
-   - **IMMA/HMMA ratio = 3.82×** — gate was ≥ 1.8× (theoretical 2.0×, exceeded by 2.1×). Mixed-sign `s32.u8.s8.s32` and unsigned `s32.u8.u8.s32` are throughput-equivalent (~890–933 TOPS); the symmetric-s8 strategy (§3.2 of design memo) stands on tooling-familiarity, not perf.
+2. **INT8 IMMA** (`mma.sync.m16n8k32.s32.s8.s8.s32`, ~838 TOPS) with Q4_K dequant→INT8 reordering — **explored across PRs #254–#269 and DEFERRED 2026-05-18.** Wrap-up memos: `docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md`, `docs/superpowers/plans/2026-05-18-q4k-imma-phase3-refuted.md`.
 
-   Phase 2 = full production tile kernel (cp.async pipeline + `ldmatrix.x4`/`x2` + Q4-symmetric-s8 reorder + per-sub-block scale-apply); 5–8 days per design memo §6. A realistic full kernel will reach 30–60 % of raw MMA throughput per the v2 HMMA Phase 2 experience, so the e2e payoff is bounded by that fraction times the 3.82× headroom × the fraction of weights actually in scope (dense Q4_K_M, M ≥ 32, not in `fp16_cache`).
+   - **Phase 1** (PR #254): raw MMA microbench confirmed **931 TOPS** on sm_120a (3.82× FP16 HMMA), no throttle.
+   - **Phase 2A** (PR #255): Q4_K → symmetric-s8 reorder kernel.
+   - **Phase 2B** (PR #267): production tile kernel — BLOCK_M=64 N=32 K=32, 4 warps/CTA with WRM·WRN=2·2, 2-stage cp.async. **Plateaus at ~40 TOPS** (4.3 % of raw MMA peak); 3-stage cp.async + ldmatrix.x4 refuted at saturation.
+   - **Phase 2C** (PRs #263 + #268 + #269): infrastructure (`WeightCaches::q4k_imma` + `gemm.q4k_imma_enabled` knob), high-level `mmq_q4k_imma_gemm` entry, production dispatch handler. Default off.
+   - **Phase 3** (this date, refutation memo): end-to-end A/B on **Gemma-3-12B-it Q4_K_M** at pp2048: IMMA **3.8× slower** (1697 vs 6418 tok/s) than the default dequant→cuBLAS path. Decode unchanged. Per-dispatch IMMA at 40 TOPS = 1.5 ms; cuBLAS dequant→FP16 + GEMM at 244 TFLOPS = 0.26 ms ⇒ ~6× per-call ratio, compounded across ~336 Q4_K dispatches per prefill.
 
-   Bench code: `tests/bench/mmq_q4k_imma_bench.{h,cu}` + `tests/test_mmq_q4k_imma_bench.cu`. **Design memo:** `docs/plans/q4k_imma_design_2026_05_17.md`.
+   **Decision: DEFERRED.** All artifacts retained (kernel + dispatch handler + knob) so future researchers can re-bench when one of these conditions appears:
+   - Larger FFN shapes (N ≥ 8192, K ≥ 4096) where the 40 TOPS plateau region widens
+   - Fundamental kernel restructure (persistent CTAs + stream-K, or CUTLASS template instantiation)
+   - A workload where dequant→cuBLAS isn't reachable (fp16_cache disabled + dequant_scratch unavailable — rare)
+   - Activation-quant cost fuseable into the prior layer's epilogue
 
-Memos: `mmq_q4k_phase_a_2026_05_15.md` (v1 dp4a sweep), `mmq_q4k_v2_hmma_design_2026_05_15.md` (v2 blueprint), `q4k_mmvq_crossover_2026_05_15.md` (original mmvq-vs-cuBLAS measurement), `docs/plans/q4k_imma_design_2026_05_17.md` (INT8 IMMA forward-looking design), `docs/superpowers/plans/2026-05-18-q4k-imma-phase1-findings.md` (Phase 1 microbench result).
+Memos: `mmq_q4k_phase_a_2026_05_15.md` (v1 dp4a sweep), `mmq_q4k_v2_hmma_design_2026_05_15.md` (v2 HMMA blueprint), `q4k_mmvq_crossover_2026_05_15.md` (original mmvq-vs-cuBLAS measurement), `docs/plans/q4k_imma_design_2026_05_17.md` (INT8 IMMA design), `docs/superpowers/plans/2026-05-18-q4k-imma-phase1-findings.md` (Phase 1 PROCEED), `docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md` (Phase 2B 40 TOPS ceiling), `docs/superpowers/plans/2026-05-18-q4k-imma-phase3-refuted.md` (Phase 3 e2e refuted).
 
 ### Speculative decoding — investigated and shelved
 
