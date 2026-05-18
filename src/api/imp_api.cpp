@@ -465,6 +465,20 @@ ImpError imp_generate(ImpContext ctx, const char* prompt, const ImpGenerateParam
 
         auto tokens = tokenize_prompt(ctx, prompt, params);
 
+        // Empty token stream would walk into executor_forward.cu:183's
+        // "n_tokens must be positive" guard and then trip a FATAL at
+        // tensor.cpp:91 via the slice() of an uninitialised logits tensor.
+        // Bail out cleanly here instead of crashing the engine.
+        if (tokens.empty()) {
+            IMP_LOG_WARN(
+                "imp_generate: prompt tokenised to 0 tokens (prompt='%.80s%s', "
+                "model may lack vocab coverage or chat-template guard rejected it)",
+                prompt, std::strlen(prompt) > 80 ? "…" : "");
+            if (output_len) *output_len = 0;
+            if (output_buf_size > 0) output_buf[0] = '\0';
+            return IMP_ERROR_INVALID_ARG;
+        }
+
         // Create request with all sampling params
         auto req = std::make_shared<imp::Request>();
         req->input_tokens = std::move(tokens);
