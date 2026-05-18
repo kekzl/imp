@@ -44,7 +44,7 @@ PR #78's `use_default_system_prompt=false` workaround for Mistral-3.2-NVFP4 long
 
 **Phase 2-4** (Option-B `smooth_activations` pre-pass kernel + regression tests) **never needed** — no checkpoint in the foreseeable workload would trigger a non-null `s_inv` path. Diagnostic patch shipped to `src/model/weight_upload.cu` (per-Linear `scalar=N per_channel=M` split + `ndim/shape/numel` samples under `diagnostics.audit_nvfp4_scales=true`) as the lasting deliverable for any future SmoothQuant-calibrated NVFP4 checkpoint that might land.
 
-**Design memo:** `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md` (predicted sub-case (b); confirmed empirically).
+**Design memo:** `docs/archive/plans-2026-05/nvfp4_smoothquant_input_scale_design_2026_05_17.md` (predicted sub-case (b); confirmed empirically).
 
 ### Qwen3.5-27B MXFP4 fails at load — Phase A1+A2 shipped (#244); A3 gated on two external blockers
 
@@ -101,9 +101,9 @@ The full historical narrative below is preserved as audit trail.
 
 ---
 
-TurboQuant currently runs ~23 % behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s) end-to-end — but the kernel-level gap is **3.3-4.1× FP8 per attention call**, much larger than the end-to-end number suggests (weight-bandwidth-boundedness compresses the visible gap). Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales. **Design memo:** `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` (651 lines).
+TurboQuant currently runs ~23 % behind FP8 on Qwen3-8B Q8_0 decode (191 vs 248 tok/s) end-to-end — but the kernel-level gap is **3.3-4.1× FP8 per attention call**, much larger than the end-to-end number suggests (weight-bandwidth-boundedness compresses the visible gap). Closing it would need to drop QJL and switch to MXFP4 K directions with group micro-scales. **Design memo:** `docs/archive/plans-2026-05/turboquant_fp8_gap_design_2026_05_17.md` (651 lines).
 
-**Phase 1 microbench complete (2026-05-17, `docs/superpowers/plans/2026-05-17-turboquant-phase1-findings.md`):**
+**Phase 1 microbench complete (2026-05-17, `docs/archive/superpowers-2026-05/plans/2026-05-17-turboquant-phase1-findings.md`):**
 
 | Metric | pp=512 | pp=4096 | Threshold (§5) | Verdict |
 |---|---:|---:|---:|---|
@@ -114,7 +114,7 @@ Path A is bottleneck-targeted (QJL XNOR+popcount + Q-side sketch precompute is t
 
 Path B (per-token QJL tuning) **shelved** — its 3-5 % recovery ceiling vs QJL's actual 54-60 % dominant cost makes it the wrong shape. `--kv-turboquant-lite` remains retirable as part of Path A.
 
-**Phase 2 NIAH ran (2026-05-17, `docs/superpowers/plans/2026-05-17-turboquant-phase2-findings.md`):**
+**Phase 2 NIAH ran (2026-05-17, `docs/archive/superpowers-2026-05/plans/2026-05-17-turboquant-phase2-findings.md`):**
 - **4 K context, all 4 configs (FP16 / FP8 / TQ-QJL-on / TQ-QJL-off via `IMP_TQ_SKIP_QJL=1`):** 100 % retrieval. Δ(TQ_off − TQ_on) = 0 pp → formally PASS by the design memo's ±5 pp threshold, but vacuous signal (Qwen3-8B aces NIAH at 4 K regardless of KV dtype).
 - **16 K context, FP16 / FP8:** 53 % / 67 %. **Both TQ configs:** 0 % — the engine rejects 15 547-token prompts with `Prefill error: out of memory` because TurboQuant has no chunked-prefill support (single-chunk cap = 4096 BPE tokens, `src/runtime/engine.cpp:1997`).
 
@@ -122,7 +122,7 @@ The 16 K engine limit is itself a Phase 2 finding: **TurboQuant cannot reach lon
 
 **Phase 3 shipped end-to-end:** Slice 1 (PR #248, `ScaleDtype` template scaffolding), Slice 2 (PR #249, `--kv-mxfp4` end-to-end wiring), Slice 3 (this branch, NIAH re-run + bugfix).
 
-**Slice 3 NIAH re-run (2026-05-17, `docs/superpowers/plans/2026-05-17-mxfp4-kv-slice3-findings.md`):**
+**Slice 3 NIAH re-run (2026-05-17, `docs/archive/superpowers-2026-05/plans/2026-05-17-mxfp4-kv-slice3-findings.md`):**
 - First run found MXFP4-KV producing **degenerate "the the the" loops, 0 % NIAH retrieval at 4K**. Looked like a Path A dead end.
 - Root cause: encoder-decoder scale mismatch in `write_kv_cache_mxfp4_kv_kernel` — nibbles quantized with `inv_sc = 1/sc_exact`, scale stored as UE8M0-rounded `sc_byte`. For E4M3 the mismatch is ~1.5 % (NVFP4 tolerates it); for UE8M0 (power-of-2 only) it's up to 2 × per group, compounded over 32 layers ⇒ doom.
 - 5-LOC fix: quantize to UE8M0 first, derive `inv_sc` from the UE8M0-decoded scale, then quantize nibbles round-trip-consistently. TurboQuant's MXFP4 K write kernel already did this pattern correctly (`executor_kernels.cu:1187-1191`); Slice 2 missed the precedent.

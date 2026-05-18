@@ -3,7 +3,7 @@
 **Date:** 2026-05-18
 **Branch:** main (`weight_upload.cu` diagnostic edit only, no semantic change)
 **Scope:** Resolve the design memo §4 sub-case question (`input_scale` per-tensor scalar vs per-channel `[K]`) for every NVFP4 checkpoint imp can reach today, **including** `Mistral-Small-3.2-24B-Instruct-2506-NVFP4` (resolved via HF range-fetch of the safetensors headers + recipe.yaml, no full download required for the answer; full download running in parallel as a follow-up artifact).
-**Design memo:** `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md` §5 Phase 1
+**Design memo:** `docs/archive/plans-2026-05/nvfp4_smoothquant_input_scale_design_2026_05_17.md` §5 Phase 1
 **Diagnostic patch:** `src/model/weight_upload.cu:1965-2079` — adds `is_scalar_count` / `is_per_channel_count` split + per-sample `ndim/shape/numel` logging to the `diagnostics.audit_nvfp4_scales=true` audit. Default-off; no perf or semantic change.
 
 ## Measurements
@@ -147,7 +147,7 @@ The `scalar=N per_channel=M` split + `ndim/shape/numel` per-sample log lives in 
 
 ## Cross-references
 
-- Design memo: `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md`
+- Design memo: `docs/archive/plans-2026-05/nvfp4_smoothquant_input_scale_design_2026_05_17.md`
 - 2026-05-07 refutation memo: `memory/llm_compressor_input_scale_dead_end_2026_05_07.md`
 - Long-context bisection: `memory/nvfp4_long_context_regression_2026_04_28.md`
 - PR #78 (production workaround for Mistral-3.2-NVFP4): `memory/mistral_3_2_nvfp4_use_default_system_2026_04_28.md`

@@ -153,8 +153,10 @@ Performance:
   --kv-fp8                  FP8 E4M3 KV cache (opt-in; default FP16 since PR #51)
   --kv-int8                 INT8 KV cache
   --kv-int4                 INT4 KV cache (quality cost; long-ctx only)
-  --kv-turboquant           PolarQuant + QJL (long-ctx only)
+  --kv-nvfp4                NVFP4 KV cache (FP4 + E4M3 scales, 25% of FP16)
+  --kv-mxfp4                MXFP4-KV cache (FP4 + UE8M0 scales, 25% of FP16)
   --kv-fp16                 Force FP16 KV cache (the current default)
+  (--kv-turboquant{,-lite}  DEPRECATED post-PR #251; aliased to --kv-mxfp4)
   --prefill-fp8             FP8 weight cache for prefill
   --prefill-chunk-size <n>  Max tokens per prefill chunk (default: 0)
   --decode-nvfp4            NVFP4 decode cache (FP16 prefill + NVFP4 decode)
@@ -309,8 +311,7 @@ from both Model Optimizer and llm-compressor.
    (no graph walking at runtime).
 4. **Schedule** — continuous batching with prefill / decode separation.
 5. **KV cache** — paged blocks (`block_size = 16` tokens), LRU eviction,
-   prefix caching. Default FP16 since PR #51; FP8/INT8/INT4/NVFP4/TurboQuant
-   opt-in.
+   prefix caching. Default FP16 since PR #51; FP8/INT8/INT4/NVFP4/MXFP4 opt-in.
 6. **Sample** — temperature, top-p/k, min-p, typical-p, repetition / DRY /
    Mirostat from FP32 logits.
 
