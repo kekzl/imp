@@ -6,6 +6,7 @@
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
+#include "compute/ffn_sparsity_probe.h"
 #include "compute/gemm.h"
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
@@ -82,6 +83,10 @@ Engine::~Engine() {
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled()) {
         kv_manager_->save_prefix_cache(config_.prefix_cache_path, stream_);
     }
+
+    // FFN sparsity probe (Vector 1 research instrumentation): drain per-layer
+    // counters to stderr if any decode steps ran with the probe enabled.
+    flush_ffn_sparsity_probe_log();
 
     gemm_cleanup();
     gemm_grouped_cleanup();

@@ -140,6 +140,8 @@ set(IMP_QUANT_SOURCES
 set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
     src/compute/gemm_capture_fp16_sm120.cu
+    src/compute/ffn_sparsity_probe.cu
+    src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cu
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
@@ -447,6 +449,7 @@ if(IMP_BUILD_TESTS)
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
+        tests/test_ffn_sparsity.cu
     )
 
     imp_add_test_module(test-attention SOURCES

@@ -56,6 +56,12 @@ void QuantScratch::free(VRAMAllocator* alloc) {
     }
     q8_1_max_blocks = 0;
 
+    if (ffn_block_mask) {
+        IMP_CUDA_CHECK_LOG(cudaFree(ffn_block_mask));
+        ffn_block_mask = nullptr;
+    }
+    ffn_block_mask_words = 0;
+
     if (splitk) {
         IMP_CUDA_CHECK_LOG(cudaFree(splitk));
         splitk = nullptr;
