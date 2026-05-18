@@ -46,9 +46,20 @@ PR #78's `use_default_system_prompt=false` workaround for Mistral-3.2-NVFP4 long
 
 **Design memo:** `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md` (predicted sub-case (b); confirmed empirically).
 
-### Qwen3.5-27B MXFP4 fails at load
+### Qwen3.5-27B MXFP4 fails at load — Phase A1+A2 shipped (#244); A3 gated on two external blockers
 
-12 GiB of MXFP4 weights plus the 48 GiB FP16 fallback oversubscribes 32 GB of VRAM. PR #60 converted the original IMA into a clean `IMP_LOG_ERROR` pre-flight refusal at `src/graph/executor_pre_dequant.cu:1532-1574`. **Design memo:** `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`. Recommendation: ship Path A's Phase A1 profiling first (1-2 days) — flip the FP16 fallback cache to skip MoE/LM-head entries, which alone may shrink the cache 48 → 8-12 GiB and unblock the 32 GiB ceiling without needing the full host-dequant machinery. Note: separate open bug (alpha/beta MXFP4 GEMV NaN at N=48) blocks end-to-end inference even after the loading issue is solved — out of scope for the loading fix. Workarounds: 9B Q8_0, 35B-A3B Q4_K_M.
+12 GiB of MXFP4 weights plus the 48 GiB FP16 fallback oversubscribes 32 GB of VRAM. PR #60 converted the original IMA into a clean `IMP_LOG_ERROR` pre-flight refusal at `src/graph/executor_pre_dequant.cu:1532-1574`. **Design memo:** `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`.
+
+**Phase A1+A2 shipped via PR #244 (2026-05-17):** new `attention.mxfp4_fp16_cache_policy` config field (default `legacy` = pre-PR behavior; `pruned` skips MoE `expert_*_packed` + LM head `out_proj_` from the FP16 fallback cache). Code at `src/graph/executor_pre_dequant.cu:1521-1571`. Validated on **Qwen3.5-4B MXFP4** (dense, the only locally-available MXFP4 model — the original `Qwen3.5-27B-mxfp4.gguf` mentioned in older memos is no longer on disk): FP16 cache shrinks 8020 → 6807.50 MiB (−1.18 GiB = LM head only, no MoE in dense 4B); pp64 +39 %, tg32 +11 %. The MoE expert prune is wired but not exercised by any local MXFP4 model. No production-default flip (`legacy` remains the default until a Qwen3.5-27B end-to-end test runs).
+
+**Phase A3 (verify on 27B) gated on two independent external blockers — neither in imp's control:**
+
+1. **No public Qwen3.5-27B MXFP4 GGUF exists.** `unsloth/Qwen3.5-27B-GGUF` ships only standard quants (Q3/Q4/Q5/Q6/Q8/IQ4/UD variants), no MXFP4. The HF MXFP4 sources for this model (`olka-fi/Qwen3.5-27B-MXFP4`, `mrhuseyn4/qwen3.5-27b-mxfp4`, `kaitchup/Qwen3.5-27B-MXFP4A16`) are all SafeTensors, and imp's SafeTensors loader explicitly refuses MXFP4 (`src/model/safetensors_loader.cpp:1095`: "imp does NOT have a SafeTensors MXFP4 decode path yet. Convert to GGUF for actual MXFP4 support."). Resolving this requires either a community GGUF publication or an in-repo BF16→MXFP4 GGUF conversion pipeline (multi-hour + tooling).
+2. **N=48 alpha/beta MXFP4 GEMV NaN.** Separate kernel bug — even after a working load, GDN decode through alpha/beta MXFP4 GEMV produces NaN logits (`tok=-1`). Out of scope for the loading fix per design memo §1.1. Tracked in `memory/qwen35_27b_mxfp4_ima_2026_04_25.md` §"What remains".
+
+Phase B (host-dequant + storage planner) remains deferred — only worth funding if Path A's pruned policy proves insufficient on the actual 27B once both blockers above clear.
+
+**Workarounds:** Qwen3.5-9B Q8_0 (cleanest), Qwen3.5-35B-A3B Q4_K_M (closest to 27B-scale).
 
 ### Gemma-4 Q4_K_M code-gen drift
 
