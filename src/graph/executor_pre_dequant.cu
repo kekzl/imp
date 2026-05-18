@@ -212,95 +212,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // (body extracted to pre_dequant_phase0_promote_nvfp4_sidecars_)
     pre_dequant_phase0_promote_nvfp4_sidecars_(cfg, stream);
 
-    if (cfg.is_nvfp4_prequant) {
-        Model* mut_model = const_cast<Model*>(model_);
-
-        // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
-        //
-        // Phase 0 set qtype=NVFP4 directly on the main weight Tensor sidecars
-        // but did NOT populate wcache_.nvfp4 (the legacy decode-cache map that
-        // Phase 3b iterates to build the CUTLASS cache). Without this loop,
-        // prefill (M>1) for prequant SafeTensors models falls through to
-        // gemm_nvfp4 dequant→cuBLAS in executor_kernels.cu — slower AND
-        // noisier than native CUTLASS NVFP4×NVFP4. The FP16-act ×
-        // NVFP4-deq-FP16 round-trip amplifies SmoothQuant-induced per-block
-        // quant noise on long context (Mistral-3.2-NVFP4 breaks above ~90
-        // tokens; see memory/nvfp4_long_context_regression_2026_04_28.md).
-        //
-        // Build the CUTLASS cache directly from the Tensor sidecars (data
-        // pointer, scales, tensor_scale, shape) so the prefill dispatch
-        // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
-        //
-        // Historical EXCLUSION (added 2026-05-02, REMOVED 2026-05-14):
-        // The llm-compressor NVFP4 format previously triggered a Skip-Guard
-        // that fell back to dequant→cuBLAS because the CUTLASS NVFP4×NVFP4
-        // path produced (a) numerical regressions on borderline tokens
-        // (3/4 phase4 vs 4/4 guard-on baseline) and (b) cross-capture
-        // non-determinism (2/4 graph_replay vs 4/4 guard-on baseline).
-        // Memo `cutlass_nvfp4_sm120_nondeterministic_2026_05_05` extended
-        // this to "universal sm_120 CUTLASS NVFP4 non-determinism" — even
-        // Modelopt format showed 1/4 graph_replay on CUTLASS v4.4.2.
-        //
-        // CUTLASS v4.5.0 (PR #165, 2026-05-13) silently fixed this.
-        // Re-evaluation 2026-05-14 via `scripts/validate_safetensors.py`:
-        //   - Gemma-4-NVFP4 (llm-compressor): graph_replay 4/4, phase4
-        //     parity with guard-on, det3=True, prefill 10.2k → 22.1k tok/s
-        //     (2.18× win at pp=512).
-        //   - Qwen3-30B-A3B-NVFP4-Modelopt: graph_replay 4/4 (was 1/4).
-        // Guard is no longer load-bearing; removing it restores the
-        // CUTLASS fast path for all NVFP4-prequant models uniformly.
-        if (cutlass_sm120_nvfp4_available()) {
-            int ct_count = 0;
-            size_t ct_total = 0;
-            auto register_prequant = [&](const Tensor& w) {
-                if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
-                    return;
-                if (wcache_.cutlass_nvfp4.count(w.data))
-                    return;
-                NvFP4QuantResult tmp;
-                tmp.packed_data = w.data;
-                tmp.micro_scales = w.scales;
-                tmp.tensor_scale = w.tensor_scale;
-                tmp.N = w.shape[0];
-                tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
-                CutlassNvFP4Weight cw;
-                convert_nvfp4_to_cutlass(tmp, cw, stream);
-                if (cw.data) {
-                    wcache_.cutlass_nvfp4[w.data] = cw;
-                    ct_total += cw.sf_bytes;
-                    ct_count++;
-                }
-            };
-            for (int i = 0; i < cfg.n_layers; i++) {
-                const auto& L = mut_model->layer(i);
-                register_prequant(L.wq);
-                register_prequant(L.wk);
-                register_prequant(L.wv);
-                register_prequant(L.wo);
-                register_prequant(L.w_gate);
-                register_prequant(L.w_up);
-                register_prequant(L.w_down);
-                register_prequant(L.w_gate_shared);
-                register_prequant(L.w_up_shared);
-                register_prequant(L.w_down_shared);
-                // Mamba2/GDN SSM projections (Nemotron-H, Qwen3.5/3.6 GDN). NVFP4-quantized
-                // SSM weights were previously routed to the slow dequant-to-FP16 fallback
-                // because they weren't in cutlass_nvfp4. Math is identical (same FP4 weights,
-                // same Block-Scaling) — register here to enable the CUTLASS sm_120 fast path.
-                // Fixes Mamba2 multi-chunk-prefill 5min-timeout for prompts ≥541 tokens.
-                register_prequant(L.ssm_in);
-                register_prequant(L.ssm_out);
-            }
-            register_prequant(mut_model->out_proj_);
-
-            if (ct_count > 0) {
-                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-                wcache_.cutlass_nvfp4_bytes += ct_total;
-                IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
-                             ct_total / (1024.0 * 1024.0));
-            }
-        }
-    }
+    // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
+    // (body extracted to pre_dequant_phase0b_register_cutlass_nvfp4_)
+    pre_dequant_phase0b_register_cutlass_nvfp4_(cfg, stream);
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
     auto nvfp4_beneficial = [](QType qt) -> bool {
@@ -2595,6 +2509,99 @@ void GraphExecutor::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 "NVFP4 prequant: %d Linears carry input_scale (intentionally NOT applied; "
                 "set IMP_AUDIT_NVFP4_SCALES=1 for stats).",
                 n_with_input_scale);
+        }
+    }
+}
+
+void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
+    const ModelConfig& cfg, cudaStream_t stream) {
+    if (!cfg.is_nvfp4_prequant)
+        return;
+    Model* mut_model = const_cast<Model*>(model_);
+
+    // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
+    //
+    // Phase 0 set qtype=NVFP4 directly on the main weight Tensor sidecars
+    // but did NOT populate wcache_.nvfp4 (the legacy decode-cache map that
+    // Phase 3b iterates to build the CUTLASS cache). Without this loop,
+    // prefill (M>1) for prequant SafeTensors models falls through to
+    // gemm_nvfp4 dequant→cuBLAS in executor_kernels.cu — slower AND
+    // noisier than native CUTLASS NVFP4×NVFP4. The FP16-act ×
+    // NVFP4-deq-FP16 round-trip amplifies SmoothQuant-induced per-block
+    // quant noise on long context (Mistral-3.2-NVFP4 breaks above ~90
+    // tokens; see memory/nvfp4_long_context_regression_2026_04_28.md).
+    //
+    // Build the CUTLASS cache directly from the Tensor sidecars (data
+    // pointer, scales, tensor_scale, shape) so the prefill dispatch
+    // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
+    //
+    // Historical EXCLUSION (added 2026-05-02, REMOVED 2026-05-14):
+    // The llm-compressor NVFP4 format previously triggered a Skip-Guard
+    // that fell back to dequant→cuBLAS because the CUTLASS NVFP4×NVFP4
+    // path produced (a) numerical regressions on borderline tokens
+    // (3/4 phase4 vs 4/4 guard-on baseline) and (b) cross-capture
+    // non-determinism (2/4 graph_replay vs 4/4 guard-on baseline).
+    // Memo `cutlass_nvfp4_sm120_nondeterministic_2026_05_05` extended
+    // this to "universal sm_120 CUTLASS NVFP4 non-determinism" — even
+    // Modelopt format showed 1/4 graph_replay on CUTLASS v4.4.2.
+    //
+    // CUTLASS v4.5.0 (PR #165, 2026-05-13) silently fixed this.
+    // Re-evaluation 2026-05-14 via `scripts/validate_safetensors.py`:
+    //   - Gemma-4-NVFP4 (llm-compressor): graph_replay 4/4, phase4
+    //     parity with guard-on, det3=True, prefill 10.2k → 22.1k tok/s
+    //     (2.18× win at pp=512).
+    //   - Qwen3-30B-A3B-NVFP4-Modelopt: graph_replay 4/4 (was 1/4).
+    // Guard is no longer load-bearing; removing it restores the
+    // CUTLASS fast path for all NVFP4-prequant models uniformly.
+    if (cutlass_sm120_nvfp4_available()) {
+        int ct_count = 0;
+        size_t ct_total = 0;
+        auto register_prequant = [&](const Tensor& w) {
+            if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
+                return;
+            if (wcache_.cutlass_nvfp4.count(w.data))
+                return;
+            NvFP4QuantResult tmp;
+            tmp.packed_data = w.data;
+            tmp.micro_scales = w.scales;
+            tmp.tensor_scale = w.tensor_scale;
+            tmp.N = w.shape[0];
+            tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
+            CutlassNvFP4Weight cw;
+            convert_nvfp4_to_cutlass(tmp, cw, stream);
+            if (cw.data) {
+                wcache_.cutlass_nvfp4[w.data] = cw;
+                ct_total += cw.sf_bytes;
+                ct_count++;
+            }
+        };
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = mut_model->layer(i);
+            register_prequant(L.wq);
+            register_prequant(L.wk);
+            register_prequant(L.wv);
+            register_prequant(L.wo);
+            register_prequant(L.w_gate);
+            register_prequant(L.w_up);
+            register_prequant(L.w_down);
+            register_prequant(L.w_gate_shared);
+            register_prequant(L.w_up_shared);
+            register_prequant(L.w_down_shared);
+            // Mamba2/GDN SSM projections (Nemotron-H, Qwen3.5/3.6 GDN). NVFP4-quantized
+            // SSM weights were previously routed to the slow dequant-to-FP16 fallback
+            // because they weren't in cutlass_nvfp4. Math is identical (same FP4 weights,
+            // same Block-Scaling) — register here to enable the CUTLASS sm_120 fast path.
+            // Fixes Mamba2 multi-chunk-prefill 5min-timeout for prompts ≥541 tokens.
+            register_prequant(L.ssm_in);
+            register_prequant(L.ssm_out);
+        }
+        register_prequant(mut_model->out_proj_);
+
+        if (ct_count > 0) {
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            wcache_.cutlass_nvfp4_bytes += ct_total;
+            IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
+                         ct_total / (1024.0 * 1024.0));
         }
     }
 }
