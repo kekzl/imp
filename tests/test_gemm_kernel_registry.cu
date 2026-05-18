@@ -1047,14 +1047,19 @@ TEST_F(GemmKernelRegistryTest, GgufSmallmKernelsAreRegisteredAtStaticInit) {
 }
 
 // Off-axis m_is_one (M>1 prefill) must NoMatch — Slice 7 only registers the
-// M==1 decode side. The dispatch site shouldn't accidentally pick up GGUF
-// strategies on the prefill path.
-TEST_F(GemmKernelRegistryTest, GgufWrongMIsOneReturnsNoMatch) {
+// GGUF handlers register only the M==1 decode side. The Q4_K M>1 strategy
+// is now claimed by the Phase 2C Q4_K_M INT8 IMMA handler instead — but with
+// null args the handler returns PreconditionFail (soft-check), so dispatch
+// still returns a non-Ok result that the dispatch site can fall back on.
+// (Originally this test expected NoMatch — pre-Phase-2C — and the rename
+// reflects the new contract: the M>1 path is COVERED by a handler that
+// rejects malformed args, not absent.)
+TEST_F(GemmKernelRegistryTest, GgufWrongMIsOneReturnsPreconditionFail) {
     const auto& reg = GemmKernelRegistry::instance();
     GemmStrategy m_gt_one{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/false};
     GemmKernelArgs args{};
     args.stream = stream_;
-    EXPECT_EQ(reg.dispatch(m_gt_one, args), GemmDispatchResult::NoMatch);
+    EXPECT_EQ(reg.dispatch(m_gt_one, args), GemmDispatchResult::PreconditionFail);
 }
 
 // An unsupported qtype (Q4_1 stays on legacy quant_gemm_int4, IQ4_NL/XS not

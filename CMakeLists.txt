@@ -244,6 +244,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/gemm_kernel_mxfp4.cu
     src/graph/gemm_kernel_gguf.cu
     src/graph/gemm_kernel_generic_dequant.cu
+    src/graph/gemm_kernel_q4k_imma.cu
     src/graph/gemm_scratch.cu
     src/graph/executor_workspace.cu
     src/graph/executor_workspace_buffers.cu
