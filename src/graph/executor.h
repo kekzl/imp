@@ -902,6 +902,14 @@ private:
     void moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // NVFP4→FP16 batch dequant fallback (when CUTLASS 3.x grouped-NVFP4
+    // can't fire). Predicate is checked internally; returns true if the
+    // path ran.
+    bool try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // Legacy MoE prefill path (D2H-sync + serial / batched-dequant /
+    // pre-cached-FP16 dispatch). Unconditional — caller selects when no
+    // other path matched.
+    void run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
     // after routed experts have written into h. Reads `no` (post-norm) and
     // adds its result back into `h` via elementwise_add. No-op when
