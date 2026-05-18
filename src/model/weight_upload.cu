@@ -1961,7 +1961,15 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         // Same stats for input_scale (FP32 scalar per Linear, optional).
         float is_min = 1e30f, is_max = -1e30f, is_sum = 0.0f;
         int is_count = 0, is_zero = 0, is_present = 0;
-        std::vector<std::pair<std::string, float>> is_samples;
+        int is_scalar_count = 0, is_per_channel_count = 0;
+        struct InputScaleSample {
+            std::string name;
+            int ndim;
+            int64_t shape[4];
+            size_t numel;
+            float first_val;
+        };
+        std::vector<InputScaleSample> is_samples;
         if (audit) {
             ws2_samples.reserve(8);
             is_samples.reserve(8);
@@ -2002,6 +2010,10 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             if (audit && sc.input_scale.data && !sc.input_scale.on_device) {
                 is_present++;
                 size_t n = sc.input_scale.numel();
+                if (n <= 1)
+                    is_scalar_count++;
+                else
+                    is_per_channel_count++;
                 const float* p = static_cast<const float*>(sc.input_scale.data);
                 for (size_t i = 0; i < n; ++i) {
                     float v = p[i];
@@ -2015,7 +2027,14 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     is_count++;
                 }
                 if (is_samples.size() < 8) {
-                    is_samples.emplace_back(name, p[0]);
+                    InputScaleSample s;
+                    s.name = name;
+                    s.ndim = sc.input_scale.ndim;
+                    for (int d = 0; d < s.ndim && d < 4; ++d)
+                        s.shape[d] = sc.input_scale.shape[d];
+                    s.numel = n;
+                    s.first_val = p[0];
+                    is_samples.push_back(std::move(s));
                 }
             }
             upload_scale(sc.weight_scale);
@@ -2040,11 +2059,24 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         if (audit) {
             if (is_count > 0) {
                 IMP_LOG_INFO(
-                    "NVFP4 audit: input_scale present in %d/%zu Linears, "
+                    "NVFP4 audit: input_scale present in %d/%zu Linears "
+                    "(scalar=%d per_channel=%d), "
                     "stats — count=%d zeros=%d min=%.6g max=%.6g mean=%.6g",
-                    is_present, nvfp4_scratch_.size(), is_count, is_zero, is_min, is_max, is_sum / is_count);
-                for (auto& [n, v] : is_samples) {
-                    IMP_LOG_INFO("  sample: %s.input_scale = %.6g", n.c_str(), v);
+                    is_present, nvfp4_scratch_.size(),
+                    is_scalar_count, is_per_channel_count,
+                    is_count, is_zero, is_min, is_max, is_sum / is_count);
+                for (auto& s : is_samples) {
+                    char shape_str[64];
+                    int off = 0;
+                    off += snprintf(shape_str + off, sizeof(shape_str) - off, "[");
+                    for (int d = 0; d < s.ndim; ++d) {
+                        off += snprintf(shape_str + off, sizeof(shape_str) - off,
+                                        "%s%lld", d > 0 ? "," : "", (long long)s.shape[d]);
+                    }
+                    snprintf(shape_str + off, sizeof(shape_str) - off, "]");
+                    IMP_LOG_INFO(
+                        "  sample: %s.input_scale ndim=%d shape=%s numel=%zu first=%.6g",
+                        s.name.c_str(), s.ndim, shape_str, s.numel, s.first_val);
                 }
             } else {
                 IMP_LOG_INFO(

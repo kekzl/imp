@@ -32,11 +32,19 @@ Each excluded class is a separate larger work item.
 
 When a single prompt exceeds `max_seq_len`, the engine's pre-allocated device buffer `d_pf_block_tables_` (sized `max_seq_len / block_size`) overflowed during `cudaMemcpyAsync`. Fixed in PR #134: `d_pf_block_tables_` is now sized from `max_blocks` (the total KV cache pool count), so a single request's block_table can grow to the entire cache without overflowing.
 
-### NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)
+### ~~NVFP4 SmoothQuant input_scale (Mistral-3.2 NVFP4)~~ — RETIRED 2026-05-18
 
-Mistral-Small-3.2-NVFP4 was calibrated with SmoothQuant 0.9, which records a per-Linear `input_scale` in SafeTensors. imp loads `input_scale` into `nvfp4_scratch_` but does not consume it at inference. PR #78 worked around long-prompt drift by disabling the 600-token default system prompt.
+Phase 1 diagnostic (full findings: `docs/superpowers/plans/2026-05-18-nvfp4-smoothquant-phase1-findings.md`) closed this roadmap item on **all relevant NVFP4 checkpoints**, including the one the design memo gated on.
 
-Direct absorption of `input_scale` as a per-tensor scalar GEMM alpha modifier (in either direction) was tested 2026-05-07 on Gemma-4-NVFP4 and refuted: phase4 18/20 → 4/20 (full degeneration). A real fix likely needs the per-channel SmoothQuant scaling vector applied during activation quantization, not a scalar alpha modifier — testable only against Mistral-3.2-NVFP4 (not present in default model set). **Design memo:** `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md` (defer + optional Phase 1 diagnostic; key finding: SmoothQuant is likely already fused into `input_layernorm.weight` at calibration time, in which case the engine has nothing to do).
+**Local corpus** — 6 NVFP4 models scanned via SafeTensors header + engine audit-log run. `input_scale` is **100 % scalar (numel=1)** on every Linear of every checkpoint; none of the 6 recipe.yamls ships a `SmoothQuantModifier` (all are pure `QuantizationModifier: scheme: NVFP4`). The per-Linear scalar is llm-compressor's `input_global_scale` activation-absmax anchor, not a SmoothQuant `1/s` carrier — engine's existing "intentionally NOT applied" stance at `executor_pre_dequant.cu:431` is the correct behavior. The 2026-05-07 DIVIDE/MULTIPLY refutation on Gemma-4-NVFP4 is now structurally explained (no SmoothQuant correction existed to apply, since no SmoothQuant was calibrated into the model).
+
+**Mistral-3.2-NVFP4** (the one SmoothQuant-calibrated checkpoint in scope) — resolved via HF range-fetch of the recipe.yaml + first 16 MB of each safetensors shard (no full 15 GB download required for the answer; full download running as artifact). The recipe.yaml carries an explicit `SmoothQuantModifier` with mappings `[q_proj, k_proj, v_proj] → input_layernorm` and `[gate_proj, up_proj] → post_attention_layernorm` — **exactly** the structure design memo §4 sub-case (b) predicted, with `diag(1/s)` migrated into the upstream RMSNorm weights at calibration time. The 280 on-disk `input_scale` tensors are all `(1,)` scalar (sub-cases (a)/(c) refuted on the SmoothQuant model too); the 80 `(5120,)` layernorm weights (40 layers × 2 norm types) are the SmoothQuant migration targets. imp already loads + applies those layernorm weights via the standard path — nothing engine-side to add.
+
+PR #78's `use_default_system_prompt=false` workaround for Mistral-3.2-NVFP4 long-context drift stays load-bearing, but its root cause is **not** missing SmoothQuant absorption — it's the NVFP4-activation-noise-grows-with-`||X||` issue tracked in `memory/nvfp4_long_context_regression_2026_04_28.md`. That fix is a separate, much larger workitem (dynamic NVFP4 activation quantization end-to-end + a real NVFP4×NVFP4→FP32 GEMM in the dense path) outside this roadmap entry's scope.
+
+**Phase 2-4** (Option-B `smooth_activations` pre-pass kernel + regression tests) **never needed** — no checkpoint in the foreseeable workload would trigger a non-null `s_inv` path. Diagnostic patch shipped to `src/model/weight_upload.cu` (per-Linear `scalar=N per_channel=M` split + `ndim/shape/numel` samples under `diagnostics.audit_nvfp4_scales=true`) as the lasting deliverable for any future SmoothQuant-calibrated NVFP4 checkpoint that might land.
+
+**Design memo:** `docs/plans/nvfp4_smoothquant_input_scale_design_2026_05_17.md` (predicted sub-case (b); confirmed empirically).
 
 ### Qwen3.5-27B MXFP4 fails at load
 
