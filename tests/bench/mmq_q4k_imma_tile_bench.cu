@@ -36,6 +36,45 @@ namespace {
 constexpr int kBlockM = 16;
 constexpr int kBlockN = 8;
 constexpr int kBlockK = 32;
+constexpr int kNumStages = 2;  // 2-stage cp.async pipeline
+
+// cp.async helpers (mirror src/compute/attention_paged_common.cuh, kept local
+// here so the bench TU stays self-contained).
+__device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(s), "l"(glob));
+}
+__device__ __forceinline__ void cp_async_ca_16(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(glob));
+}
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;\n");
+}
+template <int N>
+__device__ __forceinline__ void cp_async_wait_group() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+}
+
+// Per-lane async load of the A and B tiles for one K-block into a given stage.
+__device__ __forceinline__ void async_load_tile(int lane, const int8_t* X_s8, const int8_t* W_s8,
+                                                int8_t (*sA)[kBlockK], int8_t (*sB)[kBlockK],
+                                                int base_m, int base_n, int k_base, int K) {
+    {
+        const int row_in_tile = lane >> 1;       // 0..15
+        const int col_off = (lane & 1) * 16;     // 0 or 16
+        const int8_t* src = X_s8 + (base_m + row_in_tile) * K + k_base + col_off;
+        int8_t* dst = &sA[row_in_tile][col_off];
+        cp_async_ca_16(dst, src);
+    }
+    {
+        const int row_in_tile = lane >> 2;       // 0..7
+        const int col_off = (lane & 3) * 8;      // 0, 8, 16, 24
+        const int8_t* src = W_s8 + (base_n + row_in_tile) * K + k_base + col_off;
+        int8_t* dst = &sB[row_in_tile][col_off];
+        cp_async_ca_8(dst, src);
+    }
+}
 
 // One warp per CTA. Each thread holds 4 s32 accumulators (its share of the 16×8
 // output tile per m16n8k32 fragment layout). We accumulate float (after scale
@@ -53,76 +92,59 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
 
     const int lane = threadIdx.x;  // 0..31
 
-    // SMEM stage for the A and B tiles. 16×32 + 8×32 = 768 bytes per stage.
-    __shared__ int8_t sA[kBlockM][kBlockK];  // [16][32]
-    __shared__ int8_t sB[kBlockN][kBlockK];  // [8][32]
+    // Double-buffered SMEM stage. Each stage holds one K-block worth of A and B.
+    // Total: 2 * (16×32 + 8×32) = 2 * 768 = 1536 bytes per CTA.
+    __shared__ int8_t sA[kNumStages][kBlockM][kBlockK];
+    __shared__ int8_t sB[kNumStages][kBlockN][kBlockK];
 
-    // FP32 accumulator (post-MMA, post-scale-apply) for the 4 output values
-    // this thread owns within the 16×8 tile.
     float c_f32_0 = 0.0f, c_f32_1 = 0.0f, c_f32_2 = 0.0f, c_f32_3 = 0.0f;
 
     const int subs_per_K = K / kBlockK;
-    const int subs_per_row = subs_per_K;  // alias for clarity
+    const int subs_per_row = subs_per_K;
 
     const int base_m = m_block * kBlockM;
     const int base_n = n_block * kBlockN;
 
-    for (int kb = 0; kb < subs_per_K; ++kb) {
-        const int k_base = kb * kBlockK;
+    // -------- Prologue: issue the first kb=0 load --------
+    if (subs_per_K > 0) {
+        async_load_tile(lane, X_s8, W_s8, sA[0], sB[0], base_m, base_n, /*k_base=*/0, K);
+        cp_async_commit();
+    }
 
-        // -------- Load A (16×32) into SMEM --------
-        // 32 lanes × 16 bytes = 512 bytes = 16×32 ✓
-        // Each lane brings 16 bytes from X_s8[base_m + (lane/2), k_base + (lane%2)*16 .. +15]
-        {
-            const int row_in_tile = lane >> 1;            // 0..15
-            const int col_off = (lane & 1) * 16;          // 0 or 16
-            const int8_t* src = X_s8 + (base_m + row_in_tile) * K + k_base + col_off;
-            int8_t* dst = &sA[row_in_tile][col_off];
-            // 16 bytes via 2× int4 reads.
-            int4 v0 = *reinterpret_cast<const int4*>(src);
-            *reinterpret_cast<int4*>(dst) = v0;
-        }
-        // -------- Load B (8×32) into SMEM --------
-        // 32 lanes × 8 bytes = 256 bytes = 8×32 ✓
-        // 4 lanes per row, each lane brings 8 bytes.
-        {
-            const int row_in_tile = lane >> 2;            // 0..7
-            const int col_off = (lane & 3) * 8;           // 0, 8, 16, 24
-            const int8_t* src = W_s8 + (base_n + row_in_tile) * K + k_base + col_off;
-            int8_t* dst = &sB[row_in_tile][col_off];
-            // 8 bytes via 1× int2 read.
-            int2 v0 = *reinterpret_cast<const int2*>(src);
-            *reinterpret_cast<int2*>(dst) = v0;
+    for (int kb = 0; kb < subs_per_K; ++kb) {
+        const int stage = kb & 1;
+        const int next_kb = kb + 1;
+        // Issue next-iteration prefetch (next stage) before waiting on this one,
+        // so the cp.async engine overlaps it with our MMA + scale-apply.
+        if (next_kb < subs_per_K) {
+            const int next_stage = next_kb & 1;
+            async_load_tile(lane, X_s8, W_s8, sA[next_stage], sB[next_stage], base_m, base_n,
+                            next_kb * kBlockK, K);
+            cp_async_commit();
+            // Wait for THIS iteration's load (the one issued one step earlier).
+            // After we just committed the next prefetch, the older group is the
+            // last-but-one ⇒ wait_group<1>.
+            cp_async_wait_group<1>();
+        } else {
+            // Last iteration: no further prefetch issued, just drain the current.
+            cp_async_wait_group<0>();
         }
         __syncthreads();
 
-        // -------- Build A fragment (4 × b32 = 16 bytes per thread) --------
-        // m16n8k32 A operand layout (PTX ISA 8.5 §9.7.13.4.5 Figure 41,
-        // .s8.s8.s32 row.col case):
-        //   K is split into two 16-wide blocks. Per thread:
-        //     a0 = A[lane/4    ][k_base..k_base+3]    (K-block 0)
-        //     a1 = A[lane/4 + 8][k_base..k_base+3]    (K-block 0, row+8)
-        //     a2 = A[lane/4    ][k_base+16..+19]      (K-block 1)
-        //     a3 = A[lane/4 + 8][k_base+16..+19]      (K-block 1, row+8)
-        //   where k_base = (lane%4) * 4.
+        // -------- Build A fragment from sA[stage] --------
         const int a_row_lo = lane >> 2;
         const int a_row_hi = a_row_lo + 8;
         const int a_col_base = (lane & 3) * 4;
-        uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[a_row_lo][a_col_base]);
-        uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[a_row_hi][a_col_base]);
-        uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[a_row_lo][a_col_base + 16]);
-        uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[a_row_hi][a_col_base + 16]);
+        uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_lo][a_col_base]);
+        uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_hi][a_col_base]);
+        uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_lo][a_col_base + 16]);
+        uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[stage][a_row_hi][a_col_base + 16]);
 
-        // -------- Build B fragment (2 × b32 = 8 bytes per thread) --------
-        // m16n8k32 B operand layout: cols 0..7, each 4 lanes share a col.
-        //   lane → col (lane/4) ∈ [0, 8)
-        //   lane → k base (lane%4)*4
-        //   2 b32 registers: b0 = col[lane/4][k_base..k_base+3]
-        //                    b1 = col[lane/4][k_base+16..k_base+19]
+        // -------- Build B fragment from sB[stage] --------
         const int b_col = lane >> 2;
         const int b_k_base = (lane & 3) * 4;
-        uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[b_col][b_k_base]);
-        uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[b_col][b_k_base + 16]);
+        uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base]);
+        uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base + 16]);
 
         // -------- IMMA m16n8k32.row.col.s32.s8.s8.s32 --------
         int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
@@ -136,15 +158,9 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
 #endif
 
         // -------- Per-sub-block scale apply --------
-        // Output mapping for m16n8k32 (PTX ISA 8.5 §9.7.13.4 Table 26):
-        //   thread t owns 4 outputs at (row, col):
-        //     d0 → ((t/4) % 8,       (t%4)*2)
-        //     d1 → ((t/4) % 8,       (t%4)*2 + 1)
-        //     d2 → ((t/4) % 8 + 8,   (t%4)*2)
-        //     d3 → ((t/4) % 8 + 8,   (t%4)*2 + 1)
-        const int row_lo = (lane >> 2) & 7;    // 0..7
-        const int row_hi = row_lo + 8;          // 8..15
-        const int col_lo = (lane & 3) * 2;     // 0..6 (step 2)
+        const int row_lo = (lane >> 2) & 7;
+        const int row_hi = row_lo + 8;
+        const int col_lo = (lane & 3) * 2;
         const int col_hi = col_lo + 1;
 
         const int m_lo = base_m + row_lo;
