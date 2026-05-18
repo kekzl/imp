@@ -126,8 +126,8 @@ All measurements: RTX 5090, greedy, 2-rep average, tokens/sec.
 | **FP16 (default since PR #51)** | **319** | **25808** | 213 | 156 | 100% |
 | FP8 E4M3 (`--kv-fp8`) | 319 | 25808 | 213 | 156 | 50% |
 | INT4 (`--kv-int4`) | 305 | 16272 | 190 | 122 | 25% |
-| TurboQuant (`--kv-turboquant`) | 256 | 23376 | — | 70 | ~15% |
-| TurboQuant Lite | 258 | 15097 | — | 91 | ~12% |
+| NVFP4 (`--kv-nvfp4`) | parity-FP16 | — | — | — | 25% |
+| MXFP4-KV (`--kv-mxfp4`) | parity-NVFP4 | — | — | — | 25% |
 
 **Note**: Default is **FP16** as of PR #51 (was implicit auto-FP8). FP8 has
 perf parity with FP16 on **Qwen3** and **Qwen3.5/3.6 GDN** with the
@@ -138,7 +138,7 @@ Memo: `memory/kv_dtype_tradeoffs_2026_04_24.md`.
 ## Notes
 
 - **Qwen3.5 GDN**: Gated DeltaNet hybrid architecture (24 GDN + 8 attention + 32 FFN layers). Output quality matches llama.cpp for both single-turn and multi-turn.
-- **TurboQuant**: PolarQuant INT4 K directions + QJL sketch correction + INT4 V. MXFP4 variant available on sm_120+.
+- **NVFP4 / MXFP4 KV**: both store FP4 nibbles at 25% of FP16, differ only in scale encoding (NVFP4=E4M3 micro-scales, MXFP4=UE8M0). NVFP4-KV ships chunked prefill (PR #149/#156) and is decode-parity with FP16 via PTX `cvt.rn.f16x2.e2m1x2` gather. MXFP4-KV (PR #249, NIAH-validated PR #250) is ≈NVFP4 quality at 16K context. TurboQuant retired in PR #251; `--kv-turboquant{,-lite}` are deprecated aliases.
 - **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode numbers are stable. Compare decode only for reliable A/B testing.
 - **MXFP4 Prefill**: CUTLASS block-scaled GEMM for prefill (`--mxfp4-prefill`). Currently ~10% slower than FP8 cuBLASLt for Q8_0 models due to activation quantization overhead.
 - **Qwen3-Coder-30B-A3B**: NVIDIA Model Optimizer NVFP4 prequant (128 experts, 8 active). Loaded from SafeTensors. Decode uses per-expert NVFP4 GEMV (serial dispatch); prefill uses CUTLASS NVFP4 GEMM for dense + per-expert NVFP4 GEMV for MoE. Multi-turn chat verified working.
