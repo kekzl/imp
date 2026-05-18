@@ -337,19 +337,28 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
 // uses tensor_scale=1.0f since we force it after quantization.
 // If tensors are zero-weight the test trivially passes; use non-zero values.
 TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
-    // K must be multiple of 16 (NVFP4 micro-block size)
-    const int M = 16, N = 8, K = 64;
+    // gemm_nvfp4 convention (matches PyTorch nn.Linear):
+    //   A (weight, NVFP4): [N_out, K_in]
+    //   B (input,  FP16):  [M_batch, K_in]
+    //   C (output, FP16):  [M_batch, N_out]
+    // The fallback path computes  C = B @ A_fp16^T  via standard cuBLAS GEMM,
+    // so the output's first dim is the input's batch dim, not the weight's
+    // output-feature dim. (Earlier test code mixed up M and N → shape error
+    // at gemm_nvfp4:1251.)
+    //
+    // K must be multiple of 16 (NVFP4 micro-block size).
+    const int N_OUT = 16, M_BATCH = 8, K = 64;
 
-    std::vector<half> h_w(M * K), h_x(N * K);
-    for (int i = 0; i < M * K; ++i)
+    std::vector<half> h_w(N_OUT * K), h_x(M_BATCH * K);
+    for (int i = 0; i < N_OUT * K; ++i)
         h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < N * K; ++i)
+    for (int i = 0; i < M_BATCH * K; ++i)
         h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
 
-    int64_t wshape[2] = {M, K};
+    int64_t wshape[2] = {N_OUT, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     // Quantize to NVFP4
@@ -362,13 +371,13 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     float saved_ts = qr.tensor_scale;
     qr.tensor_scale = 1.0f;
 
-    int64_t xshape[2] = {N, K}, yshape[2] = {M, N};
+    int64_t xshape[2] = {M_BATCH, K}, yshape[2] = {M_BATCH, N_OUT};
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
 
     half* d_y_direct;
-    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    cudaMalloc(&d_y_direct, M_BATCH * N_OUT * sizeof(half));
     half* d_y_disp;
-    cudaMalloc(&d_y_disp, M * N * sizeof(half));
+    cudaMalloc(&d_y_disp, M_BATCH * N_OUT * sizeof(half));
     Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
     Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
@@ -379,7 +388,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::NVFP4;
-    h.shape[0] = M;
+    h.shape[0] = N_OUT;
     h.shape[1] = K;
     h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
     h.payload.nvfp4.block_scales = static_cast<uint8_t*>(qr.micro_scales);
@@ -389,9 +398,9 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
-    auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp = dev_read(d_y_disp, M * N);
-    for (int i = 0; i < M * N; ++i) {
+    auto h_direct = dev_read(d_y_direct, M_BATCH * N_OUT);
+    auto h_disp = dev_read(d_y_disp, M_BATCH * N_OUT);
+    for (int i = 0; i < M_BATCH * N_OUT; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         // Same underlying call (gemm_nvfp4 dequant + cuBLAS), expect identical.
