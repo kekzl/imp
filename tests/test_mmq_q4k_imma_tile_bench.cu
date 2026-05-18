@@ -13,7 +13,7 @@
 #include <cstring>
 #include <vector>
 
-#include "bench/mmq_q4k_imma_tile_bench.h"
+#include "compute/mmq_q4k_imma_tile.h"
 
 namespace imp {
 namespace {

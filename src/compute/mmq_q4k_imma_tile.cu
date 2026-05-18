@@ -1,33 +1,28 @@
 // =============================================================================
-// mmq_q4k_imma_tile_bench.cu — Phase 2B INT8 IMMA tile kernel (minimum viable)
+// mmq_q4k_imma_tile.cu — Phase 2B INT8 IMMA tile kernel + Phase 2C dispatcher
 // =============================================================================
 //
-// One warp per CTA, BLOCK_M=16, BLOCK_N=8, BLOCK_K=32 (one m16n8k32 MMA tile).
-// Synchronous SMEM staging. Phase 2B.1 will add cp.async + ldmatrix.x4 for
-// real perf. This version is for correctness verification only.
+// Architecture (Phase 2B.3): BLOCK_M=64 BLOCK_N=32 BLOCK_K=32; 4 warps/CTA in
+// 2×2 spatial with WRM·WRN=2·2 per warp (16 MMAs/CTA/K-block); 2-stage cp.async.
 //
 // Math identity (per design memo §3.2):
 //   out_ref[m, n] = Σ_k x_fp16[m, k] · w_fp16[n, k]
+//   x_fp16 = x_scale·X_s8;   w_fp16 = α·(W_s8 + 8) − dmin·m;   β = 8·α − dmin·m
+//   ⇒ out[m, n] = Σ_sub x_scale[m, sub] · ( α[n, sub] · Σ X_s8·W_s8
+//                                         + β[n, sub] · x_rowsum[m, sub] )
 //
-//   x_fp16[m, k] = x_scale[m, sub_k] · X_s8[m, k]
-//   w_fp16[n, k] = d_n · sc[n, sub_k] · q_w[n, k] − dmin_n · m[n, sub_k]
-//                = α[n, sub_k] · q_w[n, k] − dmin_n · m[n, sub_k]
-//                = α[n, sub_k] · (W_s8[n, k] + 8) − dmin_n · m[n, sub_k]
-//
-//   Substituting and grouping by sub-block:
-//     out[m, n] = Σ_sub x_scale[m, sub] · {
-//                     α[n, sub] · Σ_{k in sub} X_s8[m, k] · W_s8[n, k]
-//                   + β[n, sub] · Σ_{k in sub} X_s8[m, k]                }
-//
-//   where β[n, sub] = 8·α[n, sub] − dmin_n · m[n, sub].
-//
-// The IMMA's role is computing Σ_{k in sub} X_s8 · W_s8 (the s32 accumulator
-// over a 32-wide K slab). Each sub-block is exactly one MMA's worth of K.
+// The IMMA's role is the inner Σ X_s8·W_s8 over each 32-K sub-block.
 
-#include "bench/mmq_q4k_imma_tile_bench.h"
+#include "compute/mmq_q4k_imma_tile.h"
+#include "compute/mmq_q4k_imma_layout.h"
+#include "core/logging.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 
 namespace imp {
 
@@ -245,6 +240,167 @@ void mmq_q4k_imma_tile(const int8_t* X_s8, const __half* x_scale, const float* x
     dim3 block(kThreadsPerCTA, 1, 1);
     mmq_q4k_imma_tile_kernel<<<grid, block, 0, stream>>>(
         X_s8, x_scale, x_rowsum, W_s8, eff_alpha, eff_beta, out, M, N, K);
+}
+
+// =============================================================================
+// Activation quantization: FP16 [M, K] → int8 + per-sub-block FP16 scale
+// + FP32 int-rowsum. One CUDA block per (m, sub); 32 threads per block.
+// =============================================================================
+
+namespace {
+
+constexpr int kQuantSubBlock = 32;
+
+__global__ void quantize_fp16_to_int8_subblock_kernel(const __half* __restrict__ X_fp16, int M,
+                                                     int K, int8_t* __restrict__ X_s8,
+                                                     __half* __restrict__ x_scale,
+                                                     float* __restrict__ x_rowsum) {
+    const int m = blockIdx.y;
+    const int sub = blockIdx.x;
+    const int lane = threadIdx.x;  // 0..31
+    if (m >= M) return;
+    const int k_base = sub * kQuantSubBlock;
+    if (k_base >= K) return;
+
+    // Pass 1: per-thread absmax (1 element per lane in this 32-K sub-block).
+    const __half* row = X_fp16 + static_cast<size_t>(m) * K + k_base;
+    float v = __half2float(row[lane]);
+    float my_amax = fabsf(v);
+    // Warp-reduce amax.
+    for (int off = 16; off > 0; off >>= 1)
+        my_amax = fmaxf(my_amax, __shfl_xor_sync(0xFFFFFFFFu, my_amax, off));
+    const float amax = my_amax;
+    const float inv_scale = (amax > 0.0f) ? (127.0f / amax) : 0.0f;
+    const float scale = (amax > 0.0f) ? (amax / 127.0f) : 0.0f;
+
+    // Pass 2: quantize, write s8, accumulate per-lane qint, then reduce.
+    int qi = __float2int_rn(v * inv_scale);
+    qi = max(-127, min(127, qi));
+    X_s8[static_cast<size_t>(m) * K + k_base + lane] = static_cast<int8_t>(qi);
+
+    int sumq = qi;
+    for (int off = 16; off > 0; off >>= 1)
+        sumq += __shfl_xor_sync(0xFFFFFFFFu, sumq, off);
+
+    if (lane == 0) {
+        const int subs_per_row = K / kQuantSubBlock;
+        x_scale[static_cast<size_t>(m) * subs_per_row + sub] = __float2half(scale);
+        x_rowsum[static_cast<size_t>(m) * subs_per_row + sub] = static_cast<float>(sumq);
+    }
+}
+
+}  // namespace
+
+void quantize_fp16_to_int8_subblock(const __half* X_fp16, int M, int K, int8_t* X_s8,
+                                    __half* x_scale, float* x_rowsum, cudaStream_t stream) {
+    if (K % kQuantSubBlock != 0 || M <= 0 || K <= 0) return;
+    dim3 grid(K / kQuantSubBlock, M, 1);
+    dim3 block(32, 1, 1);
+    quantize_fp16_to_int8_subblock_kernel<<<grid, block, 0, stream>>>(X_fp16, M, K, X_s8, x_scale,
+                                                                     x_rowsum);
+}
+
+// =============================================================================
+// High-level entry: full Q4_K_M dense GEMM via INT8 IMMA.
+// Caches reordered weight (symmetric-s8 + α/β) per W pointer; reuses activation
+// scratch per max (M, K) shape seen.
+// =============================================================================
+
+namespace {
+
+struct WeightCache {
+    int8_t* w_sym_s8 = nullptr;
+    __half* eff_alpha = nullptr;
+    __half* eff_beta = nullptr;
+    int N = 0;
+    int K = 0;
+};
+
+struct ActScratch {
+    int8_t* X_s8 = nullptr;
+    __half* x_scale = nullptr;
+    float* x_rowsum = nullptr;
+    int max_M = 0;
+    int max_K = 0;
+};
+
+std::mutex g_imma_mtx;
+std::unordered_map<const void*, WeightCache> g_w_cache;
+ActScratch g_act_scratch;
+
+bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t stream) {
+    auto it = g_w_cache.find(W_q4k_blocks);
+    if (it != g_w_cache.end() && it->second.N == N && it->second.K == K) return true;
+
+    WeightCache c;
+    c.N = N;
+    c.K = K;
+    const int subs = K / 32;
+    if (cudaMalloc(&c.w_sym_s8, static_cast<size_t>(N) * K) != cudaSuccess) return false;
+    if (cudaMalloc(&c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
+        cudaFree(c.w_sym_s8);
+        return false;
+    }
+    if (cudaMalloc(&c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
+        cudaFree(c.w_sym_s8);
+        cudaFree(c.eff_alpha);
+        return false;
+    }
+    mmq_q4k_imma_reorder(W_q4k_blocks, N, K, c.w_sym_s8, c.eff_alpha, c.eff_beta, stream);
+    g_w_cache[W_q4k_blocks] = c;
+    return true;
+}
+
+bool ensure_act_scratch(int M, int K) {
+    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.max_M >= M && g_act_scratch.max_K >= K)
+        return true;
+    if (g_act_scratch.X_s8) {
+        cudaFree(g_act_scratch.X_s8);
+        cudaFree(g_act_scratch.x_scale);
+        cudaFree(g_act_scratch.x_rowsum);
+    }
+    g_act_scratch = ActScratch{};
+    const int new_M = std::max(M, g_act_scratch.max_M);
+    const int new_K = std::max(K, g_act_scratch.max_K);
+    const int subs = new_K / 32;
+    if (cudaMalloc(&g_act_scratch.X_s8, static_cast<size_t>(new_M) * new_K) != cudaSuccess)
+        return false;
+    if (cudaMalloc(&g_act_scratch.x_scale,
+                   static_cast<size_t>(new_M) * subs * sizeof(__half)) != cudaSuccess)
+        return false;
+    if (cudaMalloc(&g_act_scratch.x_rowsum,
+                   static_cast<size_t>(new_M) * subs * sizeof(float)) != cudaSuccess)
+        return false;
+    g_act_scratch.max_M = new_M;
+    g_act_scratch.max_K = new_K;
+    return true;
+}
+
+}  // namespace
+
+bool mmq_q4k_imma_gemm(const void* W_q4k_blocks, const __half* X_fp16, __half* Y_fp16,
+                       int M, int N, int K, cudaStream_t stream) {
+    if (M < kBlockM || N < kBlockN || K < kBlockK) return false;
+    if (M % kBlockM != 0 || N % kBlockN != 0 || K % kBlockK != 0) return false;
+
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+
+    if (!ensure_weight_cache(W_q4k_blocks, N, K, stream)) {
+        IMP_LOG_ERROR("mmq_q4k_imma_gemm: weight cache alloc failed");
+        return false;
+    }
+    if (!ensure_act_scratch(M, K)) {
+        IMP_LOG_ERROR("mmq_q4k_imma_gemm: activation scratch alloc failed");
+        return false;
+    }
+
+    quantize_fp16_to_int8_subblock(X_fp16, M, K, g_act_scratch.X_s8, g_act_scratch.x_scale,
+                                   g_act_scratch.x_rowsum, stream);
+
+    const auto& wc = g_w_cache[W_q4k_blocks];
+    mmq_q4k_imma_tile(g_act_scratch.X_s8, g_act_scratch.x_scale, g_act_scratch.x_rowsum,
+                      wc.w_sym_s8, wc.eff_alpha, wc.eff_beta, Y_fp16, M, N, K, stream);
+    return true;
 }
 
 }  // namespace imp
