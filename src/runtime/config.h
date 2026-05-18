@@ -179,6 +179,13 @@ struct RuntimeConfig {
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
+        // Phase 2C infrastructure (default off until E2E A/B lands on
+        // dense Q4_K_M models). When true, executor_pre_dequant will
+        // populate WeightCaches::q4k_imma for eligible Q4_K weights
+        // (dense, M ≥ 1024 hint) and a future dispatcher PR will route
+        // the GEMM through mmq_q4k_imma_tile. Detailed wrap-up:
+        // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
+        bool q4k_imma_enabled = false;
     } gemm;
 
     struct Gemma4 {
