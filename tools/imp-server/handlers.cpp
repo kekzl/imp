@@ -1244,6 +1244,317 @@ static void handle_vision_chat_blocking_(
     res.set_content(response.dump(), "application/json");
 }
 
+// Non-streaming chat completion: run n_completions independent generations
+// sequentially via the batching engine, build the choices array with
+// reasoning_content / tool_calls / logprobs as appropriate, send a single
+// JSON response. Caller has already submitted server_req via state.batching.
+static void nonstream_chat_response_(
+    httplib::Response& res,
+    ServerState& state,
+    ChatRequestContext& ctx,
+    std::shared_ptr<imp::Request>& imp_req,
+    std::shared_ptr<ServerRequest>& server_req,
+    const std::vector<int32_t>& saved_tokens,
+    const std::string& comp_id,
+    int64_t created)
+{
+    // Helper to create an imp::Request with the given completion index
+    auto make_imp_request = [&](int completion_idx) {
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = saved_tokens;
+        req->max_tokens = ctx.params.max_tokens;
+        req->temperature = ctx.params.temperature;
+        req->top_p = ctx.params.top_p;
+        req->top_k = ctx.params.top_k;
+        req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
+        req->min_p = ctx.params.min_p;
+        req->typical_p = ctx.params.typical_p;
+        req->repetition_penalty = ctx.params.repetition_penalty;
+        req->frequency_penalty = ctx.params.frequency_penalty;
+        req->presence_penalty = ctx.params.presence_penalty;
+        req->repeat_last_n = ctx.params.repeat_last_n;
+        req->dry_multiplier = ctx.params.dry_multiplier;
+        req->dry_base = ctx.params.dry_base;
+        req->dry_allowed_length = ctx.params.dry_allowed_length;
+        req->dry_penalty_last_n = ctx.params.dry_penalty_last_n;
+        req->mirostat = ctx.params.mirostat;
+        req->mirostat_tau = ctx.params.mirostat_tau;
+        req->mirostat_eta = ctx.params.mirostat_eta;
+        req->logprobs = ctx.params.req_logprobs;
+        req->top_logprobs = ctx.params.top_logprobs;
+        req->json_mode = ctx.params.json_mode;
+        req->json_schema = ctx.params.json_schema_str;
+        req->has_tools = ctx.params.has_tools;
+        req->tpl_family = ctx.snap.tpl_family;
+        req->logit_bias = ctx.params.logit_bias;
+        req->think_budget = ctx.params.think_budget;
+        req->status = imp::RequestStatus::PENDING;
+        return req;
+    };
+
+    // Non-streaming: decode all tokens, return complete response
+    // For n > 1, run multiple independent generations sequentially
+    json choices = json::array();
+    int total_output_tokens = 0;
+
+    for (int ci = 0; ci < ctx.params.n_completions; ci++) {
+        // For subsequent completions, create a new request and submit it
+        if (ci > 0) {
+            imp_req = make_imp_request(ci);
+            server_req = std::make_shared<ServerRequest>();
+            server_req->request = imp_req;
+            {
+                std::lock_guard<std::timed_mutex> lock(state.mtx);
+                if (!state.batching || !state.batching->is_running()) {
+                    break;
+                }
+                state.batching->submit(server_req);
+            }
+        }
+
+        auto active_req = server_req->request;
+        std::vector<int32_t> output_ids;
+        const char* finish = nullptr;
+        std::string output_text;   // accumulated output for stop matching
+        bool ns_in_think = false;  // non-streaming think budget tracking
+        int ns_think_tokens = 0;
+
+        auto ns_request_start = std::chrono::steady_clock::now();
+        for (;;) {
+            // Check request timeout
+            if (state.request_timeout > 0) {
+                auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
+                if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                    server_req->cancel();
+                    finish = "length";
+                    break;
+                }
+            }
+
+            // Read next token from the batching engine
+            TokenEvent evt;
+            if (!server_req->pop_token(evt)) {
+                continue;  // timeout — loop back to check request timeout
+            }
+
+            if (evt.token_id < 0) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
+                break;
+            }
+
+            int32_t token = evt.token_id;
+
+            // Silently drop structural stop tokens that slipped through.
+            // The engine's think-block implicit-close passes ONE EOS-like
+            // token through to recover from empty thinking; it must not
+            // appear as user-visible content.
+            if (!evt.is_last) {
+                bool is_structural_stop = (token == ctx.snap.tok->eos_id());
+                if (!is_structural_stop && ctx.snap.have_template) {
+                    for (int32_t stop_id : ctx.snap.stop_token_ids) {
+                        if (token == stop_id) {
+                            is_structural_stop = true;
+                            break;
+                        }
+                    }
+                }
+                if (is_structural_stop)
+                    continue;
+            }
+
+            // Check stop conditions
+            if (evt.is_last) {
+                if (token == ctx.snap.tok->eos_id()) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
+                    break;
+                }
+                bool is_stop = false;
+                if (ctx.snap.have_template) {
+                    for (int32_t stop_id : ctx.snap.stop_token_ids) {
+                        if (token == stop_id) {
+                            is_stop = true;
+                            break;
+                        }
+                    }
+                }
+                if (is_stop) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
+                    break;
+                }
+                finish = evt.finish_reason ? evt.finish_reason : "length";
+            }
+
+            // Track think tokens for usage reporting (no forced cap — model
+            // decides when to stop thinking, matching llama.cpp behavior).
+            if (ctx.snap.is_think_model && ctx.snap.think_end_id >= 0 &&
+                state.default_args.reasoning_format == "deepseek") {
+                if (token == ctx.snap.think_start_id) {
+                    ns_in_think = true;
+                } else if (token == ctx.snap.think_end_id) {
+                    ns_in_think = false;
+                } else if (ns_in_think) {
+                    ns_think_tokens++;
+                }
+            }
+
+            output_ids.push_back(token);
+
+            // Check text-level stop sequences
+            if (!ctx.params.stop_sequences.empty()) {
+                output_text += ctx.snap.tok->decode_token(token);
+                bool stop_found = false;
+                for (const auto& stop : ctx.params.stop_sequences) {
+                    auto pos = output_text.find(stop);
+                    if (pos != std::string::npos) {
+                        output_text = output_text.substr(0, pos);
+                        stop_found = true;
+                        break;
+                    }
+                }
+                if (stop_found) {
+                    finish = "stop";
+                    break;
+                }
+            }
+
+            // Break after processing the last non-EOS token
+            if (finish)
+                break;
+        }
+
+        if (!finish)
+            finish = "length";
+
+        int n_output_tokens = static_cast<int>(output_ids.size());
+        total_output_tokens += n_output_tokens;
+        std::string content = !ctx.params.stop_sequences.empty() ? output_text : ctx.snap.tok->decode(output_ids);
+
+        // Extract reasoning content (DeepSeek format) or strip think blocks
+        std::string reasoning_content;
+        if (ctx.snap.is_think_model && state.default_args.reasoning_format == "deepseek") {
+            auto [reasoning, cleaned] = extract_reasoning(content);
+            reasoning_content = reasoning;
+            content = cleaned;
+        } else if (ctx.snap.is_think_model && state.default_args.reasoning_format != "none") {
+            strip_think_block(content);
+        }
+
+        // Gemma-4 channel headers: structural "<|channel>NAME[<channel|>]…"
+        // wraps both the chain-of-thought and the user-facing answer. Split
+        // them so "thought" content goes to reasoning_content (OpenAI-
+        // compat) and "final" content stays in content. Falls back to
+        // strip-only if the request asked reasoning_format=none.
+        if (ctx.snap.channel_open_id >= 0) {
+            if (state.default_args.reasoning_format == "none") {
+                strip_channel_headers(content);
+            } else {
+                auto segs = split_channel_segments(content);
+                if (!segs.reasoning.empty() && reasoning_content.empty()) {
+                    reasoning_content = std::move(segs.reasoning);
+                }
+                content = std::move(segs.content);
+            }
+        }
+
+        // Build logprobs object if requested
+        json logprobs_obj = nullptr;
+        if (ctx.params.req_logprobs && active_req) {
+            const auto& lp_data = active_req->output_logprobs;
+            json content_logprobs = json::array();
+            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
+                const auto& lp = lp_data[idx];
+                json top_arr = json::array();
+                for (const auto& t : lp.top) {
+                    top_arr.push_back({{"token", safe_token_json(t.text)},
+                                       {"logprob", t.logprob},
+                                       {"bytes", token_bytes_json(t.text)}});
+                }
+                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
+                                            {"logprob", lp.logprob},
+                                            {"bytes", token_bytes_json(lp.text)},
+                                            {"top_logprobs", top_arr}});
+            }
+            logprobs_obj = {{"content", content_logprobs}};
+        }
+
+        // Parse tool calls from model output. Run even on finish=length:
+        // the model may have emitted a complete tool_call and then kept
+        // generating until the budget ran out (common before we hook the
+        // family-specific close marker as a stop token). The parser is
+        // tolerant of trailing garbage after the closing marker.
+        std::vector<ParsedToolCall> tool_calls;
+        if (ctx.params.has_tools) {
+            auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family, content,
+                                                                state.next_tool_call_id);
+            if (!parsed_calls.empty()) {
+                tool_calls = std::move(parsed_calls);
+                content = pre_content;
+                finish = "tool_calls";
+            }
+        }
+
+        json msg = {{"role", "assistant"}};
+        if (!tool_calls.empty()) {
+            // content is null when only tool calls (no preceding text)
+            msg["content"] = content.empty() ? json(nullptr) : json(content);
+            json tc_array = json::array();
+            for (const auto& tc : tool_calls) {
+                tc_array.push_back({{"id", tc.id},
+                                    {"type", "function"},
+                                    {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}});
+            }
+            msg["tool_calls"] = tc_array;
+        } else {
+            msg["content"] = content;
+        }
+        if (!reasoning_content.empty()) {
+            msg["reasoning_content"] = reasoning_content;
+        }
+
+        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
+        if (!logprobs_obj.is_null()) {
+            choice["logprobs"] = logprobs_obj;
+        }
+
+        choices.push_back(choice);
+
+        // Log each completion
+        fprintf(stderr, "[%s] completion %d/%d: %d tokens\n", comp_id.c_str(), ci + 1,
+                ctx.params.n_completions, n_output_tokens);
+    }
+
+    // Log aggregate request
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
+    fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n", comp_id.c_str(),
+            ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
+    state.metrics.requests_total++;
+    state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
+    state.metrics.tokens_completion_total += total_output_tokens;
+    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+
+    json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
+                  {"completion_tokens", total_output_tokens},
+                  {"total_tokens", ctx.snap.n_prompt_tokens + total_output_tokens}};
+
+    json response = {{"id", comp_id},      {"object", "chat.completion"},
+                     {"created", created}, {"model", ctx.snap.model_name},
+                     {"choices", choices}, {"usage", usage}};
+
+    // Pull the final finish_reason from choice 0 for log correlation;
+    // multi-completion requests still record only the aggregate.
+    const char* nonstream_finish = nullptr;
+    if (!choices.empty() && choices[0].contains("finish_reason") &&
+        choices[0]["finish_reason"].is_string()) {
+        nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
+    }
+    log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint,
+                      ctx.log_client_ip, ctx.log_raw_body,
+                      ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish, response);
+
+    res.set_content(response.dump(), "application/json");
+}
+
 // Set up SSE chunked content provider for streaming chat completion.
 // Captures state and ctx by reference for the chunked-provider lambda. ctx
 // must outlive the SSE response (httplib invokes the chunked provider after
@@ -2134,267 +2445,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     if (ctx.params.stream) {
         stream_chat_response_(res, state, ctx, server_req);
     } else {
-        // Non-streaming: decode all tokens, return complete response
-        // For n > 1, run multiple independent generations sequentially
-        json choices = json::array();
-        int total_output_tokens = 0;
-
-        for (int ci = 0; ci < ctx.params.n_completions; ci++) {
-            // For subsequent completions, create a new request and submit it
-            if (ci > 0) {
-                imp_req = make_imp_request(ci);
-                server_req = std::make_shared<ServerRequest>();
-                server_req->request = imp_req;
-                {
-                    std::lock_guard<std::timed_mutex> lock(state.mtx);
-                    if (!state.batching || !state.batching->is_running()) {
-                        break;
-                    }
-                    state.batching->submit(server_req);
-                }
-            }
-
-            auto active_req = server_req->request;
-            std::vector<int32_t> output_ids;
-            const char* finish = nullptr;
-            std::string output_text;   // accumulated output for stop matching
-            bool ns_in_think = false;  // non-streaming think budget tracking
-            int ns_think_tokens = 0;
-
-            auto ns_request_start = std::chrono::steady_clock::now();
-            for (;;) {
-                // Check request timeout
-                if (state.request_timeout > 0) {
-                    auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
-                    if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                        server_req->cancel();
-                        finish = "length";
-                        break;
-                    }
-                }
-
-                // Read next token from the batching engine
-                TokenEvent evt;
-                if (!server_req->pop_token(evt)) {
-                    continue;  // timeout — loop back to check request timeout
-                }
-
-                if (evt.token_id < 0) {
-                    finish = evt.finish_reason ? evt.finish_reason : "stop";
-                    break;
-                }
-
-                int32_t token = evt.token_id;
-
-                // Silently drop structural stop tokens that slipped through.
-                // The engine's think-block implicit-close passes ONE EOS-like
-                // token through to recover from empty thinking; it must not
-                // appear as user-visible content.
-                if (!evt.is_last) {
-                    bool is_structural_stop = (token == ctx.snap.tok->eos_id());
-                    if (!is_structural_stop && ctx.snap.have_template) {
-                        for (int32_t stop_id : ctx.snap.stop_token_ids) {
-                            if (token == stop_id) {
-                                is_structural_stop = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (is_structural_stop)
-                        continue;
-                }
-
-                // Check stop conditions
-                if (evt.is_last) {
-                    if (token == ctx.snap.tok->eos_id()) {
-                        finish = evt.finish_reason ? evt.finish_reason : "stop";
-                        break;
-                    }
-                    bool is_stop = false;
-                    if (ctx.snap.have_template) {
-                        for (int32_t stop_id : ctx.snap.stop_token_ids) {
-                            if (token == stop_id) {
-                                is_stop = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (is_stop) {
-                        finish = evt.finish_reason ? evt.finish_reason : "stop";
-                        break;
-                    }
-                    finish = evt.finish_reason ? evt.finish_reason : "length";
-                }
-
-                // Track think tokens for usage reporting (no forced cap — model
-                // decides when to stop thinking, matching llama.cpp behavior).
-                if (ctx.snap.is_think_model && ctx.snap.think_end_id >= 0 &&
-                    state.default_args.reasoning_format == "deepseek") {
-                    if (token == ctx.snap.think_start_id) {
-                        ns_in_think = true;
-                    } else if (token == ctx.snap.think_end_id) {
-                        ns_in_think = false;
-                    } else if (ns_in_think) {
-                        ns_think_tokens++;
-                    }
-                }
-
-                output_ids.push_back(token);
-
-                // Check text-level stop sequences
-                if (!ctx.params.stop_sequences.empty()) {
-                    output_text += ctx.snap.tok->decode_token(token);
-                    bool stop_found = false;
-                    for (const auto& stop : ctx.params.stop_sequences) {
-                        auto pos = output_text.find(stop);
-                        if (pos != std::string::npos) {
-                            output_text = output_text.substr(0, pos);
-                            stop_found = true;
-                            break;
-                        }
-                    }
-                    if (stop_found) {
-                        finish = "stop";
-                        break;
-                    }
-                }
-
-                // Break after processing the last non-EOS token
-                if (finish)
-                    break;
-            }
-
-            if (!finish)
-                finish = "length";
-
-            int n_output_tokens = static_cast<int>(output_ids.size());
-            total_output_tokens += n_output_tokens;
-            std::string content = !ctx.params.stop_sequences.empty() ? output_text : ctx.snap.tok->decode(output_ids);
-
-            // Extract reasoning content (DeepSeek format) or strip think blocks
-            std::string reasoning_content;
-            if (ctx.snap.is_think_model && state.default_args.reasoning_format == "deepseek") {
-                auto [reasoning, cleaned] = extract_reasoning(content);
-                reasoning_content = reasoning;
-                content = cleaned;
-            } else if (ctx.snap.is_think_model && state.default_args.reasoning_format != "none") {
-                strip_think_block(content);
-            }
-
-            // Gemma-4 channel headers: structural "<|channel>NAME[<channel|>]…"
-            // wraps both the chain-of-thought and the user-facing answer. Split
-            // them so "thought" content goes to reasoning_content (OpenAI-
-            // compat) and "final" content stays in content. Falls back to
-            // strip-only if the request asked reasoning_format=none.
-            if (ctx.snap.channel_open_id >= 0) {
-                if (state.default_args.reasoning_format == "none") {
-                    strip_channel_headers(content);
-                } else {
-                    auto segs = split_channel_segments(content);
-                    if (!segs.reasoning.empty() && reasoning_content.empty()) {
-                        reasoning_content = std::move(segs.reasoning);
-                    }
-                    content = std::move(segs.content);
-                }
-            }
-
-            // Build logprobs object if requested
-            json logprobs_obj = nullptr;
-            if (ctx.params.req_logprobs && active_req) {
-                const auto& lp_data = active_req->output_logprobs;
-                json content_logprobs = json::array();
-                for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                    const auto& lp = lp_data[idx];
-                    json top_arr = json::array();
-                    for (const auto& t : lp.top) {
-                        top_arr.push_back({{"token", safe_token_json(t.text)},
-                                           {"logprob", t.logprob},
-                                           {"bytes", token_bytes_json(t.text)}});
-                    }
-                    content_logprobs.push_back({{"token", safe_token_json(lp.text)},
-                                                {"logprob", lp.logprob},
-                                                {"bytes", token_bytes_json(lp.text)},
-                                                {"top_logprobs", top_arr}});
-                }
-                logprobs_obj = {{"content", content_logprobs}};
-            }
-
-            // Parse tool calls from model output. Run even on finish=length:
-            // the model may have emitted a complete tool_call and then kept
-            // generating until the budget ran out (common before we hook the
-            // family-specific close marker as a stop token). The parser is
-            // tolerant of trailing garbage after the closing marker.
-            std::vector<ParsedToolCall> tool_calls;
-            if (ctx.params.has_tools) {
-                auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family, content,
-                                                                    state.next_tool_call_id);
-                if (!parsed_calls.empty()) {
-                    tool_calls = std::move(parsed_calls);
-                    content = pre_content;
-                    finish = "tool_calls";
-                }
-            }
-
-            json msg = {{"role", "assistant"}};
-            if (!tool_calls.empty()) {
-                // content is null when only tool calls (no preceding text)
-                msg["content"] = content.empty() ? json(nullptr) : json(content);
-                json tc_array = json::array();
-                for (const auto& tc : tool_calls) {
-                    tc_array.push_back({{"id", tc.id},
-                                        {"type", "function"},
-                                        {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}});
-                }
-                msg["tool_calls"] = tc_array;
-            } else {
-                msg["content"] = content;
-            }
-            if (!reasoning_content.empty()) {
-                msg["reasoning_content"] = reasoning_content;
-            }
-
-            json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
-            if (!logprobs_obj.is_null()) {
-                choice["logprobs"] = logprobs_obj;
-            }
-
-            choices.push_back(choice);
-
-            // Log each completion
-            fprintf(stderr, "[%s] completion %d/%d: %d tokens\n", comp_id.c_str(), ci + 1,
-                    ctx.params.n_completions, n_output_tokens);
-        }
-
-        // Log aggregate request
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n", comp_id.c_str(),
-                ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
-        state.metrics.requests_total++;
-        state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
-        state.metrics.tokens_completion_total += total_output_tokens;
-        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-
-        json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
-                      {"completion_tokens", total_output_tokens},
-                      {"total_tokens", ctx.snap.n_prompt_tokens + total_output_tokens}};
-
-        json response = {{"id", comp_id},      {"object", "chat.completion"},
-                         {"created", created}, {"model", ctx.snap.model_name},
-                         {"choices", choices}, {"usage", usage}};
-
-        // Pull the final finish_reason from choice 0 for log correlation;
-        // multi-completion requests still record only the aggregate.
-        const char* nonstream_finish = nullptr;
-        if (!choices.empty() && choices[0].contains("finish_reason") &&
-            choices[0]["finish_reason"].is_string()) {
-            nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
-        }
-        log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint,
-                          ctx.log_client_ip, ctx.log_raw_body,
-                          ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish, response);
-
-        res.set_content(response.dump(), "application/json");
+        nonstream_chat_response_(res, state, ctx, imp_req, server_req, saved_tokens, comp_id, created);
     }
 }
 
