@@ -1656,6 +1656,23 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                 return;
         }
     }
+    // Q4_K_M direct-GEMM via INT8 IMMA (Phase 2C). Opt-in via
+    // `gemm.q4k_imma_enabled` (default off); production-recommended for dense
+    // Q4_K_M weights at M ≥ 1024 where the kernel's ~40 TOPS plateau beats
+    // the dequant→cuBLAS fallback. Falls through to FP8 / generic dequant on
+    // any precondition failure inside the handler. See
+    // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
+    if (qtype == QType::Q4_K && input.qtype == QType::F16 && M >= 1024 &&
+        ctx.beta == 0.0f && RuntimeConfig::current().gemm.q4k_imma_enabled) {
+        GemmKernelArgs args{};
+        args.input = &input;
+        args.output = &output;
+        args.stream = ctx.stream;
+        args.weight_payload = &weight;
+        GemmStrategy strat{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/false};
+        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+            return;
+    }
     // FP8 prefill (M>1): cache hit → FP8xFP8 cuBLASLt; cache miss with
     // dequant-supported qtype → dequant→FP16 cuBLAS (Slice 8.1). Raw FP16
     // weights drop to the FP16 strategy below.
