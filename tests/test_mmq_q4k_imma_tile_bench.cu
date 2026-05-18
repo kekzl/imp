@@ -176,25 +176,25 @@ void run_correctness(int M, int N, int K, unsigned seed, float max_abs_tol, floa
 }
 
 TEST(MmqQ4kImmaTile, CorrectnessTiny) {
-    // Smallest config that fills one CTA (BLOCK_M=32, BLOCK_N=16): one block,
-    // one sub-block of K.
-    run_correctness(/*M=*/32, /*N=*/16, /*K=*/32, /*seed=*/3, /*abs=*/2.0f, /*rel=*/0.02f);
+    // Smallest config that fills one CTA (BLOCK_M=64, BLOCK_N=32):
+    // one block, one sub-block of K.
+    run_correctness(/*M=*/64, /*N=*/32, /*K=*/32, /*seed=*/3, /*abs=*/2.0f, /*rel=*/0.02f);
 }
 
 TEST(MmqQ4kImmaTile, CorrectnessMultiSub) {
     // K=256 → 8 sub-blocks; tests the cross-sub-block accumulator.
-    run_correctness(/*M=*/32, /*N=*/16, /*K=*/256, /*seed=*/7, /*abs=*/8.0f, /*rel=*/0.02f);
+    run_correctness(/*M=*/64, /*N=*/32, /*K=*/256, /*seed=*/7, /*abs=*/8.0f, /*rel=*/0.02f);
 }
 
 TEST(MmqQ4kImmaTile, CorrectnessMultiTile) {
     // Multiple CTAs per dim. Sweeps the grid-launch logic.
-    run_correctness(/*M=*/64, /*N=*/32, /*K=*/128, /*seed=*/13, /*abs=*/6.0f, /*rel=*/0.02f);
+    run_correctness(/*M=*/128, /*N=*/64, /*K=*/128, /*seed=*/13, /*abs=*/6.0f, /*rel=*/0.02f);
 }
 
 TEST(MmqQ4kImmaTile, CorrectnessFFNLikeShape) {
-    // FFN-like dimensions: K = 512 (16 sub-blocks), M = 64, N = 32.
+    // FFN-like dimensions: K = 512 (16 sub-blocks), M = 128, N = 64.
     // Exercises the cross-sub-block float accumulator at scale.
-    run_correctness(/*M=*/64, /*N=*/32, /*K=*/512, /*seed=*/37, /*abs=*/40.0f, /*rel=*/0.02f);
+    run_correctness(/*M=*/128, /*N=*/64, /*K=*/512, /*seed=*/37, /*abs=*/40.0f, /*rel=*/0.02f);
 }
 
 // Bench-only — prints kernel-time and effective TOPS at production-realistic
@@ -203,15 +203,22 @@ TEST(MmqQ4kImmaTile, CorrectnessFFNLikeShape) {
 // each SM; Phase 2B.2 (multi-warp expansion) is the next real perf lever.
 TEST(MmqQ4kImmaTile, BenchSweep) {
     struct Shape { int M, N, K; };
+    // Cover production FFN shapes (Qwen3-32B FFN ~5120, Gemma-3-12B ~3072).
+    // Larger M/N is mandatory for Phase 2B.3's BLOCK_M=64 BLOCK_N=32 tile —
+    // small shapes leave 170 SMs starved (verified empirically: M=512 N=256 →
+    // 64 CTAs ≈ 0.4 CTAs/SM and the kernel regresses vs Phase 2B.2).
     Shape shapes[] = {
-        {64,  256, 2048},
-        {128, 256, 2048},
-        {256, 256, 2048},
-        {512, 256, 2048},
+        {512,  512,  2048},
+        {1024, 512,  2048},
+        {2048, 512,  2048},
+        {4096, 1024, 2048},
+        {2048, 2048, 2048},
+        {4096, 4096, 2048},
     };
 
     std::fprintf(stderr,
-                 "\n[q4k-imma-tile Phase 2B.2 bench, 4 warps/CTA (32×16 output), 2-stage cp.async]\n");
+                 "\n[q4k-imma-tile Phase 2B.3 bench, 4 warps/CTA × WRM·WRN=2·2 "
+                 "(64×32 output), 2-stage cp.async]\n");
     std::fprintf(stderr, "  %4s %4s %5s  %10s  %10s\n", "M", "N", "K", "ms/rep", "TOPS");
 
     for (auto sh : shapes) {
