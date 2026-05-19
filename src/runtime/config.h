@@ -161,6 +161,13 @@ struct RuntimeConfig {
         // Threshold M for smallM kernel (clamped to [0,128]). Legacy env:
         // IMP_NVFP4_SMALLM_THRESHOLD.
         int nvfp4_smallM_threshold = 64;
+        // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels
+        // (gemv_nvfp4_moe_{gate_up,decode}_mr<NR>). One warp computes one
+        // row, so threads-per-block = NR * 32. Higher NR amortizes block
+        // launch overhead at the cost of fewer concurrent CTAs. Valid
+        // values: 4, 8 (default), 16, 32. Other values fall back to 8.
+        // Env: IMP_MOE_MR_NR.
+        int mr_nr = 8;
     } moe;
 
     struct GDN {
