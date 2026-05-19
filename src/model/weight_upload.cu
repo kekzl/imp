@@ -1421,11 +1421,13 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
 // upload_expert_weights: MoE expert weight upload for all layers (Pass 2).
 // Handles packed 3D tensors and per-expert 2D tensors.
 // ---------------------------------------------------------------------------
-static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers,
-                                  size_t expert_reserve_bytes, const UploadCtx& ctx) {
-    // Compute per-layer expert weight costs
+// Phase 1 of upload_expert_weights: compute per-layer expert-tensor byte cost
+// for the packed 3-D tensors PLUS per-expert 2-D tensors (NVFP4 llm-compressor
+// format). Returns total_expert_bytes; fills layer_expert_bytes in place.
+static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& layers, int n_layers,
+                                          std::vector<size_t>& layer_expert_bytes) {
     size_t total_expert_bytes = 0;
-    std::vector<size_t> layer_expert_bytes(n_layers, 0);
+    layer_expert_bytes.assign(n_layers, 0);
     for (int i = 0; i < n_layers; ++i) {
         const TransformerLayer& L = layers[i];
         auto add_packed = [&](const Tensor& p, QType qt) {
@@ -1454,127 +1456,127 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
         add_2d_expert(L.expert_w_up);
         add_2d_expert(L.expert_w_down);
     }
+    return total_expert_bytes;
+}
 
-    // Decide which expert layers to upload based on actual remaining VRAM
-    std::vector<bool> experts_upload_layer(n_layers, false);
-    if (total_expert_bytes > 0) {
-        size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
+// Phase 2 of upload_expert_weights: pick which MoE layers' experts stay on
+// GPU vs go to host. Honors:
+//   - VRAM reserve passed by Engine (KV cache + workspaces + FP16 cache),
+//   - WSL2/WDDM driver overhead (auto-pick 10 % aggressive if all fit, else
+//     30 % conservative), explicit overhead_pct override (0..50),
+//   - moe.force_host_experts = N debug flag (last N MoE layers off-GPU).
+// Also re-arms the g_cached_free_mem / g_total_allocated / g_vram_reserve
+// trio so per-expert checked_cuda_malloc calls don't double-count the
+// reserve.
+static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expert_bytes,
+                                           size_t total_expert_bytes, size_t expert_reserve_bytes,
+                                           int n_layers, std::vector<bool>& experts_upload_layer) {
+    if (total_expert_bytes == 0)
+        return;
 
-        // Reserve for KV cache + SSM state + activation workspace + FP16 cache.
-        // Engine passes the exact reserve based on computed workspace sizes.
-        // CUDA driver overhead on WSL2/WDDM: cudaMalloc alignment, page tables,
-        // and WDDM shared memory management consume ~30% beyond the requested size.
-        // Empirical on RTX 5090 WSL2: 22 GiB expert alloc leaves 0 MiB from 28.7 GiB free.
-        //
-        // Auto-pick default: use 10% (aggressive) if ALL experts would fit with
-        // that overhead, else 30% (conservative). This saves users from a
-        // silent 3× perf penalty on Qwen3-Coder-30B / Qwen3.6-35B-class MoE
-        // models where the conservative default unnecessarily offloads experts
-        // to host (measured: 77 → 237 tok/s with 10% vs 30% on Qwen3-Coder-30B
-        // Q6_K, RTX 5090 native Linux).
-        //
-        // IMP_EXPERT_OVERHEAD_PCT: explicit override (integer 0..50). Required
-        // on WSL2/WDDM where the 10% auto-aggressive path may OOM at alloc time.
-        // [moe] expert_overhead_pct: explicit override (0..50). Default 10
-        // requests aggressive auto-pick; values outside the range fall back
-        // to the conservative 30% reserve.
-        int overhead_pct = RuntimeConfig::current().moe.expert_overhead_pct;
-        if (overhead_pct < 0 || overhead_pct > 50) {
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+
+    // Auto-pick default: use 10% (aggressive) if ALL experts would fit with
+    // that overhead, else 30% (conservative). This saves users from a
+    // silent 3× perf penalty on Qwen3-Coder-30B / Qwen3.6-35B-class MoE
+    // models where the conservative default unnecessarily offloads experts
+    // to host (measured: 77 → 237 tok/s with 10% vs 30% on Qwen3-Coder-30B
+    // Q6_K, RTX 5090 native Linux).
+    int overhead_pct = RuntimeConfig::current().moe.expert_overhead_pct;
+    if (overhead_pct < 0 || overhead_pct > 50) {
+        overhead_pct = 30;
+    } else if (overhead_pct == 10) {
+        size_t aggressive_overhead = static_cast<size_t>(free_mem * 10 / 100);
+        size_t aggressive_reserve = expert_reserve_bytes + aggressive_overhead;
+        size_t aggressive_budget = (free_mem > aggressive_reserve) ? (free_mem - aggressive_reserve) : 0;
+        if (aggressive_budget < total_expert_bytes) {
             overhead_pct = 30;
-        } else if (overhead_pct == 10) {
-            // Auto-pick: probe with aggressive 10%. If all experts fit, use it.
-            // Else fall back to conservative 30%.
-            size_t aggressive_overhead = static_cast<size_t>(free_mem * 10 / 100);
-            size_t aggressive_reserve = expert_reserve_bytes + aggressive_overhead;
-            size_t aggressive_budget = (free_mem > aggressive_reserve) ? (free_mem - aggressive_reserve) : 0;
-            if (aggressive_budget < total_expert_bytes) {
-                overhead_pct = 30;
-            } else {
-                IMP_LOG_INFO(
-                    "Expert offload: all experts fit with 10%% overhead "
-                    "(%.2f GiB experts, %.2f GiB free) — picking aggressive.",
-                    total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
-            }
-        }
-        size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
-        size_t total_reserve = expert_reserve_bytes + overhead;
-        size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
-
-        // [moe] force_host_experts = N: debug flag forcing the last N MoE
-        // layers off-GPU regardless of budget. Use for reproducing host-
-        // resident path bugs on a smaller quant.
-        int force_host_n = RuntimeConfig::current().moe.force_host_experts;
-        if (force_host_n < 0)
-            force_host_n = 0;
-
-        if (budget >= total_expert_bytes && force_host_n == 0) {
-            // All experts fit
-            for (int i = 0; i < n_layers; ++i) {
-                if (layer_expert_bytes[i] > 0)
-                    experts_upload_layer[i] = true;
-            }
-            IMP_LOG_INFO(
-                "Expert weights: %.2f GiB -> uploading ALL to GPU "
-                "(%.2f GiB free, %.2f GiB reserve)",
-                total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0),
-                expert_reserve_bytes / (1024.0 * 1024.0 * 1024.0));
-        } else if (force_host_n > 0) {
-            // Debug: force last N MoE layers to host. Still respect budget for
-            // the ones we do upload.
-            std::vector<int> moe_layer_idxs;
-            for (int i = 0; i < n_layers; ++i)
-                if (layer_expert_bytes[i] > 0)
-                    moe_layer_idxs.push_back(i);
-            int skip_from = std::max(0, (int)moe_layer_idxs.size() - force_host_n);
-            size_t uploaded = 0;
-            int n_uploaded = 0;
-            for (int k = 0; k < skip_from; ++k) {
-                int i = moe_layer_idxs[k];
-                if (uploaded + layer_expert_bytes[i] <= budget) {
-                    experts_upload_layer[i] = true;
-                    uploaded += layer_expert_bytes[i];
-                    n_uploaded++;
-                }
-            }
-            IMP_LOG_INFO(
-                "Expert weights (IMP_FORCE_HOST_EXPERTS=%d): uploading %d/%zu MoE layers, %d forced to host",
-                force_host_n, n_uploaded, moe_layer_idxs.size(), force_host_n);
         } else {
-            // Partial upload: greedily upload layers until budget exhausted
-            size_t uploaded = 0;
-            int n_uploaded = 0, n_total_moe = 0;
-            for (int i = 0; i < n_layers; ++i) {
-                if (layer_expert_bytes[i] == 0)
-                    continue;
-                n_total_moe++;
-                if (uploaded + layer_expert_bytes[i] <= budget) {
-                    experts_upload_layer[i] = true;
-                    uploaded += layer_expert_bytes[i];
-                    n_uploaded++;
-                }
-            }
             IMP_LOG_INFO(
-                "Expert weights: %.2f GiB total, uploading %d/%d MoE layers "
-                "(%.2f GiB on GPU, %.2f GiB on host, %.2f GiB free, "
-                "%.2f GiB reserve)",
-                total_expert_bytes / (1024.0 * 1024.0 * 1024.0), n_uploaded, n_total_moe,
-                uploaded / (1024.0 * 1024.0 * 1024.0),
-                (total_expert_bytes - uploaded) / (1024.0 * 1024.0 * 1024.0),
-                free_mem / (1024.0 * 1024.0 * 1024.0), expert_reserve_bytes / (1024.0 * 1024.0 * 1024.0));
+                "Expert offload: all experts fit with 10%% overhead "
+                "(%.2f GiB experts, %.2f GiB free) — picking aggressive.",
+                total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
         }
-
-        // Re-arm the cached free-memory window so per-expert checked_cuda_malloc
-        // calls don't fall back to a sync cudaMemGetInfo on every tensor.
-        // The budget we just computed is what we plan to spend; reflect that
-        // as headroom in the cached counter.
-        g_cached_free_mem = free_mem;
-        g_total_allocated = 0;
-        // We've already accounted for expert_reserve_bytes + overhead in the
-        // budget decision above, so for checked_cuda_malloc we drop the
-        // per-call reserve to avoid double-counting.
-        g_vram_reserve = 0;
     }
+    size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
+    size_t total_reserve = expert_reserve_bytes + overhead;
+    size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
+
+    int force_host_n = RuntimeConfig::current().moe.force_host_experts;
+    if (force_host_n < 0)
+        force_host_n = 0;
+
+    if (budget >= total_expert_bytes && force_host_n == 0) {
+        for (int i = 0; i < n_layers; ++i) {
+            if (layer_expert_bytes[i] > 0)
+                experts_upload_layer[i] = true;
+        }
+        IMP_LOG_INFO(
+            "Expert weights: %.2f GiB -> uploading ALL to GPU "
+            "(%.2f GiB free, %.2f GiB reserve)",
+            total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0),
+            expert_reserve_bytes / (1024.0 * 1024.0 * 1024.0));
+    } else if (force_host_n > 0) {
+        // Debug: force last N MoE layers to host. Still respect budget for
+        // the ones we do upload.
+        std::vector<int> moe_layer_idxs;
+        for (int i = 0; i < n_layers; ++i)
+            if (layer_expert_bytes[i] > 0)
+                moe_layer_idxs.push_back(i);
+        int skip_from = std::max(0, (int)moe_layer_idxs.size() - force_host_n);
+        size_t uploaded = 0;
+        int n_uploaded = 0;
+        for (int k = 0; k < skip_from; ++k) {
+            int i = moe_layer_idxs[k];
+            if (uploaded + layer_expert_bytes[i] <= budget) {
+                experts_upload_layer[i] = true;
+                uploaded += layer_expert_bytes[i];
+                n_uploaded++;
+            }
+        }
+        IMP_LOG_INFO(
+            "Expert weights (IMP_FORCE_HOST_EXPERTS=%d): uploading %d/%zu MoE layers, %d forced to host",
+            force_host_n, n_uploaded, moe_layer_idxs.size(), force_host_n);
+    } else {
+        // Partial upload: greedily upload layers until budget exhausted
+        size_t uploaded = 0;
+        int n_uploaded = 0, n_total_moe = 0;
+        for (int i = 0; i < n_layers; ++i) {
+            if (layer_expert_bytes[i] == 0)
+                continue;
+            n_total_moe++;
+            if (uploaded + layer_expert_bytes[i] <= budget) {
+                experts_upload_layer[i] = true;
+                uploaded += layer_expert_bytes[i];
+                n_uploaded++;
+            }
+        }
+        IMP_LOG_INFO(
+            "Expert weights: %.2f GiB total, uploading %d/%d MoE layers "
+            "(%.2f GiB on GPU, %.2f GiB on host, %.2f GiB free, "
+            "%.2f GiB reserve)",
+            total_expert_bytes / (1024.0 * 1024.0 * 1024.0), n_uploaded, n_total_moe,
+            uploaded / (1024.0 * 1024.0 * 1024.0),
+            (total_expert_bytes - uploaded) / (1024.0 * 1024.0 * 1024.0),
+            free_mem / (1024.0 * 1024.0 * 1024.0), expert_reserve_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // Re-arm the cached free-memory window so per-expert checked_cuda_malloc
+    // calls don't fall back to a sync cudaMemGetInfo on every tensor.
+    g_cached_free_mem = free_mem;
+    g_total_allocated = 0;
+    g_vram_reserve = 0;  // budget already accounted for above
+}
+
+static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers,
+                                  size_t expert_reserve_bytes, const UploadCtx& ctx) {
+    std::vector<size_t> layer_expert_bytes;
+    size_t total_expert_bytes = compute_expert_layer_costs_(layers, n_layers, layer_expert_bytes);
+
+    std::vector<bool> experts_upload_layer(n_layers, false);
+    decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,
+                                   experts_upload_layer);
 
     // Upload expert weights for each layer
     for (int i = 0; i < n_layers; ++i) {
