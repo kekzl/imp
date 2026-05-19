@@ -178,6 +178,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.moe.nvfp4_smallM = parse_bool(val, cfg.moe.nvfp4_smallM);
     else if (eq("moe.nvfp4_smallM_threshold"))
         cfg.moe.nvfp4_smallM_threshold = parse_int(val, cfg.moe.nvfp4_smallM_threshold);
+    else if (eq("moe.mr_nr"))
+        cfg.moe.mr_nr = parse_int(val, cfg.moe.mr_nr);
 
     // [gdn]
     else if (eq("gdn.fp32_scan"))
@@ -336,6 +338,10 @@ void seed_from_env(RuntimeConfig& cfg) {
         if (v > 128) v = 128;
         cfg.moe.nvfp4_smallM_threshold = v;
     }
+
+    // moe.mr_nr — IMP_MOE_MR_NR: rows-per-block for NVFP4 MoE decode kernels.
+    if (const char* e = std::getenv("IMP_MOE_MR_NR"))
+        cfg.moe.mr_nr = std::atoi(e);
 
     // diagnostics.nvfp4_force_dequant — IMP_NVFP4_FORCE_DEQUANT: '1' only.
     if (const char* e = std::getenv("IMP_NVFP4_FORCE_DEQUANT"))
