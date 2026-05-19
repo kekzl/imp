@@ -1938,6 +1938,83 @@ void Engine::step_prefill(cudaStream_t stream) {
 // step_prefill_one — process a single prefill request
 // =====================================================================
 
+// Allocate KV blocks for a prefill step. Two sub-paths:
+//   - prefix caching: try allocate_blocks_with_prefix, evict + retry on
+//     budget pressure, advance `offset` past the reused prefix.
+//   - plain: allocate `additional` blocks, evict + retry, cancel on hard
+//     failure.
+// Returns false on unrecoverable failure (req->status already set to
+// CANCELLED). On prefix-cache reuse, mutates offset / chunk_len /
+// is_last_chunk / ctx_len in place.
+bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_bs,
+                                         int total_input, int effective_chunk,
+                                         int& offset, int& chunk_len, bool& is_last_chunk,
+                                         int& ctx_len, cudaStream_t pf_stream) {
+    int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
+    int prefix_reused = 0;
+    int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
+
+    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
+        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+        if (prefix_reused < 0) {
+            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
+                int evicted = kv_manager_->evict_lru();
+                if (evicted < 0)
+                    break;
+            }
+            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+            if (prefix_reused < 0) {
+                req->status = RequestStatus::CANCELLED;
+                return false;
+            }
+        }
+
+        if (prefix_reused > 0) {
+            int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
+            int skip_tokens = effective_reused * kv_bs;
+            if (skip_tokens >= total_input) {
+                skip_tokens = (total_input / kv_bs) * kv_bs;
+                if (skip_tokens >= total_input) {
+                    skip_tokens = total_input - 1;
+                }
+            }
+            if (skip_tokens > offset) {
+                IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
+                             req->id, skip_tokens, total_input, prefix_reused);
+                req->cached_tokens = skip_tokens;
+                offset = skip_tokens;
+                req->prefill_offset = offset;
+                chunk_len = total_input - offset;
+                is_last_chunk = true;
+                if (chunk_len > effective_chunk) {
+                    chunk_len = effective_chunk;
+                    is_last_chunk = false;
+                }
+                ctx_len = offset + chunk_len;
+                (void)executor_->resize_workspace(chunk_len, pf_stream);
+            }
+        }
+    } else {
+        int additional = num_blocks - existing;
+        if (additional > 0) {
+            if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                while (kv_manager_->num_free_blocks() < additional) {
+                    int evicted = kv_manager_->evict_lru();
+                    if (evicted < 0)
+                        break;
+                }
+                if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                    kv_manager_->free_sequence(req->id);
+                    req->status = RequestStatus::CANCELLED;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t pf_stream) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     int total_input = static_cast<int>(req->input_tokens.size());
@@ -1986,69 +2063,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int ctx_len = offset + chunk_len;
     (void)executor_->resize_workspace(chunk_len, pf_stream);
 
-    int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
-
-    // Allocate KV cache blocks
-    int prefix_reused = 0;
-    int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
-
-    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
-        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
-        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-        if (prefix_reused < 0) {
-            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted < 0)
-                    break;
-            }
-            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-            if (prefix_reused < 0) {
-                req->status = RequestStatus::CANCELLED;
-                return;
-            }
-        }
-
-        if (prefix_reused > 0) {
-            int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
-            int skip_tokens = effective_reused * kv_bs;
-            if (skip_tokens >= total_input) {
-                skip_tokens = (total_input / kv_bs) * kv_bs;
-                if (skip_tokens >= total_input) {
-                    skip_tokens = total_input - 1;
-                }
-            }
-            if (skip_tokens > offset) {
-                IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)", req->id,
-                             skip_tokens, total_input, prefix_reused);
-                req->cached_tokens = skip_tokens;
-                offset = skip_tokens;
-                req->prefill_offset = offset;
-                chunk_len = total_input - offset;
-                is_last_chunk = true;
-                if (chunk_len > effective_chunk) {
-                    chunk_len = effective_chunk;
-                    is_last_chunk = false;
-                }
-                ctx_len = offset + chunk_len;
-                (void)executor_->resize_workspace(chunk_len, pf_stream);
-            }
-        }
-    } else {
-        int additional = num_blocks - existing;
-        if (additional > 0) {
-            if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                while (kv_manager_->num_free_blocks() < additional) {
-                    int evicted = kv_manager_->evict_lru();
-                    if (evicted < 0)
-                        break;
-                }
-                if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    return;
-                }
-            }
-        }
+    if (!prefill_allocate_kv_blocks_(req, kv_bs, total_input, effective_chunk, offset, chunk_len,
+                                     is_last_chunk, ctx_len, pf_stream)) {
+        return;  // caller already set req->status = CANCELLED
     }
 
     const auto& block_table = kv_manager_->block_table(req->id);
