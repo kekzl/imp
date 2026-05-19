@@ -1302,201 +1302,9 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
     std::vector<NvFP4Entry>& nvfp4_entries = dctx.entries;
 
     if (wcache_.nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
-        // Mode 2 incremental: process FP16-cached entries first (each conversion
-        // frees net VRAM since NVFP4 ≈ 28% of FP16), then from-scratch entries.
-        // Sort: FP16-cached first (smallest first to bootstrap), then from-scratch.
-        std::stable_sort(nvfp4_entries.begin(), nvfp4_entries.end(),
-                         [](const NvFP4Entry& a, const NvFP4Entry& b) {
-                             if (a.from_scratch != b.from_scratch)
-                                 return !a.from_scratch;
-                             size_t a_sz = static_cast<size_t>(a.weight.shape[0]) * a.weight.shape[1];
-                             size_t b_sz = static_cast<size_t>(b.weight.shape[0]) * b.weight.shape[1];
-                             return a_sz < b_sz;
-                         });
-
-        float* d_absmax_buf = nullptr;
-        float* d_tscale_buf = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
-
-        int actual_count = 0;
-        size_t actual_bytes = 0;
-        int actual_from_fp16 = 0;
-        int actual_from_scratch = 0;
-
-        for (auto& e : nvfp4_entries) {
-            int rows = static_cast<int>(e.weight.shape[0]);
-            int cols = static_cast<int>(e.weight.shape[1]);
-            size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
-                                 static_cast<size_t>(rows) * cols / 16 + 4;
-
-            // Check actual free VRAM (10% of total as safety margin)
-            size_t free_mem = 0, total_mem = 0;
-            IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
-            size_t nvfp4_safety = std::max(total_mem / 10, static_cast<size_t>(1024 * 1024));
-            if (free_mem < nvfp4_bytes + nvfp4_safety) {
-                IMP_LOG_INFO(
-                    "NVFP4 incremental: VRAM exhausted after %d tensors "
-                    "(%.1f MiB, %.1f MiB free)",
-                    actual_count, actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
-                break;
-            }
-
-            const half* fp16_ptr = nullptr;
-            void* tmp_buf = nullptr;
-
-            if (e.from_scratch) {
-                size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-                void* dq_buf = qscratch_.dequant;
-                if (need > qscratch_.dequant_size) {
-                    if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
-                        continue;
-                    dq_buf = tmp_buf;
-                }
-                dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
-                fp16_ptr = reinterpret_cast<const half*>(dq_buf);
-            } else {
-                auto it = wcache_.fp16.find(e.orig_ptr);
-                fp16_ptr = reinterpret_cast<const half*>(it->second.data);
-            }
-
-            Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
-
-            NvFP4QuantResult result;
-            quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
-
-            // Sync immediately so we can read tensor_scale and free FP16
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-
-            float h_tscale;
-            IMP_CUDA_CHECK_LOG(
-                cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-            result.tensor_scale = h_tscale;
-            wcache_.nvfp4[e.orig_ptr] = result;
-            actual_bytes += nvfp4_bytes;
-            actual_count++;
-
-            if (tmp_buf)
-                IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
-
-            // Free FP16 cache entry to reclaim VRAM for next weight
-            if (!e.from_scratch) {
-                auto it = wcache_.fp16.find(e.orig_ptr);
-                if (it != wcache_.fp16.end()) {
-                    size_t freed = it->second.nbytes();
-                    vram_free(vram_alloc_, it->second.data);
-                    wcache_.fp16.erase(it);
-                    wcache_.fp16_bytes -= freed;
-                    actual_from_fp16++;
-                }
-            } else {
-                actual_from_scratch++;
-            }
-        }
-
-        IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
-
-        wcache_.nvfp4_bytes = actual_bytes;
-        IMP_LOG_INFO(
-            "NVFP4 decode cache: %d tensors, %.2f MiB "
-            "(%d from FP16, %d from scratch, mode: %s)",
-            actual_count, actual_bytes / (1024.0 * 1024.0), actual_from_fp16, actual_from_scratch,
-            mode_str);
+        nvfp4_decode_quantize_mode2_(stream, dctx);
     } else if (!nvfp4_entries.empty()) {
-        // Mode 1 standard batch: quantize entries that fit in budget, single sync.
-        size_t budget_used = 0;
-        int nvfp4_count = 0;
-        int nvfp4_from_scratch = 0;
-        bool budget_exhausted = false;
-
-        std::vector<NvFP4Entry> budgeted;
-        for (auto& e : nvfp4_entries) {
-            size_t rows = e.weight.shape[0], cols = e.weight.shape[1];
-            size_t nvfp4_bytes = rows * cols / 2 + rows * cols / 16 + 4;
-            if (budget_used + nvfp4_bytes > remaining_budget) {
-                if (!budget_exhausted) {
-                    budget_exhausted = true;
-                    IMP_LOG_INFO(
-                        "NVFP4 cache: VRAM budget reached after %d/%zu tensors "
-                        "(%.1f / %.1f MiB)",
-                        nvfp4_count, nvfp4_entries.size(), budget_used / (1024.0 * 1024.0),
-                        remaining_budget / (1024.0 * 1024.0));
-                }
-                continue;
-            }
-            budget_used += nvfp4_bytes;
-            nvfp4_count++;
-            if (e.from_scratch)
-                nvfp4_from_scratch++;
-            budgeted.push_back(e);
-        }
-
-        float* d_absmax_buf = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-
-        float* d_tscales_all = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float)));
-
-        std::vector<void*> tmp_bufs;
-        for (size_t i = 0; i < budgeted.size(); i++) {
-            auto& e = budgeted[i];
-            const half* fp16_ptr = nullptr;
-            int rows = static_cast<int>(e.weight.shape[0]);
-            int cols = static_cast<int>(e.weight.shape[1]);
-
-            if (e.from_scratch) {
-                size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-                void* dq_buf = qscratch_.dequant;
-                if (need > qscratch_.dequant_size) {
-                    void* tmp = nullptr;
-                    if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp)
-                        continue;
-                    dq_buf = tmp;
-                    tmp_bufs.push_back(tmp);
-                }
-                dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
-                fp16_ptr = reinterpret_cast<const half*>(dq_buf);
-            } else {
-                auto it = wcache_.fp16.find(e.orig_ptr);
-                fp16_ptr = reinterpret_cast<const half*>(it->second.data);
-            }
-
-            Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
-
-            NvFP4QuantResult result;
-            quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscales_all + i, stream);
-            wcache_.nvfp4[e.orig_ptr] = result;
-        }
-
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        for (void* p : tmp_bufs)
-            IMP_CUDA_CHECK_LOG(cudaFree(p));
-
-        std::vector<float> h_tscales(budgeted.size());
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all, budgeted.size() * sizeof(float),
-                                      cudaMemcpyDeviceToHost));
-        for (size_t i = 0; i < budgeted.size(); i++) {
-            auto it = wcache_.nvfp4.find(budgeted[i].orig_ptr);
-            if (it != wcache_.nvfp4.end()) {
-                it->second.tensor_scale = h_tscales[i];
-            }
-        }
-
-        IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_tscales_all));
-
-        wcache_.nvfp4_bytes = budget_used;
-        if (nvfp4_from_scratch > 0) {
-            IMP_LOG_INFO(
-                "NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, "
-                "mode: %s)",
-                nvfp4_count, budget_used / (1024.0 * 1024.0), nvfp4_count - nvfp4_from_scratch,
-                nvfp4_from_scratch, mode_str);
-        } else {
-            IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)", nvfp4_count,
-                         budget_used / (1024.0 * 1024.0), mode_str);
-        }
+        nvfp4_decode_quantize_mode1_(remaining_budget, stream, dctx);
     }
 
     // In "only" mode (2), release remaining FP16 cache.
@@ -2474,6 +2282,219 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
                      nvfp4_moe_total / (1024.0 * 1024.0));
     } else if (wcache_.nvfp4.empty()) {
         IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
+    }
+}
+
+// Mode 2 ("only") incremental NVFP4 quantize. Process FP16-cached entries
+// first (each conversion nets VRAM since NVFP4 ≈ 28% of FP16), then the
+// from-scratch entries until VRAM is exhausted. Frees each source FP16
+// entry immediately after the corresponding NVFP4 result is committed.
+void GraphExecutor::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx) {
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    auto& nvfp4_entries = dctx.entries;
+
+    // Sort: FP16-cached first (smallest first to bootstrap), then from-scratch.
+    std::stable_sort(nvfp4_entries.begin(), nvfp4_entries.end(),
+                     [](const NvFP4Entry& a, const NvFP4Entry& b) {
+                         if (a.from_scratch != b.from_scratch)
+                             return !a.from_scratch;
+                         size_t a_sz = static_cast<size_t>(a.weight.shape[0]) * a.weight.shape[1];
+                         size_t b_sz = static_cast<size_t>(b.weight.shape[0]) * b.weight.shape[1];
+                         return a_sz < b_sz;
+                     });
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    int actual_count = 0;
+    size_t actual_bytes = 0;
+    int actual_from_fp16 = 0;
+    int actual_from_scratch = 0;
+
+    for (auto& e : nvfp4_entries) {
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                             static_cast<size_t>(rows) * cols / 16 + 4;
+
+        // Check actual free VRAM (10% of total as safety margin)
+        size_t free_mem = 0, total_mem = 0;
+        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+        size_t nvfp4_safety = std::max(total_mem / 10, static_cast<size_t>(1024 * 1024));
+        if (free_mem < nvfp4_bytes + nvfp4_safety) {
+            IMP_LOG_INFO(
+                "NVFP4 incremental: VRAM exhausted after %d tensors "
+                "(%.1f MiB, %.1f MiB free)",
+                actual_count, actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
+            break;
+        }
+
+        const half* fp16_ptr = nullptr;
+        void* tmp_buf = nullptr;
+
+        if (e.from_scratch) {
+            size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+            void* dq_buf = qscratch_.dequant;
+            if (need > qscratch_.dequant_size) {
+                if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+                    continue;
+                dq_buf = tmp_buf;
+            }
+            dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+            fp16_ptr = reinterpret_cast<const half*>(dq_buf);
+        } else {
+            auto it = wcache_.fp16.find(e.orig_ptr);
+            fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+        }
+
+        Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
+
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+
+        // Sync immediately so we can read tensor_scale and free FP16
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        wcache_.nvfp4[e.orig_ptr] = result;
+        actual_bytes += nvfp4_bytes;
+        actual_count++;
+
+        if (tmp_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+
+        // Free FP16 cache entry to reclaim VRAM for next weight
+        if (!e.from_scratch) {
+            auto it = wcache_.fp16.find(e.orig_ptr);
+            if (it != wcache_.fp16.end()) {
+                size_t freed = it->second.nbytes();
+                vram_free(vram_alloc_, it->second.data);
+                wcache_.fp16.erase(it);
+                wcache_.fp16_bytes -= freed;
+                actual_from_fp16++;
+            }
+        } else {
+            actual_from_scratch++;
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    wcache_.nvfp4_bytes = actual_bytes;
+    IMP_LOG_INFO(
+        "NVFP4 decode cache: %d tensors, %.2f MiB "
+        "(%d from FP16, %d from scratch, mode: %s)",
+        actual_count, actual_bytes / (1024.0 * 1024.0), actual_from_fp16, actual_from_scratch,
+        dctx.mode_str);
+}
+
+// Mode 1 ("additive") batch NVFP4 quantize. Pick entries fitting the
+// remaining VRAM budget, quantize them via a single batched
+// quantize_fp16_to_nvfp4_async pass, then commit tensor_scales after one
+// stream sync.
+void GraphExecutor::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
+                                                 Nvfp4DecodeContext& dctx) {
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    auto& nvfp4_entries = dctx.entries;
+    (void)remaining_budget;  // read-only here; budget bookkeeping done after MoE phase
+
+    size_t budget_used = 0;
+    int nvfp4_count = 0;
+    int nvfp4_from_scratch = 0;
+    bool budget_exhausted = false;
+
+    std::vector<NvFP4Entry> budgeted;
+    for (auto& e : nvfp4_entries) {
+        size_t rows = e.weight.shape[0], cols = e.weight.shape[1];
+        size_t nvfp4_bytes = rows * cols / 2 + rows * cols / 16 + 4;
+        if (budget_used + nvfp4_bytes > remaining_budget) {
+            if (!budget_exhausted) {
+                budget_exhausted = true;
+                IMP_LOG_INFO(
+                    "NVFP4 cache: VRAM budget reached after %d/%zu tensors "
+                    "(%.1f / %.1f MiB)",
+                    nvfp4_count, nvfp4_entries.size(), budget_used / (1024.0 * 1024.0),
+                    remaining_budget / (1024.0 * 1024.0));
+            }
+            continue;
+        }
+        budget_used += nvfp4_bytes;
+        nvfp4_count++;
+        if (e.from_scratch)
+            nvfp4_from_scratch++;
+        budgeted.push_back(e);
+    }
+
+    float* d_absmax_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+
+    float* d_tscales_all = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float)));
+
+    std::vector<void*> tmp_bufs;
+    for (size_t i = 0; i < budgeted.size(); i++) {
+        auto& e = budgeted[i];
+        const half* fp16_ptr = nullptr;
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+
+        if (e.from_scratch) {
+            size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+            void* dq_buf = qscratch_.dequant;
+            if (need > qscratch_.dequant_size) {
+                void* tmp = nullptr;
+                if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp)
+                    continue;
+                dq_buf = tmp;
+                tmp_bufs.push_back(tmp);
+            }
+            dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+            fp16_ptr = reinterpret_cast<const half*>(dq_buf);
+        } else {
+            auto it = wcache_.fp16.find(e.orig_ptr);
+            fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+        }
+
+        Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
+
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscales_all + i, stream);
+        wcache_.nvfp4[e.orig_ptr] = result;
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    for (void* p : tmp_bufs)
+        IMP_CUDA_CHECK_LOG(cudaFree(p));
+
+    std::vector<float> h_tscales(budgeted.size());
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all, budgeted.size() * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    for (size_t i = 0; i < budgeted.size(); i++) {
+        auto it = wcache_.nvfp4.find(budgeted[i].orig_ptr);
+        if (it != wcache_.nvfp4.end()) {
+            it->second.tensor_scale = h_tscales[i];
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscales_all));
+
+    wcache_.nvfp4_bytes = budget_used;
+    if (nvfp4_from_scratch > 0) {
+        IMP_LOG_INFO(
+            "NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, "
+            "mode: %s)",
+            nvfp4_count, budget_used / (1024.0 * 1024.0), nvfp4_count - nvfp4_from_scratch,
+            nvfp4_from_scratch, dctx.mode_str);
+    } else {
+        IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)", nvfp4_count,
+                     budget_used / (1024.0 * 1024.0), dctx.mode_str);
     }
 }
 
