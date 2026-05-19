@@ -20,6 +20,7 @@
 #include <cuda_fp16.h>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <list>
 
@@ -469,6 +470,27 @@ struct WeightCaches {
     bool dual_path_quant = false;
 };
 
+// Per-call state for GraphExecutor::pre_dequant_phase3_nvfp4_decode_().
+// Bundles the locals shared between sub-phase helpers — exclusion set,
+// candidate entries, mode string, MoE-cache accumulators.
+struct Nvfp4DecodeContext {
+    // One entry per weight that may receive NVFP4 quantization. Populated by
+    // the collect phase; consumed by the mode-1 / mode-2 / second-pass phases.
+    struct Entry {
+        const void* orig_ptr;
+        Tensor weight;
+        QType qtype;
+        bool from_scratch;
+    };
+
+    std::unordered_set<const void*> exclude_ptrs;
+    std::vector<Entry> entries;
+    const char* mode_str = "";          // "additive" or "only", set early
+    size_t moe_budget = 0;              // initialised before the MoE-cache phase
+    int    nvfp4_moe_count = 0;         // populated by the MoE-cache phase
+    size_t nvfp4_moe_total = 0;
+};
+
 // Per-call state for GraphExecutor::run_moe_ffn(). Bundles the locals that
 // were previously captured by the monolithic body so each MoE phase helper
 // can take a single MoeFfnContext& instead of a 20-arg parameter list.
@@ -690,6 +712,22 @@ private:
                                        size_t& remaining_budget, cudaStream_t stream);
     void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
                                           size_t& remaining_budget, cudaStream_t stream);
+    // Sub-phase helpers for pre_dequant_phase3_nvfp4_decode_. Each operates
+    // on a shared Nvfp4DecodeContext; the orchestrator above calls them in
+    // sequence, mirroring the legacy monolithic body.
+    void nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
+                                      Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_budget, cudaStream_t stream,
+                                                 Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
+                                   Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cudaStream_t stream);
+    void nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream);
+    void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
+    void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, size_t& remaining_budget,
+                                         cudaStream_t stream, Nvfp4DecodeContext& dctx);
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
 
