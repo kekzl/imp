@@ -74,9 +74,32 @@ TEST_F(PrimaryModelTest, GenerateCoherentOutput) {
     EXPECT_NE(text.find("Paris"), std::string::npos) << "Expected 'Paris' in output: " << text;
 }
 
+// Helper: drop <think>...</think> blocks so this test works against both
+// non-thinking baselines (Qwen3-4B-Instruct, Llama-3.2-3B) and thinking
+// models (Qwen3-8B, DeepSeek-R1-Distill). Open `<think>` with no close —
+// model exhausted the token budget mid-reasoning — drops everything from
+// `<think>` to end so the post-reasoning substring check fails clean.
+static std::string strip_think_blocks_for_test_(std::string s) {
+    while (true) {
+        size_t open = s.find("<think>");
+        if (open == std::string::npos)
+            break;
+        size_t close = s.find("</think>", open);
+        if (close == std::string::npos) {
+            s.erase(open);
+            break;
+        }
+        s.erase(open, close + 8 /*len("</think>")*/ - open);
+    }
+    return s;
+}
+
 TEST_F(PrimaryModelTest, MultiTurnConversation) {
     ImpGenerateParams params = imp_generate_params_default();
-    params.max_tokens = 32;
+    // Thinking models (Qwen3-8B, DeepSeek-R1) need headroom for the
+    // <think>…</think> block plus the answer. Non-thinking models finish
+    // long before reaching 256; the cap only matters for the worst case.
+    params.max_tokens = 256;
     params.temperature = 0.0f;
     params.apply_chat_template = 1;
 
@@ -97,8 +120,9 @@ TEST_F(PrimaryModelTest, MultiTurnConversation) {
               IMP_SUCCESS);
     EXPECT_GT(len2, 0u);
 
-    std::string text2(out2, len2);
-    EXPECT_NE(text2.find("4"), std::string::npos) << "Expected '4' in output: " << text2;
+    std::string text2 = strip_think_blocks_for_test_(std::string(out2, len2));
+    EXPECT_NE(text2.find("4"), std::string::npos)
+        << "Expected '4' in (think-stripped) output: " << text2;
 }
 
 TEST_F(PrimaryModelTest, TokenizeRoundtrip) {
