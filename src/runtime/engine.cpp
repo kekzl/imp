@@ -602,61 +602,45 @@ void Engine::clear_image() { vision_.clear_image(); }
 // Initialization — decomposed into sub-phases
 // =====================================================================
 
-bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
-    if (!model)
-        return false;
-
-    model_ = std::move(model);
-    config_ = config;
-
-    const auto& mcfg = model_->config();
-
-    // --- IMP_DEBUG_RAW: disable all optimization/cache/approximation paths ---
-    // Meta-flag for debugging: forces the engine into a "naked" FP16 forward pass
-    // for reproducible byte-level comparison against a reference implementation
-    // (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs)
-    // and cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
+// IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
+// for reproducible byte-level comparison against a reference implementation
+// (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs) and
+// cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
+void Engine::init_apply_debug_raw_overrides_() {
     const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
-    if (debug_raw_) {
-        IMP_LOG_INFO(
-            "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
-            "cuBLAS)");
-        // Weight storage: keep FP16 (skip the lossy cache paths)
-        config_.use_fp8_prefill = 0;
-        config_.use_nvfp4_decode = 0;
-        config_.dual_path_quant = false;
-        // CUDA graphs off (graph capture can mask state bugs)
-        config_.use_cuda_graphs = 0;
-        setenv("IMP_NO_CUDA_GRAPH", "1", 0);
-        // No warmup (warmup can leak state into first request)
-        setenv("IMP_NO_WARMUP", "1", 0);
-        // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
-        setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
-        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
-        // MoE: no expert LRU cache (state-carrying)
-        setenv("IMP_NO_EXPERT_CACHE", "1", 0);
-        // GDN: use reference unfused scan (no register-state reordering)
-        setenv("IMP_GDN_REF", "1", 0);
-        // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
-        // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
-        // some combinations. The RAW flag is about disabling *caches and approximations*,
-        // not about swapping kernel variants.
-    }
+    if (!debug_raw_)
+        return;
+    IMP_LOG_INFO(
+        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
+        "cuBLAS)");
+    // Weight storage: keep FP16 (skip the lossy cache paths)
+    config_.use_fp8_prefill = 0;
+    config_.use_nvfp4_decode = 0;
+    config_.dual_path_quant = false;
+    // CUDA graphs off (graph capture can mask state bugs)
+    config_.use_cuda_graphs = 0;
+    setenv("IMP_NO_CUDA_GRAPH", "1", 0);
+    // No warmup (warmup can leak state into first request)
+    setenv("IMP_NO_WARMUP", "1", 0);
+    // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
+    setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
+    setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+    // MoE: no expert LRU cache (state-carrying)
+    setenv("IMP_NO_EXPERT_CACHE", "1", 0);
+    // GDN: use reference unfused scan (no register-state reordering)
+    setenv("IMP_GDN_REF", "1", 0);
+    // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
+    // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
+    // some combinations. The RAW flag is about disabling *caches and approximations*,
+    // not about swapping kernel variants.
+}
 
-    // --- KV cache dtype policy ---
-    // Default: FP16 (safe). FP8 E4M3 is opt-in via --kv-fp8 / IMP_KV_FP8=1.
-    //
-    // Rationale: the auto-upgrade to FP8 was found (2026-04-24) to produce
-    // NaN logits on several model families (Mistral-Small-3.1, DeepSeek-R1,
-    // Qwen3.5-4B/9B GDN, Gemma-4) due to a KV-write stride bug that has not
-    // been root-caused yet. Correctness-first: users who want the 50% KV VRAM
-    // savings explicitly ask for FP8 via the existing flag.
-    //
-    // Legacy escape hatches kept for compatibility:
-    // - [kv_cache] dtype = "fp16" forces FP16 (no-op under the new default).
-    // - [kv_cache] fp8_auto_legacy = true restores the old opt-out auto-
-    //              upgrade behavior for users who rely on it for batch-
-    //              serving VRAM budgets.
+// KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
+// max_batch_size auto-sizing. Default: FP16 (safe). FP8 / NVFP4 / MXFP4-KV
+// are opt-in. See the inline rationale for the 2026-04-24 root-cause memo.
+void Engine::init_resolve_kv_dtype_policy_() {
+    const auto& mcfg = model_->config();
+    const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
     const bool force_kv_fp16 = (RuntimeConfig::current().kv_cache.dtype == "fp16");
     const bool fp8_auto_legacy = RuntimeConfig::current().kv_cache.fp8_auto_legacy;
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
@@ -665,18 +649,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     } else if (config_.kv_cache_dtype == QType::NVFP4) {
-        // NVFP4 KV: ~3.6× compression vs FP16 (4 bits + UE4M3 per-16 + ~3% scale overhead).
-        // Klasse-A unlock for long-ctx dense models (Gemma-4-26B, Gemma-3-27B, Qwen3-32B).
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
-        // FP8 prefill cache stacks another lossy layer; disable to avoid compound drift.
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
             config_.use_fp8_prefill = 0;
         }
     } else if (config_.kv_cache_dtype == QType::MXFP4_KV) {
-        // MXFP4-KV: same FP4 E2M1 byte layout + per-16-element grouping as NVFP4,
-        // but UE8M0 scale bytes (pure-exponent, ~3.6× compression identical to NVFP4).
-        // This is the Path A retirement target per design memo §3.1.2.
         IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
@@ -684,24 +662,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic
-    // cuBLAS GEMM algo selection produces run-to-run numerical noise in
-    // Q/K/V projections. When the KV cache is FP8-E4M3, the quantize-
-    // dequantize round-trip amplifies that noise enough to push softmax
-    // inputs into NaN after the first 1-3 decode tokens. Reproduced on
-    // Mistral-Small-3.1 Q6_K, DeepSeek-R1-Distill-14B Q6_K, Qwen3.5-4B/9B
-    // GDN Q8_0, Gemma-4 (the existing hard-coded arch override at
-    // line ~492 was working around the same root cause).
-    //
-    // Fix: when FP8 KV cache is active, force deterministic cuBLAS. Near-
-    // zero perf cost on sm_120 (deterministic mode only pins the algo
-    // choice, does not disable tensor cores). Users who've verified their
-    // model is fine with non-deterministic FP8 KV can opt out via
-    // IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1.
     if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
         !RuntimeConfig::current().kv_cache.allow_nondeterministic_fp8 &&
         !RuntimeConfig::current().runtime.deterministic_gemm) {
-        // Promote the runtime config in-place so downstream readers see it.
         RuntimeConfig promoted = RuntimeConfig::current();
         promoted.runtime.deterministic_gemm = true;
         RuntimeConfig::install(promoted);
@@ -711,35 +674,37 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
             "Set kv_cache.allow_nondeterministic_fp8=true to opt out.");
     }
-    // NOTE: compound FP8 precision loss (stacking FP8 KV on top of FP8
-    // prefill + NVFP4 decode) is model-dependent. Mistral-Small-3.1 and
-    // DeepSeek-R1-Distill need the secondary caches OFF (--no-fp8-prefill
-    // --no-nvfp4) for coherent output, but Llama-3.2-3B and others break
-    // DIFFERENTLY when NVFP4 is forced off on --kv-fp8. No one-size-fits-all
-    // auto-toggle — users with affected models use the explicit flags.
 
     if (config_.max_batch_size <= 0) {
-        // Estimate model weight size from config to determine batch capacity.
-        // Rough heuristic: 2 bytes/param for FP16. d_model * d_model * n_layers * ~12 gives
-        // approximate total weight bytes for a dense transformer.
-        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers *
-                                     12;  // ~12 matrices per layer
+        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers * 12;
         if (mcfg.n_experts > 0) {
-            // MoE: expert weights dominate
             approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
                                    mcfg.n_layers * 2;
         }
         if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 1;  // >20GB models
+            config_.max_batch_size = 1;
         else if (approx_weight_bytes > 10ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 4;  // 10-20GB
+            config_.max_batch_size = 4;
         else if (approx_weight_bytes > 5ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 8;  // 5-10GB
+            config_.max_batch_size = 8;
         else
-            config_.max_batch_size = 16;  // <5GB
+            config_.max_batch_size = 16;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)", config_.max_batch_size,
                      approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
     }
+}
+
+bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
+    if (!model)
+        return false;
+
+    model_ = std::move(model);
+    config_ = config;
+
+    const auto& mcfg = model_->config();
+
+    init_apply_debug_raw_overrides_();
+    init_resolve_kv_dtype_policy_();
 
     // --- Auto-detect SSM state dtype for hybrid models ---
     // Nemotron-H and similar Mamba models: use FP16 for SSM h_state (~50% VRAM savings).
@@ -769,7 +734,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // cache active — accumulated dequant error through deep narrow-GQA
     // stacks.
     const bool no_fp8_prefill = (RuntimeConfig::current().attention.fp8_prefill == "never");
-    if (!config_.use_fp8_prefill && !debug_raw_ && !no_fp8_prefill) {
+    if (!config_.use_fp8_prefill && !RuntimeConfig::current().runtime.debug_raw && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
     } else if (no_fp8_prefill) {

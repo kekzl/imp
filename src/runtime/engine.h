@@ -333,6 +333,16 @@ private:
     bool init_kv_cache();
     bool init_features();
     void warmup();
+    // Config-resolution helpers for the front half of init() — each one
+    // mutates config_ / RuntimeConfig in place, then init() executes
+    // init_weights / init_kv_cache / init_features. Order matters: see the
+    // call sequence in init() for which flag each one resolves.
+    void init_apply_debug_raw_overrides_();
+    void init_resolve_kv_dtype_policy_();
+    void init_resolve_ssm_dtype_();
+    void init_resolve_fp8_prefill_();
+    void init_resolve_quant_flags_();
+    void init_compute_max_seq_len_();
 
     // Build banned_token_ids_ — special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
