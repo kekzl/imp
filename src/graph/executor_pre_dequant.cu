@@ -1307,208 +1307,12 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_quantize_mode1_(remaining_budget, stream, dctx);
     }
 
-    // In "only" mode (2), release remaining FP16 cache.
-    // Before freeing, migrate FP16 weights to FP8 cache so prefill retains
-    // fast FP8 GEMM.  FP8 = half the size of FP16, net 50% VRAM savings.
     if (wcache_.nvfp4_decode_mode == 2 && !wcache_.fp16.empty()) {
-        int migrated = 0;
-        size_t migrated_bytes = 0;
-        if (wcache_.use_fp8) {
-            struct MigrateEntry {
-                const void* orig_ptr;
-                Tensor fp16_tensor;
-                size_t n_elems;
-            };
-            std::vector<MigrateEntry> to_migrate;
-            for (auto& [orig_ptr, fp16_tensor] : wcache_.fp16) {
-                if (wcache_.fp8.count(orig_ptr))
-                    continue;
-                size_t n = static_cast<size_t>(fp16_tensor.shape[0]) * fp16_tensor.shape[1];
-                to_migrate.push_back({orig_ptr, fp16_tensor, n});
-            }
-
-            if (!to_migrate.empty()) {
-                int max_grid = 0;
-                size_t total_fp8_bytes = 0;
-                for (auto& e : to_migrate) {
-                    int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
-                    int grid = (threads_needed + 255) / 256;
-                    if (grid > max_grid)
-                        max_grid = grid;
-                    total_fp8_bytes += e.n_elems;
-                }
-
-                float* d_block_maxes = nullptr;
-                float* d_absmax = nullptr;
-                IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
-                IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
-
-                float* d_scales_all = nullptr;
-                IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float)));
-
-                uint8_t* d_fp8_bulk = nullptr;
-                d_fp8_bulk = static_cast<uint8_t*>(
-                    vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_migration_cache"));
-                if (!d_fp8_bulk) {
-                    cudaError_t e = cudaGetLastError();
-                    IMP_LOG_WARN("FP8 migration cache alloc failed (%.1f MiB): %s",
-                                 total_fp8_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
-                }
-
-                size_t fp8_offset = 0;
-                for (size_t i = 0; i < to_migrate.size() && d_fp8_bulk; i++) {
-                    auto& e = to_migrate[i];
-                    void* fp8_buf = d_fp8_bulk + fp8_offset;
-                    fp8_offset += e.n_elems;
-
-                    calibrate_and_quantize_fp8_async(e.fp16_tensor.data, fp8_buf,
-                                                     static_cast<int>(e.n_elems), d_block_maxes, max_grid,
-                                                     d_absmax, d_scales_all + i, stream);
-
-                    Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.fp16_tensor.ndim, e.fp16_tensor.shape, true);
-                    wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
-                    migrated++;
-                    migrated_bytes += e.n_elems + sizeof(float);
-                }
-
-                wcache_.fp8_migrated_data = d_fp8_bulk;
-                wcache_.fp8_migrated_data_size = total_fp8_bytes;
-
-                if (migrated > 0) {
-                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-                    std::vector<float> h_scales(migrated);
-                    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
-                                                  cudaMemcpyDeviceToHost));
-                    int idx = 0;
-                    for (size_t i = 0; i < to_migrate.size() && idx < migrated; i++, idx++) {
-                        auto it = wcache_.fp8.find(to_migrate[i].orig_ptr);
-                        if (it != wcache_.fp8.end()) {
-                            it->second.host_scale = h_scales[idx];
-                        }
-                    }
-                }
-
-                IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
-                IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
-                wcache_.fp8_migrated_scales = d_scales_all;
-                wcache_.fp8_migrated_count = migrated;
-            }
-        }
-
-        // Free remaining FP16 cache — but KEEP entries that have no NVFP4
-        // or FP8 alternative (e.g. GDN `ssm_in`/`ssm_out` on hybrid models
-        // like Qwen 3.5/3.6). Without this, run_gdn falls back to on-the-fly
-        // dequant which produces ~5% per-element drift at L0 and cascades
-        // to sign-flips at the shared MLP → garbage output.
-        size_t freed = 0;
-        size_t kept_bytes = 0;
-        int kept_count = 0;
-        std::vector<const void*> to_erase;
-        for (auto& [ptr, tensor] : wcache_.fp16) {
-            const bool has_nvfp4 = (wcache_.nvfp4.find(ptr) != wcache_.nvfp4.end());
-            const bool has_fp8 = (wcache_.fp8.find(ptr) != wcache_.fp8.end());
-            if (has_nvfp4 || has_fp8) {
-                vram_free(vram_alloc_, tensor.data);
-                freed += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
-                to_erase.push_back(ptr);
-            } else {
-                kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
-                kept_count++;
-            }
-        }
-        for (auto p : to_erase)
-            wcache_.fp16.erase(p);
-        wcache_.fp16_bytes = kept_bytes;
-        if (kept_count > 0) {
-            IMP_LOG_INFO(
-                "NVFP4 only mode: preserved %d FP16 entries (%.2f MiB) "
-                "with no NVFP4/FP8 alternative (GDN/hybrid weights)",
-                kept_count, kept_bytes / (1024.0 * 1024.0));
-        }
-
-        // Free fused caches (prefill uses individual FP8 weights)
-        for (auto& [idx, tensor] : wcache_.fused_kv) {
-            if (tensor.data)
-                vram_free(vram_alloc_, tensor.data);
-        }
-        wcache_.fused_kv.clear();
-        for (auto& [idx, tensor] : wcache_.fused_gate_up) {
-            if (tensor.data)
-                vram_free(vram_alloc_, tensor.data);
-        }
-        wcache_.fused_gate_up.clear();
-
-        remaining_budget += freed;
-        wcache_.fp8_bytes += migrated_bytes;
-        IMP_LOG_INFO(
-            "NVFP4 only mode: freed FP16 cache (%.2f MiB), migrated %d weights to FP8 (%.2f MiB)",
-            freed / (1024.0 * 1024.0), migrated, migrated_bytes / (1024.0 * 1024.0));
+        nvfp4_decode_free_fp16_and_migrate_fp8_(remaining_budget, stream, dctx);
     }
 
-    // --- NVFP4 second pass: cache remaining tensors with freed VRAM ---
-    // After FP16-Free and FP8 migration, VRAM that was locked by FP16 cache is
-    // now available. Re-run NVFP4 for entries that were skipped due to VRAM pressure.
     if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
-        float* d_absmax_buf2 = nullptr;
-        float* d_tscale_buf2 = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf2, sizeof(float)));
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf2, sizeof(float)));
-
-        int second_count = 0;
-        size_t second_bytes = 0;
-
-        for (auto& e : nvfp4_entries) {
-            if (wcache_.nvfp4.count(e.orig_ptr))
-                continue;  // already cached
-            int rows = static_cast<int>(e.weight.shape[0]);
-            int cols = static_cast<int>(e.weight.shape[1]);
-            size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
-                                 static_cast<size_t>(rows) * cols / 16 + 4;
-
-            size_t free_mem2 = 0, total_mem2 = 0;
-            IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem2, &total_mem2));
-            size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
-            if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
-                break;
-
-            // Dequant from quantized weights via scratch buffer
-            size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-            void* dq_buf = qscratch_.dequant;
-            void* tmp_buf = nullptr;
-            if (!dequant_gpu_supported(e.qtype) || !qscratch_.dequant)
-                continue;
-            if (need > qscratch_.dequant_size) {
-                if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
-                    continue;
-                dq_buf = tmp_buf;
-            }
-            dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
-
-            Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2, e.weight.shape, true);
-            NvFP4QuantResult result;
-            quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf2, d_tscale_buf2, stream);
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-
-            float h_tscale;
-            IMP_CUDA_CHECK_LOG(
-                cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost));
-            result.tensor_scale = h_tscale;
-            wcache_.nvfp4[e.orig_ptr] = result;
-            second_bytes += nvfp4_bytes;
-            second_count++;
-
-            if (tmp_buf)
-                IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
-        }
-
-        IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf2));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf2));
-
-        if (second_count > 0) {
-            wcache_.nvfp4_bytes += second_bytes;
-            IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB", second_count,
-                         second_bytes / (1024.0 * 1024.0));
-        }
+        nvfp4_decode_second_pass_(budget, stream, dctx);
     }
 
     // --- Phase 3b: Convert NVFP4 weights to CUTLASS sm_120 block-scaled format ---
@@ -2495,6 +2299,219 @@ void GraphExecutor::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
     } else {
         IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)", nvfp4_count,
                      budget_used / (1024.0 * 1024.0), dctx.mode_str);
+    }
+}
+
+// Mode 2 ("only") FP16-cache release with FP8 migration. Migrate every
+// FP16 entry not already FP8-cached into a contiguous FP8 buffer
+// (calibrate + per-tensor scale), then free the FP16 cache except entries
+// that have no NVFP4/FP8 alternative (GDN ssm_in/ssm_out on hybrids).
+// Also frees the fused KV / gate-up prefill caches.
+void GraphExecutor::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_budget,
+                                                            cudaStream_t stream,
+                                                            Nvfp4DecodeContext& dctx) {
+    (void)dctx;
+    int migrated = 0;
+    size_t migrated_bytes = 0;
+    if (wcache_.use_fp8) {
+        struct MigrateEntry {
+            const void* orig_ptr;
+            Tensor fp16_tensor;
+            size_t n_elems;
+        };
+        std::vector<MigrateEntry> to_migrate;
+        for (auto& [orig_ptr, fp16_tensor] : wcache_.fp16) {
+            if (wcache_.fp8.count(orig_ptr))
+                continue;
+            size_t n = static_cast<size_t>(fp16_tensor.shape[0]) * fp16_tensor.shape[1];
+            to_migrate.push_back({orig_ptr, fp16_tensor, n});
+        }
+
+        if (!to_migrate.empty()) {
+            int max_grid = 0;
+            size_t total_fp8_bytes = 0;
+            for (auto& e : to_migrate) {
+                int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
+                int grid = (threads_needed + 255) / 256;
+                if (grid > max_grid)
+                    max_grid = grid;
+                total_fp8_bytes += e.n_elems;
+            }
+
+            float* d_block_maxes = nullptr;
+            float* d_absmax = nullptr;
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
+
+            float* d_scales_all = nullptr;
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float)));
+
+            uint8_t* d_fp8_bulk = nullptr;
+            d_fp8_bulk = static_cast<uint8_t*>(
+                vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_migration_cache"));
+            if (!d_fp8_bulk) {
+                cudaError_t e = cudaGetLastError();
+                IMP_LOG_WARN("FP8 migration cache alloc failed (%.1f MiB): %s",
+                             total_fp8_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
+            }
+
+            size_t fp8_offset = 0;
+            for (size_t i = 0; i < to_migrate.size() && d_fp8_bulk; i++) {
+                auto& e = to_migrate[i];
+                void* fp8_buf = d_fp8_bulk + fp8_offset;
+                fp8_offset += e.n_elems;
+
+                calibrate_and_quantize_fp8_async(e.fp16_tensor.data, fp8_buf,
+                                                 static_cast<int>(e.n_elems), d_block_maxes, max_grid,
+                                                 d_absmax, d_scales_all + i, stream);
+
+                Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.fp16_tensor.ndim, e.fp16_tensor.shape, true);
+                wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                migrated++;
+                migrated_bytes += e.n_elems + sizeof(float);
+            }
+
+            wcache_.fp8_migrated_data = d_fp8_bulk;
+            wcache_.fp8_migrated_data_size = total_fp8_bytes;
+
+            if (migrated > 0) {
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                std::vector<float> h_scales(migrated);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
+                                              cudaMemcpyDeviceToHost));
+                int idx = 0;
+                for (size_t i = 0; i < to_migrate.size() && idx < migrated; i++, idx++) {
+                    auto it = wcache_.fp8.find(to_migrate[i].orig_ptr);
+                    if (it != wcache_.fp8.end()) {
+                        it->second.host_scale = h_scales[idx];
+                    }
+                }
+            }
+
+            IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
+            wcache_.fp8_migrated_scales = d_scales_all;
+            wcache_.fp8_migrated_count = migrated;
+        }
+    }
+
+    // Free remaining FP16 cache — but KEEP entries that have no NVFP4
+    // or FP8 alternative (e.g. GDN `ssm_in`/`ssm_out` on hybrid models
+    // like Qwen 3.5/3.6). Without this, run_gdn falls back to on-the-fly
+    // dequant which produces ~5% per-element drift at L0 and cascades
+    // to sign-flips at the shared MLP → garbage output.
+    size_t freed = 0;
+    size_t kept_bytes = 0;
+    int kept_count = 0;
+    std::vector<const void*> to_erase;
+    for (auto& [ptr, tensor] : wcache_.fp16) {
+        const bool has_nvfp4 = (wcache_.nvfp4.find(ptr) != wcache_.nvfp4.end());
+        const bool has_fp8 = (wcache_.fp8.find(ptr) != wcache_.fp8.end());
+        if (has_nvfp4 || has_fp8) {
+            vram_free(vram_alloc_, tensor.data);
+            freed += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
+            to_erase.push_back(ptr);
+        } else {
+            kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
+            kept_count++;
+        }
+    }
+    for (auto p : to_erase)
+        wcache_.fp16.erase(p);
+    wcache_.fp16_bytes = kept_bytes;
+    if (kept_count > 0) {
+        IMP_LOG_INFO(
+            "NVFP4 only mode: preserved %d FP16 entries (%.2f MiB) "
+            "with no NVFP4/FP8 alternative (GDN/hybrid weights)",
+            kept_count, kept_bytes / (1024.0 * 1024.0));
+    }
+
+    // Free fused caches (prefill uses individual FP8 weights)
+    for (auto& [idx, tensor] : wcache_.fused_kv) {
+        if (tensor.data)
+            vram_free(vram_alloc_, tensor.data);
+    }
+    wcache_.fused_kv.clear();
+    for (auto& [idx, tensor] : wcache_.fused_gate_up) {
+        if (tensor.data)
+            vram_free(vram_alloc_, tensor.data);
+    }
+    wcache_.fused_gate_up.clear();
+
+    remaining_budget += freed;
+    wcache_.fp8_bytes += migrated_bytes;
+    IMP_LOG_INFO(
+        "NVFP4 only mode: freed FP16 cache (%.2f MiB), migrated %d weights to FP8 (%.2f MiB)",
+        freed / (1024.0 * 1024.0), migrated, migrated_bytes / (1024.0 * 1024.0));
+}
+
+// NVFP4 second pass: after the FP16-free + FP8 migration phase frees VRAM,
+// re-attempt NVFP4 quantization for entries skipped earlier due to budget
+// pressure. Same per-tensor cudaMemGetInfo gate as mode 2.
+void GraphExecutor::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
+                                              Nvfp4DecodeContext& dctx) {
+    (void)budget;
+    auto& nvfp4_entries = dctx.entries;
+
+    float* d_absmax_buf2 = nullptr;
+    float* d_tscale_buf2 = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf2, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf2, sizeof(float)));
+
+    int second_count = 0;
+    size_t second_bytes = 0;
+
+    for (auto& e : nvfp4_entries) {
+        if (wcache_.nvfp4.count(e.orig_ptr))
+            continue;  // already cached
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                             static_cast<size_t>(rows) * cols / 16 + 4;
+
+        size_t free_mem2 = 0, total_mem2 = 0;
+        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem2, &total_mem2));
+        size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
+        if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
+            break;
+
+        // Dequant from quantized weights via scratch buffer
+        size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+        void* dq_buf = qscratch_.dequant;
+        void* tmp_buf = nullptr;
+        if (!dequant_gpu_supported(e.qtype) || !qscratch_.dequant)
+            continue;
+        if (need > qscratch_.dequant_size) {
+            if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+                continue;
+            dq_buf = tmp_buf;
+        }
+        dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+
+        Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2, e.weight.shape, true);
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf2, d_tscale_buf2, stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        wcache_.nvfp4[e.orig_ptr] = result;
+        second_bytes += nvfp4_bytes;
+        second_count++;
+
+        if (tmp_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf2));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf2));
+
+    if (second_count > 0) {
+        wcache_.nvfp4_bytes += second_bytes;
+        IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB", second_count,
+                     second_bytes / (1024.0 * 1024.0));
     }
 }
 
