@@ -602,61 +602,45 @@ void Engine::clear_image() { vision_.clear_image(); }
 // Initialization — decomposed into sub-phases
 // =====================================================================
 
-bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
-    if (!model)
-        return false;
-
-    model_ = std::move(model);
-    config_ = config;
-
-    const auto& mcfg = model_->config();
-
-    // --- IMP_DEBUG_RAW: disable all optimization/cache/approximation paths ---
-    // Meta-flag for debugging: forces the engine into a "naked" FP16 forward pass
-    // for reproducible byte-level comparison against a reference implementation
-    // (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs)
-    // and cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
+// IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
+// for reproducible byte-level comparison against a reference implementation
+// (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs) and
+// cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
+void Engine::init_apply_debug_raw_overrides_() {
     const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
-    if (debug_raw_) {
-        IMP_LOG_INFO(
-            "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
-            "cuBLAS)");
-        // Weight storage: keep FP16 (skip the lossy cache paths)
-        config_.use_fp8_prefill = 0;
-        config_.use_nvfp4_decode = 0;
-        config_.dual_path_quant = false;
-        // CUDA graphs off (graph capture can mask state bugs)
-        config_.use_cuda_graphs = 0;
-        setenv("IMP_NO_CUDA_GRAPH", "1", 0);
-        // No warmup (warmup can leak state into first request)
-        setenv("IMP_NO_WARMUP", "1", 0);
-        // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
-        setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
-        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
-        // MoE: no expert LRU cache (state-carrying)
-        setenv("IMP_NO_EXPERT_CACHE", "1", 0);
-        // GDN: use reference unfused scan (no register-state reordering)
-        setenv("IMP_GDN_REF", "1", 0);
-        // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
-        // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
-        // some combinations. The RAW flag is about disabling *caches and approximations*,
-        // not about swapping kernel variants.
-    }
+    if (!debug_raw_)
+        return;
+    IMP_LOG_INFO(
+        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
+        "cuBLAS)");
+    // Weight storage: keep FP16 (skip the lossy cache paths)
+    config_.use_fp8_prefill = 0;
+    config_.use_nvfp4_decode = 0;
+    config_.dual_path_quant = false;
+    // CUDA graphs off (graph capture can mask state bugs)
+    config_.use_cuda_graphs = 0;
+    setenv("IMP_NO_CUDA_GRAPH", "1", 0);
+    // No warmup (warmup can leak state into first request)
+    setenv("IMP_NO_WARMUP", "1", 0);
+    // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
+    setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
+    setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+    // MoE: no expert LRU cache (state-carrying)
+    setenv("IMP_NO_EXPERT_CACHE", "1", 0);
+    // GDN: use reference unfused scan (no register-state reordering)
+    setenv("IMP_GDN_REF", "1", 0);
+    // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
+    // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
+    // some combinations. The RAW flag is about disabling *caches and approximations*,
+    // not about swapping kernel variants.
+}
 
-    // --- KV cache dtype policy ---
-    // Default: FP16 (safe). FP8 E4M3 is opt-in via --kv-fp8 / IMP_KV_FP8=1.
-    //
-    // Rationale: the auto-upgrade to FP8 was found (2026-04-24) to produce
-    // NaN logits on several model families (Mistral-Small-3.1, DeepSeek-R1,
-    // Qwen3.5-4B/9B GDN, Gemma-4) due to a KV-write stride bug that has not
-    // been root-caused yet. Correctness-first: users who want the 50% KV VRAM
-    // savings explicitly ask for FP8 via the existing flag.
-    //
-    // Legacy escape hatches kept for compatibility:
-    // - [kv_cache] dtype = "fp16" forces FP16 (no-op under the new default).
-    // - [kv_cache] fp8_auto_legacy = true restores the old opt-out auto-
-    //              upgrade behavior for users who rely on it for batch-
-    //              serving VRAM budgets.
+// KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
+// max_batch_size auto-sizing. Default: FP16 (safe). FP8 / NVFP4 / MXFP4-KV
+// are opt-in. See the inline rationale for the 2026-04-24 root-cause memo.
+void Engine::init_resolve_kv_dtype_policy_() {
+    const auto& mcfg = model_->config();
+    const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
     const bool force_kv_fp16 = (RuntimeConfig::current().kv_cache.dtype == "fp16");
     const bool fp8_auto_legacy = RuntimeConfig::current().kv_cache.fp8_auto_legacy;
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
@@ -665,18 +649,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     } else if (config_.kv_cache_dtype == QType::NVFP4) {
-        // NVFP4 KV: ~3.6× compression vs FP16 (4 bits + UE4M3 per-16 + ~3% scale overhead).
-        // Klasse-A unlock for long-ctx dense models (Gemma-4-26B, Gemma-3-27B, Qwen3-32B).
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
-        // FP8 prefill cache stacks another lossy layer; disable to avoid compound drift.
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
             config_.use_fp8_prefill = 0;
         }
     } else if (config_.kv_cache_dtype == QType::MXFP4_KV) {
-        // MXFP4-KV: same FP4 E2M1 byte layout + per-16-element grouping as NVFP4,
-        // but UE8M0 scale bytes (pure-exponent, ~3.6× compression identical to NVFP4).
-        // This is the Path A retirement target per design memo §3.1.2.
         IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
@@ -684,24 +662,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic
-    // cuBLAS GEMM algo selection produces run-to-run numerical noise in
-    // Q/K/V projections. When the KV cache is FP8-E4M3, the quantize-
-    // dequantize round-trip amplifies that noise enough to push softmax
-    // inputs into NaN after the first 1-3 decode tokens. Reproduced on
-    // Mistral-Small-3.1 Q6_K, DeepSeek-R1-Distill-14B Q6_K, Qwen3.5-4B/9B
-    // GDN Q8_0, Gemma-4 (the existing hard-coded arch override at
-    // line ~492 was working around the same root cause).
-    //
-    // Fix: when FP8 KV cache is active, force deterministic cuBLAS. Near-
-    // zero perf cost on sm_120 (deterministic mode only pins the algo
-    // choice, does not disable tensor cores). Users who've verified their
-    // model is fine with non-deterministic FP8 KV can opt out via
-    // IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1.
     if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
         !RuntimeConfig::current().kv_cache.allow_nondeterministic_fp8 &&
         !RuntimeConfig::current().runtime.deterministic_gemm) {
-        // Promote the runtime config in-place so downstream readers see it.
         RuntimeConfig promoted = RuntimeConfig::current();
         promoted.runtime.deterministic_gemm = true;
         RuntimeConfig::install(promoted);
@@ -711,43 +674,35 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
             "Set kv_cache.allow_nondeterministic_fp8=true to opt out.");
     }
-    // NOTE: compound FP8 precision loss (stacking FP8 KV on top of FP8
-    // prefill + NVFP4 decode) is model-dependent. Mistral-Small-3.1 and
-    // DeepSeek-R1-Distill need the secondary caches OFF (--no-fp8-prefill
-    // --no-nvfp4) for coherent output, but Llama-3.2-3B and others break
-    // DIFFERENTLY when NVFP4 is forced off on --kv-fp8. No one-size-fits-all
-    // auto-toggle — users with affected models use the explicit flags.
 
     if (config_.max_batch_size <= 0) {
-        // Estimate model weight size from config to determine batch capacity.
-        // Rough heuristic: 2 bytes/param for FP16. d_model * d_model * n_layers * ~12 gives
-        // approximate total weight bytes for a dense transformer.
-        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers *
-                                     12;  // ~12 matrices per layer
+        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers * 12;
         if (mcfg.n_experts > 0) {
-            // MoE: expert weights dominate
             approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
                                    mcfg.n_layers * 2;
         }
         if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 1;  // >20GB models
+            config_.max_batch_size = 1;
         else if (approx_weight_bytes > 10ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 4;  // 10-20GB
+            config_.max_batch_size = 4;
         else if (approx_weight_bytes > 5ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 8;  // 5-10GB
+            config_.max_batch_size = 8;
         else
-            config_.max_batch_size = 16;  // <5GB
+            config_.max_batch_size = 16;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)", config_.max_batch_size,
                      approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
     }
+}
 
-    // --- Auto-detect SSM state dtype for hybrid models ---
-    // Nemotron-H and similar Mamba models: use FP16 for SSM h_state (~50% VRAM savings).
-    // GDN models (Qwen3.5 / Qwen3.6) MUST keep FP32: the delta-rule scan kernel
-    // writes FP32 (float) into h_state and assumes 4 bytes/element. FP16 allocation
-    // would be half the size, so each layer's scan overflows into the next layer's
-    // state region — shipped bug that corrupted L1+ GDN state on every Qwen 3.6
-    // forward, producing 37% scan-output divergence vs llama.cpp.
+// Auto-detect SSM state dtype for hybrid models. Nemotron-H and similar
+// Mamba models: use FP16 (~50% VRAM savings). GDN models (Qwen3.5/3.6)
+// MUST keep FP32: the delta-rule scan kernel writes FP32 (float) into
+// h_state and assumes 4 bytes/element. FP16 allocation would be half the
+// size and the next layer's state region would overflow — shipped bug
+// that corrupted L1+ GDN state on every Qwen 3.6 forward, producing 37%
+// scan-output divergence vs llama.cpp.
+void Engine::init_resolve_ssm_dtype_() {
+    const auto& mcfg = model_->config();
     bool has_gdn_for_dtype = false;
     if (mcfg.ssm_state_size > 0) {
         for (int i = 0; i < mcfg.n_layers; i++) {
@@ -761,21 +716,30 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
     }
+}
 
-    // --- Auto-detect FP8 prefill ---
-    // Under runtime.debug_raw or [attention] fp8_prefill = "never", keep
-    // disabled. The "never" escape hatch is for models (e.g. DeepSeek-R1-
-    // Distill-Qwen-14B Q6_K) that produce garbage decode with FP8 weight
-    // cache active — accumulated dequant error through deep narrow-GQA
-    // stacks.
+// Auto-detect FP8 prefill. Under runtime.debug_raw or
+// [attention] fp8_prefill = "never", keep disabled. The "never" escape
+// hatch is for models (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) that
+// produce garbage decode with FP8 weight cache active — accumulated
+// dequant error through deep narrow-GQA stacks.
+void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (RuntimeConfig::current().attention.fp8_prefill == "never");
-    if (!config_.use_fp8_prefill && !debug_raw_ && !no_fp8_prefill) {
+    if (!config_.use_fp8_prefill && !RuntimeConfig::current().runtime.debug_raw && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
     } else if (no_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
     }
+}
 
+// Resolve NVFP4 decode mode (additive/only/none) + dual-path quant
+// validation + Gemma-4 model-specific carve-outs (force FP16 paths
+// until proper kernels land, except CUDA Graphs which Gemma-4 keeps
+// because the MoE decode fast path is fully captured). The biggest
+// init helper — central place where the quant-stack profile is fixed.
+void Engine::init_resolve_quant_flags_() {
+    const auto& mcfg = model_->config();
     // --- Resolve auto-detection flags ---
     // NVFP4 decode mode
     int n_gdn_auto = 0;
@@ -912,10 +876,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
         }
     }
+}
 
-    // --- Auto-detect max_seq_len ---
-    // Runs AFTER model-specific overrides (Gemma-4 forces FP16 KV etc.) so the
-    // per-token cost reflects the actual dtype that will be allocated.
+// Auto-detect max_seq_len. Runs AFTER model-specific overrides (Gemma-4
+// forces FP16 KV etc.) so the per-token cost reflects the actual dtype
+// that will be allocated. Conservative cap at 16K; the user can override
+// via runtime.max_seq_len.
+void Engine::init_compute_max_seq_len_() {
+    const auto& mcfg = model_->config();
     if (int v = RuntimeConfig::current().runtime.max_seq_len; v > 0) {
         config_.max_seq_len = v;
         IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
@@ -939,7 +907,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (populated > 0)
                 kv_layer_count = populated;
         }
-        // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
         auto kv = config_.kv_cache_dtype;
         bool packed_int4 = (kv == QType::INT4);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
@@ -950,11 +917,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // afford. (Was 30%, calibrated when weight caches competed at FP16.)
         int max_by_vram = (kv_bytes_per_token > 0) ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
                                                    : 131072;
-        // Conservative auto-default: cap at 16K even when model + VRAM both
-        // allow more. Long contexts (Qwen3.6 256K, Qwen3 40K) consume a lot of
-        // VRAM and most workloads don't need them. Users requesting longer
-        // context pass --max-seq-len explicitly; the cap doesn't apply when
-        // the user sets it.
         constexpr int kAutoMaxSeqLenCap = 16384;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
@@ -962,6 +924,24 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             config_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token,
             kv_layer_count, mcfg.n_layers);
     }
+}
+
+bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
+    if (!model)
+        return false;
+
+    model_ = std::move(model);
+    config_ = config;
+
+    const auto& mcfg = model_->config();
+
+    init_apply_debug_raw_overrides_();
+    init_resolve_kv_dtype_policy_();
+    init_resolve_ssm_dtype_();
+    init_resolve_fp8_prefill_();
+    init_resolve_quant_flags_();
+
+    init_compute_max_seq_len_();
 
     // --- Core initialization ---
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
@@ -1958,6 +1938,83 @@ void Engine::step_prefill(cudaStream_t stream) {
 // step_prefill_one — process a single prefill request
 // =====================================================================
 
+// Allocate KV blocks for a prefill step. Two sub-paths:
+//   - prefix caching: try allocate_blocks_with_prefix, evict + retry on
+//     budget pressure, advance `offset` past the reused prefix.
+//   - plain: allocate `additional` blocks, evict + retry, cancel on hard
+//     failure.
+// Returns false on unrecoverable failure (req->status already set to
+// CANCELLED). On prefix-cache reuse, mutates offset / chunk_len /
+// is_last_chunk / ctx_len in place.
+bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_bs,
+                                         int total_input, int effective_chunk,
+                                         int& offset, int& chunk_len, bool& is_last_chunk,
+                                         int& ctx_len, cudaStream_t pf_stream) {
+    int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
+    int prefix_reused = 0;
+    int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
+
+    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
+        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+        if (prefix_reused < 0) {
+            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
+                int evicted = kv_manager_->evict_lru();
+                if (evicted < 0)
+                    break;
+            }
+            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+            if (prefix_reused < 0) {
+                req->status = RequestStatus::CANCELLED;
+                return false;
+            }
+        }
+
+        if (prefix_reused > 0) {
+            int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
+            int skip_tokens = effective_reused * kv_bs;
+            if (skip_tokens >= total_input) {
+                skip_tokens = (total_input / kv_bs) * kv_bs;
+                if (skip_tokens >= total_input) {
+                    skip_tokens = total_input - 1;
+                }
+            }
+            if (skip_tokens > offset) {
+                IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
+                             req->id, skip_tokens, total_input, prefix_reused);
+                req->cached_tokens = skip_tokens;
+                offset = skip_tokens;
+                req->prefill_offset = offset;
+                chunk_len = total_input - offset;
+                is_last_chunk = true;
+                if (chunk_len > effective_chunk) {
+                    chunk_len = effective_chunk;
+                    is_last_chunk = false;
+                }
+                ctx_len = offset + chunk_len;
+                (void)executor_->resize_workspace(chunk_len, pf_stream);
+            }
+        }
+    } else {
+        int additional = num_blocks - existing;
+        if (additional > 0) {
+            if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                while (kv_manager_->num_free_blocks() < additional) {
+                    int evicted = kv_manager_->evict_lru();
+                    if (evicted < 0)
+                        break;
+                }
+                if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                    kv_manager_->free_sequence(req->id);
+                    req->status = RequestStatus::CANCELLED;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t pf_stream) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     int total_input = static_cast<int>(req->input_tokens.size());
@@ -2006,69 +2063,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     int ctx_len = offset + chunk_len;
     (void)executor_->resize_workspace(chunk_len, pf_stream);
 
-    int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
-
-    // Allocate KV cache blocks
-    int prefix_reused = 0;
-    int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
-
-    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
-        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
-        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-        if (prefix_reused < 0) {
-            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted < 0)
-                    break;
-            }
-            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-            if (prefix_reused < 0) {
-                req->status = RequestStatus::CANCELLED;
-                return;
-            }
-        }
-
-        if (prefix_reused > 0) {
-            int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
-            int skip_tokens = effective_reused * kv_bs;
-            if (skip_tokens >= total_input) {
-                skip_tokens = (total_input / kv_bs) * kv_bs;
-                if (skip_tokens >= total_input) {
-                    skip_tokens = total_input - 1;
-                }
-            }
-            if (skip_tokens > offset) {
-                IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)", req->id,
-                             skip_tokens, total_input, prefix_reused);
-                req->cached_tokens = skip_tokens;
-                offset = skip_tokens;
-                req->prefill_offset = offset;
-                chunk_len = total_input - offset;
-                is_last_chunk = true;
-                if (chunk_len > effective_chunk) {
-                    chunk_len = effective_chunk;
-                    is_last_chunk = false;
-                }
-                ctx_len = offset + chunk_len;
-                (void)executor_->resize_workspace(chunk_len, pf_stream);
-            }
-        }
-    } else {
-        int additional = num_blocks - existing;
-        if (additional > 0) {
-            if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                while (kv_manager_->num_free_blocks() < additional) {
-                    int evicted = kv_manager_->evict_lru();
-                    if (evicted < 0)
-                        break;
-                }
-                if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    return;
-                }
-            }
-        }
+    if (!prefill_allocate_kv_blocks_(req, kv_bs, total_input, effective_chunk, offset, chunk_len,
+                                     is_last_chunk, ctx_len, pf_stream)) {
+        return;  // caller already set req->status = CANCELLED
     }
 
     const auto& block_table = kv_manager_->block_table(req->id);
