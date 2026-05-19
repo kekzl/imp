@@ -2437,61 +2437,16 @@ void Engine::step_decode(cudaStream_t dec_stream) {
 // step_decode_forward — build batch, run forward pass, sample, process
 // =====================================================================
 
-void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
-                                 cudaStream_t dec_stream) {
-    // Switch workspace for decode
-    if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
-        executor_->use_workspace(1);
-    } else {
-        if (executor_->active_workspace() == 1)
-            executor_->use_workspace(0);
-        (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
-    }
-
-    // Build batched decode
-    decode_builder_.reset();
-
-    int max_ctx = 0;
-    for (auto& req : valid_decode) {
-        int ctx_len = req->context_len();
-        max_ctx = std::max(max_ctx, ctx_len);
-
-        int32_t last_token = req->output_tokens.empty() ? req->input_tokens.back()
-                                                        : req->output_tokens.back();
-        int position = ctx_len - 1;
-
-        const auto& bt = kv_manager_->block_table(req->id);
-        decode_builder_.add_decode_sequence(last_token, position, bt.data(), static_cast<int>(bt.size()),
-                                            ctx_len);
-    }
-
-    Batch batch = decode_builder_.build();
-
-    // Upload to GPU using pre-allocated pool
-    GPUBatch gpu_batch;
-    if (decode_batch_pool_.is_allocated()) {
-        int pool_max = decode_batch_pool_.max_blocks_per_seq();
-        if (batch.max_blocks_per_seq < pool_max) {
-            int n_seq = batch.n_sequences;
-            int old_stride = batch.max_blocks_per_seq;
-            size_t needed = static_cast<size_t>(n_seq) * pool_max;
-            padded_block_table_.resize(needed);
-            std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
-            for (int s = 0; s < n_seq; s++) {
-                for (int b = 0; b < old_stride; b++) {
-                    padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
-                }
-            }
-            batch.block_tables.swap(padded_block_table_);
-            batch.max_blocks_per_seq = pool_max;
-        }
-        gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
-    } else {
-        gpu_batch.upload(batch, dec_stream);
-    }
-
-    // Build InferenceState
-    InferenceState state;
+// Populate the InferenceState for a decode step from the uploaded GPU batch.
+// Handles per-seq residual metadata (single-seq fast path vs multi-seq
+// per-batch upload), sampling params, decode-step seed, penalties, recurrent
+// state, and JSON/schema constrainer attach. Returns needs_logprobs so the
+// caller knows whether to capture decode_logits_out for the logprobs pass.
+void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
+                                           std::vector<std::shared_ptr<Request>>& valid_decode,
+                                           int max_ctx, cudaStream_t dec_stream,
+                                           InferenceState& state, bool& needs_logprobs,
+                                           bool& needs_json_mode, bool& needs_schema_mode) {
     state.token_ids = gpu_batch.d_token_ids;
     state.positions = gpu_batch.d_positions;
     state.n_tokens = gpu_batch.total_tokens;
@@ -2577,9 +2532,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
 
     // Check if any request needs logprobs or constrained mode
-    bool needs_logprobs = false;
-    bool needs_json_mode = false;
-    bool needs_schema_mode = false;
+    needs_logprobs = false;
+    needs_json_mode = false;
+    needs_schema_mode = false;
     for (const auto& r : valid_decode) {
         if (r->logprobs)
             needs_logprobs = true;
@@ -2602,6 +2557,67 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         }
         state.json_constrainer = constraints_.json_constrainer();
     }
+}
+
+void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
+                                 cudaStream_t dec_stream) {
+    // Switch workspace for decode
+    if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
+        executor_->use_workspace(1);
+    } else {
+        if (executor_->active_workspace() == 1)
+            executor_->use_workspace(0);
+        (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+    }
+
+    // Build batched decode
+    decode_builder_.reset();
+
+    int max_ctx = 0;
+    for (auto& req : valid_decode) {
+        int ctx_len = req->context_len();
+        max_ctx = std::max(max_ctx, ctx_len);
+
+        int32_t last_token = req->output_tokens.empty() ? req->input_tokens.back()
+                                                        : req->output_tokens.back();
+        int position = ctx_len - 1;
+
+        const auto& bt = kv_manager_->block_table(req->id);
+        decode_builder_.add_decode_sequence(last_token, position, bt.data(), static_cast<int>(bt.size()),
+                                            ctx_len);
+    }
+
+    Batch batch = decode_builder_.build();
+
+    // Upload to GPU using pre-allocated pool
+    GPUBatch gpu_batch;
+    if (decode_batch_pool_.is_allocated()) {
+        int pool_max = decode_batch_pool_.max_blocks_per_seq();
+        if (batch.max_blocks_per_seq < pool_max) {
+            int n_seq = batch.n_sequences;
+            int old_stride = batch.max_blocks_per_seq;
+            size_t needed = static_cast<size_t>(n_seq) * pool_max;
+            padded_block_table_.resize(needed);
+            std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
+            for (int s = 0; s < n_seq; s++) {
+                for (int b = 0; b < old_stride; b++) {
+                    padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
+                }
+            }
+            batch.block_tables.swap(padded_block_table_);
+            batch.max_blocks_per_seq = pool_max;
+        }
+        gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
+    } else {
+        gpu_batch.upload(batch, dec_stream);
+    }
+
+    InferenceState state;
+    bool needs_logprobs = false;
+    bool needs_json_mode = false;
+    bool needs_schema_mode = false;
+    decode_build_inference_state_(gpu_batch, valid_decode, max_ctx, dec_stream, state, needs_logprobs,
+                                  needs_json_mode, needs_schema_mode);
 
     // Per-request sampling lambda
     auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {

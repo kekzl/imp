@@ -365,6 +365,16 @@ private:
                                                 int32_t*& d_token_ids, int*& d_positions,
                                                 int*& d_block_tables, int*& d_context_lens,
                                                 bool& pf_pool_used);
+    // step_decode_forward sub-phase: populate `state` from the uploaded
+    // GPU batch + per-seq residual metadata + sampling params + recurrent
+    // state + JSON/schema constrainers. Returns `needs_logprobs` so the
+    // caller knows whether to capture decode_logits_out for the logprobs
+    // pass downstream.
+    void decode_build_inference_state_(GPUBatch& gpu_batch,
+                                       std::vector<std::shared_ptr<imp::Request>>& valid_decode,
+                                       int max_ctx, cudaStream_t dec_stream,
+                                       InferenceState& state, bool& needs_logprobs,
+                                       bool& needs_json_mode, bool& needs_schema_mode);
 
     // Build banned_token_ids_ — special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
