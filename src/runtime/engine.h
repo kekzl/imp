@@ -352,6 +352,19 @@ private:
                                                    int total_input, int effective_chunk,
                                                    int& offset, int& chunk_len, bool& is_last_chunk,
                                                    int& ctx_len, cudaStream_t pf_stream);
+    // step_prefill_one sub-phase: upload token_ids / positions / block_tables /
+    // context_lens to device. Uses the prefill_pool_ buffers when chunk_len <=
+    // max_seq_len, otherwise falls back to cudaMallocAsync. Returns false on
+    // alloc / memcpy failure (caller sets req->status = CANCELLED, frees its
+    // KV blocks). Outputs: device buffer pointers + `pf_pool_used` flag for
+    // the matching free path.
+    [[nodiscard]] bool prefill_upload_metadata_(std::shared_ptr<Request>& req,
+                                                const std::vector<int>& block_table,
+                                                int chunk_len, int offset, int ctx_len,
+                                                cudaStream_t pf_stream,
+                                                int32_t*& d_token_ids, int*& d_positions,
+                                                int*& d_block_tables, int*& d_context_lens,
+                                                bool& pf_pool_used);
 
     // Build banned_token_ids_ — special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
