@@ -694,25 +694,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 }
 
-bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
-    if (!model)
-        return false;
-
-    model_ = std::move(model);
-    config_ = config;
-
+// Auto-detect SSM state dtype for hybrid models. Nemotron-H and similar
+// Mamba models: use FP16 (~50% VRAM savings). GDN models (Qwen3.5/3.6)
+// MUST keep FP32: the delta-rule scan kernel writes FP32 (float) into
+// h_state and assumes 4 bytes/element. FP16 allocation would be half the
+// size and the next layer's state region would overflow — shipped bug
+// that corrupted L1+ GDN state on every Qwen 3.6 forward, producing 37%
+// scan-output divergence vs llama.cpp.
+void Engine::init_resolve_ssm_dtype_() {
     const auto& mcfg = model_->config();
-
-    init_apply_debug_raw_overrides_();
-    init_resolve_kv_dtype_policy_();
-
-    // --- Auto-detect SSM state dtype for hybrid models ---
-    // Nemotron-H and similar Mamba models: use FP16 for SSM h_state (~50% VRAM savings).
-    // GDN models (Qwen3.5 / Qwen3.6) MUST keep FP32: the delta-rule scan kernel
-    // writes FP32 (float) into h_state and assumes 4 bytes/element. FP16 allocation
-    // would be half the size, so each layer's scan overflows into the next layer's
-    // state region — shipped bug that corrupted L1+ GDN state on every Qwen 3.6
-    // forward, producing 37% scan-output divergence vs llama.cpp.
     bool has_gdn_for_dtype = false;
     if (mcfg.ssm_state_size > 0) {
         for (int i = 0; i < mcfg.n_layers; i++) {
@@ -726,13 +716,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
     }
+}
 
-    // --- Auto-detect FP8 prefill ---
-    // Under runtime.debug_raw or [attention] fp8_prefill = "never", keep
-    // disabled. The "never" escape hatch is for models (e.g. DeepSeek-R1-
-    // Distill-Qwen-14B Q6_K) that produce garbage decode with FP8 weight
-    // cache active — accumulated dequant error through deep narrow-GQA
-    // stacks.
+// Auto-detect FP8 prefill. Under runtime.debug_raw or
+// [attention] fp8_prefill = "never", keep disabled. The "never" escape
+// hatch is for models (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) that
+// produce garbage decode with FP8 weight cache active — accumulated
+// dequant error through deep narrow-GQA stacks.
+void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (RuntimeConfig::current().attention.fp8_prefill == "never");
     if (!config_.use_fp8_prefill && !RuntimeConfig::current().runtime.debug_raw && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
@@ -740,7 +731,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else if (no_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
     }
+}
 
+// Resolve NVFP4 decode mode (additive/only/none) + dual-path quant
+// validation + Gemma-4 model-specific carve-outs (force FP16 paths
+// until proper kernels land, except CUDA Graphs which Gemma-4 keeps
+// because the MoE decode fast path is fully captured). The biggest
+// init helper — central place where the quant-stack profile is fixed.
+void Engine::init_resolve_quant_flags_() {
+    const auto& mcfg = model_->config();
     // --- Resolve auto-detection flags ---
     // NVFP4 decode mode
     int n_gdn_auto = 0;
@@ -877,10 +876,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
         }
     }
+}
 
-    // --- Auto-detect max_seq_len ---
-    // Runs AFTER model-specific overrides (Gemma-4 forces FP16 KV etc.) so the
-    // per-token cost reflects the actual dtype that will be allocated.
+// Auto-detect max_seq_len. Runs AFTER model-specific overrides (Gemma-4
+// forces FP16 KV etc.) so the per-token cost reflects the actual dtype
+// that will be allocated. Conservative cap at 16K; the user can override
+// via runtime.max_seq_len.
+void Engine::init_compute_max_seq_len_() {
+    const auto& mcfg = model_->config();
     if (int v = RuntimeConfig::current().runtime.max_seq_len; v > 0) {
         config_.max_seq_len = v;
         IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
@@ -904,7 +907,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (populated > 0)
                 kv_layer_count = populated;
         }
-        // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
         auto kv = config_.kv_cache_dtype;
         bool packed_int4 = (kv == QType::INT4);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
@@ -915,11 +917,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // afford. (Was 30%, calibrated when weight caches competed at FP16.)
         int max_by_vram = (kv_bytes_per_token > 0) ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
                                                    : 131072;
-        // Conservative auto-default: cap at 16K even when model + VRAM both
-        // allow more. Long contexts (Qwen3.6 256K, Qwen3 40K) consume a lot of
-        // VRAM and most workloads don't need them. Users requesting longer
-        // context pass --max-seq-len explicitly; the cap doesn't apply when
-        // the user sets it.
         constexpr int kAutoMaxSeqLenCap = 16384;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
@@ -927,6 +924,24 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             config_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token,
             kv_layer_count, mcfg.n_layers);
     }
+}
+
+bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
+    if (!model)
+        return false;
+
+    model_ = std::move(model);
+    config_ = config;
+
+    const auto& mcfg = model_->config();
+
+    init_apply_debug_raw_overrides_();
+    init_resolve_kv_dtype_policy_();
+    init_resolve_ssm_dtype_();
+    init_resolve_fp8_prefill_();
+    init_resolve_quant_flags_();
+
+    init_compute_max_seq_len_();
 
     // --- Core initialization ---
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
