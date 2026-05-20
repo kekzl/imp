@@ -252,6 +252,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/pre_dequant_phase2_fp8_cache.cu
     src/exec/pre_dequant_phase3_nvfp4_decode.cu
+    src/exec/pre_dequant_phase3c_mxfp4.cu
     src/exec/pre_dequant_phase4_tensor_registry.cu
     src/exec/executor_workspace_config.cu
     src/exec/executor_attention.cu
