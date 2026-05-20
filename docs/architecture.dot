@@ -87,19 +87,17 @@ digraph imp_e2e {
         pref_logits [label="Final RMSNorm + LM head\n→ logits (last chunk only)"];
     }
 
-    // === Attention Dispatcher detail ===
+    // === Attention Dispatcher detail (post-Phase-2) ===
     subgraph cluster_attn_dispatch {
-        label="Attention Dispatcher  (3 layers, 10 paths)";
+        label="Attention Dispatcher  (cuBLAS default / FMHA fallback)";
         style="rounded,filled"; fillcolor="#fee2e2"; fontcolor="#7f1d1d";
-        ad_gate [label="executor_attention.cu:847\nif (force_cublas || !no_cublas)\n  && attn_scores_buf_\n  && n ≤ cap\n  && (force_cublas || !sliding)", fillcolor="#fecaca", shape=diamond, margin="0.08,0.05"];
-        ad_naive [label="naive_attention_prefill\n(Gemma-4 hd=512 fallback)", fillcolor="#fee2e2"];
+        ad_gate [label="executor_attention.cu (prefill gate)\nif (s_matrix_fits\n    && !non_gemma4_sliding)", fillcolor="#fecaca", shape=diamond, margin="0.08,0.05"];
         ad_cublas [label="attention_cublas_prefill\ncuBLAS QK^T → 1 GiB S-matrix\n→ causal_softmax → cuBLAS PV", fillcolor="#fca5a5"];
-        ad_chain [label="attention_prefill_dispatch\nMXFP4-BS → MXFP4-legacy →\nFP8 → FP16 FMHA → WMMA fallback\nattention_dispatch.cu:30", fillcolor="#fee2e2"];
-        ad_decode [label="DECODE: switch(cache_dtype)\nINT4 / NVFP4±TC / MXFP4-KV /\nINT8 / FP8 / FP16-paged\nexecutor_attention.cu:996", fillcolor="#fecaca"];
+        ad_chain [label="attention_prefill_dispatch\nMXFP4-legacy → FP8 → FP16 FMHA →\nWMMA fallback\nattention_dispatch.cu:30", fillcolor="#fee2e2"];
+        ad_decode [label="DECODE: switch(cache_dtype)\nINT4 / NVFP4±TC / MXFP4-KV /\nINT8 / FP8 / FP16-paged", fillcolor="#fecaca"];
 
-        ad_gate -> ad_naive [label="naive flag\n&& n≤2048", style=dotted, fontsize=8];
-        ad_gate -> ad_cublas [label="TRUE\n(typical Qwen3/Gemma-4)", fontsize=8, color="#dc2626"];
-        ad_gate -> ad_chain  [label="FALSE\n(rare: VRAM-full or sliding)", fontsize=8, color="#16a34a"];
+        ad_gate -> ad_cublas [label="TRUE\n(default: Qwen3/Gemma-4/...)", fontsize=8, color="#dc2626"];
+        ad_gate -> ad_chain  [label="FALSE\n(S-matrix full or non-Gemma-4 sliding)", fontsize=8, color="#16a34a"];
     }
 
     // === Phase 4: Per-Request Decode Loop ===
