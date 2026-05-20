@@ -806,61 +806,37 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             goto after_attention;
         }
 
-        // cuBLAS QK^T materialization: faster than flash attention for short prefills
-        // (pp<=512). Benchmarked: pp128 cuBLAS 3270 vs FMHA 2918 (+12%), pp512 ~equal.
-        // Falls back to flash attention for long sequences, sliding window, or when
-        // the S-matrix buffer wasn't allocated (VRAM-constrained).
-        // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
-        // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
-        // use cuBLAS attention for all layers (it handles arbitrary head_dim).
-        const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
-        bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
-        // Gemma-4 SWA layers used to need a naive FP32 fallback because the
-        // FMHA chain emitted garbage on hd=256 + sliding and the cuBLAS softmax
-        // had no sliding-window mask. cuBLAS now supports sliding_window
-        // directly (causal_softmax_*_kernel mask `(abs_row - j) >= sliding_window`),
-        // and chunked prefill keeps the S-matrix within capacity for Gemma-4
-        // long contexts (see gemma4_chunked_prefill_2026_05_15.md), so the
-        // naive fallback has been retired.
-        if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ &&
-            n <= static_cast<int>(attn_scores_.shape[1]) &&
-            (force_cublas_attn || !sliding_active)) {
-            // The n<=1024 heuristic below picks Flash Attention for long contexts
-            // (O(1) memory) over cuBLAS (O(n^2) S-matrix). Gemma-4 with mixed
-            // head_dims (256 SWA / 512 global) MUST stay on cuBLAS for the
-            // global layers at any n that fits the S-matrix: the FMHA chain
-            // (fmha_sm120_prefill → flash_attention_blackwell → _tc) tops out at
-            // head_dim=256 with per-tile kernels; head_dim=512 falls to
-            // flash_attention_prefill_tc whose ~280 KB static tile exceeds
-            // sm_120's 100 KB opt-in dynamic smem, poisoning the stream with
-            // cudaErrorInvalidValue. force_cublas_attn (set on per-layer shapes)
-            // therefore overrides the n<=1024 heuristic AND the !sliding_active
-            // gate — Gemma-4 SWA layers now use the cuBLAS sliding_window mask
-            // instead of falling to naive.
-            // For NON-Gemma-4 SWA models (Qwen with window etc.), keep
-            // `!sliding_active` so they fall to FMHA where SWA is faster than
-            // the materialized S-matrix path.
-            // Pass the FULL attn_scores_ tensor (capacity = max seq_len^2) so
-            // attention_cublas_prefill can decide whether the FP32 S-matrix
-            // fits. Constructing a sub-view with shape=[nh, n, n] hides the
-            // real capacity from the FP32-fits check.
-            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale, /*causal=*/true,
-                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream,
-                                     layer_sliding_window);
-        } else {
-            // Flash attention: tiled O(n) memory, handles softcap + sliding window.
-            // Dispatch chain: CUTLASS FMHA → Blackwell WMMA → Hopper WMMA → scalar.
-            int64_t q4s[4] = {1, n, nh, hd};
-            int64_t kv4s[4] = {1, n, nkv, hd};
-            int64_t o4s[4] = {1, n, nh, hd};
+        // Prefill dispatch (post-Phase-2 simplification):
+        //   cuBLAS QK^T + causal softmax + cuBLAS PV is the default. Falls back
+        //   to the FMHA chain (attention_prefill_dispatch → fmha_sm120_prefill →
+        //   flash_attention_blackwell) when the S-matrix workspace can't hold
+        //   [nh, n, n], or when the layer uses sliding-window attention on a
+        //   model that isn't Gemma-4 (Gemma-4 SWA uses the cuBLAS sliding_window
+        //   mask via chunked prefill — see gemma4_chunked_prefill_2026_05_15).
+        //
+        // force_cublas_attn: set per-layer for Gemma-4 hd=512 global layers,
+        // where FMHA OOMs the 100 KiB smem cap. cuBLAS handles arbitrary
+        // head_dim at the cost of the materialized S-matrix.
+        const bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
+        const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
+                                   n <= static_cast<int>(attn_scores_.shape[1]);
+        const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
 
+        if (s_matrix_fits && !non_gemma4_sliding) {
+            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                                     /*causal=*/true, cfg.attn_logit_softcap,
+                                     /*q_offset=*/0, stream, layer_sliding_window);
+        } else {
+            // FMHA fallback: tiled O(n) memory chain.
+            int64_t q4s[4]  = {1, n, nh, hd};
+            int64_t kv4s[4] = {1, n, nkv, hd};
+            int64_t o4s[4]  = {1, n, nh, hd};
             Tensor q4 = qv.reshape(4, q4s);
             Tensor k4 = kk.reshape(4, kv4s);
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
-
-            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream);
+            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
+                                       layer_sliding_window, cfg.attn_logit_softcap, stream);
         }
 
         // Persist K, V into cache for later decode steps

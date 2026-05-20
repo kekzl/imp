@@ -94,7 +94,6 @@ struct RuntimeConfig {
         // unlocks Qwen3.5-27B MXFP4 load on 32 GiB VRAM by shrinking the
         // ~48 GiB FP16 fallback to ~8-12 GiB.
         std::string mxfp4_fp16_cache_policy = "legacy";
-        bool no_cublas = false;
         bool force_cublas_decode = false;
         bool no_qknorm_fused = false;
         bool splitk_pipe = true;
