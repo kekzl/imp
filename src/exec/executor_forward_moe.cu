@@ -246,7 +246,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // at GEMM output) to isolate precision drift. Allocated below in the FP16
     // batch path; freed at moe_after_experts. Other prefill paths ignore this.
     ctx.fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
-                            RuntimeConfig::current().gemma4.fp32_expert_down);
+                            cfg.overrides.gemma4.fp32_expert_down);
     ctx.fp32_down_buf = nullptr;
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                              ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
@@ -347,7 +347,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
-    if (cfg.arch == ModelArch::GEMMA4 && RuntimeConfig::current().gemma4.no_decode_fast) {
+    if (cfg.arch == ModelArch::GEMMA4 && cfg.overrides.gemma4.no_decode_fast) {
         ctx.will_decode_fast = false;
     }
 
@@ -452,7 +452,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
-        } else if (RuntimeConfig::current().gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
+        } else if (cfg.overrides.gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
                    ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                    ly.expert_down_packed.on_device &&
                    try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
@@ -2698,7 +2698,8 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
     Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+                                 model_->config().overrides.gemma4.force_mmvq);
     gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
 
     if (shared_gated) {
@@ -2735,7 +2736,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
         sanitize_fp16(static_cast<__half*>(sh_down.data), static_cast<int64_t>(n) * d, stream);
     }
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
-        !RuntimeConfig::current().gemma4.no_post_ffw_1) {
+        !cfg.overrides.gemma4.no_post_ffw_1) {
         rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
     }
 

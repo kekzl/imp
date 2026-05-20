@@ -182,15 +182,10 @@ struct RuntimeConfig {
         bool q4k_imma_enabled = false;
     } gemm;
 
-    struct Gemma4 {
-        bool fp32_gemm_out = false;
-        bool no_graphs = false;
-        bool force_mmvq = false;
-        bool fp32_expert_down = false;
-        bool no_decode_fast = false;
-        bool no_post_ffw_1 = false;
-        bool ggml_prefill = false;
-    } gemma4;
+    // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture
+    // refactor. Phase 5 Track A moved it to ModelConfig::Overrides::Gemma4 —
+    // see src/model/model_config.h. Model-specific knobs do not belong on a
+    // global runtime singleton.)
 
     struct Generation {
         bool no_logit_softcap = false;

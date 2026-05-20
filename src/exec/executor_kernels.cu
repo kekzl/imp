@@ -1840,6 +1840,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
         args.q8_1_buf = qs->q8_1_buf;
         args.d8_buf = qs->d8_buf;
         args.dequant_scratch = qs->dequant;  // fused-gemv readiness sentinel
+        args.force_mmvq = ctx.force_mmvq;
         GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
         if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
             return;

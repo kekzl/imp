@@ -587,7 +587,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                              !RuntimeConfig::current().gemm.no_dp4a_lm;
 
     // GemmContext for LM head GEMM dispatches.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+                                 model_->config().overrides.gemma4.force_mmvq);
 
     // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).
     const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)

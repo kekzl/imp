@@ -205,21 +205,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     else if (eq("gemm.q4k_imma_enabled"))
         cfg.gemm.q4k_imma_enabled = parse_bool(val, cfg.gemm.q4k_imma_enabled);
 
-    // [gemma4]
-    else if (eq("gemma4.fp32_gemm_out"))
-        cfg.gemma4.fp32_gemm_out = parse_bool(val, cfg.gemma4.fp32_gemm_out);
-    else if (eq("gemma4.no_graphs"))
-        cfg.gemma4.no_graphs = parse_bool(val, cfg.gemma4.no_graphs);
-    else if (eq("gemma4.force_mmvq"))
-        cfg.gemma4.force_mmvq = parse_bool(val, cfg.gemma4.force_mmvq);
-    else if (eq("gemma4.fp32_expert_down"))
-        cfg.gemma4.fp32_expert_down = parse_bool(val, cfg.gemma4.fp32_expert_down);
-    else if (eq("gemma4.no_decode_fast"))
-        cfg.gemma4.no_decode_fast = parse_bool(val, cfg.gemma4.no_decode_fast);
-    else if (eq("gemma4.no_post_ffw_1"))
-        cfg.gemma4.no_post_ffw_1 = parse_bool(val, cfg.gemma4.no_post_ffw_1);
-    else if (eq("gemma4.ggml_prefill"))
-        cfg.gemma4.ggml_prefill = parse_bool(val, cfg.gemma4.ggml_prefill);
+    // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5
+    // Track A of the architecture refactor. Per-model knobs no longer live
+    // on the global RuntimeConfig singleton — they are now populated by the
+    // GGUF / SafeTensors loader or the engine init resolver onto the model.
 
     // [generation]
     else if (eq("generation.no_logit_softcap"))

@@ -110,6 +110,11 @@ struct GemmKernelArgs {
     // casts to block_q8_1*.
     void* q8_1_buf = nullptr;
     float* d8_buf = nullptr;
+
+    // Per-model gemma4.force_mmvq override (Phase 5 Track A). Used by the
+    // GGUF small-M kernels to decide between the mmvq and dp4a backends.
+    // Sourced from ModelConfig::Overrides::Gemma4::force_mmvq via GemmContext.
+    bool force_mmvq = false;
 };
 
 // Result of a dispatch attempt.
