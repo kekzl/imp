@@ -1,4 +1,4 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, gemm_mxfp4_cutlass_sm120 (QW7 dual-cache path)
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, gemm_nvfp4_cutlass_sm120, quantize_fp16_to_nvfp4_cutlass

@@ -1,8 +1,8 @@
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
-#include "graph/executor_helpers.h"
-#include "graph/executor_debug.h"
-#include "graph/gemm_context.h"
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/executor_helpers.h"
+#include "exec/executor_debug.h"
+#include "exec/gemm_context.h"
 #include "runtime/config.h"
 #include <cstdio>
 #include <stdexcept>
@@ -24,7 +24,7 @@
 #include "compute/ssm.h"
 #include "compute/gdn.h"
 #include "memory/kv_cache_manager.h"
-#include "graph/executor_kernels.h"
+#include "exec/executor_kernels.h"
 #include "memory/gdn_state.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"

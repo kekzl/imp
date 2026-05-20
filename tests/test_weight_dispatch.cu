@@ -3,7 +3,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
-#include "graph/weight_handle.h"
+#include "exec/weight_handle.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"

@@ -1,4 +1,4 @@
-#include "graph/gemm_scratch.h"
+#include "exec/gemm_scratch.h"
 
 #include "core/logging.h"
 

@@ -3,7 +3,7 @@
 // imp.conf — central runtime configuration.
 //
 // Replaces ~50 ad-hoc IMP_*-prefixed environment variables that were scattered
-// over ~80 getenv() call sites in src/runtime/ and src/graph/. The same values
+// over ~80 getenv() call sites in src/runtime/ and src/exec/. The same values
 // now flow through a single RuntimeConfig struct loaded once at startup,
 // optionally from a TOML file, with CLI-flag overrides on top.
 //

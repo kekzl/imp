@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include "graph/executor_kernels.h"
+#include "exec/executor_kernels.h"
 #include "core/tensor.h"
 
 #include <vector>

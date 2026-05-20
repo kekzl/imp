@@ -1,4 +1,4 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"                       // gemm() FP16 cuBLAS wrapper
 #include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, dequant_mxfp4_to_fp16

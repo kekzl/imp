@@ -1,4 +1,4 @@
-#include "graph/quant_scratch.h"
+#include "exec/quant_scratch.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 

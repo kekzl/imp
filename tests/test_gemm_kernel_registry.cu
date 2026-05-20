@@ -1,10 +1,10 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, convert_nvfp4_to_mxfp4_cutlass
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
 #include "core/tensor.h"
-#include "graph/executor.h"  // FP8CacheEntry
-#include "graph/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
+#include "exec/executor.h"  // FP8CacheEntry
+#include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
 #include "quant/dequant_gpu.h"  // Slice 8.1 parity test
 #include "quant/fp8_quant.h"
 #include "quant/mxfp4_gemm.h"  // gemv_mxfp4_kpar
@@ -854,7 +854,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
 // prefill (1) + NVFP4 GEMV (1) + NVFP4 GEMM (1) + CUTLASS_NVFP4 GEMM (1) +
 // MXFP4 GEMV (1) + MXFP4 GEMM (1) we now expect at least 8 entries. The
 // dual-cache CUTLASS MXFP4 branch (legacy line 2149-2174) is intentionally
-// NOT migrated — see src/graph/gemm_kernel_mxfp4.cu header.
+// NOT migrated — see src/exec/gemm_kernel_mxfp4.cu header.
 TEST_F(GemmKernelRegistryTest, Mxfp4KernelsAreRegisteredAtStaticInit) {
     const auto& reg = GemmKernelRegistry::instance();
     EXPECT_GE(reg.size(), 8u)

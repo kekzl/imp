@@ -2,10 +2,10 @@
 // Handles: dequant scratch, sampling, MMVQ, split-K, attention S-matrix, FMHA,
 // MoE workspace, FP8 activation, CUTLASS NVFP4/MXFP4 activation buffers.
 
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
-#include "graph/executor_helpers.h"
-#include "graph/gemm_scratch.h"  // prewarm_mmvq_scratch
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/executor_helpers.h"
+#include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/sampling.h"

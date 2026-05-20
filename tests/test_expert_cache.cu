@@ -12,7 +12,7 @@
 // recency + key→slot maps.
 
 #include <gtest/gtest.h>
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include <cuda_runtime.h>
 #include <cstring>
 #include <cstdint>

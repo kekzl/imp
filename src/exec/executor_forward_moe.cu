@@ -9,10 +9,10 @@
 //   4. Batch path (cuBLAS/CUTLASS for large batches)
 //   5. Shared expert path (parallel dense FFN when present)
 
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
-#include "graph/gemm_context.h"
-#include "graph/executor_debug.h"
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/gemm_context.h"
+#include "exec/executor_debug.h"
 #include "runtime/config.h"
 #include <atomic>
 #include "compute/embedding.h"

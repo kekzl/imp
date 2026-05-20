@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "memory/kv_cache.h"
 #include "compute/gemm.h"
 #include "test_model_builder.h"

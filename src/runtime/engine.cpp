@@ -844,7 +844,7 @@ void Engine::init_resolve_quant_flags_() {
         // live K/V region — Gemma-4 has dual head_dim (256 SWA / 512 global)
         // and the workspace is allocated for max_head_dim, leaving a
         // tail-region of uninitialized memory on SWA layers. The fix in
-        // src/graph/executor_kv_write.cu narrows the calibration view to
+        // src/exec/executor_kv_write.cu narrows the calibration view to
         // `nkv * hd` per layer; FP8 KV is now safe to opt into on Gemma-4.
         // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly

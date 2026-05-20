@@ -2,7 +2,7 @@
 // that corrupted Gemma-4-26B-A4B NVFP4 legacy-MoE prefill (memo
 // llm_compressor_phase2_item2_2026_04_26 + PR #65 fix).
 //
-// Bug context: src/graph/executor_forward_moe.cu had a manual M loop calling
+// Bug context: src/exec/executor_forward_moe.cu had a manual M loop calling
 // gemv_nvfp4_kpar once per row for M>1 prefill on per-expert NVFP4 weights.
 // At Gemma-4 expert dims (N=704, K=2816 for gate/up; N=2816, K=704 for down),
 // this produced garbage output empirically while the dequant→cuBLAS path

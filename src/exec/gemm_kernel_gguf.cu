@@ -1,11 +1,11 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"        // quantize_fp16_to_q8_1, block_q8_1
 #include "compute/ggml_mmvq.h"   // ggml_mmvq_q4k / q5k / q5_1 / q8_0
 #include "core/logging.h"
 #include "core/tensor.h"
-#include "graph/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv, block_q8_1
-#include "graph/gemm_scratch.h"  // mmvq_scratch_get_or_grow (Slice 8.6 hoist)
+#include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv, block_q8_1
+#include "exec/gemm_scratch.h"  // mmvq_scratch_get_or_grow (Slice 8.6 hoist)
 #include "runtime/config.h"
 
 #include <cuda_fp16.h>
@@ -94,7 +94,7 @@ namespace imp {
 // returns NoMatch / PreconditionFail. Slice 8 retires the legacy switch.
 // ---------------------------------------------------------------------------
 
-// `mmvq_scratch_get_or_grow` lives in graph/gemm_scratch.h since Slice 8.6
+// `mmvq_scratch_get_or_grow` lives in exec/gemm_scratch.h since Slice 8.6
 // (TU hoist). Engine init MUST call `prewarm_mmvq_scratch` from
 // `executor_workspace_buffers.cu` with the model's largest dims before the
 // hot path fires — see gemm_scratch.h.
