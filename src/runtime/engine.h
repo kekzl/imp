@@ -7,7 +7,7 @@
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
-#include "runtime/vision_pipeline.h"
+#include "vision/vision_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
 #include "memory/kv_cache.h"
@@ -320,7 +320,7 @@ private:
     // Phase 3: API in place (enable_mtp_spec_decode + mtp_draft_step), NOT
     // yet auto-invoked by the decode loop. Phase 4 wires CLI flag, Phase 5
     // measures acceptance.
-    // Defined in <runtime/mtp_forward.h>; forward-declared to avoid include.
+    // Defined in <compute/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
     void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
 

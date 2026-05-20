@@ -16,7 +16,7 @@
 #include "model/model.h"
 #include "model/safetensors_loader.h"
 #include "runtime/engine.h"
-#include "runtime/mtp_forward.h"
+#include "compute/mtp_forward.h"
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>

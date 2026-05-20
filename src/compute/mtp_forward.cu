@@ -12,7 +12,7 @@
 //   token     = argmax(logits)
 // =============================================================================
 
-#include "runtime/mtp_forward.h"
+#include "compute/mtp_forward.h"
 #include "compute/activation.h"     // swiglu, shared_expert_gate_scale
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"

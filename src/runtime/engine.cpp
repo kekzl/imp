@@ -3,7 +3,7 @@
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
-#include "runtime/mtp_forward.h"
+#include "compute/mtp_forward.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"

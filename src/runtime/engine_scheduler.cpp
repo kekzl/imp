@@ -23,7 +23,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/batch.h"
-#include "runtime/mtp_forward.h"
+#include "compute/mtp_forward.h"
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
 #include "compute/layernorm.h"
