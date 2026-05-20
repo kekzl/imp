@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
@@ -27,56 +28,14 @@
 
 namespace imp {
 
-// =====================================================================
-// File-local helpers (pure refactoring — no behavior changes)
-// =====================================================================
-namespace {
-
-// Free prefill metadata buffers when not using the pre-allocated pool.
-void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables, int* d_context_lens,
-                          cudaStream_t stream) {
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
-}
-
-// Compute a deterministic-but-varying seed for each decode step.
-// Mixes the request seed (or a hash of the request ID + clock) with
-// the current output token count so each step gets a unique RNG draw.
-int compute_step_seed(const Request& req) {
-    int base_seed = req.seed >= 0
-                        ? req.seed
-                        : static_cast<int>(std::hash<int>{}(req.id) ^
-                                           std::chrono::steady_clock::now().time_since_epoch().count());
-    int step = static_cast<int>(req.output_tokens.size());
-    return base_seed + step;
-}
-
-// Build a TokenLogprobInfo from raw logits on the host.
-TokenLogprobInfo build_logprob_info(const float* h_logits, int vocab_size, int32_t sampled_token,
-                                    int top_logprobs, Tokenizer* tok) {
-    LogprobResult lp_result;
-    compute_logprobs_cpu(h_logits, vocab_size, sampled_token, top_logprobs, &lp_result);
-
-    TokenLogprobInfo info;
-    info.logprob = lp_result.sampled_logprob;
-    info.text = tok->decode_token(sampled_token);
-    info.top.reserve(lp_result.top.size());
-    for (const auto& [tid, tlp] : lp_result.top) {
-        info.top.push_back({tid, tlp, tok->decode_token(tid)});
-    }
-    return info;
-}
-
-// Ensure workspace 0 is active (used before prefill and after decode).
-void ensure_prefill_workspace(GraphExecutor* executor) {
-    if (executor->has_decode_workspace() && executor->active_workspace() != 0) {
-        executor->use_workspace(0);
-    }
-}
-
-}  // anonymous namespace
+// File-local helpers were lifted to runtime/engine_internal.h so that
+// the per-subsystem engine_*.cpp translation units (Phase 4 Tasks 2-7)
+// can share them. The using-declarations below preserve the unqualified
+// call sites in this file.
+using engine_internal::build_logprob_info;
+using engine_internal::compute_step_seed;
+using engine_internal::ensure_prefill_workspace;
+using engine_internal::free_prefill_buffers;
 
 Engine::~Engine() {
     // Save prefix cache to disk before shutdown
