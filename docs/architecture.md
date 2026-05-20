@@ -53,7 +53,7 @@ distinct private methods on `Engine`:
 | Load runtime config | `RuntimeConfig::load()` | `imp.conf` + `--config` CLI + legacy env-var seeds (`src/runtime/config.cpp`) |
 | Resolve quant/KV/SSM dtypes | `init_resolve_*` group | `init_resolve_kv_dtype_policy_`, `init_resolve_ssm_dtype_`, `init_resolve_fp8_prefill_`, `init_resolve_quant_flags_` |
 | Compute max sequence length | `init_compute_max_seq_len_` | VRAM budget → max context (`src/runtime/vram_budget.cpp`) |
-| Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant orchestrated by `src/exec/executor_pre_dequant.cu` (76 LOC dispatcher, calls 7 per-phase TUs: `pre_dequant_phase0_nvfp4_loader.cu`, `phase1_fp16_cache.cu`, `phase2_fp8_cache.cu`, `phase3_nvfp4_decode.cu`, `phase3c_mxfp4.cu`, `phase4_tensor_registry.cu`) |
+| Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant in `src/exec/executor_pre_dequant.cu` |
 | Init KV cache | `init_kv_cache` | Paged blocks (block_size=16); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
 | Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~1 GiB — see Known wounds), FP8 activation scratch, split-K attn scratch |
 | Warm up | `warmup()` | Captures CUDA graph for decode (`src/runtime/cuda_graph.cu`) |
