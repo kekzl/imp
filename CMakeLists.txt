@@ -248,6 +248,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_workspace_buffers.cu
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cu
+    src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/executor_workspace_config.cu
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
