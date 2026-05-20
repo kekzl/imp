@@ -1,0 +1,220 @@
+digraph imp_e2e {
+    rankdir=TB;
+    graph [
+        fontname="Helvetica",
+        fontsize=11,
+        labelloc=t,
+        label="imp — End-to-End LLM Load + Execution Pipeline\n(RTX 5090 / sm_120a CUDA Inference Engine)",
+        bgcolor="white",
+        nodesep=0.3,
+        ranksep=0.4,
+        splines=ortho
+    ];
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", margin="0.15,0.08"];
+    edge [fontname="Helvetica", fontsize=9, color="#333333"];
+
+    // === User / Binary ===
+    user [label="User / CLI / Server", fillcolor="#1f2937", fontcolor="white", shape=ellipse];
+
+    subgraph cluster_binaries {
+        label="Binaries (tools/)";
+        style="rounded,filled"; fillcolor="#f3f4f6"; fontcolor="#374151";
+        bin_cli    [label="imp-cli\nmain.cpp + args.cpp", fillcolor="#e5e7eb"];
+        bin_server [label="imp-server\nHTTP/SSE (cpp-httplib)", fillcolor="#e5e7eb"];
+        bin_bench  [label="imp-bench\ngemm/attn/e2e", fillcolor="#e5e7eb"];
+    }
+
+    // === Public C API ===
+    subgraph cluster_api {
+        label="Public C API   (include/imp/*.h, src/api/imp_api.cpp)";
+        style="rounded,filled"; fillcolor="#dbeafe"; fontcolor="#1e3a8a";
+        api_load     [label="imp_model_load\n(path) → ImpModel", fillcolor="#bfdbfe"];
+        api_ctx      [label="imp_context_create\n(model, ImpConfig) → ImpContext", fillcolor="#bfdbfe"];
+        api_tok      [label="imp_tokenize /\nimp_detokenize", fillcolor="#bfdbfe"];
+        api_pref     [label="imp_prefill_with_params\n(tokens, n) → status", fillcolor="#bfdbfe"];
+        api_dec      [label="imp_decode_step\n(params) → next token", fillcolor="#bfdbfe"];
+        api_gen      [label="imp_generate /\nimp_generate_streaming", fillcolor="#bfdbfe"];
+    }
+
+    // === Phase 1: Model Loading ===
+    subgraph cluster_load {
+        label="① Load Phase  (one-time, src/model/)";
+        style="rounded,filled"; fillcolor="#ecfdf5"; fontcolor="#065f46";
+        load_detect [label="Format detect\nfile.gguf vs ./hf-dir/"];
+        load_gguf [label="GGUFLoader\ngguf_loader.cpp", fillcolor="#a7f3d0"];
+        load_st   [label="SafeTensorsLoader\nsafetensors_loader.cpp + hf_config_loader", fillcolor="#a7f3d0"];
+        load_llmc [label="LLM-Compressor recipe\nllm_compressor_loader.cpp\n(NVFP4 input_scale, etc.)", fillcolor="#a7f3d0"];
+        load_tok  [label="Tokenizer\nBPE / SentencePiece / Qwen2\ntokenizer.cpp + chat_template.cpp", fillcolor="#a7f3d0"];
+        load_tmap [label="Weight map\nweight_map.cpp\n(tensor name → role)", fillcolor="#a7f3d0"];
+        load_model [label="Model object\nModelConfig + tensor refs\nmodel.cpp / model_arch.h", fillcolor="#6ee7b7"];
+    }
+
+    // === Phase 2: Engine init ===
+    subgraph cluster_init {
+        label="② Engine Init  (one-time, src/runtime/engine.cpp ~929-1622)";
+        style="rounded,filled"; fillcolor="#f0f9ff"; fontcolor="#0c4a6e";
+        init_cfg [label="RuntimeConfig::load()\nimp.conf + --config + --set\n+ legacy env seeds", fillcolor="#bae6fd"];
+        init_dtype [label="init_resolve_kv_dtype_policy_\ninit_resolve_ssm_dtype_\ninit_resolve_fp8_prefill_\ninit_resolve_quant_flags_", fillcolor="#bae6fd"];
+        init_seqlen [label="init_compute_max_seq_len_\n(VRAM budget → max ctx)\nvram_budget.cpp", fillcolor="#bae6fd"];
+        init_weights [label="init_weights\nupload_weight + upload_expert_weights\nweight_upload.cu\n+ pre-dequant (Q8→FP16→FP8 cache)\nexecutor_pre_dequant.cu", fillcolor="#7dd3fc"];
+        init_kv [label="init_kv_cache\npaged blocks (size=16)\nKV dtype (FP16/FP8/INT8/INT4/NVFP4/MXFP4)", fillcolor="#7dd3fc"];
+        init_ws [label="init_features\nworkspace buffers\nexecutor_workspace_buffers.cu\n• MMVQ scratch (~110 MiB)\n• cuBLAS S-matrix (~1 GiB!)\n• FP8 activation scratch\n• Split-K attn scratch", fillcolor="#7dd3fc"];
+        init_warmup [label="warmup()\nCUDA graph capture (decode)\ncuda_graph.cu", fillcolor="#7dd3fc"];
+        init_engine [label="Engine ready\n(GraphExecutor + Tokenizer + KV manager)", fillcolor="#38bdf8", fontcolor="white"];
+    }
+
+    // === Phase 3: Per-Request Prefill ===
+    subgraph cluster_prefill {
+        label="③ Per-Request Prefill  (engine.cpp::step_prefill)";
+        style="rounded,filled"; fillcolor="#fef3c7"; fontcolor="#78350f";
+        pref_tok [label="Tokenize prompt\n(chat template applied)"];
+        pref_chunk [label="Chunked prefill\nprefill_chunk_size\n(per-arch default)", fillcolor="#fde68a"];
+        pref_fwd [label="GraphExecutor::forward()\nexecutor_forward.cu\n(per chunk, per layer)", fillcolor="#fcd34d"];
+
+        // Layer loop sub-cluster
+        subgraph cluster_layer {
+            label="Per-Layer Forward";
+            style="rounded,filled"; fillcolor="#fffbeb"; fontcolor="#92400e";
+            l_rmsn1 [label="RMSNorm", fillcolor="#fef3c7"];
+            l_qkv [label="QKV GEMM\n+ RoPE + KV-cache write\nexecutor_kv_write.cu", fillcolor="#fef3c7"];
+            l_attn [label="Attention\n(see dispatch →)", fillcolor="#fbbf24"];
+            l_oproj [label="O proj GEMM", fillcolor="#fef3c7"];
+            l_rmsn2 [label="RMSNorm + residual"];
+            l_ffn [label="FFN  (dense)\n  gate+up GEMM → SwiGLU →\n  down GEMM\nexecutor_ffn.cu\n  — OR —\nMoE (Qwen3.6 / Gemma-4 / Coder-30B)\nrouting → top-k → grouped GEMM\nexecutor_forward_moe.cu", fillcolor="#fef3c7"];
+            l_rmsn1 -> l_qkv -> l_attn -> l_oproj -> l_rmsn2 -> l_ffn [style=dashed, color="#d97706"];
+        }
+
+        pref_logits [label="Final RMSNorm + LM head\n→ logits (last chunk only)"];
+    }
+
+    // === Attention Dispatcher detail ===
+    subgraph cluster_attn_dispatch {
+        label="Attention Dispatcher  (3 layers, 10 paths)";
+        style="rounded,filled"; fillcolor="#fee2e2"; fontcolor="#7f1d1d";
+        ad_gate [label="executor_attention.cu:847\nif (force_cublas || !no_cublas)\n  && attn_scores_buf_\n  && n ≤ cap\n  && (force_cublas || !sliding)", fillcolor="#fecaca", shape=diamond, margin="0.08,0.05"];
+        ad_naive [label="naive_attention_prefill\n(Gemma-4 hd=512 fallback)", fillcolor="#fee2e2"];
+        ad_cublas [label="attention_cublas_prefill\ncuBLAS QK^T → 1 GiB S-matrix\n→ causal_softmax → cuBLAS PV", fillcolor="#fca5a5"];
+        ad_chain [label="attention_prefill_dispatch\nMXFP4-BS → MXFP4-legacy →\nFP8 → FP16 FMHA → WMMA fallback\nattention_dispatch.cu:30", fillcolor="#fee2e2"];
+        ad_decode [label="DECODE: switch(cache_dtype)\nINT4 / NVFP4±TC / MXFP4-KV /\nINT8 / FP8 / FP16-paged\nexecutor_attention.cu:996", fillcolor="#fecaca"];
+
+        ad_gate -> ad_naive [label="naive flag\n&& n≤2048", style=dotted, fontsize=8];
+        ad_gate -> ad_cublas [label="TRUE\n(typical Qwen3/Gemma-4)", fontsize=8, color="#dc2626"];
+        ad_gate -> ad_chain  [label="FALSE\n(rare: VRAM-full or sliding)", fontsize=8, color="#16a34a"];
+    }
+
+    // === Phase 4: Per-Request Decode Loop ===
+    subgraph cluster_decode {
+        label="④ Per-Request Decode  (per token, engine.cpp::step_decode_forward)";
+        style="rounded,filled"; fillcolor="#ffedd5"; fontcolor="#7c2d12";
+        dec_graph [label="Replay captured CUDA graph\n(if no graph: forward() direct)\ncuda_graph.cu", fillcolor="#fed7aa"];
+        dec_attn [label="Paged attention decode\n(see dispatch →)\npaged_attention_decode_*", fillcolor="#fed7aa"];
+        dec_ffn [label="FFN GEMV\n(dp4a/mma.sync/NVFP4)\nexecutor_ffn.cu", fillcolor="#fed7aa"];
+        dec_logits [label="LM head GEMV → logits"];
+        dec_pen [label="Apply penalties\nrepeat/freq/presence/DRY\nrequest.cpp"];
+        dec_samp [label="Sampler\ntemp/top-p/top-k/min-p/\ntypical/mirostat\nrequest.cpp", fillcolor="#fb923c", fontcolor="white"];
+        dec_stop [label="Stop check\n(EOS, max_tokens, stop_strings)", shape=diamond];
+        dec_mtp [label="MTP spec-decode\n(optional, k drafts)\nmtp_forward.cu", fillcolor="#ffedd5"];
+    }
+
+    // === Memory subsystem (sidebar) ===
+    subgraph cluster_mem {
+        label="Memory  (src/memory + src/runtime/vram_*)";
+        style="rounded,filled"; fillcolor="#f5f3ff"; fontcolor="#4c1d95";
+        mem_alloc [label="VRAM allocator\nvram_allocator.cu", fillcolor="#ddd6fe"];
+        mem_kv [label="Paged KV cache\nblock_size=16\nKV manager (block_table)", fillcolor="#ddd6fe"];
+        mem_weight [label="Weight cache\nFP8 / NVFP4 prequant\n(prefill 2× speedup)", fillcolor="#ddd6fe"];
+        mem_expert [label="Expert weight cache\n(MoE host-offload)\nexpert_cache.cu", fillcolor="#ddd6fe"];
+    }
+
+    // === Kernel subsystem (sidebar) ===
+    subgraph cluster_kernels {
+        label="Kernels  (src/compute + src/quant)";
+        style="rounded,filled"; fillcolor="#fdf2f8"; fontcolor="#831843";
+        k_attn [label="Attention\nfmha_sm120 (FP16/FP8/MXFP4/cluster)\npaged_attention_decode_*\nattention_cublas_prefill", fillcolor="#fbcfe8"];
+        k_gemm [label="GEMM\ncuBLAS / CUTLASS (NVFP4/MXFP4/FP8)\nmmq_q4k v1+v2\ngemv_dp4a / gemv_nvfp4", fillcolor="#fbcfe8"];
+        k_quant [label="Quant / Dequant\ndequant_q8_0 / Q4_K\nquantize_fp16_nvfp4_cutlass\ncalibrate_quantize_fp8", fillcolor="#fbcfe8"];
+        k_misc [label="RMSNorm, RoPE,\nSwiGLU, Softmax\nfused QKnorm+RoPE", fillcolor="#fbcfe8"];
+    }
+
+    // === Edges: user / binaries → API ===
+    user -> bin_cli [color="#1f2937"];
+    user -> bin_server [color="#1f2937"];
+    user -> bin_bench [color="#1f2937"];
+    bin_cli -> api_load [style=dashed];
+    bin_cli -> api_ctx [style=dashed];
+    bin_cli -> api_tok [style=dashed];
+    bin_cli -> api_pref [style=dashed];
+    bin_cli -> api_dec [style=dashed];
+
+    // === Edges: API → phases ===
+    api_load -> load_detect [color="#059669"];
+    load_detect -> load_gguf [label=".gguf"];
+    load_detect -> load_st   [label="HF dir"];
+    load_st -> load_llmc [label="recipe.yaml", style=dotted];
+    load_gguf -> load_tmap;
+    load_st -> load_tmap;
+    load_gguf -> load_tok;
+    load_st -> load_tok;
+    load_tmap -> load_model;
+    load_tok -> load_model;
+
+    api_ctx -> init_cfg [color="#0284c7"];
+    init_cfg -> init_dtype;
+    load_model -> init_dtype [style=dashed, color="#65a30d"];
+    init_dtype -> init_seqlen;
+    init_seqlen -> init_weights;
+    init_weights -> init_kv;
+    init_kv -> init_ws;
+    init_ws -> init_warmup;
+    init_warmup -> init_engine;
+
+    api_pref -> pref_tok [color="#d97706"];
+    api_tok  -> pref_tok [style=dotted];
+    init_engine -> pref_chunk [style=dashed, color="#65a30d"];
+    pref_tok -> pref_chunk;
+    pref_chunk -> pref_fwd;
+    pref_fwd -> l_rmsn1 [lhead=cluster_layer, style=invis];
+    l_ffn -> pref_logits [ltail=cluster_layer, label="× N layers", color="#d97706"];
+
+    api_dec -> dec_graph [color="#ea580c"];
+    init_engine -> dec_graph [style=dashed, color="#65a30d"];
+    pref_logits -> dec_graph [label="first token from\nprefill", style=dashed, color="#d97706"];
+    dec_graph -> dec_attn;
+    dec_attn -> dec_ffn;
+    dec_ffn -> dec_logits;
+    dec_logits -> dec_pen;
+    dec_pen -> dec_samp;
+    dec_samp -> dec_stop;
+    dec_stop -> dec_graph [label="next token", color="#ea580c"];
+    dec_stop -> api_dec [label="EOS/limit", color="#ea580c", style=dashed];
+    dec_graph -> dec_mtp [style=dotted, label="if MTP\nenabled"];
+
+    // === Attention dispatch wiring ===
+    l_attn -> ad_gate [color="#7f1d1d", style=dashed];
+    dec_attn -> ad_decode [color="#7f1d1d", style=dashed];
+
+    // === Memory references (dashed grey) ===
+    init_weights -> mem_weight [style=dotted, color="#7c3aed", arrowhead=none];
+    init_kv -> mem_kv [style=dotted, color="#7c3aed", arrowhead=none];
+    init_ws -> mem_alloc [style=dotted, color="#7c3aed", arrowhead=none];
+    pref_fwd -> mem_kv [style=dotted, color="#7c3aed", arrowhead=none];
+    dec_attn -> mem_kv [style=dotted, color="#7c3aed", arrowhead=none];
+
+    // === Kernel references (dashed pink) ===
+    ad_chain -> k_attn [style=dotted, color="#be185d", arrowhead=none];
+    ad_cublas -> k_attn [style=dotted, color="#be185d", arrowhead=none];
+    ad_decode -> k_attn [style=dotted, color="#be185d", arrowhead=none];
+    l_qkv -> k_gemm [style=dotted, color="#be185d", arrowhead=none];
+    l_ffn -> k_gemm [style=dotted, color="#be185d", arrowhead=none];
+    init_weights -> k_quant [style=dotted, color="#be185d", arrowhead=none];
+
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style="rounded,filled"; fillcolor="#fafafa"; fontcolor="#525252";
+        leg_phase [label="phase / pipeline", fillcolor="#dbeafe"];
+        leg_data [label="data flow", fontsize=9, shape=plaintext];
+        leg_mem  [label="memory ref", fontsize=9, shape=plaintext, fontcolor="#7c3aed"];
+        leg_kern [label="kernel call", fontsize=9, shape=plaintext, fontcolor="#be185d"];
+    }
+}
