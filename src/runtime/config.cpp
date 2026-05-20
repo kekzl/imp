@@ -126,8 +126,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.mxfp4_fp16_fallback = parse_bool(val, cfg.attention.mxfp4_fp16_fallback);
     else if (eq("attention.mxfp4_fp16_cache_policy"))
         cfg.attention.mxfp4_fp16_cache_policy = val;
-    else if (eq("attention.fmha_blockscale"))
-        cfg.attention.fmha_blockscale = val;
     else if (eq("attention.naive"))
         cfg.attention.naive = parse_bool(val, cfg.attention.naive);
     else if (eq("attention.no_cublas"))

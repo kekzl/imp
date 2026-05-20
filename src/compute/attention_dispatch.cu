@@ -7,7 +7,6 @@
 
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_fmha_mxfp4_sm120.h"
-#include "compute/attention_fmha_mxf4nvf4_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
 
 namespace imp {
@@ -32,21 +31,9 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
     // Enabled with IMP_MXFP4_ATTENTION=1.
-    //
-    // By default uses kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 with
-    // per-16-element UE4M3 scales (+1.8% vs legacy at HD=128). head_dim=96
-    // internally falls back to legacy kind::f8f6f4.m16n8k32 (not multiple of 64).
-    // Set IMP_FMHA_BLOCKSCALE=0 to force the legacy path entirely (A/B testing).
     if (attention_mxfp4_available()) {
-        static const bool use_blockscale = !mxf4nvf4_blockscale_disabled();
-        if (use_blockscale) {
-            if (fmha_sm120_mxf4nvf4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
-                return;
-            }
-        } else {
-            if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
-                return;
-            }
+        if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+            return;
         }
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
     }
