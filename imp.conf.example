@@ -50,11 +50,9 @@ fmha_sm120           = "auto"
 mxfp4                = "auto"
 mxfp4_fp16_fallback  = false
 fmha_blockscale      = "auto"
-naive                = false
 no_cublas            = false
 force_cublas_decode  = false
 no_qknorm_fused      = false
-no_naive_swa         = false
 splitk_pipe          = true
 gate_concat          = false
 
