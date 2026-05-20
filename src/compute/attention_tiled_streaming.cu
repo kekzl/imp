@@ -1,6 +1,5 @@
 #include "compute/attention_tiled_streaming.h"
 #include "core/logging.h"
-#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace imp {
