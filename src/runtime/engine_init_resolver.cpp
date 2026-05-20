@@ -21,7 +21,7 @@ namespace imp {
 // (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs) and
 // cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
 void Engine::init_apply_debug_raw_overrides_() {
-    const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
+    const bool debug_raw_ = runtime_config_.runtime.debug_raw;
     if (!debug_raw_)
         return;
     IMP_LOG_INFO(
@@ -54,9 +54,9 @@ void Engine::init_apply_debug_raw_overrides_() {
 // are opt-in. See the inline rationale for the 2026-04-24 root-cause memo.
 void Engine::init_resolve_kv_dtype_policy_() {
     const auto& mcfg = model_->config();
-    const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
-    const bool force_kv_fp16 = (RuntimeConfig::current().kv_cache.dtype == "fp16");
-    const bool fp8_auto_legacy = RuntimeConfig::current().kv_cache.fp8_auto_legacy;
+    const bool debug_raw_ = runtime_config_.runtime.debug_raw;
+    const bool force_kv_fp16 = (runtime_config_.kv_cache.dtype == "fp16");
+    const bool fp8_auto_legacy = runtime_config_.kv_cache.fp8_auto_legacy;
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
@@ -77,11 +77,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
-        !RuntimeConfig::current().kv_cache.allow_nondeterministic_fp8 &&
-        !RuntimeConfig::current().runtime.deterministic_gemm) {
-        RuntimeConfig promoted = RuntimeConfig::current();
-        promoted.runtime.deterministic_gemm = true;
-        RuntimeConfig::install(promoted);
+        !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
+        !runtime_config_.runtime.deterministic_gemm) {
+        // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
+        // (formerly an install() call into the global singleton).
+        runtime_config_.runtime.deterministic_gemm = true;
         setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
@@ -138,8 +138,8 @@ void Engine::init_resolve_ssm_dtype_() {
 // produce garbage decode with FP8 weight cache active — accumulated
 // dequant error through deep narrow-GQA stacks.
 void Engine::init_resolve_fp8_prefill_() {
-    const bool no_fp8_prefill = (RuntimeConfig::current().attention.fp8_prefill == "never");
-    if (!config_.use_fp8_prefill && !RuntimeConfig::current().runtime.debug_raw && !no_fp8_prefill) {
+    const bool no_fp8_prefill = (runtime_config_.attention.fp8_prefill == "never");
+    if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
     } else if (no_fp8_prefill) {
@@ -264,10 +264,10 @@ void Engine::init_resolve_quant_flags_() {
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
         // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
         // deterministic GEMM paths so generation is stable run-to-run.
-        if (!RuntimeConfig::current().runtime.deterministic_gemm) {
-            RuntimeConfig promoted = RuntimeConfig::current();
-            promoted.runtime.deterministic_gemm = true;
-            RuntimeConfig::install(promoted);
+        if (!runtime_config_.runtime.deterministic_gemm) {
+            // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
+            // (formerly an install() call into the global singleton).
+            runtime_config_.runtime.deterministic_gemm = true;
             IMP_LOG_INFO(
                 "Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }
@@ -296,7 +296,7 @@ void Engine::init_resolve_quant_flags_() {
 // via runtime.max_seq_len.
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
-    if (int v = RuntimeConfig::current().runtime.max_seq_len; v > 0) {
+    if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
         config_.max_seq_len = v;
         IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
     }

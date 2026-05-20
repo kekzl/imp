@@ -181,7 +181,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec2 = 0;
     }
     // Diagnostic: generation.mtp_no_rope (legacy IMP_MTP_NO_ROPE=1) disables RoPE entirely.
-    if (RuntimeConfig::current().generation.mtp_no_rope) {
+    if (runtime_config_.generation.mtp_no_rope) {
         ws->rope_dim = 0;
     }
     // Runtime weight_offset matches what the main model's rmsnorm calls pass:
@@ -573,6 +573,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_ = std::move(model);
     config_ = config;
 
+    // Phase 5 Track D: snapshot the process-wide RuntimeConfig into the
+    // per-Engine field. main.cpp (imp-cli / imp-server) has already called
+    // RuntimeConfig::install(load(...)) by this point. After this assign,
+    // every Engine::* method reads runtime_config_ directly; engine_init_
+    // resolver_ helpers mutate this snapshot in place for arch-specific
+    // defaults.
+    runtime_config_ = RuntimeConfig::current();
+
     const auto& mcfg = model_->config();
 
     init_apply_debug_raw_overrides_();
@@ -603,7 +611,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     if (!init_features())
         return false;
-    if (!RuntimeConfig::current().runtime.warmup) {
+    if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
     } else {
         warmup();
@@ -618,6 +626,10 @@ bool Engine::init_weights() {
     // Initialize graph executor (Phase 1: compute sizes, no GPU allocation)
     executor_ = std::make_unique<GraphExecutor>();
     executor_->set_vram_allocator(&memory_manager_.vram_allocator());
+    // Phase 5 Track D: wire per-Engine RuntimeConfig before any executor init.
+    // GraphExecutor methods read this via runtime_config() instead of the
+    // RuntimeConfig::current() singleton.
+    executor_->set_runtime_config(runtime_config_);
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,
@@ -799,7 +811,7 @@ bool Engine::init_weights() {
             // architectural caveat; Phase 5.1+ refactors dispatch kernels
             // to read the device mirror at runtime so the captured graph
             // adapts correctly.
-            if (RuntimeConfig::current().moe.allow_graphs_under_offload) {
+            if (runtime_config_.moe.allow_graphs_under_offload) {
                 IMP_LOG_WARN(
                     "CUDA graphs ENABLED under host-offload "
                     "(moe.allow_graphs_under_offload=true). EXPERIMENTAL: output "
@@ -818,7 +830,7 @@ bool Engine::init_weights() {
                 config_.use_cuda_graphs = false;
             }
         }
-        if (RuntimeConfig::current().runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
+        if (runtime_config_.runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: runtime.cuda_graphs=never");
             config_.use_cuda_graphs = false;
         }
@@ -923,7 +935,7 @@ bool Engine::init_kv_cache() {
     // residual write/read kernels read the state at execution time. This
     // makes the whole path graph-capture-safe — graphs stay enabled.
     {
-        const auto& rcfg = RuntimeConfig::current();
+        const auto& rcfg = runtime_config_;
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
@@ -1179,7 +1191,7 @@ void Engine::build_banned_token_list() {
     // Diagnostic bypass: generation.no_ban (legacy IMP_NO_BAN=1) disables the
     // ban list. Used to bisect Mistral-Small-3.2-NVFP4 long-form repetition
     // (ban vs weight quality).
-    if (RuntimeConfig::current().generation.no_ban) {
+    if (runtime_config_.generation.no_ban) {
         banned_token_ids_.clear();
         IMP_LOG_WARN("generation.no_ban=true: skipping banned-token list (debug)");
         return;
@@ -1865,7 +1877,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // = prefill_chunk_size). H2D upload happened above on pf_stream
         // *before* this wrapper — captured region is forward_logits only,
         // analogous to the decode graph pattern.
-        const bool prefill_graph_enabled = RuntimeConfig::current().runtime.prefill_graph;
+        const bool prefill_graph_enabled = runtime_config_.runtime.prefill_graph;
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs;
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
@@ -2308,7 +2320,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     std::vector<int32_t> tokens;
     Tensor decode_logits_out;
 
-    const bool profiling = RuntimeConfig::current().diagnostics.profile;
+    const bool profiling = runtime_config_.diagnostics.profile;
     int graph_idx = gpu_batch.n_sequences - 1;
     if (config_.use_cuda_graphs && !profiling && gpu_batch.n_sequences > 0 && graph_idx < kMaxGraphPoolSize &&
         decode_batch_pool_.is_allocated()) {
@@ -2382,7 +2394,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             if (match) mtp_accuracy_.matches++;
             // Optional verbose log: prints (predicted, actual, match) with
             // decoded strings so accept patterns can be analyzed offline.
-            const bool s_pattern_log = RuntimeConfig::current().diagnostics.mtp_pattern_log;
+            const bool s_pattern_log = runtime_config_.diagnostics.mtp_pattern_log;
             if (s_pattern_log) {
                 Tokenizer* tok = model_->tokenizer();
                 std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
@@ -2431,7 +2443,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Optional: apply the main model's output norm before passing
             // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
             // in some MTP variants; gate by env so we can A/B.
-            const bool s_pre_norm_h = RuntimeConfig::current().diagnostics.mtp_prenorm_h;
+            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h;
             const void* h_for_mtp = h_view.data;
             // Scratch buffer for the normalized variant (allocated once).
             static void* s_h_normed = nullptr;
