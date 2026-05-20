@@ -48,9 +48,9 @@ PR #78's `use_default_system_prompt=false` workaround for Mistral-3.2-NVFP4 long
 
 ### Qwen3.5-27B MXFP4 fails at load — Phase A1+A2 shipped (#244); A3 gated on two external blockers
 
-12 GiB of MXFP4 weights plus the 48 GiB FP16 fallback oversubscribes 32 GB of VRAM. PR #60 converted the original IMA into a clean `IMP_LOG_ERROR` pre-flight refusal at `src/graph/executor_pre_dequant.cu:1532-1574`. **Design memo:** `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`.
+12 GiB of MXFP4 weights plus the 48 GiB FP16 fallback oversubscribes 32 GB of VRAM. PR #60 converted the original IMA into a clean `IMP_LOG_ERROR` pre-flight refusal at `src/exec/executor_pre_dequant.cu:1532-1574`. **Design memo:** `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`.
 
-**Phase A1+A2 shipped via PR #244 (2026-05-17):** new `attention.mxfp4_fp16_cache_policy` config field (default `legacy` = pre-PR behavior; `pruned` skips MoE `expert_*_packed` + LM head `out_proj_` from the FP16 fallback cache). Code at `src/graph/executor_pre_dequant.cu:1521-1571`. Validated on **Qwen3.5-4B MXFP4** (dense, the only locally-available MXFP4 model — the original `Qwen3.5-27B-mxfp4.gguf` mentioned in older memos is no longer on disk): FP16 cache shrinks 8020 → 6807.50 MiB (−1.18 GiB = LM head only, no MoE in dense 4B); pp64 +39 %, tg32 +11 %. The MoE expert prune is wired but not exercised by any local MXFP4 model. No production-default flip (`legacy` remains the default until a Qwen3.5-27B end-to-end test runs).
+**Phase A1+A2 shipped via PR #244 (2026-05-17):** new `attention.mxfp4_fp16_cache_policy` config field (default `legacy` = pre-PR behavior; `pruned` skips MoE `expert_*_packed` + LM head `out_proj_` from the FP16 fallback cache). Code at `src/exec/executor_pre_dequant.cu:1521-1571`. Validated on **Qwen3.5-4B MXFP4** (dense, the only locally-available MXFP4 model — the original `Qwen3.5-27B-mxfp4.gguf` mentioned in older memos is no longer on disk): FP16 cache shrinks 8020 → 6807.50 MiB (−1.18 GiB = LM head only, no MoE in dense 4B); pp64 +39 %, tg32 +11 %. The MoE expert prune is wired but not exercised by any local MXFP4 model. No production-default flip (`legacy` remains the default until a Qwen3.5-27B end-to-end test runs).
 
 **Phase A3 (verify on 27B) gated on two independent external blockers — neither in imp's control:**
 
@@ -67,7 +67,7 @@ Q4_K_M decodes coherent for chat but degenerates on complex code-gen prompts (Fi
 
 ### MoE expert offload disables CUDA Graphs
 
-Decode fast-path (`src/graph/executor_forward_moe.cu:524`) handles all device-resident MoE quants — Q6_K, Q8_0, Q4_0, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, NVFP4 — fully device-side (no D2H memcpy of routing or expert offsets), so CUDA Graphs capture cleanly. Verified A/B 2026-05-07: Qwen3-Coder Q6_K tg128 117 → 232 tok/s (+97%), Gemma-4 Q4_K_M tg128 65 → 179 tok/s (+177%).
+Decode fast-path (`src/exec/executor_forward_moe.cu:524`) handles all device-resident MoE quants — Q6_K, Q8_0, Q4_0, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, NVFP4 — fully device-side (no D2H memcpy of routing or expert offsets), so CUDA Graphs capture cleanly. Verified A/B 2026-05-07: Qwen3-Coder Q6_K tg128 117 → 232 tok/s (+97%), Gemma-4 Q4_K_M tg128 65 → 179 tok/s (+177%).
 
 The remaining limitation is **host-offloaded experts**: when the model + KV doesn't fit in VRAM, `experts_on_host_=true` triggers per-layer H2D staging via `expert_cache_` LRU at `executor_forward_moe.cu:1256-1278` (dequant path) and `:1413-1426` (fused-GEMV path), inserting a host pointer dereference + `cudaMemcpyAsync` per expert per token. `engine.cpp:1158-1165` disables CUDA Graphs in that mode. Tip: bumping `IMP_EXPERT_OVERHEAD_PCT` from 30 to 10 trades VRAM headroom for full on-device experts and unlocks +97% to +234% decode (Qwen3-Coder Q6_K is the real workload that actually triggers host-offload today). Generalising the LRU prefetch to be device-side / async-pipelined would restore Graphs while keeping host-offload available. **Design memo:** `docs/plans/moe_host_offload_graphs_design_2026_05_17.md` (4-6 weeks for full Phase 1-5).
 
@@ -203,7 +203,7 @@ A Blackwell-style cluster-launch variant of the FMHA prefill kernel (DSMEM K-bro
 
 ### GEMM dispatch unification (R5) — DONE
 
-The 21-parameter `gemm_dispatch_impl` god-dispatcher has been **retired**. The strategy-keyed `GemmKernel` registry (`src/graph/gemm_kernel_registry.h`) is the unconditional dispatch path. Slice 8.6 (final) closed the cross-axis refactor by migrating the QW7 dual-cache CUTLASS MXFP4 probe into the CUTLASS_NVFP4 handler, deleting the legacy switch (~247 LOC), and hoisting `mmvq_scratch_get_or_grow` into its own TU (`src/graph/gemm_scratch.{h,cu}`).
+The 21-parameter `gemm_dispatch_impl` god-dispatcher has been **retired**. The strategy-keyed `GemmKernel` registry (`src/exec/gemm_kernel_registry.h`) is the unconditional dispatch path. Slice 8.6 (final) closed the cross-axis refactor by migrating the QW7 dual-cache CUTLASS MXFP4 probe into the CUTLASS_NVFP4 handler, deleting the legacy switch (~247 LOC), and hoisting `mmvq_scratch_get_or_grow` into its own TU (`src/exec/gemm_scratch.{h,cu}`).
 
 | Slice | Tier / scope | Status |
 |---|---|---|
