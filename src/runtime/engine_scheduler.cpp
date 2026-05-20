@@ -1293,5 +1293,4 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         }
     }
 }
-}
 }  // namespace imp
