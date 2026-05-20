@@ -476,6 +476,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_chunked.cu
         tests/test_attention_prefill_paths_bench.cu
         tests/test_tiled_attention_ceiling_bench.cu
+        tests/test_attention_tiled_streaming.cu
     )
 
     imp_add_test_module(test-quant SOURCES
