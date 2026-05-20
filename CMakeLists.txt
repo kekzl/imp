@@ -228,14 +228,14 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_sampling_stop.cpp
-    src/runtime/vision_pipeline.cpp
+    src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
-    src/runtime/mtp_forward.cu
+    src/compute/mtp_forward.cu
 )
 
 set(IMP_EXEC_SOURCES

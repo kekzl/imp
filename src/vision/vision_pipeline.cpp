@@ -1,4 +1,4 @@
-#include "runtime/vision_pipeline.h"
+#include "vision/vision_pipeline.h"
 #include "vision/vision_loader.h"
 #include "vision/image_processor.h"
 #include "model/model.h"
