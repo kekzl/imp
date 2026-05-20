@@ -221,7 +221,12 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/batch.cpp
     src/runtime/engine.cpp
     src/runtime/engine_init_resolver.cpp
+    src/runtime/engine_weight_upload.cpp
+    src/runtime/engine_kv_cache_init.cpp
+    src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
+    src/runtime/engine_scheduler.cpp
+    src/runtime/engine_sampling_stop.cpp
     src/runtime/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
