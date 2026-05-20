@@ -71,6 +71,8 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 ---
 
 ### Phase 3 — Pre-Dequant + Quant-Zoo aufräumen
+**Status (2026-05-20):** Closed. Landed: #301 (shared helpers header), #302 (Phase 1 FP16 cache), #303 (Phase 2 FP8 cache), #304 (Phase 4 tensor registry), #305 (Phase 0 + 0b NVFP4 loader combined), #306 (Phase 3 NVFP4 decode — entry + 9 helpers, the biggest piece at 1325 LOC), #307 (Phase 3c standalone MXFP4 + dead-include sweep). This PR (#308) closes Phase 3 with the roadmap status + architecture.md update. The plan deviated from "split by quant family" to "split by execution phase" because the spec's premise (per-Q-type functions exist) was wrong — phases handle multiple formats per orchestration step. **Result:** `executor_pre_dequant.cu` is now 76 LOC pure orchestrator (was 2693 LOC, target was ≤200 — beat by >60% margin). Soft PRs 8 (gemm_kernel registry alignment) and 9 (dequant_*.cu reconciliation doc) **deferred** to opportunistic work.
+
 **Goal:** `executor_pre_dequant.cu` (2693 LOC) becomes a thin dispatcher over a format registry, with one source file per quant family.
 
 **Critical PRs**
