@@ -285,24 +285,22 @@ struct RuntimeConfig {
     // Convenience: locate + load + apply overrides + log a one-line summary.
     // Pass empty path to use the search-path default.
     static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides);
-
-    // ---- Process-wide singleton (legacy, being retired) ------------------
-    //
-    // Tools (imp-cli, imp-server) call install() once with the loaded
-    // RuntimeConfig before constructing the Engine. Engine::init() snapshots
-    // it into a per-Engine field (Phase 5 Track D, 2026-05-20) and from that
-    // point Engine::* and GraphExecutor::* methods read the per-instance
-    // copy instead of the singleton.
-    //
-    // The singleton remains for the long tail of free functions in
-    // src/compute/, src/quant/, src/model/, src/runtime/ that don't carry
-    // an Engine* / GraphExecutor* context (e.g. PDL kernel-attr lookup,
-    // gemm dispatch helpers, weight_upload static helpers, chat_template
-    // debug paths, graph_diag inline helpers). A follow-up PR will
-    // thread `const RuntimeConfig&` through those modules and delete
-    // current() / install().
-    static const RuntimeConfig& current();
-    static void install(const RuntimeConfig& cfg);
 };
+
+// ---- Pending-config handoff (tool-main → Engine) -----------------------
+//
+// The C API constructs Engine inside src/api/imp_api.cpp. Tool mains
+// (imp-cli, imp-server) load a RuntimeConfig from imp.conf + CLI
+// overrides at startup and need to hand that to Engine::init without
+// passing it through the ABI-stable ImpConfig C struct.
+//
+// Workflow: tool main calls set_pending_runtime_config(loaded_cfg) once,
+// then later imp_context_create() pulls it via take_pending_runtime_config()
+// and passes to Engine::init. This replaces the former
+// RuntimeConfig::install() process-wide singleton (Phase 5 Track D
+// follow-up, 2026-05-20) — the lifetime is now bounded to a single
+// Engine construction; there is no per-call accessor.
+void set_pending_runtime_config(RuntimeConfig cfg);
+RuntimeConfig take_pending_runtime_config();
 
 }  // namespace imp

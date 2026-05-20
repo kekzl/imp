@@ -474,25 +474,45 @@ RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
     return cfg;
 }
 
-// ---- Process-wide singleton ---------------------------------------------
+// ---- Pending-config handoff (tool main → Engine::init) ------------------
 //
-// First touch of the singleton seeds from legacy IMP_* env vars. This means
-// tests / library users that never call RuntimeConfig::load() still observe
-// env-based defaults. Subsequent install() calls overwrite the singleton.
+// Replaces the former RuntimeConfig::current()/install() singleton
+// (Phase 5 Track D follow-up, 2026-05-20). The static storage now lives
+// for at most one Engine construction: tool main stashes the loaded
+// config via set_pending_runtime_config(); imp_context_create() takes
+// it via take_pending_runtime_config() and hands it to Engine::init.
+// If the take() call finds no pending config (library users that never
+// called the setter), it returns a freshly loaded RuntimeConfig (with
+// the seed_from_env() legacy IMP_* compat path) so behavior matches
+// the historical first-touch-of-singleton initialization.
 
 namespace {
-RuntimeConfig& mutable_current() {
-    static RuntimeConfig instance = []() {
-        RuntimeConfig cfg;
-        seed_from_env(cfg);
-        return cfg;
-    }();
-    return instance;
+RuntimeConfig& pending_slot() {
+    static RuntimeConfig slot;
+    return slot;
+}
+bool& pending_set() {
+    static bool b = false;
+    return b;
 }
 }  // anonymous namespace
 
-const RuntimeConfig& RuntimeConfig::current() { return mutable_current(); }
+void set_pending_runtime_config(RuntimeConfig cfg) {
+    pending_slot() = std::move(cfg);
+    pending_set() = true;
+}
 
-void RuntimeConfig::install(const RuntimeConfig& cfg) { mutable_current() = cfg; }
+RuntimeConfig take_pending_runtime_config() {
+    if (pending_set()) {
+        pending_set() = false;
+        return std::move(pending_slot());
+    }
+    // No tool-main install — fall back to env-seeded defaults so tests
+    // and library users that skip RuntimeConfig::load() still observe
+    // legacy IMP_* env values.
+    RuntimeConfig cfg;
+    seed_from_env(cfg);
+    return cfg;
+}
 
 }  // namespace imp

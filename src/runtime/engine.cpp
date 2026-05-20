@@ -573,13 +573,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_ = std::move(model);
     config_ = config;
 
-    // Phase 5 Track D: snapshot the process-wide RuntimeConfig into the
-    // per-Engine field. main.cpp (imp-cli / imp-server) has already called
-    // RuntimeConfig::install(load(...)) by this point. After this assign,
-    // every Engine::* method reads runtime_config_ directly; engine_init_
+    // Phase 5 Track D (follow-up): take the pending RuntimeConfig stashed
+    // by tool main (imp-cli / imp-server) via set_pending_runtime_config().
+    // If no pending config was set (library/test embeddings), this returns
+    // a freshly loaded env-seeded default. Either way, every Engine::*
+    // method reads runtime_config_ directly from here on; engine_init_
     // resolver_ helpers mutate this snapshot in place for arch-specific
     // defaults.
-    runtime_config_ = RuntimeConfig::current();
+    runtime_config_ = take_pending_runtime_config();
 
     const auto& mcfg = model_->config();
 

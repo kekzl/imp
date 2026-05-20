@@ -8,6 +8,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 
@@ -80,13 +81,12 @@ void Engine::init_resolve_kv_dtype_policy_() {
         !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
         !runtime_config_.runtime.deterministic_gemm) {
         // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
-        // (formerly an install() call into the global singleton).
+        // (formerly an install() call into the global singleton). Free-
+        // function readers (gemm.cu's algo-selection skip-benchmark branch)
+        // now read from the process_diag cache; update it here too so the
+        // promotion is visible to them.
         runtime_config_.runtime.deterministic_gemm = true;
-        // TRANSITIONAL (Phase 5 Track D): mirror to RuntimeConfig::current() so
-        // free-function readers (e.g. gemm.cu's algo-selection skip-benchmark
-        // branch) see the promotion. The full free-function migration is the
-        // Phase 5 Track D follow-up PR; remove this dual-write when it lands.
-        RuntimeConfig::install(runtime_config_);
+        process_diag_set_deterministic_gemm(true);
         setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
@@ -271,10 +271,11 @@ void Engine::init_resolve_quant_flags_() {
         // deterministic GEMM paths so generation is stable run-to-run.
         if (!runtime_config_.runtime.deterministic_gemm) {
             // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
-            // (formerly an install() call into the global singleton).
+            // (formerly an install() call into the global singleton). Also
+            // update the process_diag cache so free-function gemm.cu reader
+            // observes the promotion (see FP8-KV block above).
             runtime_config_.runtime.deterministic_gemm = true;
-            // TRANSITIONAL (Phase 5 Track D): see comment in FP8-KV block above.
-            RuntimeConfig::install(runtime_config_);
+            process_diag_set_deterministic_gemm(true);
             IMP_LOG_INFO(
                 "Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }

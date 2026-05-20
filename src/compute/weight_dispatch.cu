@@ -7,7 +7,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -103,7 +103,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             // forcing dequant fixes coherence, the bug is in gemv_nvfp4_kpar
             // (numerical drift over many decode steps). Mirrors the Gemma-4
             // MoE M>1 fallback pattern.
-            const bool force_dequant = imp::RuntimeConfig::current().diagnostics.nvfp4_force_dequant;
+            const bool force_dequant = imp::process_diag_nvfp4_force_dequant();
             if (M == 1 && !force_dequant) {
                 // GEMV path
                 gemv_nvfp4_kpar(tmp, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data),

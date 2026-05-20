@@ -2,7 +2,7 @@
 #include "compute/warp_reduce.cuh"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -393,7 +393,7 @@ bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t st
     // d_output); any pointer change invalidates the captured slot.
     //
     // [runtime] no_vision_graph = true forces the eager path (debugging).
-    const bool disable_graph = RuntimeConfig::current().runtime.no_vision_graph;
+    const bool disable_graph = process_diag_no_vision_graph();
     if (disable_graph) {
         return encode_impl(d_pixels, d_output, stream);
     }

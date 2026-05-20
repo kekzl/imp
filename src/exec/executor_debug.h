@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -15,7 +15,7 @@
 
 namespace imp {
 
-inline bool debug_forward_enabled() { return RuntimeConfig::current().diagnostics.debug_forward; }
+inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); }
 
 // Decode-step counter shared between executor_forward.cu (writer) and
 // executor_ssm_gdn.cu (reader). Prefill passes use step=0; each single-token
@@ -29,15 +29,8 @@ inline int& debug_decode_step() {
 // Hidden-state npy dump for layer-diff analysis against llama.cpp.
 // Returns the directory if [diagnostics] dump_hidden_dir is non-empty, else
 // nullptr. Accepts "1" or "all" as shorthand for /tmp (matches the legacy
-// IMP_DUMP_HIDDEN=1 behaviour).
-inline const char* dump_hidden_dir() {
-    const std::string& d = RuntimeConfig::current().diagnostics.dump_hidden_dir;
-    if (d.empty())
-        return nullptr;
-    if (d == "1" || d == "all")
-        return "/tmp";
-    return d.c_str();
-}
+// IMP_DUMP_HIDDEN=1 behaviour). Resolution happens in process_diag_install().
+inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(); }
 
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.
 // Self-describing (python: np.load(path) just works).
