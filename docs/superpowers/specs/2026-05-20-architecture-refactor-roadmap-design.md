@@ -101,6 +101,8 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 ---
 
 ### Phase 4 — Engine.cpp zerteilen
+**Status (2026-05-20):** Closed. Landed: #310 (engine_internal.h helpers), #311 (InitResolver — 6 init_resolve_* methods), #312 (WeightUploadOrchestrator — init_weights), #313 (KVCacheInitializer — init_kv_cache), #314 (WorkspaceBuilder+Warmup+banned-tokens combined), #315 (Scheduler — 13 step/prefill/decode methods, biggest at 1244 LOC), #316 (Sampling+Stop helpers — final per-subsystem split). This PR (#317) closes Phase 4 with roadmap status + architecture.md update. **Plan deviated from "named class with constructor injection" to "TU-split-only"** because the spec's proposal required a multi-week pure-functional redesign while the measurable target (≤800 LOC) is achievable with TU split alone. **Result:** `engine.cpp` is now 570 LOC façade (was 3112 LOC, target ≤800 — beaten by ~30% margin). Soft PRs 8 (move mtp_forward.cu → src/compute/) and 9 (move vision_pipeline → src/vision/) **deferred** to opportunistic work; promoting subsystems to named classes preserved as future refactor.
+
 **Goal:** `src/runtime/engine.cpp` shrinks from 3112 LOC to ≤800 LOC. Each subsystem becomes a named owner with constructor injection.
 
 **Critical PRs** (one subsystem per PR, ordered by independence)

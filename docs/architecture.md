@@ -147,12 +147,17 @@ These are documented for honesty. See the refactor roadmap in
 [`superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md`](superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md)
 for the resolution plan.
 
-- **`src/runtime/engine.cpp` is 3112 LOC across one .cpp file.** `Engine::init`
-  itself is short, but it orchestrates ~7 init helpers (`init_resolve_*`,
-  `init_weights`, `init_kv_cache`, `init_features`, `warmup`) totaling
-  700+ LOC, plus per-step scheduling, sampling helpers, vision, and MTP.
-  The helper boundaries don't map to subsystems. Phase 4 splits it into
-  named subsystems with constructor injection.
+- **`src/runtime/engine.cpp` was 3112 LOC; now 570 LOC** (Phase 4 closed
+  2026-05-20). The `Engine::*` methods are split across 7 TUs by concern:
+  `engine_init_resolver.cpp` (dtype/SSM/seq-len resolution),
+  `engine_weight_upload.cpp` (init_weights), `engine_kv_cache_init.cpp`,
+  `engine_workspace_warmup.cpp`, `engine_scheduler.cpp` (the 13
+  step/prefill/decode methods, biggest at 1291 LOC),
+  `engine_sampling_stop.cpp`. The `engine.cpp` façade keeps constructor,
+  `init()`, `generate()`, `add_request()`, MTP/vision wrappers, accessors.
+  Methods stay `Engine::*` (declarations in `engine.h` unchanged); promoting
+  to named subsystem classes with constructor injection is preserved as
+  opportunistic future refactor.
 - **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace.**
   Caps maximum context length. Phase 5 evaluates tiled streaming softmax
   or FMHA-default-switch.
