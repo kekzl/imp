@@ -70,10 +70,10 @@ __device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t phase) {
     asm volatile(
         "{\n"
         ".reg .pred p;\n"
-        "WAIT: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
-        "@p bra DONE;\n"
-        "bra WAIT;\n"
-        "DONE:\n"
+        "WAIT_%=: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
+        "@p bra DONE_%=;\n"
+        "bra WAIT_%=;\n"
+        "DONE_%=:\n"
         "}\n"
         :: "r"(s), "r"(phase));
 }
