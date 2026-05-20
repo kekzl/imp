@@ -1,4 +1,4 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"
 #include "core/logging.h"

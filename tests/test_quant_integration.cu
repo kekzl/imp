@@ -3,7 +3,7 @@
 #include <cuda_fp16.h>
 #include "model/model.h"
 #include "model/gguf_loader.h"
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "compute/gemm.h"

@@ -1,6 +1,6 @@
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
-#include "graph/executor_helpers.h"
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/executor_helpers.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>

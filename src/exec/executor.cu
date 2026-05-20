@@ -1,5 +1,5 @@
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/gemm.h"

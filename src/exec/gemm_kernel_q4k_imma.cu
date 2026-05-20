@@ -21,7 +21,7 @@
 // Reference: docs/plans/q4k_imma_design_2026_05_17.md,
 // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
 
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/mmq_q4k_imma_tile.h"
 #include "core/logging.h"

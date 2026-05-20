@@ -1,6 +1,6 @@
 #pragma once
 
-#include "graph/quant_scratch.h"
+#include "exec/quant_scratch.h"
 #include <cuda_runtime.h>
 
 namespace imp {

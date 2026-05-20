@@ -2,7 +2,7 @@
 #include "runtime/graph_diag.h"
 #include "runtime/pdl.h"
 #include "runtime/config.h"
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>

@@ -15,7 +15,7 @@
 #include "memory/gdn_state.h"
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "core/cuda_raii.h"
 #include <memory>
 #include <string>

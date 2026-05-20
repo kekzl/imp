@@ -1,6 +1,6 @@
 #pragma once
 
-#include "graph/executor.h"  // VRAMBudget
+#include "exec/executor.h"  // VRAMBudget
 #include "model/model.h"
 #include "memory/kv_cache.h"
 #include <cstddef>

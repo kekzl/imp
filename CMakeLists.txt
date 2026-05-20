@@ -233,33 +233,33 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/mtp_forward.cu
 )
 
-set(IMP_GRAPH_SOURCES
-    src/graph/executor.cu
-    src/graph/executor_kernels.cu
-    src/graph/gemm_kernel_registry.cu
-    src/graph/gemm_kernel_fp8.cu
-    src/graph/gemm_kernel_nvfp4_gemv.cu
-    src/graph/gemm_kernel_nvfp4_gemm.cu
-    src/graph/gemm_kernel_cutlass_nvfp4.cu
-    src/graph/gemm_kernel_mxfp4.cu
-    src/graph/gemm_kernel_gguf.cu
-    src/graph/gemm_kernel_generic_dequant.cu
-    src/graph/gemm_kernel_q4k_imma.cu
-    src/graph/gemm_scratch.cu
-    src/graph/executor_workspace.cu
-    src/graph/executor_workspace_buffers.cu
-    src/graph/executor_kv_write.cu
-    src/graph/executor_pre_dequant.cu
-    src/graph/executor_workspace_config.cu
-    src/graph/executor_attention.cu
-    src/graph/executor_forward.cu
-    src/graph/executor_ffn.cu
-    src/graph/executor_ssm_gdn.cu
-    src/graph/executor_forward_moe.cu
-    src/graph/expert_cache.cu
-    src/graph/weight_handle.cu
-    src/graph/moe_workspace.cu
-    src/graph/quant_scratch.cu
+set(IMP_EXEC_SOURCES
+    src/exec/executor.cu
+    src/exec/executor_kernels.cu
+    src/exec/gemm_kernel_registry.cu
+    src/exec/gemm_kernel_fp8.cu
+    src/exec/gemm_kernel_nvfp4_gemv.cu
+    src/exec/gemm_kernel_nvfp4_gemm.cu
+    src/exec/gemm_kernel_cutlass_nvfp4.cu
+    src/exec/gemm_kernel_mxfp4.cu
+    src/exec/gemm_kernel_gguf.cu
+    src/exec/gemm_kernel_generic_dequant.cu
+    src/exec/gemm_kernel_q4k_imma.cu
+    src/exec/gemm_scratch.cu
+    src/exec/executor_workspace.cu
+    src/exec/executor_workspace_buffers.cu
+    src/exec/executor_kv_write.cu
+    src/exec/executor_pre_dequant.cu
+    src/exec/executor_workspace_config.cu
+    src/exec/executor_attention.cu
+    src/exec/executor_forward.cu
+    src/exec/executor_ffn.cu
+    src/exec/executor_ssm_gdn.cu
+    src/exec/executor_forward_moe.cu
+    src/exec/expert_cache.cu
+    src/exec/weight_handle.cu
+    src/exec/moe_workspace.cu
+    src/exec/quant_scratch.cu
 )
 
 set(IMP_VISION_SOURCES
@@ -281,7 +281,7 @@ add_library(imp STATIC
     ${IMP_QUANT_SOURCES}
     ${IMP_COMPUTE_SOURCES}
     ${IMP_RUNTIME_SOURCES}
-    ${IMP_GRAPH_SOURCES}
+    ${IMP_EXEC_SOURCES}
     ${IMP_VISION_SOURCES}
     ${IMP_API_SOURCES}
 )

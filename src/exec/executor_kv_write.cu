@@ -1,9 +1,9 @@
 // KV cache write dispatch — extracted from executor_forward.cu (RF-004).
 // Handles all KV cache dtype paths: TurboQuant, INT4, INT8, FP8, FP16.
 
-#include "graph/executor.h"
-#include "graph/executor_kernels.h"
-#include "graph/executor_helpers.h"
+#include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/executor_helpers.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"

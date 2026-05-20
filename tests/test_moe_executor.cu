@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "model/model.h"
 #include "core/tensor.h"
 #include "compute/gemm.h"

@@ -1,9 +1,9 @@
-#include "graph/gemm_kernel_registry.h"
+#include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"
 #include "core/logging.h"
 #include "core/tensor.h"
-#include "graph/executor.h"  // FP8CacheEntry
+#include "exec/executor.h"  // FP8CacheEntry
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 

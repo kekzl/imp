@@ -1,5 +1,5 @@
 #include "model/model.h"
-#include "graph/executor.h"
+#include "exec/executor.h"
 #include "compute/gemm.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
