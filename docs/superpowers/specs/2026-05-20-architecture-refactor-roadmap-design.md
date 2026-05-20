@@ -48,6 +48,8 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 ---
 
 ### Phase 2 — Attention-Dispatcher entrümpeln
+**Status (2026-05-20):** Closed. Landed: #295 (archive cluster, ~1100 LOC + 23 cluster tests removed), #296 (archive mxf4nvf4 + remove `attention.fmha_blockscale`), #297 (archive `attention_naive` + inline parity ref into `tests/test_attention_chunked.cu`), #298 (collapse prefill gate to 2-branch switch, remove `attention.no_cublas`). This PR (#299) closes Phase 2: roadmap spec status, refreshed `docs/architecture.{md,dot,svg}` to reflect the simplified gate, MEMORY.md update. Soft PRs (5) attention-dispatch.md, (6) compile-only resurrection check, (7) drop `attention_paged_common.cuh` — **deferred** to opportunistic work.
+
 **Goal:** From "3 layers, 10 paths" to "Default cuBLAS / Sliding-Fallback / Decode-paged" plus one FMHA variant for non-cuBLAS cases.
 
 **Critical PRs**

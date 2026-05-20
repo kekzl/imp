@@ -77,27 +77,34 @@ After the last layer of the last chunk: final RMSNorm + LM head → logits.
 
 ### Attention dispatcher (the central choice)
 
-`executor_attention.cu` decides which attention kernel to call. The gate
-at `executor_attention.cu:847` checks:
+`executor_attention.cu` decides which attention kernel to call. The
+post-Phase-2 prefill gate is a two-branch switch:
 
 ```
-if (force_cublas || !no_cublas) && attn_scores_buf_ && n ≤ cap
-    && (force_cublas || !sliding)
+const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
+                           n <= attn_scores_.shape[1];
+const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
+
+if (s_matrix_fits && !non_gemma4_sliding)
+    attention_cublas_prefill(...);
+else
+    attention_prefill_dispatch(...);   // FMHA fallback
 ```
 
-When true (the default for typical Qwen3 / Gemma-4 configs), prefill goes
-through `attention_cublas_prefill`: cuBLAS QK^T → ~1 GiB S-matrix buffer
-→ causal softmax → cuBLAS PV. When false, it falls through to
-`attention_prefill_dispatch` (`attention_dispatch.cu:30`), which selects
-among the per-dtype FMHA variants.
+When the S-matrix workspace can hold `[nh, n, n]` AND the layer is
+either non-sliding or is Gemma-4 (which uses the cuBLAS sliding mask
+via chunked prefill), prefill goes through `attention_cublas_prefill`:
+cuBLAS QK^T → ~1 GiB S-matrix buffer → causal softmax → cuBLAS PV.
+Otherwise it falls through to `attention_prefill_dispatch`
+(`attention_dispatch.cu:30`), which selects among the per-dtype FMHA
+kernels.
 
-Decode attention uses a separate switch on `cache_dtype` at
-`executor_attention.cu:996`, dispatching to one of the paged kernels
+`force_cublas_attn` is set per-layer for Gemma-4 hd=512 global layers
+where FMHA OOMs the 100 KiB smem cap.
+
+Decode attention uses a separate switch on `cache_dtype` further down
+in the same file, dispatching to one of the paged kernels
 (INT4 / NVFP4 ± TC / MXFP4-KV / INT8 / FP8 / FP16-paged).
-
-**Status:** the FMHA dispatch chain currently has more variants than are
-default-enabled. Phase 2 of the refactor roadmap archives the unused
-variants.
 
 ## Phase 4 — Decode loop (per token, `Engine::step_decode_forward`)
 
