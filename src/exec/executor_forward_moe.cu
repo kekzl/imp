@@ -153,7 +153,7 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // reading the cache, then queue the next layer's prefetch so the
     // prefetch stream gets compute-time overlap.
     if (expert_cache_.n_slots_ > 0) {
-        const int top_k_prefetch = RuntimeConfig::current().moe.prefetch_top_k;
+        const int top_k_prefetch = runtime_config().moe.prefetch_top_k;
         if (top_k_prefetch > 0) {
             expert_cache_.await_prefetch(layer, stream);
             const int next_layer = layer + 1;
@@ -167,7 +167,7 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
     // legacy-serial-fallback uninit reads become deterministic zero reads.
     // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
-    if (RuntimeConfig::current().moe.zero_workspace) {
+    if (runtime_config().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
@@ -1313,7 +1313,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
     // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
     // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
-    static const bool force_off = RuntimeConfig::current().moe.no_cutlass3x;
+    static const bool force_off = runtime_config().moe.no_cutlass3x;
     if (force_off)
         return false;
     if (!cutlass_grouped_3x_nvfp4_available())
@@ -1360,7 +1360,7 @@ bool device_args_done = false;
     // NVFP4 (decode unchanged). Set moe.nvfp4_device_args=false
     // (legacy IMP_NVFP4_DEVICE_ARGS=0) to force the legacy
     // path for A/B or workarounds.
-    const bool da_enabled = imp::RuntimeConfig::current().moe.nvfp4_device_args;
+    const bool da_enabled = runtime_config().moe.nvfp4_device_args;
     const bool use_device_args =
         da_enabled &&
         moe_.d_M_per && moe_.d_M_per_count >= ne &&
@@ -1578,7 +1578,7 @@ char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 // ---------------------------------------------------------------------
 bool smallM_done = false;
 {
-    const auto& moe_cfg = imp::RuntimeConfig::current().moe;
+    const auto& moe_cfg = runtime_config().moe;
     const bool smallM_optin = moe_cfg.nvfp4_smallM;
     if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
         const int smallM_threshold = moe_cfg.nvfp4_smallM_threshold;
@@ -2412,7 +2412,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // Higher expert counts (e.g. 128 in Qwen3-Coder) prefer separate
     // gemv_gate_fp32 (128 parallel blocks).
     constexpr int kMaxFusedExperts = 8;
-    const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir;
+    const std::string& dl = runtime_config().diagnostics.dump_logits_dir;
     bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");
 
     if (fp32_gate_logits_ready) {
@@ -2466,7 +2466,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     }
 
     // Routing decision dump
-    if (const std::string& drv = RuntimeConfig::current().diagnostics.dump_routing_dir; !drv.empty()) {
+    if (const std::string& drv = runtime_config().diagnostics.dump_routing_dir; !drv.empty()) {
         bool dump_all = (drv == "all");
         if (layer == 0 || dump_all) {
             int last_tok = n - 1;
@@ -2629,7 +2629,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         int eff_q8_blocks = eff / 32;
         if (!non_gated_experts) {
             if (cfg.ffn_activation == FFNActivation::GEGLU) {
-                if (layer == 0 && RuntimeConfig::current().diagnostics.debug_forward)
+                if (layer == 0 && runtime_config().diagnostics.debug_forward)
                     fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
                 geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             } else {
@@ -2683,7 +2683,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     const auto& ly = model_->layer(layer);
 
     // DIAGNOSTIC: moe.no_shared_mlp config flag (was IMP_NO_SHARED_MLP env).
-    static const bool s_no_shared_mlp = RuntimeConfig::current().moe.no_shared_mlp;
+    static const bool s_no_shared_mlp = runtime_config().moe.no_shared_mlp;
     if (ly.w_up_shared.data == nullptr || s_no_shared_mlp) return;
 
     int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
@@ -2698,7 +2698,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
     Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
     gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
 
@@ -2749,7 +2749,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
         debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
     }
     // Qwen3-Next / Qwen3.6: per-token sigmoid gate on shared-expert output.
-    static const bool skip_shexp_gate = RuntimeConfig::current().moe.no_shexp_gate;
+    static const bool skip_shexp_gate = runtime_config().moe.no_shexp_gate;
     if (!skip_shexp_gate && ly.shared_expert_gate_inp.data != nullptr &&
         ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
         shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);

@@ -273,7 +273,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
@@ -552,7 +552,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        const bool use_concat = RuntimeConfig::current().attention.gate_concat;
+        const bool use_concat = runtime_config().attention.gate_concat;
         if (use_concat) {
             // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
             // One 2D copy each, width = q_actual_dim bytes per row.
@@ -598,7 +598,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        const bool no_qknorm_fused = RuntimeConfig::current().attention.no_qknorm_fused;
+        const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
         if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
@@ -806,17 +806,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             goto after_attention;
         }
 
-        // Prefill dispatch (post-Phase-2 simplification):
-        //   cuBLAS QK^T + causal softmax + cuBLAS PV is the default. Falls back
-        //   to the FMHA chain (attention_prefill_dispatch → fmha_sm120_prefill →
-        //   flash_attention_blackwell) when the S-matrix workspace can't hold
-        //   [nh, n, n], or when the layer uses sliding-window attention on a
-        //   model that isn't Gemma-4 (Gemma-4 SWA uses the cuBLAS sliding_window
-        //   mask via chunked prefill — see gemma4_chunked_prefill_2026_05_15).
-        //
-        // force_cublas_attn: set per-layer for Gemma-4 hd=512 global layers,
-        // where FMHA OOMs the 100 KiB smem cap. cuBLAS handles arbitrary
-        // head_dim at the cost of the materialized S-matrix.
+        // Prefill dispatch (post-Phase-2 + Phase-5 Track D):
         const bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
@@ -835,8 +825,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor k4 = kk.reshape(4, kv4s);
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
-            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
-                                       layer_sliding_window, cfg.attn_logit_softcap, stream);
+
+            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
+                                       cfg.attn_logit_softcap, stream, runtime_config());
         }
 
         // Persist K, V into cache for later decode steps
@@ -878,7 +869,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
-        const bool force_cublas_decode = RuntimeConfig::current().attention.force_cublas_decode;
+        const bool force_cublas_decode = runtime_config().attention.force_cublas_decode;
         if (force_cublas_decode && n == 1 && attn_scores_buf_) {
             // Reconstruct K/V from cache for this position
             KVCache* cache_dbg = state.kv_cache;
@@ -962,7 +953,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk (legacy
             // IMP_USE_BITDECODING_QK=1) routes to the WMMA-Q.K variant; default
             // keeps the scalar-FFMA path unchanged.
-            const bool use_bitdecoding_tc = imp::RuntimeConfig::current().kv_cache.bitdecoding_qk;
+            const bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc) {
                 // QW6 from review/phase5_synthesis.md §2.1: gate the entire
                 // residual-arg marshalling (8+ trailing args) behind a single

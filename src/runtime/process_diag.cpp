@@ -1,0 +1,108 @@
+#include "runtime/process_diag.h"
+#include "runtime/config.h"
+
+namespace imp {
+
+namespace {
+
+struct ProcessDiag {
+    // Diagnostics
+    bool debug_forward = false;
+    bool debug_template = false;
+    bool graph_diag = false;
+    bool nvfp4_force_dequant = false;
+    bool log_gemm_algo = false;
+    bool audit_nvfp4_scales = false;
+    std::string dump_hidden_dir;
+    std::string dump_hidden_dir_resolved;  // "1"/"all" → "/tmp"
+    std::string graph_dump_dir;
+
+    // Runtime
+    bool no_pdl = false;
+    bool no_vision_graph = false;
+    std::string graph_capture_mode = "relaxed";
+    bool prefill_graph_enabled = true;
+
+    // GEMM (may be promoted in place by engine_init_resolver)
+    bool deterministic_gemm = false;
+
+    // Attention
+    bool attention_splitk_pipe = true;
+    std::string attention_mxfp4_mode = "auto";
+
+    // FFN
+    bool ffn_sparsity_probe = false;
+
+    // MoE
+    int moe_mr_nr = 8;
+    int moe_expert_overhead_pct = 10;
+    int moe_force_host_experts = 0;
+
+    // GDN
+    std::string gdn_layout_override;
+};
+
+ProcessDiag& slot() {
+    static ProcessDiag d;
+    return d;
+}
+
+}  // namespace
+
+void process_diag_install(const RuntimeConfig& cfg) {
+    auto& d = slot();
+    d.debug_forward = cfg.diagnostics.debug_forward;
+    d.debug_template = cfg.diagnostics.debug_template;
+    d.graph_diag = cfg.diagnostics.graph_diag;
+    d.nvfp4_force_dequant = cfg.diagnostics.nvfp4_force_dequant;
+    d.log_gemm_algo = cfg.diagnostics.log_gemm_algo;
+    d.audit_nvfp4_scales = cfg.diagnostics.audit_nvfp4_scales;
+    d.dump_hidden_dir = cfg.diagnostics.dump_hidden_dir;
+    if (d.dump_hidden_dir == "1" || d.dump_hidden_dir == "all") {
+        d.dump_hidden_dir_resolved = "/tmp";
+    } else {
+        d.dump_hidden_dir_resolved = d.dump_hidden_dir;
+    }
+    d.graph_dump_dir = cfg.diagnostics.graph_dump_dir;
+    d.no_pdl = cfg.runtime.no_pdl;
+    d.no_vision_graph = cfg.runtime.no_vision_graph;
+    d.graph_capture_mode = cfg.runtime.graph_capture_mode;
+    d.prefill_graph_enabled = cfg.runtime.prefill_graph;
+    d.deterministic_gemm = cfg.runtime.deterministic_gemm;
+    d.attention_splitk_pipe = cfg.attention.splitk_pipe;
+    d.attention_mxfp4_mode = cfg.attention.mxfp4;
+    d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
+    d.moe_mr_nr = cfg.moe.mr_nr;
+    d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
+    d.moe_force_host_experts = cfg.moe.force_host_experts;
+    d.gdn_layout_override = cfg.gdn.layout_override;
+}
+
+bool process_diag_debug_forward() { return slot().debug_forward; }
+bool process_diag_debug_template() { return slot().debug_template; }
+bool process_diag_graph_diag() { return slot().graph_diag; }
+bool process_diag_nvfp4_force_dequant() { return slot().nvfp4_force_dequant; }
+bool process_diag_log_gemm_algo() { return slot().log_gemm_algo; }
+bool process_diag_audit_nvfp4_scales() { return slot().audit_nvfp4_scales; }
+const char* process_diag_dump_hidden_dir() {
+    return slot().dump_hidden_dir_resolved.empty() ? nullptr
+                                                   : slot().dump_hidden_dir_resolved.c_str();
+}
+const char* process_diag_graph_dump_dir() {
+    return slot().graph_dump_dir.empty() ? nullptr : slot().graph_dump_dir.c_str();
+}
+bool process_diag_no_pdl() { return slot().no_pdl; }
+bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
+const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
+bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }
+bool process_diag_deterministic_gemm() { return slot().deterministic_gemm; }
+void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
+bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
+const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
+bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
+int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
+int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
+int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
+const std::string& process_diag_gdn_layout_override() { return slot().gdn_layout_override; }
+
+}  // namespace imp

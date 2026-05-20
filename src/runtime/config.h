@@ -282,22 +282,22 @@ struct RuntimeConfig {
     // Convenience: locate + load + apply overrides + log a one-line summary.
     // Pass empty path to use the search-path default.
     static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides);
-
-    // ---- Process-wide singleton -----------------------------------------
-    //
-    // Engine init calls install() once with the loaded RuntimeConfig.
-    // All ~80 former getenv("IMP_*") call sites read via current(), which
-    // returns a const reference to the installed config (or a default-
-    // constructed one if install() was never called).
-    //
-    // This is intentionally a process-wide singleton because the runtime
-    // configuration is global state — there is no expectation of two
-    // engines with different runtime configs in the same process. If
-    // that ever changes, threading a const RuntimeConfig& through every
-    // executor call site is a mechanical refactor; the read-side API
-    // (current().runtime.no_pdl etc.) does not need to change.
-    static const RuntimeConfig& current();
-    static void install(const RuntimeConfig& cfg);
 };
+
+// ---- Pending-config handoff (tool-main → Engine) -----------------------
+//
+// The C API constructs Engine inside src/api/imp_api.cpp. Tool mains
+// (imp-cli, imp-server) load a RuntimeConfig from imp.conf + CLI
+// overrides at startup and need to hand that to Engine::init without
+// passing it through the ABI-stable ImpConfig C struct.
+//
+// Workflow: tool main calls set_pending_runtime_config(loaded_cfg) once,
+// then later imp_context_create() pulls it via take_pending_runtime_config()
+// and passes to Engine::init. This replaces the former
+// RuntimeConfig::install() process-wide singleton (Phase 5 Track D
+// follow-up, 2026-05-20) — the lifetime is now bounded to a single
+// Engine construction; there is no per-call accessor.
+void set_pending_runtime_config(RuntimeConfig cfg);
+RuntimeConfig take_pending_runtime_config();
 
 }  // namespace imp

@@ -101,7 +101,7 @@ bool Engine::init_kv_cache() {
     // residual write/read kernels read the state at execution time. This
     // makes the whole path graph-capture-safe — graphs stay enabled.
     {
-        const auto& rcfg = RuntimeConfig::current();
+        const auto& rcfg = runtime_config_;
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "exec/quant_scratch.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -30,18 +31,34 @@ struct GemmContext {
     // to false so non-Gemma-4 models behave identically.
     bool force_mmvq = false;
 
+    // Phase 5 Track D follow-up: per-Engine knobs; were read from
+    // RuntimeConfig::current() in gemm_dispatch / gemm_kernel_gguf hot paths.
+    // Wired by the executor's GemmContext::make caller from runtime_config().
+    bool q4k_imma_enabled = false;
+    bool gemm_no_mmvq = false;
+    bool gemm_no_mmvq_q8_0 = false;
+    bool gemm_no_dp4a_gemv = false;
+
     // Quantization scratch buffers (non-owning)
     const QuantScratch* qscratch = nullptr;
 
-    // Helper: create from executor state
+    // Helper: create from executor state. `rcfg` is the per-Engine RuntimeConfig
+    // — its gemm.* flags are mirrored into the context once at construction
+    // (replaces the former RuntimeConfig::current() reads in gemm_dispatch
+    // and gemm_kernel_gguf).
     static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
-                            bool force_fp16 = false, bool force_mmvq = false) {
+                            const RuntimeConfig& rcfg, bool force_fp16 = false,
+                            bool force_mmvq = false) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;
         ctx.qscratch = &qs;
         ctx.force_fp16 = force_fp16;
         ctx.force_mmvq = force_mmvq;
+        ctx.q4k_imma_enabled = rcfg.gemm.q4k_imma_enabled;
+        ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
+        ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
+        ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
         return ctx;
     }
 

@@ -4,6 +4,7 @@
 #include "batching_engine.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
+#include "runtime/config.h"
 
 #include <imp/imp.h>
 #include <httplib.h>
@@ -70,6 +71,10 @@ struct ServerState {
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
     std::string model_name;
+    // Loaded once at startup (imp.conf + --set overrides). load_model_into_state
+    // re-stashes this via set_pending_runtime_config() before each Engine
+    // construction (server may swap models at runtime via /v1/models POST).
+    imp::RuntimeConfig runtime_config;
     std::timed_mutex mtx;
     int default_max_tokens = 8192;
     int max_seq_len = 0;
@@ -137,8 +142,8 @@ int64_t unix_timestamp();
 std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir);
 std::string find_model_path(const ServerState& state, const std::string& name);
 
-ImpConfig build_config(const ServerArgs& args, const std::string& model_path = {},
-                       const json& overrides = json::object());
+ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
+                       const std::string& model_path = {}, const json& overrides = json::object());
 std::string load_model_into_state(ServerState& state, const std::string& path,
                                   const json& config_overrides = json::object());
 

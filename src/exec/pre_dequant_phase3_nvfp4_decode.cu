@@ -789,7 +789,7 @@ if (mx_native > 0) {
     // 14) cascade we have not yet root-caused. Tracking in
     // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
     // honor the historical fallback path.
-    bool force_fallback = RuntimeConfig::current().attention.mxfp4_fp16_fallback;
+    bool force_fallback = runtime_config().attention.mxfp4_fp16_fallback;
     bool has_gdn = (cfg.ssm_inner_size > 0);
     bool mxfp4_gemv_available = !force_fallback && !has_gdn;
     for (auto& [p, m] : wcache_.cutlass_mxfp4)
@@ -817,7 +817,7 @@ if (mx_native > 0) {
     // load on 32 GiB VRAM.
     std::unordered_set<const void*> pruned_skip_ptrs;
     const bool pruned_policy =
-        (RuntimeConfig::current().attention.mxfp4_fp16_cache_policy == "pruned");
+        (runtime_config().attention.mxfp4_fp16_cache_policy == "pruned");
     if (pruned_policy) {
         for (int li = 0; li < cfg.n_layers; ++li) {
             const auto& L = model_->layer(li);
@@ -1029,7 +1029,7 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
         size_t kMoeReserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
         {
-            const int v = imp::RuntimeConfig::current().moe.reserve_mib;
+            const int v = runtime_config().moe.reserve_mib;
             if (v >= 128 && v <= 4096)
                 kMoeReserve = static_cast<size_t>(v) * 1024ULL * 1024ULL;
         }

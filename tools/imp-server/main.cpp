@@ -2,6 +2,7 @@
 #include "handlers.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -15,10 +16,6 @@ using json = nlohmann::json;
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
 
-    // Load imp.conf (if present) + apply --set overrides; install as the
-    // process-wide RuntimeConfig.
-    imp::RuntimeConfig::install(imp::RuntimeConfig::load(args.config_path, args.config_overrides));
-
     if (args.model_path.empty()) {
         fprintf(stderr, "Error: --model is required\n");
         return 1;
@@ -30,6 +27,15 @@ int main(int argc, char** argv) {
     state.default_max_tokens = args.max_tokens;
     state.default_think_budget = args.think_budget;
     state.default_args = args;
+
+    // Load imp.conf (if present) + apply --set overrides, then stash for
+    // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
+    // RuntimeConfig::install() process-wide singleton). The server may
+    // reload models at runtime via /v1/models POST; load_model_into_state
+    // re-stashes the same config snapshot before each Engine construction.
+    state.runtime_config = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
+    imp::process_diag_install(state.runtime_config);
+    imp::set_pending_runtime_config(state.runtime_config);
 
     ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
     std::string resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);

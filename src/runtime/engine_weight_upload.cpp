@@ -205,7 +205,7 @@ bool Engine::init_weights() {
             // architectural caveat; Phase 5.1+ refactors dispatch kernels
             // to read the device mirror at runtime so the captured graph
             // adapts correctly.
-            if (RuntimeConfig::current().moe.allow_graphs_under_offload) {
+            if (runtime_config_.moe.allow_graphs_under_offload) {
                 IMP_LOG_WARN(
                     "CUDA graphs ENABLED under host-offload "
                     "(moe.allow_graphs_under_offload=true). EXPERIMENTAL: output "
@@ -224,7 +224,7 @@ bool Engine::init_weights() {
                 config_.use_cuda_graphs = false;
             }
         }
-        if (RuntimeConfig::current().runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
+        if (runtime_config_.runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: runtime.cuda_graphs=never");
             config_.use_cuda_graphs = false;
         }

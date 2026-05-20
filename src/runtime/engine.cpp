@@ -181,7 +181,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec2 = 0;
     }
     // Diagnostic: generation.mtp_no_rope (legacy IMP_MTP_NO_ROPE=1) disables RoPE entirely.
-    if (RuntimeConfig::current().generation.mtp_no_rope) {
+    if (runtime_config_.generation.mtp_no_rope) {
         ws->rope_dim = 0;
     }
     // Runtime weight_offset matches what the main model's rmsnorm calls pass:
@@ -367,6 +367,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_ = std::move(model);
     config_ = config;
 
+    // Phase 5 Track D (follow-up): take the pending RuntimeConfig stashed
+    // by tool main (imp-cli / imp-server) via set_pending_runtime_config().
+    // If no pending config was set (library/test embeddings), this returns
+    // a freshly loaded env-seeded default. Either way, every Engine::*
+    // method reads runtime_config_ directly from here on; engine_init_
+    // resolver_ helpers mutate this snapshot in place for arch-specific
+    // defaults.
+    runtime_config_ = take_pending_runtime_config();
+
     const auto& mcfg = model_->config();
 
     init_apply_debug_raw_overrides_();
@@ -397,7 +406,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     if (!init_features())
         return false;
-    if (!RuntimeConfig::current().runtime.warmup) {
+    if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
     } else {
         warmup();

@@ -283,8 +283,8 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
 
 // Build ImpConfig from default args + optional JSON overrides.
 // Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
-ImpConfig build_config(const ServerArgs& args, const std::string& model_path, const json& overrides,
-                       ImpModel model = nullptr) {
+ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
+                       const std::string& model_path, const json& overrides, ImpModel model = nullptr) {
     (void)model_path;
     (void)model;
     ImpConfig config = imp_config_default();
@@ -367,7 +367,7 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path, co
     // cached blocks get different physical KV addresses, causing FP rounding
     // differences in attention kernels and breaking determinism for identical
     // requests).
-    config.use_prefix_caching = imp::RuntimeConfig::current().server.prefix_cache ? 1 : 0;
+    config.use_prefix_caching = runtime_cfg.server.prefix_cache ? 1 : 0;
 
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
     config.enable_green_contexts = 1;
@@ -412,8 +412,13 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         return msg;
     }
 
-    // Create context (engine auto-detects config from model metadata)
-    ImpConfig config = build_config(state.default_args, path, config_overrides, state.model);
+    // Create context (engine auto-detects config from model metadata).
+    // Re-stash the runtime config so Engine::init's take_pending_runtime_config()
+    // picks it up. The server may swap models at runtime; each swap rebuilds the
+    // Engine and consumes the pending slot.
+    imp::set_pending_runtime_config(state.runtime_config);
+    ImpConfig config = build_config(state.default_args, state.runtime_config, path, config_overrides,
+                                    state.model);
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to create context: ") + imp_error_string(err);
