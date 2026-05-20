@@ -115,6 +115,13 @@ struct GemmKernelArgs {
     // GGUF small-M kernels to decide between the mmvq and dp4a backends.
     // Sourced from ModelConfig::Overrides::Gemma4::force_mmvq via GemmContext.
     bool force_mmvq = false;
+
+    // Phase 5 Track D follow-up: per-Engine RuntimeConfig::gemm flags
+    // that gemm_kernel_gguf used to read directly via RuntimeConfig::current().
+    // Threaded from GemmContext at dispatch time.
+    bool no_mmvq = false;
+    bool no_mmvq_q8_0 = false;
+    bool no_dp4a_gemv = false;
 };
 
 // Result of a dispatch attempt.

@@ -1,7 +1,7 @@
 #include "runtime/cuda_graph.h"
 #include "runtime/graph_diag.h"
 #include "runtime/pdl.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include "exec/executor.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
@@ -26,13 +26,13 @@ namespace imp {
 // worked under "global" continues to work under "relaxed".
 static cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {
-        const auto& cfg = RuntimeConfig::current();
-        const std::string& mode = cfg.runtime.graph_capture_mode;
+        const std::string& mode = process_diag_graph_capture_mode();
+        const bool prefill_graph = process_diag_prefill_graph_enabled();
         if (mode == "global") {
             // Warn loudly when the user has both opted into prefill_graph AND
             // the known-deadlocking strict capture mode — most common cause of
             // a silent hang at first NVFP4 MoE prefill replay.
-            if (cfg.runtime.prefill_graph) {
+            if (prefill_graph) {
                 IMP_LOG_WARN(
                     "CudaGraphCapture: runtime.graph_capture_mode=\"global\" + "
                     "runtime.prefill_graph=true is the known-hangy combination "

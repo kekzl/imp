@@ -274,7 +274,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
@@ -883,7 +883,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor o4 = ao.reshape(4, o4s);
 
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream);
+                                       cfg.attn_logit_softcap, stream, runtime_config());
         }
 
         // Persist K, V into cache for later decode steps

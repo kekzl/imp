@@ -7,7 +7,7 @@
 // Off by default; no overhead when unset.
 
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>
@@ -20,12 +20,9 @@ enum class Phase { NORMAL, CAPTURE, REPLAY };
 
 inline thread_local Phase g_phase = Phase::NORMAL;
 
-inline bool enabled() { return RuntimeConfig::current().diagnostics.graph_diag; }
+inline bool enabled() { return imp::process_diag_graph_diag(); }
 
-inline const char* dump_path() {
-    const std::string& d = RuntimeConfig::current().diagnostics.graph_dump_dir;
-    return d.empty() ? nullptr : d.c_str();
-}
+inline const char* dump_path() { return imp::process_diag_graph_dump_dir(); }
 
 inline const char* phase_name(Phase p) {
     switch (p) {

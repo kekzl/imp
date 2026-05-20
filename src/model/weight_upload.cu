@@ -3,7 +3,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -1483,7 +1483,7 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     // models where the conservative default unnecessarily offloads experts
     // to host (measured: 77 → 237 tok/s with 10% vs 30% on Qwen3-Coder-30B
     // Q6_K, RTX 5090 native Linux).
-    int overhead_pct = RuntimeConfig::current().moe.expert_overhead_pct;
+    int overhead_pct = process_diag_moe_expert_overhead_pct();
     if (overhead_pct < 0 || overhead_pct > 50) {
         overhead_pct = 30;
     } else if (overhead_pct == 10) {
@@ -1503,7 +1503,7 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t total_reserve = expert_reserve_bytes + overhead;
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
 
-    int force_host_n = RuntimeConfig::current().moe.force_host_experts;
+    int force_host_n = process_diag_moe_force_host_experts();
     if (force_host_n < 0)
         force_host_n = 0;
 
@@ -1986,7 +1986,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         // (tensor-level FP32 scalar) BEFORE upload, so we can bisect
         // Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges against
         // a known-good model (e.g. Gemma-4-NVFP4).
-        const bool audit = imp::RuntimeConfig::current().diagnostics.audit_nvfp4_scales;
+        const bool audit = imp::process_diag_audit_nvfp4_scales();
         float ws2_min = 1e30f, ws2_max = -1e30f, ws2_sum = 0.0f;
         int ws2_count = 0, ws2_zero = 0;
         std::vector<std::pair<std::string, float>> ws2_samples;

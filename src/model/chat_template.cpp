@@ -1,6 +1,6 @@
 #include "model/chat_template.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <algorithm>
 #include <functional>
@@ -435,7 +435,7 @@ std::vector<int32_t> ChatTemplate::apply_chatml(const Tokenizer& tok, const std:
     auto asst_ids = tok.encode("assistant\n");
     tokens.insert(tokens.end(), asst_ids.begin(), asst_ids.end());
 
-    if (RuntimeConfig::current().diagnostics.debug_template) {
+    if (imp::process_diag_debug_template()) {
         fprintf(stderr, "[DEBUG_TPL] chatml %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);
@@ -581,7 +581,7 @@ std::vector<int32_t> ChatTemplate::apply_gemma(const Tokenizer& tok,
     tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
 
     // Debug: print template token IDs
-    if (RuntimeConfig::current().diagnostics.debug_template) {
+    if (imp::process_diag_debug_template()) {
         fprintf(stderr, "[DEBUG_TPL] %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);
@@ -657,7 +657,7 @@ std::vector<int32_t> ChatTemplate::apply_phi(const Tokenizer& tok,
     tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
 
     // Debug: print template token IDs
-    if (RuntimeConfig::current().diagnostics.debug_template) {
+    if (imp::process_diag_debug_template()) {
         fprintf(stderr, "[DEBUG_TPL] phi %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);
@@ -1059,7 +1059,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
         return {};
     }
     IMP_LOG_DEBUG("Jinja2 rendered (%zu chars)", rendered.size());
-    if (RuntimeConfig::current().diagnostics.debug_template) {
+    if (imp::process_diag_debug_template()) {
         std::string escaped;
         for (char c : rendered) {
             if (c == '\n')

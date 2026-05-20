@@ -62,7 +62,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
@@ -270,7 +270,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     Tensor h = view_tokens(hidden_, n);

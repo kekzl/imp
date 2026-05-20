@@ -1,5 +1,5 @@
 #include "compute/ffn_sparsity_probe.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -33,7 +33,7 @@ ProbeState g_state;
 
 void ensure_init_locked() {
     if (g_state.initialized) return;
-    g_state.enabled = RuntimeConfig::current().ffn.sparsity_probe;
+    g_state.enabled = process_diag_ffn_sparsity_probe();
     if (g_state.enabled) {
         const size_t bytes = sizeof(unsigned long long) * kMaxLayers * kSlotsPerLayer;
         cudaError_t e = cudaMalloc(&g_state.d_counters, bytes);
