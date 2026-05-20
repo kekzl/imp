@@ -516,6 +516,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
         tests/test_mtp_forward.cpp
+        tests/test_api_generate.cpp
     )
 
     set(IMP_TEST_BINARIES
