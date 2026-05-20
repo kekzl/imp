@@ -384,6 +384,82 @@ static void apply_sampling_params(imp::Request& req, const ImpGenerateParams* pa
 
 // --- Generation ---
 
+// Thin wrapper helper: tokenise the prompt, prefill, then loop decode_step.
+// `on_token` is invoked for every newly decoded token; return true to keep
+// going, false to stop early (the caller's request gets cancelled).
+//
+// This is the shared body of imp_generate / imp_generate_streaming. Both
+// public entry points stay ABI-stable; only their bodies collapse into this
+// helper + imp_prefill_with_params + imp_decode_step.
+namespace {
+
+template <typename OnToken>
+static ImpError generate_via_prefill_decode_loop(ImpContext ctx, const char* prompt,
+                                                 const ImpGenerateParams* params,
+                                                 OnToken&& on_token) {
+    auto* tok = ctx->model_handle->model->tokenizer();
+    if (!tok)
+        return IMP_ERROR_INVALID_MODEL;
+
+    auto tokens = tokenize_prompt(ctx, prompt, params);
+
+    // Empty token stream would walk into executor_forward.cu's "n_tokens must
+    // be positive" guard and then trip a FATAL via the slice() of an
+    // uninitialised logits tensor. Bail out cleanly here instead of crashing.
+    if (tokens.empty()) {
+        IMP_LOG_WARN(
+            "imp_generate: prompt tokenised to 0 tokens (prompt='%.80s%s', "
+            "model may lack vocab coverage or chat-template guard rejected it)",
+            prompt, std::strlen(prompt) > 80 ? "…" : "");
+        return IMP_ERROR_INVALID_ARG;
+    }
+
+    // Prefill: imp_prefill_with_params handles request lifecycle, sampling
+    // params for the first-token sample, and the engine->step() loop until
+    // PREFILLING completes.
+    ImpError err = imp_prefill_with_params(ctx, tokens.data(),
+                                           static_cast<int>(tokens.size()), params);
+    if (err != IMP_SUCCESS)
+        return err;
+
+    // The prefill last-chunk sampler emits the FIRST generation token into
+    // req->output_tokens. imp_prefill_with_params marks those as "already
+    // consumed" so a token-level (prefill+decode_step) caller doesn't get
+    // them — but the high-level imp_generate / imp_generate_streaming
+    // contract says every generated token reaches the caller. Reset the
+    // cursor so imp_decode_step drains the prefill-sampled token(s) on its
+    // first call(s) before stepping the engine again.
+    ctx->consumed_output = 0;
+
+    // Decode loop: imp_decode_step handles per-step sampling params,
+    // multi-token (self-spec) consumption, and clears active_request when the
+    // engine marks FINISHED (EOS or its own max_tokens guard fires).
+    const int max_tokens = params->max_tokens > 0 ? params->max_tokens : 1;
+    for (int i = 0; i < max_tokens; ++i) {
+        int32_t token = 0;
+        ImpError step_err = imp_decode_step(ctx, params, &token);
+        if (step_err != IMP_SUCCESS) {
+            // INTERNAL after natural finish (active_request was cleared) is
+            // the normal stop signal — anything else propagates.
+            if (step_err == IMP_ERROR_INTERNAL && !ctx->active_request)
+                break;
+            return step_err;
+        }
+
+        if (!on_token(token))
+            return IMP_ERROR_CANCELLED;
+
+        // Engine signalled FINISHED (EOS / its own max_tokens) — decode_step
+        // already cleaned up and set active_request = nullptr.
+        if (!ctx->active_request)
+            break;
+    }
+
+    return IMP_SUCCESS;
+}
+
+}  // namespace
+
 ImpError imp_generate_streaming(ImpContext ctx, const char* prompt, const ImpGenerateParams* params,
                                 ImpTokenCallback cb, void* user_data) {
     if (!ctx || !prompt || !params || !cb) {
@@ -398,46 +474,12 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt, const ImpGen
         if (!tok)
             return IMP_ERROR_INVALID_MODEL;
 
-        auto tokens = tokenize_prompt(ctx, prompt, params);
-
-        // Create request
-        auto req = std::make_shared<imp::Request>();
-        req->input_tokens = std::move(tokens);
-        apply_sampling_params(*req, params);
-        req->status = imp::RequestStatus::PENDING;
-
-        ctx->engine->add_request(req);
-
-        // Prefill
-        while (req->status == imp::RequestStatus::PENDING || req->status == imp::RequestStatus::PREFILLING) {
-            bool has_work = ctx->engine->step();
-            if (!has_work)
-                break;
-        }
-
-        // Decode with streaming callback
-        size_t prev_output_size = req->output_tokens.size();
-        while (req->status != imp::RequestStatus::FINISHED && req->status != imp::RequestStatus::CANCELLED) {
-            bool has_work = ctx->engine->step();
-            if (!has_work && req->status != imp::RequestStatus::FINISHED)
-                break;
-
-            // Deliver new tokens via callback
-            while (prev_output_size < req->output_tokens.size()) {
-                int32_t token = req->output_tokens[prev_output_size];
+        return generate_via_prefill_decode_loop(
+            ctx, prompt, params, [&](int32_t token) -> bool {
                 std::string text = tok->decode({token});
                 int stop = cb(text.c_str(), text.size(), user_data);
-                prev_output_size++;
-                if (stop != 0) {
-                    // User requested stop
-                    ctx->engine->kv_manager()->free_sequence(req->id);
-                    req->status = imp::RequestStatus::CANCELLED;
-                    return IMP_ERROR_CANCELLED;
-                }
-            }
-        }
-
-        return IMP_SUCCESS;
+                return stop == 0;
+            });
     } catch (const std::bad_alloc&) {
         return IMP_ERROR_OUT_OF_MEMORY;
     } catch (const std::exception& e) {
@@ -463,55 +505,24 @@ ImpError imp_generate(ImpContext ctx, const char* prompt, const ImpGenerateParam
         if (!tok)
             return IMP_ERROR_INVALID_MODEL;
 
-        auto tokens = tokenize_prompt(ctx, prompt, params);
+        std::vector<int32_t> output_tokens;
+        output_tokens.reserve(params->max_tokens > 0 ? params->max_tokens : 256);
 
-        // Empty token stream would walk into executor_forward.cu:183's
-        // "n_tokens must be positive" guard and then trip a FATAL at
-        // tensor.cpp:91 via the slice() of an uninitialised logits tensor.
-        // Bail out cleanly here instead of crashing the engine.
-        if (tokens.empty()) {
-            IMP_LOG_WARN(
-                "imp_generate: prompt tokenised to 0 tokens (prompt='%.80s%s', "
-                "model may lack vocab coverage or chat-template guard rejected it)",
-                prompt, std::strlen(prompt) > 80 ? "…" : "");
+        ImpError err = generate_via_prefill_decode_loop(
+            ctx, prompt, params, [&](int32_t token) -> bool {
+                output_tokens.push_back(token);
+                return true;
+            });
+        if (err != IMP_SUCCESS) {
             if (output_len) *output_len = 0;
             if (output_buf_size > 0) output_buf[0] = '\0';
-            return IMP_ERROR_INVALID_ARG;
+            return err;
         }
 
-        // Create request with all sampling params
-        auto req = std::make_shared<imp::Request>();
-        req->input_tokens = std::move(tokens);
-        apply_sampling_params(*req, params);
-        req->ignore_eos = (params->ignore_eos != 0);
-        req->logprobs = (params->logprobs != 0);
-        req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
-        req->json_mode = (params->json_mode != 0);
-        req->status = imp::RequestStatus::PENDING;
+        // Detokenise the accumulated tokens.
+        std::string result = tok->decode(output_tokens);
 
-        ctx->engine->add_request(req);
-
-        // Prefill
-        while (req->status == imp::RequestStatus::PENDING || req->status == imp::RequestStatus::PREFILLING) {
-            bool has_work = ctx->engine->step();
-            if (!has_work)
-                break;
-        }
-
-        // Decode
-        while (req->status != imp::RequestStatus::FINISHED && req->status != imp::RequestStatus::CANCELLED) {
-            bool has_work = ctx->engine->step();
-            if (!has_work && req->status != imp::RequestStatus::FINISHED)
-                break;
-        }
-
-        // Collect output
-        std::string result;
-        for (int32_t t : req->output_tokens) {
-            result += tok->decode({t});
-        }
-
-        // Copy result to output buffer
+        // Copy result to output buffer.
         size_t copy_len = result.size();
         if (copy_len >= output_buf_size) {
             copy_len = output_buf_size - 1;
