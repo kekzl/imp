@@ -1,5 +1,6 @@
 #include "compute/attention_tiled_streaming.h"
 #include "core/logging.h"
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 
@@ -118,16 +119,138 @@ __device__ __forceinline__ float redux_add_f32(float x) {
 
 }  // namespace
 
+template <int Br, int HD>
+__global__ void __launch_bounds__(kThreads, 1)
+attention_tiled_streaming_kernel(
+        const __half* __restrict__ Q,
+        const __half* __restrict__ K,
+        const __half* __restrict__ V,
+        __half* __restrict__ O,
+        int seq_q, int seq_kv,
+        int n_heads, int n_kv_heads,
+        float scale, bool causal,
+        int sliding_window, float softcap, int q_offset) {
+    constexpr int Bkv = default_Bkv<HD>();
+
+    // Suppress unused-parameter warnings for params used in later tasks.
+    (void)V; (void)causal; (void)sliding_window; (void)softcap; (void)q_offset;
+    (void)seq_kv; (void)Bkv;
+
+    // Block coordinates: x=row-block, y=head, z=batch.
+    const int row_block = blockIdx.x;
+    const int head = blockIdx.y;
+    const int batch = blockIdx.z;
+    const int kv_head = head / (n_heads / n_kv_heads);
+    (void)kv_head; (void)K;  // K is unused until iter loop (Task 6).
+
+    const int q_row0 = row_block * Br;
+    if (q_row0 >= seq_q) return;
+
+    const int tid = threadIdx.x;
+
+    // ------------------------------------------------------------------
+    // Shared memory layout
+    // ------------------------------------------------------------------
+    extern __shared__ __align__(128) uint8_t smem_raw[];
+
+    __half* Q_smem = reinterpret_cast<__half*>(smem_raw);
+    __half* K_smem[2];                          // double-buffered
+    K_smem[0] = Q_smem + Br * HD;
+    K_smem[1] = K_smem[0] + Bkv * HD;
+    __half* V_smem = K_smem[1] + Bkv * HD;
+    uint64_t* mbar = reinterpret_cast<uint64_t*>(V_smem + Bkv * HD);
+    (void)K_smem; (void)V_smem;  // unused until iter loop.
+
+    // mbar layout: [Q_ready, K_ready[0], K_ready[1], V_ready,
+    //               QKt_done, V_consumed]
+    if (tid == 0) {
+        mbar_init(&mbar[0], 1);         // Q_ready
+        mbar_init(&mbar[1], 1);         // K_ready[0]
+        mbar_init(&mbar[2], 1);         // K_ready[1]
+        mbar_init(&mbar[3], 1);         // V_ready
+        mbar_init(&mbar[4], 7);         // QKt_done
+        mbar_init(&mbar[5], 7);         // V_consumed
+    }
+    __syncthreads();
+
+    // ------------------------------------------------------------------
+    // Q load: one-time. All 256 threads cooperate.
+    // ------------------------------------------------------------------
+    const __half* Q_gmem = Q
+        + static_cast<size_t>(batch) * seq_q * n_heads * HD
+        + static_cast<size_t>(q_row0) * n_heads * HD
+        + static_cast<size_t>(head) * HD;
+
+    constexpr int kHalvesPerChunk = 8;          // 16 bytes per cp.async
+    constexpr int kQChunks = (Br * HD) / kHalvesPerChunk;
+    for (int c = tid; c < kQChunks; c += kThreads) {
+        int elem = c * kHalvesPerChunk;
+        int r = elem / HD;
+        int d = elem % HD;
+        const __half* src = Q_gmem + static_cast<size_t>(r) * n_heads * HD + d;
+        cp_async_16(&Q_smem[r * HD + d], src);
+    }
+    cp_async_commit();
+    cp_async_wait_all();
+    __syncthreads();
+    if (tid == 0) mbar_arrive(&mbar[0]);
+
+    // Real iteration loop lands in Task 6. For now: just return so the
+    // launcher path doesn't UB. (Note: returning here is fine; the kernel
+    // hasn't written O yet so the test will FAIL on the correctness check —
+    // expected baseline state for Task 5.)
+    (void)Q_gmem;  // silence unused after we exit early.
+    (void)O; (void)scale;
+}
+
 bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        const Tensor& V, Tensor& O, float scale,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
-    // Stub: returns false so the dispatcher falls back to cuBLAS.
-    // Real implementation lands in subsequent tasks.
-    (void)Q; (void)K; (void)V; (void)O; (void)scale; (void)causal;
-    (void)sliding_window; (void)softcap; (void)q_offset; (void)stream;
-    return false;
+    // v1: only hd=128 supported at this task. Other hds bail to cuBLAS.
+    if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
+        return false;
+    if (Q.ndim != 4) return false;
+    const int batch = static_cast<int>(Q.shape[0]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
+    const int n_kv_heads = static_cast<int>(K.shape[2]);
+
+    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
+    if (seq_q == 0 || seq_kv == 0) return false;
+    if (head_dim != 128) return false;       // expanding in Task 7+
+
+    constexpr int Br = 64;
+    constexpr int HD = 128;
+    constexpr int Bkv = 64;
+
+    // Smem: Q + K_dbuf + V + 6 mbarriers.
+    const size_t smem_bytes =
+          Br * HD * sizeof(__half)
+        + 2 * Bkv * HD * sizeof(__half)
+        + Bkv * HD * sizeof(__half)
+        + 6 * sizeof(uint64_t);
+
+    cudaFuncSetAttribute(
+        attention_tiled_streaming_kernel<Br, HD>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes));
+
+    dim3 grid((seq_q + Br - 1) / Br, n_heads, batch);
+    attention_tiled_streaming_kernel<Br, HD><<<grid, kThreads, smem_bytes, stream>>>(
+        static_cast<const __half*>(Q.data),
+        static_cast<const __half*>(K.data),
+        static_cast<const __half*>(V.data),
+        static_cast<__half*>(O.data),
+        seq_q, seq_kv, n_heads, n_kv_heads,
+        scale, causal, sliding_window, softcap, q_offset);
+
+    if (cudaGetLastError() != cudaSuccess) return false;
+    (void)scale; // referenced for compile, kernel will use later
+    return true;
 }
 
 }  // namespace imp
