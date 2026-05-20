@@ -142,8 +142,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.splitk_pipe = parse_bool(val, cfg.attention.splitk_pipe);
     else if (eq("attention.gate_concat"))
         cfg.attention.gate_concat = parse_bool(val, cfg.attention.gate_concat);
-    else if (eq("attention.no_fmha_cluster"))
-        cfg.attention.no_fmha_cluster = parse_bool(val, cfg.attention.no_fmha_cluster);
 
     // [moe]
     else if (eq("moe.expert_overhead_pct"))
