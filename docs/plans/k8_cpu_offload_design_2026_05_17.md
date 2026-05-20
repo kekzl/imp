@@ -428,7 +428,7 @@ investment.
   is a no-op.
 - Wire `KVBlockOffloadManager::ensure_block(block_id, compute_stream)`
   into the executor at the paged-attention dispatch site
-  (`src/graph/executor_attention.cu`).
+  (`src/exec/executor_attention.cu`).
 - Validate: zero perf change in `make verify-fast` baseline.
 
 **Deliverable:** the plumbing is in place. Future phases can flip the
