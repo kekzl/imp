@@ -14,6 +14,7 @@
 #include "memory/ssm_state.h"
 #include "memory/gdn_state.h"
 #include "memory/layer_offload.h"
+#include "memory/memory_manager.h"
 #include "memory/vram_allocator.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
@@ -192,11 +193,15 @@ public:
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
-    VRAMAllocator& vram_allocator() noexcept { return vram_alloc_; }
+    VRAMAllocator& vram_allocator() noexcept { return memory_manager_.vram_allocator(); }
+    MemoryManager& memory_manager() noexcept { return memory_manager_; }
+    const MemoryManager& memory_manager() const noexcept { return memory_manager_; }
 
 private:
     // ── Core components ──────────────────────────────────────────────
-    VRAMAllocator vram_alloc_;
+    // Phase 5 Track C: façade over VRAMAllocator + (lazy) PinnedAllocator/
+    // DeviceAllocator + vram_budget/storage_planner free functions.
+    MemoryManager memory_manager_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
     std::unique_ptr<Scheduler> scheduler_;
