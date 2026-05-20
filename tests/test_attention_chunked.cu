@@ -1,14 +1,128 @@
 #include "compute/attention_cublas.h"
-#include "compute/attention_naive.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cfloat>
 #include <gtest/gtest.h>
 #include <vector>
 #include <cmath>
 #include <random>
 
 namespace imp {
+
+namespace {
+
+// Local naive reference attention for cuBLAS-SWA parity check.
+// Inlined from the archived src/compute/attention_naive.{h,cu} (see
+// docs/archive/attention_naive/RESURRECTION.md). Pure FP32 accumulation,
+// one block per (head, query). Handles GQA + causal + sliding window.
+__global__ void naive_attention_prefill_ref_kernel(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V,
+    half* __restrict__ O, int seq_len, int n_heads, int n_kv_heads, int head_dim,
+    float scale, float softcap, int sliding_window) {
+    const int head = blockIdx.x;
+    const int q_pos = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int gqa_group = head / (n_heads / n_kv_heads);
+
+    if (head >= n_heads || q_pos >= seq_len)
+        return;
+
+    const half* q_row = Q + (int64_t)q_pos * n_heads * head_dim + head * head_dim;
+    half* o_row = O + (int64_t)q_pos * n_heads * head_dim + head * head_dim;
+
+    extern __shared__ float smem[];
+    float* scores = smem;
+
+    for (int k_pos = tid; k_pos < seq_len; k_pos += blockDim.x) {
+        if (k_pos > q_pos) {
+            scores[k_pos] = -FLT_MAX;
+        } else if (sliding_window > 0 && (q_pos - k_pos) >= sliding_window) {
+            scores[k_pos] = -FLT_MAX;
+        } else {
+            const half* k_row = K + (int64_t)k_pos * n_kv_heads * head_dim + gqa_group * head_dim;
+            float dot = 0.0f;
+            for (int d = 0; d < head_dim; d++)
+                dot += __half2float(q_row[d]) * __half2float(k_row[d]);
+            dot *= scale;
+            if (softcap > 0.0f)
+                dot = softcap * tanhf(dot / softcap);
+            scores[k_pos] = dot;
+        }
+    }
+    __syncthreads();
+
+    float local_max = -FLT_MAX;
+    for (int j = tid; j < seq_len; j += blockDim.x)
+        local_max = fmaxf(local_max, scores[j]);
+    for (int off = 16; off > 0; off >>= 1)
+        local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
+
+    __shared__ float s_max_vals[8];
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    if (lane == 0)
+        s_max_vals[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float m = s_max_vals[0];
+        for (int w = 1; w < (blockDim.x + 31) / 32; w++)
+            m = fmaxf(m, s_max_vals[w]);
+        s_max_vals[0] = m;
+    }
+    __syncthreads();
+    float max_val = s_max_vals[0];
+
+    float local_sum = 0.0f;
+    for (int j = tid; j < seq_len; j += blockDim.x) {
+        float e = (scores[j] > -FLT_MAX + 1.0f) ? expf(scores[j] - max_val) : 0.0f;
+        scores[j] = e;
+        local_sum += e;
+    }
+    for (int off = 16; off > 0; off >>= 1)
+        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, off);
+
+    __shared__ float s_sum_vals[8];
+    if (lane == 0)
+        s_sum_vals[warp_id] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float s = 0.0f;
+        for (int w = 0; w < (blockDim.x + 31) / 32; w++)
+            s += s_sum_vals[w];
+        s_sum_vals[0] = (s > 0.0f) ? (1.0f / s) : 0.0f;
+    }
+    __syncthreads();
+    float inv_sum = s_sum_vals[0];
+
+    for (int j = tid; j < seq_len; j += blockDim.x)
+        scores[j] *= inv_sum;
+    __syncthreads();
+
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int k_pos = 0; k_pos < seq_len; k_pos++) {
+            if (scores[k_pos] > 0.0f) {
+                const half* v_row = V + (int64_t)k_pos * n_kv_heads * head_dim + gqa_group * head_dim;
+                acc += scores[k_pos] * __half2float(v_row[d]);
+            }
+        }
+        o_row[d] = __float2half(acc);
+    }
+}
+
+static void naive_attention_prefill_ref(const half* Q, const half* K, const half* V, half* O,
+                                        int seq_len, int n_heads, int n_kv_heads, int head_dim,
+                                        float scale, float softcap, cudaStream_t stream,
+                                        int sliding_window = 0) {
+    int threads = 256;
+    dim3 grid(n_heads, seq_len);
+    size_t smem = seq_len * sizeof(float);
+    naive_attention_prefill_ref_kernel<<<grid, threads, smem, stream>>>(
+        Q, K, V, O, seq_len, n_heads, n_kv_heads, head_dim, scale, softcap, sliding_window);
+}
+
+}  // anonymous namespace
 
 // Helper: allocate FP16 device tensor [d0, d1].
 static Tensor make_fp16_tensor_2d(int d0, int d1) {
@@ -177,8 +291,8 @@ TEST(AttentionChunkedTest, GQA_Ratio4) {
 
 // ---------------------------------------------------------------------------
 // Sliding-window attention parity: cuBLAS path with sliding_window must match
-// naive_attention_prefill within FP16/FP32-S precision. Catches off-by-ones at
-// the window edge.
+// the local naive_attention_prefill_ref within FP16/FP32-S precision. Catches
+// off-by-ones at the window edge.
 // ---------------------------------------------------------------------------
 TEST(AttentionChunkedTest, SlidingWindowMatchesNaive) {
     constexpr int q_len = 128, kv_len = 128;
@@ -210,12 +324,12 @@ TEST(AttentionChunkedTest, SlidingWindowMatchesNaive) {
     attention_cublas_prefill(Q, K, V, O_cublas, S, nh, nkv, hd, scale, /*causal=*/true,
                              /*softcap=*/0.0f, /*q_offset=*/0, /*stream=*/0,
                              /*sliding_window=*/sliding_window);
-    naive_attention_prefill(static_cast<const half*>(Q.data),
-                            static_cast<const half*>(K.data),
-                            static_cast<const half*>(V.data),
-                            static_cast<half*>(O_naive.data),
-                            q_len, nh, nkv, hd, scale, /*softcap=*/0.0f, /*stream=*/0,
-                            sliding_window);
+    naive_attention_prefill_ref(static_cast<const half*>(Q.data),
+                                static_cast<const half*>(K.data),
+                                static_cast<const half*>(V.data),
+                                static_cast<half*>(O_naive.data),
+                                q_len, nh, nkv, hd, scale, /*softcap=*/0.0f, /*stream=*/0,
+                                sliding_window);
     cudaDeviceSynchronize();
 
     std::vector<half> h_oc(q_len * nh * hd), h_on(q_len * nh * hd);

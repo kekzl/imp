@@ -18,8 +18,7 @@ namespace imp {
 // q_offset=0 reproduces the historic square path exactly.
 //
 // sliding_window > 0 additionally masks K[j] where (abs_pos - j) >= sliding_window,
-// i.e. the visible K window is [abs_pos - sliding_window + 1, abs_pos]. Matches the
-// semantics of naive_attention_prefill's sliding_window parameter. Defaults to 0 (off).
+// i.e. the visible K window is [abs_pos - sliding_window + 1, abs_pos]. Defaults to 0 (off).
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr,

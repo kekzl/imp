@@ -100,8 +100,7 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
     const float* row_in = S_in + row_base;
     half* row_out = S_out + row_base;
     int abs_row = q_offset + row;
-    // sliding_window > 0: mask j where (abs_row - j) >= sliding_window
-    // (matches naive_attention_prefill semantics).
+    // sliding_window > 0: mask j where (abs_row - j) >= sliding_window.
     auto masked = [abs_row, causal, sliding_window](int j) {
         if (causal && j > abs_row) return true;
         if (sliding_window > 0 && (abs_row - j) >= sliding_window) return true;
