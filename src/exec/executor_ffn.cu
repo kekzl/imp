@@ -231,7 +231,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         // Instrumentation-only: measure contextual FFN sparsity (decode only).
         // Reads go and uo, counts rows with |silu(gate)*up| under each of 5
         // thresholds. Cheap (~1 µs / layer) when on, no-op when off.
-        if (n == 1 && RuntimeConfig::current().ffn.sparsity_probe &&
+        if (n == 1 && runtime_config().ffn.sparsity_probe &&
             go.qtype == QType::F16 && uo.qtype == QType::F16) {
             const int K_ff = static_cast<int>(ly.w_gate.shape[0]);
             probe_ffn_silu_sparsity(layer, static_cast<const half*>(go.data),
@@ -338,7 +338,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // Phase 2 FFN sparsity: when threshold > 0 and Q8_0 down_proj, build
             // a per-Q8-block mask from gate*up and dispatch the masked GEMV.
             // Falls through to standard dispatch for other qtypes or when off.
-            const float sparsity_thr = RuntimeConfig::current().ffn.sparsity_threshold;
+            const float sparsity_thr = runtime_config().ffn.sparsity_threshold;
             if (sparsity_thr > 0.0f && ly.w_down.qtype == QType::Q8_0 &&
                 qscratch_.ffn_block_mask != nullptr &&
                 cfg.ffn_activation != FFNActivation::GEGLU) {

@@ -218,7 +218,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // ---- Optional per-component profiling (IMP_PROFILE=1) ----
     // Profiling disables CUDA graph capture (they are incompatible).
     // Use IMP_PROFILE=1 for diagnostic runs only.
-    const bool do_profile = RuntimeConfig::current().diagnostics.profile;
+    const bool do_profile = runtime_config().diagnostics.profile;
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
     bool profiling = do_profile;
@@ -336,7 +336,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
-    if (!RuntimeConfig::current().diagnostics.dump_hidden_dir.empty()) {
+    if (!runtime_config().diagnostics.dump_hidden_dir.empty()) {
         std::vector<half> h_buf(n * cfg.d_model);
         cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
         char fname[256];
@@ -356,7 +356,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
     // [diagnostics] exit_layer = N runs only N layers (-1 = full forward).
     {
-        const int s_exit = RuntimeConfig::current().diagnostics.exit_layer;
+        const int s_exit = runtime_config().diagnostics.exit_layer;
         if (s_exit > 0)
             max_layer = std::min(max_layer, s_exit);
     }
@@ -408,7 +408,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             cudaEventRecord(ev_attn[i], stream);
 
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
-        const bool skip_moe = RuntimeConfig::current().moe.skip;
+        const bool skip_moe = runtime_config().moe.skip;
         if (skip_moe) {
             // Debug: skip all FFN/MoE to isolate attention bugs
         } else if (layer_has_moe(i)) {
@@ -473,7 +473,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                     // Binary dump: full hidden state for selected layers.
                     // [diagnostics] dump_hidden_dir = "<path>"  → layers 0/5/15/29.
                     // [diagnostics] dump_hidden_dir = "all"     → every layer.
-                    const std::string& dh = RuntimeConfig::current().diagnostics.dump_hidden_dir;
+                    const std::string& dh = runtime_config().diagnostics.dump_hidden_dir;
                     if (!dh.empty()) {
                         const bool dump_all = (dh == "all");
                         bool sel = dump_all || (i == 0 || i == 5 || i == 15 || i == 29);
@@ -511,7 +511,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Only sync when the MoE path did NOT go through the FP32 accum kernel
         // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
         if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4 &&
-            RuntimeConfig::current().moe.force_fp16_sync) {
+            runtime_config().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
@@ -584,7 +584,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_.qtype;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
-                             !RuntimeConfig::current().gemm.no_dp4a_lm;
+                             !runtime_config().gemm.no_dp4a_lm;
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
@@ -656,7 +656,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
             // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
             // if it still gives +8.83 then the bug is in hidden state or output_norm.
-            if (RuntimeConfig::current().generation.lm_dequant_fp16) {
+            if (runtime_config().generation.lm_dequant_fp16) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 int N = cfg.vocab_size;
@@ -807,7 +807,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 
     // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
-    const bool skip_softcap = RuntimeConfig::current().generation.no_logit_softcap;
+    const bool skip_softcap = runtime_config().generation.no_logit_softcap;
     if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;

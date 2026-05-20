@@ -279,7 +279,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     break;
                 }
             }
-            if (has_host_experts && !RuntimeConfig::current().moe.no_expert_cache) {
+            if (has_host_experts && !runtime_config().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
@@ -289,7 +289,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 budget = static_cast<size_t>(budget * 0.15);  // 15% of available
                 const auto& mcfg = model_->config();
-                bool debug_parity = RuntimeConfig::current().moe.expert_cache_debug_parity;
+                bool debug_parity = runtime_config().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
                                        mcfg.n_experts, debug_parity)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
@@ -709,7 +709,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     }
                 }
                 if (cutlass_sm120_mxfp4_available() &&
-                    (has_mxfp4_weights || RuntimeConfig::current().attention.mxfp4 == "always")) {
+                    (has_mxfp4_weights || runtime_config().attention.mxfp4 == "always")) {
                     qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
                     qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n,
                                                                                         max_k);

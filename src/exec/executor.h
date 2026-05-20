@@ -16,6 +16,7 @@
 #include "exec/moe_workspace.h"
 #include "exec/quant_scratch.h"
 #include "runtime/storage_planner.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -700,6 +701,16 @@ public:
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
+    // Phase 5 Track D: per-Engine RuntimeConfig (replaces RuntimeConfig::current()
+    // singleton). Engine wires this via set_runtime_config() during init.
+    // When the executor is constructed outside an Engine (unit tests that
+    // create a bare GraphExecutor without an owning Engine), the pointer
+    // remains null and the accessor falls back to the process-wide singleton.
+    void set_runtime_config(const RuntimeConfig& cfg) noexcept { runtime_config_ = &cfg; }
+    const RuntimeConfig& runtime_config() const noexcept {
+        return runtime_config_ ? *runtime_config_ : RuntimeConfig::current();
+    }
+
 private:
     // Phases of pre_dequant_weights(), extracted for readability.
     // Cross-phase state: remaining_budget is reduced by each FP16/FP8/NVFP4
@@ -910,6 +921,11 @@ private:
 
     // --- Layer offload manager (non-owning, set by engine) ---
     LayerOffloadManager* offload_mgr_ = nullptr;
+
+    // --- Per-Engine RuntimeConfig (Phase 5 Track D, non-owning) ---
+    // Engine wires this via set_runtime_config() during Engine::init.
+    // Replaces RuntimeConfig::current() inside GraphExecutor::* methods.
+    const RuntimeConfig* runtime_config_ = nullptr;
 
     // --- Allocation and configuration methods ---
 

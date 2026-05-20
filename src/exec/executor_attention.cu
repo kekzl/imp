@@ -553,7 +553,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        const bool use_concat = RuntimeConfig::current().attention.gate_concat;
+        const bool use_concat = runtime_config().attention.gate_concat;
         if (use_concat) {
             // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
             // One 2D copy each, width = q_actual_dim bytes per row.
@@ -599,7 +599,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        const bool no_qknorm_fused = RuntimeConfig::current().attention.no_qknorm_fused;
+        const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
         if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
@@ -814,8 +814,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
         // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
         // use cuBLAS attention for all layers (it handles arbitrary head_dim).
-        const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
-        const bool use_naive_attn = RuntimeConfig::current().attention.naive;
+        const bool no_cublas_attn = runtime_config().attention.no_cublas;
+        const bool use_naive_attn = runtime_config().attention.naive;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
         // Gemma-4 SWA used to need the naive FP32 workaround because the FMHA
         // chain emitted garbage on hd=256 + sliding and the cuBLAS softmax had
@@ -831,7 +831,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int cublas_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
         bool gemma4_overflow_cublas = (cfg.arch == ModelArch::GEMMA4 && n > cublas_cap);
         bool use_naive_for_swa = (gemma4_overflow_cublas && n <= 8192 &&
-                                  !RuntimeConfig::current().attention.no_naive_swa);
+                                  !runtime_config().attention.no_naive_swa);
         if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
             // Naive reference attention: simple FP32, no optimization.
             if (layer == 0 && use_naive_for_swa && !use_naive_attn)
@@ -925,7 +925,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
-        const bool force_cublas_decode = RuntimeConfig::current().attention.force_cublas_decode;
+        const bool force_cublas_decode = runtime_config().attention.force_cublas_decode;
         if (force_cublas_decode && n == 1 && attn_scores_buf_) {
             // Reconstruct K/V from cache for this position
             KVCache* cache_dbg = state.kv_cache;
@@ -1009,7 +1009,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk (legacy
             // IMP_USE_BITDECODING_QK=1) routes to the WMMA-Q.K variant; default
             // keeps the scalar-FFMA path unchanged.
-            const bool use_bitdecoding_tc = imp::RuntimeConfig::current().kv_cache.bitdecoding_qk;
+            const bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc) {
                 // QW6 from review/phase5_synthesis.md §2.1: gate the entire
                 // residual-arg marshalling (8+ trailing args) behind a single
