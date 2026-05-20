@@ -234,8 +234,6 @@ set(IMP_RUNTIME_SOURCES
 )
 
 set(IMP_GRAPH_SOURCES
-    src/graph/op.cpp
-    src/graph/graph.cpp
     src/graph/executor.cu
     src/graph/executor_kernels.cu
     src/graph/gemm_kernel_registry.cu
