@@ -563,7 +563,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // = prefill_chunk_size). H2D upload happened above on pf_stream
         // *before* this wrapper — captured region is forward_logits only,
         // analogous to the decode graph pattern.
-        const bool prefill_graph_enabled = RuntimeConfig::current().runtime.prefill_graph;
+        const bool prefill_graph_enabled = runtime_config_.runtime.prefill_graph;
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs;
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
@@ -1006,7 +1006,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     std::vector<int32_t> tokens;
     Tensor decode_logits_out;
 
-    const bool profiling = RuntimeConfig::current().diagnostics.profile;
+    const bool profiling = runtime_config_.diagnostics.profile;
     int graph_idx = gpu_batch.n_sequences - 1;
     if (config_.use_cuda_graphs && !profiling && gpu_batch.n_sequences > 0 && graph_idx < kMaxGraphPoolSize &&
         decode_batch_pool_.is_allocated()) {
@@ -1080,7 +1080,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             if (match) mtp_accuracy_.matches++;
             // Optional verbose log: prints (predicted, actual, match) with
             // decoded strings so accept patterns can be analyzed offline.
-            const bool s_pattern_log = RuntimeConfig::current().diagnostics.mtp_pattern_log;
+            const bool s_pattern_log = runtime_config_.diagnostics.mtp_pattern_log;
             if (s_pattern_log) {
                 Tokenizer* tok = model_->tokenizer();
                 std::string ps = tok ? tok->decode_token(mtp_pending_prediction_) : std::string();
@@ -1129,7 +1129,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Optional: apply the main model's output norm before passing
             // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
             // in some MTP variants; gate by env so we can A/B.
-            const bool s_pre_norm_h = RuntimeConfig::current().diagnostics.mtp_prenorm_h;
+            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h;
             const void* h_for_mtp = h_view.data;
             // Scratch buffer for the normalized variant (allocated once).
             static void* s_h_normed = nullptr;

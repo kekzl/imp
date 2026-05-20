@@ -118,7 +118,7 @@ void Engine::build_banned_token_list() {
     // Diagnostic bypass: generation.no_ban (legacy IMP_NO_BAN=1) disables the
     // ban list. Used to bisect Mistral-Small-3.2-NVFP4 long-form repetition
     // (ban vs weight quality).
-    if (RuntimeConfig::current().generation.no_ban) {
+    if (runtime_config_.generation.no_ban) {
         banned_token_ids_.clear();
         IMP_LOG_WARN("generation.no_ban=true: skipping banned-token list (debug)");
         return;

@@ -806,6 +806,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             goto after_attention;
         }
 
+        // Prefill dispatch (post-Phase-2 + Phase-5 Track D):
+        const bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
+        const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
+                                   n <= static_cast<int>(attn_scores_.shape[1]);
+        const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
 
         if (s_matrix_fits && !non_gemma4_sliding) {
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
