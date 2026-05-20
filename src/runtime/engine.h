@@ -9,6 +9,7 @@
 #include "runtime/cuda_graph.h"
 #include "runtime/vision_pipeline.h"
 #include "runtime/constraint_manager.h"
+#include "runtime/config.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
@@ -197,11 +198,24 @@ public:
     MemoryManager& memory_manager() noexcept { return memory_manager_; }
     const MemoryManager& memory_manager() const noexcept { return memory_manager_; }
 
+    // Phase 5 Track D: per-Engine RuntimeConfig (replaces RuntimeConfig::current()
+    // singleton). Engine::init snapshots the loaded config; engine_init_resolver
+    // mutates it in place for arch-specific defaults; GraphExecutor reads a
+    // non-owning pointer set via set_runtime_config().
+    const RuntimeConfig& runtime_config() const noexcept { return runtime_config_; }
+    RuntimeConfig& mutable_runtime_config() noexcept { return runtime_config_; }
+
 private:
     // ── Core components ──────────────────────────────────────────────
     // Phase 5 Track C: façade over VRAMAllocator + (lazy) PinnedAllocator/
     // DeviceAllocator + vram_budget/storage_planner free functions.
     MemoryManager memory_manager_;
+    // Phase 5 Track D: per-Engine runtime configuration (replaces the
+    // RuntimeConfig::current() process-wide singleton). Snapshot is
+    // initialized from RuntimeConfig::current() at the start of init() and
+    // then mutated in-place by engine_init_resolver helpers for arch-
+    // specific defaults (deterministic_gemm, prefill_graph, etc.).
+    RuntimeConfig runtime_config_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
     std::unique_ptr<Scheduler> scheduler_;

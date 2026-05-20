@@ -181,7 +181,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec2 = 0;
     }
     // Diagnostic: generation.mtp_no_rope (legacy IMP_MTP_NO_ROPE=1) disables RoPE entirely.
-    if (RuntimeConfig::current().generation.mtp_no_rope) {
+    if (runtime_config_.generation.mtp_no_rope) {
         ws->rope_dim = 0;
     }
     // Runtime weight_offset matches what the main model's rmsnorm calls pass:
@@ -367,6 +367,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_ = std::move(model);
     config_ = config;
 
+    // Phase 5 Track D: snapshot the process-wide RuntimeConfig into the
+    // per-Engine field. main.cpp (imp-cli / imp-server) has already called
+    // RuntimeConfig::install(load(...)) by this point. After this assign,
+    // every Engine::* method reads runtime_config_ directly; engine_init_
+    // resolver_ helpers mutate this snapshot in place for arch-specific
+    // defaults.
+    runtime_config_ = RuntimeConfig::current();
+
     const auto& mcfg = model_->config();
 
     init_apply_debug_raw_overrides_();
@@ -397,7 +405,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     if (!init_features())
         return false;
-    if (!RuntimeConfig::current().runtime.warmup) {
+    if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
     } else {
         warmup();

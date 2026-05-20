@@ -283,19 +283,21 @@ struct RuntimeConfig {
     // Pass empty path to use the search-path default.
     static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides);
 
-    // ---- Process-wide singleton -----------------------------------------
+    // ---- Process-wide singleton (legacy, being retired) ------------------
     //
-    // Engine init calls install() once with the loaded RuntimeConfig.
-    // All ~80 former getenv("IMP_*") call sites read via current(), which
-    // returns a const reference to the installed config (or a default-
-    // constructed one if install() was never called).
+    // Tools (imp-cli, imp-server) call install() once with the loaded
+    // RuntimeConfig before constructing the Engine. Engine::init() snapshots
+    // it into a per-Engine field (Phase 5 Track D, 2026-05-20) and from that
+    // point Engine::* and GraphExecutor::* methods read the per-instance
+    // copy instead of the singleton.
     //
-    // This is intentionally a process-wide singleton because the runtime
-    // configuration is global state — there is no expectation of two
-    // engines with different runtime configs in the same process. If
-    // that ever changes, threading a const RuntimeConfig& through every
-    // executor call site is a mechanical refactor; the read-side API
-    // (current().runtime.no_pdl etc.) does not need to change.
+    // The singleton remains for the long tail of free functions in
+    // src/compute/, src/quant/, src/model/, src/runtime/ that don't carry
+    // an Engine* / GraphExecutor* context (e.g. PDL kernel-attr lookup,
+    // gemm dispatch helpers, weight_upload static helpers, chat_template
+    // debug paths, graph_diag inline helpers). A follow-up PR will
+    // thread `const RuntimeConfig&` through those modules and delete
+    // current() / install().
     static const RuntimeConfig& current();
     static void install(const RuntimeConfig& cfg);
 };
