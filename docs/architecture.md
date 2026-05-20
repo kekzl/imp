@@ -147,10 +147,17 @@ for the resolution plan.
   The helper boundaries don't map to subsystems. Phase 4 splits it into
   named subsystems with constructor injection.
 - **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace.**
-  Caps maximum context length. Phase 5 evaluates tiled streaming softmax
-  or FMHA-default-switch.
-- **`RuntimeConfig::current()` is a global singleton.** Phase 5
-  de-globalizes it to per-Engine.
+  Caps maximum context length. Phase 5 Track E (tiled streaming softmax)
+  was scoped but deferred as opportunistic future work — 10-15 day
+  perf-sensitive kernel rewrite. Reopens when a regression attributes
+  specifically to the S-matrix workspace cap.
+- **`RuntimeConfig::current()` is a global singleton — partially
+  retired (Phase 5 Track D 2026-05-20).** Each `Engine` now owns its
+  own `RuntimeConfig` (`Engine::runtime_config_`), and `GraphExecutor`
+  holds a non-owning pointer set via `set_runtime_config()`. 61 of 94
+  call sites migrated; 33 free-function readers in `compute/`, `quant/`,
+  `model/`, etc. still consume the singleton until a follow-up PR
+  threads `const RuntimeConfig&` through them.
 - **The directory `src/exec/` was previously `src/graph/`.** The Graph
   IR that motivated the old name was deleted in #287 and the directory
   renamed in #290 to match its actual contents (imperative executor +

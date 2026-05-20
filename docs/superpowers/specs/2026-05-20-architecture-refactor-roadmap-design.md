@@ -24,6 +24,8 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 
 ## 3. The Five Phases
 
+> **All five phases closed 2026-05-20.** Track E (tiled streaming softmax for the 1 GiB cuBLAS S-matrix) deferred as soft, opt-in future work. Track D follow-up (singleton retirement for 33 free-function readers) is the only outstanding work item from the roadmap.
+
 ### Phase 1 — Lügen entfernen
 **Status (2026-05-20):** Closed. Landed: #287 (delete dead Graph IR), #286 + #289 (architecture diagram + README link), #291 (narrative companion docs/architecture.md), #290 (soft PR — rename src/graph/ → src/exec/), #292 (closeout: roadmap.md path sweep + this status line). Deferred follow-ups: stale `src/graph/` paths in `docs/plans/*_2026_05_17.md` historical design memos and `review/phase3_maint.md` audit snapshot — these are point-in-time records.
 
@@ -119,6 +121,9 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 ---
 
 ### Phase 5 — Schichten und APIs (höchstes Risiko)
+**Status (2026-05-20):** Closed (Tracks A-D shipped; Track E deferred). Landed: #319 (Track A — gemma4 → ModelConfig::Overrides), #320 (Track B — imp_generate* dedupe via imp_prefill+imp_decode_step), #321 (Track C — MemoryManager façade), #322 (Track D partial — Engine + GraphExecutor migrated; 33 free-function calls remain on singleton). This PR (#323) closes Phase 5 with roadmap status + architecture.md wound updates + final memo. **Track D follow-up PR will eliminate the singleton** by threading `const RuntimeConfig&` through the remaining free functions in `compute/`, `quant/`, `model/`, `runtime/` inline helpers, `vision/`, `exec/` debug headers, and CLI/server tools. **Track E (tiled streaming softmax for the 1 GiB S-matrix)** deferred — perf-sensitive kernel rewrite estimated at 10-15 days; reopens when a decode-perf regression specifically attributes to the S-matrix workspace cap, or as opportunistic work.
+
+
 **Goal:** Structural honesty. The fuzzy boundaries become sharp.
 
 **Critical PRs**
