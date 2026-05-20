@@ -116,7 +116,7 @@ Full build options, test commands, and verify-gate setup: [`docs/usage.md`](docs
 
 | Document | Description |
 |---|---|
-| [Architecture diagram](docs/architecture.svg) ([source](docs/architecture.dot)) | End-to-end load + execution pipeline (load → engine init → prefill → decode) |
+| [Architecture](docs/architecture.md) ([diagram](docs/architecture.svg)) | End-to-end load + execution pipeline (load → engine init → prefill → decode) |
 | [Usage & reference](docs/usage.md) | Build, server, CLI, C API |
 | [Supported models](docs/supported-models.md) | Tested model families with VRAM + tok/s |
 | [Quantization](docs/quantization.md) | GGUF Q*_K, NVFP4, MXFP4, FP8 KV — formats, pipelines, trade-offs |
