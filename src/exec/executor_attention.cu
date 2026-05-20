@@ -17,7 +17,6 @@
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
-#include "compute/attention_naive.h"
 #include "compute/attention_paged.h"
 #include "compute/kv_gather.h"
 #include "compute/moe_routing.h"
@@ -814,39 +813,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
         // use cuBLAS attention for all layers (it handles arbitrary head_dim).
         const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
-        const bool use_naive_attn = RuntimeConfig::current().attention.naive;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
-        // Gemma-4 SWA used to need the naive FP32 workaround because the FMHA
-        // chain emitted garbage on hd=256 + sliding and the cuBLAS softmax had
-        // no sliding-window mask. cuBLAS now supports sliding_window directly
-        // (causal_softmax_*_kernel mask `(abs_row - j) >= sliding_window`), so
-        // SWA layers go through the cuBLAS gate below. Naive remains the
-        // fallback for the one remaining failure mode:
-        //   - Gemma-4 GLOBAL layers (hd=512) at n > cublas_cap: the cuBLAS
-        //     gate fails, FMHA fallback dispatches flash_attention_prefill_tc
-        //     whose ~280 KB static tile exceeds sm_120's 100 KB opt-in smem.
-        // Naive's smem bound is seq_len*4B (n=8192 → 32 KB). Bypassable via
-        // IMP_NO_NAIVE_SWA=1.
-        int cublas_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
-        bool gemma4_overflow_cublas = (cfg.arch == ModelArch::GEMMA4 && n > cublas_cap);
-        bool use_naive_for_swa = (gemma4_overflow_cublas && n <= 8192 &&
-                                  !RuntimeConfig::current().attention.no_naive_swa);
-        if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
-            // Naive reference attention: simple FP32, no optimization.
-            if (layer == 0 && use_naive_for_swa && !use_naive_attn)
-                IMP_LOG_INFO(
-                    "Gemma-4 long-context fallback: layer %d using NAIVE attention (n=%d > cublas_cap=%d "
-                    "and FMHA hd=%d tc-tile OOMs)",
-                    layer, n, cublas_cap, hd);
-            else if (layer == 0)
-                IMP_LOG_INFO("Using NAIVE reference attention (n=%d, nh=%d, nkv=%d, hd=%d, scale=%.2f)", n,
-                             nh, nkv, hd, scale);
-            naive_attention_prefill(static_cast<const half*>(qv.data), static_cast<const half*>(kk.data),
-                                    static_cast<const half*>(vv.data), static_cast<half*>(ao.data), n, nh,
-                                    nkv, hd, scale, cfg.attn_logit_softcap, stream, layer_sliding_window);
-        } else if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ &&
-                   n <= static_cast<int>(attn_scores_.shape[1]) &&
-                   (force_cublas_attn || !sliding_active)) {
+        // Gemma-4 SWA layers used to need a naive FP32 fallback because the
+        // FMHA chain emitted garbage on hd=256 + sliding and the cuBLAS softmax
+        // had no sliding-window mask. cuBLAS now supports sliding_window
+        // directly (causal_softmax_*_kernel mask `(abs_row - j) >= sliding_window`),
+        // and chunked prefill keeps the S-matrix within capacity for Gemma-4
+        // long contexts (see gemma4_chunked_prefill_2026_05_15.md), so the
+        // naive fallback has been retired.
+        if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ &&
+            n <= static_cast<int>(attn_scores_.shape[1]) &&
+            (force_cublas_attn || !sliding_active)) {
             // The n<=1024 heuristic below picks Flash Attention for long contexts
             // (O(1) memory) over cuBLAS (O(n^2) S-matrix). Gemma-4 with mixed
             // head_dims (256 SWA / 512 global) MUST stay on cuBLAS for the

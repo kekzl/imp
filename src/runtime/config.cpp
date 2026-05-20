@@ -128,16 +128,12 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.mxfp4_fp16_cache_policy = val;
     else if (eq("attention.fmha_blockscale"))
         cfg.attention.fmha_blockscale = val;
-    else if (eq("attention.naive"))
-        cfg.attention.naive = parse_bool(val, cfg.attention.naive);
     else if (eq("attention.no_cublas"))
         cfg.attention.no_cublas = parse_bool(val, cfg.attention.no_cublas);
     else if (eq("attention.force_cublas_decode"))
         cfg.attention.force_cublas_decode = parse_bool(val, cfg.attention.force_cublas_decode);
     else if (eq("attention.no_qknorm_fused"))
         cfg.attention.no_qknorm_fused = parse_bool(val, cfg.attention.no_qknorm_fused);
-    else if (eq("attention.no_naive_swa"))
-        cfg.attention.no_naive_swa = parse_bool(val, cfg.attention.no_naive_swa);
     else if (eq("attention.splitk_pipe"))
         cfg.attention.splitk_pipe = parse_bool(val, cfg.attention.splitk_pipe);
     else if (eq("attention.gate_concat"))
