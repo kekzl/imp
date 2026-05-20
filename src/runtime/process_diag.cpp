@@ -10,7 +10,6 @@ struct ProcessDiag {
     bool debug_forward = false;
     bool debug_template = false;
     bool graph_diag = false;
-    bool dump_tokens = false;
     bool nvfp4_force_dequant = false;
     bool log_gemm_algo = false;
     bool audit_nvfp4_scales = false;
@@ -41,9 +40,6 @@ struct ProcessDiag {
 
     // GDN
     std::string gdn_layout_override;
-
-    // Server
-    bool server_prefix_cache = false;
 };
 
 ProcessDiag& slot() {
@@ -58,7 +54,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.debug_forward = cfg.diagnostics.debug_forward;
     d.debug_template = cfg.diagnostics.debug_template;
     d.graph_diag = cfg.diagnostics.graph_diag;
-    d.dump_tokens = cfg.diagnostics.dump_tokens;
     d.nvfp4_force_dequant = cfg.diagnostics.nvfp4_force_dequant;
     d.log_gemm_algo = cfg.diagnostics.log_gemm_algo;
     d.audit_nvfp4_scales = cfg.diagnostics.audit_nvfp4_scales;
@@ -81,13 +76,11 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;
     d.gdn_layout_override = cfg.gdn.layout_override;
-    d.server_prefix_cache = cfg.server.prefix_cache;
 }
 
 bool process_diag_debug_forward() { return slot().debug_forward; }
 bool process_diag_debug_template() { return slot().debug_template; }
 bool process_diag_graph_diag() { return slot().graph_diag; }
-bool process_diag_dump_tokens() { return slot().dump_tokens; }
 bool process_diag_nvfp4_force_dequant() { return slot().nvfp4_force_dequant; }
 bool process_diag_log_gemm_algo() { return slot().log_gemm_algo; }
 bool process_diag_audit_nvfp4_scales() { return slot().audit_nvfp4_scales; }
@@ -102,7 +95,6 @@ bool process_diag_no_pdl() { return slot().no_pdl; }
 bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
 const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }
-bool process_diag_server_prefix_cache() { return slot().server_prefix_cache; }
 bool process_diag_deterministic_gemm() { return slot().deterministic_gemm; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
 bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }

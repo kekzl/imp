@@ -212,9 +212,13 @@ private:
     MemoryManager memory_manager_;
     // Phase 5 Track D: per-Engine runtime configuration (replaces the
     // RuntimeConfig::current() process-wide singleton). Snapshot is
-    // initialized from RuntimeConfig::current() at the start of init() and
-    // then mutated in-place by engine_init_resolver helpers for arch-
-    // specific defaults (deterministic_gemm, prefill_graph, etc.).
+    // initialized from take_pending_runtime_config() at the start of
+    // Engine::init(). Tool mains (imp-cli, imp-server) stash the loaded
+    // RuntimeConfig via set_pending_runtime_config() before constructing
+    // the Engine; library/test embeddings without a pending config get
+    // a freshly env-seeded default. The snapshot is then mutated in-place
+    // by engine_init_resolver helpers for arch-specific defaults
+    // (deterministic_gemm, prefill_graph, etc.).
     RuntimeConfig runtime_config_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
