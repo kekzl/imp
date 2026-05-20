@@ -117,6 +117,24 @@ struct ModelConfig {
     // can use this to decide whether to invoke tensor-name heuristics, and
     // higher layers can surface an explicit warning to the user.
     bool arch_inferred_fallback = false;
+
+    // Model-specific runtime knobs that used to live on the global
+    // RuntimeConfig singleton. Phase 5 Track A of the architecture refactor
+    // moved them onto ModelConfig so the "model-name in a runtime
+    // singleton" smell goes away. Populated from imp.conf (legacy
+    // [gemma4] section seeds compat) or set by engine_init_resolver when
+    // the arch is GEMMA4; default-constructed otherwise.
+    struct Overrides {
+        struct Gemma4 {
+            bool fp32_gemm_out = false;
+            bool no_graphs = false;
+            bool force_mmvq = false;
+            bool fp32_expert_down = false;
+            bool no_decode_fast = false;
+            bool no_post_ffw_1 = false;
+            bool ggml_prefill = false;
+        } gemma4;
+    } overrides;
 };
 
 // Forward declaration — full definition in quant/nvfp4_quant.h.

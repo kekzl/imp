@@ -274,7 +274,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
+                                 model_->config().overrides.gemma4.force_mmvq);
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
     //    For decode (n=1) with matching quant types: fused RMSNorm→Q8_1→QKV GEMV.
@@ -1197,7 +1198,7 @@ after_attention:
         // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq
         // and dp4a fast paths via output.qtype==FP32 guards in dispatch.
         const bool fp32_attn_out = (model_->config().arch == ModelArch::GEMMA4 && using_fp32_accum &&
-                                    RuntimeConfig::current().gemma4.fp32_gemm_out);
+                                    model_->config().overrides.gemma4.fp32_gemm_out);
         void* po_fp32_buf = nullptr;
         if (fp32_attn_out) {
             size_t bytes = static_cast<size_t>(n) * model_->config().d_model * sizeof(float);

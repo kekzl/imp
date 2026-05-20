@@ -170,9 +170,11 @@ static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtyp
 
     // mmvq has stricter eligibility (legacy line 2216-2220): force_mmvq set,
     // qtype mmvq supports, K%32==0, no_mmvq off, no_mmvq_q8_0 off for Q8_0.
+    // `force_mmvq` is the per-model override forwarded via GemmKernelArgs from
+    // ModelConfig::Overrides::Gemma4::force_mmvq (Phase 5 Track A).
     const bool no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
     const bool no_mmvq_all = rcfg.gemm.no_mmvq;
-    const bool use_mmvq = rcfg.gemma4.force_mmvq && mmvq_eligible && (K % 32 == 0) && !no_mmvq_all &&
+    const bool use_mmvq = args.force_mmvq && mmvq_eligible && (K % 32 == 0) && !no_mmvq_all &&
                           !(no_mmvq_q8_0 && qtype == QType::Q8_0);
 
     // dp4a eligibility (legacy line 2221-2222): scratch present + is_dp4a_qtype.

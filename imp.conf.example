@@ -95,18 +95,11 @@ no_dp4a_lm           = false
 no_mmvq              = false
 no_mmvq_q8_0         = false
 
-[gemma4]
-fp32_gemm_out        = false
-no_graphs            = false
-force_mmvq           = false
-# FP32 expert-down GEMM (Gemma-4 numerical-parity diagnostic).
-fp32_expert_down     = false
-# Disable the decode fast-path (debug bisect).
-no_decode_fast       = false
-# Disable post-FFW norm 1 in the parallel-branch path (debug).
-no_post_ffw_1        = false
-# Force ggml-style prefill matmul for Gemma-4 (debug A/B path).
-ggml_prefill         = false
+# [gemma4] section moved out of the global RuntimeConfig in Phase 5
+# Track A of the architecture refactor. These are now per-model
+# overrides on ModelConfig::Overrides::Gemma4 (see src/model/model_config.h);
+# the GGUF loader / engine init resolver populates them when the
+# loaded model is Gemma-4. There is no user-facing knob today.
 
 [generation]
 no_logit_softcap     = false

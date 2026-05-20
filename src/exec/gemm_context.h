@@ -24,17 +24,24 @@ struct GemmContext {
     const WeightCaches* wcache = nullptr;
     bool force_fp16 = false;
 
+    // Per-model override: when set, the GGUF small-M dispatch path prefers
+    // the mmvq backend over dp4a for eligible qtypes. Sourced from
+    // ModelConfig::Overrides::Gemma4::force_mmvq (Phase 5 Track A). Defaults
+    // to false so non-Gemma-4 models behave identically.
+    bool force_mmvq = false;
+
     // Quantization scratch buffers (non-owning)
     const QuantScratch* qscratch = nullptr;
 
     // Helper: create from executor state
     static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
-                            bool force_fp16 = false) {
+                            bool force_fp16 = false, bool force_mmvq = false) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;
         ctx.qscratch = &qs;
         ctx.force_fp16 = force_fp16;
+        ctx.force_mmvq = force_mmvq;
         return ctx;
     }
 

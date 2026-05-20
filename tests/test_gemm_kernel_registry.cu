@@ -1184,13 +1184,10 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     dispatch_dp4a_gemv(QType::Q8_0, d_weight, static_cast<const block_q8_1*>(d_q8_1), d_d8,
                        reinterpret_cast<half*>(d_out_direct), N, K, stream_);
 
-    // Path 2: registry dispatch through the GGUF Q8_0 kernel adapter. We
-    // must temporarily disable force_mmvq so the handler picks the dp4a
-    // backend (legacy precedence: mmvq wins when both eligible).
-    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
-    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
-    mut_cfg.gemma4.force_mmvq = false;
-
+    // Path 2: registry dispatch through the GGUF Q8_0 kernel adapter. The
+    // handler reads `args.force_mmvq` (Phase 5 Track A: per-model override
+    // forwarded via GemmKernelArgs); leave it false so the dp4a backend
+    // wins (legacy precedence: mmvq wins when both eligible).
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
@@ -1201,10 +1198,10 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     args.weight_payload = &weight;
     args.q8_1_buf = d_q8_1;
     args.d8_buf = d_d8;
+    args.force_mmvq = false;
     GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
 
-    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
     cudaStreamSynchronize(stream_);
 
     std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
@@ -1280,11 +1277,9 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
     Tensor weight(d_weight, QType::Q8_0, 2, w_shape, /*on_device=*/true);
 
-    // Enable force_mmvq so the handler picks mmvq (precedence over dp4a).
-    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
-    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
-    mut_cfg.gemma4.force_mmvq = true;
-
+    // Enable force_mmvq on the args so the handler picks mmvq (precedence
+    // over dp4a). Phase 5 Track A: per-model override now lives on
+    // GemmKernelArgs::force_mmvq, forwarded from ModelConfig overrides.
     __half* d_out = nullptr;
     cudaMalloc(&d_out, sizeof(__half) * M * N);
     cudaMemsetAsync(d_out, 0, sizeof(__half) * M * N, stream_);
@@ -1295,13 +1290,12 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     args.output = &output;
     args.stream = stream_;
     args.weight_payload = &weight;
+    args.force_mmvq = true;
     // q8_1_buf / d8_buf intentionally NOT supplied — mmvq has its own
     // file-scope scratch and should win the gate.
 
     GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
-
-    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
     cudaStreamSynchronize(stream_);
 
     std::vector<__half> h_out(M * N);
@@ -1392,10 +1386,7 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
 
     // Path 2: registry dispatch with mmvq disabled, dp4a scratch null,
     // dequant_scratch non-null. Force the handler into the third branch.
-    auto& mut_cfg = const_cast<RuntimeConfig&>(RuntimeConfig::current());
-    const bool prev_force_mmvq = mut_cfg.gemma4.force_mmvq;
-    mut_cfg.gemma4.force_mmvq = false;
-
+    // Phase 5 Track A: force_mmvq now lives on GemmKernelArgs.
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
@@ -1409,13 +1400,13 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
     args.output = &out_registry;
     args.stream = stream_;
     args.weight_payload = &weight;
+    args.force_mmvq = false;
     // q8_1_buf / d8_buf intentionally null — dp4a branch must not fire.
     args.dequant_scratch = &dummy_scratch_sentinel;
 
     GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
 
-    mut_cfg.gemma4.force_mmvq = prev_force_mmvq;
     cudaStreamSynchronize(stream_);
 
     std::vector<__half> h_out_direct(M * N), h_out_registry(M * N);
