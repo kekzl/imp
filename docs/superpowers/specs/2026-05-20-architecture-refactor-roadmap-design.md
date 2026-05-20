@@ -25,7 +25,7 @@ The diagram itself admits several of the problems verbatim — "1 GiB S-matrix!"
 ## 3. The Five Phases
 
 ### Phase 1 — Lügen entfernen
-**Status (2026-05-20):** Closed. Landed: #287 (delete dead Graph IR), #286 + #289 (architecture diagram + README link), #291 (narrative companion docs/architecture.md), #290 (soft PR — rename src/graph/ → src/exec/). One soft follow-up deferred: `docs/roadmap.md` still has 4 stale src/graph/ paths.
+**Status (2026-05-20):** Closed. Landed: #287 (delete dead Graph IR), #286 + #289 (architecture diagram + README link), #291 (narrative companion docs/architecture.md), #290 (soft PR — rename src/graph/ → src/exec/), #292 (closeout: roadmap.md path sweep + this status line). Deferred follow-ups: stale `src/graph/` paths in `docs/plans/*_2026_05_17.md` historical design memos and `review/phase3_maint.md` audit snapshot — these are point-in-time records.
 
 **Goal:** What the repo claims must be true.
 
