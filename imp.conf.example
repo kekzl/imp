@@ -49,12 +49,6 @@ fp8_fmha             = "auto"
 fmha_sm120           = "auto"
 mxfp4                = "auto"
 mxfp4_fp16_fallback  = false
-<<<<<<< HEAD
-naive                = false
-=======
-fmha_blockscale      = "auto"
->>>>>>> f2fed9f (refactor(config): drop orphan naive + no_naive_swa from imp.conf.example)
-no_cublas            = false
 force_cublas_decode  = false
 no_qknorm_fused      = false
 splitk_pipe          = true
