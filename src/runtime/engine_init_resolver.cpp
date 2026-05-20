@@ -82,6 +82,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
         // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
         // (formerly an install() call into the global singleton).
         runtime_config_.runtime.deterministic_gemm = true;
+        // TRANSITIONAL (Phase 5 Track D): mirror to RuntimeConfig::current() so
+        // free-function readers (e.g. gemm.cu's algo-selection skip-benchmark
+        // branch) see the promotion. The full free-function migration is the
+        // Phase 5 Track D follow-up PR; remove this dual-write when it lands.
+        RuntimeConfig::install(runtime_config_);
         setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
@@ -268,6 +273,8 @@ void Engine::init_resolve_quant_flags_() {
             // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
             // (formerly an install() call into the global singleton).
             runtime_config_.runtime.deterministic_gemm = true;
+            // TRANSITIONAL (Phase 5 Track D): see comment in FP8-KV block above.
+            RuntimeConfig::install(runtime_config_);
             IMP_LOG_INFO(
                 "Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }
