@@ -128,8 +128,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.mxfp4_fp16_cache_policy = val;
     else if (eq("attention.fmha_blockscale"))
         cfg.attention.fmha_blockscale = val;
-    else if (eq("attention.no_cublas"))
-        cfg.attention.no_cublas = parse_bool(val, cfg.attention.no_cublas);
     else if (eq("attention.force_cublas_decode"))
         cfg.attention.force_cublas_decode = parse_bool(val, cfg.attention.force_cublas_decode);
     else if (eq("attention.no_qknorm_fused"))
