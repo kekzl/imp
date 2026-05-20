@@ -2,7 +2,7 @@
 #include "model/json_util.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -339,7 +339,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         // for SafeTensors stays grouped.
         cfg.gdn_grouped_head_layout = true;
         {
-            const std::string& v = RuntimeConfig::current().gdn.layout_override;
+            const std::string& v = process_diag_gdn_layout_override();
             if (v == "tiled" || v == "TILED") {
                 cfg.gdn_grouped_head_layout = false;
                 IMP_LOG_INFO("GDN head layout: forced to TILED via gdn.layout_override=tiled");

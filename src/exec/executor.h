@@ -701,14 +701,18 @@ public:
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
-    // Phase 5 Track D: per-Engine RuntimeConfig (replaces RuntimeConfig::current()
-    // singleton). Engine wires this via set_runtime_config() during init.
-    // When the executor is constructed outside an Engine (unit tests that
-    // create a bare GraphExecutor without an owning Engine), the pointer
-    // remains null and the accessor falls back to the process-wide singleton.
+    // Phase 5 Track D (follow-up): per-Engine RuntimeConfig (the former
+    // RuntimeConfig::current() singleton is gone). Engine wires this via
+    // set_runtime_config() during init; the contract is now "set before
+    // first access". Tests that build a bare GraphExecutor without an
+    // owning Engine must wire a RuntimeConfig themselves (see
+    // tests/test_helpers.h for a default loader).
     void set_runtime_config(const RuntimeConfig& cfg) noexcept { runtime_config_ = &cfg; }
     const RuntimeConfig& runtime_config() const noexcept {
-        return runtime_config_ ? *runtime_config_ : RuntimeConfig::current();
+        // CRITICAL: set_runtime_config() must be called before any forward.
+        // Hard-failing here would crash unit tests; cold default is acceptable.
+        static const RuntimeConfig kDefault;
+        return runtime_config_ ? *runtime_config_ : kDefault;
     }
 
 private:

@@ -1663,7 +1663,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     // any precondition failure inside the handler. See
     // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
     if (qtype == QType::Q4_K && input.qtype == QType::F16 && M >= 1024 &&
-        ctx.beta == 0.0f && RuntimeConfig::current().gemm.q4k_imma_enabled) {
+        ctx.beta == 0.0f && ctx.q4k_imma_enabled) {
         GemmKernelArgs args{};
         args.input = &input;
         args.output = &output;
@@ -1841,6 +1841,9 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
         args.d8_buf = qs->d8_buf;
         args.dequant_scratch = qs->dequant;  // fused-gemv readiness sentinel
         args.force_mmvq = ctx.force_mmvq;
+        args.no_mmvq = ctx.gemm_no_mmvq;
+        args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
+        args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
         GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
         if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
             return;

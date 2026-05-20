@@ -5,7 +5,7 @@
 #include "core/tensor.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>
@@ -1016,7 +1016,7 @@ static bool use_moe_multirow(int K) { return (K / kMicroBlockSize) <= 512; }
 // Default 8 = legacy behavior; 4/16/32 are A/B candidates for the perf
 // regression recovery work (see PR opening MoE NVFP4 decode tile sweep).
 static int resolve_mr_nr() {
-    int v = imp::RuntimeConfig::current().moe.mr_nr;
+    int v = imp::process_diag_moe_mr_nr();
     if (v == 4 || v == 8 || v == 16 || v == 32) return v;
     return 8;
 }

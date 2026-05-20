@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "runtime/presets.h"
 #include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <chrono>
 #include <cstdio>
@@ -17,10 +18,15 @@
 int main(int argc, char** argv) {
     CliArgs args = parse_args(argc, argv);
 
-    // Load imp.conf (if present) + apply --set overrides; install as the
-    // process-wide RuntimeConfig so all downstream code reads through
-    // RuntimeConfig::current() instead of getenv("IMP_*").
-    imp::RuntimeConfig::install(imp::RuntimeConfig::load(args.config_path, args.config_overrides));
+    // Load imp.conf (if present) + apply --set overrides, then stash for
+    // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
+    // RuntimeConfig::install() process-wide singleton).
+    imp::RuntimeConfig runtime_cfg = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
+    // Cache the few diagnostic / runtime-mode flags that are read from free
+    // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)
+    // before set_pending_runtime_config() consumes the value.
+    imp::process_diag_install(runtime_cfg);
+    imp::set_pending_runtime_config(runtime_cfg);
 
     if (args.model_path.empty()) {
         print_usage(argv[0]);
@@ -554,14 +560,14 @@ int main(int argc, char** argv) {
                 tokens = tok->encode(args.prompt);
                 // Prepend BOS when the tokenizer requires it (e.g. Gemma)
                 bool add_bos = tok->add_bos();
-                if (imp::RuntimeConfig::current().generation.force_bos)
+                if (ctx->engine->runtime_config().generation.force_bos)
                     add_bos = true;
                 if (add_bos) {
                     tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
                 }
             }
             int n_prompt_tokens = static_cast<int>(tokens.size());
-            if (imp::RuntimeConfig::current().diagnostics.dump_tokens) {
+            if (ctx->engine->runtime_config().diagnostics.dump_tokens) {
                 fprintf(stderr, "[DUMP_TOKENS] n=%d:", n_prompt_tokens);
                 for (int ti = 0; ti < n_prompt_tokens && ti < 20; ti++)
                     fprintf(stderr, " %d", tokens[ti]);
@@ -705,7 +711,7 @@ int main(int argc, char** argv) {
 
             // Benchmark using Engine::generate() (conditional graph loop) for comparison.
             // This eliminates per-step host overhead — shows true GPU-limited throughput.
-            if (imp::RuntimeConfig::current().bench.generate) {
+            if (ctx->engine->runtime_config().bench.generate) {
                 // Reset context for fresh generation
                 imp_context_reset(ctx);
 

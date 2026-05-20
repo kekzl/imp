@@ -2,6 +2,7 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -121,7 +122,8 @@ TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
     Tensor O(d_o, QType::F16, 4, shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-    EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream_));
+    RuntimeConfig rcfg;  // defaults
+    EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream_, rcfg));
     cudaStreamSynchronize(stream_);
 
     cudaFree(d_q);

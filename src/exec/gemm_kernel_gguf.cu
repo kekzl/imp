@@ -6,7 +6,6 @@
 #include "core/tensor.h"
 #include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv, block_q8_1
 #include "exec/gemm_scratch.h"  // mmvq_scratch_get_or_grow (Slice 8.6 hoist)
-#include "runtime/config.h"
 
 #include <cuda_fp16.h>
 
@@ -164,22 +163,20 @@ static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtyp
 
     // The dispatch site already filtered on `input.qtype==F16`, `M==1`, and
     // `output.qtype != F32`. The kernel re-checks the runtime-config gates
-    // that legacy evaluates at the call site:
-    const auto& rcfg = RuntimeConfig::current();
+    // that legacy evaluates at the call site (Phase 5 Track D follow-up:
+    // these come via GemmKernelArgs from GemmContext::make instead of the
+    // RuntimeConfig::current() singleton).
     const int K = static_cast<int>(weight.shape[1]);
 
     // mmvq has stricter eligibility (legacy line 2216-2220): force_mmvq set,
     // qtype mmvq supports, K%32==0, no_mmvq off, no_mmvq_q8_0 off for Q8_0.
     // `force_mmvq` is the per-model override forwarded via GemmKernelArgs from
     // ModelConfig::Overrides::Gemma4::force_mmvq (Phase 5 Track A).
-    const bool no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
-    const bool no_mmvq_all = rcfg.gemm.no_mmvq;
-    const bool use_mmvq = args.force_mmvq && mmvq_eligible && (K % 32 == 0) && !no_mmvq_all &&
-                          !(no_mmvq_q8_0 && qtype == QType::Q8_0);
+    const bool use_mmvq = args.force_mmvq && mmvq_eligible && (K % 32 == 0) && !args.no_mmvq &&
+                          !(args.no_mmvq_q8_0 && qtype == QType::Q8_0);
 
     // dp4a eligibility (legacy line 2221-2222): scratch present + is_dp4a_qtype.
-    const bool no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
-    const bool use_dp4a = !no_dp4a_gemv && args.q8_1_buf != nullptr && args.d8_buf != nullptr &&
+    const bool use_dp4a = !args.no_dp4a_gemv && args.q8_1_buf != nullptr && args.d8_buf != nullptr &&
                           is_dp4a_qtype(qtype);
 
     // Fused-gemv fallback (Slice 8.2 — legacy lines 2267-2276): only Q6_K and

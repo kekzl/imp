@@ -2,7 +2,7 @@
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -321,9 +321,7 @@ static constexpr int kBenchmarkIters = 5;
 // is set, log shape + per-candidate algoId/tileId + chosen algo for every
 // benchmark_and_select_algo call. Used to enumerate which exact GEMM shapes
 // select cuBLAS legacy WMMA kernels (Finding 1/5).
-static int gemm_algo_log_enabled() {
-    return imp::RuntimeConfig::current().diagnostics.log_gemm_algo ? 1 : 0;
-}
+static int gemm_algo_log_enabled() { return imp::process_diag_log_gemm_algo() ? 1 : 0; }
 
 static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
@@ -361,7 +359,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     }
     // [runtime] deterministic_gemm = true skips timing-based selection so
     // repeat runs produce bitwise-identical prefill outputs.
-    const bool s_deterministic_gemm = RuntimeConfig::current().runtime.deterministic_gemm;
+    const bool s_deterministic_gemm = imp::process_diag_deterministic_gemm();
     if (s_deterministic_gemm || nresults == 1) {
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;

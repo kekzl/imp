@@ -1,5 +1,5 @@
 #include "runtime/pdl.h"
-#include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <unordered_set>
@@ -28,7 +28,7 @@ void disable(const void* kernel_func) {
 
 bool is_enabled(const void* kernel_func) {
     // Disable PDL globally via [runtime] no_pdl = true in imp.conf.
-    if (RuntimeConfig::current().runtime.no_pdl)
+    if (process_diag_no_pdl())
         return false;
     return enabled_kernels().count(kernel_func) > 0;
 }
