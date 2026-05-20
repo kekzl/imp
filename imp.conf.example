@@ -49,7 +49,6 @@ fp8_fmha             = "auto"
 fmha_sm120           = "auto"
 mxfp4                = "auto"
 mxfp4_fp16_fallback  = false
-fmha_blockscale      = "auto"
 naive                = false
 no_cublas            = false
 force_cublas_decode  = false

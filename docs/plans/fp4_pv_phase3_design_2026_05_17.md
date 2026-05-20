@@ -1,5 +1,11 @@
 # FP4 PV Phase 3 — Attention design memo (2026-05-17)
 
+> NOTE (2026-05-20): the `mxf4nvf4` block-scale FMHA variant referenced
+> below was archived in Phase 2 of the refactor roadmap (commit `469b66f`).
+> See `docs/archive/fmha_mxf4nvf4_sm120/`. The `RuntimeConfig::attention.fmha_blockscale`
+> runtime knob mentioned in §1 and §8 has been removed. Historical content
+> preserved as-is.
+
 Scoping memo for **FP4 P×V (Phase 3)** of the MXFP4 FMHA kernel on
 RTX 5090 / sm_120a. **No source changes** — this is a decision-support
 document.
