@@ -113,9 +113,12 @@ Per token:
 3. **FFN GEMV** — dp4a / mma.sync / NVFP4 variants in
    `executor_ffn.cu`.
 4. **LM head GEMV** → logits.
-5. **Apply penalties** (repeat / freq / presence / DRY) — `request.cpp`.
+5. **Apply penalties** (repeat / freq / presence / DRY) —
+   `src/compute/sampling.cu` (kernels) called from `src/exec/executor.cu`.
+   Parameters are declared in `src/runtime/request.h`.
 6. **Sampler** (temp / top-p / top-k / min-p / typical / mirostat) —
-   `request.cpp`.
+   `src/compute/sampling.{h,cu}` (`sample_greedy`, `sample_topk_topp`,
+   `sample_mirostat_v2`, `apply_typical_p`).
 7. **Stop check** — EOS, max_tokens, stop strings.
 8. **(Optional) MTP spec-decode draft** — `src/runtime/mtp_forward.cu`.
 
@@ -137,8 +140,12 @@ These are documented for honesty. See the refactor roadmap in
 [`superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md`](superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md)
 for the resolution plan.
 
-- **`Engine::init` is 700+ LOC of orchestration in one method.** Will be
-  split into named subsystems in Phase 4.
+- **`src/runtime/engine.cpp` is 3112 LOC across one .cpp file.** `Engine::init`
+  itself is short, but it orchestrates ~7 init helpers (`init_resolve_*`,
+  `init_weights`, `init_kv_cache`, `init_features`, `warmup`) totaling
+  700+ LOC, plus per-step scheduling, sampling helpers, vision, and MTP.
+  The helper boundaries don't map to subsystems. Phase 4 splits it into
+  named subsystems with constructor injection.
 - **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace.**
   Caps maximum context length. Phase 5 evaluates tiled streaming softmax
   or FMHA-default-switch.
