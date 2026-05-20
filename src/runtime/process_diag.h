@@ -28,7 +28,6 @@ void process_diag_install(const RuntimeConfig& cfg);
 bool process_diag_debug_forward();
 bool process_diag_debug_template();
 bool process_diag_graph_diag();
-bool process_diag_dump_tokens();
 bool process_diag_nvfp4_force_dequant();
 bool process_diag_log_gemm_algo();
 bool process_diag_audit_nvfp4_scales();
@@ -69,8 +68,5 @@ int process_diag_moe_force_host_experts();
 // GDN: layout override read at model-load time by hf_config_loader (no
 // per-Engine context at that point in the loader pipeline).
 const std::string& process_diag_gdn_layout_override();
-
-// Server
-bool process_diag_server_prefix_cache();
 
 }  // namespace imp
