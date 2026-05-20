@@ -94,7 +94,7 @@ namespace imp {
 // returns NoMatch / PreconditionFail. Slice 8 retires the legacy switch.
 // ---------------------------------------------------------------------------
 
-// `mmvq_scratch_get_or_grow` lives in graph/gemm_scratch.h since Slice 8.6
+// `mmvq_scratch_get_or_grow` lives in exec/gemm_scratch.h since Slice 8.6
 // (TU hoist). Engine init MUST call `prewarm_mmvq_scratch` from
 // `executor_workspace_buffers.cu` with the model's largest dims before the
 // hot path fires — see gemm_scratch.h.
