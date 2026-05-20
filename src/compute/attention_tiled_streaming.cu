@@ -133,15 +133,13 @@ attention_tiled_streaming_kernel(
     constexpr int Bkv = default_Bkv<HD>();
 
     // Suppress unused-parameter warnings for params used in later tasks.
-    (void)V; (void)causal; (void)sliding_window; (void)softcap; (void)q_offset;
-    (void)seq_kv; (void)Bkv;
+    (void)causal; (void)sliding_window; (void)softcap; (void)q_offset;
 
     // Block coordinates: x=row-block, y=head, z=batch.
     const int row_block = blockIdx.x;
     const int head = blockIdx.y;
     const int batch = blockIdx.z;
     const int kv_head = head / (n_heads / n_kv_heads);
-    (void)kv_head; (void)K;  // K is unused until iter loop (Task 6).
 
     const int q_row0 = row_block * Br;
     if (q_row0 >= seq_q) return;
@@ -159,7 +157,6 @@ attention_tiled_streaming_kernel(
     K_smem[1] = K_smem[0] + Bkv * HD;
     __half* V_smem = K_smem[1] + Bkv * HD;
     uint64_t* mbar = reinterpret_cast<uint64_t*>(V_smem + Bkv * HD);
-    (void)K_smem; (void)V_smem;  // unused until iter loop.
 
     // mbar layout: [Q_ready, K_ready[0], K_ready[1], V_ready,
     //               QKt_done, V_consumed]
@@ -195,12 +192,103 @@ attention_tiled_streaming_kernel(
     __syncthreads();
     if (tid == 0) mbar_arrive(&mbar[0]);
 
-    // Real iteration loop lands in Task 6. For now: just return so the
-    // launcher path doesn't UB. (Note: returning here is fine; the kernel
-    // hasn't written O yet so the test will FAIL on the correctness check —
-    // expected baseline state for Task 5.)
-    (void)Q_gmem;  // silence unused after we exit early.
-    (void)O; (void)scale;
+    // Phase counters per mbarrier (parity-based wait).
+    uint32_t phase_K[2] = {0u, 0u};
+    uint32_t phase_V = 0u;
+    uint32_t phase_QKt = 0u;
+    uint32_t phase_VC = 0u;
+
+    const int n_kv_tiles = (seq_kv + Bkv - 1) / Bkv;
+    int k_slot = 0;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // ------------------------------------------------------------------
+    // Producer warp (warp 0): cp.async-loads K (double-buffered) + V (single-buffered).
+    // ------------------------------------------------------------------
+    if (warp_id == kProducerWarp) {
+        // Pre-load K[0] into K_smem[0] before the iter loop.
+        const __half* K_gmem0 = K
+            + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
+            + static_cast<size_t>(0) * Bkv * n_kv_heads * HD
+            + static_cast<size_t>(kv_head) * HD;
+        for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+            int elem = c * kHalvesPerChunk;
+            int r = elem / HD;
+            int d = elem % HD;
+            cp_async_16(&K_smem[0][r * HD + d],
+                         K_gmem0 + static_cast<size_t>(r) * n_kv_heads * HD + d);
+        }
+        cp_async_commit();
+        cp_async_wait_all();
+        if (lane == 0) mbar_arrive(&mbar[1]);          // K_ready[0]
+
+        for (int i = 0; i < n_kv_tiles; ++i) {
+            // Prefetch K[i+1] into the OTHER slot if not last iter.
+            if (i + 1 < n_kv_tiles) {
+                int next_slot = 1 - k_slot;
+                const __half* K_gmem_next = K
+                    + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
+                    + static_cast<size_t>(i + 1) * Bkv * n_kv_heads * HD
+                    + static_cast<size_t>(kv_head) * HD;
+                for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+                    int elem = c * kHalvesPerChunk;
+                    int r = elem / HD;
+                    int d = elem % HD;
+                    cp_async_16(&K_smem[next_slot][r * HD + d],
+                                 K_gmem_next + static_cast<size_t>(r) * n_kv_heads * HD + d);
+                }
+                cp_async_commit();
+                cp_async_wait_all();
+                if (lane == 0) mbar_arrive(&mbar[1 + next_slot]);
+            }
+
+            // Wait for consumers to finish QKᵀ before loading V[i].
+            mbar_wait(&mbar[4], phase_QKt);
+            phase_QKt ^= 1u;
+
+            // Load V[i] (single buffer).
+            const __half* V_gmem = V
+                + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
+                + static_cast<size_t>(i) * Bkv * n_kv_heads * HD
+                + static_cast<size_t>(kv_head) * HD;
+            for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+                int elem = c * kHalvesPerChunk;
+                int r = elem / HD;
+                int d = elem % HD;
+                cp_async_16(&V_smem[r * HD + d],
+                             V_gmem + static_cast<size_t>(r) * n_kv_heads * HD + d);
+            }
+            cp_async_commit();
+            cp_async_wait_all();
+            if (lane == 0) mbar_arrive(&mbar[3]);     // V_ready
+
+            // Wait for consumers to finish PV before reusing V buffer next iter.
+            mbar_wait(&mbar[5], phase_VC);
+            phase_VC ^= 1u;
+
+            k_slot ^= 1;
+        }
+        return;
+    }
+
+    // ------------------------------------------------------------------
+    // Consumer warps (warps 1..7): placeholder — just signal arrival so
+    // the producer can progress. Real mma/softmax/PV land in Tasks 7-9.
+    // ------------------------------------------------------------------
+    for (int i = 0; i < n_kv_tiles; ++i) {
+        mbar_wait(&mbar[1 + k_slot], phase_K[k_slot]);
+        phase_K[k_slot] ^= 1u;
+        // (QKᵀ would go here)
+        if (lane == 0) mbar_arrive(&mbar[4]);          // QKt_done
+        mbar_wait(&mbar[3], phase_V);
+        phase_V ^= 1u;
+        // (PV would go here)
+        if (lane == 0) mbar_arrive(&mbar[5]);          // V_consumed
+        k_slot ^= 1;
+    }
+
+    (void)O; (void)scale; (void)Q_gmem;
 }
 
 bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
