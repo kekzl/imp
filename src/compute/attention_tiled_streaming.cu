@@ -326,12 +326,11 @@ attention_tiled_streaming_kernel(
 
         // ----- QKᵀ -----
         // Each mma m16n8k16 produces a 16×8 tile of S.
-        // For Bkv=64 → 8 col-tiles per warp.
-        // For HD=128 → 8 k-iters per col-tile.
-        float S_frag[64 / kMmaN][4];
+        // col-tiles = Bkv / kMmaN (varies with hd: 8 for Bkv=64, 4 for Bkv=32).
+        float S_frag[Bkv / kMmaN][4];
         if (is_mma_warp) {
             #pragma unroll
-            for (int n_it = 0; n_it < 64 / kMmaN; ++n_it) {
+            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
                 #pragma unroll
                 for (int k = 0; k < 4; ++k) S_frag[n_it][k] = 0.0f;
 
@@ -537,36 +536,42 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
 
     if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
     if (seq_q == 0 || seq_kv == 0) return false;
-    if (head_dim != 128) return false;       // expanding in Task 7+
+    // Dispatch to the appropriate template instantiation based on head_dim.
+    // hd=512 is deferred to Task 12 (chunked kernel).
+    auto launch_hd = [&]<int Br, int HD>() -> bool {
+        constexpr int Bkv = default_Bkv<HD>();
+        // Smem: Q + K_dbuf (2 slots) + V + 6 mbarriers.
+        const size_t smem_bytes =
+              static_cast<size_t>(Br) * HD * sizeof(__half)
+            + 2 * static_cast<size_t>(Bkv) * HD * sizeof(__half)
+            + static_cast<size_t>(Bkv) * HD * sizeof(__half)
+            + 6 * sizeof(uint64_t);
 
-    constexpr int Br = 64;
-    constexpr int HD = 128;
-    constexpr int Bkv = 64;
+        cudaFuncSetAttribute(
+            attention_tiled_streaming_kernel<Br, HD>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(smem_bytes));
 
-    // Smem: Q + K_dbuf + V + 6 mbarriers.
-    const size_t smem_bytes =
-          Br * HD * sizeof(__half)
-        + 2 * Bkv * HD * sizeof(__half)
-        + Bkv * HD * sizeof(__half)
-        + 6 * sizeof(uint64_t);
+        dim3 grid((seq_q + Br - 1) / Br, n_heads, batch);
+        attention_tiled_streaming_kernel<Br, HD><<<grid, kThreads, smem_bytes, stream>>>(
+            static_cast<const __half*>(Q.data),
+            static_cast<const __half*>(K.data),
+            static_cast<const __half*>(V.data),
+            static_cast<__half*>(O.data),
+            seq_q, seq_kv, n_heads, n_kv_heads,
+            scale, causal, sliding_window, softcap, q_offset);
 
-    cudaFuncSetAttribute(
-        attention_tiled_streaming_kernel<Br, HD>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(smem_bytes));
+        return cudaGetLastError() == cudaSuccess;
+    };
 
-    dim3 grid((seq_q + Br - 1) / Br, n_heads, batch);
-    attention_tiled_streaming_kernel<Br, HD><<<grid, kThreads, smem_bytes, stream>>>(
-        static_cast<const __half*>(Q.data),
-        static_cast<const __half*>(K.data),
-        static_cast<const __half*>(V.data),
-        static_cast<__half*>(O.data),
-        seq_q, seq_kv, n_heads, n_kv_heads,
-        scale, causal, sliding_window, softcap, q_offset);
-
-    if (cudaGetLastError() != cudaSuccess) return false;
-    (void)scale; // referenced for compile, kernel will use later
-    return true;
+    switch (head_dim) {
+        case  64: return launch_hd.template operator()< 128,  64>();
+        case  96: return launch_hd.template operator()<  96,  96>();
+        case 128: return launch_hd.template operator()<  64, 128>();
+        case 256: return launch_hd.template operator()<  32, 256>();
+        // hd=512 lands in Task 12.
+        default: return false;
+    }
 }
 
 }  // namespace imp
