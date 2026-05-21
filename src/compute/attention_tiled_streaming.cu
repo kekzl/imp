@@ -363,11 +363,11 @@ attention_tiled_streaming_kernel(
 
                 if (causal) {
                     // Each lane owns 4 (row, col) positions in the 16×8 D-tile.
-                    // Empirically verified m16n8k16 D-frag layout for sm_120a:
-                    //   frag[0] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
-                    //   frag[1] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
-                    //   frag[2] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
-                    //   frag[3] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
+                    // Standard PTX ISA m16n8k16 D-frag layout:
+                    //   frag[0] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
+                    //   frag[1] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
+                    //   frag[2] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
+                    //   frag[3] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
                     const int row_in_warp_base = consumer_id * kMmaM;
                     const int row_a_local = lane / 4;
                     const int row_b_local = row_a_local + 8;
@@ -382,20 +382,20 @@ attention_tiled_streaming_kernel(
                     const int abs_k_b = i * Bkv + n_it * kMmaN + col_b_local;
 
                     // Mask future positions: K > Q means future → mask to -INF.
-                    // frag[0,1] → row_b (upper), frag[2,3] → row_a (lower).
-                    if (abs_k_a > abs_q_b) S_frag[n_it][0] = -INFINITY;
-                    if (abs_k_b > abs_q_b) S_frag[n_it][1] = -INFINITY;
-                    if (abs_k_a > abs_q_a) S_frag[n_it][2] = -INFINITY;
-                    if (abs_k_b > abs_q_a) S_frag[n_it][3] = -INFINITY;
+                    // frag[0,1] → row_a (lower), frag[2,3] → row_b (upper).
+                    if (abs_k_a > abs_q_a) S_frag[n_it][0] = -INFINITY;
+                    if (abs_k_b > abs_q_a) S_frag[n_it][1] = -INFINITY;
+                    if (abs_k_a > abs_q_b) S_frag[n_it][2] = -INFINITY;
+                    if (abs_k_b > abs_q_b) S_frag[n_it][3] = -INFINITY;
 
                     if (sliding_window > 0) {
                         // Sliding window: K visible only if abs_q - abs_k < sliding_window.
                         // Mask if abs_q - abs_k >= sliding_window.
-                        // Same inverted frag↔row convention: frag[0,1] use abs_q_b, frag[2,3] use abs_q_a.
-                        if (abs_q_b - abs_k_a >= sliding_window) S_frag[n_it][0] = -INFINITY;
-                        if (abs_q_b - abs_k_b >= sliding_window) S_frag[n_it][1] = -INFINITY;
-                        if (abs_q_a - abs_k_a >= sliding_window) S_frag[n_it][2] = -INFINITY;
-                        if (abs_q_a - abs_k_b >= sliding_window) S_frag[n_it][3] = -INFINITY;
+                        // Standard frag↔row convention: frag[0,1] use abs_q_a, frag[2,3] use abs_q_b.
+                        if (abs_q_a - abs_k_a >= sliding_window) S_frag[n_it][0] = -INFINITY;
+                        if (abs_q_a - abs_k_b >= sliding_window) S_frag[n_it][1] = -INFINITY;
+                        if (abs_q_b - abs_k_a >= sliding_window) S_frag[n_it][2] = -INFINITY;
+                        if (abs_q_b - abs_k_b >= sliding_window) S_frag[n_it][3] = -INFINITY;
                     }
                 }
             }
@@ -404,14 +404,14 @@ attention_tiled_streaming_kernel(
         if (is_mma_warp) {
             // Online softmax across S_frag[0..Bkv/kMmaN-1][4].
             //
-            // Empirically verified m16n8k16 effective layout for sm_120a:
-            //   frag[0] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
-            //   frag[1] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
-            //   frag[2] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
-            //   frag[3] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
+            // Standard PTX ISA m16n8k16 D-frag layout:
+            //   frag[0] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
+            //   frag[1] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
+            //   frag[2] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
+            //   frag[3] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
             //
-            // r_max_ab[0] and row_l[0] accumulate for frag[0,1] (row_b = lane/4+8).
-            // r_max_ab[1] and row_l[1] accumulate for frag[2,3] (row_a = lane/4).
+            // r_max_ab[0] and row_l[0] accumulate for frag[0,1] (row_a = lane/4).
+            // r_max_ab[1] and row_l[1] accumulate for frag[2,3] (row_b = lane/4+8).
             // Shfl_xor across 4 lanes sharing the same row-pair (offsets 1 and 2).
 
             // Compute per-row local max across all Bkv/kMmaN col-tiles.
@@ -461,6 +461,8 @@ attention_tiled_streaming_kernel(
             for (int rb = 0; rb < 2; ++rb) {
                 row_l[rb] = scale_prev[rb] * row_l[rb] + r_sum[rb];
             }
+            // O_frag[0,1] = row_a content, scale by row_a factor
+            // O_frag[2,3] = row_b content, scale by row_b factor
             #pragma unroll
             for (int n = 0; n < HD / kMmaN; ++n) {
                 O_frag[n][0] *= scale_prev[0];
@@ -491,19 +493,30 @@ attention_tiled_streaming_kernel(
                     // Repack S_frag → P_frag (FP32 → FP16, pair into b32).
                     // S_frag n-index: sa = 2*k_it_v (k-cols 0..7 in this A-tile),
                     //                 sb = 2*k_it_v+1 (k-cols 8..15 in this A-tile).
-                    // P_frag[0,1] feed a[0,1] → output rows consistent with row_b.
-                    // P_frag[2,3] feed a[2,3] → output rows consistent with row_a.
+                    //
+                    // PTX ISA m16n8k16 A-frag layout (row.col, empirically verified on sm_120a):
+                    //   a[0] = (row_a, k<8)  → accumulates into d[0,1] (row_a output)
+                    //   a[1] = (row_b, k<8)  → accumulates into d[2,3] (row_b output)
+                    //   a[2] = (row_a, k≥8)  → accumulates into d[0,1] (row_a output)
+                    //   a[3] = (row_b, k≥8)  → accumulates into d[2,3] (row_b output)
+                    //
+                    // Note: a[1] and a[2] are interleaved by row (not by k-half as the
+                    // written PTX ISA spec implies). The correct packing is:
+                    //   P_frag[0] = row_a, k<8
+                    //   P_frag[1] = row_b, k<8   ← row_b at LOWER k
+                    //   P_frag[2] = row_a, k≥8   ← row_a at HIGHER k
+                    //   P_frag[3] = row_b, k≥8
                     int sa = 2 * k_it_v + 0;
                     int sb = 2 * k_it_v + 1;
-                    __half2 h01_lo = __floats2half2_rn(S_frag[sa][0], S_frag[sa][1]);
-                    __half2 h01_hi = __floats2half2_rn(S_frag[sb][0], S_frag[sb][1]);
-                    __half2 h23_lo = __floats2half2_rn(S_frag[sa][2], S_frag[sa][3]);
-                    __half2 h23_hi = __floats2half2_rn(S_frag[sb][2], S_frag[sb][3]);
+                    __half2 h_ra_lo = __floats2half2_rn(S_frag[sa][0], S_frag[sa][1]);  // row_a, k<8
+                    __half2 h_rb_lo = __floats2half2_rn(S_frag[sa][2], S_frag[sa][3]);  // row_b, k<8
+                    __half2 h_ra_hi = __floats2half2_rn(S_frag[sb][0], S_frag[sb][1]);  // row_a, k≥8
+                    __half2 h_rb_hi = __floats2half2_rn(S_frag[sb][2], S_frag[sb][3]);  // row_b, k≥8
                     uint32_t P_frag[4];
-                    P_frag[0] = *reinterpret_cast<uint32_t*>(&h01_lo);
-                    P_frag[1] = *reinterpret_cast<uint32_t*>(&h01_hi);
-                    P_frag[2] = *reinterpret_cast<uint32_t*>(&h23_lo);
-                    P_frag[3] = *reinterpret_cast<uint32_t*>(&h23_hi);
+                    P_frag[0] = *reinterpret_cast<uint32_t*>(&h_ra_lo);  // a[0]: row_a k<8  → d[0,1]
+                    P_frag[1] = *reinterpret_cast<uint32_t*>(&h_rb_lo);  // a[1]: row_b k<8  → d[2,3]
+                    P_frag[2] = *reinterpret_cast<uint32_t*>(&h_ra_hi);  // a[2]: row_a k≥8  → d[0,1]
+                    P_frag[3] = *reinterpret_cast<uint32_t*>(&h_rb_hi);  // a[3]: row_b k≥8  → d[2,3]
 
                     mma_m16n8k16_f16(O_frag[n_it_v], P_frag, V_frag);
                 }
@@ -518,8 +531,15 @@ attention_tiled_streaming_kernel(
     // ------------------------------------------------------------------
     // Epilogue: normalize O by 1/row_l, downcast to FP16, write to gmem.
     // ------------------------------------------------------------------
+    // PV MMA D-frag layout (standard PTX ISA, verified empirically on sm_120a):
+    //   O_frag[0,1] (D output d[0,1]) accumulates ROW_A (lower) weighted V
+    //   O_frag[2,3] (D output d[2,3]) accumulates ROW_B (upper) weighted V
+    // Normalization and write addresses use standard layout:
+    //   O_frag[0,1] ÷ row_l[0] (row_a's sum) → write to abs_row_a
+    //   O_frag[2,3] ÷ row_l[1] (row_b's sum) → write to abs_row_b
     if (is_mma_warp) {
-        // Normalize.
+        // Normalize: O_frag[0,1] = row_a result → divide by row_l[0]
+        //            O_frag[2,3] = row_b result → divide by row_l[1]
         #pragma unroll
         for (int n = 0; n < HD / kMmaN; ++n) {
             O_frag[n][0] *= (1.0f / row_l[0]);
@@ -528,11 +548,8 @@ attention_tiled_streaming_kernel(
             O_frag[n][3] *= (1.0f / row_l[1]);
         }
 
-        // Store: convert each (16-row × 8-col) D-tile to FP16 and write to gmem.
-        // Effective output-row mapping (consistent with softmax grouping):
-        //   frag[0,1] (row_l[0]) → written to abs_row_a = q_row0 + row_in_warp_base + lane/4
-        //   frag[2,3] (row_l[1]) → written to abs_row_b = q_row0 + row_in_warp_base + lane/4+8
-        //   col_a = (lane % 4) * 2, col_b = col_a + 1
+        // Store: O_frag[0,1] = row_a → write to abs_row_a
+        //        O_frag[2,3] = row_b → write to abs_row_b
         const int row_in_warp_base = consumer_id * kMmaM;
         const int row_a = lane / 4;
         const int row_b = row_a + 8;
@@ -543,6 +560,7 @@ attention_tiled_streaming_kernel(
             int col_base = n * kMmaN + col_a;
             int abs_row_a = q_row0 + row_in_warp_base + row_a;
             int abs_row_b = q_row0 + row_in_warp_base + row_b;
+            // O_frag[0,1] = row_a content → write to abs_row_a
             if (abs_row_a < seq_q) {
                 __half2 packed = __floats2half2_rn(O_frag[n][0], O_frag[n][1]);
                 __half* dst = reinterpret_cast<__half*>(O)
@@ -552,6 +570,7 @@ attention_tiled_streaming_kernel(
                     + col_base;
                 *reinterpret_cast<__half2*>(dst) = packed;
             }
+            // O_frag[2,3] = row_b content → write to abs_row_b
             if (abs_row_b < seq_q) {
                 __half2 packed = __floats2half2_rn(O_frag[n][2], O_frag[n][3]);
                 __half* dst = reinterpret_cast<__half*>(O)
@@ -572,7 +591,6 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
-    return false;  // disabled: degeneration bug, see investigation
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
     if (Q.ndim != 4) return false;
