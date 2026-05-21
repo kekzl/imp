@@ -364,6 +364,18 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
+    // Track E v2 is numerically correct but ~50% slower than cuBLAS at long
+    // context (scalar FP32 PV vs cuBLAS tensor-core PV). Production-disabled
+    // until a WMMA-PV variant matches correctness without losing perf.
+    //
+    // A/B on Qwen3-8B Q8_0:
+    //   pp512:  v2 = 10295 tok/s  vs cuBLAS = 12225 (-15.8%)
+    //   pp4096: v2 =  4906 tok/s  vs cuBLAS =  9905 (-50.5%)
+    //   pp8192: v2 =  3095 tok/s  vs cuBLAS =  8199 (-62.2%)
+    //
+    // Kernel stays in tree for the next optimisation pass (WMMA PV with
+    // FP32 accumulator + careful P handling).
+    return false;
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
     if (Q.ndim != 4)
