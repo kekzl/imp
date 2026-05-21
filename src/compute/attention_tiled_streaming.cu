@@ -572,6 +572,7 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
+    return false;  // disabled: degeneration bug, see investigation
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
     if (Q.ndim != 4) return false;
