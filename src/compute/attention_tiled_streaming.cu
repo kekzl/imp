@@ -591,6 +591,18 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
+    // DISABLED — multi-model smoke test (2026-05-21) revealed degeneration
+    // on Gemma-4 (Q8_0, Q4_K_M, NVFP4), Qwen3-8B-NVFP4, and a CUDA-error
+    // crash on Qwen3.5-4B (GDN+attention hybrid). Only Qwen3-8B-Q8_0 and
+    // Qwen3.6-35B-NVFP4 produce coherent output. Root cause unknown —
+    // the PV-repack fix in #353 resolved one bug class, but more remain.
+    //
+    // Suspects: hd=256 path (Gemma SWA), GDN attention shape contract,
+    // KV layout differences across architectures.
+    //
+    // Track E stays in tree for investigation but every call falls back
+    // to cuBLAS / FMHA via the existing dispatcher branches.
+    return false;
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
     if (Q.ndim != 4) return false;
