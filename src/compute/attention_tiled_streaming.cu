@@ -142,8 +142,6 @@ attention_tiled_streaming_kernel(
         int sliding_window, float softcap, int q_offset) {
     constexpr int Bkv = default_Bkv<HD>();
 
-    // Suppress unused-parameter warnings for params used in later tasks.
-    (void)sliding_window; (void)softcap;
 
     // Block coordinates: x=row-block, y=head, z=batch.
     const int row_block = blockIdx.x;
@@ -350,6 +348,16 @@ attention_tiled_streaming_kernel(
                 #pragma unroll
                 for (int k = 0; k < 4; ++k) S_frag[n_it][k] *= scale;
 
+                // Soft-cap: softcap * tanh(S / softcap). Applied BEFORE the
+                // mask so that masked positions remain -INFINITY (not -softcap).
+                if (softcap > 0.0f) {
+                    const float inv_softcap = 1.0f / softcap;
+                    #pragma unroll
+                    for (int k = 0; k < 4; ++k) {
+                        S_frag[n_it][k] = softcap * tanhf(S_frag[n_it][k] * inv_softcap);
+                    }
+                }
+
                 if (causal) {
                     // Each lane owns 4 (row, col) positions in the 16×8 D-tile.
                     // Empirically verified m16n8k16 D-frag layout for sm_120a:
@@ -376,6 +384,16 @@ attention_tiled_streaming_kernel(
                     if (abs_k_b > abs_q_b) S_frag[n_it][1] = -INFINITY;
                     if (abs_k_a > abs_q_a) S_frag[n_it][2] = -INFINITY;
                     if (abs_k_b > abs_q_a) S_frag[n_it][3] = -INFINITY;
+
+                    if (sliding_window > 0) {
+                        // Sliding window: K visible only if abs_q - abs_k < sliding_window.
+                        // Mask if abs_q - abs_k >= sliding_window.
+                        // Same inverted frag↔row convention: frag[0,1] use abs_q_b, frag[2,3] use abs_q_a.
+                        if (abs_q_b - abs_k_a >= sliding_window) S_frag[n_it][0] = -INFINITY;
+                        if (abs_q_b - abs_k_b >= sliding_window) S_frag[n_it][1] = -INFINITY;
+                        if (abs_q_a - abs_k_a >= sliding_window) S_frag[n_it][2] = -INFINITY;
+                        if (abs_q_a - abs_k_b >= sliding_window) S_frag[n_it][3] = -INFINITY;
+                    }
                 }
             }
         }
