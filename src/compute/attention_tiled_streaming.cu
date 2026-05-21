@@ -1,656 +1,461 @@
+// =============================================================================
+// attention_tiled_streaming.cu — Track E v2: tiled FA2 attention for sm_120a
+// =============================================================================
+//
+// Flash-Attention-2 style tiled streaming attention.  The key design goal is
+// numerical agreement with the cuBLAS reference to < 5e-3 absolute error
+// even for magnitude-1.0 Q/K/V inputs.
+//
+// Numerical strategy (differs from attention_fmha_sm120.cu):
+//   • QK^T GEMM uses WMMA with FP32 accumulator → stored in S_tile as FP32.
+//   • Online softmax step keeps P = exp(S − m) as FP32 in S_tile (no FP16
+//     conversion, no per-tile normalization by l).
+//   • PV GEMM is a scalar FP32 loop (no WMMA).  V is loaded as FP16 and
+//     upcast to FP32 on the fly.  O_acc accumulates entirely in FP32.
+//   • Final output = O_acc / l_final, converted to FP16 at store time.
+//
+// This matches cuBLAS's numerical path (FP32 attention weights, FP32 PV dot)
+// far more closely than a kernel that stores P as FP16.
+//
+// Supported configs:
+//   head_dim ∈ {64, 96, 128, 256}          (512 → returns false)
+//   dtype: FP16 Q/K/V/O
+//   GQA, causal, sliding_window, softcap, chunked-prefill (q_offset > 0)
+// =============================================================================
+
 #include "compute/attention_tiled_streaming.h"
+#include "compute/attention_paged_common.cuh"
 #include "core/logging.h"
-#include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cstdint>
+#include <cuda_fp16.h>
+#include <float.h>
+#include <mma.h>
+
+using namespace nvcuda;
 
 namespace imp {
 
-namespace {
+// =============================================================================
+// Constants
+// =============================================================================
 
-// 4 producers + 4 consumers = 8 warps × 32 threads = 256 threads/CTA.
-constexpr int kWarps = 8;
-constexpr int kThreads = kWarps * 32;
-constexpr int kProducerWarp = 0;  // start of producer range
-constexpr int kNumProducerWarps = 4;  // experiment: 4 producers + 4 consumers
+static constexpr int kTE_WARP_SIZE     = 32;
+static constexpr int kTE_NUM_WARPS     = 8;
+static constexpr int kTE_BLOCK_THREADS = kTE_WARP_SIZE * kTE_NUM_WARPS;  // 256
+static constexpr int kTE_Bkv           = 64;
+static constexpr int kTE_WMMA_M        = 16;
+static constexpr int kTE_WMMA_N        = 16;
+static constexpr int kTE_WMMA_K        = 16;
 
-// MMA tile dimensions (m16n8k16 FP16).
-constexpr int kMmaM = 16;
-constexpr int kMmaN = 8;
-constexpr int kMmaK = 16;
+// =============================================================================
+// Kernel
+// =============================================================================
 
-// Bkv per hd. Br baked into kernel template.
-template <int HD>
-constexpr int default_Bkv() {
-    return (HD <= 128) ? 64 : 32;
-}
+template <int Bq, int HD>
+__global__ void __launch_bounds__(kTE_BLOCK_THREADS, 1) track_e_kernel(
+    const half* __restrict__ Q,
+    const half* __restrict__ K,
+    const half* __restrict__ V,
+    half*       __restrict__ O,
+    int batch_size, int seq_q, int seq_kv,
+    int n_heads, int n_kv_heads,
+    float scale, bool causal, int sliding_window, float softcap,
+    int q_offset)
+{
+    constexpr int Bkv      = kTE_Bkv;
+    constexpr int head_dim = HD;
+    // threads-per-row for the parallel softmax + PV scatter
+    constexpr int TPR = kTE_BLOCK_THREADS / Bq;
+    static_assert(TPR >= 1 && (TPR & (TPR-1)) == 0, "TPR must be pow2");
 
-// Br per hd. Picked in §2 of the spec.
-template <int HD>
-constexpr int default_Br() {
-    if constexpr (HD == 64)  return 128;
-    else if constexpr (HD == 96)  return 96;
-    else if constexpr (HD == 128) return 64;
-    else if constexpr (HD == 256) return 32;
-    else if constexpr (HD == 512) return 32;
-    else return -1;  // SFINAE-ish: unsupported.
-}
+    // ---- block / thread indices -----------------------------------------------
+    const int tile_q     = blockIdx.x;
+    const int batch_head = blockIdx.y;
+    const int batch_idx  = batch_head / n_heads;
+    const int head_idx   = batch_head % n_heads;
+    const int kv_head    = head_idx / (n_heads / n_kv_heads);
 
-// HD chunk size for hd=512 chunked path.
-constexpr int kHDChunkBytes = 128 * 2;  // 128 halves = 256 B
-constexpr int kHDChunkHalves = 128;
+    const int tid     = threadIdx.x + threadIdx.y * blockDim.x;
+    const int warp_id = tid / kTE_WARP_SIZE;
+    const int q_start = tile_q * Bq;           // tile start within this chunk
+    const int abs_q_start = q_offset + q_start; // absolute position of Q[0] of tile
 
-}  // namespace
+    // parallel-softmax addressing
+    const int sm_row  = tid / TPR;
+    const int sm_lane = tid % TPR;
 
-namespace {
+    // ---- global memory strides: [batch, seq, heads, head_dim] ----------------
+    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-__device__ __forceinline__ void cp_async_16(void* smem, const void* glob) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(glob));
-}
+    const half* Q_ptr = Q
+        + (int64_t)batch_idx * seq_q  * q_row_stride
+        + (int64_t)q_start            * q_row_stride
+        + (int64_t)head_idx           * head_dim;
+    const half* K_ptr = K
+        + (int64_t)batch_idx * seq_kv * kv_row_stride
+        + (int64_t)kv_head            * head_dim;
+    const half* V_ptr = V
+        + (int64_t)batch_idx * seq_kv * kv_row_stride
+        + (int64_t)kv_head            * head_dim;
+    half* O_ptr = O
+        + (int64_t)batch_idx * seq_q  * q_row_stride
+        + (int64_t)q_start            * q_row_stride
+        + (int64_t)head_idx           * head_dim;
 
-__device__ __forceinline__ void cp_async_commit() {
-    asm volatile("cp.async.commit_group;\n");
-}
+    // ---- shared memory layout -------------------------------------------------
+    //   Q_tile  : half  [Bq  × HD]
+    //   KV_tile : half  [Bkv × HD]   (K then V reuse same buffer)
+    //   S_tile  : float [Bq  × Bkv]  (FP32 scores → FP32 probabilities, no FP16 cast)
+    //   O_acc   : float [Bq  × HD]   (FP32 accumulator, normalised at final write)
+    //   row_m   : float [Bq]
+    //   row_l   : float [Bq]
+    extern __shared__ char smem[];
+    half*  Q_tile  = reinterpret_cast<half*>(smem);
+    half*  KV_tile = Q_tile  + Bq  * head_dim;
+    float* S_tile  = reinterpret_cast<float*>(KV_tile + Bkv * head_dim);
+    float* O_acc   = S_tile  + Bq  * Bkv;
+    float* row_m   = O_acc   + Bq  * head_dim;
+    float* row_l   = row_m   + Bq;
 
-__device__ __forceinline__ void cp_async_wait_all() {
-    asm volatile("cp.async.wait_all;\n");
-}
+    // ---- load Q tile (vectorised float4 = 8 halves per iter) ------------------
+    {
+        const int total_vec8 = (Bq * head_dim) / 8;
+        for (int vi = tid; vi < total_vec8; vi += kTE_BLOCK_THREADS) {
+            int i = vi * 8;
+            int r = i / head_dim;
+            int d = i % head_dim;
+            float4* dst = reinterpret_cast<float4*>(&Q_tile[i]);
+            if (q_start + r < seq_q) {
+                const float4* src = reinterpret_cast<const float4*>(
+                    &Q_ptr[(int64_t)r * q_row_stride + d]);
+                *dst = *src;
+            } else {
+                *dst = make_float4(0.f, 0.f, 0.f, 0.f);
+            }
+        }
+    }
 
-__device__ __forceinline__ void mbar_init(uint64_t* bar, uint32_t count) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(s), "r"(count));
-}
-
-__device__ __forceinline__ void mbar_arrive(uint64_t* bar) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" ::"r"(s));
-}
-
-__device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t phase) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "WAIT_%=: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
-        "@p bra DONE_%=;\n"
-        "bra WAIT_%=;\n"
-        "DONE_%=:\n"
-        "}\n"
-        :: "r"(s), "r"(phase));
-}
-
-// ldmatrix x4 (loads 4 fragments, 16x16 halves, into 4 32-bit regs per lane).
-__device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile(
-        "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-        : "r"(s));
-}
-
-// ldmatrix x4 with .trans modifier for column-major operand loading.
-// Used for B-operand fragments in mma.row.col layout (K in QKᵀ, V in PV).
-__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t (&r)[4], const void* smem) {
-    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile(
-        "ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-        : "r"(s));
-}
-
-// mma.sync.m16n8k16 FP16 in/out (acc FP32). D += A·B.
-__device__ __forceinline__ void mma_m16n8k16_f16(
-        float (&d)[4],
-        const uint32_t (&a)[4], const uint32_t (&b)[2]) {
-    asm volatile(
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-        "{%0, %1, %2, %3}, "
-        "{%4, %5, %6, %7}, "
-        "{%8, %9}, "
-        "{%0, %1, %2, %3};\n"
-        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
-          "r"(b[0]), "r"(b[1]));
-}
-
-__device__ __forceinline__ float redux_max_f32(float x) {
-    float result;
-    asm volatile("redux.sync.max.f32 %0, %1, 0xffffffff;\n"
-                 : "=f"(result) : "f"(x));
-    return result;
-}
-
-__device__ __forceinline__ float redux_add_f32(float x) {
-    float result;
-    asm volatile("redux.sync.add.f32 %0, %1, 0xffffffff;\n"
-                 : "=f"(result) : "f"(x));
-    return result;
-}
-
-}  // namespace
-
-template <int Br, int HD>
-__global__ void __launch_bounds__(kThreads, 1)
-attention_tiled_streaming_kernel(
-        const __half* __restrict__ Q,
-        const __half* __restrict__ K,
-        const __half* __restrict__ V,
-        __half* __restrict__ O,
-        int seq_q, int seq_kv,
-        int n_heads, int n_kv_heads,
-        float scale, bool causal,
-        int sliding_window, float softcap, int q_offset) {
-    constexpr int Bkv = default_Bkv<HD>();
-
-
-    // Block coordinates: x=row-block, y=head, z=batch.
-    const int row_block = blockIdx.x;
-    const int head = blockIdx.y;
-    const int batch = blockIdx.z;
-    const int kv_head = head / (n_heads / n_kv_heads);
-
-    const int q_row0 = row_block * Br;
-    if (q_row0 >= seq_q) return;
-
-    const int tid = threadIdx.x;
-
-    // ------------------------------------------------------------------
-    // Shared memory layout
-    // ------------------------------------------------------------------
-    extern __shared__ __align__(128) uint8_t smem_raw[];
-
-    __half* Q_smem = reinterpret_cast<__half*>(smem_raw);
-    __half* K_smem[2];                          // double-buffered
-    K_smem[0] = Q_smem + Br * HD;
-    K_smem[1] = K_smem[0] + Bkv * HD;
-    __half* V_smem = K_smem[1] + Bkv * HD;
-    uint64_t* mbar = reinterpret_cast<uint64_t*>(V_smem + Bkv * HD);
-
-    // mbar layout: [Q_ready, K_ready[0], K_ready[1], V_ready,
-    //               QKt_done, V_consumed]
-    if (tid == 0) {
-        mbar_init(&mbar[0], 1);         // Q_ready
-        mbar_init(&mbar[1], 1);         // K_ready[0]
-        mbar_init(&mbar[2], 1);         // K_ready[1]
-        mbar_init(&mbar[3], 1);         // V_ready
-        mbar_init(&mbar[4], 4);         // QKt_done
-        mbar_init(&mbar[5], 4);         // V_consumed
+    // ---- zero O_acc + init running softmax state ------------------------------
+    {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.f, 0.f, 0.f, 0.f);
+        for (int vi = tid; vi < total_vec4; vi += kTE_BLOCK_THREADS)
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
+    }
+    if (tid < Bq) {
+        row_m[tid] = -FLT_MAX;
+        row_l[tid] = 0.f;
     }
     __syncthreads();
 
-    // ------------------------------------------------------------------
-    // Q load: one-time. All 256 threads cooperate.
-    // ------------------------------------------------------------------
-    const __half* Q_gmem = Q
-        + static_cast<size_t>(batch) * seq_q * n_heads * HD
-        + static_cast<size_t>(q_row0) * n_heads * HD
-        + static_cast<size_t>(head) * HD;
+    // ---- KV tile loop bounds --------------------------------------------------
+    // compute_kv_tile_bounds uses absolute q_start for causal tile pruning.
+    int num_kv_tiles, first_kv_tile;
+    compute_kv_tile_bounds(abs_q_start, Bq, Bkv,
+                           q_offset + seq_q,   // absolute end of this chunk
+                           seq_kv,
+                           causal, sliding_window,
+                           first_kv_tile, num_kv_tiles);
 
-    constexpr int kHalvesPerChunk = 8;          // 16 bytes per cp.async
-    constexpr int kQChunks = (Br * HD) / kHalvesPerChunk;
-    for (int c = tid; c < kQChunks; c += kThreads) {
-        int elem = c * kHalvesPerChunk;
-        int r = elem / HD;
-        int d = elem % HD;
-        const __half* src = Q_gmem + static_cast<size_t>(r) * n_heads * HD + d;
-        cp_async_16(&Q_smem[r * HD + d], src);
-    }
-    cp_async_commit();
-    cp_async_wait_all();
-    __syncthreads();
-    if (tid == 0) mbar_arrive(&mbar[0]);
+    // ---- derived WMMA tiling constants ----------------------------------------
+    const int hd_chunks   = head_dim / kTE_WMMA_K;    // QK^T k-reduction chunks
+    const int s_row_tiles = Bq  / kTE_WMMA_M;
+    const int s_col_tiles = Bkv / kTE_WMMA_N;
+    const int s_total     = s_row_tiles * s_col_tiles;
 
-    // Phase counters per mbarrier (parity-based wait).
-    uint32_t phase_K[2] = {0u, 0u};
-    uint32_t phase_V = 0u;
-    uint32_t phase_QKt = 0u;
-    uint32_t phase_VC = 0u;
+    // ==========================================================================
+    // Main loop over KV tiles
+    // ==========================================================================
+    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
+        const int kv_start = j * Bkv;
 
-    const int n_kv_tiles = (seq_kv + Bkv - 1) / Bkv;
-    int k_slot = 0;
-    const int warp_id = tid / 32;
-    const int lane = tid & 31;
-
-    // ------------------------------------------------------------------
-    // Producer warps 0-3: 4 warps cooperate on cp.async-loading K + V.
-    // ------------------------------------------------------------------
-    if (warp_id < kNumProducerWarps) {
-        const int producer_lane = warp_id * 32 + lane;            // 0..127
-        constexpr int producer_threads = kNumProducerWarps * 32;  // 128
-
-        // Pre-load K[0] into K_smem[0] before the iter loop.
-        const __half* K_gmem0 = K
-            + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
-            + static_cast<size_t>(0) * Bkv * n_kv_heads * HD
-            + static_cast<size_t>(kv_head) * HD;
-        for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
-            int elem = c * kHalvesPerChunk;
-            int r = elem / HD;
-            int d = elem % HD;
-            cp_async_16(&K_smem[0][r * HD + d],
-                         K_gmem0 + static_cast<size_t>(r) * n_kv_heads * HD + d);
-        }
-        cp_async_commit();
-        cp_async_wait_all();
-        if (producer_lane == 0) mbar_arrive(&mbar[1]);  // K_ready[0]
-
-        for (int i = 0; i < n_kv_tiles; ++i) {
-            // Prefetch K[i+1] into the OTHER slot if not last iter.
-            if (i + 1 < n_kv_tiles) {
-                int next_slot = 1 - k_slot;
-                const __half* K_gmem_next = K
-                    + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
-                    + static_cast<size_t>(i + 1) * Bkv * n_kv_heads * HD
-                    + static_cast<size_t>(kv_head) * HD;
-                for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
-                    int elem = c * kHalvesPerChunk;
-                    int r = elem / HD;
-                    int d = elem % HD;
-                    cp_async_16(&K_smem[next_slot][r * HD + d],
-                                 K_gmem_next + static_cast<size_t>(r) * n_kv_heads * HD + d);
+        // ---- load K tile -----------------------------------------------------
+        {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += kTE_BLOCK_THREADS) {
+                int i = vi * 8;
+                int r = i / head_dim;
+                int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
+                if (kv_start + r < seq_kv) {
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
+                } else {
+                    *dst = make_float4(0.f, 0.f, 0.f, 0.f);
                 }
-                cp_async_commit();
-                cp_async_wait_all();
-                if (producer_lane == 0) mbar_arrive(&mbar[1 + next_slot]);
+            }
+        }
+        __syncthreads();
+
+        // ---- Phase 1: S = Q @ K^T  via WMMA (FP32 accumulator) ---------------
+        for (int tile_idx = warp_id; tile_idx < s_total; tile_idx += kTE_NUM_WARPS) {
+            int ri = tile_idx / s_col_tiles;
+            int ci = tile_idx % s_col_tiles;
+
+            wmma::fragment<wmma::accumulator,
+                           kTE_WMMA_M, kTE_WMMA_N, kTE_WMMA_K, float> acc;
+            wmma::fill_fragment(acc, 0.f);
+
+            for (int k = 0; k < hd_chunks; k++) {
+                wmma::fragment<wmma::matrix_a,
+                               kTE_WMMA_M, kTE_WMMA_N, kTE_WMMA_K,
+                               half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(
+                    a_frag,
+                    Q_tile + ri * kTE_WMMA_M * head_dim + k * kTE_WMMA_K,
+                    head_dim);
+
+                wmma::fragment<wmma::matrix_b,
+                               kTE_WMMA_M, kTE_WMMA_N, kTE_WMMA_K,
+                               half, wmma::col_major> b_frag;
+                wmma::load_matrix_sync(
+                    b_frag,
+                    KV_tile + ci * kTE_WMMA_N * head_dim + k * kTE_WMMA_K,
+                    head_dim);
+
+                wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            // Wait for consumers to finish QKᵀ before loading V[i].
-            mbar_wait(&mbar[4], phase_QKt);
-            phase_QKt ^= 1u;
+            wmma::store_matrix_sync(
+                S_tile + ri * kTE_WMMA_M * Bkv + ci * kTE_WMMA_N,
+                acc, Bkv, wmma::mem_row_major);
+        }
+        __syncthreads();
 
-            // Load V[i] (single buffer).
-            const __half* V_gmem = V
-                + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
-                + static_cast<size_t>(i) * Bkv * n_kv_heads * HD
-                + static_cast<size_t>(kv_head) * HD;
-            for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
-                int elem = c * kHalvesPerChunk;
-                int r = elem / HD;
-                int d = elem % HD;
-                cp_async_16(&V_smem[r * HD + d],
-                             V_gmem + static_cast<size_t>(r) * n_kv_heads * HD + d);
+        // ---- apply scale, softcap, causal/SWA mask ----------------------------
+        // Pass abs_q_start so that chunked-prefill causal masking is correct.
+        apply_score_masks(S_tile, Bq, Bkv, kTE_BLOCK_THREADS, tid,
+                          abs_q_start, kv_start,
+                          q_offset + seq_q, seq_kv,
+                          scale, softcap, causal, sliding_window);
+        __syncthreads();
+
+        // ---- Phase 2: online softmax (fully FP32, P stored in S_tile) ---------
+        // Strategy:  keep P = exp(S − m_new) as FP32 in S_tile.
+        // O_acc is rescaled by exp(m_old − m_new) each tile.
+        // Final normalization (÷ row_l) is deferred to the output write step.
+        {
+            const int r = sm_row;
+            const bool row_valid = (r < Bq) && (q_start + r < seq_q);
+
+            // Row max reduction across TPR lanes
+            float partial_max = -FLT_MAX;
+            if (row_valid) {
+                for (int c = sm_lane; c < Bkv; c += TPR)
+                    partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
             }
-            cp_async_commit();
-            cp_async_wait_all();
-            if (producer_lane == 0) mbar_arrive(&mbar[3]);  // V_ready
+#pragma unroll
+            for (int off = TPR / 2; off >= 1; off >>= 1)
+                partial_max = fmaxf(partial_max,
+                    __shfl_xor_sync(0xffffffff, partial_max, off));
+            float m_ij = partial_max;
 
-            // Wait for consumers to finish PV before reusing V buffer next iter.
-            mbar_wait(&mbar[5], phase_VC);
-            phase_VC ^= 1u;
+            float m_old = row_valid ? row_m[r] : -FLT_MAX;
+            float m_new = fmaxf(m_old, m_ij);
+            float alpha = __expf(m_old - m_new);   // correction for O_acc
 
-            k_slot ^= 1;
-        }
-        return;
-    }
-
-    // ------------------------------------------------------------------
-    // Consumer warps 4..7: own one row-tile of Q each (all 4 active at Br=64).
-    // ------------------------------------------------------------------
-    const int consumer_id = warp_id - kNumProducerWarps;  // warp_id 4-7 -> 0..3
-    const bool is_mma_warp = (consumer_id >= 0 && consumer_id < Br / kMmaM);
-
-    // Per-warp register state — only valid if is_mma_warp.
-    float O_frag[HD / kMmaN][4];      // FP32 O accumulator, used in Task 9.
-    float row_m[2];                    // per-lane row-max [row_a, row_b], Task 8.
-    float row_l[2];                    // per-lane row-sum [row_a, row_b], Task 8.
-    if (is_mma_warp) {
-        #pragma unroll
-        for (int n = 0; n < HD / kMmaN; ++n) {
-            #pragma unroll
-            for (int k = 0; k < 4; ++k) O_frag[n][k] = 0.0f;
-        }
-        #pragma unroll
-        for (int k = 0; k < 2; ++k) {
-            row_m[k] = -INFINITY;
-            row_l[k] = 0.0f;
-        }
-    }
-
-    // Wait for Q tile to be ready.
-    mbar_wait(&mbar[0], /*phase=*/0u);
-
-    // Load Q fragments into registers (one-time per CTA).
-    uint32_t Q_frag[HD / kMmaK][4];   // [k_iter][4 regs]
-    if (is_mma_warp) {
-        const int row_in_warp_base = consumer_id * kMmaM;
-        #pragma unroll
-        for (int k_it = 0; k_it < HD / kMmaK; ++k_it) {
-            __half* Q_tile_ptr = &Q_smem[row_in_warp_base * HD + k_it * kMmaK];
-            ldmatrix_x4(Q_frag[k_it], Q_tile_ptr);
-        }
-    }
-
-    for (int i = 0; i < n_kv_tiles; ++i) {
-        mbar_wait(&mbar[1 + k_slot], phase_K[k_slot]);
-        phase_K[k_slot] ^= 1u;
-
-        // ----- QKᵀ -----
-        // Each mma m16n8k16 produces a 16×8 tile of S.
-        // col-tiles = Bkv / kMmaN (varies with hd: 8 for Bkv=64, 4 for Bkv=32).
-        float S_frag[Bkv / kMmaN][4];
-        if (is_mma_warp) {
-            #pragma unroll
-            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
-                #pragma unroll
-                for (int k = 0; k < 4; ++k) S_frag[n_it][k] = 0.0f;
-
-                #pragma unroll
-                for (int k_it = 0; k_it < HD / kMmaK; ++k_it) {
-                    // K is laid out [Bkv, HD]; for mma.col we read columns.
-                    // K_smem[k_slot] tile: 8 cols at [n_it*8, k_it*16].
-                    __half* K_tile_ptr =
-                        &K_smem[k_slot][n_it * kMmaN * HD + k_it * kMmaK];
-                    uint32_t K_full[4];
-                    ldmatrix_x4_trans(K_full, K_tile_ptr);
-                    uint32_t K_frag[2] = {K_full[0], K_full[1]};
-                    mma_m16n8k16_f16(S_frag[n_it], Q_frag[k_it], K_frag);
+            // exp + sum; map masked (−∞) values to 0 explicitly
+            float partial_sum = 0.f;
+            if (row_valid) {
+                for (int c = sm_lane; c < Bkv; c += TPR) {
+                    float s_val = S_tile[r * Bkv + c];
+                    float p = (s_val <= -FLT_MAX * 0.5f)
+                                  ? 0.f : __expf(s_val - m_new);
+                    partial_sum += p;
+                    S_tile[r * Bkv + c] = p;  // store FP32 prob (unnormalised)
                 }
+            } else if (r < Bq) {
+                // zero out padding rows so PV accumulation stays clean
+                for (int c = sm_lane; c < Bkv; c += TPR)
+                    S_tile[r * Bkv + c] = 0.f;
+            }
+#pragma unroll
+            for (int off = TPR / 2; off >= 1; off >>= 1)
+                partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, off);
 
-                // Scale by 1/sqrt(hd).
-                #pragma unroll
-                for (int k = 0; k < 4; ++k) S_frag[n_it][k] *= scale;
+            float l_old = row_valid ? row_l[r] : 0.f;
+            float l_new = alpha * l_old + partial_sum;
+            if (sm_lane == 0 && row_valid) {
+                row_m[r] = m_new;
+                row_l[r] = l_new;
+            }
 
-                // Soft-cap: softcap * tanh(S / softcap). Applied BEFORE the
-                // mask so that masked positions remain -INFINITY (not -softcap).
-                if (softcap > 0.0f) {
-                    const float inv_softcap = 1.0f / softcap;
-                    #pragma unroll
-                    for (int k = 0; k < 4; ++k) {
-                        S_frag[n_it][k] = softcap * tanhf(S_frag[n_it][k] * inv_softcap);
+            // Rescale O_acc rows: O_old *= exp(m_old - m_new)
+            if (row_valid && alpha != 1.f) {
+                for (int d = sm_lane; d < head_dim; d += TPR)
+                    O_acc[r * head_dim + d] *= alpha;
+            }
+        }
+        __syncthreads();
+
+        // ---- load V tile into KV_tile ----------------------------------------
+        {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += kTE_BLOCK_THREADS) {
+                int i = vi * 8;
+                int r = i / head_dim;
+                int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
+                if (kv_start + r < seq_kv) {
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
+                } else {
+                    *dst = make_float4(0.f, 0.f, 0.f, 0.f);
+                }
+            }
+        }
+        __syncthreads();
+
+        // ---- Phase 3: O_acc += P @ V  (scalar FP32, P unnormalised) ----------
+        // S_tile[r][c] = P[r][c] = exp(S[r][c] - m_new)  (FP32)
+        // KV_tile[c][d] = V[c][d]  (FP16, upcast inline)
+        // Each thread row sm_row handles columns sm_lane, sm_lane+TPR, ...
+        {
+            const int r = sm_row;
+            if (r < Bq) {
+                for (int d = sm_lane; d < head_dim; d += TPR) {
+                    float acc = O_acc[r * head_dim + d];
+                    for (int c = 0; c < Bkv; c++) {
+                        float p = S_tile[r * Bkv + c];
+                        float v = __half2float(KV_tile[c * head_dim + d]);
+                        acc += p * v;
                     }
-                }
-
-                if (causal) {
-                    // Each lane owns 4 (row, col) positions in the 16×8 D-tile.
-                    // Standard PTX ISA m16n8k16 D-frag layout:
-                    //   frag[0] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
-                    //   frag[1] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
-                    //   frag[2] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
-                    //   frag[3] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
-                    const int row_in_warp_base = consumer_id * kMmaM;
-                    const int row_a_local = lane / 4;
-                    const int row_b_local = row_a_local + 8;
-                    const int col_a_local = (lane % 4) * 2;
-                    const int col_b_local = col_a_local + 1;
-
-                    // Absolute Q row positions for the mask.
-                    const int abs_q_a = q_offset + q_row0 + row_in_warp_base + row_a_local;
-                    const int abs_q_b = q_offset + q_row0 + row_in_warp_base + row_b_local;
-                    // Absolute K position for this col-tile.
-                    const int abs_k_a = i * Bkv + n_it * kMmaN + col_a_local;
-                    const int abs_k_b = i * Bkv + n_it * kMmaN + col_b_local;
-
-                    // Mask future positions: K > Q means future → mask to -INF.
-                    // frag[0,1] → row_a (lower), frag[2,3] → row_b (upper).
-                    if (abs_k_a > abs_q_a) S_frag[n_it][0] = -INFINITY;
-                    if (abs_k_b > abs_q_a) S_frag[n_it][1] = -INFINITY;
-                    if (abs_k_a > abs_q_b) S_frag[n_it][2] = -INFINITY;
-                    if (abs_k_b > abs_q_b) S_frag[n_it][3] = -INFINITY;
-
-                    if (sliding_window > 0) {
-                        // Sliding window: K visible only if abs_q - abs_k < sliding_window.
-                        // Mask if abs_q - abs_k >= sliding_window.
-                        // Standard frag↔row convention: frag[0,1] use abs_q_a, frag[2,3] use abs_q_b.
-                        if (abs_q_a - abs_k_a >= sliding_window) S_frag[n_it][0] = -INFINITY;
-                        if (abs_q_a - abs_k_b >= sliding_window) S_frag[n_it][1] = -INFINITY;
-                        if (abs_q_b - abs_k_a >= sliding_window) S_frag[n_it][2] = -INFINITY;
-                        if (abs_q_b - abs_k_b >= sliding_window) S_frag[n_it][3] = -INFINITY;
-                    }
+                    O_acc[r * head_dim + d] = acc;
                 }
             }
         }
-
-        if (is_mma_warp) {
-            // Online softmax across S_frag[0..Bkv/kMmaN-1][4].
-            //
-            // Standard PTX ISA m16n8k16 D-frag layout:
-            //   frag[0] = row(lane/4)     col((lane%4)*2)     ← lower row (row_a)
-            //   frag[1] = row(lane/4)     col((lane%4)*2 + 1) ← lower row (row_a)
-            //   frag[2] = row(lane/4 + 8) col((lane%4)*2)     ← upper row (row_b)
-            //   frag[3] = row(lane/4 + 8) col((lane%4)*2 + 1) ← upper row (row_b)
-            //
-            // r_max_ab[0] and row_l[0] accumulate for frag[0,1] (row_a = lane/4).
-            // r_max_ab[1] and row_l[1] accumulate for frag[2,3] (row_b = lane/4+8).
-            // Shfl_xor across 4 lanes sharing the same row-pair (offsets 1 and 2).
-
-            // Compute per-row local max across all Bkv/kMmaN col-tiles.
-            float r_max_ab[2] = {-INFINITY, -INFINITY};
-            #pragma unroll
-            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
-                r_max_ab[0] = fmaxf(r_max_ab[0], fmaxf(S_frag[n_it][0], S_frag[n_it][1]));
-                r_max_ab[1] = fmaxf(r_max_ab[1], fmaxf(S_frag[n_it][2], S_frag[n_it][3]));
-            }
-            // Reduce across 4 lanes sharing the same row-pair.
-            #pragma unroll
-            for (int off : {1, 2}) {
-                r_max_ab[0] = fmaxf(r_max_ab[0], __shfl_xor_sync(0xffffffffu, r_max_ab[0], off));
-                r_max_ab[1] = fmaxf(r_max_ab[1], __shfl_xor_sync(0xffffffffu, r_max_ab[1], off));
-            }
-
-            // Update running max and compute O rescale factor.
-            float new_m[2];
-            float scale_prev[2];
-            #pragma unroll
-            for (int rb = 0; rb < 2; ++rb) {
-                new_m[rb]     = fmaxf(row_m[rb], r_max_ab[rb]);
-                scale_prev[rb] = __expf(row_m[rb] - new_m[rb]);
-                row_m[rb]     = new_m[rb];
-            }
-
-            // Apply P = exp(S - new_m) and accumulate r_sum.
-            float r_sum[2] = {0.0f, 0.0f};
-            #pragma unroll
-            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
-                S_frag[n_it][0] = __expf(S_frag[n_it][0] - new_m[0]);
-                S_frag[n_it][1] = __expf(S_frag[n_it][1] - new_m[0]);
-                S_frag[n_it][2] = __expf(S_frag[n_it][2] - new_m[1]);
-                S_frag[n_it][3] = __expf(S_frag[n_it][3] - new_m[1]);
-                r_sum[0] += S_frag[n_it][0] + S_frag[n_it][1];
-                r_sum[1] += S_frag[n_it][2] + S_frag[n_it][3];
-            }
-            // Warp-reduce r_sum across the 4-lane row-group.
-            #pragma unroll
-            for (int off : {1, 2}) {
-                r_sum[0] += __shfl_xor_sync(0xffffffffu, r_sum[0], off);
-                r_sum[1] += __shfl_xor_sync(0xffffffffu, r_sum[1], off);
-            }
-
-            // Update l and rescale O accumulator by exp(prev_m - new_m).
-            #pragma unroll
-            for (int rb = 0; rb < 2; ++rb) {
-                row_l[rb] = scale_prev[rb] * row_l[rb] + r_sum[rb];
-            }
-            // O_frag[0,1] = row_a content, scale by row_a factor
-            // O_frag[2,3] = row_b content, scale by row_b factor
-            #pragma unroll
-            for (int n = 0; n < HD / kMmaN; ++n) {
-                O_frag[n][0] *= scale_prev[0];
-                O_frag[n][1] *= scale_prev[0];
-                O_frag[n][2] *= scale_prev[1];
-                O_frag[n][3] *= scale_prev[1];
-            }
-        }
-
-        if (lane == 0) mbar_arrive(&mbar[4]);
-        mbar_wait(&mbar[3], phase_V);
-        phase_V ^= 1u;
-
-        if (is_mma_warp) {
-            // PV: O += P × V. P is in S_frag (post-softmax in registers).
-            // V_smem layout: [Bkv][HD] row-major. Use ldmatrix.trans for col-major B.
-            #pragma unroll
-            for (int n_it_v = 0; n_it_v < HD / kMmaN; ++n_it_v) {
-                #pragma unroll
-                for (int k_it_v = 0; k_it_v < Bkv / kMmaK; ++k_it_v) {
-                    // Load V_frag (16 K-rows × 8 N-cols of V at (k_it_v*16, n_it_v*8))
-                    __half* V_tile_ptr =
-                        &V_smem[k_it_v * kMmaK * HD + n_it_v * kMmaN];
-                    uint32_t V_full[4];
-                    ldmatrix_x4_trans(V_full, V_tile_ptr);
-                    uint32_t V_frag[2] = {V_full[0], V_full[1]};
-
-                    // Repack S_frag → P_frag (FP32 → FP16, pair into b32).
-                    // S_frag n-index: sa = 2*k_it_v (k-cols 0..7 in this A-tile),
-                    //                 sb = 2*k_it_v+1 (k-cols 8..15 in this A-tile).
-                    //
-                    // PTX ISA m16n8k16 A-frag layout (row.col, empirically verified on sm_120a):
-                    //   a[0] = (row_a, k<8)  → accumulates into d[0,1] (row_a output)
-                    //   a[1] = (row_b, k<8)  → accumulates into d[2,3] (row_b output)
-                    //   a[2] = (row_a, k≥8)  → accumulates into d[0,1] (row_a output)
-                    //   a[3] = (row_b, k≥8)  → accumulates into d[2,3] (row_b output)
-                    //
-                    // Note: a[1] and a[2] are interleaved by row (not by k-half as the
-                    // written PTX ISA spec implies). The correct packing is:
-                    //   P_frag[0] = row_a, k<8
-                    //   P_frag[1] = row_b, k<8   ← row_b at LOWER k
-                    //   P_frag[2] = row_a, k≥8   ← row_a at HIGHER k
-                    //   P_frag[3] = row_b, k≥8
-                    int sa = 2 * k_it_v + 0;
-                    int sb = 2 * k_it_v + 1;
-                    __half2 h_ra_lo = __floats2half2_rn(S_frag[sa][0], S_frag[sa][1]);  // row_a, k<8
-                    __half2 h_rb_lo = __floats2half2_rn(S_frag[sa][2], S_frag[sa][3]);  // row_b, k<8
-                    __half2 h_ra_hi = __floats2half2_rn(S_frag[sb][0], S_frag[sb][1]);  // row_a, k≥8
-                    __half2 h_rb_hi = __floats2half2_rn(S_frag[sb][2], S_frag[sb][3]);  // row_b, k≥8
-                    uint32_t P_frag[4];
-                    P_frag[0] = *reinterpret_cast<uint32_t*>(&h_ra_lo);  // a[0]: row_a k<8  → d[0,1]
-                    P_frag[1] = *reinterpret_cast<uint32_t*>(&h_rb_lo);  // a[1]: row_b k<8  → d[2,3]
-                    P_frag[2] = *reinterpret_cast<uint32_t*>(&h_ra_hi);  // a[2]: row_a k≥8  → d[0,1]
-                    P_frag[3] = *reinterpret_cast<uint32_t*>(&h_rb_hi);  // a[3]: row_b k≥8  → d[2,3]
-
-                    mma_m16n8k16_f16(O_frag[n_it_v], P_frag, V_frag);
-                }
-            }
-        }
-
-        if (lane == 0) mbar_arrive(&mbar[5]);
-        k_slot ^= 1;
+        __syncthreads();
     }
-    (void)Q_frag;  // used in QKt above.
 
-    // ------------------------------------------------------------------
-    // Epilogue: normalize O by 1/row_l, downcast to FP16, write to gmem.
-    // ------------------------------------------------------------------
-    // PV MMA D-frag layout (standard PTX ISA, verified empirically on sm_120a):
-    //   O_frag[0,1] (D output d[0,1]) accumulates ROW_A (lower) weighted V
-    //   O_frag[2,3] (D output d[2,3]) accumulates ROW_B (upper) weighted V
-    // Normalization and write addresses use standard layout:
-    //   O_frag[0,1] ÷ row_l[0] (row_a's sum) → write to abs_row_a
-    //   O_frag[2,3] ÷ row_l[1] (row_b's sum) → write to abs_row_b
-    if (is_mma_warp) {
-        // Normalize: O_frag[0,1] = row_a result → divide by row_l[0]
-        //            O_frag[2,3] = row_b result → divide by row_l[1]
-        #pragma unroll
-        for (int n = 0; n < HD / kMmaN; ++n) {
-            O_frag[n][0] *= (1.0f / row_l[0]);
-            O_frag[n][1] *= (1.0f / row_l[0]);
-            O_frag[n][2] *= (1.0f / row_l[1]);
-            O_frag[n][3] *= (1.0f / row_l[1]);
-        }
-
-        // Store: O_frag[0,1] = row_a → write to abs_row_a
-        //        O_frag[2,3] = row_b → write to abs_row_b
-        const int row_in_warp_base = consumer_id * kMmaM;
-        const int row_a = lane / 4;
-        const int row_b = row_a + 8;
-        const int col_a = (lane % 4) * 2;
-
-        #pragma unroll
-        for (int n = 0; n < HD / kMmaN; ++n) {
-            int col_base = n * kMmaN + col_a;
-            int abs_row_a = q_row0 + row_in_warp_base + row_a;
-            int abs_row_b = q_row0 + row_in_warp_base + row_b;
-            // O_frag[0,1] = row_a content → write to abs_row_a
-            if (abs_row_a < seq_q) {
-                __half2 packed = __floats2half2_rn(O_frag[n][0], O_frag[n][1]);
-                __half* dst = reinterpret_cast<__half*>(O)
-                    + static_cast<size_t>(batch) * seq_q * n_heads * HD
-                    + static_cast<size_t>(abs_row_a) * n_heads * HD
-                    + static_cast<size_t>(head) * HD
-                    + col_base;
-                *reinterpret_cast<__half2*>(dst) = packed;
-            }
-            // O_frag[2,3] = row_b content → write to abs_row_b
-            if (abs_row_b < seq_q) {
-                __half2 packed = __floats2half2_rn(O_frag[n][2], O_frag[n][3]);
-                __half* dst = reinterpret_cast<__half*>(O)
-                    + static_cast<size_t>(batch) * seq_q * n_heads * HD
-                    + static_cast<size_t>(abs_row_b) * n_heads * HD
-                    + static_cast<size_t>(head) * HD
-                    + col_base;
-                *reinterpret_cast<__half2*>(dst) = packed;
+    // ---- write final output: O = O_acc / row_l --------------------------------
+    {
+        const int r = sm_row;
+        if (r < Bq && q_start + r < seq_q) {
+            float inv_l = (row_l[r] > 0.f) ? (1.f / row_l[r]) : 0.f;
+            for (int d = sm_lane; d < head_dim; d += TPR) {
+                float v = O_acc[r * head_dim + d] * inv_l;
+                O_ptr[(int64_t)r * q_row_stride + d] = __float2half(v);
             }
         }
     }
-
-    (void)scale; (void)Q_gmem;
 }
+
+// =============================================================================
+// Shared memory size helper
+// =============================================================================
+
+static size_t compute_smem_track_e(int Bq, int Bkv, int head_dim) {
+    return (size_t)Bq  * head_dim * sizeof(half)   // Q_tile
+         + (size_t)Bkv * head_dim * sizeof(half)   // KV_tile
+         + (size_t)Bq  * Bkv     * sizeof(float)   // S_tile
+         + (size_t)Bq  * head_dim * sizeof(float)  // O_acc
+         + 2 * (size_t)Bq        * sizeof(float);  // row_m + row_l
+}
+
+// =============================================================================
+// Public launcher
+// =============================================================================
 
 bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        const Tensor& V, Tensor& O, float scale,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
-    // DISABLED — multi-model smoke test (2026-05-21) revealed degeneration
-    // on Gemma-4 (Q8_0, Q4_K_M, NVFP4), Qwen3-8B-NVFP4, and a CUDA-error
-    // crash on Qwen3.5-4B (GDN+attention hybrid). Only Qwen3-8B-Q8_0 and
-    // Qwen3.6-35B-NVFP4 produce coherent output. Root cause unknown —
-    // the PV-repack fix in #353 resolved one bug class, but more remain.
-    //
-    // Suspects: hd=256 path (Gemma SWA), GDN attention shape contract,
-    // KV layout differences across architectures.
-    //
-    // Track E stays in tree for investigation but every call falls back
-    // to cuBLAS / FMHA via the existing dispatcher branches.
-    return false;
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
-    if (Q.ndim != 4) return false;
-    const int batch = static_cast<int>(Q.shape[0]);
-    const int seq_q = static_cast<int>(Q.shape[1]);
-    const int n_heads = static_cast<int>(Q.shape[2]);
-    const int head_dim = static_cast<int>(Q.shape[3]);
-    const int seq_kv = static_cast<int>(K.shape[1]);
+    if (Q.ndim != 4)
+        return false;
+
+    const int batch_size = static_cast<int>(Q.shape[0]);
+    const int seq_q      = static_cast<int>(Q.shape[1]);
+    const int n_heads    = static_cast<int>(Q.shape[2]);
+    const int head_dim   = static_cast<int>(Q.shape[3]);
+    const int seq_kv     = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
     if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
-    if (seq_q == 0 || seq_kv == 0) return false;
-    // Dispatch to the appropriate template instantiation based on head_dim.
-    // hd=512 is deferred to Task 12 (chunked kernel).
-    auto launch_hd = [&]<int Br, int HD>() -> bool {
-        constexpr int Bkv = default_Bkv<HD>();
-        // Smem: Q + K_dbuf (2 slots) + V + 6 mbarriers.
-        const size_t smem_bytes =
-              static_cast<size_t>(Br) * HD * sizeof(__half)
-            + 2 * static_cast<size_t>(Bkv) * HD * sizeof(__half)
-            + static_cast<size_t>(Bkv) * HD * sizeof(__half)
-            + 6 * sizeof(uint64_t);
+    if (seq_q == 0 || seq_kv == 0)                     return false;
+    if (head_dim % kTE_WMMA_K != 0)                    return false;
 
-        cudaFuncSetAttribute(
-            attention_tiled_streaming_kernel<Br, HD>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(smem_bytes));
+    int device = 0;
+    cudaGetDevice(&device);
+    int max_smem = 0;
+    cudaDeviceGetAttribute(&max_smem,
+        cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
 
-        dim3 grid((seq_q + Br - 1) / Br, n_heads, batch);
-        attention_tiled_streaming_kernel<Br, HD><<<grid, kThreads, smem_bytes, stream>>>(
-            static_cast<const __half*>(Q.data),
-            static_cast<const __half*>(K.data),
-            static_cast<const __half*>(V.data),
-            static_cast<__half*>(O.data),
-            seq_q, seq_kv, n_heads, n_kv_heads,
-            scale, causal, sliding_window, softcap, q_offset);
-
-        return cudaGetLastError() == cudaSuccess;
-    };
-
-    switch (head_dim) {
-        case  64: return launch_hd.template operator()< 128,  64>();
-        case  96: return launch_hd.template operator()<  96,  96>();
-        case 128: return launch_hd.template operator()<  64, 128>();
-        case 256: return launch_hd.template operator()<  32, 256>();
-        // hd=512 lands in Task 12.
-        default: return false;
+    int Bq;
+    {
+        size_t smem128 = compute_smem_track_e(128, kTE_Bkv, head_dim);
+        size_t smem64  = compute_smem_track_e( 64, kTE_Bkv, head_dim);
+        size_t smem32  = compute_smem_track_e( 32, kTE_Bkv, head_dim);
+        if      (smem128 <= (size_t)max_smem) Bq = 128;
+        else if (smem64  <= (size_t)max_smem) Bq = 64;
+        else if (smem32  <= (size_t)max_smem) Bq = 32;
+        else {
+            IMP_LOG_DEBUG("TrackE: no Bq fits smem (hd=%d)", head_dim);
+            return false;
+        }
     }
+    const size_t smem = compute_smem_track_e(Bq, kTE_Bkv, head_dim);
+
+    const int num_q_tiles = (seq_q + Bq - 1) / Bq;
+    dim3 grid(num_q_tiles, batch_size * n_heads);
+    dim3 block(kTE_WARP_SIZE, kTE_NUM_WARPS);
+
+    IMP_LOG_DEBUG("TrackE: Sq=%d Skv=%d nh=%d hd=%d Bq=%d q_off=%d",
+                  seq_q, seq_kv, n_heads, head_dim, Bq, q_offset);
+
+#define LAUNCH_TE(BQ, HD)                                                            \
+    do {                                                                             \
+        cudaError_t _e = cudaFuncSetAttribute(                                       \
+            track_e_kernel<BQ, HD>,                                                  \
+            cudaFuncAttributeMaxDynamicSharedMemorySize,                              \
+            static_cast<int>(smem));                                                 \
+        if (_e != cudaSuccess) { return false; }                                     \
+        cudaFuncSetAttribute(track_e_kernel<BQ, HD>,                                 \
+                             cudaFuncAttributePreferredSharedMemoryCarveout,          \
+                             cudaSharedmemCarveoutMaxShared);                        \
+        track_e_kernel<BQ, HD><<<grid, block, smem, stream>>>(                       \
+            reinterpret_cast<const half*>(Q.data),                                   \
+            reinterpret_cast<const half*>(K.data),                                   \
+            reinterpret_cast<const half*>(V.data),                                   \
+            reinterpret_cast<half*>(O.data),                                         \
+            batch_size, seq_q, seq_kv, n_heads, n_kv_heads,                          \
+            scale, causal, sliding_window, softcap, q_offset);                       \
+    } while (0)
+
+    if (Bq == 128) {
+        switch (head_dim) {
+            case  64: LAUNCH_TE(128,  64); return true;
+            case  96: LAUNCH_TE(128,  96); return true;
+            case 128: LAUNCH_TE(128, 128); return true;
+            case 256: LAUNCH_TE(128, 256); return true;
+            default: break;
+        }
+    } else if (Bq == 64) {
+        switch (head_dim) {
+            case  64: LAUNCH_TE(64,  64); return true;
+            case  96: LAUNCH_TE(64,  96); return true;
+            case 128: LAUNCH_TE(64, 128); return true;
+            case 256: LAUNCH_TE(64, 256); return true;
+            default: break;
+        }
+    } else {
+        switch (head_dim) {
+            case  64: LAUNCH_TE(32,  64); return true;
+            case  96: LAUNCH_TE(32,  96); return true;
+            case 128: LAUNCH_TE(32, 128); return true;
+            case 256: LAUNCH_TE(32, 256); return true;
+            default: break;
+        }
+    }
+
+#undef LAUNCH_TE
+
+    return false;  // hd=512 or unsupported
 }
 
 }  // namespace imp
