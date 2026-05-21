@@ -291,8 +291,8 @@ attention_tiled_streaming_kernel(
 
     // Per-warp register state — only valid if is_mma_warp.
     float O_frag[HD / kMmaN][4];      // FP32 O accumulator, used in Task 9.
-    float row_m[4];                    // per-lane row-max (4 floats), Task 8.
-    float row_l[4];                    // per-lane row-sum, Task 8.
+    float row_m[2];                    // per-lane row-max [row_a, row_b], Task 8.
+    float row_l[2];                    // per-lane row-sum [row_a, row_b], Task 8.
     if (is_mma_warp) {
         #pragma unroll
         for (int n = 0; n < HD / kMmaN; ++n) {
@@ -300,12 +300,11 @@ attention_tiled_streaming_kernel(
             for (int k = 0; k < 4; ++k) O_frag[n][k] = 0.0f;
         }
         #pragma unroll
-        for (int k = 0; k < 4; ++k) {
+        for (int k = 0; k < 2; ++k) {
             row_m[k] = -INFINITY;
             row_l[k] = 0.0f;
         }
     }
-    (void)row_m; (void)row_l;  // used in Task 8.
 
     // Wait for Q tile to be ready.
     mbar_wait(&mbar[0], /*phase=*/0u);
@@ -353,7 +352,75 @@ attention_tiled_streaming_kernel(
                 for (int k = 0; k < 4; ++k) S_frag[n_it][k] *= scale;
             }
         }
-        (void)S_frag;  // used in Task 8 softmax.
+
+        if (is_mma_warp) {
+            // Online softmax across S_frag[0..Bkv/kMmaN-1][4].
+            //
+            // m16n8k16 D-fragment per-lane layout:
+            //   frag[0] = row(lane/4)      col((lane%4)*2)
+            //   frag[1] = row(lane/4)      col((lane%4)*2 + 1)
+            //   frag[2] = row(lane/4 + 8)  col((lane%4)*2)
+            //   frag[3] = row(lane/4 + 8)  col((lane%4)*2 + 1)
+            //
+            // Per lane: row_a = lane/4 (frag[0,1]), row_b = lane/4+8 (frag[2,3]).
+            // To reduce across col-tiles within a row, shfl_xor across the
+            // 4 lanes sharing the same row-pair (offsets 1 and 2 within group-of-4).
+
+            // Compute per-row local max across all Bkv/kMmaN col-tiles.
+            float r_max_ab[2] = {-INFINITY, -INFINITY};
+            #pragma unroll
+            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
+                r_max_ab[0] = fmaxf(r_max_ab[0], fmaxf(S_frag[n_it][0], S_frag[n_it][1]));
+                r_max_ab[1] = fmaxf(r_max_ab[1], fmaxf(S_frag[n_it][2], S_frag[n_it][3]));
+            }
+            // Reduce across 4 lanes sharing the same row-pair.
+            #pragma unroll
+            for (int off : {1, 2}) {
+                r_max_ab[0] = fmaxf(r_max_ab[0], __shfl_xor_sync(0xffffffffu, r_max_ab[0], off));
+                r_max_ab[1] = fmaxf(r_max_ab[1], __shfl_xor_sync(0xffffffffu, r_max_ab[1], off));
+            }
+
+            // Update running max and compute O rescale factor.
+            float new_m[2];
+            float scale_prev[2];
+            #pragma unroll
+            for (int rb = 0; rb < 2; ++rb) {
+                new_m[rb]     = fmaxf(row_m[rb], r_max_ab[rb]);
+                scale_prev[rb] = __expf(row_m[rb] - new_m[rb]);
+                row_m[rb]     = new_m[rb];
+            }
+
+            // Apply P = exp(S - new_m) and accumulate r_sum.
+            float r_sum[2] = {0.0f, 0.0f};
+            #pragma unroll
+            for (int n_it = 0; n_it < Bkv / kMmaN; ++n_it) {
+                S_frag[n_it][0] = __expf(S_frag[n_it][0] - new_m[0]);
+                S_frag[n_it][1] = __expf(S_frag[n_it][1] - new_m[0]);
+                S_frag[n_it][2] = __expf(S_frag[n_it][2] - new_m[1]);
+                S_frag[n_it][3] = __expf(S_frag[n_it][3] - new_m[1]);
+                r_sum[0] += S_frag[n_it][0] + S_frag[n_it][1];
+                r_sum[1] += S_frag[n_it][2] + S_frag[n_it][3];
+            }
+            // Warp-reduce r_sum across the 4-lane row-group.
+            #pragma unroll
+            for (int off : {1, 2}) {
+                r_sum[0] += __shfl_xor_sync(0xffffffffu, r_sum[0], off);
+                r_sum[1] += __shfl_xor_sync(0xffffffffu, r_sum[1], off);
+            }
+
+            // Update l and rescale O accumulator by exp(prev_m - new_m).
+            #pragma unroll
+            for (int rb = 0; rb < 2; ++rb) {
+                row_l[rb] = scale_prev[rb] * row_l[rb] + r_sum[rb];
+            }
+            #pragma unroll
+            for (int n = 0; n < HD / kMmaN; ++n) {
+                O_frag[n][0] *= scale_prev[0];
+                O_frag[n][1] *= scale_prev[0];
+                O_frag[n][2] *= scale_prev[1];
+                O_frag[n][3] *= scale_prev[1];
+            }
+        }
 
         if (lane == 0) mbar_arrive(&mbar[4]);
         mbar_wait(&mbar[3], phase_V);
