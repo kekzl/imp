@@ -39,7 +39,8 @@ void fill_fp16_deterministic(__half* d_ptr, size_t n) {
     std::vector<__half> host(n);
     for (size_t i = 0; i < n; ++i) {
         float v = (static_cast<float>((i * 2654435761u) % 1024u) / 1024.0f) - 0.5f;
-        host[i] = __float2half(v * 0.125f);
+        // Magnitude 1.0 — close to real Qwen3 Q/K/V scale.
+        host[i] = __float2half(v);
     }
     cudaMemcpy(d_ptr, host.data(), n * sizeof(__half), cudaMemcpyHostToDevice);
 }
