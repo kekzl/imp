@@ -273,20 +273,86 @@ attention_tiled_streaming_kernel(
     }
 
     // ------------------------------------------------------------------
-    // Consumer warps (warps 1..7): placeholder — just signal arrival so
-    // the producer can progress. Real mma/softmax/PV land in Tasks 7-9.
+    // Consumer warps 1..7: own one row-tile of Q each (warps 1..4 active
+    // for Br=64, warps 5..7 are helpers idle until Task 8 softmax helpers).
     // ------------------------------------------------------------------
+    const int consumer_id = warp_id - 1;   // 0..6
+    const bool is_mma_warp = (consumer_id >= 0 && consumer_id < Br / kMmaM);
+
+    // Per-warp register state — only valid if is_mma_warp.
+    float O_frag[HD / kMmaN][4];      // FP32 O accumulator, used in Task 9.
+    float row_m[4];                    // per-lane row-max (4 floats), Task 8.
+    float row_l[4];                    // per-lane row-sum, Task 8.
+    if (is_mma_warp) {
+        #pragma unroll
+        for (int n = 0; n < HD / kMmaN; ++n) {
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) O_frag[n][k] = 0.0f;
+        }
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            row_m[k] = -INFINITY;
+            row_l[k] = 0.0f;
+        }
+    }
+    (void)row_m; (void)row_l;  // used in Task 8.
+
+    // Wait for Q tile to be ready.
+    mbar_wait(&mbar[0], /*phase=*/0u);
+
+    // Load Q fragments into registers (one-time per CTA).
+    uint32_t Q_frag[HD / kMmaK][4];   // [k_iter][4 regs]
+    if (is_mma_warp) {
+        const int row_in_warp_base = consumer_id * kMmaM;
+        #pragma unroll
+        for (int k_it = 0; k_it < HD / kMmaK; ++k_it) {
+            __half* Q_tile_ptr = &Q_smem[row_in_warp_base * HD + k_it * kMmaK];
+            ldmatrix_x4(Q_frag[k_it], Q_tile_ptr);
+        }
+    }
+
     for (int i = 0; i < n_kv_tiles; ++i) {
         mbar_wait(&mbar[1 + k_slot], phase_K[k_slot]);
         phase_K[k_slot] ^= 1u;
-        // (QKᵀ would go here)
-        if (lane == 0) mbar_arrive(&mbar[4]);          // QKt_done
+
+        // ----- QKᵀ -----
+        // Each mma m16n8k16 produces a 16×8 tile of S.
+        // For Bkv=64 → 8 col-tiles per warp.
+        // For HD=128 → 8 k-iters per col-tile.
+        float S_frag[64 / kMmaN][4];
+        if (is_mma_warp) {
+            #pragma unroll
+            for (int n_it = 0; n_it < 64 / kMmaN; ++n_it) {
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) S_frag[n_it][k] = 0.0f;
+
+                #pragma unroll
+                for (int k_it = 0; k_it < HD / kMmaK; ++k_it) {
+                    // K is laid out [Bkv, HD]; for mma.col we read columns.
+                    // K_smem[k_slot] tile: 8 cols at [n_it*8, k_it*16].
+                    __half* K_tile_ptr =
+                        &K_smem[k_slot][n_it * kMmaN * HD + k_it * kMmaK];
+                    uint32_t K_full[4];
+                    ldmatrix_x4(K_full, K_tile_ptr);
+                    uint32_t K_frag[2] = {K_full[0], K_full[1]};
+                    mma_m16n8k16_f16(S_frag[n_it], Q_frag[k_it], K_frag);
+                }
+
+                // Scale by 1/sqrt(hd).
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) S_frag[n_it][k] *= scale;
+            }
+        }
+        (void)S_frag;  // used in Task 8 softmax.
+
+        if (lane == 0) mbar_arrive(&mbar[4]);
         mbar_wait(&mbar[3], phase_V);
         phase_V ^= 1u;
-        // (PV would go here)
-        if (lane == 0) mbar_arrive(&mbar[5]);          // V_consumed
+        // PV would go here in Task 9.
+        if (lane == 0) mbar_arrive(&mbar[5]);
         k_slot ^= 1;
     }
+    (void)O_frag; (void)Q_frag;  // used in Tasks 8/9.
 
     (void)O; (void)scale; (void)Q_gmem;
 }
