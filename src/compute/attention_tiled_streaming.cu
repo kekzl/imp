@@ -88,6 +88,16 @@ __device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem) 
         : "r"(s));
 }
 
+// ldmatrix x4 with .trans modifier for column-major operand loading.
+// Used for B-operand fragments in mma.row.col layout (K in QKᵀ, V in PV).
+__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t (&r)[4], const void* smem) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile(
+        "ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+        : "r"(s));
+}
+
 // mma.sync.m16n8k16 FP16 in/out (acc FP32). D += A·B.
 __device__ __forceinline__ void mma_m16n8k16_f16(
         float (&d)[4],
@@ -333,7 +343,7 @@ attention_tiled_streaming_kernel(
                     __half* K_tile_ptr =
                         &K_smem[k_slot][n_it * kMmaN * HD + k_it * kMmaK];
                     uint32_t K_full[4];
-                    ldmatrix_x4(K_full, K_tile_ptr);
+                    ldmatrix_x4_trans(K_full, K_tile_ptr);
                     uint32_t K_frag[2] = {K_full[0], K_full[1]};
                     mma_m16n8k16_f16(S_frag[n_it], Q_frag[k_it], K_frag);
                 }
