@@ -425,13 +425,98 @@ attention_tiled_streaming_kernel(
         if (lane == 0) mbar_arrive(&mbar[4]);
         mbar_wait(&mbar[3], phase_V);
         phase_V ^= 1u;
-        // PV would go here in Task 9.
+
+        if (is_mma_warp) {
+            // PV: O += P × V. P is in S_frag (post-softmax in registers).
+            // V_smem layout: [Bkv][HD] row-major. Use ldmatrix.trans for col-major B.
+            #pragma unroll
+            for (int n_it_v = 0; n_it_v < HD / kMmaN; ++n_it_v) {
+                #pragma unroll
+                for (int k_it_v = 0; k_it_v < Bkv / kMmaK; ++k_it_v) {
+                    // Load V_frag (16 K-rows × 8 N-cols of V at (k_it_v*16, n_it_v*8))
+                    __half* V_tile_ptr =
+                        &V_smem[k_it_v * kMmaK * HD + n_it_v * kMmaN];
+                    uint32_t V_full[4];
+                    ldmatrix_x4_trans(V_full, V_tile_ptr);
+                    uint32_t V_frag[2] = {V_full[0], V_full[1]};
+
+                    // Repack S_frag → P_frag (FP32 → FP16, pair into b32).
+                    // A-tile at (warp-row × k_it_v): 16 rows × 16 cols.
+                    // S_frag[2*k_it_v + 0] = cols 0..7 of A-tile (8 cols).
+                    // S_frag[2*k_it_v + 1] = cols 8..15 of A-tile (8 cols).
+                    int sa = 2 * k_it_v + 0;
+                    int sb = 2 * k_it_v + 1;
+                    __half2 h_row_a_lo = __floats2half2_rn(S_frag[sa][0], S_frag[sa][1]);
+                    __half2 h_row_a_hi = __floats2half2_rn(S_frag[sb][0], S_frag[sb][1]);
+                    __half2 h_row_b_lo = __floats2half2_rn(S_frag[sa][2], S_frag[sa][3]);
+                    __half2 h_row_b_hi = __floats2half2_rn(S_frag[sb][2], S_frag[sb][3]);
+                    uint32_t P_frag[4];
+                    P_frag[0] = *reinterpret_cast<uint32_t*>(&h_row_a_lo);
+                    P_frag[1] = *reinterpret_cast<uint32_t*>(&h_row_a_hi);
+                    P_frag[2] = *reinterpret_cast<uint32_t*>(&h_row_b_lo);
+                    P_frag[3] = *reinterpret_cast<uint32_t*>(&h_row_b_hi);
+
+                    mma_m16n8k16_f16(O_frag[n_it_v], P_frag, V_frag);
+                }
+            }
+        }
+
         if (lane == 0) mbar_arrive(&mbar[5]);
         k_slot ^= 1;
     }
-    (void)O_frag; (void)Q_frag;  // used in Tasks 8/9.
+    (void)Q_frag;  // used in QKt above.
 
-    (void)O; (void)scale; (void)Q_gmem;
+    // ------------------------------------------------------------------
+    // Epilogue: normalize O by 1/row_l, downcast to FP16, write to gmem.
+    // ------------------------------------------------------------------
+    if (is_mma_warp) {
+        // Normalize.
+        #pragma unroll
+        for (int n = 0; n < HD / kMmaN; ++n) {
+            O_frag[n][0] *= (1.0f / row_l[0]);
+            O_frag[n][1] *= (1.0f / row_l[0]);
+            O_frag[n][2] *= (1.0f / row_l[1]);
+            O_frag[n][3] *= (1.0f / row_l[1]);
+        }
+
+        // Store: convert each (16-row × 8-col) D-tile to FP16 and write to gmem.
+        // m16n8k16 D-fragment layout per lane:
+        //   row_a = lane / 4         (covers frag[0], frag[1])
+        //   row_b = lane / 4 + 8     (covers frag[2], frag[3])
+        //   col_a = (lane % 4) * 2   (frag[0], frag[2])
+        //   col_b = col_a + 1        (frag[1], frag[3])
+        const int row_in_warp_base = consumer_id * kMmaM;
+        const int row_a = lane / 4;
+        const int row_b = row_a + 8;
+        const int col_a = (lane % 4) * 2;
+
+        #pragma unroll
+        for (int n = 0; n < HD / kMmaN; ++n) {
+            int col_base = n * kMmaN + col_a;
+            int abs_row_a = q_row0 + row_in_warp_base + row_a;
+            int abs_row_b = q_row0 + row_in_warp_base + row_b;
+            if (abs_row_a < seq_q) {
+                __half2 packed = __floats2half2_rn(O_frag[n][0], O_frag[n][1]);
+                __half* dst = reinterpret_cast<__half*>(O)
+                    + static_cast<size_t>(batch) * seq_q * n_heads * HD
+                    + static_cast<size_t>(abs_row_a) * n_heads * HD
+                    + static_cast<size_t>(head) * HD
+                    + col_base;
+                *reinterpret_cast<__half2*>(dst) = packed;
+            }
+            if (abs_row_b < seq_q) {
+                __half2 packed = __floats2half2_rn(O_frag[n][2], O_frag[n][3]);
+                __half* dst = reinterpret_cast<__half*>(O)
+                    + static_cast<size_t>(batch) * seq_q * n_heads * HD
+                    + static_cast<size_t>(abs_row_b) * n_heads * HD
+                    + static_cast<size_t>(head) * HD
+                    + col_base;
+                *reinterpret_cast<__half2*>(dst) = packed;
+            }
+        }
+    }
+
+    (void)scale; (void)Q_gmem;
 }
 
 bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
