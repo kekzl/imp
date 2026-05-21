@@ -8,10 +8,11 @@ namespace imp {
 
 namespace {
 
-// 1 producer + 7 consumers = 8 warps × 32 threads = 256 threads/CTA.
+// 4 producers + 4 consumers = 8 warps × 32 threads = 256 threads/CTA.
 constexpr int kWarps = 8;
 constexpr int kThreads = kWarps * 32;
-constexpr int kProducerWarp = 0;
+constexpr int kProducerWarp = 0;  // start of producer range
+constexpr int kNumProducerWarps = 4;  // experiment: 4 producers + 4 consumers
 
 // MMA tile dimensions (m16n8k16 FP16).
 constexpr int kMmaM = 16;
@@ -173,8 +174,8 @@ attention_tiled_streaming_kernel(
         mbar_init(&mbar[1], 1);         // K_ready[0]
         mbar_init(&mbar[2], 1);         // K_ready[1]
         mbar_init(&mbar[3], 1);         // V_ready
-        mbar_init(&mbar[4], 7);         // QKt_done
-        mbar_init(&mbar[5], 7);         // V_consumed
+        mbar_init(&mbar[4], 4);         // QKt_done
+        mbar_init(&mbar[5], 4);         // V_consumed
     }
     __syncthreads();
 
@@ -212,15 +213,18 @@ attention_tiled_streaming_kernel(
     const int lane = tid & 31;
 
     // ------------------------------------------------------------------
-    // Producer warp (warp 0): cp.async-loads K (double-buffered) + V (single-buffered).
+    // Producer warps 0-3: 4 warps cooperate on cp.async-loading K + V.
     // ------------------------------------------------------------------
-    if (warp_id == kProducerWarp) {
+    if (warp_id < kNumProducerWarps) {
+        const int producer_lane = warp_id * 32 + lane;            // 0..127
+        constexpr int producer_threads = kNumProducerWarps * 32;  // 128
+
         // Pre-load K[0] into K_smem[0] before the iter loop.
         const __half* K_gmem0 = K
             + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
             + static_cast<size_t>(0) * Bkv * n_kv_heads * HD
             + static_cast<size_t>(kv_head) * HD;
-        for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+        for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
             int elem = c * kHalvesPerChunk;
             int r = elem / HD;
             int d = elem % HD;
@@ -229,7 +233,7 @@ attention_tiled_streaming_kernel(
         }
         cp_async_commit();
         cp_async_wait_all();
-        if (lane == 0) mbar_arrive(&mbar[1]);          // K_ready[0]
+        if (producer_lane == 0) mbar_arrive(&mbar[1]);  // K_ready[0]
 
         for (int i = 0; i < n_kv_tiles; ++i) {
             // Prefetch K[i+1] into the OTHER slot if not last iter.
@@ -239,7 +243,7 @@ attention_tiled_streaming_kernel(
                     + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
                     + static_cast<size_t>(i + 1) * Bkv * n_kv_heads * HD
                     + static_cast<size_t>(kv_head) * HD;
-                for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+                for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
                     int elem = c * kHalvesPerChunk;
                     int r = elem / HD;
                     int d = elem % HD;
@@ -248,7 +252,7 @@ attention_tiled_streaming_kernel(
                 }
                 cp_async_commit();
                 cp_async_wait_all();
-                if (lane == 0) mbar_arrive(&mbar[1 + next_slot]);
+                if (producer_lane == 0) mbar_arrive(&mbar[1 + next_slot]);
             }
 
             // Wait for consumers to finish QKᵀ before loading V[i].
@@ -260,7 +264,7 @@ attention_tiled_streaming_kernel(
                 + static_cast<size_t>(batch) * seq_kv * n_kv_heads * HD
                 + static_cast<size_t>(i) * Bkv * n_kv_heads * HD
                 + static_cast<size_t>(kv_head) * HD;
-            for (int c = lane; c < (Bkv * HD) / kHalvesPerChunk; c += 32) {
+            for (int c = producer_lane; c < (Bkv * HD) / kHalvesPerChunk; c += producer_threads) {
                 int elem = c * kHalvesPerChunk;
                 int r = elem / HD;
                 int d = elem % HD;
@@ -269,7 +273,7 @@ attention_tiled_streaming_kernel(
             }
             cp_async_commit();
             cp_async_wait_all();
-            if (lane == 0) mbar_arrive(&mbar[3]);     // V_ready
+            if (producer_lane == 0) mbar_arrive(&mbar[3]);  // V_ready
 
             // Wait for consumers to finish PV before reusing V buffer next iter.
             mbar_wait(&mbar[5], phase_VC);
@@ -281,10 +285,9 @@ attention_tiled_streaming_kernel(
     }
 
     // ------------------------------------------------------------------
-    // Consumer warps 1..7: own one row-tile of Q each (warps 1..4 active
-    // for Br=64, warps 5..7 are helpers idle until Task 8 softmax helpers).
+    // Consumer warps 4..7: own one row-tile of Q each (all 4 active at Br=64).
     // ------------------------------------------------------------------
-    const int consumer_id = warp_id - 1;   // 0..6
+    const int consumer_id = warp_id - kNumProducerWarps;  // warp_id 4-7 -> 0..3
     const bool is_mma_warp = (consumer_id >= 0 && consumer_id < Br / kMmaM);
 
     // Per-warp register state — only valid if is_mma_warp.
@@ -569,7 +572,6 @@ bool attention_tiled_streaming_prefill(const Tensor& Q, const Tensor& K,
                                        bool causal, int sliding_window,
                                        float softcap, int q_offset,
                                        cudaStream_t stream) {
-    // v1: only hd=128 supported at this task. Other hds bail to cuBLAS.
     if (Q.qtype != QType::F16 || K.qtype != QType::F16 || V.qtype != QType::F16)
         return false;
     if (Q.ndim != 4) return false;
