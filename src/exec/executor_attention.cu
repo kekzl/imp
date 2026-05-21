@@ -18,6 +18,7 @@
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
 #include "compute/attention_paged.h"
+#include "compute/attention_tiled_streaming.h"
 #include "compute/kv_gather.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
@@ -794,9 +795,24 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
 
-            attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
-                                     layer_sliding_window);
+            // Try Track E first (chunked-prefill path: rectangular Q[n] × KV[ctx_len]).
+            {
+                int64_t q4s[4]  = {1, (int64_t)n,        (int64_t)nh,  (int64_t)hd};
+                int64_t k4s[4]  = {1, (int64_t)ctx_len,  (int64_t)nkv, (int64_t)hd};
+                int64_t o4s[4]  = {1, (int64_t)n,        (int64_t)nh,  (int64_t)hd};
+                Tensor qv4   = qv.reshape(4, q4s);
+                Tensor kf4   = k_full_t.reshape(4, k4s);
+                Tensor vf4   = v_full_t.reshape(4, k4s);
+                Tensor ao4   = ao.reshape(4, o4s);
+                bool track_e_ok = imp::attention_tiled_streaming_prefill(
+                    qv4, kf4, vf4, ao4, scale, /*causal=*/true,
+                    layer_sliding_window, cfg.attn_logit_softcap, q_offset, stream);
+                if (!track_e_ok) {
+                    attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
+                                             /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
+                                             layer_sliding_window);
+                }
+            }
 
             cudaFreeAsync(k_full, stream);
             cudaFreeAsync(v_full, stream);
@@ -812,22 +828,30 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
 
-        if (s_matrix_fits && !non_gemma4_sliding) {
-            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap,
-                                     /*q_offset=*/0, stream, layer_sliding_window);
-        } else {
-            // FMHA fallback: tiled O(n) memory chain.
-            int64_t q4s[4]  = {1, n, nh, hd};
-            int64_t kv4s[4] = {1, n, nkv, hd};
-            int64_t o4s[4]  = {1, n, nh, hd};
+        // Try Track E first (preferred for FP16 KV at hd ∈ {64,96,128,256}).
+        // Falls back to cuBLAS or FMHA for configs Track E declines.
+        {
+            int64_t q4s[4]  = {1, (int64_t)n,   (int64_t)nh,  (int64_t)hd};
+            int64_t kv4s[4] = {1, (int64_t)n,   (int64_t)nkv, (int64_t)hd};
+            int64_t o4s[4]  = {1, (int64_t)n,   (int64_t)nh,  (int64_t)hd};
             Tensor q4 = qv.reshape(4, q4s);
             Tensor k4 = kk.reshape(4, kv4s);
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
-
-            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, runtime_config());
+            bool track_e_ok = imp::attention_tiled_streaming_prefill(
+                q4, k4, v4, o4, scale, /*causal=*/true,
+                layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+            if (!track_e_ok) {
+                if (s_matrix_fits && !non_gemma4_sliding) {
+                    attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                                             /*causal=*/true, cfg.attn_logit_softcap,
+                                             /*q_offset=*/0, stream, layer_sliding_window);
+                } else {
+                    // FMHA fallback: tiled O(n) memory chain.
+                    attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
+                                               cfg.attn_logit_softcap, stream, runtime_config());
+                }
+            }
         }
 
         // Persist K, V into cache for later decode steps
@@ -902,16 +926,31 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int64_t v_shape[2] = {ctx_len, nkv * hd};
             Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
             Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
-            // Use n=1 cuBLAS attention with causal=false (all context visible)
-            int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
-            half* s_buf = nullptr;
-            cudaMalloc(&s_buf, nh * ctx_len * sizeof(half));
-            Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
-            attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/false,
-                                     cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+            // Use n=1 cuBLAS attention with causal=false (all context visible).
+            // Track E is tried first; it will decline causal=false and fall through to cuBLAS.
+            {
+                int64_t q4s[4] = {1, 1,              (int64_t)nh,  (int64_t)hd};
+                int64_t k4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
+                int64_t o4s[4] = {1, 1,              (int64_t)nh,  (int64_t)hd};
+                Tensor q4 = qv.reshape(4, q4s);
+                Tensor k4 = k_cont.reshape(4, k4s);
+                Tensor v4 = v_cont.reshape(4, k4s);
+                Tensor o4 = ao.reshape(4, o4s);
+                bool track_e_ok = imp::attention_tiled_streaming_prefill(
+                    q4, k4, v4, o4, scale, /*causal=*/false,
+                    /*sliding_window=*/0, cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+                if (!track_e_ok) {
+                    int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
+                    half* s_buf = nullptr;
+                    cudaMalloc(&s_buf, nh * ctx_len * sizeof(half));
+                    Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
+                    attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/false,
+                                             cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+                    cudaFree(s_buf);
+                }
+            }
             cudaFree(k_flat);
             cudaFree(v_flat);
-            cudaFree(s_buf);
             goto after_attention;
         }
 
