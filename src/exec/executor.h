@@ -536,6 +536,15 @@ struct MoeFfnContext {
     MoeRoutingResult routing{};
     void* fp32_down_buf = nullptr;
     bool residual_fused = false;  // true when decode-fast / fused scatter already added residual
+
+    // True if moe_gather has already populated moe_.gathered for this MoE
+    // call. Set to false in run_moe_ffn when the CUTLASS3x device-args path
+    // will fire (it consumes ctx.no via sorted_token_ids directly and doesn't
+    // need the gathered intermediate). If that path falls back to the legacy
+    // dispatcher, the legacy fallback calls moe_gather lazily and flips this
+    // back to true. Default true so paths that never check it always see a
+    // populated buffer.
+    bool moe_gather_done = true;
 };
 
 // Imperative executor for the transformer forward pass.
@@ -979,6 +988,14 @@ private:
     // / smallM / legacy host-args sub-variants). Predicate is checked
     // internally; returns true if the path ran.
     bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // Cheap precondition mirror for try_run_moe_cutlass3x_nvfp4_prefill_'s
+    // device-args fast path. Read upstream of moe_gather to skip the gather
+    // when the path is guaranteed to fire (and thereby own this MoE layer
+    // exclusively — it reads ctx.no via sorted_token_ids and doesn't need
+    // the gathered intermediate). If the device-args path's run-time gate
+    // turns out false anyway, the legacy fallback gathers lazily — so a
+    // mismatch here costs at most one wasted gather, never wrong output.
+    bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
     // Optional shared expert (parallel dense FFN) — called from run_moe_ffn
     // after routed experts have written into h. Reads `no` (post-norm) and
     // adds its result back into `h` via elementwise_add. No-op when

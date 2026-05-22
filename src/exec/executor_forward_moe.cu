@@ -382,6 +382,51 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     }
 }
 
+// Cheap precondition mirror for the CUTLASS 3.x NVFP4 device-args fast path
+// inside try_run_moe_cutlass3x_nvfp4_prefill_ (lines ~1316–1372). Keep the
+// two predicates in sync — if device-args' actual gate flips false at runtime
+// while this returns true, the legacy fallback inside the function gathers
+// lazily, so output stays correct (at most one wasted decision).
+bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
+                                                        const MoeFfnContext& ctx) const {
+    if (runtime_config().moe.no_cutlass3x)
+        return false;
+    if (!cutlass_grouped_3x_nvfp4_available())
+        return false;
+    if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
+        return false;
+    if (!runtime_config().moe.nvfp4_device_args)
+        return false;
+    if (!moe_.d_M_per || moe_.d_M_per_count < ctx.ne)
+        return false;
+    if (!moe_.d_sfa_offsets || !moe_.d_B_ptrs_cache || !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full)
+        return false;
+    if (!moe_.cutlass3x_sfa_ptrs || moe_.cutlass3x_sfa_ptrs_count < ctx.ne)
+        return false;
+    // All expert tensors must be CUTLASS_NVFP4 — covers_ids() in the inner
+    // function. Mirrored here to avoid the upstream skip-gather firing when
+    // the inner path would refuse to take this layer.
+    const auto& ly = model_->layer(layer);
+    auto covers_ids = [&](const std::vector<TensorID>& ids) {
+        if (static_cast<int>(ids.size()) < ctx.ne)
+            return false;
+        for (int e = 0; e < ctx.ne; ++e) {
+            if (ids[e] == kInvalidTensorID)
+                return false;
+            if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+                return false;
+        }
+        return true;
+    };
+    if (!covers_ids(ly.expert_up_ids))
+        return false;
+    if (!covers_ids(ly.expert_down_ids))
+        return false;
+    if (!ctx.non_gated_experts && !covers_ids(ly.expert_gate_ids))
+        return false;
+    return true;
+}
+
 void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     MoeFfnContext ctx;
 
@@ -467,8 +512,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // isn't available.
             // =========================================================================
 
-            // Gather: reorder tokens by expert assignment (required for batch/legacy paths)
-            {
+            // Gather: reorder tokens by expert assignment (required for batch/legacy paths).
+            // Skipped when the CUTLASS 3.x NVFP4 device-args fast path will fire — that
+            // path reads ctx.no via routing.sorted_token_ids in a fused gather+quantize
+            // kernel and never touches moe_.gathered. Lazy gather inside the legacy
+            // fallback catches the (rare) case where device-args' inner gate flips false
+            // at runtime. Saves ~16 MB HBM write per layer on Qwen3-Coder-30B-A3B-NVFP4.
+            if (moe_cutlass3x_will_use_device_args_(layer, ctx)) {
+                ctx.moe_gather_done = false;
+            } else {
                 int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
                 Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
                 moe_gather(no, routing, gathered, stream);
@@ -1561,6 +1613,21 @@ bool device_args_done = false;
 }
 
 if (!device_args_done) {
+// Lazy moe_gather: caller skipped the upstream gather when this path was
+// predicted to fire. The fast path didn't, so the legacy fallback needs the
+// gathered FP16 intermediate. Idempotent (moe_gather_done guard) — never
+// double-gathers.
+if (!ctx.moe_gather_done) {
+    int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+    Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
+    moe_gather(ctx.no, routing, gathered, stream);
+    ctx.moe_gather_done = true;
+    IMP_LOG_WARN(
+        "MoE prefill: device-args predicted but inner gate refused — "
+        "lazy moe_gather + legacy fallback (one wasted decision; "
+        "investigate moe_cutlass3x_will_use_device_args_ mismatch)");
+}
+
 // Legacy D2H+sync + smallM + non-smallM dispatch path.
 std::vector<int32_t> h_offsets(ne + 1);
 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
