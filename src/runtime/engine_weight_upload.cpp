@@ -24,6 +24,7 @@ bool Engine::init_weights() {
     // Initialize graph executor (Phase 1: compute sizes, no GPU allocation)
     executor_ = std::make_unique<GraphExecutor>();
     executor_->set_vram_allocator(&memory_manager_.vram_allocator());
+    executor_->set_runtime_config(runtime_config_);
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,
