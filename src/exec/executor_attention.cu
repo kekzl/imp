@@ -253,8 +253,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     }
     const StorageTier wo_tier = (ly.wo_id != kInvalidTensorID) ? registry_.handle(ly.wo_id).primary_tier
                                                                : StorageTier::Undefined;
+    // NVFP4 wo: primary tier OR Phase-3 secondary NVFP4 decode cache
+    // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
+    const bool wo_nvfp4_secondary = (wcache_.nvfp4.count(ly.wo.data) != 0);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
-                              wo_tier == StorageTier::NVFP4);
+                              (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
                                  qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
@@ -296,12 +299,24 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                           mxfp4_hwk->payload.mxfp4.linear_scales && mxfp4_hwv &&
                           mxfp4_hwv->primary_tier == StorageTier::MXFP4 &&
                           mxfp4_hwv->payload.mxfp4.linear_scales);
-        // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed)
-        // Reuse handle pointers already fetched above (same wq_id/wk_id/wv_id).
-        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && mxfp4_hwq &&
-                          mxfp4_hwq->primary_tier == StorageTier::NVFP4 && mxfp4_hwk &&
-                          mxfp4_hwk->primary_tier == StorageTier::NVFP4 && mxfp4_hwv &&
-                          mxfp4_hwv->primary_tier == StorageTier::NVFP4);
+        // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed).
+        // Two sources: (1) primary NVFP4 storage tier (native NVFP4 models),
+        // (2) secondary NVFP4 decode cache populated by Phase 3 for
+        // Q8_0/Q6_K/Q5_K models — c8763ad refactor lost this fallback;
+        // restore by also probing `wcache_.nvfp4`.
+        auto nv_q_it = wcache_.nvfp4.find(ly.wq.data);
+        auto nv_k_it = wcache_.nvfp4.find(ly.wk.data);
+        auto nv_v_it = wcache_.nvfp4.find(ly.wv.data);
+        const bool nv_q_secondary = (nv_q_it != wcache_.nvfp4.end());
+        const bool nv_k_secondary = (nv_k_it != wcache_.nvfp4.end());
+        const bool nv_v_secondary = (nv_v_it != wcache_.nvfp4.end());
+        const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
+                                  nv_q_secondary;
+        const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
+                                  nv_k_secondary;
+        const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4) ||
+                                  nv_v_secondary;
+        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && wq_is_nvfp4 && wk_is_nvfp4 && wv_is_nvfp4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
@@ -342,24 +357,22 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (nvfp4_qkv) {
             // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-            // Reconstruct NvFP4QuantResult structs from handle payloads.
-            // hw->shape[1] is the PACKED column count (K/2 for FP4 packed);
-            // NvFP4QuantResult.K must be the logical K = packed_cols * 2.
-            auto make_nvfp4 = [](const WeightHandle* hw) {
+            // Pick the NvFP4QuantResult: secondary cache (Q8_0+NVFP4-decode) is
+            // already a populated struct; primary-tier handle needs reconstruction.
+            auto from_handle = [](const WeightHandle* hw) {
                 NvFP4QuantResult tmp;
                 tmp.packed_data = hw->payload.nvfp4.data;
                 tmp.micro_scales = hw->payload.nvfp4.block_scales;
-                // tensor_scale: host float pointer (borrowed from wcache_.nvfp4 map).
                 tmp.tensor_scale = (hw->payload.nvfp4.tensor_scale != nullptr)
                                        ? *hw->payload.nvfp4.tensor_scale
                                        : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]) * 2;  // packed → logical K
+                tmp.K = static_cast<int>(hw->shape[1]) * 2;
                 return tmp;
             };
-            auto nv_q = make_nvfp4(mxfp4_hwq);
-            auto nv_k = make_nvfp4(mxfp4_hwk);
-            auto nv_v = make_nvfp4(mxfp4_hwv);
+            NvFP4QuantResult nv_q = nv_q_secondary ? nv_q_it->second : from_handle(mxfp4_hwq);
+            NvFP4QuantResult nv_k = nv_k_secondary ? nv_k_it->second : from_handle(mxfp4_hwk);
+            NvFP4QuantResult nv_v = nv_v_secondary ? nv_v_it->second : from_handle(mxfp4_hwv);
             int q_rows = nv_q.N;
             int k_rows = nv_k.N;
             int v_rows = nv_v.N;
@@ -1089,15 +1102,21 @@ after_attention:
     //    start of run_attention and this point.
     if (will_fuse_o_nvfp4) {
         // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
-        const WeightHandle& wo_h = registry_.handle(ly.wo_id);
+        // Source: secondary cache (Q8_0/Q6_K/Q5_K) is already a populated struct;
+        // primary-tier handle needs reconstruction.
         NvFP4QuantResult wo_nvfp4;
-        wo_nvfp4.packed_data = wo_h.payload.nvfp4.data;
-        wo_nvfp4.micro_scales = wo_h.payload.nvfp4.block_scales;
-        wo_nvfp4.tensor_scale = (wo_h.payload.nvfp4.tensor_scale != nullptr)
-                                    ? *wo_h.payload.nvfp4.tensor_scale
-                                    : 1.0f;
-        wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
-        wo_nvfp4.K = static_cast<int>(wo_h.shape[1]) * 2;  // packed → logical K
+        if (wo_nvfp4_secondary) {
+            wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
+        } else {
+            const WeightHandle& wo_h = registry_.handle(ly.wo_id);
+            wo_nvfp4.packed_data = wo_h.payload.nvfp4.data;
+            wo_nvfp4.micro_scales = wo_h.payload.nvfp4.block_scales;
+            wo_nvfp4.tensor_scale = (wo_h.payload.nvfp4.tensor_scale != nullptr)
+                                        ? *wo_h.payload.nvfp4.tensor_scale
+                                        : 1.0f;
+            wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
+            wo_nvfp4.K = static_cast<int>(wo_h.shape[1]) * 2;  // packed → logical K
+        }
         int M_o = wo_nvfp4.N;
         int K_o = wo_nvfp4.K;
         gemv_nvfp4_residual(wo_nvfp4, static_cast<const half*>(ao.data), static_cast<half*>(h.data),

@@ -88,8 +88,12 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     bool will_fuse_down_mxfp4 = (!has_post_ffn_norm && n == 1 && h.qtype == QType::F16 &&
                                  wd_tier == StorageTier::MXFP4 &&
                                  hwd->payload.mxfp4.linear_scales != nullptr);
+    // NVFP4 down: primary tier OR Phase-3 secondary NVFP4 decode cache
+    // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
+    const bool wd_nvfp4_secondary = (wcache_.nvfp4.count(ly.w_down.data) != 0);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 && n == 1 &&
-                                 h.qtype == QType::F16 && wd_tier == StorageTier::NVFP4);
+                                 h.qtype == QType::F16 &&
+                                 (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
                                     qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                     h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
@@ -122,9 +126,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         bool mxfp4_ffn = (n == 1 && hwg && hwg->primary_tier == StorageTier::MXFP4 &&
                           hwg->payload.mxfp4.linear_scales && hwu &&
                           hwu->primary_tier == StorageTier::MXFP4 && hwu->payload.mxfp4.linear_scales);
-        // NVFP4 gate+up decode path
-        bool nvfp4_ffn = (n == 1 && hwg && hwg->primary_tier == StorageTier::NVFP4 && hwu &&
-                          hwu->primary_tier == StorageTier::NVFP4);
+        // NVFP4 gate+up decode path: primary tier OR Phase-3 secondary cache
+        auto nv_g_it = wcache_.nvfp4.find(ly.w_gate.data);
+        auto nv_u_it = wcache_.nvfp4.find(ly.w_up.data);
+        const bool nv_g_secondary = (nv_g_it != wcache_.nvfp4.end());
+        const bool nv_u_secondary = (nv_u_it != wcache_.nvfp4.end());
+        const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4) || nv_g_secondary;
+        const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
+        bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                                h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype));
         if (mxfp4_ffn) {
@@ -154,21 +163,21 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // NVFP4 gate+up: RMSNorm to FP16, then NVFP4 fused GEMV
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
-            // Reconstruct NvFP4QuantResult structs from handle payloads.
-            auto make_nvfp4 = [](const WeightHandle* hw) {
+            // Pick source: secondary NVFP4 cache (Q8_0/Q6_K/Q5_K) is already a
+            // populated struct; primary-tier handle needs reconstruction.
+            auto from_handle = [](const WeightHandle* hw) {
                 NvFP4QuantResult tmp;
                 tmp.packed_data = hw->payload.nvfp4.data;
                 tmp.micro_scales = hw->payload.nvfp4.block_scales;
-                // tensor_scale: host float pointer borrowed from wcache_.nvfp4 map.
                 tmp.tensor_scale = (hw->payload.nvfp4.tensor_scale != nullptr)
                                        ? *hw->payload.nvfp4.tensor_scale
                                        : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]) * 2;  // packed → logical K
+                tmp.K = static_cast<int>(hw->shape[1]) * 2;
                 return tmp;
             };
-            auto nv_g = make_nvfp4(hwg);
-            auto nv_u = make_nvfp4(hwu);
+            NvFP4QuantResult nv_g = nv_g_secondary ? nv_g_it->second : from_handle(hwg);
+            NvFP4QuantResult nv_u = nv_u_secondary ? nv_u_it->second : from_handle(hwu);
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                      stream);
@@ -280,15 +289,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           static_cast<const half*>(h.data), M_d, K_d, stream);
             }
         } else if (will_fuse_down_nvfp4) {
-            // Reconstruct NvFP4QuantResult from handle payload.
+            // Pick source: secondary NVFP4 cache (Q8_0/Q6_K/Q5_K decode path)
+            // is already a populated struct; primary-tier handle needs reconstruction.
             NvFP4QuantResult wd_nvfp4;
-            wd_nvfp4.packed_data = hwd->payload.nvfp4.data;
-            wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
-            wd_nvfp4.tensor_scale = (hwd->payload.nvfp4.tensor_scale != nullptr)
-                                        ? *hwd->payload.nvfp4.tensor_scale
-                                        : 1.0f;
-            wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
-            wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
+            if (wd_nvfp4_secondary) {
+                wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
+            } else {
+                wd_nvfp4.packed_data = hwd->payload.nvfp4.data;
+                wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
+                wd_nvfp4.tensor_scale = (hwd->payload.nvfp4.tensor_scale != nullptr)
+                                            ? *hwd->payload.nvfp4.tensor_scale
+                                            : 1.0f;
+                wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
+                wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
+            }
             int K_d = wd_nvfp4.K;
             int M_d = wd_nvfp4.N;
             int n_mb_d = K_d / 16;

@@ -595,6 +595,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                    ? &registry_.handle(model_->out_proj_id)
                                    : nullptr;
     const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
+    // Phase-3 secondary NVFP4 decode cache (Q8_0/Q6_K/Q5_K source LM head).
+    // c8763ad refactor lost this fallback; restore by also probing wcache_.nvfp4.
+    auto lm_nvfp4_it = wcache_.nvfp4.find(model_->output_proj().data);
+    const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
+    const bool lm_is_nvfp4 = (lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary;
 
     // L2 streaming hint for the LM head projection (QW3 from review/phase5_synthesis.md §2.1):
     // output_proj is huge (vocab_size × d_model — ~780 MiB for Qwen3-8B Q8_0) and
@@ -628,18 +633,22 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_last.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (lm_tier == StorageTier::NVFP4) {
+        } else if (lm_is_nvfp4) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                          ? *lm_h->payload.nvfp4.tensor_scale
-                                          : 1.0f;
-            nvfp4_lm_r.N = cfg.vocab_size;
-            nvfp4_lm_r.K = cfg.d_model;
+            if (lm_nvfp4_secondary) {
+                nvfp4_lm_r = lm_nvfp4_it->second;
+            } else {
+                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
+                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                                              ? *lm_h->payload.nvfp4.tensor_scale
+                                              : 1.0f;
+                nvfp4_lm_r.N = cfg.vocab_size;
+                nvfp4_lm_r.K = cfg.d_model;
+            }
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_last.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (use_dp4a_lm) {
@@ -708,18 +717,22 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_final.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n == 1 && lm_tier == StorageTier::NVFP4) {
+        } else if (n == 1 && lm_is_nvfp4) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                          ? *lm_h->payload.nvfp4.tensor_scale
-                                          : 1.0f;
-            nvfp4_lm_r.N = cfg.vocab_size;
-            nvfp4_lm_r.K = cfg.d_model;
+            if (lm_nvfp4_secondary) {
+                nvfp4_lm_r = lm_nvfp4_it->second;
+            } else {
+                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
+                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                                              ? *lm_h->payload.nvfp4.tensor_scale
+                                              : 1.0f;
+                nvfp4_lm_r.N = cfg.vocab_size;
+                nvfp4_lm_r.K = cfg.d_model;
+            }
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n == 1 && use_dp4a_lm) {
@@ -734,17 +747,21 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                   nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n > 1 && lm_tier == StorageTier::NVFP4) {
+        } else if (n > 1 && lm_is_nvfp4) {
             // Per-row NVFP4 GEMV LM head for batched decode.
             // NVFP4 GEMV is M=1 only — loop over rows.
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                          ? *lm_h->payload.nvfp4.tensor_scale
-                                          : 1.0f;
-            nvfp4_lm_r.N = cfg.vocab_size;
-            nvfp4_lm_r.K = cfg.d_model;
+            if (lm_nvfp4_secondary) {
+                nvfp4_lm_r = lm_nvfp4_it->second;
+            } else {
+                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
+                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                                              ? *lm_h->payload.nvfp4.tensor_scale
+                                              : 1.0f;
+                nvfp4_lm_r.N = cfg.vocab_size;
+                nvfp4_lm_r.K = cfg.d_model;
+            }
             Tensor no_row = view_tokens(norm_out_, 1);
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
