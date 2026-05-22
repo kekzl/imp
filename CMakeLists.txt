@@ -162,7 +162,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
-    src/compute/attention_tiled_streaming.cu
     src/compute/attention_dispatch.cu
     src/compute/rope.cu
     src/compute/layernorm.cu
@@ -204,8 +203,6 @@ if(IMP_USE_CUTLASS)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_prefill_paths_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/tiled_attention_ceiling_bench.cu)
     endif()
     if(IMP_BUILD_TESTS)
         set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
@@ -474,10 +471,6 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc.cu
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
-        tests/test_attention_prefill_paths_bench.cu
-        tests/test_tiled_attention_ceiling_bench.cu
-        tests/test_attention_tiled_streaming.cu
-        tests/test_mma_layout_probe.cu
     )
 
     imp_add_test_module(test-quant SOURCES
