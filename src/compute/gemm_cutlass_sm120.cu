@@ -311,7 +311,8 @@ __device__ __forceinline__ int moe_find_expert(const int* offsets, int ne, int r
 // MoE variant: one kernel quantizes all [expanded, K] rows into contiguous
 // packed output + per-expert SFA slabs (one per expert).
 __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
-    const half* __restrict__ input,          // [expanded, K] FP16
+    const half* __restrict__ input,          // [expanded, K] (gather=null) OR [n_tokens, K] (gather!=null)
+    const int32_t* __restrict__ gather,      // [expanded] sorted_token_ids permutation, or null
     uint8_t* __restrict__ packed_out,        // [expanded, K/2] contiguous
     uint8_t* const* __restrict__ sfa_bases,  // [ne] per-expert SFA base (may be null)
     const int* __restrict__ offsets,         // [ne+1] cumulative row offsets
@@ -329,7 +330,13 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
     if (!sfa)
         return;
 
-    quantize_micro_block_nvfp4(input + static_cast<int64_t>(row) * K, k_group,
+    // Fused-gather path: input is the pre-permute MoE input in token order,
+    // and `gather[row]` indexes the source token for this expert-sorted row.
+    // Saves the gathered FP16 intermediate when the upstream moe_gather is
+    // skipped — that skip is gated on a lazy-gather addition in the legacy
+    // MoE fallback path (see plan in docs/plans/moe_prefill_cudagraph_*.md).
+    const int src_row = (gather != nullptr) ? gather[row] : row;
+    quantize_micro_block_nvfp4(input + static_cast<int64_t>(src_row) * K, k_group,
                                packed_out + static_cast<int64_t>(row) * (K / 2),
                                sfa + sfatom_offset(local_row, k_group, n_k_tiles));
 }
@@ -446,7 +453,33 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
     int threads = 256;
     int blocks = (total_mb + threads - 1) / threads;
     quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
+        reinterpret_cast<const half*>(src_fp16), /*gather=*/nullptr,
+        reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
+        d_offsets, expanded, K, ne, n_k_tiles);
+}
+
+void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
+                                               const int32_t* sorted_token_ids,
+                                               void* dst_packed,
+                                               uint8_t* const* d_sfa_bases,
+                                               const int* d_offsets, int expanded, int K, int ne,
+                                               cudaStream_t stream) {
+    IMP_CHECK(K % kSFVecSize == 0,
+              "quantize_fp16_to_nvfp4_cutlass_moe_gather: K=%d must be multiple of %d", K, kSFVecSize);
+    IMP_CHECK(sorted_token_ids != nullptr,
+              "quantize_fp16_to_nvfp4_cutlass_moe_gather: sorted_token_ids must not be null");
+    if (expanded == 0)
+        return;
+
+    int K_groups = K / kSFVecSize;
+    int total_mb = expanded * K_groups;
+    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
+
+    int threads = 256;
+    int blocks = (total_mb + threads - 1) / threads;
+    quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const half*>(src_fp16), sorted_token_ids,
+        reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
         d_offsets, expanded, K, ne, n_k_tiles);
 }
 

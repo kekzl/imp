@@ -63,6 +63,31 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
                                         const int* d_offsets, int expanded, int K, int ne,
                                         cudaStream_t stream);
 
+// MoE fused gather + NVFP4 CUTLASS quantize. Same packing + scale layout as
+// quantize_fp16_to_nvfp4_cutlass_moe, but the input is read in *token order*
+// (i.e. the pre-permute MoE input `norm_out[n_tokens, K]`) and each output row
+// `r` reads from `src_fp16[sorted_token_ids[r] * K + ...]`. Designed to enable
+// a future skip-gather optimisation (drop the upstream moe_gather + write
+// straight from norm_out to NVFP4) by giving the dispatcher one entry point
+// that consumes the permutation directly. Bit-identical to the
+// (moe_gather → quantize_fp16_to_nvfp4_cutlass_moe) pair when the gather is
+// idempotent (it is — `sorted_token_ids` is a permutation).
+//
+// Today (2026-05-23) the upstream `moe_gather` still runs, so this saves only
+// the gathered_base HBM read which is an L2 hit on a 96 MB-L2 RTX 5090 — net
+// perf delta ~0 on Qwen3-Coder-30B-A3B-NVFP4 pp512 (measured). The real win
+// (~+1.3 % from skipping the moe_gather HBM write drain) is gated on a
+// lazy-gather addition in the legacy fallback path (Phase 2 of the multi-week
+// plan in docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_*.md).
+// Ship the kernel + dispatch wiring now so the future fix is one branch + one
+// `if (!gather_done) moe_gather(...);` instead of also a new kernel.
+void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
+                                               const int32_t* sorted_token_ids,
+                                               void* dst_packed,
+                                               uint8_t* const* d_sfa_bases,
+                                               const int* d_offsets, int expanded, int K, int ne,
+                                               cudaStream_t stream);
+
 // Fused activation + NVFP4 CUTLASS quantize for the MoE down-projection input.
 // Replaces apply_expert_activation(gate, up -> swiglu) + quantize_fp16_to_nvfp4_cutlass_moe(swiglu).
 // Reads gate + up directly from HBM, computes the activation in registers, and

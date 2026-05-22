@@ -1383,7 +1383,12 @@ bool device_args_done = false;
             static_cast<const int32_t*>(routing.expert_offsets.data),
             moe_.d_M_per, ne, stream);
 
-        char* gathered_base    = static_cast<char*>(moe_.gathered.data);
+        // gathered_base intentionally not bound. The gate/up input quant
+        // path reads ctx.no via sorted_token_ids directly (skip-the-read
+        // half of the gather+quant fusion; full skip-gather is gated on a
+        // legacy-fallback lazy-gather addition, see plan doc). The down
+        // projection input comes from fused_act_quantize_device which
+        // reads gate/up outputs directly.
         char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
         char* expert_up_base   = static_cast<char*>(moe_.expert_up.data);
         char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
@@ -1409,14 +1414,10 @@ bool device_args_done = false;
                 moe_.cutlass3x_sf_size,
                 stream);
         };
-        auto quantize_device = [&](const char* a_base, int K_in) {
-            prep_sfa(K_in);
-            imp::quantize_fp16_to_nvfp4_cutlass_moe(
-                a_base, moe_.cutlass3x_packed,
-                reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-                static_cast<const int*>(routing.expert_offsets.data),
-                expanded, K_in, ne, stream);
-        };
+        // (Former quantize_device lambda removed — the gate/up call site
+        // below uses quantize_fp16_to_nvfp4_cutlass_moe_gather inline.
+        // The down-projection input is handled by fused_act_quantize_device.)
+
         // Fused activation + quantize for the down-projection input.
         // Replaces apply_expert_activation(gate, up -> swiglu_buf) +
         // quantize_device(swiglu_buf, eff). Reads gate/up directly,
@@ -1505,7 +1506,23 @@ bool device_args_done = false;
             };
 
         // Gate / Up share input quantization (K_in = d).
-        quantize_device(gathered_base, d);
+        // Fused gather + quantize — reads ctx.no in token order via
+        // sorted_token_ids and writes packed FP4 + SFA in expert-sorted
+        // layout in one kernel pass. Saves the gathered_base HBM read
+        // (the moe_gather write still happens upstream; conditional
+        // skip-gather is a follow-up that needs a will-device-args
+        // pre-check + lazy-gather in the legacy fallback). See
+        // docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_*.md
+        // Phase 2 and docs/archive/bench-2026-05-10/moe_fusion_targets.md
+        // Candidate B.
+        prep_sfa(d);
+        imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
+            ctx.no.data,
+            static_cast<const int32_t*>(routing.sorted_token_ids.data),
+            moe_.cutlass3x_packed,
+            reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+            static_cast<const int*>(routing.expert_offsets.data),
+            expanded, d, ne, stream);
         bool ok = true;
         if (!non_gated_experts)
             ok = ok && dispatch_device(ly.expert_gate_ids,
