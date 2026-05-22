@@ -63,7 +63,7 @@ Concrete technical commitments — these are means, not ends, but progress on th
 - **MXFP4 FMHA** (already novel — first such impl) must stay ahead and expand to more shapes. The +6.7–7.9% over FP8 FMHA on Qwen3 is the baseline, not the ceiling.
 - **CUTLASS Hopper FMHA path on sm_120** for prefill — keep up with CUTLASS releases.
 - **WMMA 8-warp decode kernel** is the decode workhorse on sm_120. Tune for every hero model's head dim.
-- **Grouped GEMM dequant for MoE prefill** — the single biggest known gap. Fix this and Qwen3-Coder prefill returns to parity or better. Currently 1258 vs 25513 tok/s vs vLLM. Top engineering priority.
+- **Grouped GEMM dequant for MoE prefill** — closing the residual gap to vLLM single-seq. Qwen3-Coder-30B-A3B-NVFP4 pp512: imp ~14–16 k tok/s (cuBLAS-algo-variance band per the 2026-05-10 31-commit dive), vLLM 0.20.2 single-seq 18.5 k tok/s (**1.14–1.32× gap**). vLLM's 25.5 k multi-seq is continuous-batching mode, not a fair single-seq comparison — imp is batch=1 by design. Engineering priority remains high but the gap is multi-week (CUTLASS sm120 `MoEProblemShape` scheduler upstream, custom kernel work, or gather+quant fusion patterns), not a single-PR win.
 
 ### Memory
 - **Paged KV cache** (block 16) with LRU, prefix caching — keep and extend.
