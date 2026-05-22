@@ -112,6 +112,35 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
     Nvfp4DecodeContext dctx;
     dctx.mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
 
+    // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront
+    // 10% headroom (see vram_budget.cpp:50), so its budget arithmetic already
+    // protects against shared/system-memory fallback; the in-loop safety is a
+    // backstop only. Mode 2 omits the upfront 10% to fit larger weight caches
+    // and previously paid for it with a 10% in-loop safety (3.2 GiB on a 32 GiB
+    // 5090) that starved the dense NVFP4 cache. Replace with the same formula
+    // the MoE expert path already uses: a KV-headroom estimate at 16 K tokens
+    // plus a 256 MiB workspace cushion, clamped to [256 MiB, 1 GiB].
+    if (wcache_.nvfp4_decode_mode == 2) {
+        int n_attn_layers = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            if (model_->layer(i).wq.data != nullptr &&
+                model_->layer(i).gdn_gate.data == nullptr)
+                n_attn_layers++;
+        }
+        if (n_attn_layers == 0)
+            n_attn_layers = cfg.n_layers;
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int kv_heads = cfg.n_kv_heads > 0 ? cfg.n_kv_heads : cfg.n_heads;
+        constexpr int kKvFloorTokens = 16384;
+        size_t per_token_kv = static_cast<size_t>(n_attn_layers) * 2 *
+                              static_cast<size_t>(kv_heads) * static_cast<size_t>(hd) * 2;
+        size_t kv_reserve = static_cast<size_t>(kKvFloorTokens) * per_token_kv;
+        constexpr size_t kWorkspaceSafety = 256ULL * 1024 * 1024;
+        constexpr size_t kReserveCap = 1024ULL * 1024 * 1024;
+        constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
+        dctx.safety_reserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
+    }
+
     nvfp4_decode_collect_candidates_(cfg, dctx);
 
     // Aliases keep the body that hasn't been extracted yet readable.
@@ -180,10 +209,11 @@ void GraphExecutor::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
                              static_cast<size_t>(rows) * cols / 16 + 4;
 
-        // Check actual free VRAM (10% of total as safety margin)
+        // Check actual free VRAM against the per-call safety reserve computed
+        // in pre_dequant_phase3_nvfp4_decode_ (see dctx.safety_reserve).
         size_t free_mem = 0, total_mem = 0;
         IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
-        size_t nvfp4_safety = std::max(total_mem / 10, static_cast<size_t>(1024 * 1024));
+        size_t nvfp4_safety = std::max(dctx.safety_reserve, static_cast<size_t>(1024 * 1024));
         if (free_mem < nvfp4_bytes + nvfp4_safety) {
             IMP_LOG_INFO(
                 "NVFP4 incremental: VRAM exhausted after %d tensors "
@@ -583,6 +613,12 @@ void GraphExecutor::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         size_t free_mem = 0, total_mem = 0;
         IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+        // Intentionally NOT using dctx.safety_reserve here: populating
+        // cutlass_nvfp4 in mode 2 destabilised CUDA-graph capture on
+        // Qwen3-14B Q6_K (bimodal 97 vs 145 tok/s decode across trials).
+        // The dense in-loop safety relaxation already delivers the +15%
+        // decode win; the CUTLASS path stays conservative until the
+        // capture-failure root cause is understood.
         size_t kCtReserve = std::max(total_mem / 10, static_cast<size_t>(256ULL * 1024 * 1024));
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
     } else {
