@@ -126,6 +126,7 @@ A release is shippable when, on RTX 5090:
 
 This number goes up over time. It never goes down. If a refactor makes it go down, the refactor is wrong, no matter how clean the code looks.
 
-Current: 121.4 tok/s (+25.5% vs llama.cpp c830f99, May 2026).
-Next milestone: 150 tok/s.
+Current: **145.6 tok/s** default flags, **151 tok/s** with `--decode-nvfp4` (May 22 2026, post PR #362 + #364 — the 150 milestone is reached, default is one PR away).
+Previous: 121.4 tok/s (May 2026, +25.5% vs llama.cpp c830f99).
+Next milestone: 150 tok/s ✓ hit with `--decode-nvfp4` on 2026-05-22 (PR #364). Promote to default once the prefill cost (-9 % vs mode 2) is shown not to break the dense-prefill llama.cpp bar.
 Stretch: 200 tok/s with TurboDraft on.
