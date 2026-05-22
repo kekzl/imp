@@ -167,7 +167,24 @@ void Engine::init_resolve_quant_flags_() {
             n_gdn_auto++;
 
     if (config_.use_nvfp4_decode < 0) {
-        if (n_gdn_auto > 0) {
+        const auto wq_qtype = model_->layer(0).wq.qtype;
+        const bool nvfp4_beneficial_qtype = (wq_qtype == QType::Q8_0 || wq_qtype == QType::Q8_K ||
+                                              wq_qtype == QType::Q6_K || wq_qtype == QType::Q5_K);
+        const bool is_moe = (mcfg.n_experts > 0);
+        const bool is_gdn = (n_gdn_auto > 0);
+
+        if (nvfp4_beneficial_qtype && !is_moe && !is_gdn) {
+            // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (additive — both FP8
+            // prefill and NVFP4 decode caches populated) measures +4% decode
+            // over mode 2 on Qwen3-14B Q6_K @ ctx=2048 (151 vs 145.6 tok/s,
+            // PR #364), at -9% prefill (5080 vs 5540). GOAL.md ranks decode #1
+            // for the north-star, so dense Q*_K defaults to mode 1.
+            // MoE / GDN / native-NVFP4 / sub-8-bit models stay on mode 2 —
+            // either the mode-1 advantage is absent (NVFP4 prequant) or it
+            // regresses (host-offloaded MoE measured -8% on Gemma-4 Q8_0).
+            config_.use_nvfp4_decode = 1;
+            IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");
+        } else if (is_gdn) {
             // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
             // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
             // pre_dequant_weights to preserve recurrent state precision.
@@ -177,8 +194,9 @@ void Engine::init_resolve_quant_flags_() {
                 "ssm_in/ssm_out excluded for precision)",
                 n_gdn_auto);
         } else {
+            const char* why = is_moe ? "MoE" : "non-Q*_K-6-8bit";
             config_.use_nvfp4_decode = 2;
-            IMP_LOG_INFO("NVFP4 decode: auto → mode 2");
+            IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (%s)", why);
         }
     }
 
