@@ -170,15 +170,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                                        : needed_blocks;
             if (config.use_nvfp4_decode != 2)
                 budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
-
-            // FP8 prefill: use remaining VRAM after NVFP4 decode + KV cache.
-            // Cap FP8 to what we actually need (nvfp4_elems = raw weight bytes).
-            size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
-            size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
-            size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
-                                           ? (available - kv_actual - nvfp4_actual)
-                                           : 0;
-            budget.fp8_cache_bytes = std::min(nvfp4_elems, remaining_for_fp8);
+            // FP8 budget is computed below — after the kv_max_blocks clamp /
+            // min_kv_blocks enforcement — so it reflects the FINAL KV size.
             budget.nvfp4_second_pass = (config.use_nvfp4_decode == 2);
             break;
         }
@@ -222,6 +215,22 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                      min_kv_blocks, min_kv_tok);
         budget.kv_max_blocks = min_kv_blocks;
         budget.kv_cache_bytes = static_cast<size_t>(min_kv_blocks) * per_block_total;
+    }
+
+    // FP8 prefill: use remaining VRAM after NVFP4 decode + the *final* KV size.
+    // Computing this earlier (against the unclamped kv_max_blocks) silently
+    // zeroed FP8 in mode 1 because the 0.8 kv_fraction filled the budget on
+    // paper, even though `target_blocks` clamped the actual KV allocation
+    // back down. The post-clamp computation lets mode 1 (additive) populate
+    // both caches when VRAM allows — Qwen3-14B Q6_K mode 1 default flags
+    // previously cached fp8=0 tensors and paid ~28 % prefill for it.
+    if (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE) {
+        size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
+        size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
+        size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
+                                       ? (available - kv_actual - nvfp4_actual)
+                                       : 0;
+        budget.fp8_cache_bytes = std::min(nvfp4_elems, remaining_for_fp8);
     }
 
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
