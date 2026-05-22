@@ -5,9 +5,13 @@
 #include <cstring>
 
 void print_usage(const char* prog) {
-    fprintf(stderr,
-            "Usage: %s [options]\n"
-            "\n"
+    // Two-step print: the only printf substitution is `prog` in the first
+    // line. Everything else is static help text — emit it via fputs so any
+    // `%` in option descriptions (e.g. "+4 % decode") is taken literally.
+    // Previous single-fprintf invocation interpreted those as format specs
+    // and corrupted the output ("+4 pct" was the workaround in PR #369).
+    fprintf(stderr, "Usage: %s [options]\n\n", prog);
+    fputs(
             "Options:\n"
             "  --model <path>        Path to model file or HuggingFace repo ID (required)\n"
             "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
@@ -50,7 +54,7 @@ void print_usage(const char* prog) {
             "  --kv-turboquant       [DEPRECATED] Alias for --kv-mxfp4\n"
             "  --kv-turboquant-lite  [DEPRECATED] Alias for --kv-mxfp4\n"
             "  --tq-sketch-mult <n>  [DEPRECATED, ignored]\n"
-            "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
+            "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50% SSM VRAM)\n"
             "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma, "
@@ -60,11 +64,11 @@ void print_usage(const char* prog) {
             "  --mtp-spec-decode <k> Enable MTP spec-decode with draft length k (requires model_mtp.safetensors)\n"
             "  --decode-nvfp4        Force mode 1 (additive: FP8 prefill + NVFP4 decode caches).\n"
             "                        Auto-default for dense Q*_K (6-8 bit GGUF) on sm_120 since\n"
-            "                        PR #367 — +4 pct decode vs mode 2 at -9 pct prefill on\n"
+            "                        PR #367 — +4 % decode vs mode 2 at -9 % prefill on\n"
             "                        Qwen3-14B Q6_K.\n"
             "  --decode-nvfp4-only   Force mode 2 (replacement: NVFP4-only, no duplicate FP8 cache).\n"
             "                        Auto-default for native NVFP4 / MXFP4, MoE, GDN, sub-8-bit.\n"
-            "                        Saves VRAM and gives faster prefill at -3 pct decode — use\n"
+            "                        Saves VRAM and gives faster prefill at -3 % decode — use\n"
             "                        for long-prompt workloads where prefill dominates wallclock.\n"
             "  --prefix-caching      Reuse KV cache blocks for shared token prefixes\n"
             "  --streaming-kv        Enable StreamingLLM smart KV cache (attention sinks + window)\n"
@@ -80,7 +84,7 @@ void print_usage(const char* prog) {
             "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
             "  --image <path>        Input image for vision (requires --mmproj)\n"
             "  --help                Show this help message\n",
-            prog);
+            stderr);
 }
 
 CliArgs parse_args(int argc, char** argv) {
