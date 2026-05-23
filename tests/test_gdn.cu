@@ -455,16 +455,57 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
     EXPECT_LT(max_diff_chunk2, 1e-3f);
     EXPECT_LT(max_diff_state, 1e-5f);
 
+    // === Run C: gdn_scan_chunkwise_f32 — the Phase 1b scaffolding ===
+    // Currently a chunk-iterating sequential wrapper. Once Phase 1b.1 lands
+    // the real SSD matmul kernel, this same test catches any deviation.
+    float* d_state_cw;
+    half* d_y_cw;
+    cudaMalloc(&d_state_cw, state_floats * sizeof(float));
+    cudaMalloc(&d_y_cw, n_tok * inner * sizeof(half));
+    cudaMemset(d_state_cw, 0, state_floats * sizeof(float));
+    gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cw, d_y_cw, n_tok,
+                           n_heads, head_dim, state_size, n_groups, nullptr,
+                           /*chunk_size=*/chunk, /*grouped_layout=*/0);
+    cudaDeviceSynchronize();
+
+    std::vector<half> y_cw(n_tok * inner);
+    std::vector<float> state_cw_host(state_floats);
+    cudaMemcpy(y_cw.data(), d_y_cw, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_cw_host.data(), d_state_cw, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_diff_cw_y = 0;
+    for (int i = 0; i < n_tok * inner; i++) {
+        float d = std::abs(__half2float(y_full[i]) - __half2float(y_cw[i]));
+        if (d > max_diff_cw_y)
+            max_diff_cw_y = d;
+    }
+    float max_diff_cw_state = 0;
+    for (int i = 0; i < state_floats; i++) {
+        float d = std::abs(state_full[i] - state_cw_host[i]);
+        if (d > max_diff_cw_state)
+            max_diff_cw_state = d;
+    }
+    std::printf("  ChunkBoundaryHandoff: max_diff Y_chunkwise = %.6e\n", max_diff_cw_y);
+    std::printf("  ChunkBoundaryHandoff: max_diff state_chunkwise = %.6e\n", max_diff_cw_state);
+    // Same tolerance budgets as Run B (chunkwise scaffold is a chunk-iterating
+    // wrapper around gdn_scan_fused_f32, so for now this should also be bit-
+    // exact 0.0; once Phase 1b.1 ships the SSD matmul kernel, FMA-order
+    // differences may push the FP16 output toward the 1e-3 budget).
+    EXPECT_LT(max_diff_cw_y, 1e-3f);
+    EXPECT_LT(max_diff_cw_state, 1e-5f);
+
     cudaFree(d_conv);
     cudaFree(d_A);
     cudaFree(d_dt);
     cudaFree(d_state_full);
     cudaFree(d_state_mid);
+    cudaFree(d_state_cw);
     cudaFree(d_alpha);
     cudaFree(d_beta);
     cudaFree(d_y_full);
     cudaFree(d_y_chunk1);
     cudaFree(d_y_chunk2);
+    cudaFree(d_y_cw);
 }
 
 // =========================================================================
