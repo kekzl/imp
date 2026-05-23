@@ -331,6 +331,143 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
 }
 
 // =========================================================================
+// Test 3b: Chunk-boundary handoff equivalence
+// -------------------------------------------------------------------------
+// Phase 1a of the chunkwise SSD scan refactor (docs/plans/gdn_chunkwise_
+// scan_design_2026_05_23.md). Establishes the precondition for Phase 1b:
+// splitting a sequential GDN scan at any token boundary, saving the H state
+// at the split, and resuming with that saved state must produce bit-
+// equivalent output to a single monolithic scan.
+//
+// This isn't just a sanity test — it's the regression gate for the Phase 1b
+// parallel-within-chunk SSD kernel. ANY chunkwise replacement must preserve
+// the same chunk-end-state and intra-chunk-y semantics. If this test passes
+// for two implementations (sequential and chunkwise), they're functionally
+// interchangeable at the dispatch layer.
+//
+// Setup: n_tok=16 (= 2 chunks of 8), n_heads=4, head_dim=128, state=128.
+//   Run A: gdn_scan_fused_f32(tokens[0..16], state=zeros)  → Y_full, state_full
+//   Run B: gdn_scan_fused_f32(tokens[0..8],  state=zeros)  → Y_chunk1, state_mid
+//          gdn_scan_fused_f32(tokens[8..16], state=state_mid) → Y_chunk2, state_end
+// Assert: Y_full[0..8] ≈ Y_chunk1, Y_full[8..16] ≈ Y_chunk2, state_full ≈ state_end.
+// =========================================================================
+
+TEST(GDNScanTest, ChunkBoundaryHandoff) {
+    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 16;
+    constexpr int chunk = n_tok / 2;
+
+    srand(123);
+    std::vector<float> conv_f32(n_tok * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    // GPU buffers
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state_full, *d_state_mid;
+    half *d_alpha, *d_beta, *d_y_full, *d_y_chunk1, *d_y_chunk2;
+    cudaMalloc(&d_conv, n_tok * conv_channels * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_full, state_floats * sizeof(float));
+    cudaMalloc(&d_state_mid, state_floats * sizeof(float));
+    cudaMalloc(&d_alpha, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_beta, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_y_full, n_tok * inner * sizeof(half));
+    cudaMalloc(&d_y_chunk1, chunk * inner * sizeof(half));
+    cudaMalloc(&d_y_chunk2, chunk * inner * sizeof(half));
+
+    cudaMemcpy(d_conv, conv_f32.data(), n_tok * conv_channels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+
+    // === Run A: monolithic full scan ===
+    cudaMemset(d_state_full, 0, state_floats * sizeof(float));
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_full, d_y_full, n_tok,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    cudaDeviceSynchronize();
+
+    // === Run B: chunked scan with mid-state handoff ===
+    cudaMemset(d_state_mid, 0, state_floats * sizeof(float));
+    // Chunk 1: tokens [0..chunk), uses zero state. d_state_mid mutates in-place.
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_mid, d_y_chunk1, chunk,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    // Chunk 2: tokens [chunk..n_tok), uses d_state_mid carried from chunk 1.
+    // Offset alpha/beta by chunk * n_heads; conv_f32 by chunk * conv_channels.
+    gdn_scan_fused_f32(d_conv + static_cast<size_t>(chunk) * conv_channels, conv_channels,
+                       d_alpha + chunk * n_heads, d_beta + chunk * n_heads, d_A, d_dt, d_state_mid,
+                       d_y_chunk2, chunk, n_heads, head_dim, state_size, n_groups, nullptr);
+    cudaDeviceSynchronize();
+
+    // === Compare ===
+    std::vector<half> y_full(n_tok * inner), y_chunk1(chunk * inner), y_chunk2(chunk * inner);
+    std::vector<float> state_full(state_floats), state_mid_host(state_floats);
+    cudaMemcpy(y_full.data(), d_y_full, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_chunk1.data(), d_y_chunk1, chunk * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_chunk2.data(), d_y_chunk2, chunk * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_full.data(), d_state_full, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_mid_host.data(), d_state_mid, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Y_full[0..chunk] vs Y_chunk1
+    float max_diff_chunk1 = 0;
+    for (int i = 0; i < chunk * inner; i++) {
+        float d = std::abs(__half2float(y_full[i]) - __half2float(y_chunk1[i]));
+        if (d > max_diff_chunk1)
+            max_diff_chunk1 = d;
+    }
+    // Y_full[chunk..n_tok] vs Y_chunk2
+    float max_diff_chunk2 = 0;
+    for (int i = 0; i < chunk * inner; i++) {
+        float d = std::abs(__half2float(y_full[chunk * inner + i]) - __half2float(y_chunk2[i]));
+        if (d > max_diff_chunk2)
+            max_diff_chunk2 = d;
+    }
+    // state_full vs state_mid (after chunk 2)
+    float max_diff_state = 0;
+    for (int i = 0; i < state_floats; i++) {
+        float d = std::abs(state_full[i] - state_mid_host[i]);
+        if (d > max_diff_state)
+            max_diff_state = d;
+    }
+
+    std::printf("\n  ChunkBoundaryHandoff: max_diff Y_chunk1 = %.6e\n", max_diff_chunk1);
+    std::printf("  ChunkBoundaryHandoff: max_diff Y_chunk2 = %.6e\n", max_diff_chunk2);
+    std::printf("  ChunkBoundaryHandoff: max_diff state    = %.6e\n", max_diff_state);
+
+    // FP16 output: max-abs-diff < 1e-3 covers FP16 rounding. State is FP32 → tighter.
+    EXPECT_LT(max_diff_chunk1, 1e-3f);
+    EXPECT_LT(max_diff_chunk2, 1e-3f);
+    EXPECT_LT(max_diff_state, 1e-5f);
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_full);
+    cudaFree(d_state_mid);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_full);
+    cudaFree(d_y_chunk1);
+    cudaFree(d_y_chunk2);
+}
+
+// =========================================================================
 // Test 4: Zero state + one token produces non-zero output
 // =========================================================================
 
