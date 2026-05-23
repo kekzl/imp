@@ -5,7 +5,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked install-hooks format format-check
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -93,6 +93,24 @@ verify-chunked:
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_chunked.json \
 	 IMP_VERIFY_CHUNK_SIZE=512 \
 	 scripts/verify.sh fast
+
+# Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
+# 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
+# see memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md.
+# Defaults to Qwen3-8B Q8_0; pass MODEL=… to override.
+#
+# Mounts the resolved model directory (defaults to ~/models so symlinks work)
+# AND the repo root (so the script can write back to tests/perf_baseline.json).
+# `-u` matches the host UID so the write succeeds.
+MODEL ?= /models/Qwen3-8B-Q8_0.gguf
+MODELS_DIR ?= $(HOME)/models
+gen-perf-baseline: build
+	@docker run --rm --gpus all \
+		-v $(MODELS_DIR):/models \
+		-v $(PWD):/src -w /src \
+		-u $(shell id -u):$(shell id -g) \
+		-e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+		--entrypoint bash $(DOCKER_IMG) scripts/gen_perf_baseline.sh "$(MODEL)"
 
 # install the pre-push hook that runs verify-fast when source files change
 install-hooks:
