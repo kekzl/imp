@@ -1,5 +1,7 @@
 # MoE Prefill via CUTLASS `MoEProblemShape` — CUDA Graph Capture Plan
-*2026-05-23 · multi-week design doc · not yet implemented*
+*2026-05-23 · multi-week design doc*
+
+**Status (2026-05-23): DEFERRED — original motivation mostly closed via other levers.** The release-blocker metric (Qwen3-Coder-30B-A3B-NVFP4 MoE prefill gap to vLLM 0.20.2 single-seq) narrowed from 1.14–1.32× to **1.056×** via #374 + sustained-pp ramp work — see `memory/qwen3_coder_moe_prefill_gap_closed_2026_05_23.md`. The remaining ~5–6 % gap is what this plan would target; the lever is still valid but the urgency dropped. Also still blocked upstream on CUTLASS sm_120 `MoEProblemShape` scheduler (`IsMoEScheduler = false` at `cutlass/gemm/kernel/sm100_gemm_mixed_tma_cpasync_warpspecialized.hpp:92`). Re-open when (a) CUTLASS 4.5+ ships the sm_120 MoE scheduler OR (b) a workload re-opens a meaningful (> 8 %) MoE prefill gap.
 
 ## Mission
 

@@ -1,5 +1,7 @@
 # GDN Scan Split-K Refactor — Design Doc
-*2026-05-23 · multi-day design doc · not yet implemented*
+*2026-05-23 · multi-day design doc*
+
+**Status (2026-05-23): REFUTED at Phase 0.** `ncu --set full` confirmed Memory 17.57 %, Compute 3.95 %, Achieved Occupancy 7.85 % (vs theoretical 16.67 %) — the kernel is latency-bound, not HBM-bound. But the sync-overhead math kills the lever: 4× `cg::grid_group::sync()` × 30 layers = 600–1200 µs added vs ~90 µs realistic win = **~10× net negative**. DO NOT PROCEED to Phase 1. Refutation memo: `memory/gdn_scan_splitk_phase0_refuted_2026_05_23.md`. Algorithmic angle taken instead: chunkwise SSD scan (see `gdn_chunkwise_scan_design_2026_05_23.md`) — Phase 0 PROCEED, +15.2 % wall already achieved at Phase 1b.1, multi-phase ship plan active.
 
 ## Mission
 

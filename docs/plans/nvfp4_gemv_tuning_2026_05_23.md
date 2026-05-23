@@ -1,5 +1,7 @@
 # NVFP4 Decode GEMV Tuning — Toward the 175 tok/s Milestone
-*2026-05-23 · multi-week design doc · not yet implemented*
+*2026-05-23 · multi-week design doc*
+
+**Status (2026-05-23): REFUTED — 175 milestone via NVFP4-GEMV kernel tuning is dead.** All four hypotheses (H1 SMEM staging, H2 scale-batch4, H3 register pressure, H4 software prefetch) were tested and refuted. ncu showed top-3 GEMVs at **64–73 % HBM peak**, not the 43 % analytical estimate that motivated the plan. H2 implementation caused a −41 % decode regression (157.71 → 92.28 tok/s) because the stride change blew the L1 cache. H4 (prefetch) and H1 (SMEM stage) showed flat zero wall delta — nvcc had already scheduled loads optimally. Memos: `memory/qwen3_14b_full_profile_2026_05_23.md`, `memory/h4_gemv_prefetch_refuted_2026_05_23.md`, `memory/h2_gemv_scale_batch4_refuted_2026_05_23.md`. To unlock the 175 milestone the gain has to come from **outside the per-GEMV kernel** (fusion of latency-bound minor kernels, model-level NVFP4 expansion to LM head — also refuted, see `lm_head_only_nvfp4_qwen3_6_refuted_2026_05_23.md`).
 
 ## Mission
 
