@@ -831,6 +831,107 @@ TEST(GDNScanTest, ChunkwiseWyTcMatchesFused) {
 }
 
 // =========================================================================
+// Test 3g: Phase 2c fully-tuned WY-TC-MMA matches sequential
+// -------------------------------------------------------------------------
+// CHUNK=32, all 5 chunk-internal matmuls (KK, QK, KH, QH, H_L) on WMMA.
+// Same tolerance as Phase 2b — FP16 storage costs ~3-4 mantissa bits but
+// FP32 WMMA accumulation preserves per-matmul precision.
+// =========================================================================
+
+TEST(GDNScanTest, ChunkwiseWyTc2MatchesFused) {
+    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 64;  // 2 Phase-2c chunks of 32
+
+    srand(29);
+    std::vector<float> conv_f32(n_tok * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state_ref, *d_state_tc2;
+    half *d_alpha, *d_beta, *d_y_ref, *d_y_tc2;
+    cudaMalloc(&d_conv, n_tok * conv_channels * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_ref, state_floats * sizeof(float));
+    cudaMalloc(&d_state_tc2, state_floats * sizeof(float));
+    cudaMalloc(&d_alpha, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_beta, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_y_ref, n_tok * inner * sizeof(half));
+    cudaMalloc(&d_y_tc2, n_tok * inner * sizeof(half));
+
+    cudaMemcpy(d_conv, conv_f32.data(), n_tok * conv_channels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_state_ref, 0, state_floats * sizeof(float));
+    cudaMemset(d_state_tc2, 0, state_floats * sizeof(float));
+
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_chunkwise_wy_tc2_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_tc2, d_y_tc2,
+                                  n_tok, n_heads, head_dim, state_size, n_groups, nullptr,
+                                  /*grouped_layout=*/0);
+    cudaError_t launch_err = cudaPeekAtLastError();
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    if (launch_err != cudaSuccess)
+        std::printf("\n  WY-TC2 launch error: %s\n", cudaGetErrorString(launch_err));
+    if (sync_err != cudaSuccess)
+        std::printf("  WY-TC2 sync error: %s\n", cudaGetErrorString(sync_err));
+
+    std::vector<half> y_ref(n_tok * inner), y_tc2(n_tok * inner);
+    std::vector<float> state_ref(state_floats), state_tc2(state_floats);
+    cudaMemcpy(y_ref.data(), d_y_ref, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_tc2.data(), d_y_tc2, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_ref.data(), d_state_ref, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_tc2.data(), d_state_tc2, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_diff_y = 0;
+    for (int i = 0; i < n_tok * inner; i++) {
+        float diff = std::abs(__half2float(y_ref[i]) - __half2float(y_tc2[i]));
+        if (diff > max_diff_y)
+            max_diff_y = diff;
+    }
+    float max_diff_state = 0;
+    for (int i = 0; i < state_floats; i++) {
+        float diff = std::abs(state_ref[i] - state_tc2[i]);
+        if (diff > max_diff_state)
+            max_diff_state = diff;
+    }
+
+    std::printf("\n  ChunkwiseWyTc2: max_diff Y = %.6e\n", max_diff_y);
+    std::printf("  ChunkwiseWyTc2: max_diff state = %.6e\n", max_diff_state);
+
+    EXPECT_LT(max_diff_y, 1e-2f);
+    EXPECT_LT(max_diff_state, 1e-2f);
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_ref);
+    cudaFree(d_state_tc2);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_ref);
+    cudaFree(d_y_tc2);
+}
+
+// =========================================================================
 // Test 3d: Chunkwise prototype microbench (Phase 1b.1).
 // -------------------------------------------------------------------------
 // Times the chunkwise SSD prototype vs the sequential fused scan at the
@@ -944,10 +1045,20 @@ TEST(GDNScanTest, ChunkwiseProtoMicrobench) {
         },
         "gdn_scan_chunkwise_wy_tc_f32 (Phase 2b TC-MMA)");
 
+    float ms_wy_tc2 = bench(
+        [&]() {
+            gdn_scan_chunkwise_wy_tc2_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y,
+                                          n_tok, n_heads, head_dim, state_size, n_groups, nullptr,
+                                          /*grouped_layout=*/0);
+        },
+        "gdn_scan_chunkwise_wy_tc2_f32 (Phase 2c CHUNK=32 + H_L TC)");
+
     std::printf("  Ratio Phase1b.1/fused = %.3fx\n", ms_chunkwise / ms_fused);
     std::printf("  Ratio Phase2a-WY/fused = %.3fx (naive shared-mem matmul)\n", ms_wy / ms_fused);
-    std::printf("  Ratio Phase2b-WY-TC/fused = %.3fx (KK/QK/KH/QH on Tensor Cores)\n",
+    std::printf("  Ratio Phase2b-WY-TC/fused = %.3fx (KK/QK/KH/QH on TC, CHUNK=16)\n",
                 ms_wy_tc / ms_fused);
+    std::printf("  Ratio Phase2c-WY-TC2/fused = %.3fx (all 5 matmuls on TC, CHUNK=32)\n",
+                ms_wy_tc2 / ms_fused);
 
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);
