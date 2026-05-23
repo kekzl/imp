@@ -1,0 +1,29 @@
+{
+  "model": "Qwen3-14B-Q6_K.gguf",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "cuda": "13.2",
+  "vram_total_mb": 32607,
+  "timestamp": "2026-05-23T09:21:00Z",
+  "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
+  "reps": 5,
+  "n_trials": 5,
+  "_note": "This is the GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric (157.71 tok/s) is the actual headline north-star number from GOAL.md; it's not auto-gated by verify.sh today (the script reads tg128 from a pp=512 bench) but is recorded here as the canonical cold-median measurement against which manual checks can be made.",
+  "metrics": {
+    "prefill_tps": {
+      "pp512": 5955.99,
+      "pp2048": 5266.41
+    },
+    "decode_tps": {
+      "tg128": 165.72,
+      "tg128_at_ctx_2048": 157.71
+    },
+    "memory_mb": {
+      "model_weights": 11860
+    }
+  },
+  "thresholds": {
+    "decode_regression_pct": 3,
+    "prefill_regression_pct": 5,
+    "vram_increase_pct": 10
+  }
+}
