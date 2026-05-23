@@ -1,0 +1,167 @@
+# NVFP4 Decode GEMV Tuning — Toward the 175 tok/s Milestone
+*2026-05-23 · multi-week design doc · not yet implemented*
+
+## Mission
+
+Drive the three dominant NVFP4 decode-side GEMV kernels in `src/quant/nvfp4_gemm.cu` from **~43 % HBM peak utilisation to ≥ 80 %** on RTX 5090, closing roughly half of the gap to the **175 tok/s** milestone on the GOAL.md north-star (Qwen3-14B Q6_K @ ctx=2048).
+
+Current north-star (2026-05-23, cold-median):
+```
+tg128 @ ctx=2048: 157.71 ± 0.16 tok/s
+```
+
+Realistic ceiling from this lever alone: **+15-25 % decode wall**, lands the north-star at ~180–195 tok/s.
+
+## Why this is the right lever
+
+Decode-time profile (`--no-cuda-graphs` so nsys doesn't hide captured-graph kernels — see `qwen3_14b_north_star_profile_2026_05_23.md` for the full audit-trail, including the corrected interpretation):
+
+| % of decode kernel time | Kernel | Shape (per layer per token) |
+|---:|---|---|
+| **40.0** | `gemv_nvfp4_gate_up_fused_mr_kernel<8>` | M=1, N=2·intermediate=34816, K=hidden=5120 |
+| **28.4** | `gemv_nvfp4_residual_kernel`             | M=1, N=hidden=5120, K=intermediate=17408 (down_proj) |
+| **9.4**  | `gemv_nvfp4_qkv_fused_kernel`            | M=1, N=hidden·(1+2·kv_fraction), K=hidden |
+| 5.3 | `paged_attention_splitk_pipeline_kernel<128>` | — |
+| 4.2 | `gemv_nvfp4_multirow_fp32_kernel<8>` | M=1, N=vocab, K=hidden (output_proj) |
+
+**77.8 % of decode kernel time is in the top three GEMVs.** Speeding these is the most direct path to north-star tok/s.
+
+## Analytical roofline (gate_up_fused_mr at K=5120 on Qwen3-14B)
+
+| Quantity | Value |
+|---|---|
+| Weight bytes per call (NVFP4 + scales) | ~50 MB |
+| Activation bytes | ~10 KB (negligible — same x reused across 2·intermediate rows) |
+| Output bytes | ~70 KB (negligible) |
+| HBM ideal time at 1792 GB/s | **28 µs** |
+| Measured (nsys avg per call, 30,720 invocations) | **65 µs** |
+| Achieved HBM | **769 GB/s = 43 % of peak** |
+| Headroom | **~2.3×** |
+
+The roofline number is the *kernel-level* ceiling. Translating to wall:
+- 40 % of kernel time × (1 − 28/65) = ~22.7 % decode kernel time saved if gate_up alone reaches peak
+- Decode wall is largely launch-overhead today, but with graphs ON the GPU-busy share is much higher than the 10-19 % we observed in the no-graphs trace — wall-clock impact is closer to the kernel-time delta than to the no-graphs wall ratio
+
+## Current kernel structure (`gemv_nvfp4_gate_up_fused_mr_kernel<NR=8>`)
+
+```
+Block: 256 threads = 8 warps × 32 lanes
+NR=8: each warp handles 1 output row
+Grid: (2·intermediate) / NR = 4352 blocks
+
+Per warp inner loop (warp_k_loop):
+  for mi = lane; mi < n_mb=K/16; mi += 32:
+    8-byte packed load → uint2 (16 NVFP4 weights)
+    1-byte micro_scale load
+    HW cvt.rn.f16x2.e2m1x2 PTX (8 invocations, one per byte)
+    8 × FP16 × FP16 → FP32 FMA per micro-block
+
+Per block:
+  Weight bytes:  8 rows × 10 iter/lane × 32 lanes × 8 bytes  ≈ 20.5 KB
+  Scale bytes:   8 × 10 × 32 × 1                              ≈ 2.5 KB
+  Activation:    K × 2 bytes = 10 KB (cached after warp 0)
+```
+
+`dot_micro_block` already does the right things on sm_120:
+- HW FP4 decode via `cvt.rn.f16x2.e2m1x2` (1 PTX instruction per byte, was 8-op prmt cascade before PR ##56)
+- `uint2` (8-byte) packed loads
+- `half2` activation loads
+- Bitwise FP8→FP32 scale decode (no SFU `exp2f` call)
+- Deferred per-microblock scale (scale once per 16 elements, not per element)
+
+So the obvious low-hanging fruit (HW FP4 decode, scale-decode fast path, half2 loads, fused gate+up) is already in. The remaining ~57 % HBM gap is in second-order factors.
+
+## Hypotheses for the 57 % gap (untested — needs `ncu` measurement)
+
+### H1 — Activation x is re-loaded N×NR times from L1/L2 instead of SMEM-resident
+The kernel reads `x[elem_base + b*2]` directly from global. For NR=8 warps in a block all reading the same activation chunks, L1/L2 absorbs the redundancy but per-warp memory pipe contention may still dominate.
+
+**Mitigation:** stage `x[0..K]` into SMEM once per block (10 KB, fits easily — 165 KB SMEM/block on sm_120), have all 8 warps read from SMEM. Estimate: +5-10 % HBM utilisation, possibly more if scale-stream then becomes the bottleneck.
+
+### H2 — Scale stream is uncoalesced / sub-cacheline
+Each lane loads 1 byte `row_ms[mi]` per iteration. 32 lanes × 1 byte = 32-byte aligned. **Likely OK** but verify with `ncu --metrics l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum`.
+
+If scale loads are sub-coalesced, fix: load 4 bytes per lane (4 micro-blocks ahead), keep in registers, decode lazily.
+
+### H3 — Register pressure caps occupancy
+The kernel uses `__launch_bounds__(kMRThreads=256)` (8 warps/block) without explicit min-blocks-per-SM. With 170 SMs and 4352 blocks, that's 25.6 blocks/SM ideal. Actual occupancy is capped by registers/SMEM.
+
+If register pressure > 64/thread, occupancy drops to 4 blocks/SM (one block/SM/warp). Fix: `__launch_bounds__(256, 4)` to enforce ≥ 4 blocks/SM; if compiler refuses, refactor inner loop to spill less.
+
+### H4 — FMA pipeline contention with load issue
+`__fmaf_rn` × 16 per microblock followed by another microblock load. If the HMMA/FMA latency isn't masked by load throughput, we lose cycles.
+
+**Mitigation:** software prefetch — issue next-microblock load before completing this microblock's FMAs (cp.async into shared, then sync at next iter boundary). Or unroll the inner loop 2-4× and interleave loads with FMAs.
+
+### H5 — One warp per row leaves warp K-parallelism unused for short K
+For K=5120, n_mb = 320, lane iterates 10 times. With 8 warps in the block, 8 rows complete simultaneously. But for K=17408 (`residual_kernel` down_proj), n_mb = 1088, lane iterates 34 times — warps become more I/O bound.
+
+**Mitigation:** for the residual kernel (down_proj, K=17408), consider hybrid: 4 warps per row × 64 micro-block iter per warp. Single-warp pattern may underutilise.
+
+## Implementation phases
+
+### Phase 0 — Measure (1 day; **blocked on `ERR_NVGPUCTRPERM`**)
+
+- [ ] Unblock `ncu` perf counters: set kernel param `NVreg_RestrictProfilingToAdminUsers=0` on the WSL2 NVIDIA driver (requires reboot), or run via `sudo` with explicit `--target-processes all`. Without this, all of Phase 0 is qualitative-only.
+- [ ] `ncu --metrics dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,launch__registers_per_thread,l1tex__t_sector_hit_rate.pct,smsp__cycles_active.avg.pct_of_peak_sustained_elapsed` on `gemv_nvfp4_gate_up_fused_mr_kernel<8>` to confirm or refute H1-H5.
+- [ ] Same on `gemv_nvfp4_residual_kernel` (K=17408 — different bottleneck class).
+- [ ] Same on `gemv_nvfp4_qkv_fused_kernel`.
+
+**Exit:** at least one of H1-H5 has a confirmed signature in the metrics. Without this, don't touch the kernel.
+
+### Phase 1 — SMEM-stage the activation (H1)  (~2 days)
+
+- [ ] Patch `gemv_nvfp4_gate_up_fused_mr_kernel`: extern `__shared__ half s_x[K]` (or template K-tile if K > SMEM budget). Block-cooperative load on entry. `__syncthreads()`. Rewrite `dot_micro_block` to read from `s_x` instead of global.
+- [ ] Same patch on `gemv_nvfp4_residual_kernel` (K=17408 → 35 KB SMEM — still fits).
+- [ ] Same patch on `gemv_nvfp4_qkv_fused_kernel`.
+- [ ] Microbench each: kernel-level time must drop by ≥ 5 % vs baseline. If not, H1 is refuted; revert.
+
+**Exit:** verified microbench delta + E2E `make verify-fast` still passes. If E2E doesn't improve (cuBLAS-algo variance), preserve the kernel change as a no-op-for-now baseline for Phase 2.
+
+### Phase 2 — Scale-stream coalescing (H2) (~1 day, only if Phase 1 leaves the kernel with HBM headroom)
+
+- [ ] Load 4-8 bytes of `row_ms` per lane upfront, keep in registers, decode in inner loop.
+- [ ] Microbench. Expected: +1-3 % HBM if H2 was real, neutral otherwise.
+
+### Phase 3 — Register-pressure / occupancy tuning (H3) (~2 days)
+
+- [ ] Add explicit `__launch_bounds__(256, ≥4)` and rebuild. If compiler complains about register spill, refactor inner loop.
+- [ ] Try `kMRWarps=4` (smaller block, more blocks-per-SM) as an A/B against the current `kMRWarps=8`. The launch dispatch in `use_multirow` would need a second branch for "small K, many warps" vs "large K, few warps".
+
+### Phase 4 — Software prefetch / loop pipelining (H4, H5) (~3-5 days)
+
+- [ ] `cp.async` next microblock into SMEM ring; sync at iter boundary.
+- [ ] For `residual_kernel` (K=17408), prototype the 4-warp-per-row variant.
+- [ ] Microbench gate.
+
+### Phase 5 — E2E A/B and ship (~1 day)
+
+- [ ] Run the cold-median north-star bench (`scripts/gen_perf_baseline.sh /models/Qwen3-14B-Q6_K.gguf` or the inline script in this session's transcript) before and after the full Phase 1-4 stack.
+- [ ] Acceptable target: ≥ 175 tok/s @ ctx=2048 cold-median. Stretch: 195 tok/s.
+- [ ] Update `tests/perf_baseline.json` if methodology change is warranted.
+
+## Risks
+
+- **H1 may be a wash if L1/L2 already absorbs the activation reuse.** SMEM staging adds `__syncthreads()` overhead — for a 4352-block kernel with only 25.6 blocks/SM, the sync may not amortise. Mitigation: measure before committing, revert cleanly if neutral.
+- **Register-pressure refactors are easy to regress correctness.** Add a microbench parity test (compare to reference FP32 dequant+GEMV) before and after every Phase-3 change.
+- **The 43 % HBM number is on Qwen3-14B specifically.** Other hero models (Qwen3-8B, Qwen3-Coder-30B, Gemma-4-26B) will land at different fractions; the tuning must not regress them. Add the hero-model verify-fast sweep before merging.
+- **Phase 0 perf-counter unblock requires WSL2 reboot.** If the user can't reboot, Phase 0 collapses to qualitative analysis only (= flying blind on H1-H5 verification). In that case, ship only Phase 1 (SMEM staging — safe, easy to revert) and stop.
+
+## Don't repeat
+
+- ❌ Reading kernel fractions from a default `nsys -t cuda` trace with CUDA Graphs ON. The captured-graph kernels are aggregated under their first-launch instance — under-counts decode kernels ~50× and inflates load/prefill kernels. Always `--no-cuda-graphs` (or `--cuda-graph-trace` if your nsys supports it) for decode breakdown.
+- ❌ Concluding `dequant_q6k` is a lever from a graphs-ON profile. It's 2.6 % of decode kernel time once graphs are disabled (was 39.9 % with graphs ON — the graphs ON number was an artifact of nsys aggregation, not a real bottleneck). See `qwen3_14b_north_star_profile_2026_05_23.md` for the full audit trail.
+- ❌ Investing in direct Q6_K × FP16 GEMM (the Q4_K_v2 retread). Ceiling is ~3 % wall.
+- ❌ Tensor-Core MMA paths for these kernels. M=1 GEMV — there's no MMA to use. The lever is CUDA-core kernel tuning + HBM scheduling.
+
+## Re-evaluation triggers
+
+Re-open this plan when one of these fires:
+- Phase 0 perf-counter perms unblock and the metrics confirm/refute the H1-H5 hypotheses
+- A hero model lands that pushes the gate_up / residual / qkv kernels to a different HBM utilisation point (e.g., Qwen3.6 or a hybrid GDN that changes the shape mix)
+- New `cp.async` / SMEM scheduling primitives land on sm_120 (PTX 9.3+, CUDA 13.3+)
+- A different bottleneck overtakes the GEMVs (e.g., paged_attention or rmsnorm grows past 10 %)
+
+---
+
+*This plan is a planning artefact, not a commitment to ship in any specific session. It captures the technical state so the next session can pick up the Phase 0 measurement immediately.*
