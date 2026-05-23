@@ -1,5 +1,11 @@
 # Kernel Fusion — rmsnorm into NVFP4 GEMV Hot Path
-*2026-05-23 · multi-day design doc · not yet implemented*
+*2026-05-23 · multi-day design doc*
+
+**Status (2026-05-23): REFUTED at Phase 0 (both paths).**
+- **Path A** (1-day dispatch swap to reuse existing `residual_add_rmsnorm`) — REFUTED: not a 1-day swap, actually a 3–5 day refactor across function contracts. The fused kernel writes `hidden += residual; out = rmsnorm(hidden)` but the current dataflow has `po` (post-output) and `r` (residual) flowing into SEPARATE downstream buffers. Memo: `memory/kernel_fusion_path_a_phase0_refuted_2026_05_23.md`.
+- **Path B** (fuse rmsnorm INTO the NVFP4 GEMV) — REFUTED: microbench at production hot-path M values shows the fused kernel WINS -40 to -51 % at small M but REGRESSES +23 % at M=6144 (Qwen3.6 attn QKV). Redundant rmsnorm work at hot path = +112 % overhead vs the 5 % design-doc gate (refuted by 22×). Memo: `memory/kernel_fusion_path_b_phase0_refuted_hot_path_2026_05_23.md`.
+
+Don't reopen unless one of the "Re-evaluation triggers" below fires.
 
 ## Mission
 
