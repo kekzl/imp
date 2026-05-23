@@ -48,6 +48,21 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                 cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0);
 
+// Phase 2a — WY-representation parallel delta-rule scan prototype.
+// Numerically equivalent to the sequential delta rule but factors the
+// chunk-internal dependency into a forward triangular solve + matrix-matrix
+// products (steps 2/3/5/6 of the algorithm in
+// docs/plans/gdn_chunkwise_scan_design_2026_05_23.md §"Phase 2a"). Naive
+// shared-memory matmuls; Tensor Core MMA is Phase 2b.
+//
+// Currently instantiated for HD=SS=128, CHUNK=32 (chunk_size=32 dispatch);
+// other shapes fall back to gdn_scan_fused_f32 to avoid silent precision
+// loss before validation lands.
+void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                               const float* A_log, const float* dt_bias, float* h_state, half* y,
+                               int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                               cudaStream_t stream, int grouped_layout = 0);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
