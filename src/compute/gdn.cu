@@ -334,6 +334,49 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     }
 }
 
+// EXPERIMENTAL — Phase 1b scaffolding for chunkwise SSD scan.
+// Current implementation: chunk-iterating sequential wrapper around
+// `gdn_scan_fused_f32`. Functionally identical to the monolithic call (the
+// kernel handles the H state in/out cleanly across multiple invocations,
+// validated by tests/test_gdn.cu::ChunkBoundaryHandoff). Phase 1b.1 replaces
+// the per-chunk call with a parallel-within-chunk SSD matmul kernel.
+//
+// The chunk_size parameter is currently informational (default 64 = Mamba2
+// paper's typical SSD block size). When the SSD kernel ships, it will tile
+// the within-chunk math at this block size.
+//
+// Reference for delta-rule parallel scan: Yang et al. 2024, "Parallel Linear
+// Attention With The Delta Rule" (the standard Mamba2 SSD assumes scalar
+// decay and doesn't cover GDN's rank-1 (I - β k k^T) multiplicative update).
+//
+// Phase 0 verdict (ncu): docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
+//   Memory 5.47 % peak / Compute 5.47 % peak / Achieved Occ 8.33 % → PROCEED.
+void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, float* h_state, half* y,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            cudaStream_t stream, int chunk_size, int grouped_layout) {
+    // Effective chunk size: clamp to [1, n_tokens] so a single-token decode
+    // path falls through cleanly to one call with the same args.
+    if (chunk_size <= 0)
+        chunk_size = 64;
+    if (chunk_size > n_tokens)
+        chunk_size = n_tokens;
+
+    const int inner = n_heads * head_dim_ssm;
+    int t = 0;
+    while (t < n_tokens) {
+        const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
+        // h_state mutates in-place across chunks — kernel reads it as the
+        // entry state and writes the chunk-end state back. No additional
+        // host-side sync needed; the chunks are issued on the same stream.
+        gdn_scan_fused_f32(conv_f32 + static_cast<size_t>(t) * conv_channels, conv_channels,
+                           alpha + t * n_heads, beta + t * n_heads, A_log, dt_bias, h_state,
+                           y + static_cast<size_t>(t) * inner, this_chunk, n_heads, head_dim_ssm,
+                           state_size, n_groups, stream, grouped_layout);
+        t += this_chunk;
+    }
+}
+
 // FP32-output variant — writes scan result as FP32 for downstream
 // FP32-input RMSNorm+Gate (avoids FP16 subnormal-truncation at ~6e-5).
 void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,

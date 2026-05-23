@@ -19,6 +19,27 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                         int grouped_layout = 0);
 
+// EXPERIMENTAL — Phase 1b scaffolding for chunkwise SSD scan.
+// Same signature as `gdn_scan_fused_f32`. Will eventually implement the
+// parallel-within-chunk Mamba2 SSD algorithm (cf. Yang et al. 2024 "Parallel
+// Linear Attention With The Delta Rule" for the delta-rule adaptation; the
+// standard Mamba2 SSD assumes scalar decay and doesn't cover GDN's rank-1
+// `(I - β k k^T)` multiplicative update).
+//
+// Currently implemented as a chunk-iterating sequential wrapper around
+// `gdn_scan_fused_f32` — the FUNCTIONAL behavior is identical to the
+// monolithic call, validated by `tests/test_gdn.cu::ChunkBoundaryHandoff`.
+// Phase 1b.1 replaces the within-chunk sequential scan with the SSD matmul
+// algorithm; this scaffolding establishes the API + regression-gate plumbing.
+//
+// Design doc: docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
+// Phase 0 verdict: docs/plans/gdn_chunkwise_scan_design_2026_05_23.md →
+// PROCEED (latency-bound, 5.47 % mem + 5.47 % compute at peak).
+void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
+                            int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
