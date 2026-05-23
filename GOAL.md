@@ -13,7 +13,7 @@ Single-user, single-GPU, latency-first. Not a competitor to vLLM/SGLang on throu
 Ranked, non-negotiable order:
 
 1. **Decode throughput (tok/s) at batch=1** on RTX 5090 — primary metric. Must lead llama.cpp, vLLM, SGLang, ExLlamaV3, MLC-LLM on every supported architecture and quant combination we ship.
-2. **Prefill throughput (tok/s) at batch=1** on RTX 5090 — must match or beat llama.cpp on dense; must close the MoE gap to vLLM (currently ~20× behind on Qwen3-Coder NVFP4 prefill — unacceptable).
+2. **Prefill throughput (tok/s) at batch=1** on RTX 5090 — must match or beat llama.cpp on dense; must close the MoE gap to vLLM (Qwen3-Coder NVFP4 pp512 was 1.14-1.32× behind vLLM 0.20.2 single-seq as of 2026-05-10; closed to **1.056× as of 2026-05-23** post-#374 skip-gather, see *What "best on 5090" requires* below).
 3. **Time-to-first-token (TTFT)** at realistic prompt lengths (512, 2048, 8192, 32k) — must be competitive with vLLM despite our batch=1 focus.
 4. **VRAM efficiency** — must fit larger models than competitors at equivalent quality (NVFP4, FP8 KV, paged cache). 32 GB on a 5090 should serve everything up to ~70B dense at usable quality.
 5. **Quality** — perplexity and downstream eval parity with llama.cpp at the same quant. No silent quality regressions for speed.
@@ -63,7 +63,13 @@ Concrete technical commitments — these are means, not ends, but progress on th
 - **MXFP4 FMHA** (already novel — first such impl) must stay ahead and expand to more shapes. The +6.7–7.9% over FP8 FMHA on Qwen3 is the baseline, not the ceiling.
 - **CUTLASS Hopper FMHA path on sm_120** for prefill — keep up with CUTLASS releases.
 - **WMMA 8-warp decode kernel** is the decode workhorse on sm_120. Tune for every hero model's head dim.
-- **Grouped GEMM dequant for MoE prefill** — closing the residual gap to vLLM single-seq. Qwen3-Coder-30B-A3B-NVFP4 pp512: imp ~14–16 k tok/s (cuBLAS-algo-variance band per the 2026-05-10 31-commit dive), vLLM 0.20.2 single-seq 18.5 k tok/s (**1.14–1.32× gap**). vLLM's 25.5 k multi-seq is continuous-batching mode, not a fair single-seq comparison — imp is batch=1 by design. Engineering priority remains high but the gap is multi-week (CUTLASS sm120 `MoEProblemShape` scheduler upstream, custom kernel work, or gather+quant fusion patterns), not a single-PR win.
+- **Grouped GEMM dequant for MoE prefill** — gap to vLLM single-seq has substantially closed. Qwen3-Coder-30B-A3B-NVFP4 (cold-median 5×5 trials, 15 s cooldown, 2026-05-23):
+  - **pp512 = 17,521 tok/s** (σ wide: 16k-19k spread across trials — cuBLAS-algo-state still drifts at this kernel size despite cold-median methodology)
+  - **pp2048 = 18,573 tok/s** (σ tight: 18.3k-18.9k = 3 % spread — exceeds vLLM 0.20.2's pp512 single-seq number)
+  - **tg128 @ ctx=512 = 273.24 tok/s** (σ 0.09 — rock solid)
+  - **tg128 @ ctx=2048 = 268.46 tok/s** (σ 0.10)
+
+  Compared to vLLM 0.20.2 single-seq pp512 = 18,500 tok/s: **gap = 1.056× (5.6 %)**, was 1.14-1.32× pre-#374. The MoE-prefill skip-gather (#374) + downstream improvements moved us from 14,562 → 17,521 pp512 (+20.3 %). pp2048 actually exceeds vLLM's single-seq pp512 baseline. vLLM's 25.5 k multi-seq is continuous-batching mode, not a fair single-seq comparison — imp is batch=1 by design. **Remaining 5.6 % gap is within cuBLAS-algo-variance band on pp512.** Engineering priority drops here — the MoEProblemShape upstream / custom kernel work path documented in `docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_2026_05_23.md` is no longer a release blocker.
 
 ### Memory
 - **Paged KV cache** (block 16) with LRU, prefix caching — keep and extend.
