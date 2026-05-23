@@ -63,6 +63,22 @@ void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const h
                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                cudaStream_t stream, int grouped_layout = 0);
 
+// Phase 2b — WY-rep delta-rule scan with Tensor Core MMA on the four
+// chunk-internal matmuls (KK, QK, KH, QH). The H_L update remains scalar
+// but with hoisted cumulative-decay caching. CHUNK=16 to fit the FP16
+// K̃/Q̃/H_0 + FP32 KH/QH outputs within the 99 KiB sm_120 opt-in cap.
+//
+// Numerically near-equivalent to the sequential reference (FP16 storage
+// of K̃/Q̃/H_0 introduces a small precision drop, but FP32 accumulation
+// throughout the WMMA + downstream ops keeps the output within Phase 1a's
+// tolerance budget).
+//
+// HD=SS=128 only; other shapes fall back to gdn_scan_fused_f32.
+void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, const half* alpha,
+                                  const half* beta, const float* A_log, const float* dt_bias,
+                                  float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
+                                  int state_size, int n_groups, cudaStream_t stream, int grouped_layout = 0);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,

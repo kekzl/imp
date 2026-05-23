@@ -2,8 +2,11 @@
 #include "core/logging.h"
 #include <cmath>
 #include <type_traits>
+#include <mma.h>
 
 namespace imp {
+
+namespace wmma = nvcuda::wmma;
 
 // Forward declarations
 __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*, const half*, const half*,
@@ -577,22 +580,342 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         }
 
         // ---------------- STEP 6: H_L = D[0..L] H_0 + Σ_t D[t+1..L] k̃_t u_t^T ----------------
-        // Thread d updates column d of H. For each state row s: H_reg[s] *= D[0..L] then add Σ_t D[t+1..L] k̃_t[s] u_t[d].
+        // Tuning (2026-05-24):
+        //   - Hoist D[t+1..L] = exp(logD[L] - logD[t+1]) out of the (s, t) double
+        //     loop. The decay factor depends only on t, so computing it L*SS times
+        //     per chunk per head is wasted work. Precompute once into s_g (which
+        //     is reusable scratch by this point in the chunk).
+        //   - Loop interchange (t outer, s inner). The inner loop now walks
+        //     s_k[t*SS + s] with stride 1 in s, instead of the natural (s, t)
+        //     order's stride-SS column access. Sequential reads → much better
+        //     L1/coalescing.
+        //   - Hoist the per-thread per-t coefficient (D[t+1..L] · u_t[d]) out of
+        //     the s loop so the inner s loop is one FMA per element.
         {
             const float D_0L = expf(s_logD[L]);
+            if (d < L) {
+                s_g[d] = expf(s_logD[L] - s_logD[d + 1]);  // D[d+1..L], shared
+            }
+            __syncthreads();
 #pragma unroll
             for (int s = 0; s < SS; s++) {
-                float add = 0.0f;
-                for (int t_loc = 0; t_loc < L; t_loc++) {
-                    const float logD_t1L = s_logD[L] - s_logD[t_loc + 1];
-                    add += expf(logD_t1L) * s_k[t_loc * SS + s] * s_u[t_loc * HD + d];
+                H_reg[s] *= D_0L;
+            }
+            for (int t_loc = 0; t_loc < L; t_loc++) {
+                const float coef = s_g[t_loc] * s_u[t_loc * HD + d];
+                const float* k_row = s_k + t_loc * SS;
+#pragma unroll
+                for (int s = 0; s < SS; s++) {
+                    H_reg[s] += coef * k_row[s];
                 }
-                H_reg[s] = D_0L * H_reg[s] + add;
             }
         }
 
         t_chunk_start += L;
         __syncthreads();  // Before reusing s_k / s_q / etc. for the next chunk.
+    }
+
+    // Write final state back to global memory.
+    {
+        float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+        for (int s = 0; s < SS; s++)
+            H_col[s * HD] = H_reg[s];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b — Tensor Core MMA prototype on top of the Phase 2a WY-rep math.
+//
+// Replaces the four chunk-internal scalar shared-memory matmuls in Phase 2a
+// (KK, QK, KH, QH) with WMMA 16×16×16 FP16→FP32 Tensor Core dispatches.
+// The H_L update (Step 6) stays scalar but with hoisted exp-of-cumulative-
+// decay caching — independent optimisation that drops ~SS × L exp calls per
+// chunk per head down to L per chunk per head.
+//
+// CHUNK=16 (not 32 like Phase 2a) — the WMMA shape is exactly the 16×16
+// fragment and the smem budget at CHUNK=32 with FP16 K̃/Q̃ + FP16 H_0 +
+// FP32 outputs blows past the 99 KiB sm_120 opt-in cap. CHUNK=16 lands at
+// ~69 KiB.
+//
+// Smem layout (HD=SS=128, CHUNK=16):
+//   s_k_fp16[L*SS]    = 4 KiB     normalised K (FP16 for WMMA matmul)
+//   s_q_fp16[L*SS]    = 4 KiB     normalised Q (FP16 for WMMA matmul)
+//   s_h0_fp16[SS*HD]  = 32 KiB    H_0 materialised from registers as FP16
+//   s_kh_fp32[L*HD]   = 8 KiB     KH = K̃ H_0 (WMMA output, FP32 accum)
+//   s_qh_fp32[L*HD]   = 8 KiB     QH = Q̃ H_0
+//   s_kk_fp32[L*L]    = 1 KiB     KK = K̃ K̃^T
+//   s_qk_fp32[L*L]    = 1 KiB     QK = Q̃ K̃^T
+//   s_u_fp32[L*HD]    = 8 KiB     U (output of triangular solve)
+//   s_D[L+1]          = 68 B      cumulative decay (exp space, not log)
+//   s_g, s_beta       = 128 B
+//   s_reduce[HD]      = 512 B
+// Total ~67 KiB → fits with the 96 KiB opt-in (same as Phase 1b.1/2a).
+//
+// WMMA operand setup:
+//   - K̃ K̃^T (KK):   A=K̃ row_major [L,SS], B=K̃ col_major [SS,L]
+//   - Q̃ K̃^T (QK):   A=Q̃ row_major, B=K̃ col_major
+//   - K̃ H_0 (KH):    A=K̃ row_major, B=H_0 row_major [SS,HD]
+//   - Q̃ H_0 (QH):    A=Q̃ row_major, B=H_0 row_major
+//
+// Phase 2b is the FIRST imp GDN-side TC-MMA path. The H_L update remains
+// scalar; integrating WMMA on H_L would require an extra ~16 KiB temp tile
+// buffer or careful warp-fragment-back-to-register choreography that
+// doesn't fit in this initial prototype.
+// ---------------------------------------------------------------------------
+template <int HD, int SS, int CHUNK>
+__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
+    const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
+    const half* __restrict__ beta_all, const float* __restrict__ A_log,
+    const float* __restrict__ dt_bias, float* __restrict__ h_state, half* __restrict__ y_out,
+    int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout) {
+    static_assert(CHUNK == 16, "WMMA prototype tuned for CHUNK=16 only");
+    static_assert(HD == 128 && SS == 128, "WMMA prototype tuned for HD=SS=128 only");
+
+    const int h = blockIdx.x;
+    if (h >= n_heads)
+        return;
+    const int d = threadIdx.x;
+    const int warp_id = d / 32;
+    const int n_warps = HD / 32;  // 4 warps per block
+
+    const int g_idx = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
+    const int inner = n_heads * HD;
+    const int BC_size = n_groups * SS;
+    const float scale = rsqrtf(static_cast<float>(HD));
+    const float A_h = A_log[h];
+    const float dtb_h = dt_bias[h];
+
+    // State in registers (one column per thread).
+    float H_reg[SS];
+    {
+        const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+        for (int s = 0; s < SS; s++)
+            H_reg[s] = H_col[s * HD];
+    }
+
+    extern __shared__ float smem[];
+    half* s_k_fp16 = reinterpret_cast<half*>(smem);                      // [L * SS]
+    half* s_q_fp16 = s_k_fp16 + CHUNK * SS;                              // [L * SS]
+    half* s_h0_fp16 = s_q_fp16 + CHUNK * SS;                             // [SS * HD]
+    float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + SS * HD);    // [L * HD]
+    float* s_qh_fp32 = s_kh_fp32 + CHUNK * HD;                           // [L * HD]
+    float* s_kk_fp32 = s_qh_fp32 + CHUNK * HD;                           // [L * L]
+    float* s_qk_fp32 = s_kk_fp32 + CHUNK * CHUNK;                        // [L * L]
+    float* s_u_fp32 = s_qk_fp32 + CHUNK * CHUNK;                         // [L * HD]
+    float* s_D = s_u_fp32 + CHUNK * HD;                                  // [L + 1]   exp-cumulative decay
+    float* s_g = s_D + (CHUNK + 1);                                      // [L]
+    float* s_beta = s_g + CHUNK;                                         // [L]
+    float* s_reduce = s_beta + CHUNK;                                    // [HD]
+
+    int t_chunk_start = 0;
+    while (t_chunk_start < n_tokens) {
+        const int L = (t_chunk_start + CHUNK <= n_tokens) ? CHUNK : (n_tokens - t_chunk_start);
+
+        // ---------------- STEP 1: load K, Q (FP32→FP16) and L2-normalise ----------------
+        // First load raw values into FP16 (FP16 has 11 mantissa bits — sufficient for the
+        // post-norm values which are ≤ 1 in magnitude after rsqrt scaling).
+        if (d < SS) {
+            for (int t_loc = 0; t_loc < L; t_loc++) {
+                const int t = t_chunk_start + t_loc;
+                const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
+                s_q_fp16[t_loc * SS + d] = __float2half(row[g_idx * SS + d]);
+                s_k_fp16[t_loc * SS + d] = __float2half(row[BC_size + g_idx * SS + d]);
+            }
+        }
+        __syncthreads();
+
+        // Per-token L2-norm reduction (parallel across SS via block reduction).
+        for (int t_loc = 0; t_loc < L; t_loc++) {
+            float k_sq = 0.0f, q_sq = 0.0f;
+            for (int i = d; i < SS; i += HD) {
+                float k = __half2float(s_k_fp16[t_loc * SS + i]);
+                float q = __half2float(s_q_fp16[t_loc * SS + i]);
+                k_sq += k * k;
+                q_sq += q * q;
+            }
+            s_reduce[d] = k_sq;
+            __syncthreads();
+            for (int stride = HD / 2; stride > 0; stride >>= 1) {
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
+                __syncthreads();
+            }
+            const float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+
+            s_reduce[d] = q_sq;
+            __syncthreads();
+            for (int stride = HD / 2; stride > 0; stride >>= 1) {
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
+                __syncthreads();
+            }
+            const float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+
+            if (d < SS) {
+                s_k_fp16[t_loc * SS + d] = __float2half(__half2float(s_k_fp16[t_loc * SS + d]) * k_inv);
+                s_q_fp16[t_loc * SS + d] = __float2half(__half2float(s_q_fp16[t_loc * SS + d]) * q_inv);
+            }
+            __syncthreads();
+        }
+
+        // ---------------- STEP 2: g_t, β_t, cumulative decay D[0..t+1] ----------------
+        if (d == 0) {
+            float D_cum = 1.0f;
+            s_D[0] = 1.0f;
+            for (int t_loc = 0; t_loc < L; t_loc++) {
+                const int t = t_chunk_start + t_loc;
+                float alpha_h = __half2float(alpha_all[t * n_heads + h]);
+                float dt_val = alpha_h + dtb_h;
+                dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
+                float lg_t = fmaxf(A_h * dt_val, -20.0f);
+                s_g[t_loc] = expf(lg_t);
+                D_cum *= s_g[t_loc];
+                s_D[t_loc + 1] = D_cum;
+                float beta_h = __half2float(beta_all[t * n_heads + h]);
+                s_beta[t_loc] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
+            }
+        }
+
+        // ---------------- STEP 3: materialise H_0 in shared memory as FP16 ----------------
+        // Each thread d writes its column to s_h0_fp16[s * HD + d].
+        // The static H_reg[SS] array doesn't allow trivial cp.async; do per-element stores.
+#pragma unroll
+        for (int s = 0; s < SS; s++) {
+            s_h0_fp16[s * HD + d] = __float2half(H_reg[s]);
+        }
+        __syncthreads();
+
+        // ---------------- STEP 4: WMMA matmuls KK, QK, KH, QH ----------------
+        // All four use the same SS-dim inner reduction (L×SS × SS×{L,HD}).
+        // Output tiles distributed across warps. Standard m=n=k=16 fragments.
+
+        // KK and QK (L×L outputs, single 16×16 tile each). Warp 0 does KK, warp 1 does QK.
+        if (warp_id == 0) {
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+            wmma::fill_fragment(c_frag, 0.0f);
+            for (int k = 0; k < SS / 16; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16, SS);
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
+                wmma::load_matrix_sync(b_frag, s_k_fp16 + k * 16, SS);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+            wmma::store_matrix_sync(s_kk_fp32, c_frag, CHUNK, wmma::mem_row_major);
+        } else if (warp_id == 1) {
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+            wmma::fill_fragment(c_frag, 0.0f);
+            for (int k = 0; k < SS / 16; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, s_q_fp16 + k * 16, SS);
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
+                wmma::load_matrix_sync(b_frag, s_k_fp16 + k * 16, SS);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+            wmma::store_matrix_sync(s_qk_fp32, c_frag, CHUNK, wmma::mem_row_major);
+        }
+
+        // KH and QH (L×HD outputs, 1 M-tile × 8 N-tiles = 8 tiles each, 16 total).
+        // All 4 warps process tiles in stride-4 fashion.
+        const int kh_n_tiles = HD / 16;  // 8
+        for (int tile_idx = warp_id; tile_idx < kh_n_tiles; tile_idx += n_warps) {
+            const int n_offset = tile_idx * 16;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+            wmma::fill_fragment(c_frag, 0.0f);
+            for (int k = 0; k < SS / 16; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16, SS);
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+                wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+            wmma::store_matrix_sync(s_kh_fp32 + n_offset, c_frag, HD, wmma::mem_row_major);
+        }
+        for (int tile_idx = warp_id; tile_idx < kh_n_tiles; tile_idx += n_warps) {
+            const int n_offset = tile_idx * 16;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+            wmma::fill_fragment(c_frag, 0.0f);
+            for (int k = 0; k < SS / 16; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, s_q_fp16 + k * 16, SS);
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+                wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+            wmma::store_matrix_sync(s_qh_fp32 + n_offset, c_frag, HD, wmma::mem_row_major);
+        }
+        __syncthreads();
+
+        // ---------------- STEP 5: triangular solve for u_t ----------------
+        // Sequential over t (intra-chunk), parallel over HD output dim.
+        // u_t[d] = c_t[d] - Σ_{j<t} T[t,j] u_j[d]
+        // c_t[d] = β_t v_t[d] - β_t g_t D[0..t] KH[t,d]
+        // T[t,j] = β_t g_t (D[0..t]/D[0..j+1]) KK[t,j]
+        for (int t_loc = 0; t_loc < L; t_loc++) {
+            const int t = t_chunk_start + t_loc;
+            const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
+            const float v_d = row[2 * BC_size + h * HD + d];
+
+            const float g_t = s_g[t_loc];
+            const float beta_t = s_beta[t_loc];
+            const float D_0t = s_D[t_loc];
+
+            float u_t = beta_t * v_d - beta_t * g_t * D_0t * s_kh_fp32[t_loc * HD + d];
+            const float bg_Dt = beta_t * g_t * D_0t;
+            for (int j = 0; j < t_loc; j++) {
+                const float D_inv_j1 = 1.0f / s_D[j + 1];
+                const float coef = bg_Dt * D_inv_j1 * s_kk_fp32[t_loc * CHUNK + j];
+                u_t -= coef * s_u_fp32[j * HD + d];
+            }
+            s_u_fp32[t_loc * HD + d] = u_t;
+            __syncthreads();
+        }
+
+        // ---------------- STEP 6: Y[t] for all chunk tokens ----------------
+        // y_t[d] = scale · (D[0..t+1] QH[t,d] + Σ_{j≤t} (D[0..t+1]/D[0..j+1]) QK[t,j] u_j[d])
+        for (int t_loc = 0; t_loc < L; t_loc++) {
+            const int t = t_chunk_start + t_loc;
+            const float D_0t1 = s_D[t_loc + 1];
+
+            float y = D_0t1 * s_qh_fp32[t_loc * HD + d];
+            for (int j = 0; j <= t_loc; j++) {
+                const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
+                y += coef * s_u_fp32[j * HD + d];
+            }
+            y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
+        }
+
+        // ---------------- STEP 7: H_L = D[0..L] H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T ----------------
+        // Precompute D[t+1..L] = D[0..L] / D[0..t+1] into s_g (reusable scratch, no longer needed).
+        // Saves SS × L − L expf calls per chunk per head.
+        const float D_0L = s_D[L];
+        if (d < L) {
+            s_g[d] = D_0L / s_D[d + 1];  // D[d+1..L]
+        }
+        __syncthreads();
+
+        // Loop interchange (t outer, s inner) — sequential smem access to s_k_fp16
+        // along s (stride 1) instead of stride-SS column access. Plus hoist the
+        // per-thread per-t coefficient (s_g[t] · u_t[d]) out of the s loop.
+        // Halves the H_L step's effective memory traffic vs the natural (s, t)
+        // ordering and eliminates SS × L redundant scalar multiplications per
+        // thread per chunk.
+#pragma unroll
+        for (int s = 0; s < SS; s++) {
+            H_reg[s] *= D_0L;
+        }
+        for (int t_loc = 0; t_loc < L; t_loc++) {
+            const float coef = s_g[t_loc] * s_u_fp32[t_loc * HD + d];
+            const half* k_row = s_k_fp16 + t_loc * SS;
+#pragma unroll
+            for (int s = 0; s < SS; s++) {
+                H_reg[s] += coef * __half2float(k_row[s]);
+            }
+        }
+
+        t_chunk_start += L;
+        __syncthreads();  // Before reusing smem for the next chunk.
     }
 
     // Write final state back to global memory.
@@ -905,6 +1228,42 @@ void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const h
         return;
     }
     // Unsupported shape — fall back to the sequential kernel for safety.
+    gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                       head_dim_ssm, state_size, n_groups, stream, grouped_layout);
+}
+
+// Phase 2b host launcher. HD=SS=128 + CHUNK=16 path; other shapes fall back
+// to the sequential kernel.
+void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, const half* alpha,
+                                  const half* beta, const float* A_log, const float* dt_bias,
+                                  float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
+                                  int state_size, int n_groups, cudaStream_t stream, int grouped_layout) {
+    if (head_dim_ssm == 128 && state_size == 128 && n_tokens >= 1) {
+        constexpr int HD = 128, SS = 128, CHUNK = 16;
+        // Shared-memory budget for the TC kernel (FP16 storage of K̃/Q̃/H_0,
+        // FP32 outputs):
+        //   s_k_fp16 + s_q_fp16 = 2 * CHUNK * SS * 2 = 8 KiB
+        //   s_h0_fp16           = SS * HD * 2        = 32 KiB
+        //   s_kh + s_qh         = 2 * CHUNK * HD * 4 = 16 KiB
+        //   s_kk + s_qk         = 2 * CHUNK^2 * 4    = 2 KiB
+        //   s_u_fp32            = CHUNK * HD * 4     = 8 KiB
+        //   s_D + s_g + s_beta + s_reduce ≈ 1 KiB
+        // Total ~67 KiB — fits within the 96 KiB opt-in.
+        const size_t smem =
+            (2 * CHUNK * SS) * sizeof(half) + (SS * HD) * sizeof(half) +
+            (2 * CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) * sizeof(float);
+        static bool attr_set = false;
+        if (!attr_set) {
+            cudaFuncSetAttribute(
+                reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK>),
+                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+            attr_set = true;
+        }
+        gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
+            conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
+            grouped_layout);
+        return;
+    }
     gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
                        head_dim_ssm, state_size, n_groups, stream, grouped_layout);
 }
