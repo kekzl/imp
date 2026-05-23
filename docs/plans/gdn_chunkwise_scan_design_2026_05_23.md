@@ -219,14 +219,57 @@ Total ~113 KiB exceeds the 100 KiB sm_120 per-block cap → need to either drop 
 - `D[0..L]` can underflow for large L if `g_t < 1` consistently. Mitigate by carrying `log_D` instead of `D` and exponentiating at use; small constant cost.
 - The triangular solve accumulates rounding errors over L steps. For L=32-64 this is well within the FP16-output tolerance (1e-3 from Phase 1a).
 
-#### Phase 2b — Tensor Core MMA via CUTLASS / cute (multi-week) ⏳ PENDING
+#### Phase 2b — Tensor Core MMA prototype ✅ DONE 2026-05-24 (partial)
 
-Once Phase 2a's WY-rep is correct, replace the naive shared-memory matmuls in steps 2, 5, 6 with CUTLASS / cute MMA tile dispatches. Operand layouts to derive:
-- `K̃ K̃^T` (L×SS × SS×L → L×L): standard A·A^T, FP16 input → FP32 accum on `mma.m16n8k16`.
-- `K̃ H_0` (L×SS × SS×HD → L×HD): FP16 input → FP32 accum.
-- Q̃ K̃^T similar; the masked variant needs the decay-scaled mask applied post-MMA (free if fused with the next matmul).
+**Result**: New kernel `gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK=16>` in `src/compute/gdn.cu`. Replaces Phase 2a's four chunk-internal scalar matmuls (KK, QK, KH, QH) with WMMA 16×16×16 FP16→FP32 Tensor Core dispatches. The H_L update (Step 6) remains scalar but with hoisted cumulative-decay caching (drops ~SS·L exp calls per chunk per head down to L per chunk per head).
 
-sm_120 Tensor Core throughput is 838 TFLOPS FP16-accum (no tcgen05/wgmma). The L=64 inner matmuls fit naturally on `mma.m16n8k16` tiles — the chunk-internal computation is structurally identical to a small attention block.
+CHUNK=16 (not 32 like Phase 2a) because the smem budget at CHUNK=32 with FP16 K̃/Q̃ + FP16 H_0 + FP32 outputs blows past the 99 KiB sm_120 opt-in cap. CHUNK=16 lands at ~67 KiB and fits cleanly.
+
+**Numerics on `GDNScanTest.ChunkwiseWyTcMatchesFused` (n_tok=32, 2 chunks of 16, HD=SS=128)**:
+- max_diff Y = **1.5e-5** (well inside Phase 1a's 1e-3 FP16 budget)
+- max_diff H state = **5.4e-5** (right at the FP32 1e-5 boundary; expected from FP16 K̃/Q̃/H_0 storage)
+
+WMMA matmuls accumulate in FP32 so per-matmul precision is preserved; the small drop vs Phase 2a's bit-exact result comes from FP16 storage of the matmul operands.
+
+**Microbench (n_tok=4096, n_heads=32, HD=SS=128, n_groups=16, RTX 5090 sm_120, 20 reps)**:
+
+| Kernel | Time | vs sequential |
+|---|---|---|
+| gdn_scan_fused_f32 (sequential)        | 1.566 µs/tok | 1.000× |
+| gdn_scan_chunkwise_f32 (Phase 1b.1)    | 1.346 µs/tok | **0.860×** (+15.6 %) |
+| gdn_scan_chunkwise_wy_f32 (Phase 2a)   | 3.506 µs/tok | 2.239× |
+| gdn_scan_chunkwise_wy_tc_f32 (Phase 2b)| **3.588 µs/tok** | **2.291×** |
+
+**The Phase 2b TC-MMA implementation does not beat Phase 2a or the sequential reference.** Honest finding — the result documents what the actual bottleneck is. Root cause: the H_L update step (Step 6) is now the dominant cost in both Phase 2a and Phase 2b. TC-MMA-ifying KK / QK / KH / QH leaves the L·SS·HD H_L accumulation scalar, and that single step dominates the per-chunk runtime. Plus:
+
+1. **CHUNK=16 doubles per-chunk overhead** vs CHUNK=32 (2× the chunks for the same prefill, 2× the setup / sync / decay-precompute costs)
+2. **H_0 materialisation to shared memory** as FP16 costs ~32 KiB of stores per chunk
+3. **FP16 storage round-trips** in the L2-norm and c_t computation add per-element conversion costs
+
+To make Phase 2b beat sequential requires one (or both) of:
+- **Phase 2c**: TC-MMA the H_L update (the dominant cost). Needs a 16×16 output-tile accumulator pattern with intermediate shared-memory storage for warp-fragment-to-register reshuffling. Multi-day. The single most impactful follow-up.
+- **CHUNK=32 with smarter smem**: drop the s_h0_fp16 materialisation, keep KH/QH scalar (sacrificing those TC-MMA wins), only TC-MMA the small KK/QK. Likely doesn't beat sequential either since KK/QK are a small fraction of the FLOPs.
+
+The Phase 2b prototype is shipped to:
+1. Validate the TC-MMA infrastructure on the GDN scan path (numerics pass, no kernel-launch issues)
+2. Document the bottleneck honestly so future sessions don't repeat the wrong optimisation
+3. Give Phase 2c a working WMMA template to drop H_L matmul into
+
+Not wired into production dispatch (would regress wall by 2.3×). The new test `ChunkwiseWyTcMatchesFused` is the regression gate for Phase 2c / Phase 2d work that targets the H_L step.
+
+Code: `gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK=16>` in `src/compute/gdn.cu`; host launcher `gdn_scan_chunkwise_wy_tc_f32`; test in `tests/test_gdn.cu`.
+
+#### Phase 2c — TC-MMA the H_L update ⏳ PENDING
+
+The remaining algorithmic lever. H_L = D[0..L]·H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T. The Σ_t expression is structurally a K̃_scaled^T · U matmul (SS×L · L×HD → SS×HD). Implementing it via WMMA requires:
+
+- Per-output-tile (16×16) WMMA accumulation
+- An intermediate smem buffer ≥ 16·HD floats (8 KiB) to receive each warp's output tile
+- Per-thread loop reading the warp's tile and adding to H_reg + D[0..L]·H_0_reg
+
+Expected outcome (per analysis): brings Phase 2b's 2.291× ratio down to ~1.0× or below sequential. Combined with Phase 1b.1's structural win, this is where the design doc's +20-30 % prefill wall is supposed to come from.
+
+Multi-day kernel + validation work. Phase 1b.1 + Phase 2a + Phase 2b are the prerequisites and are now all landed.
 
 ### Phase 3 — Numerical validation across context lengths (2-3 days) ⏳ PENDING
 
