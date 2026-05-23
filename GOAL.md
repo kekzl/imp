@@ -126,7 +126,9 @@ A release is shippable when, on RTX 5090:
 
 This number goes up over time. It never goes down. If a refactor makes it go down, the refactor is wrong, no matter how clean the code looks.
 
-Current: **150.1 tok/s default flags** (May 22 2026, post PRs #362 + #364 + #367 — auto-resolve picks mode 1 for dense Q*_K models). The 150 milestone is hit by default.
-Previous: 121.4 tok/s (May 2026, +25.5% vs llama.cpp c830f99).
+Measurement methodology (always cold-median, never single-shot): 5 independent `imp-cli --bench` invocations × 5 reps × 15 s cooldown between trials, take the median. Resists cuBLAS-algo-state drift over long sessions (`memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md`).
+
+Current: **157.71 tok/s default flags** (May 23 2026, cold-median methodology — 5 trials × 5 reps × 15 s cooldown, σ = 0.16 tok/s across samples; same code as the May 22 measurement, just less cuBLAS-algo-cache-state noise). The 150 milestone is hit by default with margin.
+Previous: 150.1 tok/s (May 22 2026, single-shot, post PRs #362 + #364 + #367). 121.4 tok/s (May 2026, +25.5% vs llama.cpp c830f99).
 Next milestone: **175 tok/s** — needs architectural work (decode kernel tuning per the 35 % attention / 60 % FFN profile split, FP8 prefill cache coverage for the remaining ~100 layer-tensors that fall back to CUTLASS NVFP4 prefill, or LM_HEAD quantization unlock).
 Stretch: 200 tok/s with TurboDraft or draft-model spec-decode on (both blocked: TurboDraft broken on pretrained, no MTP head shipped for Qwen3-14B, draft-model integration is multi-week).
