@@ -116,13 +116,117 @@ The +15 % win is structural and comes for free with Phase 1b.1 — caching K, Q 
 
 Code: `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` in `src/compute/gdn.cu` (under "Phase 1b.1 — Standalone chunkwise SSD scan prototype"); dispatch in `gdn_scan_chunkwise_f32`; tests `ChunkwiseProtoMatchesFused` + `ChunkwiseProtoMicrobench` in `tests/test_gdn.cu`.
 
-### Phase 2 — Production kernel integration (5-7 days) ⏳ PENDING
+### Phase 2 — Production kernel integration (5-7 days) ⏳ IN PROGRESS
 
-- [ ] Add `gdn_scan_chunkwise_kernel<HD, SS, CHUNK_SIZE, YOut>` in `src/compute/gdn.cu`
-- [ ] Use CUTLASS / cute tile descriptors for the chunk-internal lower-triangular MMA
-- [ ] FP32 accumulation for cross-chunk state propagation (precision preservation)
-- [ ] Dispatch from `gdn_scan_fused_f32_*` host launchers when `n_tokens >= CHUNK_SIZE` (decode falls through to existing sequential path)
-- [ ] Gate behind `gdn.chunkwise_scan = false` config flag (off by default until validated)
+- [x] Add `gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut>` in `src/compute/gdn.cu` (PR #388 templated on YOut)
+- [ ] Use CUTLASS / cute tile descriptors for the chunk-internal lower-triangular MMA → **Phase 2b** (Tensor Core acceleration; multi-week)
+- [x] FP32 accumulation for cross-chunk state propagation (precision preservation) — done in 1b.1
+- [x] Dispatch from `gdn_scan_fused_f32_*` host launchers when `n_tokens >= CHUNK_SIZE` (decode falls through to existing sequential path) — done in PR #388 (auto-merged #390)
+- [x] Gate behind `gdn.chunkwise_scan = false` config flag (off by default until validated) — done in PR #388
+
+The dispatch + flag plumbing landed; the remaining piece is the **algorithmic core**: replacing the sequential delta-rule sweep with the WY-rep parallel scan. Split into 2a (correctness reference, naive shared-memory matmul) and 2b (Tensor Core MMA via CUTLASS / cute).
+
+#### Phase 2a — WY-rep delta-rule math worked out ✅ DONE 2026-05-24
+
+**Result**: New kernel `gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK=32>` in `src/compute/gdn.cu` implements the full WY-representation parallel delta-rule scan (Yang et al. 2024 adapted for GDN). Algorithm:
+
+1. **Setup** — per-token g_t, β_t, log-cumulative-decay log_D[t+1]; L2-normalised K̃, Q̃ cached in shared memory
+2. **Gram matrices KH, QH (matmul vs in-register H_0)** — thread d computes its own column of K̃·H_0 and Q̃·H_0
+3. **Gram matrices KK, QK (chunk-internal)** — lower-triangular Gram matrices; threads cooperate across L²=1024 entries
+4. **Forward triangular solve for u_t** — sequential over t∈[0,L), parallel over HD output dim (thread d owns column d of U)
+5. **Y computation** — y_t = scale · (D[0..t+1]·QH[t,:] + Σ_{j≤t} D[j+1..t+1]·QK[t,j]·u_j)
+6. **H_L update** — H_L = D[0..L]·H_0 + Σ_t D[t+1..L]·k̃_t·u_t^T
+
+CHUNK=32 (not 64 as design doc target) because the s_kh + s_qh + s_u buffers (3·CHUNK·HD floats each) push smem to ~89 KiB at CHUNK=32 — already near the sm_120 `sharedMemPerBlockOptin` cap of 99 KiB. CHUNK=64 would need ~157 KiB; either FP16 storage for K̃/Q̃ (precision audit) or smarter buffer reuse (recompute QH on the fly) is the path to CHUNK=64.
+
+**Numerics on `GDNScanTest.ChunkwiseWyMatchesFused` (n_tok=64, 2 chunks of 32, HD=SS=128)**:
+- max_diff Y = **3.8e-6** (FP16 quantisation floor; effectively bit-exact)
+- max_diff H state = **6e-8** (FP32 reordering noise)
+
+Well inside Phase 1a's FP16 1e-3 / FP32 1e-5 budgets. The chunk-internal log-space cumulative decay + the matmul reformulation don't introduce material precision error vs the sequential register-cached delta-rule loop.
+
+**Microbench (n_tok=4096, n_heads=32, HD=SS=128, n_groups=16, RTX 5090 sm_120, 20 reps)**:
+- gdn_scan_fused_f32 (sequential):       6.661 ms = **1.626 µs/token**
+- gdn_scan_chunkwise_f32 (Phase 1b.1):   5.686 ms = **1.388 µs/token** (0.854× wall, +17 % throughput)
+- gdn_scan_chunkwise_wy_f32 (Phase 2a):  14.771 ms = **3.606 µs/token** (2.218× wall, **-55 % throughput**)
+
+The 2.2× slowdown is expected and documents the gap that Phase 2b's Tensor Core MMA closes. Phase 2a does roughly 3× the FLOPs of the sequential kernel (chunk-internal KK matmul + forward solve + Y matmul) and runs them as scalar dot products in shared memory — without TC acceleration, those FLOPs cost more wall-clock than the sequential register-cached loop saves on dependency-breaking parallelism. The Tensor Core path turns those matmuls into ~16× faster MMA tile ops, which is where the design doc's +20-30 % wall lives.
+
+Phase 2a is shipped as **correctness reference + algorithmic scaffold only** — not wired into the production dispatch (would regress perf). The test `ChunkwiseWyMatchesFused` is the regression gate for any Phase 2b TC-MMA replacement.
+
+Code: `gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK>` in `src/compute/gdn.cu`; host launcher `gdn_scan_chunkwise_wy_f32` (HD=SS=128 + CHUNK=32 path; other shapes fall back to sequential); tests `ChunkwiseWyMatchesFused` + extended `ChunkwiseProtoMicrobench` in `tests/test_gdn.cu`.
+
+##### Original Phase 2a algorithmic derivation (kept for reference)
+
+Reference: Yang et al. 2024, *"Parallel Linear Attention With The Delta Rule"*. The math below is the imp-specific derivation; the kernel implementation is the multi-day part.
+
+**Per-token recurrence (current sequential kernel):**
+```
+H_{t+1} = g_t (I - β_t k̃_t k̃_t^T) H_t + β_t k̃_t v_t^T   ∈ R^{SS×HD}
+y_t     = q̃_t^T H_{t+1} · scale                          ∈ R^HD
+```
+where `k̃ = k / ‖k‖`, `q̃ = q / ‖q‖`.
+
+**Linearization via WY representation.** Define `u_t = β_t (v_t - g_t k̃_t^T H_t)` ∈ R^HD. Then `H_{t+1} = g_t H_t + k̃_t u_t^T`, and unrolling gives:
+```
+H_T  = D[0..T] H_0 + Σ_{t<T} D[t+1..T] k̃_t u_t^T          (cumulative state)
+y_t  = scale · (D[0..t+1] q̃_t^T H_0 + Σ_{j≤t} D[j+1..t+1] (q̃_t · k̃_j) u_j^T)
+```
+where `D[a..b] = Π_{i=a..b-1} g_i` is the cumulative decay product.
+
+`u_t` depends on `H_t` which depends recursively on prior `u_j`'s. Substituting:
+```
+k̃_t^T H_t = D[0..t] k̃_t^T H_0 + Σ_{j<t} D[j+1..t] (k̃_t · k̃_j) u_j^T
+```
+gives the **forward triangular solve**:
+```
+u_t = c_t - Σ_{j<t} T[t,j] u_j
+```
+where
+```
+c_t    = β_t v_t - β_t g_t D[0..t] (k̃_t^T H_0)             ∈ R^HD
+T[t,j] = β_t g_t D[j+1..t] (k̃_t · k̃_j)                    ∈ R     (j < t, strict lower-tri)
+```
+
+**Per-chunk algorithm (L tokens, given H_0):**
+
+1. **Setup (parallel over t):** compute `g_t, β_t`; L2-normalise `k̃_t, q̃_t`; cumulative decay `D[0..t]`.
+2. **Gram matrices (parallel matmul):**
+   - `KK = K̃ K̃^T ∈ R^{L×L}` (chunk-internal Gram)
+   - `QK = Q̃ K̃^T ∈ R^{L×L}` (chunk-internal masked attention)
+   - `KH = K̃ H_0 ∈ R^{L×HD}` (K̃ times entry state — produces the `c_t` bias)
+   - `QH = Q̃ H_0 ∈ R^{L×HD}` (Q̃ times entry state — produces the y-bias term)
+3. **Build T and c (parallel over t, j):**
+   - `T[t,j] = β_t g_t D[j+1..t] · KK[t,j]` for `j < t`
+   - `c_t = β_t v_t - β_t g_t D[0..t] · KH[t,:]`
+4. **Forward triangular solve (sequential over t, parallel over HD output dim):**
+   - `u_0 = c_0`
+   - `u_t = c_t - Σ_{j<t} T[t,j] u_j` for `t = 1..L-1` (each iteration: one row of L×HD matrix)
+5. **Compute Y (parallel over t):** `y_t = scale · (D[0..t+1] QH[t,:] + Σ_{j≤t} D[j+1..t+1] · QK[t,j] · u_j)`
+6. **Compute H_L (parallel matmul):** `H_L = D[0..L] H_0 + Σ_t D[t+1..L] k̃_t u_t^T` — a rank-L update to scaled H_0.
+
+**Where the parallelism lives:** steps 2, 3, 5, 6 are all matrix-matrix multiplies amenable to Tensor Core MMA (Phase 2b). Step 4 is the irreducibly sequential dependency — but it's `L = 64` sequential scalar steps on a vector of HD=128 elements, not `L × SS` sequential ops as in the existing kernel. The serial dependency length collapses from ~123k (4096 tokens × 30 layers) to ~64 per chunk.
+
+**Shared memory budget at L=64, HD=SS=128 (FP32):**
+- s_k[L·SS] = 32 KiB, s_q[L·SS] = 32 KiB, s_u[L·HD] = 32 KiB
+- s_KK[L·L] = 16 KiB (could fold into matmul-on-fly)
+- s_misc (g, β, D, reduce) ≈ 1 KiB
+
+Total ~113 KiB exceeds the 100 KiB sm_120 per-block cap → need to either drop CHUNK to 32 (~57 KiB, fits with opt-in) or store K̃/Q̃ as FP16 (halves to ~57 KiB; precision impact needs audit). Prototype uses CHUNK=32 + FP32 throughout.
+
+**Numerical precision concerns:**
+- FP32 accumulation throughout (matches current sequential kernel).
+- `D[0..L]` can underflow for large L if `g_t < 1` consistently. Mitigate by carrying `log_D` instead of `D` and exponentiating at use; small constant cost.
+- The triangular solve accumulates rounding errors over L steps. For L=32-64 this is well within the FP16-output tolerance (1e-3 from Phase 1a).
+
+#### Phase 2b — Tensor Core MMA via CUTLASS / cute (multi-week) ⏳ PENDING
+
+Once Phase 2a's WY-rep is correct, replace the naive shared-memory matmuls in steps 2, 5, 6 with CUTLASS / cute MMA tile dispatches. Operand layouts to derive:
+- `K̃ K̃^T` (L×SS × SS×L → L×L): standard A·A^T, FP16 input → FP32 accum on `mma.m16n8k16`.
+- `K̃ H_0` (L×SS × SS×HD → L×HD): FP16 input → FP32 accum.
+- Q̃ K̃^T similar; the masked variant needs the decay-scaled mask applied post-MMA (free if fused with the next matmul).
+
+sm_120 Tensor Core throughput is 838 TFLOPS FP16-accum (no tcgen05/wgmma). The L=64 inner matmuls fit naturally on `mma.m16n8k16` tiles — the chunk-internal computation is structurally identical to a small attention block.
 
 ### Phase 3 — Numerical validation across context lengths (2-3 days) ⏳ PENDING
 

@@ -617,6 +617,108 @@ TEST(GDNScanTest, ChunkwiseProtoMatchesFused) {
 }
 
 // =========================================================================
+// Test 3e: Phase 2a WY-rep prototype matches sequential
+// -------------------------------------------------------------------------
+// Validates the new `gdn_scan_chunkwise_wy_f32` kernel — factorises the
+// chunk-internal sequential dependency into a forward triangular solve +
+// matrix-matrix products (WY representation, Yang et al. 2024). Same math
+// as the sequential kernel but reorganised; expected to be numerically
+// close (FMA-order may differ → ~5e-3 FP16 tolerance, ~1e-2 FP32 state).
+// =========================================================================
+
+TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
+    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 64;  // 2 WY chunks of 32 — exercises chunk loop + state propagation
+
+    srand(17);
+    std::vector<float> conv_f32(n_tok * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state_ref, *d_state_wy;
+    half *d_alpha, *d_beta, *d_y_ref, *d_y_wy;
+    cudaMalloc(&d_conv, n_tok * conv_channels * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_ref, state_floats * sizeof(float));
+    cudaMalloc(&d_state_wy, state_floats * sizeof(float));
+    cudaMalloc(&d_alpha, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_beta, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_y_ref, n_tok * inner * sizeof(half));
+    cudaMalloc(&d_y_wy, n_tok * inner * sizeof(half));
+
+    cudaMemcpy(d_conv, conv_f32.data(), n_tok * conv_channels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_state_ref, 0, state_floats * sizeof(float));
+    cudaMemset(d_state_wy, 0, state_floats * sizeof(float));
+
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_chunkwise_wy_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_wy, d_y_wy, n_tok,
+                              n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0);
+    cudaDeviceSynchronize();
+
+    std::vector<half> y_ref(n_tok * inner), y_wy(n_tok * inner);
+    std::vector<float> state_ref(state_floats), state_wy(state_floats);
+    cudaMemcpy(y_ref.data(), d_y_ref, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_wy.data(), d_y_wy, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_ref.data(), d_state_ref, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_wy.data(), d_state_wy, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_diff_y = 0;
+    for (int i = 0; i < n_tok * inner; i++) {
+        float diff = std::abs(__half2float(y_ref[i]) - __half2float(y_wy[i]));
+        if (diff > max_diff_y)
+            max_diff_y = diff;
+    }
+    float max_diff_state = 0;
+    for (int i = 0; i < state_floats; i++) {
+        float diff = std::abs(state_ref[i] - state_wy[i]);
+        if (diff > max_diff_state)
+            max_diff_state = diff;
+    }
+
+    std::printf("\n  ChunkwiseWy: max_diff Y = %.6e\n", max_diff_y);
+    std::printf("  ChunkwiseWy: max_diff state = %.6e\n", max_diff_state);
+
+    // The WY reformulation differs from the sequential FMA order, but the
+    // chunk-internal matmuls + log-space cumulative decay land within FP32
+    // reordering noise: ~4e-6 max-abs on Y (FP16 quantisation floor),
+    // ~6e-8 max-abs on FP32 state at 2 chunks of 32 tokens. These are well
+    // inside Phase 1a's FP16 1e-3 / FP32 1e-5 budgets.
+    EXPECT_LT(max_diff_y, 1e-3f);
+    EXPECT_LT(max_diff_state, 1e-5f);
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_ref);
+    cudaFree(d_state_wy);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_ref);
+    cudaFree(d_y_wy);
+}
+
+// =========================================================================
 // Test 3d: Chunkwise prototype microbench (Phase 1b.1).
 // -------------------------------------------------------------------------
 // Times the chunkwise SSD prototype vs the sequential fused scan at the
@@ -714,8 +816,17 @@ TEST(GDNScanTest, ChunkwiseProtoMicrobench) {
         },
         "gdn_scan_chunkwise_f32 (Phase 1b.1 proto)");
 
-    std::printf("  Ratio chunkwise/fused = %.3fx (prototype is structural, no SSD math yet)\n",
-                ms_chunkwise / ms_fused);
+    float ms_wy = bench(
+        [&]() {
+            gdn_scan_chunkwise_wy_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
+                                      n_heads, head_dim, state_size, n_groups, nullptr,
+                                      /*grouped_layout=*/0);
+        },
+        "gdn_scan_chunkwise_wy_f32 (Phase 2a WY-rep)");
+
+    std::printf("  Ratio Phase1b.1/fused = %.3fx\n", ms_chunkwise / ms_fused);
+    std::printf("  Ratio Phase2a-WY/fused = %.3fx (naive shared-mem matmul; Phase 2b adds Tensor Cores)\n",
+                ms_wy / ms_fused);
 
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);
