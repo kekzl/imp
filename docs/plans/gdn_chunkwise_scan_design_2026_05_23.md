@@ -65,20 +65,45 @@ Reference implementations:
 
 ## Implementation phases
 
-### Phase 0 — Verify the bottleneck breakdown (1 day)
+### Phase 0 — Verify the bottleneck breakdown (1 day) ✅ DONE 2026-05-23
 
-- [ ] ncu with full memory + compute breakdown on `gdn_scan_fused_kernel` at PREFILL shape (n_tokens=4096, large grid)
-- [ ] Classify: HBM-bound? SM-throughput-bound? Latency-bound on the sequential dependency?
-- [ ] If HBM-bound, the chunkwise rewrite won't help (same total bytes). If compute or latency-bound, chunkwise can win.
+- [x] ncu with full memory + compute breakdown on `gdn_scan_fused_kernel` at PREFILL shape (n_tokens=4096, large grid)
+- [x] Classify: HBM-bound? SM-throughput-bound? Latency-bound on the sequential dependency?
+- [x] If HBM-bound, the chunkwise rewrite won't help (same total bytes). If compute or latency-bound, chunkwise can win.
 
-### Phase 1 — Numerical reference implementation (3-5 days)
+**Verdict: PROCEED.** `ncu --set full` measurements (3 captures, consistent):
+- Memory Throughput: **5.47 %** of peak (43 GB/s)
+- Compute (SM) Throughput: **5.47 %** of peak
+- Achieved Occupancy: **8.33 %** (half theoretical 16.67 %)
+- Grid 32, Registers/thread 255 (compiler max), Block Limit Registers = 2
+
+Both memory AND compute at 5.47 % is the **latency-bound signature** — the kernel waits on the sequential dependency chain. Cross-chunk sync cost (4 × 7 µs = 28 µs) is only 6 % of the per-call kernel time (467 µs avg) — sync overhead doesn't refute chunkwise the way it refuted split-K for decode (where 28 µs / 5.9 µs = 475 %). Full memo: `memory/gdn_chunkwise_scan_phase0_proceed_2026_05_23.md`.
+
+### Phase 1a — Regression gate test ✅ DONE 2026-05-23 (PR #385)
+
+- [x] Add `GDNScanTest.ChunkBoundaryHandoff` to `tests/test_gdn.cu`
+- [x] Validate that splitting a 16-token sequential scan at the midpoint with H-state handoff produces bit-equivalent output to a monolithic 16-token scan
+- [x] Sets the FP16 output tolerance budget (1e-3) and FP32 state tolerance budget (1e-5) for Phase 1b.1
+
+**Result**: bit-exact (`max_diff = 0.0` on all 3 checks) on the existing sequential kernel. This test is the regression gate for the future SSD kernel.
+
+### Phase 1b scaffolding — `gdn_scan_chunkwise_f32` API ✅ DONE 2026-05-23 (PR #386)
+
+- [x] Add `gdn_scan_chunkwise_f32(...)` host function to `src/compute/gdn.{h,cu}` with `chunk_size` parameter (default 64)
+- [x] Initial implementation: chunk-iterating sequential wrapper around `gdn_scan_fused_f32` (functionally identical, no perf change)
+- [x] Extend `ChunkBoundaryHandoff` to include the chunkwise function as Run C
+
+**Result**: bit-exact pass (`max_diff Y_chunkwise = 0.0`, `max_diff state_chunkwise = 0.0`). API surface ready for Phase 1b.1 to drop in the real SSD kernel.
+
+### Phase 1b.1 — Standalone CUDA SSD prototype (3-5 days) ⏳ PENDING
 
 - [ ] Standalone CUDA prototype of the chunkwise SSD algorithm at chunk_size=64
 - [ ] Pure FP32 first (no NVFP4/FP8 quantisation), correctness reference
-- [ ] Bit-equivalent (to numerical tolerance) output vs `gdn_scan_fused_kernel` at chunk_size=64 boundary
+- [ ] Bit-near-equivalent (within tolerance budget set by Phase 1a) output vs `gdn_scan_fused_kernel` at chunk_size=64 boundary
 - [ ] Microbench: compare per-token throughput on the standalone kernel
+- [ ] **Reference**: Yang et al. 2024 "Parallel Linear Attention With The Delta Rule" — the standard Mamba2 SSD assumes scalar decay and doesn't cover GDN's rank-1 `(I - β k k^T)` multiplicative update. The Yang paper covers the delta-rule via WY-representation tricks for the matrix product chain.
 
-### Phase 2 — Production kernel integration (5-7 days)
+### Phase 2 — Production kernel integration (5-7 days) ⏳ PENDING
 
 - [ ] Add `gdn_scan_chunkwise_kernel<HD, SS, CHUNK_SIZE, YOut>` in `src/compute/gdn.cu`
 - [ ] Use CUTLASS / cute tile descriptors for the chunk-internal lower-triangular MMA
@@ -86,13 +111,13 @@ Reference implementations:
 - [ ] Dispatch from `gdn_scan_fused_f32_*` host launchers when `n_tokens >= CHUNK_SIZE` (decode falls through to existing sequential path)
 - [ ] Gate behind `gdn.chunkwise_scan = false` config flag (off by default until validated)
 
-### Phase 3 — Numerical validation across context lengths (2-3 days)
+### Phase 3 — Numerical validation across context lengths (2-3 days) ⏳ PENDING
 
 - [ ] Coherence smoke tests on Qwen3.6-35B-A3B-NVFP4 at ctx={128, 1024, 4096, 16384}
 - [ ] NIAH retrieval at ctx={4K, 16K, 32K} — sensitive to GDN state precision drift
 - [ ] If any context shows degradation, debug FP32-accumulation precision in the cross-chunk propagation
 
-### Phase 4 — Perf bench + ship decision (1 day)
+### Phase 4 — Perf bench + ship decision (1 day) ⏳ PENDING
 
 - [ ] Cold-median bench Qwen3.6 + Qwen3.5-9B-GDN + Qwen3.5-4B-GDN (all GDN models) with chunkwise scan on
 - [ ] Compare per-pp wall vs sequential baseline
