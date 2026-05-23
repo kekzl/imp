@@ -26,21 +26,35 @@ Decode-time profile (`--no-cuda-graphs` so nsys doesn't hide captured-graph kern
 
 **77.8 % of decode kernel time is in the top three GEMVs.** Speeding these is the most direct path to north-star tok/s.
 
-## Analytical roofline (gate_up_fused_mr at K=5120 on Qwen3-14B)
+## Roofline — *corrected via `ncu` 2026-05-23*
+
+The analytical estimate below (~50 MB / 28 µs ideal → 43 % of peak) was a rough first-pass. **The `ncu` measurement is the source of truth** and shows the kernels are much closer to roofline than the analytical estimate suggested. ncu measurements (`launch-skip 50 --launch-count 3` on `--bench-pp 128 --max-tokens 64 --no-cuda-graphs`):
+
+| Kernel | HBM % peak | Time (µs) | L1 hit rate | SM throughput | Warps active | Regs/thread |
+|---|---:|---:|---:|---:|---:|---:|
+| `gate_up_fused_mr<8>` | **73.1 %** | 80.3 | 96.5 % | 34.4 % | 72.7 % | 45 |
+| `residual` (down_proj) | **64.3 %** | 23.2 | 96.2 % | 30.8 % | 49.1 % | 38 |
+| `qkv_fused` | **65.3 %** | 31.8 | 96.3 % | 31.3 % | 52.7 % | 40 |
+
+**Realistic kernel-time headroom is ~27-36 %, not 130 %.** Wall-clock ceiling from closing the full HBM gap on the top three kernels (78 % of decode time):
+
+```
+(1 − 0.66) × 0.78 = 0.265 ⇒ ~26.5 % decode wall savings
+tg128 @ ctx=2048 157.71 → ~199 tok/s (theoretical ceiling)
+```
+
+The 175 milestone is still within reach but with **less margin than the analytical roofline suggested**. Realistic shipped delivery is probably +10-15 % wall (= ~175-181 tok/s) — exactly the milestone, no comfortable cushion.
+
+### Analytical estimate (original, kept for context)
 
 | Quantity | Value |
 |---|---|
 | Weight bytes per call (NVFP4 + scales) | ~50 MB |
-| Activation bytes | ~10 KB (negligible — same x reused across 2·intermediate rows) |
-| Output bytes | ~70 KB (negligible) |
-| HBM ideal time at 1792 GB/s | **28 µs** |
-| Measured (nsys avg per call, 30,720 invocations) | **65 µs** |
-| Achieved HBM | **769 GB/s = 43 % of peak** |
-| Headroom | **~2.3×** |
+| HBM ideal time at 1792 GB/s | 28 µs |
+| nsys avg per call (graphs-OFF, 30,720 invocations) | 65 µs |
+| Inferred bandwidth | 769 GB/s = 43 % of peak |
 
-The roofline number is the *kernel-level* ceiling. Translating to wall:
-- 40 % of kernel time × (1 − 28/65) = ~22.7 % decode kernel time saved if gate_up alone reaches peak
-- Decode wall is largely launch-overhead today, but with graphs ON the GPU-busy share is much higher than the 10-19 % we observed in the no-graphs trace — wall-clock impact is closer to the kernel-time delta than to the no-graphs wall ratio
+The analytical "43 %" was wrong because the inferred-bandwidth calculation underestimated total HBM traffic. ncu measures actual DRAM transactions (including TLB-miss page-walks, scale prefetch headers, L2-bypass writes). The kernel is doing *more* HBM traffic per call than the naive "weight bytes" calculation predicts, and the true achieved bandwidth is much closer to peak.
 
 ## Current kernel structure (`gemv_nvfp4_gate_up_fused_mr_kernel<NR=8>`)
 
@@ -71,43 +85,56 @@ Per block:
 
 So the obvious low-hanging fruit (HW FP4 decode, scale-decode fast path, half2 loads, fused gate+up) is already in. The remaining ~57 % HBM gap is in second-order factors.
 
-## Hypotheses for the 57 % gap (untested — needs `ncu` measurement)
+## Hypotheses for the remaining 27-36 % HBM gap — *ncu-informed update*
 
-### H1 — Activation x is re-loaded N×NR times from L1/L2 instead of SMEM-resident
-The kernel reads `x[elem_base + b*2]` directly from global. For NR=8 warps in a block all reading the same activation chunks, L1/L2 absorbs the redundancy but per-warp memory pipe contention may still dominate.
+### H1 — Activation x SMEM staging — **REFUTED 2026-05-23**
 
-**Mitigation:** stage `x[0..K]` into SMEM once per block (10 KB, fits easily — 165 KB SMEM/block on sm_120), have all 8 warps read from SMEM. Estimate: +5-10 % HBM utilisation, possibly more if scale-stream then becomes the bottleneck.
+L1 hit rate on all three kernels is **96-97 %** (`l1tex__t_sector_hit_rate.pct`). The activation x reuse across N×NR warps is already absorbed by L1. SMEM staging would add a `__syncthreads()` cost without recovering meaningful traffic. **Do not pursue.**
 
-### H2 — Scale stream is uncoalesced / sub-cacheline
-Each lane loads 1 byte `row_ms[mi]` per iteration. 32 lanes × 1 byte = 32-byte aligned. **Likely OK** but verify with `ncu --metrics l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum`.
+### H2 — Scale stream coalescing — still possible (untested)
 
-If scale loads are sub-coalesced, fix: load 4 bytes per lane (4 micro-blocks ahead), keep in registers, decode lazily.
+Each lane loads 1 byte `row_ms[mi]` per iteration. 32 lanes × 1 byte = 32-byte aligned cacheline. Need `ncu --metrics l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum,l1tex__t_sectors_op_atom.sum` to confirm.
 
-### H3 — Register pressure caps occupancy
-The kernel uses `__launch_bounds__(kMRThreads=256)` (8 warps/block) without explicit min-blocks-per-SM. With 170 SMs and 4352 blocks, that's 25.6 blocks/SM ideal. Actual occupancy is capped by registers/SMEM.
+If scale loads are sub-coalesced: load 4-8 bytes per lane (4-8 micro-blocks of scales ahead), keep in registers, decode lazily.
 
-If register pressure > 64/thread, occupancy drops to 4 blocks/SM (one block/SM/warp). Fix: `__launch_bounds__(256, 4)` to enforce ≥ 4 blocks/SM; if compiler refuses, refactor inner loop to spill less.
+Realistic ceiling: +1-3 % HBM if H2 is real, neutral otherwise.
 
-### H4 — FMA pipeline contention with load issue
-`__fmaf_rn` × 16 per microblock followed by another microblock load. If the HMMA/FMA latency isn't masked by load throughput, we lose cycles.
+### H3 — Register pressure / occupancy — **MOSTLY REFUTED**
 
-**Mitigation:** software prefetch — issue next-microblock load before completing this microblock's FMAs (cp.async into shared, then sync at next iter boundary). Or unroll the inner loop 2-4× and interleave loads with FMAs.
+ncu shows 38-45 registers/thread on the three kernels. With 256 threads/block, that's ~12,800 registers/block. On sm_120 with 65,536 registers/SM, max 5 blocks/SM by register budget. Warps active is 49-73 % — close to the upper bound. **No clear register-pressure win available** without major refactor.
 
-### H5 — One warp per row leaves warp K-parallelism unused for short K
-For K=5120, n_mb = 320, lane iterates 10 times. With 8 warps in the block, 8 rows complete simultaneously. But for K=17408 (`residual_kernel` down_proj), n_mb = 1088, lane iterates 34 times — warps become more I/O bound.
+`gate_up_fused_mr<8>` at 72.7 % warps-active is essentially capped by some other factor (SMEM, perhaps, or scheduling). The `residual` (49 %) and `qkv_fused` (53 %) variants have lower warps-active — small grid (5120, 7168 blocks) means many SMs idle in tail. Hybrid 4-warp variants (H5) might help the latter two.
 
-**Mitigation:** for the residual kernel (down_proj, K=17408), consider hybrid: 4 warps per row × 64 micro-block iter per warp. Single-warp pattern may underutilise.
+### H4 — FMA pipeline / load latency hiding — main remaining lever
+
+SM throughput is 30-34 % across all three. Combined with 64-73 % HBM utilisation, the kernel is HBM-bound but the compute pipe is also nowhere near saturated. The kernel issues `__fmaf_rn × 16` per micro-block immediately after the load — if load latency isn't masked by FMA work, we lose cycles.
+
+**Mitigation:** software prefetch — issue next-microblock weight load before completing this microblock's FMAs. Either:
+- `cp.async` 2 µblocks ahead into shared mem (sync at iter boundary), or
+- 2-way unroll inner loop and interleave: load A, fma B, load B, fma A.
+
+Realistic ceiling: **+5-15 % HBM** if the prefetch closes the load-latency gap. This is the **highest-priority remaining lever**.
+
+### H5 — Warp-per-row vs warp-cooperative for short / long K
+
+For K=5120 (`gate_up_fused_mr`, `qkv_fused`) at NR=8: 8 warps per block, each handles a row, 32 lanes K-parallel over 320 micro-blocks (10 iter per lane). Balanced.
+
+For K=17408 (`residual` = down_proj at NR=1, kKparWarps=4): 4 warps cooperate on a single output row, 32 lanes × 4 warps K-parallel over 1088 micro-blocks. Lane iterates 8.5 times. Many SMs idle (grid is just M=5120 blocks on 170-SM GPU = 30 blocks/SM ideal, but with the 4-warp block-size that's effectively only 120 warps/SM, well under the 48-warp occupancy ceiling).
+
+**Mitigation:** for `residual` specifically, consider 2-warp-per-row × 2 rows per block (more block-level parallelism). Microbench-gated.
+
+Realistic ceiling: +3-8 % wall on the residual kernel only.
 
 ## Implementation phases
 
-### Phase 0 — Measure (1 day; **blocked on `ERR_NVGPUCTRPERM`**)
+### Phase 0 — Measure — **DONE 2026-05-23**
 
-- [ ] Unblock `ncu` perf counters: set kernel param `NVreg_RestrictProfilingToAdminUsers=0` on the WSL2 NVIDIA driver (requires reboot), or run via `sudo` with explicit `--target-processes all`. Without this, all of Phase 0 is qualitative-only.
-- [ ] `ncu --metrics dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,launch__registers_per_thread,l1tex__t_sector_hit_rate.pct,smsp__cycles_active.avg.pct_of_peak_sustained_elapsed` on `gemv_nvfp4_gate_up_fused_mr_kernel<8>` to confirm or refute H1-H5.
-- [ ] Same on `gemv_nvfp4_residual_kernel` (K=17408 — different bottleneck class).
-- [ ] Same on `gemv_nvfp4_qkv_fused_kernel`.
+`ncu` unblock confirmed (perf counter perms were enabled between the original write and the re-check). Results table is in the *Roofline* section above. Key findings: H1 REFUTED (L1 hit 96 %), H3 mostly REFUTED, H4 is the main remaining lever, H2 + H5 are minor secondary levers.
 
-**Exit:** at least one of H1-H5 has a confirmed signature in the metrics. Without this, don't touch the kernel.
+Original task list (kept for audit trail):
+- [x] Unblock `ncu` perf counters (`NVreg_RestrictProfilingToAdminUsers=0` was already set; previous failure may have been a transient WSL2 issue or stale driver state)
+- [x] `ncu` metrics collected on all three top GEMVs
+- [x] Hypotheses H1-H5 evaluated against metrics
 
 ### Phase 1 — SMEM-stage the activation (H1)  (~2 days)
 
