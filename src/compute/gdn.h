@@ -79,6 +79,20 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
                                   float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
                                   int state_size, int n_groups, cudaStream_t stream, int grouped_layout = 0);
 
+// Phase 2c — fully-tuned WY-rep with Tensor Core MMA on all 5 chunk-internal
+// matmuls (KK, QK, KH, QH-inlined, H_L). CHUNK=32 (vs Phase 2b's 16) by
+// dropping the s_qh materialisation and reusing the s_kh buffer for the H_L
+// strip output buffer. Parallel L2 norm across 4 warps (each warp does its
+// own token via warp-shuffle reduction). The single largest remaining lever
+// per the Phase 4 ship analysis.
+//
+// HD=SS=128 only; other shapes fall back to gdn_scan_fused_f32.
+void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, const half* alpha,
+                                   const half* beta, const float* A_log, const float* dt_bias,
+                                   float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
+                                   int state_size, int n_groups, cudaStream_t stream,
+                                   int grouped_layout = 0);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,

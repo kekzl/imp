@@ -276,17 +276,37 @@ Not wired into production dispatch (still slightly slower than sequential and ~1
 
 Code: `gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK=16>` in `src/compute/gdn.cu`; host launcher `gdn_scan_chunkwise_wy_tc_f32`; test in `tests/test_gdn.cu`.
 
-#### Phase 2c — TC-MMA the H_L update ⏳ PENDING
+#### Phase 2c — Fully-tuned WY-rep + TC-MMA on all 5 matmuls (incl. H_L) ✅ DONE 2026-05-24
 
-The remaining algorithmic lever. H_L = D[0..L]·H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T. The Σ_t expression is structurally a K̃_scaled^T · U matmul (SS×L · L×HD → SS×HD). Implementing it via WMMA requires:
+New kernel `gdn_scan_chunkwise_wy_tc2_kernel<HD=128, SS=128, CHUNK=32>` puts every chunk-internal matmul on Tensor Cores (KK, QK, KH, QH via warp-distributed WMMA tiles; H_L via an 8-strip × 8-N-tile × 2-K-iteration WMMA loop with an 8 KiB intermediate output buffer). Plus all the smaller tunings (CHUNK=32 vs Phase 2b's 16, smem-buffer overlap of s_kh → s_qh → s_u_fp16+s_strip_out, removed redundant per-iter syncs in the triangular solve).
 
-- Per-output-tile (16×16) WMMA accumulation
-- An intermediate smem buffer ≥ 16·HD floats (8 KiB) to receive each warp's output tile
-- Per-thread loop reading the warp's tile and adding to H_reg + D[0..L]·H_0_reg
+**Numerics on `GDNScanTest.ChunkwiseWyTc2MatchesFused` (n_tok=64, 2 chunks of 32)**:
+- max_diff Y = **1.5e-5** (matches Phase 2b)
+- max_diff state = **9.4e-5** (slightly looser than Phase 2b — extra rank-32 matmul accumulation in H_L step)
 
-Expected outcome (per analysis): brings Phase 2b's 2.291× ratio down to ~1.0× or below sequential. Combined with Phase 1b.1's structural win, this is where the design doc's +20-30 % prefill wall is supposed to come from.
+**Final microbench (n_tok=4096, n_heads=32, HD=SS=128, n_groups=16, RTX 5090 sm_120, 20 reps, after all tuning):**
 
-Multi-day kernel + validation work. Phase 1b.1 + Phase 2a + Phase 2b are the prerequisites and are now all landed.
+| Kernel | us/token | vs sequential |
+|---|---|---|
+| gdn_scan_fused_f32 (sequential)         | 1.567 | 1.000× |
+| gdn_scan_chunkwise_f32 (Phase 1b.1)     | 1.343 | **0.857×** (+16.7 %) |
+| gdn_scan_chunkwise_wy_f32 (Phase 2a)    | 1.863 | 1.189× |
+| gdn_scan_chunkwise_wy_tc_f32 (Phase 2b) | **1.573** | **1.004×** (break-even with sequential) |
+| gdn_scan_chunkwise_wy_tc2_f32 (Phase 2c)| 1.670 | 1.066× |
+
+**Honest final result: Phase 1b.1's simpler structural approach wins.** The WY-rep + TC-MMA paths (Phase 2a/2b/2c) all converge near sequential parity but **none beat Phase 1b.1's 0.857×**. The gap is fundamental and structural:
+
+- Phase 1b.1 caches K, Q in shared memory (one-time per chunk), then runs the **register-resident sequential delta-rule update** unchanged. State stays in registers throughout the chunk — no shared-memory round-trips of the SS×HD state matrix.
+- The WY-rep paths must materialise the state to shared memory (32 KiB FP16 per chunk for TC-MMA) and accumulate cumulative-state matmuls (KK, QK, KH, QH, H_L). At L=16 / L=32 chunk size, the materialisation + matmul overhead exceeds the dependency-breaking parallelism win.
+
+**Phase 2c is shipped but NOT recommended for production**. It's the algorithmic upper bound of the WY-rep + TC-MMA approach at sm_120; future sessions targeting the +20-30 % design ceiling will need either:
+- **Larger chunk size with smarter smem reuse** (CHUNK=64 or higher — currently blocked by the 99 KiB smem cap and the need for the 32 KiB s_h0_fp16 buffer). cp.async to overlap H_0 materialisation with compute might help.
+- **Skip H_0 materialisation entirely** by computing matmul fragments directly from H_reg via warp-shuffle gather. Complex warp-level data choreography.
+- **B200 / SM100 port** where tcgen05 MMA at ~16× the sm_120 FP16 TFLOPS would tilt the cost-benefit toward WMMA-heavy approaches.
+
+The Phase 2 ladder (1b.1 → 2a → 2b → 2c) is now complete with all numerics correct and all dispatchable via separate host launchers. The infrastructure is in tree as the basis for any future GDN scan TC-MMA work.
+
+Code: `gdn_scan_chunkwise_wy_tc2_kernel<HD, SS, CHUNK=32>` in `src/compute/gdn.cu`; host launcher `gdn_scan_chunkwise_wy_tc2_f32`; test `ChunkwiseWyTc2MatchesFused`.
 
 ### Phase 3 — Numerical validation across context lengths ✅ DONE 2026-05-24 (partial)
 
