@@ -94,6 +94,16 @@ verify-chunked:
 	 IMP_VERIFY_CHUNK_SIZE=512 \
 	 scripts/verify.sh fast
 
+# verify-north-star: gates the GOAL.md north-star model (Qwen3-14B Q6_K) against
+# tests/perf_baseline_north_star.json. Same 3%/5% thresholds as perf_baseline.json.
+# Requires Qwen3-14B-Q6_K.gguf in $(HOME)/models. Numbers were captured
+# 2026-05-23 under the cold-median methodology (PR #376) — see
+# memory/qwen3_14b_north_star_cold_median_2026_05_23.md for the raw samples
+# (σ = 0.16 tok/s on tg128 @ ctx=2048, well inside the 3% threshold).
+verify-north-star:
+	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
+	 scripts/verify.sh fast
+
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
 # see memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md.
