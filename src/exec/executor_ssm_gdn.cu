@@ -474,6 +474,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
         const bool use_ref = runtime_config().gdn.ref_kernel;
+        const bool use_chunkwise = runtime_config().gdn.chunkwise_scan && !use_ref;
         if (use_fp32_scan) {
             // Layout in conv_f32 tail:
             //   [n*conv_channels)                : conv_f32 (done)
@@ -485,11 +486,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
             float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_fused_fp32out(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                                   static_cast<const half*>(beta_proj_out.data),
-                                   static_cast<const float*>(ly.ssm_a.data),
-                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                                   y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+            if (use_chunkwise) {
+                gdn_scan_chunkwise_fp32out(conv_f32, conv_channels,
+                                           static_cast<const half*>(alpha_proj_out.data),
+                                           static_cast<const half*>(beta_proj_out.data),
+                                           static_cast<const float*>(ly.ssm_a.data),
+                                           static_cast<const float*>(ly.ssm_dt_b.data),
+                                           static_cast<float*>(h_st), y_fp32, n, n_heads, head_dim_ssm, ssize,
+                                           n_groups, stream, /*chunk_size=*/64, gl);
+            } else {
+                gdn_scan_fused_fp32out(conv_f32, conv_channels,
+                                       static_cast<const half*>(alpha_proj_out.data),
+                                       static_cast<const half*>(beta_proj_out.data),
+                                       static_cast<const float*>(ly.ssm_a.data),
+                                       static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                                       y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+            }
             // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
             // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional
             // — the !use_fp32_out path of ssm_out reads y_buf as FP16 input. The
@@ -517,12 +529,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    stream, gl);
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                               static_cast<const half*>(beta_proj_out.data),
-                               static_cast<const float*>(ly.ssm_a.data),
-                               static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                               static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                               stream, gl);
+            if (use_chunkwise) {
+                gdn_scan_chunkwise_f32(conv_f32, conv_channels,
+                                       static_cast<const half*>(alpha_proj_out.data),
+                                       static_cast<const half*>(beta_proj_out.data),
+                                       static_cast<const float*>(ly.ssm_a.data),
+                                       static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                                       static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
+                                       n_groups, stream, /*chunk_size=*/64, gl);
+            } else {
+                gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                                   static_cast<const half*>(beta_proj_out.data),
+                                   static_cast<const float*>(ly.ssm_a.data),
+                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
+                                   static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
+                                   stream, gl);
+            }
         }
     }
 

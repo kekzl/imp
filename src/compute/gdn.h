@@ -40,6 +40,14 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
                             int n_heads, int head_dim_ssm, int state_size, int n_groups,
                             cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0);
 
+// FP32-output chunkwise variant — matches `gdn_scan_fused_fp32out`'s contract.
+// Same chunked shared-memory layout as `gdn_scan_chunkwise_f32`, output kept
+// in FP32 for the gdn.fp32_scan path (RMSNorm+Gate+SiLU pipeline).
+void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                                const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
+                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                                cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
