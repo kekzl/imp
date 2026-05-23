@@ -509,6 +509,226 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
 }
 
 // =========================================================================
+// Test 3c: Chunkwise SSD prototype matches sequential fused scan
+// -------------------------------------------------------------------------
+// Phase 1b.1 of the chunkwise SSD scan refactor (docs/plans/gdn_chunkwise_
+// scan_design_2026_05_23.md). Exercises the chunked-shared-memory kernel
+// path inside gdn_scan_chunkwise_f32 (chunk_size=64), which is structurally
+// distinct from the existing per-token sequential kernel.
+//
+// Phase 1b's wrapper path (chunk_size != 64) is covered by ChunkBoundary
+// Handoff above. This test specifically validates the new
+// gdn_scan_chunkwise_kernel<128, 128, 64> at the production GDN shape
+// (Qwen 3.5 / 3.6: HD=SS=128). Tolerance budgets from Phase 1a:
+//   - FP16 y:   1e-3 max-abs-diff
+//   - FP32 H state: 1e-5 max-abs-diff
+// =========================================================================
+
+TEST(GDNScanTest, ChunkwiseProtoMatchesFused) {
+    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 128;  // 2 chunks of 64 — exercises chunk-loop + boundary
+    constexpr int chunk_size = 64;
+
+    srand(7);
+    std::vector<float> conv_f32(n_tok * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state_ref, *d_state_cw;
+    half *d_alpha, *d_beta, *d_y_ref, *d_y_cw;
+    cudaMalloc(&d_conv, n_tok * conv_channels * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_ref, state_floats * sizeof(float));
+    cudaMalloc(&d_state_cw, state_floats * sizeof(float));
+    cudaMalloc(&d_alpha, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_beta, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_y_ref, n_tok * inner * sizeof(half));
+    cudaMalloc(&d_y_cw, n_tok * inner * sizeof(half));
+
+    cudaMemcpy(d_conv, conv_f32.data(), n_tok * conv_channels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_state_ref, 0, state_floats * sizeof(float));
+    cudaMemset(d_state_cw, 0, state_floats * sizeof(float));
+
+    // Reference: monolithic sequential fused scan.
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    // Prototype: chunkwise SSD kernel (chunk_size=64 hits the new kernel path).
+    gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cw, d_y_cw, n_tok,
+                           n_heads, head_dim, state_size, n_groups, nullptr,
+                           /*chunk_size=*/chunk_size, /*grouped_layout=*/0);
+    cudaDeviceSynchronize();
+
+    std::vector<half> y_ref(n_tok * inner), y_cw(n_tok * inner);
+    std::vector<float> state_ref(state_floats), state_cw(state_floats);
+    cudaMemcpy(y_ref.data(), d_y_ref, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_cw.data(), d_y_cw, n_tok * inner * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_ref.data(), d_state_ref, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_cw.data(), d_state_cw, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_diff_y = 0;
+    for (int i = 0; i < n_tok * inner; i++) {
+        float d = std::abs(__half2float(y_ref[i]) - __half2float(y_cw[i]));
+        if (d > max_diff_y)
+            max_diff_y = d;
+    }
+    float max_diff_state = 0;
+    for (int i = 0; i < state_floats; i++) {
+        float d = std::abs(state_ref[i] - state_cw[i]);
+        if (d > max_diff_state)
+            max_diff_state = d;
+    }
+
+    std::printf("\n  ChunkwiseProto: max_diff Y = %.6e\n", max_diff_y);
+    std::printf("  ChunkwiseProto: max_diff state = %.6e\n", max_diff_state);
+
+    // Phase 1a tolerance budgets.
+    EXPECT_LT(max_diff_y, 1e-3f);
+    EXPECT_LT(max_diff_state, 1e-5f);
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_ref);
+    cudaFree(d_state_cw);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_ref);
+    cudaFree(d_y_cw);
+}
+
+// =========================================================================
+// Test 3d: Chunkwise prototype microbench (Phase 1b.1).
+// -------------------------------------------------------------------------
+// Times the chunkwise SSD prototype vs the sequential fused scan at the
+// Qwen 3.6 prefill shape (n_tokens=4096, n_heads=32, HD=SS=128, n_groups=16).
+// Gated behind IMP_GDN_MICROBENCH=1 because it's a perf probe, not a
+// correctness gate — only useful when explicitly comparing the two kernels.
+// =========================================================================
+
+TEST(GDNScanTest, ChunkwiseProtoMicrobench) {
+    if (!std::getenv("IMP_GDN_MICROBENCH")) {
+        GTEST_SKIP() << "Set IMP_GDN_MICROBENCH=1 to run the chunkwise perf probe";
+    }
+    constexpr int n_heads = 32, head_dim = 128, state_size = 128, n_groups = 16;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 4096;
+    constexpr int chunk_size = 64;
+
+    srand(11);
+    std::vector<float> conv_f32(static_cast<size_t>(n_tok) * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state;
+    half *d_alpha, *d_beta, *d_y;
+    cudaMalloc(&d_conv, static_cast<size_t>(n_tok) * conv_channels * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state, state_floats * sizeof(float));
+    cudaMalloc(&d_alpha, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_beta, n_tok * n_heads * sizeof(half));
+    cudaMalloc(&d_y, n_tok * inner * sizeof(half));
+
+    cudaMemcpy(d_conv, conv_f32.data(), static_cast<size_t>(n_tok) * conv_channels * sizeof(float),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), n_tok * n_heads * sizeof(half), cudaMemcpyHostToDevice);
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+
+    auto bench = [&](auto fn, const char* label, int reps = 20, int warmup = 3) {
+        for (int r = 0; r < warmup; r++) {
+            cudaMemset(d_state, 0, state_floats * sizeof(float));
+            fn();
+        }
+        cudaDeviceSynchronize();
+        float total_ms = 0;
+        for (int r = 0; r < reps; r++) {
+            cudaMemset(d_state, 0, state_floats * sizeof(float));
+            cudaDeviceSynchronize();
+            cudaEventRecord(e0);
+            fn();
+            cudaEventRecord(e1);
+            cudaEventSynchronize(e1);
+            float ms = 0;
+            cudaEventElapsedTime(&ms, e0, e1);
+            total_ms += ms;
+        }
+        float avg_ms = total_ms / reps;
+        float us_per_tok = avg_ms * 1000.0f / n_tok;
+        std::printf("  %s: %.3f ms avg over %d tokens = %.3f us/token (%d reps)\n", label, avg_ms, n_tok,
+                    us_per_tok, reps);
+        return avg_ms;
+    };
+
+    float ms_fused = bench(
+        [&]() {
+            gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
+                               n_heads, head_dim, state_size, n_groups, nullptr);
+        },
+        "gdn_scan_fused_f32 (sequential)");
+
+    float ms_chunkwise = bench(
+        [&]() {
+            gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
+                                   n_heads, head_dim, state_size, n_groups, nullptr,
+                                   /*chunk_size=*/chunk_size, /*grouped_layout=*/0);
+        },
+        "gdn_scan_chunkwise_f32 (Phase 1b.1 proto)");
+
+    std::printf("  Ratio chunkwise/fused = %.3fx (prototype is structural, no SSD math yet)\n",
+                ms_chunkwise / ms_fused);
+
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y);
+}
+
+// =========================================================================
 // Test 4: Zero state + one token produces non-zero output
 // =========================================================================
 

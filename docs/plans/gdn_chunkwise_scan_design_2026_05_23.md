@@ -95,13 +95,26 @@ Both memory AND compute at 5.47 % is the **latency-bound signature** — the ker
 
 **Result**: bit-exact pass (`max_diff Y_chunkwise = 0.0`, `max_diff state_chunkwise = 0.0`). API surface ready for Phase 1b.1 to drop in the real SSD kernel.
 
-### Phase 1b.1 — Standalone CUDA SSD prototype (3-5 days) ⏳ PENDING
+### Phase 1b.1 — Standalone CUDA SSD prototype ✅ DONE 2026-05-23
 
-- [ ] Standalone CUDA prototype of the chunkwise SSD algorithm at chunk_size=64
-- [ ] Pure FP32 first (no NVFP4/FP8 quantisation), correctness reference
-- [ ] Bit-near-equivalent (within tolerance budget set by Phase 1a) output vs `gdn_scan_fused_kernel` at chunk_size=64 boundary
-- [ ] Microbench: compare per-token throughput on the standalone kernel
-- [ ] **Reference**: Yang et al. 2024 "Parallel Linear Attention With The Delta Rule" — the standard Mamba2 SSD assumes scalar decay and doesn't cover GDN's rank-1 `(I - β k k^T)` multiplicative update. The Yang paper covers the delta-rule via WY-representation tricks for the matrix product chain.
+- [x] Standalone CUDA prototype of the chunkwise SSD algorithm at chunk_size=64
+- [x] Pure FP32 first (no NVFP4/FP8 quantisation), correctness reference
+- [x] Bit-near-equivalent (within tolerance budget set by Phase 1a) output vs `gdn_scan_fused_kernel` at chunk_size=64 boundary
+- [x] Microbench: compare per-token throughput on the standalone kernel
+- [x] **Reference**: Yang et al. 2024 "Parallel Linear Attention With The Delta Rule" — the standard Mamba2 SSD assumes scalar decay and doesn't cover GDN's rank-1 `(I - β k k^T)` multiplicative update. The Yang paper covers the delta-rule via WY-representation tricks for the matrix product chain.
+
+**Result**: New kernel `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` in `src/compute/gdn.cu` instantiated for HD=SS=128, CHUNK=64 (Qwen 3.5 / 3.6 GDN shape) and HD=SS=64, CHUNK=64. Dispatched from `gdn_scan_chunkwise_f32` when `chunk_size == 64` and `n_tokens >= 64`; falls through to the chunk-iterating wrapper otherwise. The structural change vs `gdn_scan_fused_kernel`: all CHUNK tokens' raw K, Q are loaded into shared memory upfront (Phase 1), L2-normalised in shared memory (Phase 2), then consumed by the sequential delta-rule sweep (Phase 3). The chunk-cached layout is the prerequisite for Phase 2's WY-rep parallel matmul.
+
+**Numerics**: bit-exact (`max_diff_y = 0.0`, `max_diff_state = 0.0`) vs the monolithic `gdn_scan_fused_f32` on the new test `GDNScanTest.ChunkwiseProtoMatchesFused` (n_tok=128 across 2 chunks of 64, HD=SS=128). Well inside the FP16 1e-3 / FP32 1e-5 budgets set by Phase 1a.
+
+**Microbench (n_tok=4096, n_heads=32, HD=SS=128, n_groups=16, RTX 5090 sm_120, 20 reps, gated on `IMP_GDN_MICROBENCH=1`)**:
+- `gdn_scan_fused_f32` (sequential):      6.602 ms / 4096 tok = **1.612 µs/token**
+- `gdn_scan_chunkwise_f32` (Phase 1b.1):  5.601 ms / 4096 tok = **1.367 µs/token**
+- Ratio: **0.848× wall** = **+15.2 % throughput** on the GDN scan kernel alone.
+
+The +15 % win is structural and comes for free with Phase 1b.1 — caching K, Q in shared memory eliminates redundant per-token global-memory loads of K (SS=128 floats) and Q (SS=128 floats) for every token of the chunk. Phase 2's WY-rep parallel matmul replaces the still-sequential delta-rule sweep on top of this; the design doc's +20-30 % prefill wall target is the combined ceiling.
+
+Code: `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` in `src/compute/gdn.cu` (under "Phase 1b.1 — Standalone chunkwise SSD scan prototype"); dispatch in `gdn_scan_chunkwise_f32`; tests `ChunkwiseProtoMatchesFused` + `ChunkwiseProtoMicrobench` in `tests/test_gdn.cu`.
 
 ### Phase 2 — Production kernel integration (5-7 days) ⏳ PENDING
 

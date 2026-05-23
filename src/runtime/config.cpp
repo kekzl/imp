@@ -184,6 +184,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gdn.ref_kernel = parse_bool(val, cfg.gdn.ref_kernel);
     else if (eq("gdn.vhead_reorder"))
         cfg.gdn.vhead_reorder = parse_bool(val, cfg.gdn.vhead_reorder);
+    else if (eq("gdn.chunkwise_scan"))
+        cfg.gdn.chunkwise_scan = parse_bool(val, cfg.gdn.chunkwise_scan);
 
     // [gemm]
     else if (eq("gemm.no_dp4a"))

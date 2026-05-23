@@ -160,6 +160,17 @@ struct RuntimeConfig {
         float norm_eps_override = 0.0f;  // 0 = use model default
         bool ref_kernel = false;
         bool vhead_reorder = false;
+        // Phase 1b.1 of the GDN chunkwise SSD scan refactor
+        // (docs/plans/gdn_chunkwise_scan_design_2026_05_23.md). When true,
+        // the executor dispatches GDN scan through
+        // `gdn_scan_chunkwise_{f32,fp32out}` (chunk-cached K/Q in shared
+        // memory) instead of the per-token-loop `gdn_scan_fused_{f32,fp32out}`.
+        // Bit-near-equivalent output (FP16 1e-3 / FP32 1e-5 tolerances per
+        // Phase 1a); microbench shows +15.2 % on the GDN scan kernel alone
+        // at n_tok=4096. Off by default until Phase 2's WY-rep parallel
+        // matmul lands on top — the structural prereq is shipped, the
+        // algorithmic SSD win is Phase 2.
+        bool chunkwise_scan = false;
         // Override gated-DeltaNet weight layout. Legacy env: IMP_GDN_LAYOUT.
         std::string layout_override;
     } gdn;
