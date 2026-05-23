@@ -209,7 +209,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
 // Grid:  (n_heads)              — one block per head
 // Block: (HD)                   — typically 128 threads
 // ---------------------------------------------------------------------------
-template <int HD, int SS, int CHUNK>
+template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
@@ -217,7 +217,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ A_log,     // [n_heads] FP32
     const float* __restrict__ dt_bias,   // [n_heads] FP32
     float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
-    half* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16
+    YOut* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16 or FP32
     int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout) {
     const int h = blockIdx.x;
     if (h >= n_heads)
@@ -342,7 +342,12 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
                 y_partial += h_new * q_row[s];
             }
 
-            y_out[t_global * inner + h * HD + d] = __float2half(y_partial * scale);
+            const float out_val = y_partial * scale;
+            if constexpr (std::is_same_v<YOut, float>) {
+                y_out[t_global * inner + h * HD + d] = out_val;
+            } else {
+                y_out[t_global * inner + h * HD + d] = __float2half(out_val);
+            }
         }
 
         t_chunk_start += L;
@@ -528,10 +533,16 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 //
 // Phase 0 verdict (ncu): docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
 //   Memory 5.47 % peak / Compute 5.47 % peak / Achieved Occ 8.33 % → PROCEED.
-void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int chunk_size, int grouped_layout) {
+// Templated dispatcher used by both gdn_scan_chunkwise_f32 (YOut=half) and
+// gdn_scan_chunkwise_fp32out (YOut=float). Keeps the kernel-template + smem
+// + opt-in logic in one place — the two host launchers only differ in the
+// y_out element type and the fallback they use for unsupported shapes.
+template <typename YOut, typename FusedFallback>
+static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels, const half* alpha,
+                                        const half* beta, const float* A_log, const float* dt_bias,
+                                        float* h_state, YOut* y, int n_tokens, int n_heads, int head_dim_ssm,
+                                        int state_size, int n_groups, cudaStream_t stream, int chunk_size,
+                                        int grouped_layout, FusedFallback fused) {
     if (chunk_size <= 0)
         chunk_size = 64;
     if (chunk_size > n_tokens)
@@ -546,11 +557,12 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
             const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
             static bool attr_set = false;
             if (!attr_set) {
-                cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_scan_chunkwise_kernel<HD, SS, CHUNK>),
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                cudaFuncSetAttribute(
+                    reinterpret_cast<const void*>(&gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut>),
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
                 attr_set = true;
             }
-            gdn_scan_chunkwise_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
+            gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
                 conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
                 grouped_layout);
             return;
@@ -559,7 +571,7 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
             constexpr int HD = 64, SS = 64, CHUNK = 64;
             const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
             // 2 * 64 * 64 * 4 + 64 * 4 = 32 KiB + 256 B — within default static cap.
-            gdn_scan_chunkwise_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
+            gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
                 conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
                 grouped_layout);
             return;
@@ -574,12 +586,44 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
     int t = 0;
     while (t < n_tokens) {
         const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
-        gdn_scan_fused_f32(conv_f32 + static_cast<size_t>(t) * conv_channels, conv_channels,
-                           alpha + t * n_heads, beta + t * n_heads, A_log, dt_bias, h_state,
-                           y + static_cast<size_t>(t) * inner, this_chunk, n_heads, head_dim_ssm,
-                           state_size, n_groups, stream, grouped_layout);
+        fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + t * n_heads, beta + t * n_heads,
+              h_state, y + static_cast<size_t>(t) * inner, this_chunk);
         t += this_chunk;
     }
+}
+
+void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, float* h_state, half* y,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            cudaStream_t stream, int chunk_size, int grouped_layout) {
+    gdn_scan_chunkwise_dispatch<half>(
+        conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, head_dim_ssm,
+        state_size, n_groups, stream, chunk_size, grouped_layout,
+        [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, half* y_,
+            int n_tok_chunk) {
+            gdn_scan_fused_f32(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
+                               n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
+                               grouped_layout);
+        });
+}
+
+// FP32-output chunkwise launcher. Mirrors `gdn_scan_chunkwise_f32` for the
+// `gdn.fp32_scan` path where the scan output must stay FP32 all the way
+// through RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see comment
+// at executor_ssm_gdn.cu:483-486).
+void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                                const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
+                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                                cudaStream_t stream, int chunk_size, int grouped_layout) {
+    gdn_scan_chunkwise_dispatch<float>(
+        conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads, head_dim_ssm,
+        state_size, n_groups, stream, chunk_size, grouped_layout,
+        [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, float* y_,
+            int n_tok_chunk) {
+            gdn_scan_fused_fp32out(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
+                                   n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
+                                   grouped_layout);
+        });
 }
 
 // FP32-output variant — writes scan result as FP32 for downstream
