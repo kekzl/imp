@@ -580,17 +580,34 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         }
 
         // ---------------- STEP 6: H_L = D[0..L] H_0 + Σ_t D[t+1..L] k̃_t u_t^T ----------------
-        // Thread d updates column d of H. For each state row s: H_reg[s] *= D[0..L] then add Σ_t D[t+1..L] k̃_t[s] u_t[d].
+        // Tuning (2026-05-24):
+        //   - Hoist D[t+1..L] = exp(logD[L] - logD[t+1]) out of the (s, t) double
+        //     loop. The decay factor depends only on t, so computing it L*SS times
+        //     per chunk per head is wasted work. Precompute once into s_g (which
+        //     is reusable scratch by this point in the chunk).
+        //   - Loop interchange (t outer, s inner). The inner loop now walks
+        //     s_k[t*SS + s] with stride 1 in s, instead of the natural (s, t)
+        //     order's stride-SS column access. Sequential reads → much better
+        //     L1/coalescing.
+        //   - Hoist the per-thread per-t coefficient (D[t+1..L] · u_t[d]) out of
+        //     the s loop so the inner s loop is one FMA per element.
         {
             const float D_0L = expf(s_logD[L]);
+            if (d < L) {
+                s_g[d] = expf(s_logD[L] - s_logD[d + 1]);  // D[d+1..L], shared
+            }
+            __syncthreads();
 #pragma unroll
             for (int s = 0; s < SS; s++) {
-                float add = 0.0f;
-                for (int t_loc = 0; t_loc < L; t_loc++) {
-                    const float logD_t1L = s_logD[L] - s_logD[t_loc + 1];
-                    add += expf(logD_t1L) * s_k[t_loc * SS + s] * s_u[t_loc * HD + d];
+                H_reg[s] *= D_0L;
+            }
+            for (int t_loc = 0; t_loc < L; t_loc++) {
+                const float coef = s_g[t_loc] * s_u[t_loc * HD + d];
+                const float* k_row = s_k + t_loc * SS;
+#pragma unroll
+                for (int s = 0; s < SS; s++) {
+                    H_reg[s] += coef * k_row[s];
                 }
-                H_reg[s] = D_0L * H_reg[s] + add;
             }
         }
 
@@ -878,13 +895,23 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         }
         __syncthreads();
 
+        // Loop interchange (t outer, s inner) — sequential smem access to s_k_fp16
+        // along s (stride 1) instead of stride-SS column access. Plus hoist the
+        // per-thread per-t coefficient (s_g[t] · u_t[d]) out of the s loop.
+        // Halves the H_L step's effective memory traffic vs the natural (s, t)
+        // ordering and eliminates SS × L redundant scalar multiplications per
+        // thread per chunk.
 #pragma unroll
         for (int s = 0; s < SS; s++) {
-            float add = 0.0f;
-            for (int t_loc = 0; t_loc < L; t_loc++) {
-                add += s_g[t_loc] * __half2float(s_k_fp16[t_loc * SS + s]) * s_u_fp32[t_loc * HD + d];
+            H_reg[s] *= D_0L;
+        }
+        for (int t_loc = 0; t_loc < L; t_loc++) {
+            const float coef = s_g[t_loc] * s_u_fp32[t_loc * HD + d];
+            const half* k_row = s_k_fp16 + t_loc * SS;
+#pragma unroll
+            for (int s = 0; s < SS; s++) {
+                H_reg[s] += coef * __half2float(k_row[s]);
             }
-            H_reg[s] = D_0L * H_reg[s] + add;
         }
 
         t_chunk_start += L;

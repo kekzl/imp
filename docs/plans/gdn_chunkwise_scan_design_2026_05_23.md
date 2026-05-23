@@ -233,29 +233,46 @@ WMMA matmuls accumulate in FP32 so per-matmul precision is preserved; the small 
 
 **Microbench (n_tok=4096, n_heads=32, HD=SS=128, n_groups=16, RTX 5090 sm_120, 20 reps)**:
 
+Initial Phase 2b commit (before H_L tuning):
+
 | Kernel | Time | vs sequential |
 |---|---|---|
 | gdn_scan_fused_f32 (sequential)        | 1.566 µs/tok | 1.000× |
 | gdn_scan_chunkwise_f32 (Phase 1b.1)    | 1.346 µs/tok | **0.860×** (+15.6 %) |
 | gdn_scan_chunkwise_wy_f32 (Phase 2a)   | 3.506 µs/tok | 2.239× |
-| gdn_scan_chunkwise_wy_tc_f32 (Phase 2b)| **3.588 µs/tok** | **2.291×** |
+| gdn_scan_chunkwise_wy_tc_f32 (Phase 2b)| 3.588 µs/tok | 2.291× |
 
-**The Phase 2b TC-MMA implementation does not beat Phase 2a or the sequential reference.** Honest finding — the result documents what the actual bottleneck is. Root cause: the H_L update step (Step 6) is now the dominant cost in both Phase 2a and Phase 2b. TC-MMA-ifying KK / QK / KH / QH leaves the L·SS·HD H_L accumulation scalar, and that single step dominates the per-chunk runtime. Plus:
+After H_L tuning (loop interchange + hoisted decay precompute + hoisted per-t coefficient):
 
-1. **CHUNK=16 doubles per-chunk overhead** vs CHUNK=32 (2× the chunks for the same prefill, 2× the setup / sync / decay-precompute costs)
-2. **H_0 materialisation to shared memory** as FP16 costs ~32 KiB of stores per chunk
-3. **FP16 storage round-trips** in the L2-norm and c_t computation add per-element conversion costs
+| Kernel | Time | vs sequential |
+|---|---|---|
+| gdn_scan_fused_f32 (sequential)        | 1.558 µs/tok | 1.000× |
+| gdn_scan_chunkwise_f32 (Phase 1b.1)    | 1.334 µs/tok | **0.856×** (+16.8 %) |
+| gdn_scan_chunkwise_wy_f32 (Phase 2a)   | 1.884 µs/tok | 1.208× |
+| gdn_scan_chunkwise_wy_tc_f32 (Phase 2b)| **1.594 µs/tok** | **1.023×** (within noise of sequential) |
 
-To make Phase 2b beat sequential requires one (or both) of:
-- **Phase 2c**: TC-MMA the H_L update (the dominant cost). Needs a 16×16 output-tile accumulator pattern with intermediate shared-memory storage for warp-fragment-to-register reshuffling. Multi-day. The single most impactful follow-up.
-- **CHUNK=32 with smarter smem**: drop the s_h0_fp16 materialisation, keep KH/QH scalar (sacrificing those TC-MMA wins), only TC-MMA the small KK/QK. Likely doesn't beat sequential either since KK/QK are a small fraction of the FLOPs.
+The H_L tuning brought Phase 2b from 2.3× slower to within 2 % of sequential — essentially neutral. Three changes, all applied to Step 6:
+
+1. **Loop interchange (s outer → t outer)**. Inner loop now walks `s_k[t·SS + s]` with stride 1 in s instead of stride-SS column access. Sequential reads → significantly better L1 cache behaviour.
+2. **Hoist `D[t+1..L]`** out of the (s, t) double loop into a per-chunk precomputed array of L scalars in shared memory. Eliminates `SS × L − L` exp calls per thread per chunk.
+3. **Hoist `coef = D[t+1..L] · u_t[d]`** out of the s loop. The inner s loop is now one FMA per element instead of three multiplications.
+
+**Phase 2b is now within 2 % of the sequential reference but still 19 % slower than Phase 1b.1's structural-only approach.** Honest finding: for the GDN scan path at production shape, the simpler optimisation (chunk-cached K, Q with the still-sequential delta-rule loop, Phase 1b.1) wins over the more complex algorithmic restructure (WY-rep + TC-MMA at CHUNK=16, Phase 2b). Root causes:
+
+1. **CHUNK=16 doubles per-chunk overhead** vs CHUNK=32 (4096/16 = 256 chunks for a pp=4096 prefill, vs 128 at CHUNK=32). Setup, sync, decay-precompute all run 2× as often.
+2. **H_0 materialisation to shared memory** as FP16 costs ~32 KiB of stores per chunk × 256 chunks per prefill. Unavoidable cost for the WMMA path because H_0 needs to be in shared memory for the matmul operand B.
+3. **FP16 storage round-trips** in the L2-norm and c_t computation add per-element FP16↔FP32 conversion costs.
+
+To make Phase 2b actually beat Phase 1b.1 requires:
+- **Phase 2c**: TC-MMA the H_L update (now the largest remaining cost in Phase 2b after the loop-interchange tuning). Needs a 16×16 output-tile accumulator pattern with intermediate shared-memory storage for warp-fragment-to-register reshuffling. Multi-day. The single most impactful follow-up.
+- **Phase 2d**: CHUNK=32 with smarter smem (would need to drop the s_h0_fp16 materialisation and either keep KH/QH scalar or find a different way to feed H_0 to the TC-MMA — possibly via warp-local fragment construction from registers).
 
 The Phase 2b prototype is shipped to:
 1. Validate the TC-MMA infrastructure on the GDN scan path (numerics pass, no kernel-launch issues)
-2. Document the bottleneck honestly so future sessions don't repeat the wrong optimisation
+2. Document the bottleneck and prove the H_L tuning win (which also applies to Phase 2a)
 3. Give Phase 2c a working WMMA template to drop H_L matmul into
 
-Not wired into production dispatch (would regress wall by 2.3×). The new test `ChunkwiseWyTcMatchesFused` is the regression gate for Phase 2c / Phase 2d work that targets the H_L step.
+Not wired into production dispatch (still slightly slower than sequential and ~19 % slower than Phase 1b.1). The new test `ChunkwiseWyTcMatchesFused` is the regression gate for Phase 2c / Phase 2d work.
 
 Code: `gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK=16>` in `src/compute/gdn.cu`; host launcher `gdn_scan_chunkwise_wy_tc_f32`; test in `tests/test_gdn.cu`.
 
