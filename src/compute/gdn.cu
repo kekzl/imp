@@ -183,6 +183,182 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 1b.1 — Standalone chunkwise SSD scan prototype.
+//
+// Structural prototype for the Mamba2 SSD (Structured State-space Duality)
+// algorithm adapted for the GDN delta rule. Same numerical math as
+// `gdn_scan_fused_kernel`, but reorganised into per-chunk passes that cache
+// all CHUNK tokens' normalised K and Q in shared memory upfront, then sweep
+// the within-chunk delta-rule update.
+//
+// Phase 2 will replace the sequential within-chunk loop with the WY-rep
+// parallel matmul update (Yang et al. 2024, "Parallel Linear Attention With
+// The Delta Rule"). The chunk-cached K, Q layout established here is the
+// prerequisite — both Q · K^T (chunk-internal masked-attention) and the
+// cumulative decay propagation need all CHUNK tokens' K, Q resident at once.
+//
+// Per-block shared memory:
+//   s_k[CHUNK * SS]  — normalised K, all tokens in chunk
+//   s_q[CHUNK * SS]  — normalised Q, all tokens in chunk
+//   s_reduce[HD]     — block-reduction scratch (reused per L2 norm)
+//
+// At HD=SS=128, CHUNK=64 this is 2 * 64 * 128 * 4 + 128 * 4 = 65 KiB,
+// requiring the dynamic shared-memory opt-in (cudaFuncAttributeMaxDynamicShared
+// MemorySize). Host launcher sets it once.
+//
+// Grid:  (n_heads)              — one block per head
+// Block: (HD)                   — typically 128 threads
+// ---------------------------------------------------------------------------
+template <int HD, int SS, int CHUNK>
+__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
+    const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
+    const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
+    const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
+    const float* __restrict__ A_log,     // [n_heads] FP32
+    const float* __restrict__ dt_bias,   // [n_heads] FP32
+    float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
+    half* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16
+    int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout) {
+    const int h = blockIdx.x;
+    if (h >= n_heads)
+        return;
+    const int d = threadIdx.x;
+
+    const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
+    const int inner = n_heads * HD;
+    const int BC_size = n_groups * SS;
+    const float scale = rsqrtf(static_cast<float>(HD));
+
+    const float A_h = A_log[h];
+    const float dtb_h = dt_bias[h];
+
+    // State in registers (one column per thread).
+    float H_reg[SS];
+    {
+        const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+        for (int s = 0; s < SS; s++)
+            H_reg[s] = H_col[s * HD];
+    }
+
+    extern __shared__ float smem[];
+    float* s_k = smem;                               // [CHUNK * SS]
+    float* s_q = smem + CHUNK * SS;                  // [CHUNK * SS]
+    float* s_reduce = smem + 2 * CHUNK * SS;         // [HD]
+
+    int t_chunk_start = 0;
+    while (t_chunk_start < n_tokens) {
+        const int L = (t_chunk_start + CHUNK <= n_tokens) ? CHUNK : (n_tokens - t_chunk_start);
+
+        // -------------------------------------------------------------------
+        // Phase 1: Load this chunk's K, Q (raw) into shared memory.
+        // Each thread d stores one element per token, looping over tokens.
+        // -------------------------------------------------------------------
+        if (d < SS) {
+            for (int t_local = 0; t_local < L; t_local++) {
+                const int t_global = t_chunk_start + t_local;
+                const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
+                s_q[t_local * SS + d] = row[g * SS + d];
+                s_k[t_local * SS + d] = row[BC_size + g * SS + d];
+            }
+        }
+        __syncthreads();
+
+        // -------------------------------------------------------------------
+        // Phase 2: L2-normalise K, Q for each token in the chunk.
+        // Per-token reduction (sequential across tokens, parallel across SS).
+        // Uses the SAME formula as gdn_scan_fused_kernel (rsqrt of max(sum_sq,
+        // 1e-12)) for bit-equivalent numerics.
+        // -------------------------------------------------------------------
+        for (int t_local = 0; t_local < L; t_local++) {
+            float* k_row = s_k + t_local * SS;
+            float* q_row = s_q + t_local * SS;
+
+            float k_sq = 0.0f, q_sq = 0.0f;
+            for (int i = d; i < SS; i += HD) {
+                k_sq += k_row[i] * k_row[i];
+                q_sq += q_row[i] * q_row[i];
+            }
+            s_reduce[d] = k_sq;
+            __syncthreads();
+            for (int stride = HD / 2; stride > 0; stride >>= 1) {
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
+                __syncthreads();
+            }
+            float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+
+            s_reduce[d] = q_sq;
+            __syncthreads();
+            for (int stride = HD / 2; stride > 0; stride >>= 1) {
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
+                __syncthreads();
+            }
+            float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+
+            if (d < SS) {
+                k_row[d] *= k_inv;
+                q_row[d] *= q_inv;
+            }
+            __syncthreads();
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 3: Sequential per-token delta-rule update within chunk.
+        // Reads K̃, Q̃ from shared memory; same math as gdn_scan_fused_kernel.
+        // Phase 2 of the design doc replaces this loop with the WY-rep
+        // parallel matmul update.
+        // -------------------------------------------------------------------
+        for (int t_local = 0; t_local < L; t_local++) {
+            const int t_global = t_chunk_start + t_local;
+            const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
+            const float* V_base = row + 2 * BC_size;
+            const float v_d = V_base[h * HD + d];
+
+            const float* k_row = s_k + t_local * SS;
+            const float* q_row = s_q + t_local * SS;
+
+            float alpha_h = __half2float(alpha_all[t_global * n_heads + h]);
+            float dt_val = alpha_h + dtb_h;
+            dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
+            const float g_t = expf(fmaxf(A_h * dt_val, -20.0f));
+
+            float beta_h = __half2float(beta_all[t_global * n_heads + h]);
+            beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
+
+            float kv_d = 0.0f;
+#pragma unroll
+            for (int s = 0; s < SS; s++)
+                kv_d += H_reg[s] * k_row[s];
+
+            const float delta_d = (v_d - g_t * kv_d) * beta_h;
+
+            float y_partial = 0.0f;
+#pragma unroll
+            for (int s = 0; s < SS; s++) {
+                const float h_new = g_t * H_reg[s] + k_row[s] * delta_d;
+                H_reg[s] = h_new;
+                y_partial += h_new * q_row[s];
+            }
+
+            y_out[t_global * inner + h * HD + d] = __float2half(y_partial * scale);
+        }
+
+        t_chunk_start += L;
+        __syncthreads();  // Before re-using s_k / s_q for the next chunk.
+    }
+
+    // Write final state back to global memory.
+    {
+        float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+        for (int s = 0; s < SS; s++)
+            H_col[s * HD] = H_reg[s];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fused RMSNormGated + SiLU kernel.
 // Computes: y[t,h,:] = rmsnorm(y[t,h,:], weight) * silu(gate[t,h,:])
 //
@@ -334,20 +510,21 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     }
 }
 
-// EXPERIMENTAL — Phase 1b scaffolding for chunkwise SSD scan.
-// Current implementation: chunk-iterating sequential wrapper around
-// `gdn_scan_fused_f32`. Functionally identical to the monolithic call (the
-// kernel handles the H state in/out cleanly across multiple invocations,
-// validated by tests/test_gdn.cu::ChunkBoundaryHandoff). Phase 1b.1 replaces
-// the per-chunk call with a parallel-within-chunk SSD matmul kernel.
+// Phase 1b.1 — Standalone chunkwise SSD scan host launcher.
 //
-// The chunk_size parameter is currently informational (default 64 = Mamba2
-// paper's typical SSD block size). When the SSD kernel ships, it will tile
-// the within-chunk math at this block size.
+// Dispatches to `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` for the supported
+// (HD, SS, CHUNK) combinations and falls back to a chunk-iterating wrapper
+// around `gdn_scan_fused_f32` otherwise. The chunkwise kernel produces output
+// bit-near-equivalent to `gdn_scan_fused_kernel` (FP16 1e-3, FP32 state 1e-5
+// tolerances per Phase 1a), validated by ChunkBoundaryHandoff +
+// ChunkwiseProtoMatchesFused tests.
 //
-// Reference for delta-rule parallel scan: Yang et al. 2024, "Parallel Linear
-// Attention With The Delta Rule" (the standard Mamba2 SSD assumes scalar
-// decay and doesn't cover GDN's rank-1 (I - β k k^T) multiplicative update).
+// Phase 2 will replace the within-chunk sequential delta-rule loop in
+// `gdn_scan_chunkwise_kernel` with the WY-rep parallel matmul update (Yang
+// et al. 2024, "Parallel Linear Attention With The Delta Rule"). Until then
+// the prototype is structural-only and gives no perf win over the sequential
+// fused kernel; it establishes the chunked shared-memory layout that the
+// SSD matmul will need.
 //
 // Phase 0 verdict (ncu): docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
 //   Memory 5.47 % peak / Compute 5.47 % peak / Achieved Occ 8.33 % → PROCEED.
@@ -355,20 +532,48 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
                             const float* A_log, const float* dt_bias, float* h_state, half* y,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                             cudaStream_t stream, int chunk_size, int grouped_layout) {
-    // Effective chunk size: clamp to [1, n_tokens] so a single-token decode
-    // path falls through cleanly to one call with the same args.
     if (chunk_size <= 0)
         chunk_size = 64;
     if (chunk_size > n_tokens)
         chunk_size = n_tokens;
 
+    // Direct chunkwise kernel dispatch for the supported (HD, SS, CHUNK) shapes.
+    // Phase 1b.1 covers chunk_size==64 + HD==SS in {128, 64}, the production
+    // GDN shapes (Qwen 3.5 / 3.6). Other sizes fall through to the wrapper.
+    if (chunk_size == 64 && n_tokens >= 64) {
+        if (head_dim_ssm == 128 && state_size == 128) {
+            constexpr int HD = 128, SS = 128, CHUNK = 64;
+            const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
+            static bool attr_set = false;
+            if (!attr_set) {
+                cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_scan_chunkwise_kernel<HD, SS, CHUNK>),
+                                     cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                attr_set = true;
+            }
+            gdn_scan_chunkwise_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
+                conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
+                grouped_layout);
+            return;
+        }
+        if (head_dim_ssm == 64 && state_size == 64) {
+            constexpr int HD = 64, SS = 64, CHUNK = 64;
+            const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
+            // 2 * 64 * 64 * 4 + 64 * 4 = 32 KiB + 256 B — within default static cap.
+            gdn_scan_chunkwise_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
+                conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
+                grouped_layout);
+            return;
+        }
+    }
+
+    // Fallback: chunk-iterating wrapper around the sequential fused kernel.
+    // Used for non-default chunk sizes, unsupported HD/SS combos, and the
+    // tail-chunk path where n_tokens < chunk_size. h_state mutates in-place
+    // across the per-chunk calls; same-stream submission keeps ordering.
     const int inner = n_heads * head_dim_ssm;
     int t = 0;
     while (t < n_tokens) {
         const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
-        // h_state mutates in-place across chunks — kernel reads it as the
-        // entry state and writes the chunk-end state back. No additional
-        // host-side sync needed; the chunks are issued on the same stream.
         gdn_scan_fused_f32(conv_f32 + static_cast<size_t>(t) * conv_channels, conv_channels,
                            alpha + t * n_heads, beta + t * n_heads, A_log, dt_bias, h_state,
                            y + static_cast<size_t>(t) * inner, this_chunk, n_heads, head_dim_ssm,
