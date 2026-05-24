@@ -1603,11 +1603,10 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     // before this refactor.
     const std::string& comp_id          = ctx.comp_id;
     int64_t            created          = ctx.created;
-    int                max_tokens       = ctx.params.max_tokens;
     int                n_prompt_tokens  = ctx.snap.n_prompt_tokens;
     auto               t_start          = ctx.t_start;
     const auto&        stop_sequences   = ctx.params.stop_sequences;
-    int                max_stop_len     = ctx.params.max_stop_len;
+    size_t             max_stop_len     = static_cast<size_t>(ctx.params.max_stop_len);
     int                req_logprobs     = ctx.params.req_logprobs;
     bool               include_usage    = ctx.params.include_usage;
     bool               enable_thinking  = ctx.snap.enable_thinking;
