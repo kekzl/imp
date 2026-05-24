@@ -1801,17 +1801,28 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
                 return;
         }
     }
-    // FP16 cache hit OR raw FP16/BF16-source weight (BF16 source is always
-    // converted to F16 at upload; weight.qtype is F16 here).
-    if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
-        GemmKernelArgs args{};
-        args.input = &input;
-        args.output = &output;
-        args.stream = ctx.stream;
-        args.weight_payload = &it->second;
-        GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
-        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-            return;
+    // FP16 cache hit — only fire for M > 1 prefill OR for natively-F16
+    // weights (where the cache IS the source storage). At M = 1 decode with
+    // a quantized source (Q4_K, Q8_0, Q6_K cached as FP16), the small-M
+    // dp4a/mmvq path on the ORIGINAL quantized weight is far faster than
+    // cuBLAS gemv on the FP16 overlay (5-10x lower per-call HBM read).
+    // Pre-5.1.2: Phase 1 skipped Q4_K → fp16 cache miss → fall through to
+    // dp4a (FAST). Post-5.1.2: Phase 1 caches Q4_K → fp16 hit → this branch
+    // forced cuBLAS gemv on the FP16 overlay (SLOW, −36% tg128 regression).
+    // Gating on M>1 OR native-F16 restores the M=1 dp4a fast path.
+    // Phase 5 PR #1 Commit 5.1.3.c — closes the decode regression from 5.1.2.
+    const bool native_f16_weight = (weight.qtype == QType::F16 || weight.qtype == QType::BF16);
+    if (M > 1 || native_f16_weight) {
+        if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &it->second;
+            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
     }
     if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
         GemmKernelArgs args{};
