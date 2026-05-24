@@ -942,6 +942,12 @@ if (mx_native > 0) {
             IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)", cudaGetErrorString(ae),
                           fp16_total / (1024.0 * 1024.0));
             d_fp16_bulk = nullptr;
+        } else {
+            // Track the bulk for shutdown cleanup. Each fp16 Tensor written
+            // below points to a sub-range of this allocation, so we cannot
+            // cudaFree the sub-pointers — only the bulk base.
+            wcache_.fp16_bulk_data = d_fp16_bulk;
+            wcache_.fp16_bulk_data_size = fp16_total;
         }
     }
 
@@ -1009,6 +1015,15 @@ if (mx_native > 0) {
         }
         replace_weight(const_cast<Model*>(model_)->out_proj_,
                        const_cast<Model*>(model_)->out_proj_.qtype);
+        // Tok-embed table — when weight tying is on (Qwen3.5-4B / others), it
+        // shares the same GPU storage as out_proj_, so its data pointer is
+        // already a key in wcache_.fp16. Without this replace, the embedding
+        // lookup reads the raw MXFP4 bytes as FP16 → garbage hidden state from
+        // token 0 → garbage logits → token-0 spam output. Also harmless when
+        // the embedding is FP16 (the lookup misses, qtype guard is satisfied
+        // anyway).
+        replace_weight(const_cast<Model*>(model_)->tok_emb_,
+                       const_cast<Model*>(model_)->tok_emb_.qtype);
         IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers",
                      (int)wcache_.fp16.size());
     }

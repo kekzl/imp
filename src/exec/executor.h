@@ -403,6 +403,15 @@ struct WeightCaches {
     std::unordered_map<const void*, Tensor> fp16;
     size_t fp16_bytes = 0;
 
+    // Bulk allocation used by the MXFP4 → FP16 decode fallback. When set,
+    // every Tensor::data in `fp16` is a SUB-pointer (offset) into this single
+    // cudaMalloc'd buffer — cudaFree on the sub-pointers returns
+    // "invalid argument". On shutdown, range-check each fp16 entry against
+    // this region (analogous to fp8_migrated_data) and skip the per-tensor
+    // cudaFree; the bulk pointer is freed once via raw cudaFree.
+    void* fp16_bulk_data = nullptr;
+    size_t fp16_bulk_data_size = 0;
+
     // Fused KV: [wk; wv] per layer for strided batched prefill GEMM.
     std::unordered_map<int, Tensor> fused_kv;
     // Fused gate+up: [w_gate; w_up] per layer.
