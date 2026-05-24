@@ -1912,12 +1912,37 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
         gemm_dispatch(input, weight_fallback, output, ctx);
         return;
     }
+    const auto& h = registry_.handle(id);
     int M = static_cast<int>(input.shape[0]);
+    if (M == 1 && ctx.beta == 0.0f) {
+        switch (h.primary_tier) {
+            case StorageTier::NVFP4:
+            case StorageTier::FP8:
+            case StorageTier::MXFP4:
+                imp::gemv_dispatch(h, input, output, ctx.stream);
+                return;
+            case StorageTier::CUTLASS_NVFP4: {
+                auto it = wcache_.nvfp4.find(weight_fallback.data);
+                if (it != wcache_.nvfp4.end()) {
+                    gemv_nvfp4_kpar(it->second,
+                                    reinterpret_cast<const half*>(input.data),
+                                    reinterpret_cast<half*>(output.data),
+                                    static_cast<int>(it->second.N),
+                                    static_cast<int>(it->second.K), ctx.stream);
+                    return;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        gemm_dispatch(input, weight_fallback, output, ctx);
+        return;
+    }
     if (M == 1) {
         gemm_dispatch(input, weight_fallback, output, ctx);
         return;
     }
-    const auto& h = registry_.handle(id);
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        shared_workspace_, shared_workspace_size_, ctx.stream);
 }
