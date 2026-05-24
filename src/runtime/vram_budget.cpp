@@ -1,5 +1,6 @@
 #include "runtime/vram_budget.h"
 #include "runtime/engine.h"  // EngineConfig full definition
+#include "runtime/storage_planner.h"
 #include "core/logging.h"
 #include <algorithm>
 #include <cuda_runtime.h>
@@ -144,6 +145,27 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
 
     size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
     size_t cutlass_sf_estimate = nvfp4_elems / 16;
+
+    // Phase 5 PR #1 Commit 5.1.5: cross-check the heuristic estimate against
+    // the StoragePlanner's projected total (source-qtype-aware via 5.1.1).
+    // Diverging numbers indicate the heuristic missed a tier (e.g. Q4_K weights
+    // that the planner correctly routes to FP16 but the heuristic treats as 0
+    // because nvfp4_beneficial is false). Logged as INFO; the heuristic still
+    // drives allocation until the strategy/planner unification lands.
+    {
+        PlanHints hints;
+        hints.prefer_nvfp4_decode = (config.use_nvfp4_decode > 0);
+        hints.dual_path_attn_fp8_ffn_nvfp4 = config.dual_path_quant;
+        hints.prefer_fp8 = config.use_fp8_prefill;
+        StoragePlan plan = plan_storage(model, mcfg, hints);
+        size_t heuristic_total = nvfp4_estimate + cutlass_sf_estimate;
+        IMP_LOG_INFO(
+            "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "
+            "nvfp4=%.1f MiB cutlass_sf=%.1f MiB. Heuristic still drives "
+            "allocation; planner output diagnostic only (5.1.5).",
+            plan.projected_vram_bytes / (1024.0 * 1024.0), plan.entries.size(),
+            nvfp4_estimate / (1024.0 * 1024.0), cutlass_sf_estimate / (1024.0 * 1024.0));
+    }
 
     // --- 6. Allocate based on strategy ---
     switch (budget.strategy) {

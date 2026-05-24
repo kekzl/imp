@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/qtype.h"
 #include "core/tensor_kind.h"
 #include "core/storage_tier.h"
 
@@ -24,6 +25,7 @@ struct StoragePlan {
     struct Entry {
         TensorID id;
         TensorKind kind;
+        QType source_qtype;  // source storage; feeds effective_capabilities() in downgrade loop
         StorageTier tier;
         int64_t bytes;
         int64_t rows;

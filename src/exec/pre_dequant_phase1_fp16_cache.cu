@@ -1,12 +1,19 @@
 // Pre-dequant Phase 1: FP16 cache.
-// Converts all GGUF Q*_K-quantized weights to an FP16 device cache,
-// gated by attention.mxfp4_fp16_cache_policy (legacy/pruned).
+// Converts GGUF Q*_K-quantized weights to an FP16 device cache when the
+// planner's per-weight tier decision selects FP16. Phase 5 PR #1 Commit 5.1.2
+// replaces the old NVFP4_DECODE_ONLY all-or-nothing early-exit + per-FFN
+// nvfp4_decode_mode heuristic with a centralised `effective_capabilities(kind,
+// qtype)` check — mirrors the StoragePlanner's policy so Phase 1 and Phase 3
+// agree on which weights belong where. Closes the 2026-05-24 Q4_K_M coverage
+// gap (Gemma-3-12B Q4_K weights got zero cache because Phase 1 early-exited
+// and Phase 3 only caches nvfp4_beneficial weights).
 //
 // Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
 #include "exec/pre_dequant_internal.h"
+#include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 
@@ -15,13 +22,13 @@
 
 using imp::pre_dequant_internal::create_fused_weight_pair;
 using imp::pre_dequant_internal::deduct_budget;
-using imp::pre_dequant_internal::nvfp4_beneficial;
 
 namespace imp {
 
 void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
     size_t& remaining_budget, cudaStream_t stream) {
+    (void)budget;  // strategy gate retired — plan-driven now
     size_t total_cache_bytes = 0;
     int cached_count = 0;
     bool budget_exhausted = false;
@@ -32,21 +39,29 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
             "all dense weights → FP8 cache (Phase 2)");
         return;
     }
-    if (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY) {
-        IMP_LOG_INFO(
-            "NVFP4 decode only: skipping FP16 cache (Phase 1), "
-            "VRAM reserved for NVFP4 decode cache");
-        return;
-    }
+
+    // Plan-driven per-weight gate: cache as FP16 iff the (source-qtype-aware)
+    // planner would route this kind+qtype to the FP16 tier. Sub-5-bit sources
+    // (Q4_K, Q4_0, etc.) land here. Q5_K/Q6_K/Q8_0/Q8_K → NVFP4 (Phase 3).
+    // Native FP4 → their own tier. Replaces the unconditional NVFP4-only
+    // early-exit + per-FFN nvfp4_decode_mode heuristic.
+    auto plan_routes_to_fp16 = [&](TensorKind kind, QType qtype) {
+        if (qtype == QType::F16 || qtype == QType::BF16 || qtype == QType::F32)
+            return false;  // already in compute dtype; no overlay needed
+        const auto cap = effective_capabilities(kind, qtype);
+        return cap.required_floor == StorageTier::FP16;
+    };
 
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
-    auto cache_weight = [&](const Tensor& w, QType qtype) {
+    auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
         if (!w.data || !dequant_gpu_supported(qtype))
             return;
         if (wcache_.fp16.count(w.data))
             return;  // already cached
         if (budget_exhausted)
             return;
+        if (!plan_routes_to_fp16(kind, qtype))
+            return;  // Phase 3 (NVFP4) or native FP4 owns this weight
 
         int rows = static_cast<int>(w.shape[0]);
         int cols = static_cast<int>(w.shape[1]);
@@ -81,31 +96,25 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     // Priority order: attention weights first (critical for cuBLAS prefill),
     // then SSM, shared experts, and dense FFN.  This ensures hybrid models
     // like Nemotron (23 SSM + 6 attention layers) cache all attention weights
-    // before SSM weights exhaust the VRAM budget.
+    // before SSM weights exhaust the VRAM budget. Tier-decision is per-kind
+    // via plan_routes_to_fp16; per-tensor budget pressure still applies.
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
-        cache_weight(L.wq, L.wq.qtype);
-        cache_weight(L.wk, L.wk.qtype);
-        cache_weight(L.wv, L.wv.qtype);
-        cache_weight(L.wo, L.wo.qtype);
+        cache_weight(L.wq, L.wq.qtype, TensorKind::WQ);
+        cache_weight(L.wk, L.wk.qtype, TensorKind::WK);
+        cache_weight(L.wv, L.wv.qtype, TensorKind::WV);
+        cache_weight(L.wo, L.wo.qtype, TensorKind::WO);
     }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
-        cache_weight(L.ssm_in, L.ssm_in.qtype);
-        cache_weight(L.ssm_out, L.ssm_out.qtype);
-        cache_weight(L.w_gate_shared, L.w_gate_shared.qtype);
-        cache_weight(L.w_up_shared, L.w_up_shared.qtype);
-        cache_weight(L.w_down_shared, L.w_down_shared.qtype);
-        // When NVFP4 decode is active, skip dense FFN FP16 cache for eligible
-        // weights.  Decode benefits more from NVFP4 (~47% BW reduction) than
-        // prefill loses from on-the-fly dequant.  NVFP4 is also ~3.5x smaller
-        // per tensor, so skipping FFN FP16 frees massive VRAM for full NVFP4.
-        if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate.qtype))
-            cache_weight(L.w_gate, L.w_gate.qtype);
-        if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up.qtype))
-            cache_weight(L.w_up, L.w_up.qtype);
-        if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down.qtype))
-            cache_weight(L.w_down, L.w_down.qtype);
+        cache_weight(L.ssm_in, L.ssm_in.qtype, TensorKind::SSM_IN);
+        cache_weight(L.ssm_out, L.ssm_out.qtype, TensorKind::SSM_OUT);
+        cache_weight(L.w_gate_shared, L.w_gate_shared.qtype, TensorKind::W_GATE);
+        cache_weight(L.w_up_shared, L.w_up_shared.qtype, TensorKind::W_UP);
+        cache_weight(L.w_down_shared, L.w_down_shared.qtype, TensorKind::W_DOWN);
+        cache_weight(L.w_gate, L.w_gate.qtype, TensorKind::W_GATE);
+        cache_weight(L.w_up, L.w_up.qtype, TensorKind::W_UP);
+        cache_weight(L.w_down, L.w_down.qtype, TensorKind::W_DOWN);
     }
 
     // Create fused KV weights for strided batched prefill GEMM.
