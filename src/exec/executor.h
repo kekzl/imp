@@ -770,6 +770,13 @@ private:
                                          cudaStream_t stream, Nvfp4DecodeContext& dctx);
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
+    // Phase 5 PR #1 Commit 5.1.4.b: mark Tensor.dropped_source for weights
+    // whose handle says can_drop_source(). DOES NOT cudaFree (yet) — bisect
+    // mode: trigger the safety guards in dispatch to surface unguarded paths
+    // via "dropped-source reached final fallback" warnings without actually
+    // crashing on stale pointers. Actual freeing follows once coverage is
+    // verified clean.
+    void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
 
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;

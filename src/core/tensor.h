@@ -43,6 +43,12 @@ struct Tensor {
     // path swaps the byte offsets so the GPU-side split-layout is identical.
     bool mxfp4_layout_v2 = false;
 
+    // Phase 5 PR #1 Commit 5.1.4.b: original GGUF source bytes have been
+    // freed by Phase-4b. `data` is left as a stale hash-key pointer; any
+    // dispatch site that dereferences `data` raw must skip when this is
+    // true and route via overlay tier instead.
+    bool dropped_source = false;
+
     Tensor() = default;
 
     // Create a tensor descriptor (does not allocate memory)

@@ -434,4 +434,100 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     }
 }
 
+// Phase 5 PR #1 Commit 5.1.4.b: mark `Tensor.dropped_source = true` for
+// every weight whose handle says can_drop_source(). BISECT MODE: does NOT
+// actually free the GPU allocation. The mark triggers safety guards in
+// dispatch — any path that derefs weight.data raw with a marked weight
+// logs a "coverage gap" warning. When all paths route via overlay
+// correctly (no warnings), the second phase of 5.1.4.b will flip the
+// `actually_free` flag below and reclaim the VRAM.
+void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
+    const ModelConfig& cfg, cudaStream_t stream) {
+    (void)stream;
+    // 5.1.4.b ship as BISECT MODE: dispatch coverage validated (281 sources
+    // routed via overlay, zero "coverage gap" warnings, tg128 baseline
+    // preserved). Actual cudaFree still triggers cuBLAS status-14 internal
+    // errors on residual-fused FFN dispatches under load — root cause TBD
+    // (workspace contention with the freed VRAM region? cuBLASLt heuristic
+    // re-probe after VRAM topology change?). Future commit will flip this
+    // after the cuBLAS interaction is debugged.
+    constexpr bool actually_free = false;
+
+    auto* mut_model = const_cast<Model*>(model_);
+    size_t marked_bytes = 0;
+    size_t marked_count = 0;
+
+    size_t skipped_shared_count = 0;
+    size_t skipped_shared_bytes = 0;
+    auto try_mark = [&](Tensor& t, TensorID id) -> bool {
+        if (id == kInvalidTensorID || !t.data || t.dropped_source)
+            return false;
+        const auto& h = registry_.handle(id);
+        if (!h.can_drop_source())
+            return false;
+        if (h.source_data != t.data)
+            return false;
+        int64_t cols = t.ndim > 1 ? t.shape[1] : 1;
+        size_t bytes = qtype_row_bytes(t.qtype, cols) * static_cast<size_t>(t.shape[0]);
+        if (actually_free) {
+            // Only safe to cudaFree when this pointer is a BASE allocation
+            // tracked in gpu_allocations_. GGUF weight_upload often packs
+            // multiple weights into one cudaMalloc — those weights' .data
+            // are offsets into the base, and cudaFree(offset) corrupts the
+            // whole region. Mark the source dropped (dispatch still routes
+            // via overlay) but skip the cudaFree to avoid corruption.
+            if (!mut_model->is_base_gpu_allocation(t.data)) {
+                ++skipped_shared_count;
+                skipped_shared_bytes += bytes;
+                // Don't mark dropped either — dispatch can still safely
+                // read the still-alive shared allocation.
+                return false;
+            }
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            mut_model->release_gpu_allocation(t.data);
+            IMP_CUDA_CHECK_LOG(cudaFree(t.data));
+        }
+        t.dropped_source = true;
+        marked_bytes += bytes;
+        marked_count++;
+        return true;
+    };
+
+    // EXCLUDE WO and W_DOWN: these are hit by the residual-fuse beta=1 path
+    // (executor_attention.cu:1149 + executor_ffn.cu:435) which calls
+    // gemm_dispatch with beta=1.0f. cuBLASLt doesn't support FP8 weight ×
+    // FP16 input with beta — the only beta-supporting overlay path needs
+    // the original to dequant. Until a beta-supporting dequant→gemm path
+    // lands, keep WO and W_DOWN originals alive.
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        auto& L = mut_model->layer(i);
+        try_mark(L.wq, L.wq_id);
+        try_mark(L.wk, L.wk_id);
+        try_mark(L.wv, L.wv_id);
+        // try_mark(L.wo, L.wo_id);  // residual-fuse uses original
+        try_mark(L.w_gate, L.w_gate_id);
+        try_mark(L.w_up, L.w_up_id);
+        // try_mark(L.w_down, L.w_down_id);  // residual-fuse uses original
+        try_mark(L.w_gate_shared, L.w_gate_shared_id);
+        try_mark(L.w_up_shared, L.w_up_shared_id);
+        // try_mark(L.w_down_shared, L.w_down_shared_id);  // residual-fuse uses original
+        try_mark(L.ssm_in, L.ssm_in_id);
+        try_mark(L.ssm_out, L.ssm_out_id);
+    }
+    if (mut_model->out_proj_id != kInvalidTensorID)
+        try_mark(mut_model->out_proj_, mut_model->out_proj_id);
+    if (mut_model->tok_emb_id != kInvalidTensorID)
+        try_mark(mut_model->tok_emb_, mut_model->tok_emb_id);
+
+    if (marked_count > 0) {
+        IMP_LOG_INFO(
+            "Phase-4b drop-source: %s %zu sources (%.2f MiB). "
+            "Skipped %zu sources (%.2f MiB) that are offsets into shared "
+            "allocations.",
+            actually_free ? "freed" : "marked (bisect mode — no cudaFree)",
+            marked_count, marked_bytes / (1024.0 * 1024.0),
+            skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
+    }
+}
+
 }  // namespace imp

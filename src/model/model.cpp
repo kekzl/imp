@@ -72,6 +72,12 @@ void Model::release_gpu_allocation(void* ptr) {
     }
 }
 
+bool Model::is_base_gpu_allocation(void* ptr) const {
+    if (!ptr)
+        return false;
+    return std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr) != gpu_allocations_.end();
+}
+
 // ---------------------------------------------------------------------------
 // Architecture registry — single source of truth for all per-arch metadata.
 // Replaces scattered switch statements in model.cpp, chat_template.cpp,

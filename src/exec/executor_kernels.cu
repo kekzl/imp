@@ -2,6 +2,7 @@
 #include "exec/gemm_context.h"
 #include "exec/gemm_kernel_registry.h"
 #include "exec/executor.h"
+#include "core/tensor_kind.h"
 #include "core/logging.h"
 #include "runtime/config.h"
 #include "compute/gemm.h"
@@ -1610,7 +1611,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             gemm(input, it->second, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        if (qs->dequant != nullptr && dequant_gpu_supported(qtype)) {
+        // dequant_gpu derefs weight.data raw — skip if dropped (5.1.4.b).
+        if (qs->dequant != nullptr && dequant_gpu_supported(qtype) && !weight.dropped_source) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
@@ -1841,7 +1843,9 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     const bool fp32_output = (output.qtype == QType::F32);
     const bool prefer_fp16_cache =
         (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
-    if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache) {
+    // 5.1.4.b: small-M GGUF (dp4a/mmvq) derefs weight.data — skip if dropped.
+    if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache &&
+        !weight.dropped_source) {
         GemmKernelArgs args{};
         args.input = &input;
         args.output = &output;
@@ -1861,7 +1865,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     }
     // Qtype-agnostic generic-dequant catch-all (M>1 prefill). Handler reads
     // weight.qtype off the Tensor and switches via `dequant_gpu_supported`.
-    if (M > 1 && input.qtype == QType::F16) {
+    // 5.1.4.b: skip if dropped — overlay should have fired above.
+    if (M > 1 && input.qtype == QType::F16 && !weight.dropped_source) {
         GemmKernelArgs args{};
         args.input = &input;
         args.output = &output;
@@ -1876,6 +1881,20 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
     // Final fallback: raw FP16/BF16 cuBLAS. Reached only when none of the
     // tiers above match — typically a raw FP16/BF16 weight at a shape no
     // cache covered. Matches the legacy `else { gemm(...); }` arm.
+    // 5.1.4.b safety probe: dropped weights MUST have been dispatched via
+    // overlay above. If we get here with a dropped weight, that's a coverage
+    // gap — surface it loud (once per process).
+    if (weight.dropped_source) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            IMP_LOG_WARN(
+                "gemm_dispatch: dropped weight reached final fallback! "
+                "M=%d qtype=%d kind=%s — overlay coverage gap, fix dispatch.",
+                M, static_cast<int>(qtype), tensor_kind_name(weight.kind));
+        }
+        return;  // bisect mode: don't crash; just no-op (output will be wrong, surfaces in bench)
+    }
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 

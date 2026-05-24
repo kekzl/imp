@@ -48,6 +48,12 @@ public:
     // Used when NVFP4 MoE replaces Q6K expert data to reclaim VRAM.
     void release_gpu_allocation(void* ptr);
 
+    // Phase 5 PR #1 Commit 5.1.4.b: return true if `ptr` is a BASE pointer
+    // tracked in gpu_allocations_ (1:1 with a cudaMalloc), false if it's an
+    // offset into a shared allocation. Used by Phase-4b drop-source to gate
+    // per-tensor cudaFree — only safe for base pointers. Does not mutate.
+    bool is_base_gpu_allocation(void* ptr) const;
+
     // Estimate total raw bytes for all expert packed tensors (for VRAM budget decisions).
     size_t estimate_expert_bytes() const;
 

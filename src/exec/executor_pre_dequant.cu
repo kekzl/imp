@@ -71,6 +71,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // --- Phase 4: tensor registry + overlay diagnostic + NVFP4 device-args (extracted) ---
     pre_dequant_phase4_tensor_registry_(cfg, stream);
+
+    // --- Phase 4b: mark redundant sources as dropped (5.1.4.b — bisect mode) ---
+    pre_dequant_phase4b_drop_redundant_sources_(cfg, stream);
 }
 
 }  // namespace imp
