@@ -466,7 +466,7 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
     // cudaFreeAsync + cudaMemPoolTrimTo (avoids the WDDM release that
     // corrupts cuBLAS). Requires refactoring weight_upload.cu to use
     // async allocation. Alternatively, file NVIDIA bug + wait for fix.
-    constexpr bool actually_free = false;
+    constexpr bool actually_free = true;
 
     auto* mut_model = const_cast<Model*>(model_);
     size_t marked_bytes = 0;
@@ -544,6 +544,16 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
             skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
         if (actually_free) {
             cudaDeviceSynchronize();
+            // WSL2/CUDA 13.2/sm_120 workaround: mass cudaFree causes WDDM to
+            // release physical GPU pages, corrupting cuBLAS internal state.
+            // Allocating + freeing a refill block of the same size forces the
+            // driver to re-commit pages, restoring cuBLAS to a working state.
+            void* refill = nullptr;
+            if (cudaMalloc(&refill, marked_bytes) == cudaSuccess) {
+                cudaFree(refill);
+                IMP_LOG_INFO("Phase-4b: WDDM page refill %.2f MiB (cuBLAS workaround)",
+                             marked_bytes / (1024.0 * 1024.0));
+            }
             gemm_reset();
             IMP_LOG_INFO("Phase-4b: cuBLAS handles + algo cache reset after VRAM reclamation");
         }
