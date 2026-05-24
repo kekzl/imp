@@ -189,6 +189,43 @@ Before starting Commit 5.1.1, confirm:
 2. **Branch name for Phase 5 PR #1 work?** Suggest `refactor/phase5-pr1-plan-driven-cache`.
 3. **PR strategy: single PR with 6 commits, or 6 separate PRs?** Recommend: 6 separate PRs to `main` (per the roadmap §2 "no PR stacking" rule from `pr_no_stacking_2026_05_17`).
 
+## 9. Execution outcomes (post-session 2026-05-24)
+
+5 commits shipped on `refactor/phase5-pr1-plan-driven-cache`:
+
+| Commit | Hash | Wirkung |
+|---|---|---|
+| 5.1.1 | `887a61f` | `effective_capabilities(kind, qtype)` + planner uses it. 12 new unit tests, plan-logic fixt. |
+| 5.1.2 | `cfa5a40` | Phase 1 nutzt `effective_capabilities` (Q4_K coverage gap closed). **pp512 +440% Gemma-3-12B, 2.7× llama.cpp**. tg128 −36% regression appeared (documented). |
+| 5.1.3.a | `fb9c7f0` | `WeightHandle.source_data` + `source_qtype` populated in Phase 4. Groundwork. |
+| 5.1.3.b | `9d89e00` | `WeightRegistry::find_by_source_data` lookup helper. Groundwork. |
+| 5.1.3.c | `0a1c903` | M=1 dispatch prefers dp4a over FP16 overlay (gate at line 1806). Routing correct per profile (no `gemv_fp16_kernel` at decode); regression persists → memory pressure, not dispatch. |
+
+### Plan deviations
+
+- **5.1.3 reality vs estimate**: full dispatch consolidation (rewire all callers via `weight_dispatch::dispatch(handle, ...)`, delete the 150-LOC legacy switch in `executor_kernels.cu:1596-1872`) is **4-5 days, not 1 day** per the plan. The `weight_dispatch` shim has gaps (CUTLASS_NVFP4 M=1 stub, no beta!=0 across tiers, no callers wired). The 3 sub-commits shipped (5.1.3.a/b/c) are the **structural groundwork + the high-value dispatch-routing fix** (the M=1 gate); the multi-day caller migration is deferred to its own PR.
+
+- **Decode regression diagnosed**: not a dispatch bug. Profile confirms post-5.1.3.c decode kernel mix shows only `gemv_dp4a_kpar_*` family — `gemv_fp16_kernel` no longer fires on the cached overlay. The 17.85 GiB FP16 overlay sitting in HBM (alongside the 6.79 GiB Q4_K original) causes WSL2 shared-memory fallback or TLB/L2 pressure on the original-weight reads at decode. **Structural fix needs a workload-hint API to the planner** ("decode-heavy → don't cache sub-5-bit sources as FP16") — separate design, not part of this PR.
+
+### Remaining commits (multi-session)
+
+| Commit | Status | Estimate | Notes |
+|---|---|---|---|
+| 5.1.3.d | deferred | 1-2d | Migrate executor_attention/ffn/ssm-Caller via `weight_dispatch::dispatch`. Delete legacy switch. Own PR. |
+| 5.1.4 | deferred | 1-2d | Drop original GGUF for weights fully covered by an overlay tier (Q*_K-6-8bit with FP8/NVFP4: ~12 GiB freed on Qwen3-14B). NOT applicable to Q4_K + FP16 (dp4a needs original). Needs safety guards + dispatch-site checks. |
+| 5.1.5 | deferred | 1d | VRAM budget honesty (compute from plan, fail-loud on overflow). Low-risk cleanup. |
+| 5.1.6 | deferred | 1d | Final memo + cross-engine bench refresh + perf baseline update. |
+
+### Ship-as-PR recommendation
+
+The 5 commits shipped form a coherent first PR:
+- Architectural foundation (5.1.1 + 5.1.3.a/b/c)
+- Concrete bug fix (5.1.2: Q4_K coverage gap closed, pp512 +440% on Gemma-3-12B)
+- All baselines preserved (Qwen3-14B Q6_K tg128 165, Qwen3-8B Q8_0 tg128 272, Gemma-4-26B MoE 258)
+- Known trade-off documented (Gemma-3-12B tg128 −36% from memory pressure; structural fix needs workload-hint, separate PR)
+
+Subsequent PRs build on this foundation. PR #1's value is independently realised even if the follow-up PRs slip.
+
 ## Cross-references
 
 - Parent roadmap: `docs/superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md`
