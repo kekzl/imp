@@ -561,6 +561,7 @@ struct MoeFfnContext {
 // The Graph class provides a DAG representation for visualization and debugging,
 // but this executor hardcodes the standard transformer forward pass for
 // efficiency. No graph walking is done at runtime.
+struct GemmContext;  // defined in gemm_context.h
 class GraphExecutor {
 public:
     GraphExecutor() = default;
@@ -985,6 +986,14 @@ private:
     void run_attention(int layer, const InferenceState& state, cudaStream_t stream);
     void run_ffn(int layer, cudaStream_t stream);
     void run_moe_ffn(int layer, cudaStream_t stream);
+
+    // 5.1.3.d transitional: route M>1 prefill through WeightHandle dispatch
+    // (tier-aware, no raw-data deref), M=1 decode through legacy dispatch
+    // (dp4a on original quant is fastest). Caller passes both the TensorID
+    // and the original Tensor as fallback.
+    void gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
+                          const Tensor& input, Tensor& output,
+                          const GemmContext& ctx);
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);

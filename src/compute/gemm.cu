@@ -46,35 +46,32 @@ static inline int gemv_blocks(int M) { return (M + kGemvWarps - 1) / kGemvWarps;
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // ---------------------------------------------------------------------------
-// cuBLAS / cuBLASLt handles (lazily initialized, process-lifetime)
+// cuBLAS / cuBLASLt handles (lazily initialized, resettable via gemm_reset)
 // ---------------------------------------------------------------------------
+static cublasHandle_t s_cublas_handle = nullptr;
+static cublasLtHandle_t s_cublaslt_handle = nullptr;
+
 static cublasHandle_t get_cublas_handle() {
-    static cublasHandle_t handle = nullptr;
-    if (!handle) {
-        cublasStatus_t st = cublasCreate(&handle);
+    if (!s_cublas_handle) {
+        cublasStatus_t st = cublasCreate(&s_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::gemm: cublasCreate failed (status %d)\n", (int)st);
             abort();
         }
-        // Use TF32 tensor ops for FP32 inputs (19-bit mantissa, ~8x faster
-        // than FP32 on Hopper/Blackwell tensor cores, accuracy sufficient for
-        // inference).  cuBLAS will also select FP16/BF16 tensor core paths
-        // automatically when operands match.
-        cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
-    return handle;
+    return s_cublas_handle;
 }
 
 static cublasLtHandle_t get_cublaslt_handle() {
-    static cublasLtHandle_t handle = nullptr;
-    if (!handle) {
-        cublasStatus_t st = cublasLtCreate(&handle);
+    if (!s_cublaslt_handle) {
+        cublasStatus_t st = cublasLtCreate(&s_cublaslt_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::gemm: cublasLtCreate failed (status %d)\n", (int)st);
             abort();
         }
     }
-    return handle;
+    return s_cublaslt_handle;
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +443,29 @@ void gemm_cleanup() {
         cublasLtMatmulDescDestroy(entry.opDesc);
     }
     s_gemm_cache.clear();
+}
+
+void gemm_reset() {
+    gemm_cleanup();
+    if (s_cublaslt_handle) {
+        cublasLtDestroy(s_cublaslt_handle);
+        s_cublaslt_handle = nullptr;
+    }
+    if (s_cublas_handle) {
+        cublasDestroy(s_cublas_handle);
+        s_cublas_handle = nullptr;
+    }
+    if (s_workspace) {
+        cudaFree(s_workspace);
+        s_workspace = nullptr;
+        s_workspace_size = 0;
+    }
+    if (s_bench_scratch) {
+        cudaFree(s_bench_scratch);
+        s_bench_scratch = nullptr;
+        s_bench_scratch_size = 0;
+    }
+    gemm_init();
 }
 
 // ---------------------------------------------------------------------------

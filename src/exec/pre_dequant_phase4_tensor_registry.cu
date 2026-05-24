@@ -8,6 +8,7 @@
 
 #include "exec/executor.h"
 #include "exec/pre_dequant_internal.h"
+#include "compute/gemm.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
 
@@ -68,6 +69,10 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         L.ssm_in_id = register_tensor(L.ssm_in, TensorKind::SSM_IN);
         L.ssm_out_id = register_tensor(L.ssm_out, TensorKind::SSM_OUT);
         L.gdn_gate_id = register_tensor(L.gdn_gate, TensorKind::GDN_GATE);
+        L.gdn_alpha_id = register_tensor(L.gdn_alpha, TensorKind::GDN_ALPHA);
+        L.gdn_beta_id = register_tensor(L.gdn_beta, TensorKind::GDN_BETA);
+        L.gdn_alpha_beta_packed_id = register_tensor(L.gdn_alpha_beta_packed, TensorKind::GDN_ALPHA_BETA_PACKED);
+        L.gdn_input_packed_id = register_tensor(L.gdn_input_packed, TensorKind::GDN_INPUT_PACKED);
 
         // Per-expert TensorIDs (Task 3.4)
         const int ne_layer = static_cast<int>(L.expert_w_gate.size());
@@ -444,13 +449,23 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
 void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
     (void)stream;
-    // 5.1.4.b ship as BISECT MODE: dispatch coverage validated (281 sources
-    // routed via overlay, zero "coverage gap" warnings, tg128 baseline
-    // preserved). Actual cudaFree still triggers cuBLAS status-14 internal
-    // errors on residual-fused FFN dispatches under load — root cause TBD
-    // (workspace contention with the freed VRAM region? cuBLASLt heuristic
-    // re-probe after VRAM topology change?). Future commit will flip this
-    // after the cuBLAS interaction is debugged.
+    // 5.1.4.b BISECT MODE: dispatch coverage validated (281 sources routed
+    // via overlay, zero "coverage gap" warnings, tg128 baseline preserved).
+    //
+    // Root cause (2026-05-24): mass cudaFree (201 allocs, 7.3 GiB on
+    // Qwen3-14B Q6_K) corrupts cuBLAS internal context state on WSL2 /
+    // CUDA 13.2 / sm_120. Both cublasLtMatmul AND cublasGemmEx fail with
+    // status 14 on FP16 GEMMs (M=9 K=5120 N=5120, dequant→cuBLAS prefill
+    // path). Tested: handle destroy+recreate, workspace re-alloc, algo
+    // cache flush, CUBLAS_WORKSPACE_CONFIG unset — all ineffective. The
+    // bug is at the CUDA driver/WDDM level, not user-space cuBLAS state.
+    // Models with full FP8 prefill cache (Qwen3-8B Q8_0) are unaffected
+    // because they never hit the FP16 GEMM path after the frees.
+    //
+    // Fix path: allocate weights via cudaMallocAsync + cudaMemPool, then
+    // cudaFreeAsync + cudaMemPoolTrimTo (avoids the WDDM release that
+    // corrupts cuBLAS). Requires refactoring weight_upload.cu to use
+    // async allocation. Alternatively, file NVIDIA bug + wait for fix.
     constexpr bool actually_free = false;
 
     auto* mut_model = const_cast<Model*>(model_);
@@ -527,6 +542,11 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
             actually_free ? "freed" : "marked (bisect mode — no cudaFree)",
             marked_count, marked_bytes / (1024.0 * 1024.0),
             skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
+        if (actually_free) {
+            cudaDeviceSynchronize();
+            gemm_reset();
+            IMP_LOG_INFO("Phase-4b: cuBLAS handles + algo cache reset after VRAM reclamation");
+        }
     }
 }
 

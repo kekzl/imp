@@ -2784,11 +2784,11 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
 
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
-    gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
+    gemm_via_handle_(ly.w_up_shared_id, ly.w_up_shared, no, sh_up, ctx);
 
     if (shared_gated) {
         Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-        gemm_dispatch(no, ly.w_gate_shared, sh_gate, ctx);
+        gemm_via_handle_(ly.w_gate_shared_id, ly.w_gate_shared, no, sh_gate, ctx);
         if (cfg.ffn_activation == FFNActivation::GEGLU)
             geglu(sh_gate, sh_up, sh_swiglu, stream);
         else
@@ -2807,7 +2807,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
     if (layer == 0)
         debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
-    gemm_dispatch(sh_act, ly.w_down_shared, sh_down, ctx);
+    gemm_via_handle_(ly.w_down_shared_id, ly.w_down_shared, sh_act, sh_down, ctx);
 
     if (layer == 0) {
         debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);

@@ -227,16 +227,9 @@ TEST_F(GemmKernelRegistryTest, Fp8RegistryDispatchMatchesDirectPath) {
 // (tier=FP8, qtype=NONE, m_is_one=false). The NONE qtype is the
 // qtype-agnostic key; the handler reads weight.qtype off the Tensor.
 TEST_F(GemmKernelRegistryTest, Fp8CacheMissDequantStrategyIsRegistered) {
-    const auto& reg = GemmKernelRegistry::instance();
     GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
-    GemmKernelArgs args{};
-    args.stream = stream_;
-    // Missing weight_payload — the handler IMP_CHECKs that and aborts. We
-    // can't easily reach the precondition path from NoMatch territory, so
-    // this test only pins the registration entry's existence. The
-    // PreconditionFail and parity tests below cover the handler.
-    args.weight_payload = nullptr;
-    EXPECT_NE(&reg, nullptr);  // reachability sanity
+    (void)strat;
+    EXPECT_NE(&GemmKernelRegistry::instance(), nullptr);
 }
 
 // The cache-miss handler refuses loud when the dequant scratch is missing.

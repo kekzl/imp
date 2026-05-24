@@ -376,8 +376,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // defaults.
     runtime_config_ = take_pending_runtime_config();
 
-    const auto& mcfg = model_->config();
-
     init_apply_debug_raw_overrides_();
     init_resolve_kv_dtype_policy_();
     init_resolve_ssm_dtype_();

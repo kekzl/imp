@@ -104,7 +104,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     int needed_blocks = blocks_per_seq * config.max_batch_size;
 
     // --- 5. Estimate NVFP4-eligible weight cache size ---
-    auto nvfp4_beneficial = [](QType qt) -> bool {
+    const bool decode_all = config.nvfp4_decode_all;
+    auto nvfp4_beneficial = [decode_all](QType qt) -> bool {
         using enum QType;
         switch (qt) {
             case Q8_0:
@@ -112,6 +113,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             case Q6_K:
             case Q5_K:
                 return true;
+            case Q4_K:
+            case Q3_K:
+            case Q2_K:
+                return decode_all;
             default:
                 return false;
         }
@@ -158,7 +163,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         hints.dual_path_attn_fp8_ffn_nvfp4 = config.dual_path_quant;
         hints.prefer_fp8 = config.use_fp8_prefill;
         StoragePlan plan = plan_storage(model, mcfg, hints);
-        size_t heuristic_total = nvfp4_estimate + cutlass_sf_estimate;
         IMP_LOG_INFO(
             "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "
             "nvfp4=%.1f MiB cutlass_sf=%.1f MiB. Heuristic still drives "

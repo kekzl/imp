@@ -200,6 +200,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
     else if (eq("gemm.q4k_imma_enabled"))
         cfg.gemm.q4k_imma_enabled = parse_bool(val, cfg.gemm.q4k_imma_enabled);
+    else if (eq("gemm.nvfp4_decode_all"))
+        cfg.gemm.nvfp4_decode_all = parse_bool(val, cfg.gemm.nvfp4_decode_all);
 
     // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5
     // Track A of the architecture refactor. Per-model knobs no longer live

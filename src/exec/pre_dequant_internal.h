@@ -95,13 +95,17 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
 
 // Does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
 // Used by Phase 1 (FFN-skip logic) and Phase 3 (NVFP4 decode cache).
-inline bool nvfp4_beneficial(QType qt) {
+inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
     switch (qt) {
         case QType::Q8_0:
         case QType::Q8_K:
         case QType::Q6_K:
         case QType::Q5_K:
             return true;
+        case QType::Q4_K:
+        case QType::Q3_K:
+        case QType::Q2_K:
+            return decode_all;
         default:
             return false;
     }
