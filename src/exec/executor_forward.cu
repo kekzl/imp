@@ -694,7 +694,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
-            gemm_via_handle_(model_->out_proj_id, model_->output_proj(), no_last, lg, ctx);
+            gemm_via_handle_(model_->out_proj_id, no_last, lg, ctx);
         }
         logits_out = lg;
         debug_top_logits(lg, stream);
@@ -776,7 +776,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             if (lm_tier == StorageTier::FP16) {
                 Tensor no_final = view_tokens(norm_out_, n);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemm_via_handle_(model_->out_proj_id, model_->output_proj(), no_final, lg, ctx);
+                gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
                 goto lm_head_done;
             }
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
@@ -813,7 +813,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f, qscratch_.d_act_scale,
                               lm_h->payload.fp8.d_scale, stream);
             } else {
-                gemm_via_handle_(model_->out_proj_id, model_->output_proj(), no_final, lg, ctx);
+                gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
             }
         }
     lm_head_done:

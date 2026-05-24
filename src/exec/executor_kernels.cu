@@ -1650,19 +1650,21 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
 
 // ---------------------------------------------------------------------------
 // gemm_via_handle_ — WeightHandle dispatch for all registered weights.
-// M>1 prefill routes through weight_dispatch (gemm_dispatch overload).
-// M=1 decode routes through gemv_dispatch or tier-specific handlers.
-// Uncached fallback (kInvalidTensorID, beta!=0) goes to the static
-// gemm_dispatch_uncached_fallback above.
+// M>1 routes through weight_dispatch. M=1 beta=0 routes through gemv_dispatch
+// or tier-specific handlers. M=1 beta!=0 routes through weight_dispatch
+// (cuBLAS GEMM with beta). Undefined tier (budget-exhausted) reconstructs
+// the weight Tensor from the handle and uses the uncached dequant fallback.
 // ---------------------------------------------------------------------------
-void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
-                                     const Tensor& input, Tensor& output,
-                                     const GemmContext& ctx) {
-    if (id == kInvalidTensorID) {
-        gemm_dispatch_uncached_fallback(input, weight_fallback, output, ctx);
+void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
+                                     Tensor& output, const GemmContext& ctx) {
+    const auto& h = registry_.handle(id);
+
+    if (h.primary_tier == StorageTier::Undefined) {
+        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
     }
-    const auto& h = registry_.handle(id);
+
     int M = static_cast<int>(input.shape[0]);
     if (M == 1 && ctx.beta == 0.0f) {
         switch (h.primary_tier) {
@@ -1672,7 +1674,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::CUTLASS_NVFP4: {
-                auto it = wcache_.nvfp4.find(weight_fallback.data);
+                auto it = wcache_.nvfp4.find(h.source_data);
                 if (it != wcache_.nvfp4.end()) {
                     gemv_nvfp4_kpar(it->second,
                                     reinterpret_cast<const half*>(input.data),
@@ -1684,19 +1686,18 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
                 break;
             }
             case StorageTier::FP16: {
-                // GGUF block-quant source: dp4a/mmvq on original data is
-                // 5-10x faster than cuBLAS GEMV on the FP16 overlay.
                 if (h.source_qtype != QType::NONE && h.source_qtype != QType::F16 &&
-                    h.source_qtype != QType::BF16 && !weight_fallback.dropped_source &&
+                    h.source_qtype != QType::BF16 && h.source_data != nullptr &&
                     output.qtype != QType::F32 &&
-                    input.stride[0] == weight_fallback.shape[1]) {
+                    input.stride[0] == h.shape[1]) {
                     const auto* qs = ctx.qscratch;
                     if (qs) {
+                        Tensor src(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
                         GemmKernelArgs args{};
                         args.input = &input;
                         args.output = &output;
                         args.stream = ctx.stream;
-                        args.weight_payload = &weight_fallback;
+                        args.weight_payload = &src;
                         args.q8_1_buf = qs->q8_1_buf;
                         args.d8_buf = qs->d8_buf;
                         args.dequant_scratch = qs->dequant;
@@ -1716,12 +1717,6 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
             default:
                 break;
         }
-        gemm_dispatch_uncached_fallback(input, weight_fallback, output, ctx);
-        return;
-    }
-    if (M == 1) {
-        gemm_dispatch_uncached_fallback(input, weight_fallback, output, ctx);
-        return;
     }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        shared_workspace_, shared_workspace_size_, ctx.stream);

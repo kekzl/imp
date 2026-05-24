@@ -35,8 +35,6 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         if (!t.data)
             return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
-        if (tier == StorageTier::Undefined)
-            return kInvalidTensorID;
         TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = tier;
