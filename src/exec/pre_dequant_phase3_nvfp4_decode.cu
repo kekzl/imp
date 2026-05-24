@@ -75,10 +75,11 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
             IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
     }
 
+    const bool decode_all = runtime_config().gemm.nvfp4_decode_all;
     auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
         if (!w.data)
             return;
-        if (!nvfp4_beneficial(qtype))
+        if (!nvfp4_beneficial(qtype, decode_all))
             return;
         if (wcache_.nvfp4.count(w.data))
             return;
@@ -1102,10 +1103,11 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     // layer's worth of overhead.
     size_t moe_logical_avail = moe_budget;
 
+    const bool decode_all_moe = runtime_config().gemm.nvfp4_decode_all;
     auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
         if (!packed.data)
             return;
-        if (!nvfp4_beneficial(qtype))
+        if (!nvfp4_beneficial(qtype, decode_all_moe))
             return;
         if (wcache_.nvfp4_moe.count(packed.data))
             return;

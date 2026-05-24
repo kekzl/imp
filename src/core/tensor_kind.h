@@ -48,6 +48,10 @@ enum class TensorKind : uint8_t {
     ALPHA,
     SSM_GROUP_NORM,
     GDN_GATE,
+    GDN_ALPHA,
+    GDN_BETA,
+    GDN_ALPHA_BETA_PACKED,
+    GDN_INPUT_PACKED,
 
     // Norms (always FP32)
     ATTN_NORM,

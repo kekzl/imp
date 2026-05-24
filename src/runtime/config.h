@@ -197,6 +197,11 @@ struct RuntimeConfig {
         // the GEMM through mmq_q4k_imma_tile. Detailed wrap-up:
         // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
         bool q4k_imma_enabled = false;
+        // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
+        // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode
+        // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV
+        // at 130 tok/s → NVFP4 kpar GEMV target ~165 tok/s).
+        bool nvfp4_decode_all = false;
     } gemm;
 
     // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture

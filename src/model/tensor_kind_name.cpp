@@ -60,6 +60,14 @@ const char* tensor_kind_name(TensorKind k) {
             return "SSM_GROUP_NORM";
         case TensorKind::GDN_GATE:
             return "GDN_GATE";
+        case TensorKind::GDN_ALPHA:
+            return "GDN_ALPHA";
+        case TensorKind::GDN_BETA:
+            return "GDN_BETA";
+        case TensorKind::GDN_ALPHA_BETA_PACKED:
+            return "GDN_ALPHA_BETA_PACKED";
+        case TensorKind::GDN_INPUT_PACKED:
+            return "GDN_INPUT_PACKED";
         case TensorKind::ATTN_NORM:
             return "ATTN_NORM";
         case TensorKind::FFN_NORM:

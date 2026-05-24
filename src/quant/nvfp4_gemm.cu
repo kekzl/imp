@@ -1283,7 +1283,7 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
     return s_nvfp4_dequant_buf;
 }
 
-void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream) {
+void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream, float beta) {
     IMP_CHECK(A.packed_data != nullptr, "gemm_nvfp4: A.packed_data is null");
     IMP_CHECK(B.on_device, "gemm_nvfp4: B (input) must be on device");
     IMP_CHECK(C.on_device, "gemm_nvfp4: C (output) must be on device");
@@ -1331,7 +1331,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     int64_t A_shape[2] = {N, K};
     Tensor A_fp16(dequant_buf, QType::F16, 2, A_shape, /*on_device=*/true);
 
-    gemm(B, A_fp16, C, 1.0f, 0.0f, stream);
+    gemm(B, A_fp16, C, 1.0f, beta, stream);
 }
 
 // ---------------------------------------------------------------------------

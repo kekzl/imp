@@ -452,14 +452,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 }
                 if (n > 1 && fused_kv && !per_layer_shapes) {
                     // Q: still separate (different output dim with GQA)
-                    gemm_dispatch(no, ly.wq, q_target, ctx);
+                    gemm_via_handle_(ly.wq_id, ly.wq, no, q_target, ctx);
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                 } else {
-                    gemm_dispatch(no, ly.wq, q_target, ctx);
-                    gemm_dispatch(no, ly.wk, kk, ctx);
+                    gemm_via_handle_(ly.wq_id, ly.wq, no, q_target, ctx);
+                    gemm_via_handle_(ly.wk_id, ly.wk, no, kk, ctx);
                     if (ly.wv.data != nullptr) {
-                        gemm_dispatch(no, ly.wv, vv, ctx);
+                        gemm_via_handle_(ly.wv_id, ly.wv, no, vv, ctx);
                     }
                     // else: K=V sharing path — vv populated below from kk.
                 }
@@ -1146,12 +1146,12 @@ after_attention:
     } else if (will_fuse_o_beta1 && wo_tier == StorageTier::FP16) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
-        gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
+        gemm_via_handle_(ly.wo_id, ly.wo, ao, h, ctx.with_beta(1.0f));
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) && qscratch_.dequant != nullptr &&
                dequant_gpu_supported(ly.wo.qtype) &&
                !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
-        gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
+        gemm_via_handle_(ly.wo_id, ly.wo, ao, h, ctx.with_beta(1.0f));
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add.
         // Diagnostic: when IMP_GEMMA4_FP32_GEMM_OUT is set on Gemma-4, after the
@@ -1173,9 +1173,9 @@ after_attention:
             IMP_CUDA_CHECK_LOG(cudaMallocAsync(&po_fp32_buf, bytes, stream));
             int64_t shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(model_->config().d_model)};
             Tensor po_fp32(po_fp32_buf, QType::F32, 2, shape, true);
-            gemm_dispatch(ao, ly.wo, po_fp32, ctx);
+            gemm_via_handle_(ly.wo_id, ly.wo, ao, po_fp32, ctx);
         } else {
-            gemm_dispatch(ao, ly.wo, po, ctx);
+            gemm_via_handle_(ly.wo_id, ly.wo, ao, po, ctx);
         }
         if (debug_attn_steps) {
             debug_tensor_stats_all("L0_ao_pre_wo", view_tokens(ao, n), stream);

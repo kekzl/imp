@@ -2,6 +2,7 @@
 #include "exec/gemm_context.h"
 #include "exec/gemm_kernel_registry.h"
 #include "exec/executor.h"
+#include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
 #include "core/logging.h"
 #include "runtime/config.h"
@@ -1896,6 +1897,29 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
         return;  // bisect mode: don't crash; just no-op (output will be wrong, surfaces in bench)
     }
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
+}
+
+// ---------------------------------------------------------------------------
+// 5.1.3.d transitional dispatch: WeightHandle for M>1 prefill, legacy for
+// M=1 decode. Lets call sites migrate incrementally — once all M=1 paths
+// are in weight_dispatch (dp4a, CUTLASS_NVFP4 M=1 stub), the fallback
+// branch and this function collapse to a direct weight_dispatch call.
+// ---------------------------------------------------------------------------
+void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
+                                     const Tensor& input, Tensor& output,
+                                     const GemmContext& ctx) {
+    if (id == kInvalidTensorID) {
+        gemm_dispatch(input, weight_fallback, output, ctx);
+        return;
+    }
+    int M = static_cast<int>(input.shape[0]);
+    if (M == 1) {
+        gemm_dispatch(input, weight_fallback, output, ctx);
+        return;
+    }
+    const auto& h = registry_.handle(id);
+    imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
+                       shared_workspace_, shared_workspace_size_, ctx.stream);
 }
 
 }  // namespace imp

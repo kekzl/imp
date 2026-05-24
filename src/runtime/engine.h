@@ -68,6 +68,7 @@ struct EngineConfig {
 
     // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
     int use_nvfp4_decode = -1;
+    bool nvfp4_decode_all = false;  // extend NVFP4 decode cache to Q4_K/Q3_K/Q2_K
 
     // Minimum KV cache tokens. Budget planner guarantees at least this many
     // tokens of KV capacity before allocating weight caches. 0 = auto.

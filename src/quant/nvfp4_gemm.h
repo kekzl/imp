@@ -15,7 +15,10 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
 
 // NVFP4 GEMM via cuBLASLt (for M > 1, e.g., prefill).
 // Falls back to dequant + standard GEMM if cuBLASLt NVFP4 is unavailable.
-void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream = nullptr);
+// beta: output accumulation factor (default 0 = overwrite). beta=1 enables
+// residual-fused GEMM: y = dequant(A) @ B + y.
+void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream = nullptr,
+                float beta = 0.0f);
 
 // ---------------------------------------------------------------------------
 // K-parallel NVFP4 GEMV host launchers for decode (M=1) dispatch.

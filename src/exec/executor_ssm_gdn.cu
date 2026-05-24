@@ -68,7 +68,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
-    gemm_dispatch(no, ly.ssm_in, proj, ctx);
+    gemm_via_handle_(ly.ssm_in_id, ly.ssm_in, no, proj, ctx);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -241,7 +241,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
+    gemm_via_handle_(ly.ssm_out_id, ly.ssm_out, y_buf, out_buf, ctx);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -302,13 +302,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         int total_out = packed_conv_channels + packed_inner + 2 * packed_n_heads;
         int64_t fused_shape[2] = {1, total_out};
         Tensor fused_out(gdn_fused_proj_buf_.data, compute_dtype_, 2, fused_shape, true);
-        gemm_dispatch(no, ly.gdn_input_packed, fused_out, ctx);
+        gemm_via_handle_(ly.gdn_input_packed_id, ly.gdn_input_packed, no, fused_out, ctx);
         proj = Tensor(gdn_fused_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
     } else {
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].
         proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        gemm_dispatch(no, ly.ssm_in, proj, ctx);
+        gemm_via_handle_(ly.ssm_in_id, ly.ssm_in, no, proj, ctx);
     }
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
@@ -418,7 +418,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         gate_out = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
     } else {
         gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-        gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
+        gemm_via_handle_(ly.gdn_gate_id, ly.gdn_gate, no, gate_out, ctx);
     }
 
     const bool use_fp32_scan = runtime_config().gdn.fp32_scan;
@@ -448,15 +448,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + n_heads * es, compute_dtype_,
                                        2, ab_shape, true);
-                gemm_dispatch(no, ly.gdn_alpha_beta_packed, ab_packed_out, ctx);
+                gemm_via_handle_(ly.gdn_alpha_beta_packed_id, ly.gdn_alpha_beta_packed, no, ab_packed_out, ctx);
             } else {
                 // 4-call fallback: ssm_dt_buf_ for alpha, +offset for beta.
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
                                  ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
-                gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
-                gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
+                gemm_via_handle_(ly.gdn_alpha_id, ly.gdn_alpha, no, alpha_proj_out, ctx);
+                gemm_via_handle_(ly.gdn_beta_id, ly.gdn_beta, no, beta_proj_out, ctx);
             }
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
@@ -598,7 +598,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // cuBLAS FP32-input × FP16-cached-weight path silently produces zeros on
         // sm_120 with CUBLAS_COMPUTE_32F (tested 2026-04-21). Stay on FP16 y_buf
         // input; precision benefit from FP32 scan is limited to the rmsnorm stage.
-        gemm_dispatch(y_buf, ly.ssm_out, fp32_out_t, ctx);
+        gemm_via_handle_(ly.ssm_out_id, ly.ssm_out, y_buf, fp32_out_t, ctx);
 
         // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
@@ -609,7 +609,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                                                static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
-        gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
+        gemm_via_handle_(ly.ssm_out_id, ly.ssm_out, y_buf, out_buf, ctx);
         // Per-element dump: linear_attn_out post-ssm_out GEMM, pre-residual.
         // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
         dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);

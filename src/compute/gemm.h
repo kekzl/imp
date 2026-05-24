@@ -13,6 +13,11 @@ void gemm_init();
 // Destroy cached cuBLASLt descriptors. Call at shutdown (e.g. Engine destructor).
 void gemm_cleanup();
 
+// Full cuBLAS reset: destroy handles + caches, then reinitialize.
+// Call after large-scale cudaFree (e.g. drop-source VRAM reclamation) to
+// avoid cuBLAS status-14 errors caused by stale internal context state.
+void gemm_reset();
+
 // cuBLAS GEMM wrapper: C = alpha * A @ B^T + beta * C
 // A [M, K]  B [N, K]  C [M, N]   -- all row-major
 void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float beta = 0.0f,
