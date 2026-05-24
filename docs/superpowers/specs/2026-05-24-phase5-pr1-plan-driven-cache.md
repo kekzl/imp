@@ -191,7 +191,7 @@ Before starting Commit 5.1.1, confirm:
 
 ## 9. Execution outcomes (post-session 2026-05-24)
 
-8 commits shipped on `refactor/phase5-pr1-plan-driven-cache`:
+11 commits shipped on `refactor/phase5-pr1-plan-driven-cache`:
 
 | Commit | Hash | Wirkung |
 |---|---|---|
@@ -202,6 +202,8 @@ Before starting Commit 5.1.1, confirm:
 | 5.1.3.c | `0a1c903` | M=1 dispatch prefers dp4a over FP16 overlay (gate at line 1806). Routing correct per profile (no `gemv_fp16_kernel` at decode); regression persists → memory pressure, not dispatch. |
 | docs | `f086c94` | Session interim closeout in design memo. |
 | 5.1.4.a | `095a520` | `WeightHandle::can_drop_source()` predicate + Phase-4 diagnostic. **10.7 GiB droppable on Qwen3-14B Q6_K, 7.5 GiB on Qwen3-8B Q8_0, 2.8 GiB on Gemma-3-12B Q4_K_M** (Q6_K attn only — Q4_K FFN correctly kept). Diagnostic only. |
+| 5.1.4.b | `1062158` | Phase-4b drop-source infrastructure: `Tensor.dropped_source` flag, dispatch safety guards on every weight.data deref, `Model::is_base_gpu_allocation()` predicate. Ships in **bisect mode** (no cudaFree yet). 201 sources marked / 7335 MiB on Qwen3-14B Q6_K, zero "coverage gap" warnings — dispatch routes 100 % through overlay. Actual cudaFree blocked on cuBLAS status-14 INTERNAL_ERROR (workspace lifecycle issue with newly-freed VRAM region). |
+| 5.1.5 | `4100309` | Plan-vs-heuristic budget diagnostic in `compute_vram_budget`. Surfaces 1.7 GiB gap on Qwen3-14B (2 model-global tensors planner counts that heuristic skips). Heuristic still drives allocation; full plan-driven budget gated to PR #2. |
 
 ### Plan deviations
 
@@ -209,14 +211,15 @@ Before starting Commit 5.1.1, confirm:
 
 - **Decode regression diagnosed**: not a dispatch bug. Profile confirms post-5.1.3.c decode kernel mix shows only `gemv_dp4a_kpar_*` family — `gemv_fp16_kernel` no longer fires on the cached overlay. The 17.85 GiB FP16 overlay sitting in HBM (alongside the 6.79 GiB Q4_K original) causes WSL2 shared-memory fallback or TLB/L2 pressure on the original-weight reads at decode. **Structural fix needs a workload-hint API to the planner** ("decode-heavy → don't cache sub-5-bit sources as FP16") — separate design, not part of this PR.
 
-### Remaining commits (multi-session)
+- **5.1.4.b actual cudaFree blocked**: even though dispatch coverage is fully validated (bisect mode shows zero "coverage gap" warnings + baselines preserved), flipping `actually_free = true` triggers `cuBLAS status-14 INTERNAL_ERROR` on residual-fused FFN dispatches under load (status 15 with FP8+beta variant). The bisect mode ships the infrastructure; the `actually_free` flag is one-line flip once the cuBLAS interaction is debugged. Suspect: workspace lifecycle issue with the newly-freed VRAM region OR cuBLASLt heuristic re-probe after VRAM topology change.
+
+### Remaining work (own PRs)
 
 | Commit | Status | Estimate | Notes |
 |---|---|---|---|
-| 5.1.3.d | deferred | 1-2d | Migrate executor_attention/ffn/ssm-Caller via `weight_dispatch::dispatch`. Delete legacy switch. Own PR. |
-| 5.1.4.b | deferred | 1d | **Actually** drop original GGUF for weights with `can_drop_source() == true` (5.1.4.a logged 10.7 GiB potential savings on Qwen3-14B). Requires dispatch-site safety guards on `weight.data == nullptr`. Must verify no fallthrough to line 1833/1857/1872 of `executor_kernels.cu`. |
-| 5.1.5 | dropped | — | Original scope (VRAM budget honesty via plan) overlaps with the Phase-4 plan-ideal-tiers + drop-source diagnostics already shipped (5.1.4.a). Would be redundant; subsumed by future PR #2 (`RuntimeConfig` de-globalization). |
-| 5.1.6 | deferred | 1d | Final memo + cross-engine bench refresh + perf baseline update. Probably bundled into the PR description, not its own commit. |
+| 5.1.3.d | deferred | 1-2d | Migrate executor_attention/ffn/ssm-callers via `weight_dispatch::dispatch`. Delete legacy 150-LOC switch in `executor_kernels.cu:1596-1872`. Requires extending the `weight_dispatch` shim (beta!=0 across tiers, CUTLASS_NVFP4 M=1). Own PR. |
+| 5.1.4.b (real freeing) | gated | 0.5-1d | Flip `actually_free = true` in Phase-4b. **Blocked on cuBLAS status-14 debug** (workspace interaction with newly-freed VRAM). When unblocked: ~7.3 GiB freed on Qwen3-14B Q6_K, larger KV cache, longer context. |
+| 5.1.6 | bundled | — | Final memo + bench refresh — folded into the PR description rather than its own commit. |
 
 ### Ship-as-PR recommendation
 
