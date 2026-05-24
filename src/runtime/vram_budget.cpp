@@ -163,7 +163,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         hints.dual_path_attn_fp8_ffn_nvfp4 = config.dual_path_quant;
         hints.prefer_fp8 = config.use_fp8_prefill;
         StoragePlan plan = plan_storage(model, mcfg, hints);
-        size_t heuristic_total = nvfp4_estimate + cutlass_sf_estimate;
         IMP_LOG_INFO(
             "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "
             "nvfp4=%.1f MiB cutlass_sf=%.1f MiB. Heuristic still drives "
