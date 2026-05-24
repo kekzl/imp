@@ -64,6 +64,40 @@ struct WeightHandle {
     } payload;
 
     bool is_populated() const { return primary_tier != StorageTier::Undefined; }
+
+    // Phase 5 PR #1 Commit 5.1.4.a: can the original GGUF source bytes
+    // (source_data, owned by Model::gpu_allocations_) be safely freed once
+    // this handle is populated?
+    //
+    // Safe to drop when primary_tier provides BOTH a decode-fast kernel AND
+    // a prefill kernel that consume the overlay payload (not the original).
+    // Tiers that qualify: NVFP4 (gemv_nvfp4_kpar decode + dequant→cuBLAS prefill),
+    // CUTLASS_NVFP4 (NVFP4 GEMV decode + CUTLASS NVFP4 GEMM prefill), FP8
+    // (gemv_fp8 decode + cuBLAS FP8 GEMM prefill), MXFP4 (gemv_mxfp4 +
+    // CUTLASS MXFP4 GEMM).
+    //
+    // Tiers that do NOT qualify: FP16 (decode prefers dp4a on the original
+    // quant — see 5.1.3.c), FP32 (LM-head policy keeps original), Undefined.
+    //
+    // Predicate is conservative: returns true only when both source_data is
+    // present AND the tier covers both M=1 and M>1 paths. Actual freeing
+    // additionally requires dispatch-site audits — done in 5.1.4.b.
+    bool can_drop_source() const {
+        if (source_data == nullptr)
+            return false;
+        switch (primary_tier) {
+            case StorageTier::NVFP4:
+            case StorageTier::CUTLASS_NVFP4:
+            case StorageTier::FP8:
+            case StorageTier::MXFP4:
+                return true;
+            case StorageTier::FP16:
+            case StorageTier::FP32:
+            case StorageTier::Undefined:
+                return false;
+        }
+        return false;
+    }
 };
 
 class VRAMAllocator;

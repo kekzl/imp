@@ -249,6 +249,34 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
             "Phase-4 native: %zu Model::gpu_allocations_ pointers "
             "(GGUF blocks + norms + scratch — bypass the overlay layer)",
             model_->gpu_allocations_.size());
+
+        // Phase 5 PR #1 Commit 5.1.4.a: log how many bytes of original GGUF
+        // are REDUNDANT — fully covered by the overlay tier such that the
+        // dispatch never reads `source_data`. Diagnostic-only here; actual
+        // freeing (5.1.4.b) requires dispatch-site safety guards.
+        //
+        // Qualifying tiers: NVFP4 / CUTLASS_NVFP4 / FP8 / MXFP4 (decode-fast
+        // kernels exist for the overlay). FP16-cached weights still need the
+        // original for dp4a decode (per 5.1.3.c) and are not counted.
+        {
+            size_t droppable_count = 0;
+            size_t droppable_bytes = 0;
+            for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
+                const auto& h = registry_.handle(id);
+                if (!h.can_drop_source())
+                    continue;
+                int64_t cols = h.shape[1] > 0 ? h.shape[1] : 1;
+                size_t row_bytes = qtype_row_bytes(h.source_qtype, cols);
+                size_t bytes = row_bytes * static_cast<size_t>(h.shape[0]);
+                droppable_bytes += bytes;
+                ++droppable_count;
+            }
+            IMP_LOG_INFO(
+                "Phase-4 drop-source diagnostic: %zu handles, %.2f MiB of original "
+                "GGUF could be freed (overlay tier covers prefill + decode). "
+                "Actual freeing deferred to Commit 5.1.4.b.",
+                droppable_count, droppable_bytes / (1024.0 * 1024.0));
+        }
     }
 
     // -----------------------------------------------------------------------
