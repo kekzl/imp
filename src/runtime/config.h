@@ -160,17 +160,26 @@ struct RuntimeConfig {
         float norm_eps_override = 0.0f;  // 0 = use model default
         bool ref_kernel = false;
         bool vhead_reorder = false;
-        // Phase 1b.1 of the GDN chunkwise SSD scan refactor
+        // GDN chunkwise SSD scan refactor — Phase 1b.1 structural prototype
         // (docs/plans/gdn_chunkwise_scan_design_2026_05_23.md). When true,
         // the executor dispatches GDN scan through
         // `gdn_scan_chunkwise_{f32,fp32out}` (chunk-cached K/Q in shared
         // memory) instead of the per-token-loop `gdn_scan_fused_{f32,fp32out}`.
         // Bit-near-equivalent output (FP16 1e-3 / FP32 1e-5 tolerances per
-        // Phase 1a); microbench shows +15.2 % on the GDN scan kernel alone
-        // at n_tok=4096. Off by default until Phase 2's WY-rep parallel
-        // matmul lands on top — the structural prereq is shipped, the
-        // algorithmic SSD win is Phase 2.
-        bool chunkwise_scan = false;
+        // Phase 1a); microbench shows +16.7 % on the GDN scan kernel alone
+        // at n_tok=4096 (1.567 → 1.343 µs/tok on RTX 5090). Phase 4
+        // cold-median A/B on Qwen3.6-35B-A3B Q4_K_M showed the end-to-end
+        // wall delta is within the cuBLAS variance band (±0.5 % across
+        // pp512 / pp2048 / tg128), so flipping the default on is wall-neutral
+        // for the hero MoE model and unlocks the kernel-level win for
+        // workloads where the GDN scan is a larger share of wall (longer
+        // contexts, pure-GDN models like Qwen3.5-4B-GDN / Qwen3.5-9B-GDN
+        // when bench data becomes available). Opt out via
+        // `--set gdn.chunkwise_scan=false` if a model regresses.
+        // After the Phase 2 ladder (2a / 2b / 2c, all shipped) was
+        // exhaustively benched, Phase 1b.1 remains the fastest chunkwise
+        // path on sm_120 — the WY-rep + TC-MMA variants all stay behind it.
+        bool chunkwise_scan = true;
         // Override gated-DeltaNet weight layout. Legacy env: IMP_GDN_LAYOUT.
         std::string layout_override;
     } gdn;

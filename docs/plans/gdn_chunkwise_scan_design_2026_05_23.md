@@ -338,9 +338,16 @@ NIAH ctx={16K, 32K} testing was descoped — imp doesn't ship a NIAH harness and
 
 All deltas are within the cuBLAS algo-cache variance band documented in MEMORY.md. **The +16.8 % kernel microbench win from Phase 1b.1 does not translate to a measurable end-to-end wall improvement on Qwen3.6** at the production prefill / decode sizes. Root cause: the GDN scan is ~37 % of *prefill kernel time* on this model, but only a fraction of total wall (the dominant costs are NVFP4/FP16 GEMMs in the dense layers + MoE grouped GEMM in the MoE layers + dispatch overhead, none of which the chunkwise change touches).
 
-**Ship verdict**: keep flag off-default. The chunkwise infrastructure stays in tree as the foundation for Phase 2c (TC-MMA on the H_L update) which is the only remaining algorithmic lever that could deliver the +20-30 % prefill wall the original plan targeted. Flag is opt-in for research / Phase 2c+ development.
+**Initial ship verdict (2026-05-24)**: keep flag off-default. Reasoning: no measurable wall win on the hero MoE model, so the safer choice was to keep behavior unchanged until Phase 2c TC-MMA delivered an end-to-end win.
 
-**What would change the verdict**: Phase 2c TC-MMA on H_L brings Phase 2b below sequential by a wide enough margin (≥ +10 % wall) that the existing dispatch flips can benefit. That work is the next thread, and is multi-day kernel + validation effort.
+**Updated ship verdict (2026-05-24, after Phase 2c benched)**: **flip default to `gdn.chunkwise_scan = true`**. Reasoning revised:
+- Phase 2c exhaustive bench (this doc above) showed the TC-MMA path cannot beat Phase 1b.1 on sm_120 — there's no future Phase 2c win to wait for.
+- Phase 4 A/B is wall-neutral (±0.5 % on Qwen3.6) — flipping on is NOT a regression.
+- The +16.7 % kernel-microbench win is real and may surface on workloads where the GDN scan is a larger share of total wall (longer contexts, pure-GDN models like Qwen3.5-4B-GDN / Qwen3.5-9B-GDN when bench data lands, batched serving where the scan is closer to the critical path).
+- Coherence smoke at multiple contexts shows no degeneration (output bit-identical to flag-off under temperature=0, consistent with the unit-test bit-exactness on the Phase 1b.1 kernel).
+- Cost of "no" is leaving a free 17 % kernel-throughput improvement permanently behind a feature flag.
+
+Opt out via `--set gdn.chunkwise_scan=false` if a future model regresses; the dispatch fall-through path is unchanged.
 
 ## Risks
 
