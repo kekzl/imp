@@ -889,11 +889,28 @@ void GraphExecutor::free_buffers() {
             if (tensor.data)
                 vram_free(vram_alloc_, tensor.data);
         wcache_.fused_gate_up.clear();
-        // FP16 cache
-        for (auto& [ptr, tensor] : wcache_.fp16)
-            vram_free(vram_alloc_, tensor.data);
+        // FP16 cache — entries from the MXFP4 → FP16 decode fallback are
+        // sub-pointers into wcache_.fp16_bulk_data (single bulk cudaMalloc);
+        // skip the per-tensor cudaFree for those, free the bulk once below.
+        for (auto& [ptr, tensor] : wcache_.fp16) {
+            if (!tensor.data)
+                continue;
+            bool in_bulk = wcache_.fp16_bulk_data &&
+                           reinterpret_cast<uintptr_t>(tensor.data) >=
+                               reinterpret_cast<uintptr_t>(wcache_.fp16_bulk_data) &&
+                           reinterpret_cast<uintptr_t>(tensor.data) <
+                               reinterpret_cast<uintptr_t>(wcache_.fp16_bulk_data) +
+                                   wcache_.fp16_bulk_data_size;
+            if (!in_bulk)
+                vram_free(vram_alloc_, tensor.data);
+        }
         wcache_.fp16.clear();
         wcache_.fp16_bytes = 0;
+        if (wcache_.fp16_bulk_data) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp16_bulk_data));
+            wcache_.fp16_bulk_data = nullptr;
+            wcache_.fp16_bulk_data_size = 0;
+        }
         // NVFP4 decode cache
         for (auto& [ptr, result] : wcache_.nvfp4)
             free_nvfp4_result(result);

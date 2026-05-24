@@ -87,6 +87,11 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
                 void* d_fp16_bulk = nullptr;
                 IMP_CUDA_CHECK_LOG(cudaMalloc(&d_fp16_bulk, fp16_total));
                 if (d_fp16_bulk) {
+                    // Track bulk for shutdown cleanup (same pattern as Phase 3).
+                    // Phase 3 and Phase 3c are mutually exclusive in practice
+                    // (gated on `nvfp4_decode_mode`), so only one writes here.
+                    wcache_.fp16_bulk_data = d_fp16_bulk;
+                    wcache_.fp16_bulk_data_size = fp16_total;
                     size_t offset = 0;
                     for (auto& sw : small_weights) {
                         size_t bytes = static_cast<size_t>(sw.N) * sw.K * sizeof(half);
