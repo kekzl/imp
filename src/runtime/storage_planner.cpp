@@ -31,8 +31,10 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
     return 0;
 }
 
-// Pick the initial (best allowable) tier for a tensor given its kind
-// capabilities and the hints.
+// Pick the initial (best allowable) tier for a tensor given its (source-qtype-
+// refined) capabilities and the hints. Hints can only push toward a tier that
+// the refined capabilities still list as supported — that's how the Q4_K-
+// source W_GATE case correctly stays FP16 even when `prefer_nvfp4_decode=true`.
 StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, const PlanHints& hints) {
     // dual_path hint: attention projections prefer FP8; FFN prefer NVFP4.
     if (hints.dual_path_attn_fp8_ffn_nvfp4) {
@@ -47,7 +49,10 @@ StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, cons
             return StorageTier::NVFP4;
     }
 
-    // prefer_nvfp4_decode: pick NVFP4 if the kind supports it.
+    // prefer_nvfp4_decode: pick NVFP4 only if the (refined) capabilities still
+    // list it. For Q4_K sources `effective_capabilities` stripped NVFP4, so the
+    // hint silently falls through to required_floor (FP16). That's the
+    // structural fix for the 2026-05-24 Q4_K coverage-gap bug.
     if (hints.prefer_nvfp4_decode && mask_contains(cap.supported, StorageTier::NVFP4))
         return StorageTier::NVFP4;
 
@@ -80,6 +85,9 @@ StorageTier downgrade_one(StorageTier current, StorageTier floor, const KindCapa
 // (L.wq → WQ, L.wk → WK, …) rather than the stored kind so that Phase 5
 // plan-driven allocation works correctly even before kind preservation is
 // added to every upload code path.
+//
+// `t.qtype` IS preserved across weight_upload, so the planner uses it for
+// source-qtype-aware capability refinement via `effective_capabilities`.
 void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& next_id, size_t& total,
                 const PlanHints& hints) {
     if (!t.data)
@@ -87,7 +95,7 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
     if (kind == TensorKind::UNKNOWN)
         return;  // skip unclassified tensors
 
-    const auto& cap = capabilities_of(kind);
+    const auto cap = effective_capabilities(kind, t.qtype);
     StorageTier tier = pick_initial_tier(kind, cap, hints);
     // Clamp to supported: if pick_initial_tier returned something unsupported,
     // fall back to required_floor.
@@ -98,7 +106,7 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
     int64_t cols = (t.ndim > 1 ? t.shape[1] : 1);
     int64_t bytes = bytes_for_tier(rows, cols, tier);
 
-    plan.entries.push_back({next_id++, kind, tier, bytes, rows, cols});
+    plan.entries.push_back({next_id++, kind, t.qtype, tier, bytes, rows, cols});
     total += static_cast<size_t>(bytes);
 }
 
@@ -156,6 +164,8 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
 
     // Budget satisfaction: iteratively downgrade the entry with the highest
     // bytes-saved potential until we fit or everything is at required_floor.
+    // Uses effective_capabilities(kind, source_qtype) so Q4_K-source tensors
+    // can't be downgraded to NVFP4 (no compression win, possible quality risk).
     if (hints.vram_budget_bytes > 0 && total > hints.vram_budget_bytes) {
         bool progress = true;
         while (total > hints.vram_budget_bytes && progress) {
@@ -165,7 +175,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
             int64_t best_savings = 0;
             for (size_t idx = 0; idx < plan.entries.size(); ++idx) {
                 auto& e = plan.entries[idx];
-                const auto& cap = capabilities_of(e.kind);
+                const auto cap = effective_capabilities(e.kind, e.source_qtype);
                 if (e.tier == cap.required_floor)
                     continue;
                 StorageTier next = downgrade_one(e.tier, cap.required_floor, cap);
@@ -180,7 +190,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
             }
             if (best_idx < plan.entries.size() && best_savings > 0) {
                 auto& e = plan.entries[best_idx];
-                const auto& cap = capabilities_of(e.kind);
+                const auto cap = effective_capabilities(e.kind, e.source_qtype);
                 StorageTier next = downgrade_one(e.tier, cap.required_floor, cap);
                 int64_t new_bytes = bytes_for_tier(e.rows, e.cols, next);
                 total -= static_cast<size_t>(e.bytes - new_bytes);

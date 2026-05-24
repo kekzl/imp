@@ -13,10 +13,15 @@ using namespace imp;
 // Helper: build a minimal Tensor descriptor (host ptr, no GPU memory needed)
 // ---------------------------------------------------------------------------
 
-static Tensor make_tensor_stub(TensorKind kind, int64_t rows, int64_t cols, uintptr_t ptr_sentinel) {
+static Tensor make_tensor_stub(TensorKind kind, int64_t rows, int64_t cols, uintptr_t ptr_sentinel,
+                               QType source_qtype = QType::Q6_K) {
     Tensor t;
     t.data = reinterpret_cast<void*>(ptr_sentinel);
-    t.qtype = QType::F16;
+    // Default Q6_K matches the canonical nvfp4-beneficial source used by
+    // production benches (Qwen3-14B Q6_K etc.). Tests can override to
+    // exercise source-qtype-aware capability refinement
+    // (see Phase 5 PR #1 commit 5.1.1).
+    t.qtype = source_qtype;
     t.ndim = 2;
     t.shape[0] = rows;
     t.shape[1] = cols;
@@ -303,4 +308,162 @@ TEST(StoragePlanner, ProjectedVRAMMatchesEntrySum) {
         manual_sum += static_cast<size_t>(e.bytes);
 
     EXPECT_EQ(plan.projected_vram_bytes, manual_sum);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 PR #1 — Commit 5.1.1 regression tests:
+// source-qtype-aware capability refinement
+//
+// Closes the 2026-05-24 Q4_K_M cache coverage gap by ensuring the planner
+// doesn't propose NVFP4 for sub-5-bit-source weights (where NVFP4 is a
+// representation change at similar bit-width, no compression win).
+// ---------------------------------------------------------------------------
+
+TEST(StoragePlanner, Q4KSourceDoesNotPickNVFP4UnderPreferHint) {
+    // Q4_K-source W_GATE: even with prefer_nvfp4_decode=true, NVFP4 must NOT
+    // be picked (effective_capabilities strips NVFP4 from supported, raises
+    // floor to FP16). This is the structural fix for the Gemma-3-12B Q4_K_M
+    // bug where the runtime hit zero cache coverage.
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.w_gate = make_tensor_stub(TensorKind::W_GATE, 2048, 2048, 0x1000, QType::Q4_K);
+    L.w_up = make_tensor_stub(TensorKind::W_UP, 2048, 2048, 0x2000, QType::Q4_K);
+    L.w_down = make_tensor_stub(TensorKind::W_DOWN, 2048, 2048, 0x3000, QType::Q4_K);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.prefer_nvfp4_decode = true;
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    int gate_count = 0;
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::W_GATE || e.kind == TensorKind::W_UP ||
+            e.kind == TensorKind::W_DOWN) {
+            EXPECT_EQ(e.tier, StorageTier::FP16)
+                << "Q4_K-source FFN weights must land on FP16, NOT NVFP4 — "
+                   "representation change at same bit-width is a quality risk "
+                   "(regression test for 2026-05-24 Q4_K coverage-gap bug)";
+            gate_count++;
+        }
+    }
+    EXPECT_EQ(gate_count, 3) << "expected 3 FFN entries (gate, up, down)";
+}
+
+TEST(StoragePlanner, Q6KSourcePreservesNVFP4UnderPreferHint) {
+    // Q6_K-source WQ: with prefer_nvfp4_decode=true, NVFP4 IS the right pick
+    // (>5.5 bits → compression win). Sanity check that the refinement only
+    // strips NVFP4 for sub-5-bit sources.
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.wq = make_tensor_stub(TensorKind::WQ, 2048, 2048, 0x1000, QType::Q6_K);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.prefer_nvfp4_decode = true;
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    bool found_wq = false;
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::WQ) {
+            EXPECT_EQ(e.tier, StorageTier::NVFP4)
+                << "Q6_K-source WQ should land on NVFP4 under prefer_nvfp4_decode";
+            found_wq = true;
+        }
+    }
+    EXPECT_TRUE(found_wq) << "WQ entry should be present in plan";
+}
+
+TEST(StoragePlanner, F16SourceDoesNotPickNVFP4) {
+    // F16-source weights (typical: LM head, embeddings) do NOT get NVFP4
+    // overlay — matches runtime nvfp4_beneficial() policy. Documented as
+    // "no NVFP4 conversion for F16 sources" since the runtime has no
+    // dequant→quant path for raw FP16 weights anyway.
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.wq = make_tensor_stub(TensorKind::WQ, 2048, 2048, 0x1000, QType::F16);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.prefer_nvfp4_decode = true;
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::WQ) {
+            EXPECT_NE(e.tier, StorageTier::NVFP4)
+                << "F16-source WQ must NOT pick NVFP4 — runtime has no FP16→NVFP4 quant path";
+        }
+    }
+}
+
+TEST(StoragePlanner, NativeNVFP4SourceMandatesNVFP4Tier) {
+    // Native NVFP4 weight: the "overlay" IS the source storage. Tier must
+    // be NVFP4 (or CUTLASS_NVFP4); no other tier is valid.
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.wq = make_tensor_stub(TensorKind::WQ, 2048, 2048, 0x1000, QType::NVFP4);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::WQ) {
+            EXPECT_TRUE(e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4)
+                << "NVFP4-source WQ must stay NVFP4 (or CUTLASS_NVFP4 layout)";
+            EXPECT_EQ(e.source_qtype, QType::NVFP4) << "source_qtype must be propagated to Entry";
+        }
+    }
+}
+
+TEST(StoragePlanner, EntryCarriesSourceQtype) {
+    // Sanity: plan.Entry.source_qtype must be populated from the input
+    // tensor's qtype. The Phase-5 budget-downgrade loop relies on this for
+    // re-querying effective_capabilities per entry.
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.wq = make_tensor_stub(TensorKind::WQ, 512, 512, 0x1000, QType::Q6_K);
+    L.wk = make_tensor_stub(TensorKind::WK, 512, 512, 0x2000, QType::Q8_0);
+    L.w_gate = make_tensor_stub(TensorKind::W_GATE, 512, 512, 0x3000, QType::Q4_K);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    int seen_q6k = 0, seen_q80 = 0, seen_q4k = 0;
+    for (const auto& e : plan.entries) {
+        if (e.source_qtype == QType::Q6_K)
+            ++seen_q6k;
+        else if (e.source_qtype == QType::Q8_0)
+            ++seen_q80;
+        else if (e.source_qtype == QType::Q4_K)
+            ++seen_q4k;
+    }
+    EXPECT_EQ(seen_q6k, 1);
+    EXPECT_EQ(seen_q80, 1);
+    EXPECT_EQ(seen_q4k, 1);
 }
