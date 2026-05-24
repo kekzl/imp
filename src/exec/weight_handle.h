@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/qtype.h"
 #include "core/tensor_kind.h"
 #include "core/storage_tier.h"
 
@@ -22,6 +23,15 @@ struct WeightHandle {
     // registry destructor. Never mix borrowed and owned storage on the same
     // handle — the freer would double-free or leak.
     int64_t owned_bytes = 0;
+
+    // Pointer to the ORIGINAL quantized weight bytes (in Model::gpu_allocations_),
+    // and its source qtype. Always borrowed (never freed by the handle).
+    // Used by weight_dispatch for the M=1 dp4a/mmvq fallback when primary_tier
+    // is FP16/FP8/NVFP4 but the source is a GGUF block-quant format and the
+    // small-M path on the original is faster than cuBLAS on the cached overlay.
+    // Phase 5 PR #1 Commit 5.1.3.a — used by the upcoming weight_dispatch shim.
+    const void* source_data = nullptr;
+    QType source_qtype = QType::NONE;
 
     union {
         struct {

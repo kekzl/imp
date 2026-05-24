@@ -40,6 +40,12 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = tier;
+        // Phase 5 PR #1 Commit 5.1.3.a: stash the ORIGINAL GGUF pointer + qtype
+        // so weight_dispatch can fall back to the small-M dp4a path on the
+        // original quant when primary_tier is an overlay (FP16/NVFP4/etc).
+        // Always borrowed — never freed by registry.
+        h.source_data = t.data;
+        h.source_qtype = t.qtype;
         borrow_payload_from_wcache(h, wcache_, t.data);
         return id;
     };
