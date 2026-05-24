@@ -1,5 +1,12 @@
 // CUTLASS sm_120 block-scaled MXFP4×MXFP4 GEMM for prefill acceleration.
 //
+// LEGACY / MAINTENANCE MODE (2026-05-24): MXFP4 is supported but is not
+// the dev priority. Production hero models use NVFP4 + SafeTensors
+// (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs, Gemma-4-26B-A4B-it-NVFP4,
+// etc.). Ship cleanup fixes here and don't chase residual quality bugs on
+// community MXFP4 GGUFs without an external reference engine to compare
+// against. Memory note: `feedback_gguf_mxfp4_legacy_2026_05_24`.
+//
 // Parallel to the NVFP4 CUTLASS path (gemm_cutlass_sm120.cu) but uses
 // mx_float4_t<float_e2m1_t> with UE8M0 scale factors (SFVecSize=32).
 //

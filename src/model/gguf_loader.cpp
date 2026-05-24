@@ -1,3 +1,20 @@
+// ============================================================================
+// GGUF loader.
+//
+// STATUS: LEGACY / MAINTENANCE MODE (2026-05-24).
+//   GGUF is supported for compatibility but is no longer the active dev surface.
+//   Priority is NVFP4 + SafeTensors (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs,
+//   Gemma-4-26B-A4B-it-NVFP4, etc.) — that's where the hero-model perf work lives.
+//
+//   For GGUF bugs, ship the cleanup fix (load errors, missing pointer replaces,
+//   resource cleanup cascades) and move on. Don't sink session time chasing
+//   residual quality issues — especially on community MXFP4 quants, which have
+//   a track record of being subtly broken (see qwen35_27b_mxfp4_ima_2026_04_25
+//   and qwen35_4b_mxfp4_load_partial_fix_2026_05_24 memory notes). If the next
+//   debug step requires comparing against an external reference engine
+//   (llama.cpp / HF Transformers), declare done and defer.
+// ============================================================================
+
 #include "model/gguf_loader.h"
 #include "model/loader_assign.h"
 #include "model/model_arch.h"

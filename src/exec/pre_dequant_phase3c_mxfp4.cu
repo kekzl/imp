@@ -8,6 +8,14 @@
 // Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
 // refactor roadmap. This is the final extraction — after this PR,
 // executor_pre_dequant.cu is the pure orchestrator.
+//
+// LEGACY / MAINTENANCE MODE (2026-05-24): MXFP4 is supported but not the
+// dev priority. NVFP4 + SafeTensors is where the hero models live. Ship
+// cleanup fixes here (load errors, missing pointer replaces, resource
+// leaks) and move on — don't chase residual output-quality bugs on
+// community MXFP4 quants without an external reference engine
+// (llama.cpp / HF Transformers) to compare against. See memory note
+// `feedback_gguf_mxfp4_legacy_2026_05_24` for the full rule.
 
 #include "exec/executor.h"
 #include "exec/pre_dequant_internal.h"
