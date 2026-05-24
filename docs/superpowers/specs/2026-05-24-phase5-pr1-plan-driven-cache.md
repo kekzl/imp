@@ -191,7 +191,7 @@ Before starting Commit 5.1.1, confirm:
 
 ## 9. Execution outcomes (post-session 2026-05-24)
 
-5 commits shipped on `refactor/phase5-pr1-plan-driven-cache`:
+8 commits shipped on `refactor/phase5-pr1-plan-driven-cache`:
 
 | Commit | Hash | Wirkung |
 |---|---|---|
@@ -200,6 +200,8 @@ Before starting Commit 5.1.1, confirm:
 | 5.1.3.a | `fb9c7f0` | `WeightHandle.source_data` + `source_qtype` populated in Phase 4. Groundwork. |
 | 5.1.3.b | `9d89e00` | `WeightRegistry::find_by_source_data` lookup helper. Groundwork. |
 | 5.1.3.c | `0a1c903` | M=1 dispatch prefers dp4a over FP16 overlay (gate at line 1806). Routing correct per profile (no `gemv_fp16_kernel` at decode); regression persists → memory pressure, not dispatch. |
+| docs | `f086c94` | Session interim closeout in design memo. |
+| 5.1.4.a | `095a520` | `WeightHandle::can_drop_source()` predicate + Phase-4 diagnostic. **10.7 GiB droppable on Qwen3-14B Q6_K, 7.5 GiB on Qwen3-8B Q8_0, 2.8 GiB on Gemma-3-12B Q4_K_M** (Q6_K attn only — Q4_K FFN correctly kept). Diagnostic only. |
 
 ### Plan deviations
 
@@ -212,9 +214,9 @@ Before starting Commit 5.1.1, confirm:
 | Commit | Status | Estimate | Notes |
 |---|---|---|---|
 | 5.1.3.d | deferred | 1-2d | Migrate executor_attention/ffn/ssm-Caller via `weight_dispatch::dispatch`. Delete legacy switch. Own PR. |
-| 5.1.4 | deferred | 1-2d | Drop original GGUF for weights fully covered by an overlay tier (Q*_K-6-8bit with FP8/NVFP4: ~12 GiB freed on Qwen3-14B). NOT applicable to Q4_K + FP16 (dp4a needs original). Needs safety guards + dispatch-site checks. |
-| 5.1.5 | deferred | 1d | VRAM budget honesty (compute from plan, fail-loud on overflow). Low-risk cleanup. |
-| 5.1.6 | deferred | 1d | Final memo + cross-engine bench refresh + perf baseline update. |
+| 5.1.4.b | deferred | 1d | **Actually** drop original GGUF for weights with `can_drop_source() == true` (5.1.4.a logged 10.7 GiB potential savings on Qwen3-14B). Requires dispatch-site safety guards on `weight.data == nullptr`. Must verify no fallthrough to line 1833/1857/1872 of `executor_kernels.cu`. |
+| 5.1.5 | dropped | — | Original scope (VRAM budget honesty via plan) overlaps with the Phase-4 plan-ideal-tiers + drop-source diagnostics already shipped (5.1.4.a). Would be redundant; subsumed by future PR #2 (`RuntimeConfig` de-globalization). |
+| 5.1.6 | deferred | 1d | Final memo + cross-engine bench refresh + perf baseline update. Probably bundled into the PR description, not its own commit. |
 
 ### Ship-as-PR recommendation
 
