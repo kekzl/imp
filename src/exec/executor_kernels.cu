@@ -1736,6 +1736,19 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 break;
         }
     }
+    // For M>1 prefill on CUTLASS_NVFP4 primary tier: prefer FP8 cuBLAS if
+    // available. FP8 cuBLAS avoids the per-GEMM activation quantization
+    // overhead of the CUTLASS NVFP4 path, which dominates at large M.
+    if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
+        auto fp8_it = wcache_.fp8.find(h.source_data);
+        if (fp8_it != wcache_.fp8.end()) {
+            int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};  // logical K
+            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
+                          nullptr, fp8_it->second.d_scale, ctx.stream);
+            return;
+        }
+    }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        shared_workspace_, shared_workspace_size_, ctx.stream);
 }
