@@ -599,7 +599,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // c8763ad refactor lost this fallback; restore by also probing wcache_.nvfp4.
     auto lm_nvfp4_it = wcache_.nvfp4.find(model_->output_proj().data);
     const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
-    const bool lm_is_nvfp4 = (lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary;
+    const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
+    const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
 
     // L2 streaming hint for the LM head projection (QW3 from review/phase5_synthesis.md §2.1):
     // output_proj is huge (vocab_size × d_model — ~780 MiB for Qwen3-8B Q8_0) and
@@ -633,6 +634,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_last.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        } else if (lm_has_fp8) {
+            Tensor no_last = view_tokens(norm_out_, 1);
+            rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
+            auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
+            int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
+            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (lm_is_nvfp4) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
@@ -716,6 +724,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_final.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        } else if (n == 1 && lm_has_fp8) {
+            Tensor no_final = view_tokens(norm_out_, 1);
+            rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+            auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
+            int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
+            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (n == 1 && lm_is_nvfp4) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);

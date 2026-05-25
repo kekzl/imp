@@ -1674,7 +1674,21 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::CUTLASS_NVFP4: {
-                // Try NVFP4 decode cache (GGUF models dequanted to NVFP4).
+                // Prefer FP8 for decode: NVFP4 kpar GEMV accumulates 4-bit
+                // quantization error across 36+ layers, causing Inf/NaN in
+                // hidden states and output degeneration. FP8 cuBLAS GEMV
+                // has 8-bit precision which prevents the overflow.
+                {
+                    auto fp8_it = wcache_.fp8.find(h.source_data);
+                    if (fp8_it != wcache_.fp8.end()) {
+                        int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
+                        Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+                        gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
+                                      nullptr, fp8_it->second.d_scale, ctx.stream);
+                        return;
+                    }
+                }
+                // Fallback: NVFP4 decode cache (GGUF models without FP8 cache).
                 auto it = wcache_.nvfp4.find(h.source_data);
                 if (it != wcache_.nvfp4.end()) {
                     gemv_nvfp4_kpar(it->second,
