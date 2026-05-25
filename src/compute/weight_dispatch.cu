@@ -185,13 +185,13 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                                                    stream);
                 if (ok)
                     return;
-                // CUTLASS failed; fall through to NvFP4 fallback.
+                IMP_LOG_ERROR(
+                    "gemm_dispatch CUTLASS_NVFP4: GEMM failed (M=%d N=%d K=%d), "
+                    "no dequant fallback (micro_scales unavailable in payload)",
+                    M, N, K);
+                return;
             }
 
-            // Fallback: gemm_nvfp4 (internal dequant + cuBLAS GEMM).
-            // Build NvFP4QuantResult — but CUTLASS_NVFP4 payload doesn't carry
-            // the original NvFP4 micro_scales.  We can't safely dequant here.
-            // Log and return.
             IMP_LOG_ERROR(
                 "gemm_dispatch CUTLASS_NVFP4: workspace too small (need %zu, have %zu) "
                 "and no dequant fallback (micro_scales unavailable in payload)",

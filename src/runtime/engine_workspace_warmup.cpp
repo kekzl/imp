@@ -190,10 +190,14 @@ void Engine::build_banned_token_list() {
     if (!banned_token_ids_.empty()) {
         IMP_LOG_INFO("Banned %zu special tokens from generation", banned_token_ids_.size());
         if (tok) {
+            constexpr size_t kMaxPrint = 30;
             std::string bl;
-            for (int32_t bid : banned_token_ids_) {
-                bl += std::to_string(bid) + "(" + tok->token_text(bid) + ") ";
+            size_t count = std::min(banned_token_ids_.size(), kMaxPrint);
+            for (size_t i = 0; i < count; ++i) {
+                bl += std::to_string(banned_token_ids_[i]) + "(" + tok->token_text(banned_token_ids_[i]) + ") ";
             }
+            if (banned_token_ids_.size() > kMaxPrint)
+                bl += "... (+" + std::to_string(banned_token_ids_.size() - kMaxPrint) + " more)";
             IMP_LOG_INFO("  banned: %s", bl.c_str());
         }
     }

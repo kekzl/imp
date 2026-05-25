@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>A from-scratch CUDA inference engine for NVIDIA Blackwell.</b><br>
-  Single-GPU, <code>sm_120a</code>, native NVFP4 weight + KV — <b>~200 tok/s decode on Qwen3.6-35B-A3B NVFP4 MoE</b>.<br>
+  Single-GPU, <code>sm_120a</code>, native NVFP4 weight + KV — <b>~230 tok/s decode on Qwen3.6-35B-A3B NVFP4 MoE</b>.<br>
   Every line written by <a href="https://claude.ai/claude-code">Claude Code</a>.
 </p>
 
