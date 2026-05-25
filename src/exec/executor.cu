@@ -19,8 +19,7 @@
 __global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ logits,
                                                          const int32_t* __restrict__ banned_ids, int n_banned,
                                                          int vocab_size) {
-    int i = threadIdx.x;
-    if (i < n_banned) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
         int32_t tid = banned_ids[i];
         if (tid >= 0 && tid < vocab_size)
             logits[tid] = -1e30f;
@@ -325,14 +324,17 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const Inf
         apply_dry_penalty(lp, vocab, state.host_penalty_tokens, state.n_penalty_tokens, state.dry_multiplier,
                           state.dry_base, state.dry_allowed_length, state.dry_penalty_last_n, stream);
     }
-    // Ban special tokens
+    // Ban special tokens — upload list to device and apply via kernel.
     if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
-        float neg_inf = -1e30f;
-        for (int bi = 0; bi < state.n_banned_tokens; bi++) {
-            int32_t tid = state.banned_tokens[bi];
-            if (tid >= 0 && tid < vocab)
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float), cudaMemcpyHostToDevice, stream));
+        int32_t* d_banned = nullptr;
+        size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
+        if (cudaMallocAsync(&d_banned, ban_bytes, stream) == cudaSuccess && d_banned) {
+            cudaMemcpyAsync(d_banned, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice, stream);
+            constexpr int kBanThreads = 256;
+            int blocks = (state.n_banned_tokens + kBanThreads - 1) / kBanThreads;
+            ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, d_banned, state.n_banned_tokens,
+                                                                   vocab);
+            cudaFreeAsync(d_banned, stream);
         }
     }
     // Apply logit bias
@@ -417,13 +419,12 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
     int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
     float* lp = static_cast<float*>(logits.data);
 
-    // Ban special tokens — device-side variant for graph capture.
+    // Ban special tokens — device-side kernel (graph-safe).
     if (state.d_banned_tokens && state.n_d_banned_tokens > 0) {
-        int threads = ((state.n_d_banned_tokens + 31) / 32) * 32;
-        if (threads > 256)
-            threads = 256;
-        ban_logits_kernel<<<1, threads, 0, stream>>>(lp, state.d_banned_tokens, state.n_d_banned_tokens,
-                                                     vocab);
+        constexpr int kBanThreads = 256;
+        int blocks = (state.n_d_banned_tokens + kBanThreads - 1) / kBanThreads;
+        ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(
+            lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
     }
 
     // Repetition / frequency / presence penalties — device counter grows each
