@@ -488,11 +488,21 @@ void GraphExecutor::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
     // like Qwen 3.5/3.6). Without this, run_gdn falls back to on-the-fly
     // dequant which produces ~5% per-element drift at L0 and cascades
     // to sign-flips at the shared MLP → garbage output.
+    //
+    // Also KEEP entries for native NVFP4 weights (CUTLASS_NVFP4 source):
+    // the FP16 cache is the only correct prefill path — FP8 quantization
+    // error compounds across 36 layers and shifts argmax at 152K vocab.
     size_t freed = 0;
     size_t kept_bytes = 0;
     int kept_count = 0;
     std::vector<const void*> to_erase;
     for (auto& [ptr, tensor] : wcache_.fp16) {
+        const bool has_cutlass_nvfp4 = (wcache_.cutlass_nvfp4.find(ptr) != wcache_.cutlass_nvfp4.end());
+        if (has_cutlass_nvfp4) {
+            kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
+            kept_count++;
+            continue;
+        }
         const bool has_nvfp4 = (wcache_.nvfp4.find(ptr) != wcache_.nvfp4.end());
         const bool has_fp8 = (wcache_.fp8.find(ptr) != wcache_.fp8.end());
         if (has_nvfp4 || has_fp8) {

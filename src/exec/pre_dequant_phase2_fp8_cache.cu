@@ -1,6 +1,11 @@
 // Pre-dequant Phase 2: FP8 cache.
-// Converts FP16 cache (Phase 1 output) to FP8 device tensors for the
-// fp8_prefill path, gated by attention.fp8_prefill / runtime FP8 state.
+// Converts weights to FP8 device tensors for the fp8_prefill path,
+// gated by attention.fp8_prefill / runtime FP8 state.
+//
+// Mixed precision: attention weights (WQ/WK/WV/WO) are cached in FP16
+// instead of FP8 to avoid precision loss that compounds across layers
+// and shifts argmax at large vocab sizes (NVFP4 degeneration root cause).
+// FFN/SSM weights tolerate 8-bit and go to FP8 for +53% prefill speed.
 //
 // Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
@@ -27,14 +32,75 @@ namespace imp {
 void GraphExecutor::pre_dequant_phase2_fp8_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
     size_t& remaining_budget, cudaStream_t stream) {
-    (void)cfg;  // unused in Phase 2 body
     size_t fp8_budget = std::min(remaining_budget, budget.fp8_cache_bytes);
+    size_t phase2_fp16_bytes = 0;
     if (wcache_.use_fp8) {
+        // --- FP16 weight cache for native NVFP4 ---
+        // FP8 quantization error (~0.5%/layer) compounds over 36 layers and
+        // shifts argmax in 152K vocab. vLLM avoids this by dequanting NVFP4→FP16
+        // fully at load and using FP16 cuBLAS for everything. We do the same:
+        // dequantize all NVFP4 dense weights to FP16 for prefill, keep original
+        // NVFP4 data for decode GEMV (which is single-token and doesn't compound).
+        int fp16_all_count = 0;
+        size_t fp16_all_bytes = 0;
+        {
+            auto cache_weight_fp16 = [&](const Tensor& w) {
+                if (!w.data || wcache_.fp16.count(w.data))
+                    return;
+                QType qtype = w.qtype;
+                if (qtype != QType::NVFP4)
+                    return;
+
+                int rows = static_cast<int>(w.shape[0]);
+                int cols = static_cast<int>(w.shape[1]);
+                int64_t logical_K = cols * 2;
+                size_t fp16_bytes = static_cast<size_t>(rows) * logical_K * sizeof(half);
+
+                if (fp16_all_bytes + fp16_bytes > fp8_budget)
+                    return;
+
+                void* fp16_buf = vram_alloc(vram_alloc_, fp16_bytes, "fp16_nvfp4_cache");
+                if (!fp16_buf)
+                    return;
+
+                if (w.scales) {
+                    NvFP4QuantResult nv;
+                    nv.packed_data = w.data;
+                    nv.micro_scales = w.scales;
+                    nv.tensor_scale = w.tensor_scale;
+                    nv.N = rows;
+                    nv.K = cols * 2;
+                    dequantize_nvfp4_to_fp16(nv, fp16_buf, stream);
+                } else {
+                    return;
+                }
+
+                int64_t fp16_shape[4] = {static_cast<int64_t>(rows), logical_K, 0, 0};
+                Tensor fp16_tensor(fp16_buf, QType::F16, 2, fp16_shape, true);
+                wcache_.fp16[w.data] = fp16_tensor;
+                fp16_all_count++;
+                fp16_all_bytes += fp16_bytes;
+            };
+
+            for_each_dense_weight(*model_, cfg, [&](const Tensor& w, QType) {
+                cache_weight_fp16(w);
+            });
+            if (fp16_all_count > 0) {
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                IMP_LOG_INFO("NVFP4→FP16 weight cache: %d tensors, %.2f MiB "
+                             "(FP16 prefill, NVFP4 GEMV decode)",
+                             fp16_all_count, fp16_all_bytes / (1024.0 * 1024.0));
+            }
+        }
+        phase2_fp16_bytes = fp16_all_bytes;
+        // After FP16 caching, remaining budget for FP8 (non-NVFP4 weights only)
+        fp8_budget = (fp8_budget > fp16_all_bytes) ? (fp8_budget - fp16_all_bytes) : 0;
+
+        // --- FP8 cache for remaining weights (non-NVFP4 GGUF quants) ---
         size_t fp8_total = 0;
         int fp8_count = 0;
         bool fp8_exhausted = false;
 
-        // Collect weights to convert
         struct FP8OverflowEntry {
             const void* orig_ptr;
             Tensor weight;
@@ -177,7 +243,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
         }
     }
 
-    deduct_budget(remaining_budget, wcache_.fp8_bytes);
+    deduct_budget(remaining_budget, wcache_.fp8_bytes + phase2_fp16_bytes);
 }
 
 }  // namespace imp

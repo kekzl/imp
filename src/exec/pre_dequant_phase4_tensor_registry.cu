@@ -45,11 +45,18 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         borrow_payload_from_wcache(h, wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
-        // Prefill (M>1): FP8 cuBLAS > CUTLASS NVFP4 > source dequant
+        // Prefill (M>1): FP16 cuBLAS > FP8 cuBLAS > CUTLASS NVFP4 > source dequant
         // Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
+        //
+        // Native NVFP4: all dense weights get FP16 prefill (dequanted at load)
+        // to avoid FP8 precision loss that compounds across 36 layers.
+        // Decode uses source NVFP4 data for GEMV (single-token, no compounding).
         h.prefill_tier = tier;
         h.decode_tier = tier;
-        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp8.count(t.data)) {
+        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp16.count(t.data)) {
+            h.prefill_tier = StorageTier::FP16;
+            // Decode: use source NVFP4 data for GEMV (not the FP16 cache)
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp8.count(t.data)) {
             h.prefill_tier = StorageTier::FP8;
             h.decode_tier = StorageTier::FP8;
         } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.nvfp4.count(t.data)) {

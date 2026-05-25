@@ -1703,6 +1703,24 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 }
                 break;
             }
+            case StorageTier::CUTLASS_NVFP4: {
+                // Native NVFP4: use source data for GEMV (micro_scales in source_scales)
+                if (h.source_data && h.source_scales) {
+                    NvFP4QuantResult nv;
+                    nv.packed_data = const_cast<void*>(h.source_data);
+                    nv.micro_scales = h.source_scales;
+                    nv.tensor_scale = h.source_tensor_scale;
+                    nv.N = h.shape[0];
+                    nv.K = h.shape[1] * 2;
+                    gemv_nvfp4_kpar(nv,
+                                    reinterpret_cast<const half*>(input.data),
+                                    reinterpret_cast<half*>(output.data),
+                                    static_cast<int>(nv.N),
+                                    static_cast<int>(nv.K), ctx.stream);
+                    return;
+                }
+                break;
+            }
             case StorageTier::MXFP4:
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
@@ -1747,6 +1765,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
 
+        if (prefill == StorageTier::FP16) {
+            auto fp16_it = wcache_.fp16.find(h.source_data);
+            if (fp16_it != wcache_.fp16.end()) {
+                gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);
+                return;
+            }
+        }
         if (prefill == StorageTier::FP8) {
             auto fp8_it = wcache_.fp8.find(h.source_data);
             if (fp8_it != wcache_.fp8.end()) {
