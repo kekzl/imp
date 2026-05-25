@@ -8,6 +8,7 @@
 #include "exec/executor.h"
 #include "exec/pre_dequant_internal.h"
 #include "quant/dequant_gpu.h"
+#include "quant/nvfp4_quant.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
@@ -43,7 +44,9 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
         std::vector<FP8OverflowEntry> fp8_entries;
 
         auto collect_weight_fp8 = [&](const Tensor& w, QType qtype) {
-            if (!w.data || !dequant_gpu_supported(qtype))
+            if (!w.data)
+                return;
+            if (!dequant_gpu_supported(qtype) && qtype != QType::NVFP4)
                 return;
             if (wcache_.fp16.count(w.data))
                 return;
@@ -52,7 +55,8 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
             if (fp8_exhausted)
                 return;
 
-            size_t n_elems = static_cast<size_t>(w.shape[0]) * w.shape[1];
+            int64_t logical_K = (qtype == QType::NVFP4) ? w.shape[1] * 2 : w.shape[1];
+            size_t n_elems = static_cast<size_t>(w.shape[0]) * logical_K;
             size_t fp8_bytes = n_elems;
 
             if (fp8_total + fp8_bytes + sizeof(float) > fp8_budget) {
@@ -108,8 +112,17 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                 int rows = static_cast<int>(e.weight.shape[0]);
                 int cols = static_cast<int>(e.weight.shape[1]);
 
-                // Dequant to qscratch_.dequant (reused each iteration, stream-ordered)
-                dequant_gpu(e.weight.data, qscratch_.dequant, e.qtype, rows, cols, stream);
+                if (e.qtype == QType::NVFP4 && e.weight.scales) {
+                    NvFP4QuantResult nv;
+                    nv.packed_data = e.weight.data;
+                    nv.micro_scales = e.weight.scales;
+                    nv.tensor_scale = e.weight.tensor_scale;
+                    nv.N = rows;
+                    nv.K = cols * 2;
+                    dequantize_nvfp4_to_fp16(nv, qscratch_.dequant, stream);
+                } else {
+                    dequant_gpu(e.weight.data, qscratch_.dequant, e.qtype, rows, cols, stream);
+                }
 
                 void* fp8_buf = d_fp8_bulk + fp8_offset;
                 fp8_offset += e.n_elems;
@@ -119,7 +132,10 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                                                  d_block_maxes, max_grid, d_absmax,
                                                  d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
-                Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
+                int64_t fp8_shape[4] = {e.weight.shape[0],
+                    (e.qtype == QType::NVFP4) ? e.weight.shape[1] * 2 : e.weight.shape[1],
+                    e.weight.shape[2], e.weight.shape[3]};
+                Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.weight.ndim, fp8_shape, true);
                 wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                 actual_count++;
             }
