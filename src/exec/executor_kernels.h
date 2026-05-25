@@ -255,11 +255,10 @@ void rmsnorm_add_residual(const Tensor& input, const Tensor& weight, const Tenso
 
 Tensor slice_rows(const Tensor& buf, int n_tokens);
 
-// GemmContext-based dispatch. The qtype parameter was dropped — the weight
-// tensor's own .qtype field carries the type. Callers no longer need to
-// pass a separate *_qtype mirror.
-struct GemmContext;  // forward decl — defined in gemm_context.h
-void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx);
+// GemmContext forward decl — defined in gemm_context.h.
+// The legacy gemm_dispatch free function is now a file-local uncached
+// fallback (gemm_dispatch_uncached_fallback in executor_kernels.cu).
+struct GemmContext;
 
 // MMVQ scratch buffer prewarm + hot-path getter live in gemm_scratch.h since
 // R5 Slice 8.6 (TU hoist).

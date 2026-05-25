@@ -1581,21 +1581,12 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
 }
 
 // ---------------------------------------------------------------------------
-// gemm_dispatch — single entry point that walks the GemmKernel registry in
-// tier-priority order. R5 Slice 8.6 closes the cross-axis refactor: the
-// legacy 21-parameter `gemm_dispatch_impl` switch (~250 LOC) is retired and
-// the registry is now the unconditional path. Every tier registers its
-// adapter from its own .cu file at static-init time (see
-// gemm_kernel_*.cu); adding a new qtype/quantization tier is a one-file
-// change.
-//
-// Tier order (MXFP4 GGUF → FP8 → NVFP4 GEMV → CUTLASS_NVFP4 → NVFP4 GEMM →
-// FP16 cache/raw → small-M GGUF → generic-dequant catch-all) mirrors the
-// historical legacy precedence and is the same as Slice 8 documented; it is
-// observed-equivalent to the production behaviour from when Slice 8 flipped
-// the registry default ON.
 // ---------------------------------------------------------------------------
-void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
+// Uncached fallback: safety net for weights without a WeightHandle
+// (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
+// ---------------------------------------------------------------------------
+static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
+                                            Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
     if (!wc || !qs)
@@ -1603,16 +1594,12 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
 
     const QType qtype = weight.qtype;
 
-    // Residual-add fuse (beta != 0): only FP16 weight cache or dequantable-to-FP16
-    // is supported. GEMV and block-scaled quant paths don't honor beta — callers
-    // for those cases must continue to use their explicit fast paths.
     if (ctx.beta != 0.0f) {
         auto it = wc->fp16.find(weight.data);
         if (it != wc->fp16.end()) {
             gemm(input, it->second, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        // dequant_gpu derefs weight.data raw — skip if dropped (5.1.4.b).
         if (qs->dequant != nullptr && dequant_gpu_supported(qtype) && !weight.dropped_source) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
@@ -1621,252 +1608,19 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
             gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        if (weight.qtype == QType::F16 || weight.qtype == QType::BF16) {
+        if (qtype == QType::F16 || qtype == QType::BF16) {
             gemm(input, weight, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
         IMP_LOG_ERROR(
-            "gemm_dispatch: beta=%.3f requested but no FP16 path available "
-            "for qtype=%d",
+            "gemm_dispatch_uncached_fallback: beta=%.3f but no FP16 path for qtype=%d",
             ctx.beta, (int)qtype);
         return;
     }
 
-    const auto* fp16 = &wc->fp16;
-    const auto* fp8 = (wc->use_fp8 && !ctx.force_fp16) ? &wc->fp8 : nullptr;
-    const auto* nv4 = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
-    const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
-    const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
-
     const int M = static_cast<int>(input.shape[0]);
 
-    // MXFP4 native GGUF (top priority). The kernel adapter gates internally
-    // on `linear_scales != nullptr`; cache miss + dequant_scratch nullptr at
-    // M>1 returns PreconditionFail so we fall through to the rest of the
-    // table — same as the legacy `else if (dequant_scratch != nullptr)` skip.
-    if (mx4 != nullptr && input.qtype == QType::F16) {
-        auto mx_it = mx4->find(weight.data);
-        if (mx_it != mx4->end() && mx_it->second.linear_scales != nullptr) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = &mx_it->second;
-            args.dequant_scratch = qs->dequant;  // only consumed by M>1 path
-            GemmStrategy strat{StorageTier::MXFP4, QType::F16, /*m_is_one=*/(M == 1)};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    // Q4_K_M direct-GEMM via INT8 IMMA (Phase 2C). Opt-in via
-    // `gemm.q4k_imma_enabled` (default off); production-recommended for dense
-    // Q4_K_M weights at M ≥ 1024 where the kernel's ~40 TOPS plateau beats
-    // the dequant→cuBLAS fallback. Falls through to FP8 / generic dequant on
-    // any precondition failure inside the handler. See
-    // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
-    if (qtype == QType::Q4_K && input.qtype == QType::F16 && M >= 1024 &&
-        ctx.beta == 0.0f && ctx.q4k_imma_enabled) {
-        GemmKernelArgs args{};
-        args.input = &input;
-        args.output = &output;
-        args.stream = ctx.stream;
-        args.weight_payload = &weight;
-        GemmStrategy strat{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/false};
-        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-            return;
-    }
-    // FP8 prefill (M>1): cache hit → FP8xFP8 cuBLASLt; cache miss with
-    // dequant-supported qtype → dequant→FP16 cuBLAS (Slice 8.1). Raw FP16
-    // weights drop to the FP16 strategy below.
-    if (fp8 != nullptr && M > 1 && qs->fp8_act != nullptr && qs->d_act_scale != nullptr) {
-        auto it = fp8->find(weight.data);
-        if (it != fp8->end()) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = &it->second;
-            args.fp8_act_buf = qs->fp8_act;
-            args.d_act_scale = qs->d_act_scale;
-            args.d_fp8_block_maxes = qs->d_fp8_block_maxes;
-            args.d_fp8_absmax = qs->d_fp8_absmax;
-            args.fp8_max_grid = qs->fp8_max_grid;
-            GemmStrategy strat{StorageTier::FP8, QType::F16, /*m_is_one=*/false};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        } else {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = &weight;
-            args.dequant_scratch = qs->dequant;
-            GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    // NVFP4 decode GEMV (M==1). Prequant Tensor sidecars (qtype=NVFP4 on the
-    // weight) take precedence over the nv4 cache; the temp NvFP4QuantResult
-    // is constructed here when sidecars are present.
-    if (M == 1 && input.qtype == QType::F16) {
-        NvFP4QuantResult nvfp4_tmp;
-        const NvFP4QuantResult* nvfp4_view = nullptr;
-        if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
-            nvfp4_tmp.packed_data = weight.data;
-            nvfp4_tmp.micro_scales = weight.scales;
-            nvfp4_tmp.tensor_scale = weight.tensor_scale;
-            nvfp4_tmp.N = weight.shape[0];
-            nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
-            nvfp4_view = &nvfp4_tmp;
-        } else if (nv4 != nullptr) {
-            auto it = nv4->find(weight.data);
-            if (it != nv4->end())
-                nvfp4_view = &it->second;
-        }
-        if (nvfp4_view != nullptr) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = nvfp4_view;
-            GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/true};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    // CUTLASS_NVFP4 prefill GEMM (M>1, native sm_120 block-scaled FP4 —
-    // preferred path). Slice 8.6 — QW7 dual-cache MXFP4 hand-off. When
-    // `--mxfp4-prefill` is on, executor_pre_dequant.cu populates
-    // `cutlass_mxfp4` by iterating every NVFP4 entry: cache membership is a
-    // superset of cutlass_nvfp4. We forward the MXFP4 payload + scratch
-    // through `args.mxfp4_payload` so the handler can try the MXFP4 CUTLASS
-    // GEMM first and fall back to NVFP4 CUTLASS on failure (mirrors the
-    // retired legacy QW7 probe).
-    if (M > 1 && input.qtype == QType::F16 && ct4 != nullptr &&
-        qs->cutlass_act_data != nullptr) {
-        auto ct_it = ct4->find(weight.data);
-        if (ct_it != ct4->end()) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = &ct_it->second;
-            args.cutlass_act_data = qs->cutlass_act_data;
-            args.cutlass_act_sf = qs->cutlass_act_sf;
-            args.cutlass_workspace = qs->cutlass_workspace;
-            args.cutlass_workspace_size = qs->cutlass_workspace_size;
-            if (mx4 != nullptr && qs->mxfp4_act_sf != nullptr) {
-                auto mx_it = mx4->find(weight.data);
-                if (mx_it != mx4->end()) {
-                    args.mxfp4_payload = &mx_it->second;
-                    args.mxfp4_act_sf = qs->mxfp4_act_sf;
-                    args.mxfp4_workspace = qs->mxfp4_workspace;
-                    args.mxfp4_workspace_size = qs->mxfp4_workspace_size;
-                }
-            }
-            GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    // NVFP4 prefill GEMM (M>1, dequant→cuBLAS fallback) — fires when the
-    // CUTLASS path is unavailable or returned PreconditionFail.
-    if (M > 1 && input.qtype == QType::F16) {
-        NvFP4QuantResult nvfp4_tmp;
-        const NvFP4QuantResult* nvfp4_view = nullptr;
-        if (weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
-            nvfp4_tmp.packed_data = weight.data;
-            nvfp4_tmp.micro_scales = weight.scales;
-            nvfp4_tmp.tensor_scale = weight.tensor_scale;
-            nvfp4_tmp.N = weight.shape[0];
-            nvfp4_tmp.K = weight.shape[1] * 2;  // shape[1] is packed K/2
-            nvfp4_view = &nvfp4_tmp;
-        } else if (nv4 != nullptr) {
-            auto it = nv4->find(weight.data);
-            if (it != nv4->end())
-                nvfp4_view = &it->second;
-        }
-        if (nvfp4_view != nullptr) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.beta = ctx.beta;
-            args.weight_payload = nvfp4_view;
-            GemmStrategy strat{StorageTier::NVFP4, QType::F16, /*m_is_one=*/false};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    // FP16 cache hit — only fire for M > 1 prefill OR for natively-F16
-    // weights (where the cache IS the source storage). At M = 1 decode with
-    // a quantized source (Q4_K, Q8_0, Q6_K cached as FP16), the small-M
-    // dp4a/mmvq path on the ORIGINAL quantized weight is far faster than
-    // cuBLAS gemv on the FP16 overlay (5-10x lower per-call HBM read).
-    // Pre-5.1.2: Phase 1 skipped Q4_K → fp16 cache miss → fall through to
-    // dp4a (FAST). Post-5.1.2: Phase 1 caches Q4_K → fp16 hit → this branch
-    // forced cuBLAS gemv on the FP16 overlay (SLOW, −36% tg128 regression).
-    // Gating on M>1 OR native-F16 restores the M=1 dp4a fast path.
-    // Phase 5 PR #1 Commit 5.1.3.c — closes the decode regression from 5.1.2.
-    const bool native_f16_weight = (weight.qtype == QType::F16 || weight.qtype == QType::BF16);
-    if (M > 1 || native_f16_weight) {
-        if (auto it = wc->fp16.find(weight.data); it != wc->fp16.end()) {
-            GemmKernelArgs args{};
-            args.input = &input;
-            args.output = &output;
-            args.stream = ctx.stream;
-            args.weight_payload = &it->second;
-            GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
-            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-                return;
-        }
-    }
-    if ((qtype == QType::F16 || qtype == QType::BF16) && weight.qtype == QType::F16) {
-        GemmKernelArgs args{};
-        args.input = &input;
-        args.output = &output;
-        args.stream = ctx.stream;
-        args.weight_payload = &weight;
-        GemmStrategy strat{StorageTier::FP16, QType::F16, M == 1};
-        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-            return;
-    }
-    // GGUF small-M (mmvq / dp4a / fused-gemv): M==1, FP16 input, non-FP32
-    // output. `prefer_fp16_cache` keeps the cache-vs-raw decision at the
-    // dispatch site because it depends on cache membership + stride — not
-    // expressible via GemmKernelArgs alone.
-    const bool fp32_output = (output.qtype == QType::F32);
-    const bool prefer_fp16_cache =
-        (fp16 != nullptr && fp16->count(weight.data) > 0 && input.stride[0] != weight.shape[1]);
-    // 5.1.4.b: small-M GGUF (dp4a/mmvq) derefs weight.data — skip if dropped.
-    if (M == 1 && input.qtype == QType::F16 && !fp32_output && !prefer_fp16_cache &&
-        !weight.dropped_source) {
-        GemmKernelArgs args{};
-        args.input = &input;
-        args.output = &output;
-        args.stream = ctx.stream;
-        args.beta = ctx.beta;
-        args.weight_payload = &weight;
-        args.q8_1_buf = qs->q8_1_buf;
-        args.d8_buf = qs->d8_buf;
-        args.dequant_scratch = qs->dequant;  // fused-gemv readiness sentinel
-        args.force_mmvq = ctx.force_mmvq;
-        args.no_mmvq = ctx.gemm_no_mmvq;
-        args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
-        args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
-        GemmStrategy strat{StorageTier::FP16, qtype, /*m_is_one=*/true};
-        if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
-            return;
-    }
-    // Qtype-agnostic generic-dequant catch-all (M>1 prefill). Handler reads
-    // weight.qtype off the Tensor and switches via `dequant_gpu_supported`.
-    // 5.1.4.b: skip if dropped — overlay should have fired above.
+    // Generic dequant catch-all (M>1 prefill for uncached weights)
     if (M > 1 && input.qtype == QType::F16 && !weight.dropped_source) {
         GemmKernelArgs args{};
         args.input = &input;
@@ -1879,40 +1633,38 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, co
         if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
             return;
     }
-    // Final fallback: raw FP16/BF16 cuBLAS. Reached only when none of the
-    // tiers above match — typically a raw FP16/BF16 weight at a shape no
-    // cache covered. Matches the legacy `else { gemm(...); }` arm.
-    // 5.1.4.b safety probe: dropped weights MUST have been dispatched via
-    // overlay above. If we get here with a dropped weight, that's a coverage
-    // gap — surface it loud (once per process).
+
     if (weight.dropped_source) {
         static bool warned = false;
         if (!warned) {
             warned = true;
             IMP_LOG_WARN(
-                "gemm_dispatch: dropped weight reached final fallback! "
-                "M=%d qtype=%d kind=%s — overlay coverage gap, fix dispatch.",
+                "gemm_dispatch_uncached_fallback: dropped weight at final fallback! "
+                "M=%d qtype=%d kind=%s — overlay coverage gap.",
                 M, static_cast<int>(qtype), tensor_kind_name(weight.kind));
         }
-        return;  // bisect mode: don't crash; just no-op (output will be wrong, surfaces in bench)
+        return;
     }
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
 // ---------------------------------------------------------------------------
-// 5.1.3.d transitional dispatch: WeightHandle for M>1 prefill, legacy for
-// M=1 decode. Lets call sites migrate incrementally — once all M=1 paths
-// are in weight_dispatch (dp4a, CUTLASS_NVFP4 M=1 stub), the fallback
-// branch and this function collapse to a direct weight_dispatch call.
+// gemm_via_handle_ — WeightHandle dispatch for all registered weights.
+// M>1 routes through weight_dispatch. M=1 beta=0 routes through gemv_dispatch
+// or tier-specific handlers. M=1 beta!=0 routes through weight_dispatch
+// (cuBLAS GEMM with beta). Undefined tier (budget-exhausted) reconstructs
+// the weight Tensor from the handle and uses the uncached dequant fallback.
 // ---------------------------------------------------------------------------
-void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
-                                     const Tensor& input, Tensor& output,
-                                     const GemmContext& ctx) {
-    if (id == kInvalidTensorID) {
-        gemm_dispatch(input, weight_fallback, output, ctx);
+void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
+                                     Tensor& output, const GemmContext& ctx) {
+    const auto& h = registry_.handle(id);
+
+    if (h.primary_tier == StorageTier::Undefined) {
+        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
     }
-    const auto& h = registry_.handle(id);
+
     int M = static_cast<int>(input.shape[0]);
     if (M == 1 && ctx.beta == 0.0f) {
         switch (h.primary_tier) {
@@ -1922,7 +1674,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::CUTLASS_NVFP4: {
-                auto it = wcache_.nvfp4.find(weight_fallback.data);
+                auto it = wcache_.nvfp4.find(h.source_data);
                 if (it != wcache_.nvfp4.end()) {
                     gemv_nvfp4_kpar(it->second,
                                     reinterpret_cast<const half*>(input.data),
@@ -1933,15 +1685,38 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& weight_fallback,
                 }
                 break;
             }
+            case StorageTier::FP16: {
+                if (h.source_qtype != QType::NONE && h.source_qtype != QType::F16 &&
+                    h.source_qtype != QType::BF16 && h.source_data != nullptr &&
+                    output.qtype != QType::F32 &&
+                    input.stride[0] == h.shape[1]) {
+                    const auto* qs = ctx.qscratch;
+                    if (qs) {
+                        Tensor src(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+                        GemmKernelArgs args{};
+                        args.input = &input;
+                        args.output = &output;
+                        args.stream = ctx.stream;
+                        args.weight_payload = &src;
+                        args.q8_1_buf = qs->q8_1_buf;
+                        args.d8_buf = qs->d8_buf;
+                        args.dequant_scratch = qs->dequant;
+                        args.force_mmvq = ctx.force_mmvq;
+                        args.no_mmvq = ctx.gemm_no_mmvq;
+                        args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
+                        args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
+                        GemmStrategy strat{StorageTier::FP16, h.source_qtype, true};
+                        if (GemmKernelRegistry::instance().dispatch(strat, args) ==
+                            GemmDispatchResult::Ok)
+                            return;
+                    }
+                }
+                imp::gemv_dispatch(h, input, output, ctx.stream);
+                return;
+            }
             default:
                 break;
         }
-        gemm_dispatch(input, weight_fallback, output, ctx);
-        return;
-    }
-    if (M == 1) {
-        gemm_dispatch(input, weight_fallback, output, ctx);
-        return;
     }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        shared_workspace_, shared_workspace_size_, ctx.stream);
