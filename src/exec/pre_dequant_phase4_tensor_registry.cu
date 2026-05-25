@@ -485,17 +485,14 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
         int64_t cols = t.ndim > 1 ? t.shape[1] : 1;
         size_t bytes = qtype_row_bytes(t.qtype, cols) * static_cast<size_t>(t.shape[0]);
         if (actually_free) {
-            // Only safe to cudaFree when this pointer is a BASE allocation
-            // tracked in gpu_allocations_. GGUF weight_upload often packs
-            // multiple weights into one cudaMalloc — those weights' .data
-            // are offsets into the base, and cudaFree(offset) corrupts the
-            // whole region. Mark the source dropped (dispatch still routes
-            // via overlay) but skip the cudaFree to avoid corruption.
             if (!mut_model->is_base_gpu_allocation(t.data)) {
                 ++skipped_shared_count;
                 skipped_shared_bytes += bytes;
-                // Don't mark dropped either — dispatch can still safely
-                // read the still-alive shared allocation.
+                return false;
+            }
+            if (wcache_.cutlass_nvfp4.count(t.data) > 0) {
+                ++skipped_shared_count;
+                skipped_shared_bytes += bytes;
                 return false;
             }
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
