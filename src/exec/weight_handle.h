@@ -32,6 +32,8 @@ struct WeightHandle {
     // Phase 5 PR #1 Commit 5.1.3.a — used by the upcoming weight_dispatch shim.
     const void* source_data = nullptr;
     QType source_qtype = QType::NONE;
+    void* source_scales = nullptr;
+    float source_tensor_scale = 1.0f;
 
     union {
         struct {

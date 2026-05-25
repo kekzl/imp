@@ -44,6 +44,8 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         // Always borrowed — never freed by registry.
         h.source_data = t.data;
         h.source_qtype = t.qtype;
+        h.source_scales = t.scales;
+        h.source_tensor_scale = t.tensor_scale;
         borrow_payload_from_wcache(h, wcache_, t.data);
         return id;
     };
