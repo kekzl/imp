@@ -15,6 +15,8 @@ struct WeightHandle {
     TensorID id = kInvalidTensorID;
     TensorKind kind = TensorKind::UNKNOWN;
     StorageTier primary_tier = StorageTier::Undefined;
+    StorageTier prefill_tier = StorageTier::Undefined;  // M>1 GEMM dispatch
+    StorageTier decode_tier = StorageTier::Undefined;   // M=1 GEMV dispatch
     int64_t shape[2] = {0, 0};
     // Size in bytes of VRAM owned by this handle. Zero means storage is
     // BORROWED (e.g. via the Phase-2 shim that points handles at wcache_
