@@ -1,46 +1,50 @@
 # Maintenance Sprint Log
 
-## 2026-05-25 — Session 1
+## 2026-05-25
 
-### Baseline Benchmarks (main @ b21d739 + fixes below)
+### Baseline Benchmarks
 
-RTX 5090, CUDA 13.2, sm_120a, Docker, cold GPU (28°C), batch=1.
+RTX 5090, CUDA 13.2, sm_120a, Docker, cold GPU (28°C), batch=1, graphs ON.
 
 | Model | Quant | pp512 (tok/s) | tg128 (tok/s) |
 |-------|-------|--------------|--------------|
 | Qwen3-8B | Q8_0 | 26,540 | 274 |
 | Qwen3-14B | Q6_K | 16,369 | 165 |
 | Qwen3-8B cortecs | NVFP4 | 25,539 | 226 |
-| Qwen3-Coder-30B-A3B | NVFP4 | 14,625 | 270 |
+| Qwen3-Coder-30B-A3B | NVFP4 | 16,800 | 266 |
 | Qwen3.6-35B-A3B | NVFP4 | 10,906 | 227 |
 | Gemma-4-26B-A4B | Q4_K_M | 4,645 | 256 |
 
-### Completed
+No decode regressions vs prior baselines.
 
-1. **PR #405: cudaMallocAsync weight pool** (`fix/cudamalloc-async-weight-pool`)
-   - Migrates all weight allocs from cudaMalloc/cudaFree to cudaMallocAsync/cudaFreeAsync
-   - Fixes cuBLAS status-14 on WSL2/CUDA 13.2 after mass cudaFree (WDDM page release bug)
-   - Removes gemm_reset() workaround and WDDM page-refill hack
-   - 6 files, -134/+67 LOC
+### Shipped
 
-2. **fix/tensor-kind-table-gdn-entries** (this branch, to be PR'd):
-   - TensorKindTable: added 4 missing GDN tensor kinds (GDN_ALPHA, GDN_BETA, GDN_ALPHA_BETA_PACKED, GDN_INPUT_PACKED). Fixes 3 pre-existing test failures.
-   - **Critical: Phase-4b use-after-free for native NVFP4 SafeTensors models.** Phase-4b VRAM reclamation was freeing source weight data still borrowed by the CUTLASS NVFP4 cache. ALL native NVFP4 models (cortecs, modelopt, Qwen3.6) were broken with illegal memory access. One-line fix: skip cudaFree when pointer is in wcache_.cutlass_nvfp4.
+| PR | Description |
+|----|-------------|
+| #405 | cudaMallocAsync weight pool — fixes cuBLAS status-14 |
+| #406 | NVFP4 use-after-free + TensorKindTable GDN entries |
+| #408 | Error messages, banned-token logging, test hardening, doc updates |
 
-### Bug Sweep Results
+### Bugs Fixed
 
-- Only 1 TODO in entire src/ tree (gemm_grouped.cu — related to MoE prefill, task #4)
-- 3 test failures — all fixed (TensorKindTable GDN entries)
-- 1 critical regression — fixed (NVFP4 use-after-free)
-- Remaining cudaFree calls in infrastructure code are shutdown-only, safe
+1. **cuBLAS status-14** (PR #405): mass cudaFree corrupted cuBLAS on WSL2/CUDA 13.2. Migrated to cudaMallocAsync.
+2. **NVFP4 use-after-free** (PR #406): Phase-4b freed source pointers borrowed by CUTLASS cache. ALL native NVFP4 SafeTensors models were broken.
+3. **TensorKindTable** (PR #406): 4 missing GDN tensor kinds caused 3 test failures.
+4. **Error message** (PR #408): weight_dispatch said "workspace too small" when GEMM failed for other reasons.
+5. **Gemma-3 startup** (PR #408): 6251 banned tokens built ~100KB log string, causing multi-second delays.
 
-### Findings
+### MoE Prefill Analysis
 
-- Gemma-3-12B bench mode hangs during warmup (6251 banned special tokens — printing takes too long or bench warmup loop interacts badly with the large ban list)
-- weight_dispatch.cu:195 error message is misleading: says "workspace too small" even when workspace IS large enough (the real error is a prior CUDA error from the use-after-free)
+The "1258 vs 25513 tok/s" gap was stale (pre-CUTLASS-3.x device-args). Current pp512 = 16,800 tok/s on Qwen3-Coder-30B-A3B NVFP4. Cross-engine bench shows ~20% gap vs vLLM on comparable models. vLLM cannot load Qwen3-Coder on sm_120.
 
-### Next
+### Test Hardening
 
-- MoE prefill investigation (Qwen3-Coder pp512=14,625 vs vLLM 25,513)
-- Gemma-3 bench mode warmup hang
-- Refactor targets scan
+- Added `EveryKindHasName` test (catches missing tensor_kind_name entries)
+- Added `GDNProjectionsAreFP16Only` test (regression gate for PR #406 fix)
+- All 887 tests pass (was 885 before session, 3 were failing)
+
+### Open Gaps (prioritized)
+
+1. **Q4_K_M prefill -48-59% vs llama.cpp**: needs MMQ kernel port (2-3 weeks)
+2. **NVFP4 dense pp2048 -33% vs vLLM**: CUTLASS tail utilisation
+3. **executor_forward_moe.cu 2844 LOC**: split candidate, deferred (decode risk)
