@@ -374,6 +374,11 @@ void seed_from_env(RuntimeConfig& cfg) {
     // ffn.sparsity_threshold — IMP_FFN_SPARSITY_THRESHOLD: float.
     if (const char* e = std::getenv("IMP_FFN_SPARSITY_THRESHOLD"))
         cfg.ffn.sparsity_threshold = parse_float(e, cfg.ffn.sparsity_threshold);
+
+    // attention.fp8_prefill — IMP_NO_FP8_PREFILL: '1' sets fp8_prefill="never".
+    if (const char* e = std::getenv("IMP_NO_FP8_PREFILL"))
+        if (e[0] == '1')
+            cfg.attention.fp8_prefill = "never";
 }
 
 }  // anonymous namespace
