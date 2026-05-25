@@ -66,7 +66,7 @@ static constexpr int SM120_WMMA_K = 16;
 // =============================================================================
 
 template <int Bq, int HD>
-__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_kernel(
+__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap) {
@@ -435,10 +435,13 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
         size_t smem_128 = compute_smem_sm120(128, SM120_Bkv, head_dim);
         size_t smem_64 = compute_smem_sm120(64, SM120_Bkv, head_dim);
         size_t smem_32 = compute_smem_sm120(32, SM120_Bkv, head_dim);
-        if (smem_128 <= (size_t)max_smem) {
+        size_t occ2_cap = static_cast<size_t>(max_smem) / 2;
+        if (smem_128 <= occ2_cap) {
             Bq = 128;
-        } else if (smem_64 <= (size_t)max_smem) {
+        } else if (smem_64 <= occ2_cap) {
             Bq = 64;
+        } else if (smem_32 <= occ2_cap) {
+            Bq = 32;
         } else if (smem_32 <= (size_t)max_smem) {
             Bq = 32;
         } else {
