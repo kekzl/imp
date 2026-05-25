@@ -50,6 +50,10 @@ constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> 
     t[(size_t)TensorKind::ALPHA] = build(FP16_ONLY, StorageTier::FP16);
     t[(size_t)TensorKind::SSM_GROUP_NORM] = build(FP16_ONLY, StorageTier::FP16);
     t[(size_t)TensorKind::GDN_GATE] = build(ALL_QUANT, StorageTier::NVFP4);
+    t[(size_t)TensorKind::GDN_ALPHA] = build(FP16_ONLY, StorageTier::FP16);
+    t[(size_t)TensorKind::GDN_BETA] = build(FP16_ONLY, StorageTier::FP16);
+    t[(size_t)TensorKind::GDN_ALPHA_BETA_PACKED] = build(FP16_ONLY, StorageTier::FP16);
+    t[(size_t)TensorKind::GDN_INPUT_PACKED] = build(FP16_ONLY, StorageTier::FP16);
     t[(size_t)TensorKind::ATTN_NORM] = build(FP32_ONLY, StorageTier::FP32);
     t[(size_t)TensorKind::FFN_NORM] = build(FP32_ONLY, StorageTier::FP32);
     t[(size_t)TensorKind::POST_ATTN_NORM] = build(FP32_ONLY, StorageTier::FP32);
