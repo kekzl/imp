@@ -105,7 +105,7 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 //                         preserving local precision vs per-row. Post-MMA manual
 //                         scaling is dropped — HW scales during the dot product.
 template <int Bq, int HD, bool UseBlockScaleMma = false>
-__global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
+__global__ void __launch_bounds__(MX_BLOCK_THREADS, 2) fmha_sm120_mxfp4_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap) {
@@ -170,14 +170,14 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     half* KV_fp16 = reinterpret_cast<half*>(KV_raw);       // V as FP16 (same slot)
     float* k_scales = reinterpret_cast<float*>(KV_raw + Bkv * head_dim * sizeof(half));
     float* S_tile = k_scales + Bkv;
-    float* O_acc = S_tile + Bq * Bkv;
-    float* row_m = O_acc + Bq * head_dim;
+    float* row_m = S_tile + Bq * Bkv;
     float* row_l = row_m + Bq;
+    float* rescale_buf = row_l + Bq;
     // Per-k_group UE4M3 scales for blockscale-MMA sfa/sfb operands.
     // Each row has n_k_groups = HD/16 scales (one per 16-K-block).
     // Only populated when UseBlockScaleMma=true. Placed at the tail.
     constexpr int n_k_groups = HD / 16;
-    uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(row_l + Bq);
+    uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(rescale_buf + Bq);
     uint8_t* k_scales_fp8 = q_scales_fp8 + Bq * n_k_groups;
 
     // Pre-compute sqrt(attention_scale) to absorb into Q and K scales (Opt 3).
@@ -337,19 +337,19 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     }
 
     // Zero O accumulator + init softmax state
-    {
-        // float4 = 4 FP32 zeros per iter
-        const int total_vec4 = (Bq * head_dim) / 4;
-        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        for (int vi = tid; vi < total_vec4; vi += MX_BLOCK_THREADS) {
-            reinterpret_cast<float4*>(O_acc)[vi] = zero;
-        }
-    }
+    // Persistent WMMA accumulator fragments in registers (replaces smem O_acc).
+    // Each warp handles ceil(o_total_tiles / NUM_WARPS) tiles. Max with Bq=32,
+    // HD=128: o_total = (32/16)*(128/16) = 16, 8 warps → 2 tiles/warp.
+    constexpr int MAX_O_FRAGS = 4;  // max tiles per warp (Bq=64,HD=256 → 32/8=4)
+    wmma::fragment<wmma::accumulator, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, float> o_frags[MAX_O_FRAGS];
+    for (int t = 0; t < MAX_O_FRAGS; t++)
+        wmma::fill_fragment(o_frags[t], 0.0f);
+
     if (tid < Bq) {
         row_m[tid] = -FLT_MAX;
         row_l[tid] = 0.0f;
     }
-    bool first_kv_iter = true;  // skip O_acc rescale on first tile (l_old=0 → rescale=0)
+    bool first_kv_iter = true;
     __syncthreads();
 
     // ---- KV tile loop bounds ----
@@ -817,13 +817,14 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 row_l[r] = l_new;
             }
 
-            // Step 5: Rescale O accumulator (skip on first tile: l_old=0 → rescale=0)
+            // Step 5: Write per-row rescale to smem (fragments are rescaled after sync)
             if (!first_kv_iter) {
                 float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
-                if (row_valid) {
-                    for (int d = sm_lane; d < head_dim; d += TPR)
-                        O_acc[r * head_dim + d] *= rescale;
-                }
+                if (sm_lane == 0 && r < Bq)
+                    rescale_buf[r] = rescale;
+            } else {
+                if (sm_lane == 0 && r < Bq)
+                    rescale_buf[r] = 0.0f;
             }
 
             // Step 6: Normalize + float→half for P
@@ -842,18 +843,33 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         __syncthreads();
 
         // ============================================================
-        // Phase 3: O_acc += P · V using FP16 WMMA (m16n16k16)
+        // Phase 3: rescale persistent O fragments + O += P · V
         // ============================================================
         {
             half* P_half = reinterpret_cast<half*>(S_tile);
-            for (int tile_idx = warp_id; tile_idx < o_total_tiles; tile_idx += MX_NUM_WARPS) {
+            int frag_idx = 0;
+            for (int tile_idx = warp_id; tile_idx < o_total_tiles; tile_idx += MX_NUM_WARPS, frag_idx++) {
                 int ri = tile_idx / o_col_tiles;
+
+                // Rescale fragment by per-row factor from smem.
+                // WMMA m16n16k16 accumulator: elements [0-3] → rows [0-7],
+                // elements [4-7] → rows [8-15]. Row within group = (lane_id/4)%8.
+                if (!first_kv_iter) {
+                    int row_lo = ri * MX_WMMA_M + (lane_id / 4) % 8;
+                    int row_hi = row_lo + 8;
+                    float rs_lo = (row_lo < Bq) ? rescale_buf[row_lo] : 0.0f;
+                    float rs_hi = (row_hi < Bq) ? rescale_buf[row_hi] : 0.0f;
+                    o_frags[frag_idx].x[0] *= rs_lo;
+                    o_frags[frag_idx].x[1] *= rs_lo;
+                    o_frags[frag_idx].x[2] *= rs_lo;
+                    o_frags[frag_idx].x[3] *= rs_lo;
+                    o_frags[frag_idx].x[4] *= rs_hi;
+                    o_frags[frag_idx].x[5] *= rs_hi;
+                    o_frags[frag_idx].x[6] *= rs_hi;
+                    o_frags[frag_idx].x[7] *= rs_hi;
+                }
+
                 int di = tile_idx % o_col_tiles;
-
-                wmma::fragment<wmma::accumulator, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag, O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, head_dim,
-                                       wmma::mem_row_major);
-
                 for (int k = 0; k < pv_chunks; k++) {
                     wmma::fragment<wmma::matrix_a, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, half, wmma::row_major>
                         p_frag;
@@ -864,32 +880,32 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     wmma::load_matrix_sync(v_frag, KV_fp16 + k * MX_WMMA_N * head_dim + di * MX_WMMA_N,
                                            head_dim);
 
-                    wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
+                    wmma::mma_sync(o_frags[frag_idx], p_frag, v_frag, o_frags[frag_idx]);
                 }
-
-                wmma::store_matrix_sync(O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, o_frag, head_dim,
-                                        wmma::mem_row_major);
             }
         }
         first_kv_iter = false;
         __syncthreads();
     }
 
-    // ---- Write final output (vectorized: 4 FP32 → 4 FP16 per iter) ----
+    // ---- Write final output from register fragments via smem staging ----
+    // Reuse S_tile region as staging buffer (Bq*Bkv*4 >= MX_WMMA_M*MX_WMMA_N*4).
     {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += MX_BLOCK_THREADS) {
-            int i = vi * 4;
-            int r = i / head_dim;
-            if (q_start + r >= seq_q)
-                continue;
-            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
-            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
-            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
-            uint2 packed;
-            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
-            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+        float* staging = S_tile;
+        int frag_idx = 0;
+        for (int tile_idx = warp_id; tile_idx < o_total_tiles; tile_idx += MX_NUM_WARPS, frag_idx++) {
+            int ri = tile_idx / o_col_tiles;
+            int di = tile_idx % o_col_tiles;
+            wmma::store_matrix_sync(staging + warp_id * MX_WMMA_M * MX_WMMA_N,
+                                    o_frags[frag_idx], MX_WMMA_N, wmma::mem_row_major);
+            __syncwarp();
+            for (int elem = lane_id; elem < MX_WMMA_M * MX_WMMA_N; elem += MX_WARP_SIZE) {
+                int r = ri * MX_WMMA_M + elem / MX_WMMA_N;
+                int d = di * MX_WMMA_N + elem % MX_WMMA_N;
+                if (q_start + r < seq_q && r < Bq)
+                    O_ptr[(int64_t)r * q_row_stride + d] =
+                        __float2half(staging[warp_id * MX_WMMA_M * MX_WMMA_N + elem]);
+            }
         }
     }
 }
@@ -904,12 +920,11 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
     size_t align = 16;                                      // alignment padding
     size_t kv_buf = (size_t)Bkv * head_dim * sizeof(half);  // KV (FP4 K or FP16 V)
     size_t k_scales = (size_t)Bkv * sizeof(float);          // K row scales
-    size_t s_tile = (size_t)Bq * Bkv * sizeof(float);       // S_tile
-    size_t o_acc = (size_t)Bq * head_dim * sizeof(float);   // O_acc
-    size_t softmax = 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
+    size_t s_tile = (size_t)Bq * Bkv * sizeof(float);       // S_tile (also used as output staging)
+    size_t softmax = 3 * (size_t)Bq * sizeof(float);        // row_m + row_l + rescale_buf
     int n_k_groups = head_dim / 16;
     size_t scales_fp8 = (size_t)(Bq + Bkv) * n_k_groups;  // UE4M3 per-16-K scales (blockscale)
-    return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8;
+    return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + softmax + scales_fp8;
 }
 
 // =============================================================================
@@ -952,10 +967,13 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         size_t smem_128 = compute_smem_mxfp4(128, MX_Bkv, head_dim);
         size_t smem_64 = compute_smem_mxfp4(64, MX_Bkv, head_dim);
         size_t smem_32 = compute_smem_mxfp4(32, MX_Bkv, head_dim);
-        if (smem_128 <= (size_t)max_smem) {
+        size_t occ2_cap = static_cast<size_t>(max_smem) / 2;
+        if (smem_128 <= occ2_cap) {
             Bq = 128;
-        } else if (smem_64 <= (size_t)max_smem) {
+        } else if (smem_64 <= occ2_cap) {
             Bq = 64;
+        } else if (smem_32 <= occ2_cap) {
+            Bq = 32;
         } else if (smem_32 <= (size_t)max_smem) {
             Bq = 32;
         } else {
