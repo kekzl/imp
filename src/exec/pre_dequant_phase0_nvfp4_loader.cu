@@ -308,6 +308,12 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
             tmp.tensor_scale = w.tensor_scale;
             tmp.N = w.shape[0];
             tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
+            // Register in NVFP4 cache for decode GEMV (gemv_nvfp4_kpar needs
+            // per-16 FP8 micro_scales, not SfAtom). Without this, decode falls
+            // through to the CUTLASS_NVFP4 case which uses source_scales —
+            // but that path produced zero output on some models.
+            wcache_.nvfp4[w.data] = tmp;
+
             CutlassNvFP4Weight cw;
             convert_nvfp4_to_cutlass(tmp, cw, stream);
             if (cw.data) {
