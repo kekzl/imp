@@ -471,7 +471,8 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
                 skipped_shared_bytes += bytes;
                 return false;
             }
-            if (wcache_.cutlass_nvfp4.count(t.data) > 0) {
+            if (wcache_.cutlass_nvfp4.count(t.data) > 0 ||
+                wcache_.nvfp4.count(t.data) > 0) {
                 ++skipped_shared_count;
                 skipped_shared_bytes += bytes;
                 return false;
