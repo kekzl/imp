@@ -16,28 +16,26 @@ All numbers come from one machine, one run series. Reproducing them on a differe
 
 Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
-**imp numbers refreshed: 2026-05-10** (post PR #156 chunked-prefill-hybrid + PR #157 auto max_seq_len 16K cap). llama.cpp comparison columns are from earlier captures; treat as historical reference.
+**imp numbers refreshed: 2026-05-25** (post sprint PRs #405–#412). llama.cpp / vLLM comparison from cross-engine bench 2026-05-24 (`docs/cross_engine_bench_2026_05_24.md`).
+
+**Bench-mode caveat**: `--bench --max-tokens 128` allocates less VRAM for KV cache than production, which changes the NVFP4 cache budget. MoE models (Qwen3.6, Qwen3-Coder) are most affected — use `imp-cli --prompt` for production numbers.
 
 ## Decode Throughput (tg256)
 
 Tokens generated per second — the metric that determines how fast a model responds.
 
-| Model | Params | Quant | imp | llama.cpp | Notes |
-|-------|-------:|-------|----:|----------:|------|
-| Qwen3-4B | 4.0B | Q8_0 | **236** | 244 | |
-| Qwen3-8B | 8.2B | Q8_0 | **149** | 157 | |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **222** | 180 | |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **142** | — | |
-| Llama-3.2-3B | 3.2B | Q8_0 | **306** | — | |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **261** | — | post PR #88 (was 51 with `--no-graphs`) |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **236** | — | post moe_expert_offload_fix |
-| Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **243** | — | `IMP_EXPERT_OVERHEAD_PCT=10` |
-| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **225** | — | post PR #88 (was 117–142) |
+| Model | Params | Quant | imp tg128 | imp pp512 | Notes |
+|-------|-------:|-------|----------:|----------:|------|
+| Qwen3-8B | 8.2B | Q8_0 | **274** | 26,540 | |
+| Qwen3-14B | 12B | Q6_K | **165** | 16,369 | north-star model |
+| Qwen3-8B | 8.2B | NVFP4 | **226** | 25,539 | SafeTensors cortecs |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **270** | 16,800 | SafeTensors Modelopt |
+| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **227** | 10,906 | SafeTensors Modelopt |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **256** | 4,645 | GGUF |
 | Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **325** | — | hybrid Mamba2+MoE+attention |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **187** | 151 | |
-| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **205** | — | post PR #88 (was 157–180) |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | _65_ | — | not re-tested 2026-05-10 |
-| Mistral-Small-3.2 | 24B | NVFP4 | _101_ | — | not re-tested 2026-05-10 |
+| Mistral-Small-3.2 | 24B | NVFP4 | _101_ | — | not re-tested |
+
+Decode numbers (tg128) measured in production mode (full context, graphs ON). Prefill (pp512) from `--bench` mode (graphs ON, max_tokens=128). See bench-mode caveat above for MoE models.
 
 ## Prefill Throughput (pp512)
 
