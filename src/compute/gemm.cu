@@ -46,7 +46,7 @@ static inline int gemv_blocks(int M) { return (M + kGemvWarps - 1) / kGemvWarps;
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
 // ---------------------------------------------------------------------------
-// cuBLAS / cuBLASLt handles (lazily initialized, resettable via gemm_reset)
+// cuBLAS / cuBLASLt handles (lazily initialized)
 // ---------------------------------------------------------------------------
 static cublasHandle_t s_cublas_handle = nullptr;
 static cublasLtHandle_t s_cublaslt_handle = nullptr;
@@ -443,29 +443,6 @@ void gemm_cleanup() {
         cublasLtMatmulDescDestroy(entry.opDesc);
     }
     s_gemm_cache.clear();
-}
-
-void gemm_reset() {
-    gemm_cleanup();
-    if (s_cublaslt_handle) {
-        cublasLtDestroy(s_cublaslt_handle);
-        s_cublaslt_handle = nullptr;
-    }
-    if (s_cublas_handle) {
-        cublasDestroy(s_cublas_handle);
-        s_cublas_handle = nullptr;
-    }
-    if (s_workspace) {
-        cudaFree(s_workspace);
-        s_workspace = nullptr;
-        s_workspace_size = 0;
-    }
-    if (s_bench_scratch) {
-        cudaFree(s_bench_scratch);
-        s_bench_scratch = nullptr;
-        s_bench_scratch_size = 0;
-    }
-    gemm_init();
 }
 
 // ---------------------------------------------------------------------------

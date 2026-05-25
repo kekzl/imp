@@ -8,7 +8,6 @@
 
 #include "exec/executor.h"
 #include "exec/pre_dequant_internal.h"
-#include "compute/gemm.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
 
@@ -448,24 +447,6 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
 // `actually_free` flag below and reclaim the VRAM.
 void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    (void)stream;
-    // 5.1.4.b BISECT MODE: dispatch coverage validated (281 sources routed
-    // via overlay, zero "coverage gap" warnings, tg128 baseline preserved).
-    //
-    // Root cause (2026-05-24): mass cudaFree (201 allocs, 7.3 GiB on
-    // Qwen3-14B Q6_K) corrupts cuBLAS internal context state on WSL2 /
-    // CUDA 13.2 / sm_120. Both cublasLtMatmul AND cublasGemmEx fail with
-    // status 14 on FP16 GEMMs (M=9 K=5120 N=5120, dequant→cuBLAS prefill
-    // path). Tested: handle destroy+recreate, workspace re-alloc, algo
-    // cache flush, CUBLAS_WORKSPACE_CONFIG unset — all ineffective. The
-    // bug is at the CUDA driver/WDDM level, not user-space cuBLAS state.
-    // Models with full FP8 prefill cache (Qwen3-8B Q8_0) are unaffected
-    // because they never hit the FP16 GEMM path after the frees.
-    //
-    // Fix path: allocate weights via cudaMallocAsync + cudaMemPool, then
-    // cudaFreeAsync + cudaMemPoolTrimTo (avoids the WDDM release that
-    // corrupts cuBLAS). Requires refactoring weight_upload.cu to use
-    // async allocation. Alternatively, file NVIDIA bug + wait for fix.
     constexpr bool actually_free = true;
 
     auto* mut_model = const_cast<Model*>(model_);
@@ -485,22 +466,13 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
         int64_t cols = t.ndim > 1 ? t.shape[1] : 1;
         size_t bytes = qtype_row_bytes(t.qtype, cols) * static_cast<size_t>(t.shape[0]);
         if (actually_free) {
-            // Only safe to cudaFree when this pointer is a BASE allocation
-            // tracked in gpu_allocations_. GGUF weight_upload often packs
-            // multiple weights into one cudaMalloc — those weights' .data
-            // are offsets into the base, and cudaFree(offset) corrupts the
-            // whole region. Mark the source dropped (dispatch still routes
-            // via overlay) but skip the cudaFree to avoid corruption.
             if (!mut_model->is_base_gpu_allocation(t.data)) {
                 ++skipped_shared_count;
                 skipped_shared_bytes += bytes;
-                // Don't mark dropped either — dispatch can still safely
-                // read the still-alive shared allocation.
                 return false;
             }
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             mut_model->release_gpu_allocation(t.data);
-            IMP_CUDA_CHECK_LOG(cudaFree(t.data));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
         }
         t.dropped_source = true;
         marked_bytes += bytes;
@@ -508,12 +480,6 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
         return true;
     };
 
-    // EXCLUDE WO and W_DOWN: these are hit by the residual-fuse beta=1 path
-    // (executor_attention.cu:1149 + executor_ffn.cu:435) which calls
-    // gemm_dispatch with beta=1.0f. cuBLASLt doesn't support FP8 weight ×
-    // FP16 input with beta — the only beta-supporting overlay path needs
-    // the original to dequant. Until a beta-supporting dequant→gemm path
-    // lands, keep WO and W_DOWN originals alive.
     for (int i = 0; i < cfg.n_layers; ++i) {
         auto& L = mut_model->layer(i);
         try_mark(L.wq, L.wq_id);
@@ -539,23 +505,18 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
             "Phase-4b drop-source: %s %zu sources (%.2f MiB). "
             "Skipped %zu sources (%.2f MiB) that are offsets into shared "
             "allocations.",
-            actually_free ? "freed" : "marked (bisect mode — no cudaFree)",
+            actually_free ? "freed" : "marked (bisect mode — no cudaFreeAsync)",
             marked_count, marked_bytes / (1024.0 * 1024.0),
             skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
         if (actually_free) {
-            cudaDeviceSynchronize();
-            // WSL2/CUDA 13.2/sm_120 workaround: mass cudaFree causes WDDM to
-            // release physical GPU pages, corrupting cuBLAS internal state.
-            // Allocating + freeing a refill block of the same size forces the
-            // driver to re-commit pages, restoring cuBLAS to a working state.
-            void* refill = nullptr;
-            if (cudaMalloc(&refill, marked_bytes) == cudaSuccess) {
-                cudaFree(refill);
-                IMP_LOG_INFO("Phase-4b: WDDM page refill %.2f MiB (cuBLAS workaround)",
-                             marked_bytes / (1024.0 * 1024.0));
-            }
-            gemm_reset();
-            IMP_LOG_INFO("Phase-4b: cuBLAS handles + algo cache reset after VRAM reclamation");
+            // Drain async frees. cudaFreeAsync returns allocations to the pool
+            // WITHOUT releasing physical pages (no WDDM page release → no
+            // cuBLAS status-14). The pool retains the memory for reuse by
+            // future cudaMallocAsync calls. Physical reclaim is deferred to
+            // Model::~Model which trims the pool after all weights are freed.
+            cudaStreamSynchronize(stream);
+            IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
+                         marked_bytes / (1024.0 * 1024.0));
         }
     }
 }
