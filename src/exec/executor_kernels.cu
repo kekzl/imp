@@ -1666,29 +1666,15 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     }
 
     int M = static_cast<int>(input.shape[0]);
+
+    // ---- Decode (M=1, beta=0): use decode_tier for GEMV dispatch ----
     if (M == 1 && ctx.beta == 0.0f) {
-        switch (h.primary_tier) {
-            case StorageTier::NVFP4:
-            case StorageTier::FP8:
-            case StorageTier::MXFP4:
-                imp::gemv_dispatch(h, input, output, ctx.stream);
-                return;
-            case StorageTier::CUTLASS_NVFP4: {
-                // Prefer FP8 for decode: NVFP4 kpar GEMV accumulates 4-bit
-                // quantization error across 36+ layers, causing Inf/NaN in
-                // hidden states and output degeneration. FP8 cuBLAS GEMV
-                // has 8-bit precision which prevents the overflow.
-                {
-                    auto fp8_it = wcache_.fp8.find(h.source_data);
-                    if (fp8_it != wcache_.fp8.end()) {
-                        int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
-                        Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-                        gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
-                                      nullptr, fp8_it->second.d_scale, ctx.stream);
-                        return;
-                    }
-                }
-                // Fallback: NVFP4 decode cache (GGUF models without FP8 cache).
+        StorageTier decode = h.decode_tier;
+        if (decode == StorageTier::Undefined)
+            decode = h.primary_tier;
+
+        switch (decode) {
+            case StorageTier::NVFP4: {
                 auto it = wcache_.nvfp4.find(h.source_data);
                 if (it != wcache_.nvfp4.end()) {
                     gemv_nvfp4_kpar(it->second,
@@ -1698,25 +1684,28 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                     static_cast<int>(it->second.K), ctx.stream);
                     return;
                 }
-                // Native NVFP4 SafeTensors: construct NvFP4QuantResult from
-                // the handle's source fields (CUTLASS payload only has SfAtom
-                // layout, gemv_nvfp4_kpar needs per-16 FP8 micro_scales).
-                if (h.source_data && h.source_scales) {
-                    NvFP4QuantResult nv;
-                    nv.packed_data = const_cast<void*>(h.source_data);
-                    nv.micro_scales = h.source_scales;
-                    nv.tensor_scale = h.source_tensor_scale;
-                    nv.N = h.shape[0];
-                    nv.K = h.shape[1] * 2;
-                    gemv_nvfp4_kpar(nv,
-                                    reinterpret_cast<const half*>(input.data),
-                                    reinterpret_cast<half*>(output.data),
-                                    static_cast<int>(nv.N),
-                                    static_cast<int>(nv.K), ctx.stream);
+                break;
+            }
+            case StorageTier::FP8: {
+                auto fp8_it = wcache_.fp8.find(h.source_data);
+                if (fp8_it != wcache_.fp8.end()) {
+                    float host_scale = 1.0f;
+                    if (fp8_it->second.d_scale) {
+                        cudaMemcpyAsync(&host_scale, fp8_it->second.d_scale,
+                                        sizeof(float), cudaMemcpyDeviceToHost, ctx.stream);
+                        cudaStreamSynchronize(ctx.stream);
+                    }
+                    int64_t wshape[2] = {h.shape[0],
+                        (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
+                    Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+                    gemv_fp8(fp8_w, input, output, host_scale, ctx.stream);
                     return;
                 }
                 break;
             }
+            case StorageTier::MXFP4:
+                imp::gemv_dispatch(h, input, output, ctx.stream);
+                return;
             case StorageTier::FP16: {
                 if (h.source_qtype != QType::NONE && h.source_qtype != QType::F16 &&
                     h.source_qtype != QType::BF16 && h.source_data != nullptr &&
@@ -1747,16 +1736,35 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 return;
             }
             default:
-                break;
+                imp::gemv_dispatch(h, input, output, ctx.stream);
+                return;
         }
     }
-    // For M>1 prefill on CUTLASS_NVFP4 primary tier: prefer FP8 cuBLAS if
-    // available. FP8 cuBLAS avoids the per-GEMM activation quantization
-    // overhead of the CUTLASS NVFP4 path, which dominates at large M.
+
+    // ---- Prefill (M>1): use prefill_tier for GEMM dispatch ----
+    {
+        StorageTier prefill = h.prefill_tier;
+        if (prefill == StorageTier::Undefined)
+            prefill = h.primary_tier;
+
+        if (prefill == StorageTier::FP8) {
+            auto fp8_it = wcache_.fp8.find(h.source_data);
+            if (fp8_it != wcache_.fp8.end()) {
+                int64_t wshape[2] = {h.shape[0],
+                    (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
+                Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
+                gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
+                              nullptr, fp8_it->second.d_scale, ctx.stream);
+                return;
+            }
+        }
+    }
+
+    // ---- Legacy prefill path: FP8 not available, use primary_tier ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
         auto fp8_it = wcache_.fp8.find(h.source_data);
         if (fp8_it != wcache_.fp8.end()) {
-            int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};  // logical K
+            int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
             Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
                           nullptr, fp8_it->second.d_scale, ctx.stream);

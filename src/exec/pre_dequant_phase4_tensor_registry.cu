@@ -38,15 +38,23 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = tier;
-        // Phase 5 PR #1 Commit 5.1.3.a: stash the ORIGINAL GGUF pointer + qtype
-        // so weight_dispatch can fall back to the small-M dp4a path on the
-        // original quant when primary_tier is an overlay (FP16/NVFP4/etc).
-        // Always borrowed — never freed by registry.
         h.source_data = t.data;
         h.source_qtype = t.qtype;
         h.source_scales = t.scales;
         h.source_tensor_scale = t.tensor_scale;
         borrow_payload_from_wcache(h, wcache_, t.data);
+
+        // Dual-tier dispatch: pick the best tier per operation type.
+        // Prefill (M>1): FP8 cuBLAS > CUTLASS NVFP4 > source dequant
+        // Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
+        h.prefill_tier = tier;
+        h.decode_tier = tier;
+        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp8.count(t.data)) {
+            h.prefill_tier = StorageTier::FP8;
+            h.decode_tier = StorageTier::FP8;
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.nvfp4.count(t.data)) {
+            h.decode_tier = StorageTier::NVFP4;
+        }
         return id;
     };
 
