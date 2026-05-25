@@ -590,7 +590,22 @@ int main(int argc, char** argv) {
             for (const auto& s : args.stop_sequences)
                 max_stop_len = std::max(max_stop_len, s.size());
 
-            // Capture the first token produced during prefill
+            // Resolve think token IDs for output filtering.
+            // find_token("<think>") fails on Qwen3 BPE where <think> is a
+            // regular vocab token (ID 123649, decodes to bytes not "<think>").
+            // Fall back to encode() which handles both special and BPE tokens.
+            int32_t think_start = tok->find_token("<think>");
+            int32_t think_end = tok->find_token("</think>");
+            if (think_start < 0) {
+                auto ids = tok->encode("<think>");
+                if (ids.size() == 1) think_start = ids[0];
+            }
+            if (think_end < 0) {
+                auto ids = tok->encode("</think>");
+                if (ids.size() == 1) think_end = ids[0];
+            }
+            bool in_think = false;
+
             auto t_decode_start = std::chrono::high_resolution_clock::now();
             std::vector<int32_t> output_ids;
             std::string output_text;
@@ -608,12 +623,18 @@ int main(int argc, char** argv) {
                 }
                 if (!first_is_stop) {
                     output_ids.push_back(first_tok);
-                    std::string piece = tok->decode_token(first_tok);
-                    fprintf(stderr, "[tok=%d '%s'] ", first_tok, piece.c_str());
-                    printf("%s", piece.c_str());
-                    fflush(stdout);
-                    if (!args.stop_sequences.empty())
-                        output_text += piece;
+                    if (think_start >= 0 && first_tok == think_start) {
+                        in_think = true;
+                    } else if (think_end >= 0 && first_tok == think_end) {
+                        in_think = false;
+                    } else if (!in_think) {
+                        std::string piece = tok->decode_token(first_tok);
+                        fprintf(stderr, "[tok=%d '%s'] ", first_tok, piece.c_str());
+                        printf("%s", piece.c_str());
+                        fflush(stdout);
+                        if (!args.stop_sequences.empty())
+                            output_text += piece;
+                    }
                 }
             }
 
@@ -645,6 +666,15 @@ int main(int argc, char** argv) {
                 }
 
                 output_ids.push_back(token);
+                if (think_start >= 0 && token == think_start) {
+                    in_think = true;
+                    hide_token = true;
+                } else if (think_end >= 0 && token == think_end) {
+                    in_think = false;
+                    hide_token = true;
+                } else if (in_think) {
+                    hide_token = true;
+                }
                 std::string piece = tok->decode_token(token);
                 if (step < 10)
                     fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
