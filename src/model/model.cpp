@@ -14,12 +14,14 @@
 namespace imp {
 
 Model::~Model() {
-    // Free all GPU-side weight buffers.
+    // Free all GPU-side weight buffers (allocated via cudaMallocAsync).
     for (void* ptr : gpu_allocations_) {
         if (ptr) {
-            IMP_CUDA_CHECK_LOG(cudaFree(ptr));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(ptr, nullptr));
         }
     }
+    if (!gpu_allocations_.empty())
+        cudaStreamSynchronize(nullptr);
     gpu_allocations_.clear();
 
     // Unpin host-registered expert weight regions before munmap.

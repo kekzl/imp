@@ -30,7 +30,7 @@ static size_t g_cached_free_mem = 0;
 static size_t g_total_allocated = 0;
 static size_t g_vram_reserve = 0;  // set from Engine's computed reserve
 
-static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
+static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t stream = nullptr) {
     size_t reserve = g_vram_reserve;
     // Use cached free memory (updated at start of each upload pass)
     if (g_cached_free_mem > 0) {
@@ -38,7 +38,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
             *ptr = nullptr;
             return cudaErrorMemoryAllocation;
         }
-        cudaError_t err = cudaMalloc(ptr, size);
+        cudaError_t err = cudaMallocAsync(ptr, size, stream);
         if (err == cudaSuccess)
             g_total_allocated += size;
         return err;
@@ -50,7 +50,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
     }
-    return cudaMalloc(ptr, size);
+    return cudaMallocAsync(ptr, size, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ static bool upload_qtype_mxfp4_(Tensor& weight, QType qtype, QType compute_dtype
     }
 
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, total_bytes);
+    checked_cuda_malloc(&d_data, total_bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, h_buf.data(), total_bytes, stream);
@@ -305,7 +305,7 @@ static bool upload_qtype_q4_0_(Tensor& weight, QType qtype, QType compute_dtype,
     if (raw_quant) {
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, raw_bytes);
+        checked_cuda_malloc(&d_data, raw_bytes, stream);
         if (!d_data)
             return false;
         h2d_copy(d_data, weight.data, raw_bytes, stream);
@@ -349,7 +349,7 @@ static bool upload_qtype_q4_0_(Tensor& weight, QType qtype, QType compute_dtype,
 
     // Upload packed nibbles to GPU
     void* d_nibbles = nullptr;
-    checked_cuda_malloc(&d_nibbles, nibbles_bytes);
+    checked_cuda_malloc(&d_nibbles, nibbles_bytes, stream);
     if (!d_nibbles)
         return false;
     h2d_copy(d_nibbles, h_nibbles.data(), nibbles_bytes, stream);
@@ -358,9 +358,9 @@ static bool upload_qtype_q4_0_(Tensor& weight, QType qtype, QType compute_dtype,
     // Upload scales to GPU
     void* d_scales = nullptr;
     size_t scales_bytes = scales_count * sizeof(uint16_t);
-    checked_cuda_malloc(&d_scales, scales_bytes);
+    checked_cuda_malloc(&d_scales, scales_bytes, stream);
     if (!d_scales) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_nibbles));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_nibbles, stream));
         return false;
     }
     h2d_copy(d_scales, h_scales.data(), scales_bytes, stream);
@@ -391,7 +391,7 @@ static bool upload_qtype_q8_0_(Tensor& weight, QType qtype, QType compute_dtype,
     if (raw_quant) {
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, raw_bytes);
+        checked_cuda_malloc(&d_data, raw_bytes, stream);
         if (!d_data)
             return false;
         h2d_copy(d_data, weight.data, raw_bytes, stream);
@@ -430,7 +430,7 @@ static bool upload_qtype_q8_0_(Tensor& weight, QType qtype, QType compute_dtype,
 
     size_t bytes = fp16_count * sizeof(uint16_t);
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, h_fp16.data(), bytes, stream);
@@ -457,7 +457,7 @@ static bool upload_qtype_q6_k_(Tensor& weight, QType qtype, QType compute_dtype,
     if (raw_quant) {
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, raw_bytes);
+        checked_cuda_malloc(&d_data, raw_bytes, stream);
         if (!d_data)
             return false;
         h2d_copy(d_data, weight.data, raw_bytes, stream);
@@ -509,7 +509,7 @@ static bool upload_qtype_q6_k_(Tensor& weight, QType qtype, QType compute_dtype,
 
     size_t bytes = fp16_count * sizeof(uint16_t);
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, h_fp16.data(), bytes, stream);
@@ -531,7 +531,7 @@ static bool upload_qtype_general_quant_(Tensor& weight, QType qtype, QType compu
         // Upload raw quantized bytes — executor dequants on-the-fly
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, raw_bytes);
+        checked_cuda_malloc(&d_data, raw_bytes, stream);
         if (!d_data)
             return false;
         cudaError_t cpy_err = h2d_copy(d_data, weight.data, raw_bytes, stream);
@@ -549,22 +549,22 @@ static bool upload_qtype_general_quant_(Tensor& weight, QType qtype, QType compu
         // Dequant on GPU: upload raw → dequant to FP16 → free raw
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_raw = nullptr;
-        checked_cuda_malloc(&d_raw, raw_bytes);
+        checked_cuda_malloc(&d_raw, raw_bytes, stream);
         if (!d_raw)
             return false;
         h2d_copy(d_raw, weight.data, raw_bytes, stream);
 
         size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(uint16_t);
         void* d_fp16 = nullptr;
-        checked_cuda_malloc(&d_fp16, fp16_bytes);
+        checked_cuda_malloc(&d_fp16, fp16_bytes, stream);
         if (!d_fp16) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_raw));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_raw, stream));
             return false;
         }
 
         dequant_gpu(d_raw, d_fp16, qtype, static_cast<int>(N), static_cast<int>(K), stream);
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_raw));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_raw, stream));
         gpu_allocs.push_back(d_fp16);
 
         weight = Tensor(d_fp16, QType::F16, weight.ndim, weight.shape, true);
@@ -578,7 +578,7 @@ static bool upload_qtype_f16_(Tensor& weight, QType qtype, QType compute_dtype,
                                  bool raw_quant, float weight_offset) {
     size_t bytes = weight.nbytes();
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, weight.data, bytes, stream);
@@ -605,7 +605,7 @@ static bool upload_qtype_bf16_(Tensor& weight, QType qtype, QType compute_dtype,
     }
     size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, h_fp16.data(), bytes, stream);
@@ -633,7 +633,7 @@ static bool upload_qtype_f32_(Tensor& weight, QType qtype, QType compute_dtype,
         }
         size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, bytes);
+        checked_cuda_malloc(&d_data, bytes, stream);
         if (!d_data)
             return false;
         h2d_copy(d_data, h_fp16.data(), bytes, stream);
@@ -646,7 +646,7 @@ static bool upload_qtype_f32_(Tensor& weight, QType qtype, QType compute_dtype,
         // If it's not actually FP32 data (e.g. INT8/U8 packed FP4), direct upload
         size_t bytes = weight.nbytes();
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, bytes);
+        checked_cuda_malloc(&d_data, bytes, stream);
         if (!d_data)
             return false;
         h2d_copy(d_data, weight.data, bytes, stream);
@@ -666,7 +666,7 @@ static bool upload_qtype_f32_(Tensor& weight, QType qtype, QType compute_dtype,
 
     size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, h_fp16.data(), bytes, stream);
@@ -685,7 +685,7 @@ static bool upload_qtype_raw_fallback_(Tensor& weight, QType qtype, cudaStream_t
         return false;
     }
     void* d_data = nullptr;
-    checked_cuda_malloc(&d_data, bytes);
+    checked_cuda_malloc(&d_data, bytes, stream);
     if (!d_data)
         return false;
     h2d_copy(d_data, weight.data, bytes, stream);
@@ -956,7 +956,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     // 1. Upload qweight to GPU
     size_t qw_bytes = static_cast<size_t>(K_packed) * N * sizeof(int32_t);
     int32_t* d_qweight = nullptr;
-    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qweight), qw_bytes) != cudaSuccess || !d_qweight) {
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qweight), qw_bytes, stream) != cudaSuccess || !d_qweight) {
         IMP_LOG_ERROR("GPTQ: failed to allocate qweight (%zu bytes)", qw_bytes);
         return false;
     }
@@ -966,9 +966,9 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     int32_t* d_qzeros = nullptr;
     if (gptq.qzeros.data) {
         size_t qz_bytes = static_cast<size_t>(gptq.qzeros.shape[0]) * gptq.qzeros.shape[1] * sizeof(int32_t);
-        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes) != cudaSuccess || !d_qzeros) {
+        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes, stream) != cudaSuccess || !d_qzeros) {
             IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
-            IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
             return false;
         }
         h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
@@ -977,11 +977,11 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     // 3. Upload scales to GPU
     size_t sc_bytes = static_cast<size_t>(gptq.scales.shape[0]) * gptq.scales.shape[1] * sizeof(half);
     half* d_scales = nullptr;
-    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes) != cudaSuccess || !d_scales) {
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes, stream) != cudaSuccess || !d_scales) {
         IMP_LOG_ERROR("GPTQ: failed to allocate scales");
-        IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
         if (d_qzeros)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
         return false;
     }
     h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream);
@@ -990,7 +990,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     int32_t* d_g_idx = nullptr;
     if (gptq.g_idx.data) {
         size_t gi_bytes = static_cast<size_t>(K) * sizeof(int32_t);
-        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_g_idx), gi_bytes) != cudaSuccess || !d_g_idx) {
+        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_g_idx), gi_bytes, stream) != cudaSuccess || !d_g_idx) {
             IMP_LOG_WARN("GPTQ: failed to allocate g_idx, falling back to sequential groups");
         } else {
             h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
@@ -1013,14 +1013,14 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     // 5. Allocate FP16 output [N, K]
     size_t out_bytes = static_cast<size_t>(N) * K * sizeof(half);
     half* d_out = nullptr;
-    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes) != cudaSuccess || !d_out) {
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes, stream) != cudaSuccess || !d_out) {
         IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
-        IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
         if (d_qzeros)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
         if (d_g_idx)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_g_idx));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));
         return false;
     }
 
@@ -1029,12 +1029,12 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
 
     // 7. Sync and free temporary GPU buffers
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
     if (d_qzeros)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
     if (d_g_idx)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_g_idx));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));
 
     // 8. Set output tensor
     int64_t out_shape[4] = {N, K, 0, 0};
@@ -1256,7 +1256,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         const int64_t n_elem = t->numel();
         const size_t fp32_bytes = static_cast<size_t>(n_elem) * sizeof(float);
         void* d_data = nullptr;
-        checked_cuda_malloc(&d_data, fp32_bytes);
+        checked_cuda_malloc(&d_data, fp32_bytes, ctx.stream);
         if (!d_data) {
             IMP_LOG_ERROR("Failed to allocate GPU memory for SSM F32 tensor in layer %d", i);
             return false;
@@ -1358,7 +1358,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t es = 2;  // F16 / BF16 = 2 bytes
         size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
         void* d_packed = nullptr;
-        if (cudaMalloc(&d_packed, total_bytes) == cudaSuccess && d_packed) {
+        if (cudaMallocAsync(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             char* base = static_cast<char*>(d_packed);
             // Concat in N (rows): each weight is a contiguous [out, d_model] block,
@@ -1400,7 +1400,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t row_bytes = static_cast<size_t>(n_heads) * es;
         size_t total_bytes = static_cast<size_t>(d_model) * 2 * row_bytes;
         void* d_packed = nullptr;
-        if (cudaMalloc(&d_packed, total_bytes) == cudaSuccess && d_packed) {
+        if (cudaMallocAsync(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(d_packed, 2 * row_bytes, c.data, row_bytes, row_bytes,
                                                  d_model, cudaMemcpyDeviceToDevice, ctx.stream));
@@ -1610,12 +1610,12 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 if (experts_upload_layer[i]) {
                     // Upload raw quantized bytes to GPU (respects VRAM reserve)
                     void* gpu_ptr = nullptr;
-                    cudaError_t err = checked_cuda_malloc(&gpu_ptr, total_raw);
+                    cudaError_t err = checked_cuda_malloc(&gpu_ptr, total_raw, ctx.stream);
                     if (err == cudaSuccess) {
                         cudaError_t cpy_err = h2d_copy(gpu_ptr, packed.data, total_raw, ctx.stream);
                         if (cpy_err != cudaSuccess) {
                             IMP_LOG_ERROR("  %s: h2d_copy failed: %s", name, cudaGetErrorString(cpy_err));
-                            IMP_CUDA_CHECK_LOG(cudaFree(gpu_ptr));
+                            IMP_CUDA_CHECK_LOG(cudaFreeAsync(gpu_ptr, ctx.stream));
                             return false;
                         }
                         packed.data = gpu_ptr;
@@ -1769,7 +1769,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             // simply ignored via the new shape). Peak overhead = 0.5x fused
             // instead of 1.0x for a two-buffer split.
             void* up_buf = nullptr;
-            cudaError_t e2 = checked_cuda_malloc(&up_buf, half_raw);
+            cudaError_t e2 = checked_cuda_malloc(&up_buf, half_raw, ctx.stream);
             if (e2 != cudaSuccess) {
                 IMP_LOG_ERROR("Gemma 4: cudaMalloc failed for fused expert split (layer %d, %.1f MiB)", i,
                               half_raw / (1024.0 * 1024.0));
@@ -1785,7 +1785,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                                                n_exp, cudaMemcpyDeviceToDevice, ctx.stream);
             if (cp != cudaSuccess) {
                 IMP_LOG_ERROR("Gemma 4: cudaMemcpy2DAsync failed (layer %d): %s", i, cudaGetErrorString(cp));
-                cudaFree(up_buf);
+                cudaFreeAsync(up_buf, ctx.stream);
                 return false;
             }
             // Compact the gate half in-place: row e at offset e*src_pitch must
@@ -1803,7 +1803,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 if (cp_e != cudaSuccess) {
                     IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
                                   (long)e, cudaGetErrorString(cp_e));
-                    cudaFree(up_buf);
+                    cudaFreeAsync(up_buf, ctx.stream);
                     return false;
                 }
             }
@@ -2011,7 +2011,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 return;
             size_t bytes = t.nbytes();
             void* d_ptr = nullptr;
-            if (cudaMalloc(&d_ptr, bytes) != cudaSuccess)
+            if (cudaMallocAsync(&d_ptr, bytes, stream) != cudaSuccess)
                 return;
             cudaMemcpyAsync(d_ptr, t.data, bytes, cudaMemcpyHostToDevice, stream);
             gpu_allocations_.push_back(d_ptr);
