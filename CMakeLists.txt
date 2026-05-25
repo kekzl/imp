@@ -267,6 +267,9 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_forward_moe.cu
+    src/exec/executor_forward_moe_cutlass.cu
+    src/exec/executor_forward_moe_batch.cu
+    src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
     src/exec/weight_handle.cu
     src/exec/moe_workspace.cu
