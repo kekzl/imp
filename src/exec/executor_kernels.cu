@@ -1674,6 +1674,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::CUTLASS_NVFP4: {
+                // Try NVFP4 decode cache (GGUF models dequanted to NVFP4).
                 auto it = wcache_.nvfp4.find(h.source_data);
                 if (it != wcache_.nvfp4.end()) {
                     gemv_nvfp4_kpar(it->second,
@@ -1681,6 +1682,23 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                     reinterpret_cast<half*>(output.data),
                                     static_cast<int>(it->second.N),
                                     static_cast<int>(it->second.K), ctx.stream);
+                    return;
+                }
+                // Native NVFP4 SafeTensors: construct NvFP4QuantResult from
+                // the handle's source fields (CUTLASS payload only has SfAtom
+                // layout, gemv_nvfp4_kpar needs per-16 FP8 micro_scales).
+                if (h.source_data && h.source_scales) {
+                    NvFP4QuantResult nv;
+                    nv.packed_data = const_cast<void*>(h.source_data);
+                    nv.micro_scales = h.source_scales;
+                    nv.tensor_scale = h.source_tensor_scale;
+                    nv.N = h.shape[0];
+                    nv.K = h.shape[1] * 2;
+                    gemv_nvfp4_kpar(nv,
+                                    reinterpret_cast<const half*>(input.data),
+                                    reinterpret_cast<half*>(output.data),
+                                    static_cast<int>(nv.N),
+                                    static_cast<int>(nv.K), ctx.stream);
                     return;
                 }
                 break;
