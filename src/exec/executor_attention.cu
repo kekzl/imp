@@ -827,8 +827,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
+        const bool prefer_fmha = (n >= runtime_config().attention.fmha_prefill_threshold) &&
+                                 !force_cublas_attn;
 
-        if (s_matrix_fits && !non_gemma4_sliding) {
+        if (s_matrix_fits && !non_gemma4_sliding && !prefer_fmha) {
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window);
