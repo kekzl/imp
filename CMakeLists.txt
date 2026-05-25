@@ -151,6 +151,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
+    src/compute/gemm_q4k.cu
     src/compute/kv_gather.cu
     src/compute/attention_paged.cu
     src/compute/attention_paged_fp8.cu
