@@ -148,3 +148,23 @@ TEST(EffectiveCapabilities, FloorAlwaysInSupported) {
         }
     }
 }
+
+TEST(TensorKindTable, EveryKindHasName) {
+    for (int i = 1; i < static_cast<int>(TensorKind::_COUNT); ++i) {
+        auto k = static_cast<TensorKind>(i);
+        const char* name = tensor_kind_name(k);
+        EXPECT_NE(std::string(name), "UNKNOWN")
+            << "TensorKind index " << i << " returns UNKNOWN — add a case to tensor_kind_name.cpp";
+    }
+}
+
+TEST(TensorKindTable, GDNProjectionsAreFP16Only) {
+    for (auto k : {TensorKind::GDN_ALPHA, TensorKind::GDN_BETA, TensorKind::GDN_ALPHA_BETA_PACKED,
+                   TensorKind::GDN_INPUT_PACKED}) {
+        const auto& cap = capabilities_of(k);
+        EXPECT_EQ(cap.supported, mask(StorageTier::FP16))
+            << "GDN kind " << tensor_kind_name(k)
+            << " must be FP16-only (delta-rule projections, no quantized path)";
+        EXPECT_EQ(cap.required_floor, StorageTier::FP16);
+    }
+}
