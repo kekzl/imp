@@ -260,35 +260,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         // cache size from the actual weight sizes. Each dense weight needs
         // N×K×1 bytes FP8. This enables FP8 prefill for NVFP4 SafeTensors.
         size_t fp8_size_cap = nvfp4_elems;
-        {
-            auto wq0 = (mcfg.n_layers > 0) ? model.layer(0).wq.qtype : QType::NONE;
-            auto wg0 = (mcfg.n_layers > 0) ? model.layer(0).w_gate.qtype : QType::NONE;
-            IMP_LOG_INFO("VRAM budget debug: nvfp4_elems=%zu prequant=%d remaining=%zu "
-                         "wq0.qtype=%d wq0.data=%p w_gate0.qtype=%d w_gate0.data=%p",
-                         nvfp4_elems, (int)mcfg.is_nvfp4_prequant, remaining_for_fp8,
-                         (int)wq0, model.layer(0).wq.data,
-                         (int)wg0, model.layer(0).w_gate.data);
-        }
-        if (fp8_size_cap == 0 && mcfg.is_nvfp4_prequant) {
-            for (int i = 0; i < mcfg.n_layers; i++) {
-                const auto& L = model.layer(i);
-                auto add = [&](const Tensor& w) {
-                    if (!w.data) return;
-                    // After weight_upload, NVFP4 packed data has qtype=INT8 (raw bytes)
-                    // with .scales set. Logical K = packed_cols * 2.
-                    if (w.scales != nullptr)
-                        fp8_size_cap += static_cast<size_t>(w.shape[0]) * w.shape[1] * 2;
-                    else
-                        fp8_size_cap += static_cast<size_t>(w.shape[0]) * w.shape[1];
-                };
-                add(L.wq); add(L.wk); add(L.wv); add(L.wo);
-                add(L.w_gate); add(L.w_up); add(L.w_down);
-            }
-        }
+        if (fp8_size_cap == 0 && mcfg.is_nvfp4_prequant)
+            fp8_size_cap = remaining_for_fp8;
         budget.fp8_cache_bytes = std::min(fp8_size_cap, remaining_for_fp8);
-        if (fp8_size_cap > 0 && nvfp4_elems == 0)
-            IMP_LOG_INFO("VRAM budget: native NVFP4 FP8 prefill cap = %.1f MiB",
-                         fp8_size_cap / (1024.0 * 1024.0));
     }
 
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
