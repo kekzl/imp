@@ -359,105 +359,6 @@ gemm_qk_scalar_moe_prefill_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Q5_1 scalar kernel — 32 elements/block, 24 bytes: d(2) m(2) qh(4) qs(16)
-// ---------------------------------------------------------------------------
-static constexpr int Q51_BLOCK_BYTES = 24;
-static constexpr int Q51_BLOCK_ELEMS = 32;
-
-__global__ void __launch_bounds__(SCALAR_BLOCK)
-gemm_q51_scalar_moe_prefill_kernel(
-    const uint8_t* __restrict__ packed_weights,
-    const half* __restrict__ activations,
-    half* __restrict__ output,
-    const int32_t* __restrict__ offsets,
-    int N, int K, size_t expert_stride_bytes, int n_experts) {
-
-    const int warp_id = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
-
-    const int row = blockIdx.x * SCALAR_WARPS + warp_id;
-    const int expert_id = blockIdx.y;
-
-    if (row >= N || expert_id >= n_experts)
-        return;
-
-    const int start = offsets[expert_id];
-    const int M = offsets[expert_id + 1] - start;
-    if (M == 0)
-        return;
-
-    const int blocks_per_row = K / Q51_BLOCK_ELEMS;
-    const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Q51_BLOCK_BYTES;
-    const uint8_t* W_row = packed_weights + static_cast<size_t>(expert_id) * expert_stride_bytes +
-                           static_cast<size_t>(row) * row_bytes;
-
-    for (int m_base = 0; m_base < M; m_base += SCALAR_M_TILE) {
-        const int M_cur = min(SCALAR_M_TILE, M - m_base);
-
-        float acc[SCALAR_M_TILE];
-#pragma unroll
-        for (int i = 0; i < SCALAR_M_TILE; i++)
-            acc[i] = 0.0f;
-
-        // Each lane handles one element per block, stride 32 across blocks
-        for (int blk = lane; blk < blocks_per_row; blk += 32) {
-            const uint8_t* bp = W_row + static_cast<size_t>(blk) * Q51_BLOCK_BYTES;
-            const float d = __half2float(*reinterpret_cast<const half*>(bp));
-            const float m = __half2float(*reinterpret_cast<const half*>(bp + 2));
-            const uint8_t* qh_ptr = bp + 4;
-            const uint8_t* qs_ptr = bp + 8;
-
-            // Dequant all 32 elements, accumulate against activations
-            // Process 2 elements per qs byte (low + high nibble)
-            const int k_base = blk * Q51_BLOCK_ELEMS;
-
-#pragma unroll
-            for (int m_idx = 0; m_idx < SCALAR_M_TILE; m_idx++) {
-                if (m_idx >= M_cur)
-                    break;
-                const int64_t token = start + m_base + m_idx;
-                const half* a_ptr = activations + token * K + k_base;
-
-                float dot = 0.0f;
-                for (int j = 0; j < 16; j++) {
-                    const uint8_t qs_byte = qs_ptr[j];
-                    const uint8_t qh_byte = qh_ptr[j / 4];
-
-                    const int lo4 = qs_byte & 0xF;
-                    const int hi_bit0 = (qh_byte >> ((j * 2) % 8)) & 1;
-                    const int q0 = lo4 | (hi_bit0 << 4);
-
-                    const int hi4 = qs_byte >> 4;
-                    const int hi_bit1 = (qh_byte >> ((j * 2 + 1) % 8)) & 1;
-                    const int q1 = hi4 | (hi_bit1 << 4);
-
-                    dot += (d * static_cast<float>(q0) + m) * __half2float(a_ptr[j * 2]);
-                    dot += (d * static_cast<float>(q1) + m) * __half2float(a_ptr[j * 2 + 1]);
-                }
-                acc[m_idx] += dot;
-            }
-        }
-
-#pragma unroll
-        for (int m_idx = 0; m_idx < SCALAR_M_TILE; m_idx++) {
-            if (m_idx >= M_cur)
-                break;
-#pragma unroll
-            for (int off = 16; off > 0; off >>= 1)
-                acc[m_idx] += __shfl_down_sync(0xFFFFFFFF, acc[m_idx], off);
-        }
-
-        if (lane == 0) {
-#pragma unroll
-            for (int m_idx = 0; m_idx < SCALAR_M_TILE; m_idx++) {
-                if (m_idx >= M_cur)
-                    break;
-                output[static_cast<int64_t>(start + m_base + m_idx) * N + row] = __float2half(acc[m_idx]);
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Host launchers — dp4a (Q8_1 activations in shared memory)
@@ -546,23 +447,6 @@ void gemm_q5k_dp4a_moe_fused(const void* packed_weight, const block_q8_1* q8_bas
                               cudaStream_t stream) {
     launch_dp4a<QKType::Q5_K>(packed_weight, q8_base, d8_base, c_base, offsets, K, N,
                               n_experts, weight_stride, stream);
-}
-
-void gemm_q51_fused_moe_prefill(const void* packed_weights, const void* activations, void* output,
-                                const int32_t* d_offsets, int N, int K, size_t expert_stride_bytes,
-                                int n_experts, cudaStream_t stream) {
-    if (n_experts == 0)
-        return;
-
-    const int blocks_x = (N + SCALAR_WARPS - 1) / SCALAR_WARPS;
-    dim3 grid(blocks_x, n_experts);
-    dim3 block(SCALAR_BLOCK);
-
-    gemm_q51_scalar_moe_prefill_kernel<<<grid, block, 0, stream>>>(
-        static_cast<const uint8_t*>(packed_weights),
-        static_cast<const half*>(activations),
-        static_cast<half*>(output),
-        d_offsets, N, K, expert_stride_bytes, n_experts);
 }
 
 }  // namespace imp
