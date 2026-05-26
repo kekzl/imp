@@ -394,8 +394,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             char buf[64];
             snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
                      layer_has_gdn(i)         ? "gdn"
+                     : layer_has_ssm(i)       ? "ssm"
                      : layer_has_attention(i) ? "attn"
-                                              : "ssm");
+                                              : "none");
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
             const bool dump_this_layer = debug_forward_enabled();
             if (dump_this_layer) {
