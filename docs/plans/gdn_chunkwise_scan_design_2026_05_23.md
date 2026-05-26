@@ -1,5 +1,5 @@
 # GDN Mamba2 Chunkwise (SSD) Scan — Qwen3.6 Prefill Lever
-*2026-05-23 · multi-week design doc · not yet implemented*
+*2026-05-23 · COMPLETE (all phases shipped, Phase 1b.1 is production winner)*
 
 ## Mission
 
