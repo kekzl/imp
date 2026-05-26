@@ -204,6 +204,11 @@ bool Engine::init_kv_cache() {
             if (model_->layer(i).ssm_in.data != nullptr && model_->layer(i).gdn_gate.data == nullptr)
                 n_pure_ssm++;
         has_pure_ssm_layers_ = (n_pure_ssm > 0);
+        if (has_pure_ssm_layers_ && config_.use_cuda_graphs) {
+            config_.use_cuda_graphs = false;
+            IMP_LOG_INFO("Mamba2 SSM layers detected (%d/%d): disabling CUDA graphs "
+                         "(recurrent state not yet graph-safe)", n_pure_ssm, mcfg.n_layers);
+        }
     }
 
     // Dequant weights → FP16/FP8/NVFP4 caches
