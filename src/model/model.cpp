@@ -15,28 +15,24 @@ namespace imp {
 
 Model::~Model() {
     // Free all GPU-side weight buffers (allocated via cudaMallocAsync).
+    // At program exit the CUDA runtime may tear down the default mempool
+    // before this destructor runs, making cudaFree return cudaErrorInvalidValue.
+    // Silently ignore — the driver reclaims all device memory on context destroy.
     for (void* ptr : gpu_allocations_) {
-        if (ptr) {
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(ptr, nullptr));
-        }
+        if (ptr)
+            (void)cudaFree(ptr);
     }
-    if (!gpu_allocations_.empty())
-        cudaStreamSynchronize(nullptr);
     gpu_allocations_.clear();
 
-    // Unpin host-registered expert weight regions before munmap.
     for (void* ptr : host_pinned_) {
-        if (ptr) {
-            IMP_CUDA_CHECK_LOG(cudaHostUnregister(ptr));
-        }
+        if (ptr)
+            (void)cudaHostUnregister(ptr);
     }
     host_pinned_.clear();
 
-    // Free cudaHostAlloc'd expert buffers (WSL2 DMA path).
     for (void* ptr : host_pinned_allocs_) {
-        if (ptr) {
-            IMP_CUDA_CHECK_LOG(cudaFreeHost(ptr));
-        }
+        if (ptr)
+            (void)cudaFreeHost(ptr);
     }
     host_pinned_allocs_.clear();
 
