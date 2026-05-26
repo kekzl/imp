@@ -1645,6 +1645,19 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         }
         return;
     }
+
+    // Block-quant types (Q4_K, Q5_K, Q8_0, etc.) can't be passed to cuBLAS
+    // directly — dequant to FP16 first. Without this, Q4_K_M GGUF models hit
+    // "unsupported dtype" in gemm.cu and produce garbage attention output.
+    if (dequant_gpu_supported(qtype) && qs->dequant != nullptr) {
+        int rows = static_cast<int>(weight.shape[0]);
+        int cols = static_cast<int>(weight.shape[1]);
+        dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
+        Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
+        gemm(input, w_fp16, output, 1.0f, 0.0f, ctx.stream);
+        return;
+    }
+
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
