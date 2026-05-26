@@ -40,7 +40,7 @@ struct BlockTraits<QKType::Q5_K> {
 };
 
 static constexpr int BLOCK_ELEMS = 256;
-static constexpr int WARPS_PER_CTA = 4;
+static constexpr int WARPS_PER_CTA = 8;
 static constexpr int CTA_THREADS = WARPS_PER_CTA * 32;
 static constexpr int TILE_M = 32;
 
@@ -67,7 +67,7 @@ __device__ __forceinline__ void get_scale_min_q4k(const uint8_t* sc, int j,
 //   For Q5_K: additionally, qh bit at position (2*chunk + is_high) gives the 5th bit.
 
 template <QKType BT>
-__global__ void __launch_bounds__(128, 2)
+__global__ void __launch_bounds__(CTA_THREADS, 1)
 gemm_qk_dp4a_moe_fused_kernel(
     const uint8_t* __restrict__ packed_weight,
     const block_q8_1* __restrict__ q8_base,

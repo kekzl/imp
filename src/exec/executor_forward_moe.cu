@@ -454,9 +454,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
-        // Q4_K/Q5_K fused dp4a prefill: kernel correct but ~17% slower than
-        // dequant→cuBLAS at pp512. Needs wider tiles (TC/WMMA) to compete.
-        // Enable via runtime config when ready.
+        // Q4_K/Q5_K fused dp4a prefill: +20% over dequant→cuBLAS at pp512.
+        // Gated until E2E coherence verified on a non-broken Q4_K_M MoE model.
         } else if (runtime_config().gemm.q4k_fused_prefill &&
                    try_run_moe_q4k_prefill(layer, stream, n, d, eff, ne, expanded,
                                             non_gated_experts, up_qtype, routing, no)) {
