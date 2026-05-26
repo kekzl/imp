@@ -16,6 +16,16 @@ using test::DenseTestModel;
 using test::read_logits;
 using test::verify_logits_finite;
 
+static void init_executor(GraphExecutor& executor, Model& model, int n_sequences = 1,
+                           int max_seq_len = 64) {
+    ASSERT_TRUE(executor.init(model, QType::F16, false, n_sequences, max_seq_len));
+    ASSERT_TRUE(executor.allocate_workspaces());
+    VRAMBudget budget;
+    budget.strategy = VRAMBudget::FP16_ONLY;
+    executor.pre_dequant_weights(nullptr, budget);
+    cudaDeviceSynchronize();
+}
+
 // ---------------------------------------------------------------------------
 // Helper: run prefill and return logits
 // ---------------------------------------------------------------------------
@@ -123,8 +133,7 @@ TEST(ForwardPassTest, SyntheticModelForwardLogits) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     KVCache cache(1, 4, 32, QType::F16, 8);
     Tensor logits = run_prefill(executor, cache, {1, 42, 100, 200});
@@ -146,8 +155,7 @@ TEST(ForwardPassTest, SyntheticModelDecodeAfterPrefill) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     KVCache cache(1, 4, 32, QType::F16, 8);
 
@@ -173,8 +181,7 @@ TEST(ForwardPassTest, MultiLayerPrefill) {
 
     GraphExecutor executor;
     gemm_init();
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     KVCache cache(4, 4, 32, QType::F16, 8);
     Tensor logits = run_prefill(executor, cache, {1, 2, 3, 4, 5, 6, 7, 8});
@@ -197,8 +204,7 @@ TEST(ForwardPassTest, GQAForwardPass) {
 
     GraphExecutor executor;
     gemm_init();
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     // n_kv_heads=2 for KVCache
     KVCache cache(2, 2, 32, QType::F16, 8);
@@ -224,8 +230,7 @@ TEST(ForwardPassTest, MultiStepDecode) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     KVCache cache(1, 4, 32, QType::F16, 8);
 
@@ -259,8 +264,7 @@ TEST(ForwardPassTest, DeterministicLogits) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     std::vector<int32_t> tokens = {1, 42, 100};
 
@@ -294,8 +298,7 @@ TEST(ForwardPassTest, LongSequencePrefill) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
-    ASSERT_TRUE(executor.allocate_workspaces());
+    init_executor(executor, *tm.model);
 
     // 32 tokens need 2 KV blocks (block_size=16)
     KVCache cache(1, 4, 32, QType::F16, 8);

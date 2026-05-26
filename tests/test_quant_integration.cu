@@ -675,6 +675,8 @@ TEST(QuantIntegrationTest, FP16ForwardPass) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     // Create input tokens on device
     std::vector<int32_t> h_tokens = {1, 5, 10};
@@ -721,6 +723,8 @@ TEST(QuantIntegrationTest, Q4_0ForwardPass) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     // Input tokens
     std::vector<int32_t> h_tokens = {0, 1};
@@ -788,6 +792,8 @@ TEST(QuantIntegrationTest, Q4_0Deterministic) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {3, 7};
     std::vector<int> h_positions = {0, 1};
@@ -827,6 +833,8 @@ TEST(QuantIntegrationTest, Q4_0LogitsShape) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {1, 2, 3, 4, 5};
     std::vector<int> h_positions = {0, 1, 2, 3, 4};
@@ -873,6 +881,8 @@ TEST(QuantIntegrationTest, Q4_0MultiLayer) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};
@@ -912,6 +922,8 @@ TEST(QuantIntegrationTest, Q8_0ForwardPass) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {0, 1};
     std::vector<int> h_positions = {0, 1};
@@ -976,6 +988,8 @@ TEST(QuantIntegrationTest, Q8_0MultiLayer) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};
@@ -1481,6 +1495,8 @@ TEST(QuantIntegrationTest, Q4_KForwardPass) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {0, 1, 2};
     std::vector<int> h_positions = {0, 1, 2};
@@ -1540,6 +1556,8 @@ TEST(QuantIntegrationTest, Q4_KDeterministic) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {3, 7};
     std::vector<int> h_positions = {0, 1};
@@ -1581,6 +1599,8 @@ TEST(QuantIntegrationTest, Q4_KMultiLayer) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};
@@ -1649,6 +1669,8 @@ TEST(QuantIntegrationTest, Q5_KForwardPass) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {0, 1, 2};
     std::vector<int> h_positions = {0, 1, 2};
@@ -1708,6 +1730,8 @@ TEST(QuantIntegrationTest, Q5_KMultiLayer) {
     ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
+    { VRAMBudget b; b.strategy = VRAMBudget::FP16_ONLY;
+      executor.pre_dequant_weights(nullptr, b); cudaDeviceSynchronize(); }
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};

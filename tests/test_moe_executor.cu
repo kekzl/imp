@@ -19,6 +19,16 @@ using test::free_tensor;
 using test::make_random_weight;
 using test::MoETestModel;
 
+static void init_executor_moe(GraphExecutor& executor, Model& model) {
+    ASSERT_TRUE(executor.init(model, QType::F16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+    VRAMBudget budget;
+    budget.strategy = VRAMBudget::FP16_ONLY;
+    executor.pre_dequant_weights(nullptr, budget);
+    cudaDeviceSynchronize();
+}
+
 // ============================================================================
 // Test 1: MoE executor initializes successfully
 // ============================================================================
@@ -48,9 +58,7 @@ TEST(MoEExecutorTest, ForwardProducesValidOutput) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     // Create input tokens
     const int n_tokens = 4;
@@ -115,9 +123,7 @@ TEST(MoEExecutorTest, ForwardSamplesToken) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     const int n_tokens = 3;
     std::vector<int32_t> h_tokens = {1, 2, 3};
@@ -162,9 +168,7 @@ TEST(MoEExecutorTest, Deterministic) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {5, 10, 15, 20};
@@ -210,9 +214,7 @@ TEST(MoEExecutorTest, MultiLayer) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
@@ -256,9 +258,7 @@ TEST(MoEExecutorTest, EightExperts) {
         /*n_experts=*/8, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     const int n_tokens = 8;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -302,9 +302,7 @@ TEST(MoEExecutorTest, SingleToken) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     int32_t h_token = 42;
     int h_position = 0;
@@ -355,11 +353,8 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
         /*max_seq_len=*/512, /*seed=*/200, /*weight_scale=*/0.5f);
 
     GraphExecutor dense_exec, moe_exec;
-    ASSERT_TRUE(dense_exec.init(*dense.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(dense_exec.allocate_workspaces(false));
-    ASSERT_TRUE(moe_exec.init(*moe.model, QType::F16, false));
-    ASSERT_TRUE(moe_exec.allocate_workspaces(false));
+    init_executor_moe(dense_exec, *dense.model);
+    init_executor_moe(moe_exec, *moe.model);
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
@@ -439,9 +434,7 @@ TEST(MoEExecutorTest, LogitsShape) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     for (int n_tokens : {1, 2, 4, 8, 16}) {
         std::vector<int32_t> h_tokens(n_tokens);
@@ -519,9 +512,7 @@ TEST(MoEExecutorTest, MixedMoEDense) {
     tm.all_tensors.push_back(ly0.w_down);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
-    gemm_init();
-    ASSERT_TRUE(executor.allocate_workspaces(false));
+    init_executor_moe(executor, *tm.model);
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
