@@ -144,7 +144,10 @@ void Engine::init_resolve_ssm_dtype_() {
 // dequant error through deep narrow-GQA stacks.
 void Engine::init_resolve_fp8_prefill_() {
     const bool no_fp8_prefill = (runtime_config_.attention.fp8_prefill == "never");
-    if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
+    const bool is_nvfp4_native = model_->config().is_nvfp4_prequant;
+    if (is_nvfp4_native && !config_.use_fp8_prefill) {
+        IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
+    } else if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
     } else if (no_fp8_prefill) {

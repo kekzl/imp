@@ -1098,7 +1098,9 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         IMP_LOG_DEBUG("MoE reserve: %.0f MiB (n_attn=%d, kv_heads=%d, hd=%d → %.0f MiB KV at 16K + 256 MiB workspace)",
                       kMoeReserve / (1024.0 * 1024.0), n_attn_layers, kv_heads, hd,
                       kv_reserve / (1024.0 * 1024.0));
-        moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
+        constexpr size_t kRuntimeHeadroom = 512ULL * 1024 * 1024;
+        size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
+        moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
     } else {
         moe_budget = (remaining_budget > wcache_.nvfp4_bytes) ? (remaining_budget - wcache_.nvfp4_bytes)
                                                               : 0;
@@ -1182,6 +1184,11 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
             return false;
         if (packed.data && wcache_.nvfp4_moe.count(packed.data))
             return false;
+        // Phase 0 already registered per-expert NVFP4+CUTLASS entries —
+        // skip the contiguous copy (saves ~15 GiB VRAM on 35B MoE).
+        // Batch MoE decode uses per-expert dispatch instead.
+        if (wcache_.cutlass_nvfp4.count(experts[0].data))
+            return true;
         if (moe_budget_exhausted)
             return false;
 
@@ -1335,31 +1342,63 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         // (because t.data == nullptr) and covers_ids() rejects the fast
         // path → 88% of prefill time is spent in dequantize_nvfp4_moe_kernel.
         if (cutlass_sm120_nvfp4_available()) {
+            // Phase 0 may have already created per-expert CUTLASS entries
+            // (with SfAtom scales). If so, just re-stamp the expert Tensors
+            // to point into the contiguous buffer and reuse Phase 0's entries.
+            bool phase0_has_cutlass = wcache_.cutlass_nvfp4.count(experts[0].data) != 0;
             size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
             size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
-            void* d_sfatom = vram_alloc_force(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom");
-            if (d_sfatom) {
-                convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
-                                                   static_cast<int>(K), stream);
+            void* d_sfatom = nullptr;
+            if (!phase0_has_cutlass) {
+                d_sfatom = (sfatom_total <= moe_logical_avail)
+                               ? vram_alloc_force(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom")
+                               : nullptr;
+                if (d_sfatom) {
+                    convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
+                                                       static_cast<int>(K), stream);
+                }
+            }
+            if (d_sfatom || phase0_has_cutlass) {
                 for (int e = 0; e < ne; ++e) {
                     auto& w = experts[e];
+                    void* old_data = w.data;
                     void* data_slice = static_cast<char*>(d_packed) +
                                        static_cast<size_t>(e) * expert_packed_bytes;
-                    void* sf_slice = static_cast<char*>(d_sfatom) +
-                                     static_cast<size_t>(e) * sf_per_expert;
                     w.data = data_slice;
                     w.scales = static_cast<char*>(d_ms) + static_cast<size_t>(e) * expert_ms_bytes;
                     w.on_device = true;
                     w.tensor_scale = h_ts[e];
-                    CutlassNvFP4Weight cw;
-                    cw.data = data_slice;
-                    cw.scale_factors = sf_slice;
-                    cw.tensor_scale = h_ts[e];
-                    cw.N = N;
-                    cw.K = K;
-                    cw.sf_bytes = sf_per_expert;
-                    cw.sf_borrowed = true;  // shared layer-projection SfAtom buffer
-                    wcache_.cutlass_nvfp4[data_slice] = cw;
+                    if (phase0_has_cutlass) {
+                        // Move Phase 0's CUTLASS entry from old key to new key
+                        auto it = wcache_.cutlass_nvfp4.find(old_data);
+                        if (it != wcache_.cutlass_nvfp4.end()) {
+                            CutlassNvFP4Weight cw = it->second;
+                            cw.data = data_slice;
+                            wcache_.cutlass_nvfp4.erase(it);
+                            wcache_.cutlass_nvfp4[data_slice] = cw;
+                        }
+                        // Move NVFP4 entry too
+                        auto nit = wcache_.nvfp4.find(old_data);
+                        if (nit != wcache_.nvfp4.end()) {
+                            NvFP4QuantResult nv = nit->second;
+                            nv.packed_data = data_slice;
+                            nv.micro_scales = w.scales;
+                            wcache_.nvfp4.erase(nit);
+                            wcache_.nvfp4[data_slice] = nv;
+                        }
+                    } else {
+                        void* sf_slice = static_cast<char*>(d_sfatom) +
+                                         static_cast<size_t>(e) * sf_per_expert;
+                        CutlassNvFP4Weight cw;
+                        cw.data = data_slice;
+                        cw.scale_factors = sf_slice;
+                        cw.tensor_scale = h_ts[e];
+                        cw.N = N;
+                        cw.K = K;
+                        cw.sf_bytes = sf_per_expert;
+                        cw.sf_borrowed = true;
+                        wcache_.cutlass_nvfp4[data_slice] = cw;
+                    }
                 }
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.cutlass_nvfp4_bytes += sfatom_total;

@@ -1785,8 +1785,32 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
     }
 
-    // ---- Legacy prefill path: FP8 not available, use primary_tier ----
+    // ---- CUTLASS NVFP4 prefill via GemmKernelRegistry (qscratch buffers) ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
+        const auto* qs = ctx.qscratch;
+        if (qs && qs->cutlass_act_data && qs->cutlass_act_sf) {
+            CutlassNvFP4Weight cw;
+            cw.data = h.payload.cutlass_nvfp4.weight;
+            cw.scale_factors = h.payload.cutlass_nvfp4.sf;
+            cw.tensor_scale = h.payload.cutlass_nvfp4.global_scale
+                                  ? *h.payload.cutlass_nvfp4.global_scale
+                                  : 1.0f;
+            cw.N = h.shape[0];
+            cw.K = h.shape[1] * 2;
+            GemmKernelArgs args{};
+            args.input = &input;
+            args.output = &output;
+            args.stream = ctx.stream;
+            args.weight_payload = &cw;
+            args.cutlass_act_data = qs->cutlass_act_data;
+            args.cutlass_act_sf = qs->cutlass_act_sf;
+            args.cutlass_workspace = qs->cutlass_workspace;
+            args.cutlass_workspace_size = qs->cutlass_workspace_size;
+            GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
+            if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
+                return;
+        }
+        // FP8 fallback for CUTLASS_NVFP4 (legacy path)
         auto fp8_it = wcache_.fp8.find(h.source_data);
         if (fp8_it != wcache_.fp8.end()) {
             int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
