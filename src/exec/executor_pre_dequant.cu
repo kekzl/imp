@@ -30,7 +30,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // Reserve at least 10% of total VRAM as headroom to avoid shared/system
     // memory fallback on WSL2 (not visible via nvidia-smi).
     size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);
-    size_t remaining_budget = (free_vram > min_reserve) ? (free_vram - min_reserve) : 0;
+    // Deduct NVFP4 decode cache (Phase 3, not yet allocated) from the budget
+    // so Phase 1's FP16 cache doesn't overcommit VRAM on large dense models
+    // (Gemma-3-12B Q4_K_M: 12.3 GiB FP16 + 1.4 GiB NVFP4 + 6.1 GiB KV → IMA).
+    // KV cache is already allocated before Phase 1 so free_vram already reflects it.
+    size_t total_reserve = min_reserve + budget.nvfp4_cache_bytes;
+    size_t remaining_budget = (free_vram > total_reserve) ? (free_vram - total_reserve) : 0;
 
     // Phase 4.2: run StoragePlanner for diagnostic purposes.
     // The plan output is NOT used to drive allocation yet — the existing legacy code
