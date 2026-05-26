@@ -6,7 +6,7 @@ All numbers come from one machine, one run series. Reproducing them on a differe
 
 | | |
 |---|---|
-| Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, Blackwell `sm_120f`, custom water loop |
+| Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, Blackwell `sm_120a`, custom water loop |
 | Toolchain | CUDA 13.2.1, CUTLASS v4.4.2, GCC 13, RelWithDebInfo or Release Docker build |
 | imp config | NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN), CUDA Graphs on (where the model supports it) |
 | llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
@@ -147,7 +147,7 @@ Memo: `memory/kv_dtype_tradeoffs_2026_04_24.md`.
 | Spec | Value |
 |------|-------|
 | GPU (this benchmark) | NVIDIA GeForce RTX 5090 |
-| Other supported GPUs (same `sm_120f`) | RTX PRO 5000 Blackwell (48 GB), RTX PRO 6000 Blackwell (96 GB) |
+| Other supported GPUs (same `sm_120a`) | RTX PRO 5000 Blackwell (48 GB), RTX PRO 6000 Blackwell (96 GB) |
 | Architecture | Blackwell (GB202), sm_120 |
 | VRAM | 32 GB GDDR7, 512-bit, 1792 GB/s (RTX 5090) |
 | SMs | 170 |
