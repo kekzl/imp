@@ -7,6 +7,7 @@
 #include "core/logging.h"
 #include "runtime/config.h"
 #include "compute/gemm.h"
+#include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -1769,6 +1770,43 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         StorageTier prefill = h.prefill_tier;
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
+
+        // dp4a dense: compute directly from Q4_K/Q5_K blocks (0.55 B/elem)
+        // instead of the FP16 cache (2.0 B/elem). Weight-stationary with
+        // TILE_M=16 → re-reads weight ceil(M/16) times. Only wins at small
+        // M where the GEMM is memory-bound (M ≤ 64). At M=512, cuBLAS FP16
+        // with tensor cores + single weight read is faster.
+        // sm_120 caps smem at 99 KiB — K up to ~4400 fits.
+        if (prefill == StorageTier::FP16 && ctx.beta == 0.0f && M <= 64) {
+            const auto* qs = ctx.qscratch;
+            if (qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf) {
+                int N = static_cast<int>(h.shape[0]);
+                int K = static_cast<int>(h.shape[1]);
+                constexpr size_t kSmemLimit = 101376;
+                size_t smem_needed = static_cast<size_t>(16) * (K / 32) * 36;
+                size_t needed_q8 = static_cast<size_t>(M) * ((K + 31) / 32) * sizeof(block_q8_1);
+                size_t needed_d8 = static_cast<size_t>(M) * ((K + 31) / 32) * sizeof(float);
+                if (smem_needed <= kSmemLimit &&
+                    needed_q8 <= qs->q8_1_prefill_bytes && needed_d8 <= qs->d8_prefill_bytes) {
+                    if (h.source_qtype == QType::Q4_K) {
+                        gemm_q4k_dp4a_dense(h.source_data,
+                                            reinterpret_cast<const half*>(input.data),
+                                            reinterpret_cast<half*>(output.data),
+                                            qs->q8_1_prefill_buf, qs->d8_prefill_buf,
+                                            M, N, K, ctx.stream);
+                        return;
+                    }
+                    if (h.source_qtype == QType::Q5_K) {
+                        gemm_q5k_dp4a_dense(h.source_data,
+                                            reinterpret_cast<const half*>(input.data),
+                                            reinterpret_cast<half*>(output.data),
+                                            qs->q8_1_prefill_buf, qs->d8_prefill_buf,
+                                            M, N, K, ctx.stream);
+                        return;
+                    }
+                }
+            }
+        }
 
         if (prefill == StorageTier::FP16) {
             auto fp16_it = wcache_.fp16.find(h.source_data);

@@ -42,10 +42,18 @@ struct QuantScratch {
     void* mxfp4_workspace = nullptr;
     size_t mxfp4_workspace_size = 0;
 
-    // --- dp4a (MMVQ) scratch for quantized input vector ---
+    // --- dp4a (MMVQ) scratch for quantized input vector (M=1 decode) ---
     void* q8_1_buf = nullptr;  // block_q8_1 array
     float* d8_buf = nullptr;   // float scale array
     int q8_1_max_blocks = 0;   // max K/32
+
+    // --- dp4a prefill scratch for M>1 dense GEMM (Q4_K/Q5_K) ---
+    // Sized for max_tokens * max_k/32 blocks. Eliminates the FP16 weight
+    // cache intermediate: reads Q4_K directly (0.55 B/elem vs 2.0 B/elem).
+    void* q8_1_prefill_buf = nullptr;
+    float* d8_prefill_buf = nullptr;
+    size_t q8_1_prefill_bytes = 0;
+    size_t d8_prefill_bytes = 0;
 
     // --- FFN sparsity mask (Phase 2): 1 bit per Q8 block, packed uint32. ---
     // Sized (q8_1_max_blocks + 31) / 32 uint32s. Tiny (~tens of bytes).
