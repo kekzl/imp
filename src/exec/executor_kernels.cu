@@ -1702,16 +1702,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             case StorageTier::FP8: {
                 auto fp8_it = wcache_.fp8.find(h.source_data);
                 if (fp8_it != wcache_.fp8.end()) {
-                    float host_scale = 1.0f;
-                    if (fp8_it->second.d_scale) {
-                        cudaMemcpyAsync(&host_scale, fp8_it->second.d_scale,
-                                        sizeof(float), cudaMemcpyDeviceToHost, ctx.stream);
-                        cudaStreamSynchronize(ctx.stream);
-                    }
                     int64_t wshape[2] = {h.shape[0],
                         (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
                     Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-                    gemv_fp8(fp8_w, input, output, host_scale, ctx.stream);
+                    gemv_fp8(fp8_w, input, output, fp8_it->second.host_scale, ctx.stream);
                     return;
                 }
                 break;

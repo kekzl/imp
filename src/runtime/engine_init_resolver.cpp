@@ -212,7 +212,10 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // FP8 prefill auto-disable for sub-8-bit models
+    // FP8 prefill auto-disable for sub-8-bit models: Q4_K→FP8 loses ~1 bit
+    // per weight element; with 48 attention layers this compounds into
+    // degenerate output (verified on Qwen3-30B Q4_K_M). The dequant fallback
+    // (PR #431) handles these models by dequanting Q4_K→FP16 on each forward.
     if (config_.use_fp8_prefill) {
         auto qtype = model_->layer(0).wq.qtype;
         bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K || qtype == QType::Q5_0 ||
@@ -220,7 +223,7 @@ void Engine::init_resolve_quant_flags_() {
                          qtype == QType::Q4_1 || qtype == QType::Q5_1);
         if (sub_8bit) {
             config_.use_fp8_prefill = 0;
-            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights)");
+            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights → dequant fallback)");
         }
     }
 
