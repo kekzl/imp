@@ -151,6 +151,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
+    src/compute/gemm_q4k.cu
     src/compute/kv_gather.cu
     src/compute/attention_paged.cu
     src/compute/attention_paged_fp8.cu
@@ -451,6 +452,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm.cu
         tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_dp4a.cu
+        tests/test_gemm_q4k_fused_prefill.cu
         tests/test_gemm_kernel_registry.cu
         tests/test_cluster_launch.cu
         tests/test_fp8_gemm.cu

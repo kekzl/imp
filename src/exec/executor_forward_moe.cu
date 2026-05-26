@@ -454,6 +454,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
+        // Q4_K/Q5_K fused dp4a prefill: wins when expert_d_ff is small enough
+        // that the 3.5× bandwidth savings from reading Q4_K directly outweighs
+        // cuBLAS's tiled GEMM efficiency. Measured: +20% at eff=512 (Qwen3.6),
+        // -20% at eff=768 (Qwen3-30B). Threshold: eff ≤ 640.
+        } else if (eff <= 640 &&
+                   try_run_moe_q4k_prefill(layer, stream, n, d, eff, ne, expanded,
+                                            non_gated_experts, up_qtype, routing, no)) {
+            // Falls through to scatter (step 7)
         } else if (cfg.overrides.gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
                    ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                    ly.expert_down_packed.on_device &&

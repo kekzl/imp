@@ -116,15 +116,15 @@ The +15 % win is structural and comes for free with Phase 1b.1 — caching K, Q 
 
 Code: `gdn_scan_chunkwise_kernel<HD, SS, CHUNK>` in `src/compute/gdn.cu` (under "Phase 1b.1 — Standalone chunkwise SSD scan prototype"); dispatch in `gdn_scan_chunkwise_f32`; tests `ChunkwiseProtoMatchesFused` + `ChunkwiseProtoMicrobench` in `tests/test_gdn.cu`.
 
-### Phase 2 — Production kernel integration (5-7 days) ⏳ IN PROGRESS
+### Phase 2 — Production kernel integration ✅ COMPLETE (2026-05-24)
 
 - [x] Add `gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut>` in `src/compute/gdn.cu` (PR #388 templated on YOut)
-- [ ] Use CUTLASS / cute tile descriptors for the chunk-internal lower-triangular MMA → **Phase 2b** (Tensor Core acceleration; multi-week)
+- [x] Use WMMA 16×16×16 TC-MMA for chunk-internal matmuls → **Phase 2b** (CHUNK=16) and **Phase 2c** (CHUNK=32, all 5 matmuls incl. H_L)
 - [x] FP32 accumulation for cross-chunk state propagation (precision preservation) — done in 1b.1
 - [x] Dispatch from `gdn_scan_fused_f32_*` host launchers when `n_tokens >= CHUNK_SIZE` (decode falls through to existing sequential path) — done in PR #388 (auto-merged #390)
-- [x] Gate behind `gdn.chunkwise_scan = false` config flag (off by default until validated) — done in PR #388
+- [x] Gate behind `gdn.chunkwise_scan = true` config flag (flipped on after Phase 4 A/B) — done in PR #388
 
-The dispatch + flag plumbing landed; the remaining piece is the **algorithmic core**: replacing the sequential delta-rule sweep with the WY-rep parallel scan. Split into 2a (correctness reference, naive shared-memory matmul) and 2b (Tensor Core MMA via CUTLASS / cute).
+**Final verdict: Phase 1b.1 (structural chunk-caching) is the production winner at +16.7% kernel throughput.** The WY-rep + TC-MMA ladder (2a/2b/2c) was exhaustively implemented and benchmarked but cannot beat Phase 1b.1 on sm_120 due to the fundamental cost of materialising the SS×HD state matrix to shared memory for WMMA operands. All three TC variants are in-tree as infrastructure for future SM100/B200 work but are NOT wired into production dispatch. See Phase 2c results below for the full analysis.
 
 #### Phase 2a — WY-rep delta-rule math worked out ✅ DONE 2026-05-24
 

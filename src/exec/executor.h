@@ -1053,6 +1053,11 @@ private:
     bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
+    // Fused Q4_K prefill: reads Q4_K weights directly, FP16 activations from
+    // L1/L2 cache. Same interface as Q6_K but with Q4_K dequant logic.
+    bool try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                 int ne, int expanded, bool non_gated_experts, QType up_qtype,
+                                 const MoeRoutingResult& routing, const Tensor& no);
     // Gemma-4 ggml MMVQ per-token prefill: processes tokens individually via
     // ggml Q4_K×Q8_1 dp4a kernels with FP32 norm output for full-precision
     // routing. Writes directly to `h` (per-token weighted sum + residual).
