@@ -238,7 +238,9 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
-    auto is_fuseable = [](QType q) { return q == QType::Q4_K || q == QType::Q5_K; };
+    auto is_fuseable = [](QType q) {
+        return q == QType::Q4_K || q == QType::Q5_K;
+    };
 
     bool can_fused = (ne > 16 && ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                       ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
@@ -295,19 +297,26 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
                             non_gated_experts, expanded, eff, compute_dtype_,
                             cfg.ffn_activation, stream);
 
-    // Step 5: Re-quantize activation output to Q8_1 for down projection
+    // Step 5+6: Down projection — dp4a for K-quants, scalar for Q5_1
     char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-    int down_elems = expanded * eff;
-    block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
-    float* d8_down = reinterpret_cast<float*>(
-        reinterpret_cast<char*>(q8_down) + static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1));
-    quantize_fp16_to_q8_1(reinterpret_cast<const half*>(down_act), q8_down, d8_down,
-                          down_elems, stream);
+    QType down_qtype = ly.expert_down_packed.qtype;
+    size_t down_stride = expert_stride(ly.expert_down_packed, down_qtype);
 
-    // Step 6: Down projection (dp4a, fused weight read)
-    fused_dp4a_for_qtype(ly.expert_down_packed.qtype, ly.expert_down_packed.data, q8_down, d8_down,
-                         expert_down_base, d_offsets, d, eff,
-                         expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
+    if (down_qtype == QType::Q5_1) {
+        // Q5_1: scalar FP16 path (no Q8_1 quantization needed)
+        gemm_q51_fused_moe_prefill(ly.expert_down_packed.data, down_act, expert_down_base,
+                                   d_offsets, d, eff, down_stride, ne, stream);
+    } else {
+        // Q4_K/Q5_K: dp4a path — re-quantize activations to Q8_1
+        int down_elems = expanded * eff;
+        block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
+        float* d8_down = reinterpret_cast<float*>(
+            reinterpret_cast<char*>(q8_down) + static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1));
+        quantize_fp16_to_q8_1(reinterpret_cast<const half*>(down_act), q8_down, d8_down,
+                              down_elems, stream);
+        fused_dp4a_for_qtype(down_qtype, ly.expert_down_packed.data, q8_down, d8_down,
+                             expert_down_base, d_offsets, d, eff, down_stride, ne, stream);
+    }
     return true;
 }
 
