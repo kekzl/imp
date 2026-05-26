@@ -226,6 +226,9 @@ static void fused_dp4a_for_qtype(QType qtype, const void* packed, const block_q8
         case QType::Q5_K:
             gemm_q5k_dp4a_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
             break;
+        case QType::Q6_K:
+            gemm_q6k_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
+            break;
         default:
             break;
     }
@@ -239,7 +242,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     const auto& ly = model_->layer(layer);
 
     auto is_fuseable = [](QType q) {
-        return q == QType::Q4_K || q == QType::Q5_K;
+        return q == QType::Q4_K || q == QType::Q5_K || q == QType::Q6_K;
     };
 
     bool can_fused = (ne > 16 && ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
