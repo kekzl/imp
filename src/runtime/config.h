@@ -203,6 +203,9 @@ struct RuntimeConfig {
         // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV
         // at 130 tok/s → NVFP4 kpar GEMV target ~165 tok/s).
         bool nvfp4_decode_all = false;
+        // Fused Q4_K/Q5_K × Q8_1 dp4a prefill for MoE experts. Currently ~17%
+        // slower than dequant→cuBLAS at pp512 (needs wider tiles). Opt-in only.
+        bool q4k_fused_prefill = false;
     } gemm;
 
     // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture

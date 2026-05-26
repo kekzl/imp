@@ -17,6 +17,7 @@
 #include "compute/gemm_grouped.h"
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
+#include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
@@ -212,6 +213,101 @@ bool GraphExecutor::try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int 
             ly.expert_down_packed.data, fused_down_act, expert_down_base, d_offsets, d, eff,
             expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
     }
+    return true;
+}
+
+static void fused_dp4a_for_qtype(QType qtype, const void* packed, const block_q8_1* q8,
+                                 const float* d8, void* out, const int32_t* d_offsets,
+                                 int N, int K, size_t stride_bytes, int ne, cudaStream_t stream) {
+    switch (qtype) {
+        case QType::Q4_K:
+            gemm_q4k_dp4a_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
+            break;
+        case QType::Q5_K:
+            gemm_q5k_dp4a_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
+            break;
+        default:
+            break;
+    }
+}
+
+bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+                                            int ne, int expanded, bool non_gated_experts,
+                                            QType up_qtype, const MoeRoutingResult& routing,
+                                            const Tensor& no) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    auto is_fuseable = [](QType q) { return q == QType::Q4_K || q == QType::Q5_K; };
+
+    bool can_fused = (ne > 16 && ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
+                      ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
+                      is_fuseable(up_qtype) && is_fuseable(ly.expert_down_packed.qtype) &&
+                      compute_dtype_ == QType::F16 &&
+                      moe_.batch_dequant_buf != nullptr);
+    if (can_fused && !non_gated_experts)
+        can_fused = (ly.expert_gate_packed.data && ly.expert_gate_packed.on_device &&
+                     is_fuseable(ly.expert_gate_packed.qtype));
+
+    // Buffer size check: Q8_1 for max(expanded*d, expanded*eff) elements
+    if (can_fused) {
+        int max_elems = std::max(expanded * d, expanded * eff);
+        size_t q8_bytes = static_cast<size_t>(max_elems / 32) * sizeof(block_q8_1);
+        size_t d8_bytes = static_cast<size_t>(max_elems / 32) * sizeof(float);
+        if (q8_bytes + d8_bytes > moe_.batch_dequant_buf_size)
+            can_fused = false;
+    }
+
+    if (!can_fused) return false;
+
+    if (layer == 0)
+        IMP_LOG_INFO("MoE prefill: fused Q4_K/Q5_K dp4a path (n=%d, expanded=%d)", n, expanded);
+
+    const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
+    char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+    char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+    char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
+    char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+
+    // Step 1: Gather activations
+    int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+    Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
+    moe_gather(no, routing, gathered, stream);
+
+    // Step 2: Quantize gathered activations to Q8_1 (reuse batch dequant buf)
+    int gate_up_elems = expanded * d;
+    block_q8_1* q8_buf = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
+    float* d8_buf = reinterpret_cast<float*>(
+        reinterpret_cast<char*>(q8_buf) + static_cast<size_t>(gate_up_elems / 32) * sizeof(block_q8_1));
+    quantize_fp16_to_q8_1(static_cast<const half*>(moe_.gathered.data), q8_buf, d8_buf,
+                          gate_up_elems, stream);
+
+    // Step 3: Gate + up projections (dp4a, fused weight read)
+    if (!non_gated_experts)
+        fused_dp4a_for_qtype(ly.expert_gate_packed.qtype, ly.expert_gate_packed.data, q8_buf, d8_buf,
+                             expert_gate_base, d_offsets, eff, d,
+                             expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype), ne, stream);
+    fused_dp4a_for_qtype(up_qtype, ly.expert_up_packed.data, q8_buf, d8_buf, expert_up_base,
+                         d_offsets, eff, d, expert_stride(ly.expert_up_packed, up_qtype), ne, stream);
+
+    // Step 4: Activation (SwiGLU / GeGLU / ReLU²)
+    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                            non_gated_experts, expanded, eff, compute_dtype_,
+                            cfg.ffn_activation, stream);
+
+    // Step 5: Re-quantize activation output to Q8_1 for down projection
+    char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+    int down_elems = expanded * eff;
+    block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
+    float* d8_down = reinterpret_cast<float*>(
+        reinterpret_cast<char*>(q8_down) + static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1));
+    quantize_fp16_to_q8_1(reinterpret_cast<const half*>(down_act), q8_down, d8_down,
+                          down_elems, stream);
+
+    // Step 6: Down projection (dp4a, fused weight read)
+    fused_dp4a_for_qtype(ly.expert_down_packed.qtype, ly.expert_down_packed.data, q8_down, d8_down,
+                         expert_down_base, d_offsets, d, eff,
+                         expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype), ne, stream);
     return true;
 }
 
