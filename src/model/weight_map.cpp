@@ -462,6 +462,32 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             } else if (proj == "o_proj") {
                 layer.wo = t;
                 matched = true;
+            } else if (proj == "qkv_proj") {
+                // Fused QKV (Phi-4): [Q+K+V, K_packed] → split into wq, wk, wv.
+                const auto& mc = model.config_;
+                int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
+                int q_rows = mc.n_heads * hd;
+                int kv_rows = mc.n_kv_heads * hd;
+                int64_t cols = t.shape[1];
+                size_t row_bytes = t.nbytes() / static_cast<size_t>(t.shape[0]);
+                if (t.shape[0] == q_rows + 2 * kv_rows) {
+                    layer.wq = t;
+                    layer.wq.shape[0] = q_rows;
+                    layer.wk = t;
+                    layer.wk.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows) * row_bytes;
+                    layer.wk.shape[0] = kv_rows;
+                    layer.wv = t;
+                    layer.wv.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows + kv_rows) * row_bytes;
+                    layer.wv.shape[0] = kv_rows;
+                    if (t.scales) {
+                        int64_t scale_cols = t.shape[1] / 8;
+                        size_t scale_row_bytes = static_cast<size_t>(scale_cols);
+                        layer.wk.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows) * scale_row_bytes;
+                        layer.wv.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                    }
+                    matched = true;
+                    IMP_LOG_DEBUG("  qkv_proj split: Q[%d] K[%d] V[%d]", q_rows, kv_rows, kv_rows);
+                }
             }
         }
 
@@ -579,6 +605,23 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             } else if (proj == "down_proj") {
                 layer.w_down = t;
                 matched = true;
+            } else if (proj == "gate_up_proj") {
+                // Fused gate+up (Phi-4): [2*d_ff, K_packed] → split into w_gate, w_up.
+                int64_t half_rows = t.shape[0] / 2;
+                int64_t cols = t.shape[1];
+                size_t row_bytes = t.nbytes() / static_cast<size_t>(t.shape[0]);
+                layer.w_gate = t;
+                layer.w_gate.shape[0] = half_rows;
+                layer.w_up = t;
+                layer.w_up.data = static_cast<char*>(t.data) + static_cast<size_t>(half_rows) * row_bytes;
+                layer.w_up.shape[0] = half_rows;
+                if (t.scales) {
+                    int64_t scale_cols = cols / 8;
+                    size_t scale_row_bytes = static_cast<size_t>(scale_cols);
+                    layer.w_up.scales = static_cast<char*>(t.scales) + static_cast<size_t>(half_rows) * scale_row_bytes;
+                }
+                matched = true;
+                IMP_LOG_DEBUG("  gate_up_proj split: gate[%lld] up[%lld]", (long long)half_rows, (long long)half_rows);
             }
         }
 
@@ -600,6 +643,18 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 slot = "wv";
             else if (proj == "o_proj")
                 slot = "wo";
+            else if (proj == "qkv_proj") {
+                // Route weight_scale to wq only (Phase 0 splits to wk/wv).
+                // Scalars (weight_scale_2, input_scale) go to all three.
+                if (kind == "weight_scale") {
+                    route_nvfp4_scale(model, layer_key_prefix + "wq", kind, t);
+                } else {
+                    route_nvfp4_scale(model, layer_key_prefix + "wq", kind, t);
+                    route_nvfp4_scale(model, layer_key_prefix + "wk", kind, t);
+                    route_nvfp4_scale(model, layer_key_prefix + "wv", kind, t);
+                }
+                matched = true;
+            }
             if (slot) {
                 route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                 matched = true;
@@ -617,6 +672,17 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 slot = "w_up";
             else if (proj == "down_proj")
                 slot = "w_down";
+            else if (proj == "gate_up_proj") {
+                // Route weight_scale to w_gate only (Phase 0 splits to w_up).
+                // Scalars (weight_scale_2, input_scale) go to both.
+                if (kind == "weight_scale") {
+                    route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, t);
+                } else {
+                    route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, t);
+                    route_nvfp4_scale(model, layer_key_prefix + "w_up", kind, t);
+                }
+                matched = true;
+            }
             if (slot) {
                 route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                 matched = true;

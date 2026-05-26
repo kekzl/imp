@@ -82,13 +82,20 @@ void GraphExecutor::pre_dequant_phase0_promote_nvfp4_sidecars_(
         // (transposed weight_scale). Both routes are 2D at promote time
         // (per-expert weights have been split by weight_upload.cu).
         if (w.ndim == 2 && sc.weight_scale.ndim == 2) {
-            std::string shape_err;
-            if (!nvfp4_validate_packed_scale_shapes(w.shape[0], w.shape[1],
-                                                   sc.weight_scale.shape[0], sc.weight_scale.shape[1],
-                                                   &shape_err)) {
-                n_wrong_scale_dtype++;
-                IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion.", key, shape_err.c_str());
-                return false;
+            // For fused projection splits (qkv_proj → wq/wk/wv), the scale
+            // tensor covers the full fused weight (e.g., 7680 rows) while the
+            // sub-projection has fewer rows (e.g., 1280). Accept if the scale
+            // is a superset that covers the sub-projection's row range.
+            bool is_fused_sub = (sc.weight_scale.shape[0] > w.shape[0]);
+            if (!is_fused_sub) {
+                std::string shape_err;
+                if (!nvfp4_validate_packed_scale_shapes(w.shape[0], w.shape[1],
+                                                       sc.weight_scale.shape[0], sc.weight_scale.shape[1],
+                                                       &shape_err)) {
+                    n_wrong_scale_dtype++;
+                    IMP_LOG_WARN("NVFP4 prequant: %s — %s. Skipping promotion.", key, shape_err.c_str());
+                    return false;
+                }
             }
         }
         float h_scale = 1.0f;
@@ -220,6 +227,55 @@ void GraphExecutor::pre_dequant_phase0_promote_nvfp4_sidecars_(
         if (promote(sc, *w, key.c_str()))
             prequant_count++;
     }
+    // Fused projection scale split: weight_map split qkv_proj/gate_up_proj
+    // data pointers, but scales were routed as fused tensors to ALL sub-
+    // projections. Now that promote() set .scales = fused GPU pointer,
+    // fix the sub-projection scales to point at the correct row offsets.
+    {
+        const auto& mc = cfg;
+        int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
+        int q_rows = mc.n_heads * hd;
+        int kv_rows = mc.n_kv_heads * hd;
+        int n_qkv_split = 0, n_gateup_split = 0;
+        for (int i = 0; i < mc.n_layers; i++) {
+            auto& L = mut_model->layers_[i];
+            // Fused QKV: wq got scales from promote, wk/wv need split from wq's scales
+            if (L.wq.qtype == QType::NVFP4 && L.wk.data && L.wv.data &&
+                L.wk.qtype != QType::NVFP4 && L.wq.scales &&
+                L.wq.shape[0] == q_rows && L.wk.shape[0] == kv_rows) {
+                int64_t K_packed = L.wq.shape[1];
+                size_t scale_row_bytes = static_cast<size_t>(K_packed / 8);
+                L.wk.qtype = QType::NVFP4;
+                L.wk.tensor_scale = L.wq.tensor_scale;
+                L.wk.scales = static_cast<char*>(L.wq.scales) +
+                              static_cast<size_t>(q_rows) * scale_row_bytes;
+                L.wv.qtype = QType::NVFP4;
+                L.wv.tensor_scale = L.wq.tensor_scale;
+                L.wv.scales = static_cast<char*>(L.wq.scales) +
+                              static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                n_qkv_split++;
+            }
+            // gate_up split: w_gate.scales is fused base, w_up needs offset
+            // Fused gate_up: w_gate got scales from promote, w_up has no scales
+            // (weight_scale routed to w_gate only). Copy qtype + tensor_scale
+            // from w_gate and offset the scales pointer.
+            if (L.w_gate.qtype == QType::NVFP4 && L.w_up.data &&
+                L.w_up.qtype != QType::NVFP4 && L.w_gate.scales) {
+                int64_t K_packed = L.w_gate.shape[1];
+                int64_t half_rows = L.w_gate.shape[0];
+                size_t scale_row_bytes = static_cast<size_t>(K_packed / 8);
+                L.w_up.qtype = QType::NVFP4;
+                L.w_up.tensor_scale = L.w_gate.tensor_scale;
+                L.w_up.scales = static_cast<char*>(L.w_gate.scales) +
+                                static_cast<size_t>(half_rows) * scale_row_bytes;
+                n_gateup_split++;
+            }
+        }
+        if (n_qkv_split > 0 || n_gateup_split > 0)
+            IMP_LOG_INFO("Fused projection scale split: %d QKV + %d gate_up layers",
+                         n_qkv_split, n_gateup_split);
+    }
+
     // Drop the scratch — its data pointers (weight_scale, weight_scale_2,
     // input_scale) are now device pointers borrowed by the main tensors,
     // and the host-side metadata isn't needed anymore.
