@@ -334,13 +334,11 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
             register_prequant(L.w_gate_shared);
             register_prequant(L.w_up_shared);
             register_prequant(L.w_down_shared);
-            // Mamba2/GDN SSM projections (Nemotron-H, Qwen3.5/3.6 GDN). NVFP4-quantized
-            // SSM weights were previously routed to the slow dequant-to-FP16 fallback
-            // because they weren't in cutlass_nvfp4. Math is identical (same FP4 weights,
-            // same Block-Scaling) — register here to enable the CUTLASS sm_120 fast path.
-            // Fixes Mamba2 multi-chunk-prefill 5min-timeout for prompts ≥541 tokens.
             register_prequant(L.ssm_in);
             register_prequant(L.ssm_out);
+            for (const auto& ew : L.expert_w_gate) register_prequant(ew);
+            for (const auto& ew : L.expert_w_up) register_prequant(ew);
+            for (const auto& ew : L.expert_w_down) register_prequant(ew);
         }
         register_prequant(mut_model->out_proj_);
 
