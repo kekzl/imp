@@ -907,6 +907,12 @@ static bool snapshot_state_and_tokenize_(
         ctx.snap.tpl_family = ctx.snap.have_template ? ctx.snap.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
         if (ctx.snap.have_template)
             ctx.snap.stop_token_ids = ctx.snap.chat_tpl.stop_token_ids();
+        // Provisionally add <think> as a stop token. Removed below if the
+        // request enables thinking. Without this, think-trained models at high
+        // temp can hallucinate phantom turns ("Human\n<think>...").
+        if (state.think_start_id >= 0) {
+            ctx.snap.stop_token_ids.push_back(state.think_start_id);
+        }
         ctx.snap.has_vision_request = !ctx.params.image_data.empty() && state.ctx && state.ctx->engine->has_vision();
     }
 
@@ -973,6 +979,19 @@ static bool snapshot_state_and_tokenize_(
     ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 &&
                                ctx.params.enable_thinking_requested;
     ctx.snap.suppress_thinking = ctx.snap.is_think_model && !ctx.snap.enable_thinking && ctx.params.think_budget <= 0.0f;
+
+    // If thinking IS enabled, remove the provisional <think> stop token.
+    if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
+        auto& ids = ctx.snap.stop_token_ids;
+        ids.erase(std::remove(ids.begin(), ids.end(), ctx.snap.think_start_id), ids.end());
+    }
+
+    // Guard against hallucinated turn boundaries ("Human\n") that thinking
+    // models emit at high temperature. Only inject if the caller didn't
+    // already provide stop sequences (respect user intent).
+    if (ctx.snap.is_think_model && ctx.params.stop_sequences.empty()) {
+        ctx.params.stop_sequences.push_back("\nHuman");
+    }
 
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && ctx.snap.has_vision_request) {
