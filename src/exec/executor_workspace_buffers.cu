@@ -148,6 +148,46 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (max_k > 0 && max_tokens_ > 0) {
             prewarm_mmvq_scratch(max_tokens_, max_k);
         }
+
+        // dp4a prefill scratch: enables direct Q4_K/Q5_K → dp4a GEMM for M>1
+        // without the FP16 weight cache intermediate. Only allocated when the
+        // model has sub-5-bit dense weights that benefit (Q4_K, Q5_K).
+        if (max_blocks > 0 && max_tokens_ > 1) {
+            bool has_sub5bit_dense = false;
+            for (int i = 0; i < cfg.n_layers && !has_sub5bit_dense; i++) {
+                const auto& L = model_->layer(i);
+                for (const auto* w : {&L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
+                                      &L.w_up_shared, &L.w_down_shared,
+                                      &L.wq, &L.wk, &L.wv, &L.wo}) {
+                    if (w->data && (w->qtype == QType::Q4_K || w->qtype == QType::Q5_K)) {
+                        has_sub5bit_dense = true;
+                        break;
+                    }
+                }
+            }
+            if (has_sub5bit_dense) {
+                // dp4a dense prefill only activates at M ≤ 64 (weight-stationary
+                // TILE_M=16 re-reads weight ceil(M/16) times — only wins at small M).
+                constexpr int kDp4aDenseMaxM = 64;
+                int dp4a_m = std::min(max_tokens_, kDp4aDenseMaxM);
+                int prefill_max_blocks = dp4a_m * (max_k / 32);
+                size_t q8_sz = static_cast<size_t>(prefill_max_blocks) * sizeof(block_q8_1);
+                size_t d8_sz = static_cast<size_t>(prefill_max_blocks) * sizeof(float);
+                cudaError_t e1 = cudaMalloc(&qscratch_.q8_1_prefill_buf, q8_sz);
+                cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_prefill_buf), d8_sz);
+                if (e1 != cudaSuccess || e2 != cudaSuccess) {
+                    IMP_LOG_WARN("dp4a prefill scratch alloc failed (%.1f MiB), FP16 cache fallback",
+                                 (q8_sz + d8_sz) / (1024.0 * 1024.0));
+                    if (qscratch_.q8_1_prefill_buf) { cudaFree(qscratch_.q8_1_prefill_buf); qscratch_.q8_1_prefill_buf = nullptr; }
+                    if (qscratch_.d8_prefill_buf) { cudaFree(qscratch_.d8_prefill_buf); qscratch_.d8_prefill_buf = nullptr; }
+                } else {
+                    qscratch_.q8_1_prefill_bytes = q8_sz;
+                    qscratch_.d8_prefill_bytes = d8_sz;
+                    IMP_LOG_INFO("dp4a prefill scratch: %.1f KiB (max_m=%d, max_k=%d)",
+                                 (q8_sz + d8_sz) / 1024.0, dp4a_m, max_k);
+                }
+            }
+        }
     }
 
     // Split-K paged attention scratch buffer.

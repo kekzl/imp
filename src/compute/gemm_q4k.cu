@@ -1,4 +1,4 @@
-// Fused Q4_K/Q5_K × Q8_1 dp4a GEMM kernels for MoE expert prefill.
+// Fused Q4_K/Q5_K × Q8_1 dp4a GEMM kernels for MoE expert prefill AND dense prefill.
 // Weight-stationary, Q8_1 activations in shared memory, dp4a integer accumulation.
 // Eliminates the FP16 dequant intermediate that caused 8.3× bandwidth overhead.
 //
@@ -361,7 +361,195 @@ gemm_qk_scalar_moe_prefill_kernel(
 
 
 // ---------------------------------------------------------------------------
-// Host launchers — dp4a (Q8_1 activations in shared memory)
+// Dense (non-MoE) dp4a kernel: no expert offsets, grid over (N, 1).
+// sm_120 caps shared memory at 99 KiB (101,376 B), so TILE_M is smaller
+// than the MoE kernel to fit the Q8_1 tile within that budget.
+// ---------------------------------------------------------------------------
+
+static constexpr int DENSE_TILE_M = 16;
+
+template <QKType BT>
+__global__ void __launch_bounds__(CTA_THREADS, 1)
+gemm_qk_dp4a_dense_kernel(
+    const uint8_t* __restrict__ packed_weight,
+    const block_q8_1* __restrict__ q8_base,
+    const float* __restrict__ d8_base,
+    half* __restrict__ output,
+    int M, int K, int N,
+    int q8_per_row) {
+
+    using Traits = BlockTraits<BT>;
+
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int tid = threadIdx.x;
+
+    const int n_col = blockIdx.x * WARPS_PER_CTA + warp_id;
+    if (n_col >= N)
+        return;
+
+    const int blocks_per_row = K / BLOCK_ELEMS;
+    const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
+    const uint8_t* w_row = packed_weight + static_cast<size_t>(n_col) * row_bytes;
+
+    extern __shared__ char smem_raw[];
+    int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw + DENSE_TILE_M * q8_per_row * 32);
+
+    for (int m_base = 0; m_base < M; m_base += DENSE_TILE_M) {
+        const int m_count = min(DENSE_TILE_M, M - m_base);
+
+        {
+            const int total_items = m_count * q8_per_row;
+            for (int i = tid; i < total_items; i += CTA_THREADS) {
+                const int mi = i / q8_per_row;
+                const int qi = i % q8_per_row;
+                const int tok = m_base + mi;
+
+                const block_q8_1& src = q8_base[tok * q8_per_row + qi];
+                int4* dst_qs = reinterpret_cast<int4*>(smem_qs + (mi * q8_per_row + qi) * 32);
+                int4 tmp0, tmp1;
+                memcpy(&tmp0, src.qs, 16);
+                memcpy(&tmp1, src.qs + 16, 16);
+                dst_qs[0] = tmp0;
+                dst_qs[1] = tmp1;
+
+                smem_d8[mi * q8_per_row + qi] = d8_base[tok * q8_per_row + qi];
+            }
+        }
+        __syncthreads();
+
+        float acc[DENSE_TILE_M];
+        for (int i = 0; i < DENSE_TILE_M; i++)
+            acc[i] = 0.0f;
+
+        for (int q8_idx = lane; q8_idx < q8_per_row; q8_idx += 32) {
+            const int super_blk = q8_idx / 8;
+            const int g = q8_idx % 8;
+            const int chunk = g / 2;
+            const int is_high = g & 1;
+            const int sub_block = g;
+
+            const uint8_t* bp = w_row + static_cast<size_t>(super_blk) * Traits::BYTES;
+
+            const float d_w = __half2float(*reinterpret_cast<const half*>(bp));
+            const float dmin_w = __half2float(*reinterpret_cast<const half*>(bp + 2));
+
+            uint8_t sc_val, min_val;
+            get_scale_min_q4k(bp + Traits::SCALES_OFFSET, sub_block, sc_val, min_val);
+
+            const float d_sc = d_w * static_cast<float>(sc_val);
+            const float dmin_mn = dmin_w * static_cast<float>(min_val);
+
+            const uint8_t* qs_ptr = bp + Traits::QS_OFFSET + chunk * 32;
+            uint32_t q4_packed[8];
+            memcpy(q4_packed, qs_ptr, 32);
+
+            [[maybe_unused]] uint32_t qh_packed[8] = {};
+            [[maybe_unused]] int qh_shift = 0;
+            if constexpr (BT == QKType::Q5_K) {
+                memcpy(qh_packed, bp + Traits::QH_OFFSET, 32);
+                qh_shift = 2 * chunk + is_high;
+            }
+
+            uint32_t nib[8];
+#pragma unroll
+            for (int d4 = 0; d4 < 8; d4++) {
+                if constexpr (BT == QKType::Q4_K) {
+                    nib[d4] = is_high ? ((q4_packed[d4] >> 4) & 0x0F0F0F0Fu)
+                                      : (q4_packed[d4] & 0x0F0F0F0Fu);
+                } else {
+                    uint32_t lo4 = is_high ? ((q4_packed[d4] >> 4) & 0x0F0F0F0Fu)
+                                           : (q4_packed[d4] & 0x0F0F0F0Fu);
+                    uint32_t qh4 = qh_packed[d4];
+                    uint32_t hi1_0 = ((qh4 >> (qh_shift + 0)) & 0x01u) << 4;
+                    uint32_t hi1_1 = ((qh4 >> (qh_shift + 8)) & 0x01u) << 12;
+                    uint32_t hi1_2 = ((qh4 >> (qh_shift + 16)) & 0x01u) << 20;
+                    uint32_t hi1_3 = ((qh4 >> (qh_shift + 24)) & 0x01u) << 28;
+                    nib[d4] = lo4 | hi1_0 | hi1_1 | hi1_2 | hi1_3;
+                }
+            }
+
+            for (int mi = 0; mi < m_count; mi++) {
+                const int8_t* qs_act = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
+                int4 v0 = qs_v[0];
+                int4 v1 = qs_v[1];
+                int xqs[8];
+                memcpy(&xqs[0], &v0, 16);
+                memcpy(&xqs[4], &v1, 16);
+
+                const float dq = smem_d8[mi * q8_per_row + q8_idx];
+
+                int32_t sumi = 0;
+                int32_t sum_ones = 0;
+                constexpr int ones = 0x01010101;
+#pragma unroll
+                for (int d4 = 0; d4 < 8; d4++) {
+                    int ni;
+                    memcpy(&ni, &nib[d4], 4);
+                    sumi = __dp4a(ni, xqs[d4], sumi);
+                    sum_ones = __dp4a(ones, xqs[d4], sum_ones);
+                }
+
+                acc[mi] += dq * (d_sc * static_cast<float>(sumi) -
+                                 dmin_mn * static_cast<float>(sum_ones));
+            }
+        }
+
+        for (int mi = 0; mi < m_count; mi++) {
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                acc[mi] += __shfl_down_sync(0xFFFFFFFF, acc[mi], off);
+        }
+
+        if (lane == 0) {
+            for (int mi = 0; mi < m_count; mi++) {
+                output[static_cast<size_t>(m_base + mi) * N + n_col] = __float2half(acc[mi]);
+            }
+        }
+
+        __syncthreads();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host launchers — dense dp4a
+// ---------------------------------------------------------------------------
+
+template <QKType BT>
+static void launch_dense_dp4a(const void* packed_weight, const block_q8_1* q8_base,
+                               const float* d8_base, half* output,
+                               int M, int N, int K, cudaStream_t stream) {
+    if (M <= 0 || K <= 0 || N <= 0)
+        return;
+
+    const int q8_per_row = K / 32;
+    const int n_col_blocks = (N + WARPS_PER_CTA - 1) / WARPS_PER_CTA;
+    const dim3 grid(n_col_blocks);
+    const dim3 block(CTA_THREADS);
+
+    const size_t smem_qs_bytes = static_cast<size_t>(DENSE_TILE_M) * q8_per_row * 32;
+    const size_t smem_d8_bytes = static_cast<size_t>(DENSE_TILE_M) * q8_per_row * sizeof(float);
+    const size_t smem_bytes = smem_qs_bytes + smem_d8_bytes;
+
+    static size_t smem_max_configured = 0;
+    if (smem_bytes > smem_max_configured) {
+        if (smem_bytes > 48 * 1024) {
+            cudaFuncSetAttribute(gemm_qk_dp4a_dense_kernel<BT>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(smem_bytes));
+        }
+        smem_max_configured = smem_bytes;
+    }
+
+    gemm_qk_dp4a_dense_kernel<BT><<<grid, block, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(packed_weight), q8_base, d8_base,
+        output, M, K, N, q8_per_row);
+}
+
+// ---------------------------------------------------------------------------
+// Host launchers — MoE dp4a (Q8_1 activations in shared memory)
 // ---------------------------------------------------------------------------
 
 template <QKType BT>
@@ -447,6 +635,22 @@ void gemm_q5k_dp4a_moe_fused(const void* packed_weight, const block_q8_1* q8_bas
                               cudaStream_t stream) {
     launch_dp4a<QKType::Q5_K>(packed_weight, q8_base, d8_base, c_base, offsets, K, N,
                               n_experts, weight_stride, stream);
+}
+
+void gemm_q4k_dp4a_dense(const void* packed_q4k, const half* activations, half* output,
+                          void* q8_scratch, float* d8_scratch,
+                          int M, int N, int K, cudaStream_t stream) {
+    auto* q8 = reinterpret_cast<block_q8_1*>(q8_scratch);
+    quantize_fp16_to_q8_1(activations, q8, d8_scratch, M * K, stream);
+    launch_dense_dp4a<QKType::Q4_K>(packed_q4k, q8, d8_scratch, output, M, N, K, stream);
+}
+
+void gemm_q5k_dp4a_dense(const void* packed_q5k, const half* activations, half* output,
+                          void* q8_scratch, float* d8_scratch,
+                          int M, int N, int K, cudaStream_t stream) {
+    auto* q8 = reinterpret_cast<block_q8_1*>(q8_scratch);
+    quantize_fp16_to_q8_1(activations, q8, d8_scratch, M * K, stream);
+    launch_dense_dp4a<QKType::Q5_K>(packed_q5k, q8, d8_scratch, output, M, N, K, stream);
 }
 
 }  // namespace imp
