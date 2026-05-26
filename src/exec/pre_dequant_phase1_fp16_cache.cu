@@ -53,6 +53,13 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     };
 
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
+    // When FP8 is disabled (sub-8-bit models), the planner's FP8 tier entries
+    // have no fallback — Q6_K/Q8_0 weights that would normally get FP8 prefill
+    // cache land in the dequant-on-every-forward fallback. Widen the FP16 gate
+    // to cover those weights too: any dequantable attention/FFN weight that
+    // doesn't already have an overlay gets FP16 cached.
+    const bool fp8_unavailable = !wcache_.use_fp8;
+
     auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
         if (!w.data || !dequant_gpu_supported(qtype))
             return;
@@ -60,7 +67,7 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
             return;  // already cached
         if (budget_exhausted)
             return;
-        if (!plan_routes_to_fp16(kind, qtype))
+        if (!fp8_unavailable && !plan_routes_to_fp16(kind, qtype))
             return;  // Phase 3 (NVFP4) or native FP4 owns this weight
 
         int rows = static_cast<int>(w.shape[0]);
