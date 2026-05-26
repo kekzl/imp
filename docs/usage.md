@@ -6,7 +6,7 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 
 ## Requirements
 
-- **NVIDIA Blackwell GB202** (sm_120f) — RTX 5090, RTX PRO 5000 Blackwell, or RTX PRO 6000 Blackwell. Same binary, same kernels; the workstation cards just have more VRAM (48 / 96 GB) for bigger MoE models without expert offload.
+- **NVIDIA Blackwell GB202** (sm_120a) — RTX 5090, RTX PRO 5000 Blackwell, or RTX PRO 6000 Blackwell. Same binary, same kernels; the workstation cards just have more VRAM (48 / 96 GB) for bigger MoE models without expert offload.
 - **CUDA Toolkit 13.2+** — `cudart`, `cuda_driver`, `cublas`, `cublasLt`
 - **CMake 3.25+**
 - **C++20 compiler** (GCC 11+, Clang 14+)
@@ -38,11 +38,11 @@ make verify          # full pre-merge gate (~5 min)
 | `IMP_BUILD_BENCH` | ON | imp-bench |
 | `IMP_BUILD_SERVER` | ON | imp-server |
 | `IMP_SANITIZERS` | OFF | ASAN + UBSAN (host C++ code only) |
-| `CMAKE_CUDA_ARCHITECTURES` | hard-pinned `sm_120f` | RTX 5090 only |
+| `CMAKE_CUDA_ARCHITECTURES` | hard-pinned `sm_120a` | RTX 5090 / RTX PRO 6000 |
 
-`sm_120f` is set via raw `--generate-code=arch=compute_120f,code=sm_120` in
-`CMakeLists.txt` (CMake < 3.31 workaround for the family-feature target).
-Don't override `CMAKE_CUDA_ARCHITECTURES`.
+`sm_120a` SASS + `compute_120f` PTX fallback are set via raw `--generate-code`
+in `CMakeLists.txt` (CMake < 3.31 workaround). Don't override
+`CMAKE_CUDA_ARCHITECTURES`.
 
 ## Configuration — `imp.conf`
 
@@ -271,7 +271,7 @@ imp/
 │   ├── memory/           KV cache (paged), SSM state, device/pinned allocators
 │   ├── model/            Model loading (GGUF + SafeTensors), tokenizer, weight upload
 │   ├── quant/            FP8, NVFP4, INT4/INT8 dequant, quantised GEMM
-│   ├── graph/            GraphExecutor (hardcoded transformer forward pass)
+│   ├── exec/             GraphExecutor (hardcoded transformer forward pass)
 │   ├── runtime/          Engine, Scheduler, CUDA Graphs, PDL, Green Contexts,
 │   │                     RuntimeConfig (imp.conf parser)
 │   ├── vision/           SigLIP encoder, image preprocessing, mmproj loader
@@ -315,9 +315,9 @@ from both Model Optimizer and llm-compressor.
 6. **Sample** — temperature, top-p/k, min-p, typical-p, repetition / DRY /
    Mirostat from FP32 logits.
 
-### Attention dispatch (sm_120f only)
+### Attention dispatch (sm_120a only)
 
-Runtime dispatch with no architecture checks (the build is sm_120f-only).
+Runtime dispatch with no architecture checks (the build is sm_120a-only).
 
 | Phase | Path |
 |---|---|

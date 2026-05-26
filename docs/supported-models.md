@@ -10,12 +10,14 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 |---|---|---:|---:|---|
 | Qwen3-4B | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF |
-| Qwen3-8B | Q8_0 | 8.2 GB | **274** | GGUF |
-| Qwen3-14B | Q6_K | 12 GB | **165** | GGUF (north-star, see GOAL.md) |
+| Qwen3-8B | Q8_0 | 8.2 GB | **260** | GGUF |
+| Qwen3-8B | NVFP4 | 5.0 GB | **238** | SafeTensors (cortecs) |
+| Qwen3-14B | Q6_K | 12 GB | **158** | GGUF (north-star, see GOAL.md) |
+| Qwen3-14B | NVFP4 | 10 GB | 105 | SafeTensors (nvidia) |
 | Qwen3-32B | Q4_K_M | 19 GB | — | GGUF |
+| Phi-4-reasoning-plus | NVFP4 | 9.0 GB | 115 | SafeTensors (nvidia), fused projections |
 | Llama-3.2-3B | Q8_0 | 3.2 GB | 306 | GGUF |
 | Mistral-Small-3.1-24B | Q6_K | 19 GB | — | GGUF |
-| Mistral-Small-3.2-24B | NVFP4 | 13 GB | 101 | SafeTensors (Modelopt) |
 | DeepSeek-R1-Distill-Qwen-7B | Q8_0 | 7.6 GB | — | GGUF |
 | DeepSeek-R1-Distill-Qwen-14B | Q6_K | 12 GB | — | GGUF |
 
@@ -36,13 +38,14 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 |---|---|---:|---:|---|
 | Qwen3-Coder-30B-A3B | Q6_K | 24 GB | 236 | GGUF |
 | Qwen3-Coder-30B-A3B | NVFP4 | 16 GB | 270 | SafeTensors (Modelopt) |
-| Qwen3.6-35B-A3B | Q4_K_M | 22 GB | 243 | GGUF, set `IMP_EXPERT_OVERHEAD_PCT=10` |
-| Qwen3.6-35B-A3B | NVFP4 | 18 GB | 227 | SafeTensors (Modelopt) |
+| Qwen3-30B-A3B | NVFP4 | 16 GB | 158 | SafeTensors (Modelopt) |
+| Qwen3.6-35B-A3B | Q4_K_M | 22 GB | 243 | GGUF |
+| Qwen3.6-35B-A3B | NVFP4 | 18 GB | 154 | SafeTensors (Modelopt) |
 | Gemma-4-26B-A4B-it | Q4_K_M | 14 GB | 187 | GGUF |
 | Gemma-4-26B-A4B-it | Q5_K_M | 17 GB | 65 | GGUF, recommended for code-gen |
-| Gemma-4-26B-A4B-it | NVFP4 | 14 GB | 205 | SafeTensors (Modelopt) |
-| Nemotron-3-Nano-30B-A3B | Q6_K | 32 GB | — | GGUF, Mamba2 + attention + MoE |
-| Nemotron-3-Nano-30B-A3B | NVFP4 | 18 GB | 325 | SafeTensors (Modelopt), Mamba2 + attention + MoE |
+| Gemma-4-26B-A4B-it | NVFP4 | 14 GB | 163 | SafeTensors (Modelopt) |
+| Nemotron-3-Nano-30B-A3B | NVFP4 | 18 GB | 47 | SafeTensors (Modelopt), Mamba2+attn+MoE, arch-limited |
+| Nemotron-Labs-3-Elastic-30B-A3B | NVFP4 | 18 GB | 70 | SafeTensors (QAD), same arch as Nano |
 
 ## Vision
 
