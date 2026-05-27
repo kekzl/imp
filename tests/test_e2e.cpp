@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "api/imp_internal.h"
 #include "gguf_stub.h"
 
 #include <cuda_runtime.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unistd.h>
 
@@ -498,6 +500,103 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
     EXPECT_LT(leak_pct, 5.0f) << "VRAM leak detected: " << (leak / (1024 * 1024)) << " MiB after "
                               << kNumRequests << " requests (" << leak_pct << "% of total "
                               << (total / (1024 * 1024)) << " MiB)";
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-decode output isolation correctness test
+// Verifies that 2 requests running concurrently produce non-empty, distinct
+// output — proving that their KV caches and logit buffers are isolated.
+// ---------------------------------------------------------------------------
+
+TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
+    const char* path = test_model_path();
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_NE(model, nullptr);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 256;
+    config.max_batch_size = 4;
+    config.enable_cuda_graphs = 0;
+
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &config, &ctx), IMP_SUCCESS);
+    ASSERT_NE(ctx, nullptr);
+
+    imp::Engine* engine = ctx->engine.get();
+    ASSERT_NE(engine, nullptr);
+
+    // Tokenize two different prompts
+    const char* prompts[2] = {
+        "The capital of France is",
+        "The capital of Germany is",
+    };
+
+    std::shared_ptr<imp::Request> reqs[2];
+    for (int i = 0; i < 2; i++) {
+        int32_t tokens[128];
+        int n_tokens = 0;
+        ASSERT_EQ(imp_tokenize(model, prompts[i], tokens, &n_tokens, 128), IMP_SUCCESS);
+        ASSERT_GT(n_tokens, 0);
+
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens.assign(tokens, tokens + n_tokens);
+        req->max_tokens = 16;
+        req->temperature = 0.0f;  // greedy for determinism
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->ignore_eos = false;
+        req->status = imp::RequestStatus::PENDING;
+        reqs[i] = req;
+        engine->add_request(req);
+    }
+
+    // Step until both requests finish
+    constexpr int kMaxSteps = 512;
+    for (int step = 0; step < kMaxSteps; step++) {
+        bool all_done = true;
+        for (int i = 0; i < 2; i++) {
+            if (reqs[i]->status != imp::RequestStatus::FINISHED &&
+                reqs[i]->status != imp::RequestStatus::CANCELLED) {
+                all_done = false;
+                break;
+            }
+        }
+        if (all_done) break;
+        (void)engine->step();
+    }
+
+    // Both requests must have finished (not cancelled)
+    for (int i = 0; i < 2; i++) {
+        EXPECT_EQ(reqs[i]->status, imp::RequestStatus::FINISHED)
+            << "Request " << i << " did not finish (status=" << static_cast<int>(reqs[i]->status) << ")";
+    }
+
+    // Detokenize output tokens for each request
+    std::string outputs[2];
+    for (int i = 0; i < 2; i++) {
+        ASSERT_FALSE(reqs[i]->output_tokens.empty())
+            << "Request " << i << " produced no output tokens";
+
+        char buf[1024] = {};
+        ASSERT_EQ(imp_detokenize(model, reqs[i]->output_tokens.data(),
+                                 static_cast<int>(reqs[i]->output_tokens.size()),
+                                 buf, sizeof(buf)),
+                  IMP_SUCCESS);
+        outputs[i] = std::string(buf);
+        EXPECT_GT(outputs[i].size(), 0u) << "Request " << i << " has empty decoded output";
+    }
+
+    // Outputs must be different — proves request isolation
+    EXPECT_NE(outputs[0], outputs[1])
+        << "Both requests produced identical output '" << outputs[0]
+        << "' — KV cache isolation may be broken";
 
     imp_context_free(ctx);
     imp_model_free(model);
