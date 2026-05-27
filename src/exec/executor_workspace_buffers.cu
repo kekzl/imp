@@ -219,12 +219,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // for long sequences or when VRAM-constrained.
     if (!skip_batch_dequant) {
         int nh = cfg.n_heads;
-        // 512 MiB → ~2896 attn_seq for 32-head models. Lets cuBLAS prefill
-        // run at pp ~2400-2900 where it still beats FMHA by ~15-20%; the
-        // earlier 256 MiB cap pushed the cliff in at pp=2048 (post-cbe083a
-        // n<=1024 heuristic removal). Falls through to FMHA on alloc failure
-        // (line 174), so VRAM-constrained setups still work.
-        constexpr size_t kMaxAttnScoresMiB = 1024;
+        // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
+        // 32-head models). Longer sequences auto-route to FMHA via the
+        // fmha_prefill_threshold. Reduced from 1024 to free ~768 MiB for KV.
+        constexpr size_t kMaxAttnScoresMiB = 256;
         size_t max_s_sz = kMaxAttnScoresMiB << 20;
         // max seq = sqrt(budget / (n_heads * sizeof(half)))
         int attn_seq = max_tokens_;
