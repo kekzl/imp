@@ -368,7 +368,7 @@ endif()
 if(IMP_BUILD_SERVER)
     FetchContent_Declare(httplib
         GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG v0.45.0
+        GIT_TAG v0.46.0
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(httplib)
