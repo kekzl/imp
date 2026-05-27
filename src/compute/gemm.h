@@ -24,6 +24,10 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.
                    const float* aScale = nullptr, const float* bScale = nullptr,
                    cudaStream_t stream = nullptr);
 
+// Probe whether cuBLASLt supports FP8 E4M3 GEMM on this GPU/driver.
+// Runs a tiny 8×64×8 FP8 matmul and returns true if cublasLtMatmul succeeds.
+bool gemm_cublaslt_fp8_probe();
+
 // Small batch GEMV for batch_size 1-4
 void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream = nullptr);
 
