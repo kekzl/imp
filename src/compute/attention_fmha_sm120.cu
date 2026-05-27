@@ -164,9 +164,12 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const int pv_chunks = Bkv / SM120_WMMA_K;
 
     // ================================================================
-    // Main loop over KV tiles
+    // Main loop over KV tiles (Sawtooth: alternate scan direction per Q tile for L2 locality)
     // ================================================================
-    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
+    const bool sawtooth_reverse = (blockIdx.x % 2 == 1);
+    const int n_kv_iters = num_kv_tiles - first_kv_tile;
+    for (int iter = 0; iter < n_kv_iters; iter++) {
+        const int j = sawtooth_reverse ? (num_kv_tiles - 1 - iter) : (first_kv_tile + iter);
         const int kv_start = j * Bkv;
 
         // ---- Load K tile (vectorized float4 = 8 halves per iter) ----
