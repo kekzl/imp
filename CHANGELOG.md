@@ -2,6 +2,52 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1] - 2026-05-27
+
+### Critical fixes
+
+- **FP8 prefill degeneration on sm_120** (#446) — cuBLAS 13.4 `cublasLtMatmul`
+  returns `CUBLAS_STATUS_NOT_SUPPORTED` for FP8 E4M3 GEMMs at non-aligned M on
+  consumer Blackwell. The prior `cublasGemmEx` fallback silently produced garbage
+  (no per-tensor scales), corrupting the KV cache and causing decode degeneration
+  (repetition loops, immediate EOS) on **all GGUF models**. Fix: FP8 prefill
+  auto-disabled on sm_120; FP16 weight cache used instead. FP8→FP16 dequant
+  fallback added as defense-in-depth. cuBLAS algo benchmarking now validates
+  return status during warmup.
+- **Server hallucination at turn boundaries** (#442) — thinking models at high
+  temperature could hallucinate `Human`/`<think>` turn markers, leaking internal
+  reasoning. Fixed with stop-sequence detection.
+- **CUDA graph crash on Nemotron-H** (#443) — Mamba2 SSM layers auto-detected
+  and excluded from CUDA graph capture.
+
+### New model support
+
+- **Gemma-4 dense (31B)** (#444) — weight mapping fix: `mlp.{gate,up,down}_proj`
+  was unconditionally routed to shared expert slots, breaking dense Gemma-4 models.
+- **Phi-4-reasoning-plus NVFP4** (#429) — fused qkv_proj/gate_up_proj support.
+- **Nemotron-Labs-3-Elastic-30B-A3B NVFP4** — newer QAD quant, ~70 tok/s decode.
+
+### Performance
+
+- **dp4a dense prefill for Q4_K/Q5_K** (#436) — computes directly from quantized
+  blocks (0.55 B/elem) instead of FP16 weight cache (2.0 B/elem) at small M.
+- **Q4_K_M GGUF support** (#431, #432, #414) — dequant fallback + FP8 D2H fix +
+  fused MoE dp4a. Qwen3-30B Q4_K_M: pp512=3616, tg256=271.
+- **CUTLASS NVFP4 dispatch fix** (#428) — zero-copy MoE expert registration
+  eliminated 15 GiB D2H copy on Qwen3.6-35B.
+
+### Dependencies
+
+- CUTLASS v4.5.0 → v4.5.1 (#447)
+- cpp-httplib v0.45.0 → v0.46.0 (#448)
+
+### Other fixes
+
+- FP16 cache VRAM overcommit on dense Q4_K_M (#435)
+- ForwardPassTest + MoE + quant tests segfault on weight registry (#437)
+- CUDA teardown errors in Model destructor (#439)
+- Q5_K forward pass test NaN from cross-test cuBLAS state contamination (#445)
+
 ## Unreleased
 
 - **Gemma-4 FP8 prefill carve-out removed** — the 2026-05-09 measurement
