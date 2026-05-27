@@ -2,42 +2,44 @@
 
 Single-author, single-GPU experiment -- "roadmap" means "current focus," not "schedule." Shipped work lives in [`CHANGELOG.md`](../CHANGELOG.md).
 
-## Known limitations
+## Direction: local inference for AI agents
 
-- **Chunked prefill scope** -- works for full-attention models (Qwen3, Llama, Mistral), hybrid GDN/Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4 across FP16/FP8/NVFP4/INT4 KV. Out of scope: Gemma-3 (unverified, no test model), Llama-4 (MoE+SWA), and TurboQuant KV dtypes (needs sketch-aware gather).
+The goal is making imp the fastest local engine for AI agent workloads on consumer Blackwell. Agents generate far more tokens per session (20k-100k+), accumulate context fast, and often run in parallel. This demands long context, concurrent request handling, and high decode throughput.
 
-- **Qwen3.5-27B MXFP4 fails at load** -- needs host-side dequant to fit in 32 GB VRAM. Blocked on two external issues: no public MXFP4 GGUF exists for this model, and a separate NaN bug in the N=48 alpha/beta MXFP4 GEMV path. Workaround: use Qwen3.5-9B Q8_0 or Qwen3.5-35B-A3B Q4_K_M.
+### Phase 1 -- Long context ✓
 
-- **Gemma-4 Q4_K_M code-gen drift** -- accumulated FP16 rounding over 30 layers causes degeneration on complex prompts. Use Q5_K_M or Q8_0 when output quality matters.
+**Shipped PR #453.** FMHA kernels got `q_offset` for chunked prefill. S-matrix shrunk 1024→256 MiB. Auto `fmha_prefill_threshold` routes long sequences to FMHA. Context ceiling moved from ~4-6k to 32k+.
 
-- **MoE expert offload disables CUDA Graphs** -- when the model doesn't fit in VRAM entirely, host-offloaded experts require per-layer H2D staging that prevents graph capture. Workaround: set `moe.expert_overhead_pct=10` to keep experts on-device and unlock graphs (+97-234% decode). A proper fix (kernel-driven slot resolution so captured graphs adapt to per-token routing) is a multi-week effort.
+### Phase 2 -- Concurrent requests ✓
 
-- **Reasoning models + JSON schema** -- models that emit `<think>...</think>` before responding would break strict JSON enforcement at token 0. Auto-detected and handled by `PreambleGate`: lets tokens pass until the close marker or a `{`/`[`, then strict enforcement kicks in.
+**Shipped PR #454.** Server handles up to 4 concurrent decode requests. Removed single-request cancellation guard. Added `runtime.max_batch_size` config. SSM/GDN models stay batch=1.
+
+### Phase 3 -- KV streaming for long sessions ✓
+
+**Shipped PR #455.** Auto-enables StreamingLLM when KV cache >90% full. Graceful degradation: sink tokens + sliding window, middle blocks freed. Agent sessions effectively unlimited.
 
 ## Open performance work
 
-- **Q4_K_M prefill gap vs llama.cpp** -- imp sits at -48-59% on large dense Q4_K_M prefill. Closing the gap needs a custom tiled MMQ kernel; an INT8 IMMA prototype was built and deferred (plateaued at 4.3% of raw MMA peak, 3.8x slower e2e than dequant-to-cuBLAS).
+- **Q4_K_M prefill gap** (-38% vs llama.cpp) -- needs a custom in-SMEM Q4_K MMQ kernel with FP16 HMMA. Design spec: [`specs/2026-05-28-q4k-mmq-kernel-design.md`](superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md). Prior INT8 IMMA and FP16 HMMA v2 approaches were both refuted. Estimated 2-3 weeks.
+
+- **Sawtooth Wavefront Reordering** (PR #456) -- alternate KV scan direction per Q tile for L2 locality. Implemented in both FMHA kernels. Expected +5-15% prefill at 32k+ context.
+
+## Architecture support
+
+- **MLA (DeepSeek-V2/V3)** -- latent-vector KV for 64x compression. Design spec: [`specs/2026-05-28-mla-deepseeek-architecture-design.md`](superpowers/specs/2026-05-28-mla-deepseeek-architecture-design.md). Blocked on no local MLA model. Estimated 3-4 weeks.
+
+## Known limitations
+
+- **Single GPU only.** No tensor parallelism, no multi-GPU.
+- **Blackwell only.** No Hopper, Ada, Ampere. No AMD, Intel, Apple, CPU.
+- **Gemma-4 Q4_K_M code-gen drift** -- accumulated FP16 rounding. Use Q5_K_M or Q8_0.
+- **Qwen3.5-27B MXFP4 fails at load** -- blocked on no public MXFP4 GGUF + NaN bug.
 
 ## Investigated and shelved
 
-Things that were tried and didn't pan out, so you don't have to wonder:
-
-- **Speculative decoding** -- EAGLE-3, self-speculative, PPM-based TurboDraft, and n-gram speculation all investigated. None amortise weight reads on a single bandwidth-bound GPU. MTP on Qwen3.6 lands at 22-30% acceptance -- below the ~50% needed to break even.
-
-- **FFN contextual sparsity** -- 25-52% theoretical sparsity confirmed, but the warp-cooperative GEMV layout means wallclock tracks the slowest warp, not the average skip rate. Measured +0-1% end-to-end. Code stays as opt-in research artifact.
-
-- **BitDecoding (Tensor-Core KV decode)** -- all three phases shipped (Q-K WMMA, P-V WMMA, residual FP16 cache). 0% gain at any context length tested -- decode is weight-bandwidth-bound, not attention-math-bound on consumer Blackwell.
-
-- **NVFP4 GEMV kernel tuning for 175 tok/s north-star** -- software prefetch, scale-batch4, silu tanh-form, GDN scan occupancy/split-K, kernel fusion paths A and B, LM-head GEMV swap all individually benchmarked and refuted. Top-3 GEMVs already run at 64-73% HBM peak. The 157 tok/s plateau on Qwen3-14B Q6_K is near-roofline for this hardware.
-
-- **FMHA rewrites** -- cluster-launch, TMA bulk, and long-context heuristic all A/B tested. cuBLAS attention wins or ties on sm_120 at all tested shapes.
-
-## Research interest
-
-Worth tracking but not actively being worked on:
-
-- **Sawtooth Wavefront Reordering** ([arxiv:2601.16032](https://arxiv.org/abs/2601.16032)) -- L2-locality technique for flash attention, portable to sm_120. Estimated +15-30% prefill at context >= 64K, but that workload is niche on 32 GB consumer VRAM. Re-eval when a real user workload regularly hits 64K+ context.
-
-- **KV CPU offload** -- async prefetch for cold KV blocks to enable 100K+ context. Not trivially un-bottlenecked: full-attention over a 100K cold tail touches thousands of blocks per token (~40 ms vs 5 ms decode budget). Only pays off with attention regimes that naturally skip the cold tail (SWA, eviction, retrieval).
-
-- **MLA (DeepSeek)** -- latent vector replaces full K/V for ~93% KV VRAM reduction. Gates on adding DeepSeek-V2/V3 architecture support to imp; no MLA-arch model in scope today.
+- **Speculative decoding** -- none amortize weight reads on single bandwidth-bound GPU.
+- **FFN contextual sparsity** -- warp-cooperative layout masks the skip. +0-1% measured.
+- **BitDecoding (TC KV decode)** -- decode is weight-bound, not attention-bound. 0% gain.
+- **NVFP4 GEMV tuning** -- 6 approaches refuted. 157 tok/s is 64-73% HBM peak.
+- **FMHA rewrites** -- cluster, TMA bulk, long-context heuristic all A/B tested. cuBLAS wins.
+- **MoE offload + CUDA Graphs** -- `expert_overhead_pct=10` default keeps most models on-device. Full kernel-driven slot resolution deferred (multi-week, marginal user impact).
