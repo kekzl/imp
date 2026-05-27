@@ -7,8 +7,8 @@ All numbers come from one machine, one run series. Reproducing them on a differe
 | | |
 |---|---|
 | Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, Blackwell `sm_120a`, custom water loop |
-| Toolchain | CUDA 13.2.1, CUTLASS v4.4.2, GCC 13, RelWithDebInfo or Release Docker build |
-| imp config | NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN), CUDA Graphs on (where the model supports it) |
+| Toolchain | CUDA 13.2.1, CUTLASS v4.5.1, GCC 13.3 (Ubuntu 24.04), Release Docker build |
+| imp config | NVFP4 decode cache + FP16 prefill (FP8 prefill auto-disabled on sm_120, PR #446), CUDA Graphs on (where the model supports it) |
 | llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
 | Sampling | Greedy (temp = 0) |
 | Repetitions | 3 (decode); pp512 numbers vary up to ±2.6× across container restarts due to cuBLAS algorithm selection |
@@ -16,7 +16,7 @@ All numbers come from one machine, one run series. Reproducing them on a differe
 
 Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
-**imp numbers refreshed: 2026-05-25** (post sprint PRs #405–#412). llama.cpp / vLLM comparison from cross-engine bench 2026-05-24 (`docs/cross_engine_bench_2026_05_24.md`).
+**imp numbers refreshed: 2026-05-27** (post PRs #405–#448, including FP8 prefill auto-disable #446 and CUTLASS 4.5.1 #447). llama.cpp / vLLM comparison from cross-engine bench 2026-05-24 (`docs/cross_engine_bench_2026_05_24.md`). Nemotron numbers corrected to post-SSM-fix baselines.
 
 **Bench-mode caveat**: `--bench --max-tokens 128` allocates less VRAM for KV cache than production, which changes the NVFP4 cache budget. MoE models (Qwen3.6, Qwen3-Coder) are most affected — use `imp-cli --prompt` for production numbers.
 
@@ -32,7 +32,7 @@ Tokens generated per second — the metric that determines how fast a model resp
 | Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **270** | 16,800 | SafeTensors Modelopt |
 | Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **227** | 10,906 | SafeTensors Modelopt |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **256** | 4,645 | GGUF |
-| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **325** | — | hybrid Mamba2+MoE+attention |
+| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **97** | 11,532 | hybrid Mamba2+MoE+attention, arch-limited |
 | Mistral-Small-3.2 | 24B | NVFP4 | _101_ | — | not re-tested |
 
 Decode numbers (tg128) measured in production mode (full context, graphs ON). Prefill (pp512) from `--bench` mode (graphs ON, max_tokens=128). See bench-mode caveat above for MoE models.
@@ -52,7 +52,7 @@ Tokens processed per second during the prompt ingestion phase.
 | Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **5643** | — | |
 | Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **3076** | — | `IMP_EXPERT_OVERHEAD_PCT=10` |
 | Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **1092** | — | |
-| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **690** | — | hybrid Mamba2+MoE+attention |
+| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | **11,532** | — | hybrid Mamba2+MoE+attention |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1840** | 196 | |
 | Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **1472** | — | |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | _88_ | — | not re-tested 2026-05-10 |

@@ -80,23 +80,25 @@ See [`docs/usage.md`](docs/usage.md) for the full CLI reference, server flags, a
 |---|---|---|
 | Qwen3 / Qwen3-MoE | dense + MoE | Q4_K_M, Q6_K, Q8_0, NVFP4, MXFP4 |
 | Qwen3.5 / Qwen3.6 | GDN + attention (+ MoE) | Q4_K_M, Q8_0, NVFP4 |
-| Gemma-4 (26B-A4B MoE) | MoE | Q4_K_M, Q5_K_M, Q8_0, NVFP4 |
-| Llama / Mistral / Mixtral / DeepSeek | dense + MoE | GGUF (Q*_K, Q8_0), FP8 |
+| Gemma-4 (26B-A4B MoE, 31B dense) | MoE + dense | Q4_K_M, Q5_K_M, Q8_0, NVFP4 |
+| Phi-4-reasoning-plus | dense | NVFP4 (fused projections) |
+| Llama / Mistral / Mixtral / DeepSeek | dense + MoE | GGUF (Q*_K, Q8_0) |
 | Gemma-3 | text + vision (SigLIP) | GGUF |
-| Nemotron-H | Mamba2 + Attention + MoE | GGUF |
+| Nemotron-H (Nano, Elastic) | Mamba2 + Attention + MoE | NVFP4, GGUF |
 
 Tested-and-verified models with VRAM and decode `tok/s`: [`docs/supported-models.md`](docs/supported-models.md).
 
 ## Performance
 
-Decode highlights (greedy, 256 output tokens, 3-rep average, RTX 5090, refreshed 2026-05-10):
+Decode highlights (greedy, RTX 5090, refreshed 2026-05-27):
 
-- **Llama-3.2-3B Q8_0**: 306 tok/s
-- **Nemotron-3-Nano-30B-A3B NVFP4** (hybrid Mamba2+MoE+attention): 325 tok/s
-- **Qwen3.6-35B-A3B Q4_K_M** (MoE): 243 tok/s with `IMP_EXPERT_OVERHEAD_PCT=10`
-- **Qwen3-Coder-30B-A3B NVFP4**: 261 tok/s
+- **Qwen3-8B Q8_0**: 260 tok/s (tg256)
+- **Qwen3-14B Q6_K**: 158 tok/s (tg256) — north-star model
+- **Qwen3-Coder-30B-A3B NVFP4**: 270 tok/s (tg128, MoE)
+- **Gemma-4-26B-A4B NVFP4**: 163 tok/s (tg256, MoE)
+- **Qwen3.6-35B-A3B NVFP4**: 154 tok/s (tg256, GDN+MoE hybrid)
 
-Long-context prefill (`pp=8192`) consistently ahead of llama.cpp on dense models: ×1.13 to ×1.70 across the models in [`docs/performance.md`](docs/performance.md). NVFP4 prequant decode (Qwen3.6, Gemma-4, Qwen3-Coder) ranges 200–260 tok/s.
+NVFP4 prequant decode (Qwen3.6, Gemma-4, Qwen3-Coder) ranges 150–270 tok/s. FP8 prefill is auto-disabled on sm_120 (cuBLAS 13.4 limitation); FP16 weight cache is used instead.
 
 Full numbers, methodology, and the `tests/perf_baseline.json` regression gate: [`docs/performance.md`](docs/performance.md).
 
