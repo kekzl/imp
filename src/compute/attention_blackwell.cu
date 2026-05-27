@@ -148,10 +148,12 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     const int o_total_tiles = o_row_tiles * o_col_tiles;
     const int pv_chunks = BW_Bc / WMMA_K;  // 4
 
-    // ---- prefetch first K tile into buf[0] ----
+    // ---- prefetch first K tile into buf[0] (Sawtooth: start from opposite end if reversed) ----
+    const bool sawtooth_reverse = (blockIdx.x % 2 == 1);
+    const int first_j = sawtooth_reverse ? (num_kv_tiles - 1) : first_kv_tile;
     int cur_buf = 0;
     if (first_kv_tile < num_kv_tiles) {
-        const int kv_start = first_kv_tile * BW_Bc;
+        const int kv_start = first_j * BW_Bc;
         const int total = BW_Bc * head_dim;
         for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
             int r = i / head_dim;
@@ -166,9 +168,11 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     __syncthreads();
 
     // ================================================================
-    // Main loop over KV tiles
+    // Main loop over KV tiles (Sawtooth: alternate scan direction per Q tile for L2 locality)
     // ================================================================
-    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
+    const int n_kv_iters = num_kv_tiles - first_kv_tile;
+    for (int iter = 0; iter < n_kv_iters; iter++) {
+        const int j = sawtooth_reverse ? (num_kv_tiles - 1 - iter) : (first_kv_tile + iter);
         const int kv_start = j * BW_Bc;
 
         // K[j] is in KV_bufs[cur_buf], ready.
@@ -324,10 +328,12 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
         }
         __syncthreads();
 
-        // ---- Prefetch K[j+1] into KV_bufs[1-cur_buf] ----
+        // ---- Prefetch next K tile into KV_bufs[1-cur_buf] (Sawtooth-aware) ----
         int next_buf = 1 - cur_buf;
-        if (j + 1 < num_kv_tiles) {
-            const int next_kv_start = (j + 1) * BW_Bc;
+        const int next_j = sawtooth_reverse ? (j - 1) : (j + 1);
+        const bool has_next = sawtooth_reverse ? (next_j >= first_kv_tile) : (next_j < num_kv_tiles);
+        if (has_next) {
+            const int next_kv_start = next_j * BW_Bc;
             const int total = BW_Bc * head_dim;
             for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
                 int r = i / head_dim;
