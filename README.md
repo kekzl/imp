@@ -22,24 +22,19 @@ A C++20/CUDA inference engine that targets exactly one chip family: NVIDIA Black
 
 ## Performance
 
-imp beats llama.cpp on decode by +24–86% across tested GGUF models. Prefill is competitive on Q8_0/Q6_K but loses -48–59% on Q4_K_M. Against vLLM, NVFP4 decode is +57% on dense models — and vLLM can't load Qwen3-Next NVFP4 on sm_120 at all (FlashInfer MoE backends gate on `tcgen05`).
+**Decode tok/s** — RTX 5090, greedy, single-user ([full numbers](docs/performance.md)):
 
-**Cross-engine comparison** (RTX 5090, greedy, 3 reps, 2026-05-24):
+| Model | Quant | imp | llama.cpp | vLLM | |
+|---|---|---:|---:|---:|:---:|
+| Qwen3-8B | Q8_0 | **272** | 146 | — | ![+86%](https://img.shields.io/badge/%2B86%25-22c55e?style=flat-square) |
+| Qwen3-14B | Q6_K | **164** | 106 | — | ![+55%](https://img.shields.io/badge/%2B55%25-22c55e?style=flat-square) |
+| Gemma-4-26B-A4B | Q4_K_M | **258** | 208 | — | ![+24%](https://img.shields.io/badge/%2B24%25-4ade80?style=flat-square) |
+| Qwen3.6-35B-A3B | Q4_K_M | **246** | 227 | — | ![+8%](https://img.shields.io/badge/%2B8%25-86efac?style=flat-square) |
+| Qwen3-8B | NVFP4 | **225** | — | 143 | ![+57%](https://img.shields.io/badge/%2B57%25-22c55e?style=flat-square) |
+| Gemma-4-26B-A4B | NVFP4 | 206 | — | **212** | ![-3%](https://img.shields.io/badge/--3%25-fca5a5?style=flat-square) |
+| Qwen3.6-35B-A3B | NVFP4 | **232** | — | fails | ![only imp](https://img.shields.io/badge/only_imp-22c55e?style=flat-square) |
 
-| Model | Quant | imp tg128 | llama.cpp tg128 | imp pp512 | llama.cpp pp512 |
-|---|---|---:|---:|---:|---:|
-| Qwen3-8B | Q8_0 | **272** | 146 | **12197** | 11741 |
-| Qwen3-14B | Q6_K | **164** | 106 | 5861 | **5880** |
-| Gemma-4-26B-A4B | Q4_K_M | **258** | 208 | 4734 | **9932** |
-| Qwen3.6-35B-A3B | Q4_K_M | **246** | 227 | 3151 | **7644** |
-
-| Model | Quant | imp tg128 | vLLM tg128 | imp pp512 | vLLM pp512 |
-|---|---|---:|---:|---:|---:|
-| Qwen3-8B | NVFP4 | **225** | 143 | 19762 | **21252** |
-| Gemma-4-26B-A4B | NVFP4 | 206 | **212** | 16640 | **20804** |
-| Qwen3.6-35B-A3B | NVFP4 | **232** | fails | **10407** | fails |
-
-All numbers from one RTX 5090 with a custom water loop. Prefill varies up to 2.6x across container restarts (cuBLAS autotuning) — decode is the reliable signal. Full methodology: [`docs/performance.md`](docs/performance.md).
+Prefill is competitive on Q8_0/Q6_K but -48–59% on Q4_K_M vs llama.cpp — a known gap, needs a custom kernel. vLLM can't load Qwen3-Next NVFP4 on sm_120 at all. All numbers from one machine; prefill varies up to 2.6x across container restarts (cuBLAS autotuning).
 
 ## Should I use this?
 
