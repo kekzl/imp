@@ -211,6 +211,88 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
     imp_model_free(model);
 }
 
+// --- Long-context tests (real model required) ---
+
+TEST(EndToEndModelTest, LongContext8k) {
+    const char* path = test_model_path();
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 16384;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &config, &ctx), IMP_SUCCESS);
+
+    // Build a long prompt (~6k tokens by repeating text)
+    std::string prompt;
+    while (prompt.size() < 24000)
+        prompt += "The quick brown fox jumps over the lazy dog. ";
+    prompt += "Summarize everything above in one sentence:";
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 32;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[4096];
+    size_t output_len = 0;
+    ImpError err = imp_generate(ctx, prompt.c_str(), &params, output, sizeof(output), &output_len);
+    ASSERT_EQ(err, IMP_SUCCESS) << "8k context generation failed: " << imp_error_string(err);
+    EXPECT_GT(output_len, 5u) << "Output too short — likely degenerate";
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
+TEST(EndToEndModelTest, LongContext16k_NVFP4KV) {
+    const char* path = test_model_path();
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 16384;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+    config.kv_cache_dtype = IMP_DTYPE_NVFP4;
+
+    ImpContext ctx = nullptr;
+    ImpError err = imp_context_create(model, &config, &ctx);
+    if (err != IMP_SUCCESS) {
+        imp_model_free(model);
+        GTEST_SKIP() << "Context creation failed (NVFP4 KV may not fit): " << imp_error_string(err);
+    }
+
+    // Build a ~16k token prompt
+    std::string prompt;
+    while (prompt.size() < 60000)
+        prompt += "The quick brown fox jumps over the lazy dog. ";
+    prompt += "What animal was mentioned?";
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 16;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[2048];
+    size_t output_len = 0;
+    err = imp_generate(ctx, prompt.c_str(), &params, output, sizeof(output), &output_len);
+    EXPECT_EQ(err, IMP_SUCCESS) << "16k context generation failed: " << imp_error_string(err);
+    if (err == IMP_SUCCESS)
+        EXPECT_GT(output_len, 0u);
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
 // --- Stub GGUF tests (no real model required, uses generated ~200 KB GGUF) ---
 
 class StubModelTest : public ::testing::Test {
