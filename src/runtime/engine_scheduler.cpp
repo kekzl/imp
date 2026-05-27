@@ -724,6 +724,12 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         decode_batch.resize(1);
     }
 
+    // Cap at configured max batch size
+    const int max_bs = runtime_config_.runtime.max_batch_size;
+    if (max_bs > 0 && static_cast<int>(decode_batch.size()) > max_bs) {
+        decode_batch.resize(max_bs);
+    }
+
     // Allocate new KV blocks where needed
     valid_decode_.clear();
     auto& valid_decode = valid_decode_;

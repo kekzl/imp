@@ -61,6 +61,7 @@ struct RuntimeConfig {
         // `--set runtime.prefill_graph=false` or imp.conf if a model
         // regresses. Legacy env: IMP_PREFILL_GRAPH.
         bool prefill_graph = true;
+        int max_batch_size = 4;
     } runtime;
 
     struct KVCache {

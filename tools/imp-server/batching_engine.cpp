@@ -81,30 +81,7 @@ void BatchingEngine::worker_loop() {
                 auto sr = std::move(pending_queue_.front());
                 pending_queue_.pop_front();
 
-                // Clear any stale active_request on the context.
-                // The batching engine manages requests through the scheduler,
-                // not through ctx->active_request.
-                if (ctx_->active_request) {
-                    kv_mgr->free_sequence(ctx_->active_request->id);
-                    engine->reset_ssm_state(ctx_->active_request->id);
-                    ctx_->active_request->status = imp::RequestStatus::CANCELLED;
-                    ctx_->active_request = nullptr;
-                }
-
-                // Invalidate stale CUDA graphs and batch pool upload cache
-                // when a new request arrives. Without this, decode graphs
-                // captured for a previous request are replayed with baked-in
-                // kernel parameters (max_context_len, split-K grid dims) that
-                // no longer match the new request — causing corrupt logits
-                // on models with FP32 accumulator paths (Gemma-3).
-                // The CLI path does this via imp_context_reset(); the batching
-                // engine must do it explicitly per new request.
-                engine->invalidate_graphs();
-                engine->reset_batch_pool_cache();
-
-                // Initialize notified_count to current output size (usually 0)
                 sr->notified_count = sr->request->output_tokens.size();
-
                 engine->add_request(sr->request);
                 active_requests_.push_back(std::move(sr));
             }

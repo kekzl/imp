@@ -100,6 +100,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.runtime.graph_capture_mode = val;
     else if (eq("runtime.prefill_graph"))
         cfg.runtime.prefill_graph = parse_bool(val, cfg.runtime.prefill_graph);
+    else if (eq("runtime.max_batch_size"))
+        cfg.runtime.max_batch_size = parse_int(val, cfg.runtime.max_batch_size);
 
     // [kv_cache]
     else if (eq("kv_cache.dtype"))
