@@ -94,6 +94,7 @@ struct EngineConfig {
     // Currently active only on the FP16 GQA decode path; quantized variants
     // ignore these settings.
     bool streaming_kv_enabled = false;
+    bool streaming_kv_auto = true;   // auto-enable StreamingLLM when KV cache >90% full
     int streaming_kv_n_sinks = 4;    // # initial tokens to always attend
     int streaming_kv_window = 0;     // 0 = derive from ModelConfig::sliding_window
     int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2*kKVBlockSize

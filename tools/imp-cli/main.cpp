@@ -147,6 +147,8 @@ int main(int argc, char** argv) {
         config.streaming_kv_n_sinks = args.streaming_sinks;
         config.streaming_kv_window = args.streaming_window;
     }
+    if (args.no_streaming_kv_auto)
+        config.streaming_kv_auto = 0;
     config.use_nvfp4_decode = args.decode_nvfp4;
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();

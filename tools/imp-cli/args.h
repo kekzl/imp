@@ -62,6 +62,7 @@ struct CliArgs {
     bool dual_path_quant = false;        // --dual-path-quant: FP8 attention + NVFP4 FFN
     bool prefix_caching = false;         // --prefix-caching: reuse KV blocks for shared prefixes
     bool streaming_kv = false;           // --streaming-kv: StreamingLLM smart KV cache (sinks + window)
+    bool no_streaming_kv_auto = false;   // --no-streaming-kv-auto: disable auto-StreamingLLM on KV pressure
     int streaming_sinks = 4;             // --stream-sinks: # of sink tokens to keep
     int streaming_window = 0;            // --stream-window: window size (0 = use ModelConfig::sliding_window)
     std::vector<std::string> stop_sequences;  // --stop: text-level stop strings

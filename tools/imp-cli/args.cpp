@@ -72,6 +72,7 @@ void print_usage(const char* prog) {
             "                        for long-prompt workloads where prefill dominates wallclock.\n"
             "  --prefix-caching      Reuse KV cache blocks for shared token prefixes\n"
             "  --streaming-kv        Enable StreamingLLM smart KV cache (attention sinks + window)\n"
+            "  --no-streaming-kv-auto  Disable auto-StreamingLLM when KV cache >90%% full\n"
             "  --stream-sinks <n>    Number of attention-sink tokens to always keep (default: 4)\n"
             "  --stream-window <n>   Sliding-window size (default: model's sliding_window)\n"
             "  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)\n"
@@ -200,6 +201,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.prefix_caching = true;
         } else if (std::strcmp(arg, "--streaming-kv") == 0) {
             args.streaming_kv = true;
+        } else if (std::strcmp(arg, "--no-streaming-kv-auto") == 0) {
+            args.no_streaming_kv_auto = true;
         } else if (std::strcmp(arg, "--stream-sinks") == 0 && i + 1 < argc) {
             args.streaming_sinks = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--stream-window") == 0 && i + 1 < argc) {

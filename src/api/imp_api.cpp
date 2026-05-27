@@ -74,6 +74,7 @@ ImpConfig imp_config_default(void) {
     config.mmproj_path = NULL;                // no vision model
     config.turboquant_sketch_multiplier = 2;  // sketch_dim = 2 * head_dim
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
+    config.streaming_kv_auto = 1;             // auto-enable when KV cache >90% full
     config.streaming_kv_n_sinks = 4;          // StreamingLLM paper default
     config.streaming_kv_window = 0;           // 0 = derive from ModelConfig::sliding_window
     config.streaming_kv_threshold = 0;        // 0 = auto
@@ -294,6 +295,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
         ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);
+        ecfg.streaming_kv_auto = (config->streaming_kv_auto != 0);
         ecfg.streaming_kv_n_sinks = config->streaming_kv_n_sinks;
         ecfg.streaming_kv_window = config->streaming_kv_window;
         ecfg.streaming_kv_threshold = config->streaming_kv_threshold;
