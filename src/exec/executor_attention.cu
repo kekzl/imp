@@ -807,8 +807,27 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
 
-            // Try Track E first (chunked-prefill path: rectangular Q[n] × KV[ctx_len]).
-            {
+            // Chunked prefill: choose FMHA or cuBLAS
+            const int fmha_threshold = runtime_config().attention.fmha_prefill_threshold;
+            const bool chunked_use_fmha =
+                !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
+                fmha_threshold > 0 &&
+                ctx_len >= fmha_threshold;
+
+            if (chunked_use_fmha) {
+                // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
+                int64_t q4s[4]  = {1, (int64_t)n,       (int64_t)nh,  (int64_t)hd};
+                int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
+                int64_t o4s[4]  = {1, (int64_t)n,       (int64_t)nh,  (int64_t)hd};
+                Tensor q4  = qv.reshape(4, q4s);
+                Tensor k4  = k_full_t.reshape(4, kv4s);
+                Tensor v4  = v_full_t.reshape(4, kv4s);
+                Tensor o4  = ao.reshape(4, o4s);
+                attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
+                                           layer_sliding_window, cfg.attn_logit_softcap,
+                                           stream, runtime_config(), q_offset);
+            } else {
+                // cuBLAS: needs S-matrix for [n × ctx_len]
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window);
@@ -844,7 +863,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, runtime_config());
+                                       cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0);
         }
 
         // Persist K, V into cache for later decode steps
