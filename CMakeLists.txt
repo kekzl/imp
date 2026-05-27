@@ -71,7 +71,7 @@ option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
 if(IMP_USE_CUTLASS)
     FetchContent_Declare(cutlass
         GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-        GIT_TAG v4.5.0
+        GIT_TAG v4.5.1
         GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL
     )
