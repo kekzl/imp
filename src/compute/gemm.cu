@@ -9,11 +9,13 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include "quant/fp8_quant.h"
 #include <cuda_bf16.h>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 
 #define CUBLASLT_CHECK(call)                                                        \
     do {                                                                            \
@@ -389,19 +391,29 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // m16n8k16 (`s16816gemm`) tiles. Three warmups per candidate covers
     // cuBLASLt's per-algo lazy compile + L2 fill so the timed loop reflects
     // hot-path behavior, eliminating WMMA-fallback selection (Finding 1).
+    // Track which algos actually work — cuBLAS heuristic can return algos
+    // that fail at runtime (e.g. FP8 on sm_120 at certain M values).
+    std::vector<bool> algo_ok(nresults, true);
     constexpr int kWarmupIters = 3;
     for (int i = 0; i < nresults; i++) {
-        if (results[i].workspaceSize > s_workspace_size)
+        if (results[i].workspaceSize > s_workspace_size) {
+            algo_ok[i] = false;
             continue;
+        }
         float zero = 0.0f;
-        for (int w = 0; w < kWarmupIters; w++)
-            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
-                           entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
-                           results[i].workspaceSize, stream);
+        for (int w = 0; w < kWarmupIters; w++) {
+            cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data,
+                                                 entry.Adesc, &zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
+                                                 &results[i].algo, s_workspace, results[i].workspaceSize, stream);
+            if (wst != CUBLAS_STATUS_SUCCESS) {
+                algo_ok[i] = false;
+                break;
+            }
+        }
     }
 
     for (int i = 0; i < nresults; i++) {
-        if (results[i].workspaceSize > s_workspace_size)
+        if (!algo_ok[i])
             continue;
         float zero = 0.0f;
         cudaEventRecord(start, stream);
@@ -422,6 +434,11 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
+    if (!algo_ok[best_idx]) {
+        entry.has_algo = false;
+        entry.workspace_size = 0;
+        return;
+    }
     entry.algo = results[best_idx].algo;
     entry.workspace_size = results[best_idx].workspaceSize;
     entry.has_algo = true;
@@ -973,8 +990,13 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.qtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
+    // FP8 algos on sm_120 are sensitive to exact M — an algo benchmarked at
+    // one M within a bucket can return CUBLAS_STATUS_NOT_SUPPORTED at another
+    // M in the same bucket. Use exact M for FP8 to avoid stale algo reuse.
+    bool is_fp8 = (cuda_dtype_A == CUDA_R_8F_E4M3 || cuda_dtype_B == CUDA_R_8F_E4M3);
     GemmCacheKey cache_key{
-        cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F, bucket_m(M), K, N, (aScale != nullptr)};
+        cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
+        is_fp8 ? M : bucket_m(M), K, N, (aScale != nullptr)};
 
     GemmCacheEntry* entry = nullptr;
     {
@@ -989,7 +1011,6 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
             create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F, cuda_dtype_A, cuda_dtype_B,
                                     cuda_dtype_C, (int)K, (int)M, (int)N);
 
-            // Set scale pointers before benchmarking so FP8 algos run correctly
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
@@ -1038,17 +1059,47 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
             if (++fallback_count <= 10) {
                 IMP_LOG_WARN(
                     "gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
-                    "after algo reselect, falling back to cublasGemmEx",
+                    "after algo reselect, retrying with default heuristic",
                     (int)st, (long)M, (long)K, (long)N);
             }
-            cublasHandle_t fb_handle = get_cublas_handle();
-            cublasSetStream(fb_handle, stream);
-            cublasStatus_t fb_st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K,
-                                                &alpha, B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A,
-                                                (int)K, &beta, C.data, cuda_dtype_C, (int)N,
-                                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-            if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                IMP_LOG_ERROR("gemm_cublaslt: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
+            set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
+            st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+                                &beta, C.data, entry->Cdesc, C.data, entry->Cdesc, nullptr, s_workspace,
+                                entry->workspace_size, stream);
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                static bool s_fp8_warned = false;
+                if (!s_fp8_warned) {
+                    s_fp8_warned = true;
+                    IMP_LOG_WARN(
+                        "gemm_cublaslt: FP8 GEMM unsupported by cuBLASLt on this GPU/driver. "
+                        "Falling back to FP8->FP16 dequant + FP16 GEMM (slower but correct). "
+                        "Consider --set attention.fp8_prefill=never to skip FP8 overhead.");
+                }
+                float a_scale_h = 1.0f, b_scale_h = 1.0f;
+                if (aScale)
+                    cudaMemcpy(&a_scale_h, aScale, sizeof(float), cudaMemcpyDeviceToHost);
+                if (bScale)
+                    cudaMemcpy(&b_scale_h, bScale, sizeof(float), cudaMemcpyDeviceToHost);
+
+                int a_elems = static_cast<int>(M * K);
+                int b_elems = static_cast<int>(N * K);
+                half *d_a16 = nullptr, *d_b16 = nullptr;
+                cudaMallocAsync(&d_a16, static_cast<size_t>(a_elems) * sizeof(half), stream);
+                cudaMallocAsync(&d_b16, static_cast<size_t>(b_elems) * sizeof(half), stream);
+                if (d_a16 && d_b16) {
+                    dequantize_fp8_e4m3_to_fp16(A.data, d_a16, a_elems, a_scale_h, stream);
+                    dequantize_fp8_e4m3_to_fp16(B.data, d_b16, b_elems, b_scale_h, stream);
+                    int64_t a16_shape[2] = {M, K};
+                    int64_t b16_shape[2] = {N, K};
+                    Tensor A16(d_a16, QType::F16, 2, a16_shape, true);
+                    Tensor B16(d_b16, QType::F16, 2, b16_shape, true);
+                    gemm(A16, B16, C, alpha, beta, stream);
+                } else {
+                    IMP_LOG_ERROR("gemm_cublaslt: FP8 dequant fallback alloc failed M=%ld K=%ld N=%ld",
+                                  (long)M, (long)K, (long)N);
+                }
+                if (d_a16) cudaFreeAsync(d_a16, stream);
+                if (d_b16) cudaFreeAsync(d_b16, stream);
             }
         }
     }
@@ -1680,6 +1731,53 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n", (int)st);
     }
+}
+
+bool gemm_cublaslt_fp8_probe() {
+    // Test at M=15 (non-power-of-2, common short-prompt length after chat
+    // template wrapping) because cuBLAS 13.4 FP8 on sm_120 returns
+    // NOT_SUPPORTED for certain M values even when M=16/32/64 work.
+    constexpr int M = 15, K = 4096, N = 12288;
+    void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+    float *d_sa = nullptr, *d_sb = nullptr;
+    if (cudaMalloc(&d_a, M * K) != cudaSuccess) return false;
+    if (cudaMalloc(&d_b, N * K) != cudaSuccess) { cudaFree(d_a); return false; }
+    if (cudaMalloc(&d_c, M * N * 2) != cudaSuccess) { cudaFree(d_a); cudaFree(d_b); return false; }
+    cudaMalloc(&d_sa, sizeof(float));
+    cudaMalloc(&d_sb, sizeof(float));
+    float one = 1.0f;
+    cudaMemcpy(d_sa, &one, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sb, &one, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_a, 0, M * K);
+    cudaMemset(d_b, 0, N * K);
+
+    cublasLtHandle_t lt = get_cublaslt_handle();
+    cublasLtMatmulDesc_t opDesc;
+    cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasOperation_t transA = CUBLAS_OP_T, transB = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_sa, sizeof(d_sa));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_sb, sizeof(d_sb));
+
+    cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8F_E4M3, K, N, K);
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8F_E4M3, K, M, K);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, N, M, N);
+
+    float alpha = 1.0f, beta = 0.0f;
+    cublasStatus_t st = cublasLtMatmul(lt, opDesc, &alpha, d_b, Bdesc, d_a, Adesc, &beta,
+                                        d_c, Cdesc, d_c, Cdesc, nullptr,
+                                        s_workspace, s_workspace_size, nullptr);
+
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatmulDescDestroy(opDesc);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    cudaFree(d_sa); cudaFree(d_sb);
+    cudaGetLastError();
+    return st == CUBLAS_STATUS_SUCCESS;
 }
 
 }  // namespace imp

@@ -148,8 +148,21 @@ void Engine::init_resolve_fp8_prefill_() {
     if (is_nvfp4_native && !config_.use_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
     } else if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
-        config_.use_fp8_prefill = true;
-        IMP_LOG_INFO("FP8 prefill: auto → enabled");
+        int sm_major = 0;
+        cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0);
+        int sm_minor = 0;
+        cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, 0);
+        int sm = sm_major * 10 + sm_minor;
+        if (sm >= 120 && runtime_config_.attention.fp8_prefill != "always") {
+            IMP_LOG_INFO(
+                "FP8 prefill: auto → DISABLED on sm_%d (cuBLAS 13.4 FP8 returns "
+                "NOT_SUPPORTED at non-aligned M on consumer Blackwell; "
+                "use --set attention.fp8_prefill=always to force)",
+                sm);
+        } else {
+            config_.use_fp8_prefill = true;
+            IMP_LOG_INFO("FP8 prefill: auto → enabled");
+        }
     } else if (no_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
     }
