@@ -69,7 +69,7 @@ template <int Bq, int HD>
 __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap) {
+    int sliding_window, float softcap, int q_offset) {
     constexpr int Bkv = SM120_Bkv;
     constexpr int head_dim = HD;
 
@@ -151,7 +151,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     // ---- KV tile loop bounds ----
     int num_kv_tiles, first_kv_tile;
     compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
-                           num_kv_tiles);
+                           num_kv_tiles, q_offset);
 
     // Derived WMMA tiling constants
     const int hd_chunks = head_dim / SM120_WMMA_K;
@@ -221,7 +221,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 
         // ---- Apply scale, softcap, and causal/sliding_window mask ----
         apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
-                          softcap, causal, sliding_window);
+                          softcap, causal, sliding_window, q_offset);
         __syncthreads();
 
         // ============================================================
@@ -401,7 +401,8 @@ static size_t compute_smem_sm120(int Bq, int Bkv, int head_dim) {
 // =============================================================================
 
 bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                        bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+                        bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                        int q_offset) {
     if (Q.qtype != QType::F16)
         return false;
 
@@ -485,7 +486,8 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
                                             reinterpret_cast<const half*>(K.data),                        \
                                             reinterpret_cast<const half*>(V.data),                        \
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
-                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap); \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap,  \
+                                            q_offset);                                                    \
     } while (0)
 
     if (Bq == 128) {
@@ -584,7 +586,7 @@ template <int Bq, int HD>
 __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap) {
+    int sliding_window, float softcap, int q_offset) {
     constexpr int Bkv = SM120_Bkv;
     constexpr int head_dim = HD;
     constexpr int TPR = SM120_BLOCK_THREADS / Bq;
@@ -674,7 +676,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     // KV tile bounds
     int num_kv_tiles, first_kv_tile;
     compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
-                           num_kv_tiles);
+                           num_kv_tiles, q_offset);
 
     // FP8 MMA tiling: m16n8k32 → output is 16×8, need 2 calls for 16×16 score tile
     constexpr int S_M = 16;
@@ -789,7 +791,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
 
         // Apply scale, softcap, masks (same as FP16 path)
         apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
-                          softcap, causal, sliding_window);
+                          softcap, causal, sliding_window, q_offset);
         __syncthreads();
 
         // Phase 2+3: Parallel online softmax + convert to FP16 P (same as FP16 kernel)
@@ -933,7 +935,8 @@ static size_t compute_smem_fp8(int Bq, int Bkv, int head_dim) {
 }
 
 bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                            bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+                            bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                            int q_offset) {
     if (Q.qtype != QType::F16)
         return false;
 
@@ -991,7 +994,8 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                                             reinterpret_cast<const half*>(K.data),                          \
                                             reinterpret_cast<const half*>(V.data),                          \
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,     \
-                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap);   \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap,    \
+                                            q_offset);                                                      \
     } while (0)
 
     if (Bq == 128) {

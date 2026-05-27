@@ -12,7 +12,7 @@ struct RuntimeConfig;  // fwd, defined in runtime/config.h
 // rcfg is read for attention.{fp8_fmha,fmha_sm120} ladder gates.
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                                const RuntimeConfig& rcfg);
+                                const RuntimeConfig& rcfg, int q_offset = 0);
 
 // Query the compute capability of the current device.
 int get_device_sm_version();

@@ -28,7 +28,7 @@ int get_device_sm_version() {
 
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                                const RuntimeConfig& rcfg) {
+                                const RuntimeConfig& rcfg, int q_offset) {
     // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
     // Enabled with IMP_MXFP4_ATTENTION=1.
@@ -43,7 +43,8 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // PV stays FP16. [attention] fp8_fmha: "auto" (default ON) | "never"
     const bool use_fp8_fmha = rcfg.attention.fp8_fmha != "never";
     if (use_fp8_fmha) {
-        bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+        bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                              q_offset);
         if (fp8_ok) {
             IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
             return;
@@ -54,13 +55,13 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Fallback when FP8 is disabled or unsupported config.
     const bool use_fmha_sm120 = rcfg.attention.fmha_sm120 != "never";
     if (use_fmha_sm120) {
-        if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+        if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
             return;
         }
     }
 
     // Final fallback: WMMA 128x64 tiles for Blackwell.
-    flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+    flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset);
 }
 
 }  // namespace imp
