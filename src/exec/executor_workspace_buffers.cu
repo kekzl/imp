@@ -258,6 +258,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
     }
 
+    // Auto-derive fmha_prefill_threshold from S-matrix capacity.
+    // Sequences longer than attn_seq route to FMHA (no materialized S-matrix).
+    if (runtime_config().attention.fmha_prefill_threshold == -1) {
+        int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() : 1;
+        const_cast<RuntimeConfig::Attention&>(runtime_config().attention).fmha_prefill_threshold =
+            auto_threshold;
+        IMP_LOG_INFO("auto fmha_prefill_threshold = %d (S-matrix cap)", auto_threshold);
+    }
+
     // MoE dequant and staging buffers
     if (has_moe_) {
         int d = cfg.d_model;
