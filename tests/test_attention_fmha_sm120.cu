@@ -28,11 +28,11 @@ protected:
     }
     void TearDown() override { cudaStreamDestroy(stream_); }
 
-    // CPU reference: standard attention with optional causal, sliding_window, softcap
+    // CPU reference: standard attention with optional causal, sliding_window, softcap, q_offset
     static void ref_attention(const std::vector<float>& Q_f, const std::vector<float>& K_f,
                               const std::vector<float>& V_f, std::vector<float>& O_f, int B, int Sq, int Skv,
                               int NH, int NKV, int HD, float scale, bool causal, int sliding_window,
-                              float softcap) {
+                              float softcap, int q_offset = 0) {
         for (int b = 0; b < B; b++) {
             for (int h = 0; h < NH; h++) {
                 int kvh = h / (NH / NKV);
@@ -49,9 +49,9 @@ protected:
                         dot *= scale;
                         if (softcap > 0.0f)
                             dot = softcap * tanhf(dot / softcap);
-                        if (causal && qi < ki)
+                        if (causal && (q_offset + qi) < ki)
                             dot = -FLT_MAX;
-                        if (sliding_window > 0 && (qi - ki) >= sliding_window)
+                        if (sliding_window > 0 && ((q_offset + qi) - ki) >= sliding_window)
                             dot = -FLT_MAX;
                         s[ki] = dot;
                         m = fmaxf(m, dot);
@@ -79,7 +79,7 @@ protected:
     }
 
     void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sliding_window = 0,
-                  float softcap = 0.0f, float tol = 1e-2f) {
+                  float softcap = 0.0f, float tol = 1e-2f, int q_offset = 0) {
         if (sm_ < 90) {
             GTEST_SKIP() << "FMHA sm120 requires sm_90+ (WMMA fallback)";
         }
@@ -99,7 +99,8 @@ protected:
 
         // CPU reference
         std::vector<float> O_ref(q_elems, 0.0f);
-        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sliding_window, softcap);
+        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sliding_window, softcap,
+                      q_offset);
 
         // Convert to half
         std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
@@ -131,7 +132,8 @@ protected:
         Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-        bool ok = fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, causal, sliding_window, softcap, stream_);
+        bool ok = fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, causal, sliding_window, softcap, stream_,
+                                     q_offset);
         if (!ok) {
             GTEST_SKIP() << "fmha_sm120_prefill returned false (config unsupported on this GPU)";
         }
@@ -209,6 +211,43 @@ TEST_F(FmhaSm120Test, Softcap) { run_test(1, 128, 128, 2, 2, 128, true, 0, /*sof
 
 TEST_F(FmhaSm120Test, SoftcapCausalSlidingWindow) {
     run_test(1, 128, 128, 2, 2, 128, true, /*sw=*/64, /*softcap=*/50.0f);
+}
+
+// --- Chunked prefill (q_offset > 0) ---
+
+TEST_F(FmhaSm120Test, ChunkedCausalBasic) {
+    // Q has 64 rows starting at position 448 in a 512-token sequence
+    run_test(1, 64, 512, 8, 8, 128, true, 0, 0.0f, 1e-2f, /*q_offset=*/448);
+}
+
+TEST_F(FmhaSm120Test, ChunkedCausalMiddle) {
+    // Chunk in the middle of the sequence
+    run_test(1, 128, 1024, 8, 8, 128, true, 0, 0.0f, 1e-2f, /*q_offset=*/256);
+}
+
+TEST_F(FmhaSm120Test, ChunkedCausalGQA) {
+    // GQA 4:1 ratio with q_offset
+    run_test(1, 64, 512, 32, 8, 128, true, 0, 0.0f, 1e-2f, /*q_offset=*/448);
+}
+
+TEST_F(FmhaSm120Test, ChunkedCausalHD256) {
+    // HD=256 with q_offset
+    run_test(1, 64, 512, 16, 8, 256, true, 0, 0.0f, 2e-2f, /*q_offset=*/448);
+}
+
+TEST_F(FmhaSm120Test, ChunkedSlidingWindow) {
+    // Sliding window with q_offset
+    run_test(1, 64, 512, 8, 8, 128, true, 128, 0.0f, 1e-2f, /*q_offset=*/448);
+}
+
+TEST_F(FmhaSm120Test, ChunkedLargeContext) {
+    // Large context: 512-token chunk in a 4096-token sequence
+    run_test(1, 512, 4096, 8, 8, 128, true, 0, 0.0f, 1e-2f, /*q_offset=*/3584);
+}
+
+TEST_F(FmhaSm120Test, ChunkedOffsetZero) {
+    // q_offset=0 with rectangular Q/KV (first chunk of a multi-chunk prefill)
+    run_test(1, 512, 512, 8, 8, 128, true, 0, 0.0f, 1e-2f, /*q_offset=*/0);
 }
 
 // --- Dispatch integration ---

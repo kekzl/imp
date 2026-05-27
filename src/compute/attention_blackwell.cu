@@ -50,7 +50,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                                                  const half* __restrict__ V, half* __restrict__ O,
                                                  int batch_size, int seq_q, int seq_kv, int n_heads,
                                                  int n_kv_heads, float scale, bool causal, int sliding_window,
-                                                 float softcap) {
+                                                 float softcap, int q_offset) {
     constexpr int head_dim = HD;  // compile-time head_dim for optimized div/mod
 
     // Threads-per-row for parallel softmax (power of 2, fits in warp)
@@ -136,7 +136,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     // ---- number of KV tiles to iterate ----
     int num_kv_tiles, first_kv_tile;
     compute_kv_tile_bounds(q_start, Br, BW_Bc, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
-                           num_kv_tiles);
+                           num_kv_tiles, q_offset);
 
     // Derived constants for WMMA tiling
     const int hd_chunks = head_dim / WMMA_K;
@@ -201,7 +201,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
 
         // ---- Apply scale, softcap, and causal/sliding_window mask ----
         apply_score_masks(SP_float, Br, BW_Bc, BW_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
-                          softcap, causal, sliding_window);
+                          softcap, causal, sliding_window, q_offset);
         __syncthreads();
 
         // ============================================================
@@ -367,7 +367,8 @@ static size_t compute_smem(int Br, int head_dim) {
 // ===== Host-side launcher ====================================================
 
 void flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                               bool causal, int sliding_window, float softcap, cudaStream_t stream) {
+                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                               int q_offset) {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -396,7 +397,8 @@ void flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
                                             reinterpret_cast<const half*>(K.data),                        \
                                             reinterpret_cast<const half*>(V.data),                        \
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
-                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap); \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap,  \
+                                            q_offset);                                                    \
     } while (0)
 
     // Select Br and compute grid

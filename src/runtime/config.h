@@ -79,7 +79,7 @@ struct RuntimeConfig {
     struct Attention {
         std::string fp8_prefill = "auto";
         std::string fp8_fmha = "auto";
-        int fmha_prefill_threshold = 0;
+        int fmha_prefill_threshold = -1;  // -1 = auto (derived from S-matrix capacity)
         std::string fmha_sm120 = "auto";
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;

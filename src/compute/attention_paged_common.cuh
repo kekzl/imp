@@ -283,19 +283,21 @@ static constexpr int kWmmaTileK = 16;
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int Bc, int seq_q, int seq_kv,
                                                        bool causal, int sliding_window, int& first_kv_tile,
-                                                       int& num_kv_tiles) {
+                                                       int& num_kv_tiles, int q_offset = 0) {
     num_kv_tiles = (seq_kv + Bc - 1) / Bc;
     first_kv_tile = 0;
     if (causal) {
-        int max_q = q_start + Br - 1;
-        if (max_q >= seq_q)
-            max_q = seq_q - 1;
-        int furthest_kv_tile = (max_q + Bc) / Bc;
+        // Use global Q position for causal bound: which KV tiles can have non-masked scores
+        int max_q_global = q_offset + q_start + Br - 1;
+        if (q_start + Br - 1 >= seq_q)
+            max_q_global = q_offset + seq_q - 1;
+        int furthest_kv_tile = (max_q_global + Bc) / Bc;
         if (furthest_kv_tile < num_kv_tiles)
             num_kv_tiles = furthest_kv_tile;
     }
     if (sliding_window > 0) {
-        int earliest_kv = q_start - sliding_window + 1;
+        // Use global Q position for sliding window bound
+        int earliest_kv = q_offset + q_start - sliding_window + 1;
         if (earliest_kv > 0) {
             first_kv_tile = earliest_kv / Bc;
         }
@@ -310,15 +312,16 @@ __device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int 
 __device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc, int block_threads, int tid,
                                                   int q_start, int kv_start, int seq_q, int seq_kv,
                                                   float scale, float softcap, bool causal,
-                                                  int sliding_window) {
+                                                  int sliding_window, int q_offset = 0) {
     const int total = Br * Bc;
     for (int i = tid; i < total; i += block_threads) {
         int r = i / Bc;
         int c = i % Bc;
-        int gq = q_start + r;
+        int gq = q_offset + q_start + r;  // global Q position (for causal/sliding_window)
         int gk = kv_start + c;
 
-        if (gq < seq_q && gk < seq_kv) {
+        // Bounds check uses local Q position (q_start + r), not offset-shifted
+        if ((q_start + r) < seq_q && gk < seq_kv) {
             float val = S_tile[i] * scale;
             if (softcap > 0.0f)
                 val = apply_softcap(val, softcap);
