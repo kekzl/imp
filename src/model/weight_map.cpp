@@ -279,6 +279,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     int skipped = 0;
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+    const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
     const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
     const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
     // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.6-VL)
@@ -507,10 +508,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             matched = true;
         }
 
-        // -- Gemma 4: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
+        // -- Gemma 4 MoE: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
         //    NOT dense MLP. Route to w_*_shared instead. Must come before
-        //    the generic dense-MLP branch below.
-        if (!matched && is_gemma4 && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
+        //    the generic dense-MLP branch below. Dense Gemma-4 (31B) falls
+        //    through to the standard w_gate/w_up/w_down path.
+        if (!matched && is_gemma4_moe && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
             if (proj == "gate_proj") {
                 layer.w_gate_shared = t;
