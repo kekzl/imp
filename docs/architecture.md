@@ -55,11 +55,12 @@ distinct private methods on `Engine`:
 | Compute max sequence length | `init_compute_max_seq_len_` | VRAM budget → max context (`src/runtime/vram_budget.cpp`) |
 | Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant orchestrated by `src/exec/executor_pre_dequant.cu` (calls per-phase TUs: `phase0_nvfp4_loader.cu`, `phase1_fp16_cache.cu`, `phase2_fp8_cache.cu`, `phase3_nvfp4_decode.cu`, `phase3c_mxfp4.cu`, `phase4_tensor_registry.cu`, `phase4b` drop-source + VRAM reclamation, `phase4c` second-pass FP8 using reclaimed VRAM) |
 | Init KV cache | `init_kv_cache` | Paged blocks (block_size=16); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
-| Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~1 GiB — see Known wounds), FP8 activation scratch, split-K attn scratch |
+| Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~1 GiB — see Known limitations), FP8 activation scratch, split-K attn scratch |
 | Warm up | `warmup()` | Captures CUDA graph for decode (`src/runtime/cuda_graph.cu`) |
 
-The Engine surface is currently a large class — splitting it into named
-subsystems is Phase 4 of the refactor roadmap.
+The Engine façade (`engine.cpp`, ~570 LOC) delegates to 6 per-subsystem
+TUs by concern (resolver, weight upload, KV cache, workspaces, scheduler,
+sampling/stop).
 
 ## Phase 3 — Prefill (per request, `Engine::step_prefill`)
 
@@ -133,40 +134,16 @@ Per token:
 
 - **Memory** — `src/memory/vram_allocator.cu`, `src/memory/kv_cache.cu`,
   `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cu`,
-  `src/runtime/vram_budget.cpp`, `src/runtime/storage_planner.cpp`. The
-  cross-cutting ownership here is intentionally being consolidated in
-  Phase 5 of the refactor roadmap.
+  `src/runtime/vram_budget.cpp`, `src/runtime/storage_planner.cpp`.
 - **Kernels** — `src/compute/` (attention, GEMM, RMSNorm, RoPE, SwiGLU,
   softmax, sampling) and `src/quant/` (dequant, FP8 quant, NVFP4 quant).
 - **Public C API** — `include/imp/{imp,types,error,config}.h`,
   implemented in `src/api/imp_api.cpp`. ABI-stable per CONTRIBUTING.md.
 
-## Known structural wounds
+## Known limitations
 
-These are documented for honesty. See the refactor roadmap in
-[`superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md`](superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md)
-for the resolution plan.
-
-- **`src/runtime/engine.cpp` was 3112 LOC; now 570 LOC** (Phase 4 closed
-  2026-05-20). The `Engine::*` methods are split across 7 TUs by concern:
-  `engine_init_resolver.cpp` (dtype/SSM/seq-len resolution),
-  `engine_weight_upload.cpp` (init_weights), `engine_kv_cache_init.cpp`,
-  `engine_workspace_warmup.cpp`, `engine_scheduler.cpp` (the 13
-  step/prefill/decode methods, biggest at 1291 LOC),
-  `engine_sampling_stop.cpp`. The `engine.cpp` façade keeps constructor,
-  `init()`, `generate()`, `add_request()`, MTP/vision wrappers, accessors.
-  Methods stay `Engine::*` (declarations in `engine.h` unchanged); promoting
-  to named subsystem classes with constructor injection is preserved as
-  opportunistic future refactor.
-- **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace.**
-  Caps maximum context length. Phase 5 evaluates tiled streaming softmax
-  or FMHA-default-switch.
-- **`RuntimeConfig::current()` is a global singleton.** Phase 5
-  de-globalizes it to per-Engine.
-- **The directory `src/exec/` was previously `src/graph/`.** The Graph
-  IR that motivated the old name was deleted in #287 and the directory
-  renamed in #290 to match its actual contents (imperative executor +
-  GEMM kernel registry).
+- **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace**, which caps maximum context length; a tiled streaming softmax or FMHA-default-switch would eliminate this.
+- **`RuntimeConfig::current()` is a global singleton** rather than per-Engine, preventing true multi-engine use in a single process.
 
 ## Re-rendering the diagram
 
