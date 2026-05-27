@@ -83,6 +83,7 @@ typedef struct {
     // middle KV blocks for long generations. Currently active only for the FP16
     // GQA decode path; other quantized variants ignore these settings.
     int streaming_kv_enabled;    // 0 = off (default), 1 = on
+    int streaming_kv_auto;       // 1 = auto-enable when KV cache >90% full (default)
     int streaming_kv_n_sinks;    // # of initial tokens to always keep (default 4)
     int streaming_kv_window;     // sliding window size (0 = use ModelConfig::sliding_window)
     int streaming_kv_threshold;  // ctx_len at which streaming activates

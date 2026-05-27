@@ -755,6 +755,33 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             }
         }
 
+        // Auto-activate StreamingLLM when KV cache is nearly exhausted.
+        // Only fires once (guards on !streaming_kv_enabled) and only for FP16
+        // KV — quantized variants don't support sentinel-block skipping yet.
+        if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
+            auto st = kv_manager_->stats();
+            if (st.total_blocks > 0 && st.free_blocks < st.total_blocks / 10) {
+                if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
+                    config_.streaming_kv_enabled = true;
+                    int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
+                    int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
+                                                                : model_->config().sliding_window;
+                    if (win <= 0) win = 4096;
+                    config_.streaming_kv_window = win;
+                    executor_->set_streaming_kv(n_sinks, win);
+                    IMP_LOG_WARN(
+                        "KV cache >90%% full (%d/%d blocks free) — auto-enabling "
+                        "StreamingLLM (sinks=%d, window=%d)",
+                        st.free_blocks, st.total_blocks, n_sinks, win);
+                    if (config_.use_cuda_graphs) {
+                        IMP_LOG_WARN(
+                            "Disabling CUDA Graphs (block table mutates with StreamingLLM).");
+                        config_.use_cuda_graphs = false;
+                    }
+                }
+            }
+        }
+
         // StreamingLLM smart KV cache: once context exceeds the threshold,
         // free middle blocks while keeping sinks + window. The decode kernel
         // skips the freed (-1 sentinel) slots via its own n_sinks logic.
