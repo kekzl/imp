@@ -2,6 +2,7 @@
 #include "compute/attention_tc.h"
 #include "compute/attention_paged.h"
 #include "core/tensor.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -71,7 +72,8 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     auto run_kernel = [&]() {
         if (use_cutlass) {
             // Use runtime dispatch (tries MXFP4 -> FP8 -> FP16 FMHA -> Blackwell WMMA)
-            attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream);
+            static const RuntimeConfig rcfg{};
+            attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream, rcfg);
             return;
         }
         flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream);
@@ -126,7 +128,7 @@ void bench_attention() {
         {"Qwen3-Coder-30B", 32, 4, 128}, {"DS-R1-14B", 40, 8, 128},        {"Llama-3-70B", 64, 8, 128},
     };
 
-    std::vector<int> seq_lens = {512, 1024, 2048, 4096, 8192};
+    std::vector<int> seq_lens = {512, 1024, 2048, 4096, 8192, 16384, 32768};
 
     for (const auto& cfg : configs) {
         printf("%-24s  nh=%2d nkv=%2d hd=%3d (GQA %dx)\n", cfg.name, cfg.n_heads, cfg.n_kv_heads,

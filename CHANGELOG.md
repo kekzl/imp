@@ -2,6 +2,33 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Critical fixes
+
+- **Gemma-3 garbage output** — `apply_arch_defaults` set `norm_weight_offset = 1.0`
+  for `GEMMA3`, but the llama.cpp GGUF converter already bakes the `+1` into every
+  `*norm.weight` (verified: `blk.0.attn_norm.weight` min ≈ 0.99 == learned ≈ 0 + 1;
+  same convention noted for Qwen3.5/Gemma-4 in `gguf_loader.cpp`). The extra offset
+  double-counted across all four sandwich norms × 48 layers, producing incoherent
+  token salad on every prompt. Fix: GEMMA3 now uses offset 0 (matching GEMMA4 and
+  Qwen3.5). Verified coherent on `gemma-3-12b-it-Q4_K_M` ("The capital of France is
+  Paris."), decode speed unchanged.
+
+### Performance
+
+- **Gemma-3 chunked prefill** — enabled for `GEMMA3` (was gated off as "no test
+  model"). Gemma-3 has uniform head_dim/kv_heads and reuses the same per-layer
+  cuBLAS sliding-window dispatch as Gemma-4. Verified: byte-identical greedy output
+  vs single-shot prefill on a 577-token prompt split into 3 chunks across SWA
+  boundaries.
+
+### Fixed
+
+- **`imp-bench` build break** — `bench_attention.cu` called `attention_prefill_dispatch`
+  without the `RuntimeConfig` argument added to its signature. Restored the build and
+  extended the prefill-attention sweep to 32k tokens.
+
 ## [0.9.1] - 2026-05-27
 
 ### Critical fixes
