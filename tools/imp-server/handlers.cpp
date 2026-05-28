@@ -646,6 +646,17 @@ static bool parse_chat_request_params(
         res.set_content(err.dump(), "application/json");
         return false;
     }
+    // Bound the conversation length: each message is tokenized + template-expanded
+    // on the host, so an unbounded array is a CPU/memory DoS within the body cap.
+    constexpr size_t kMaxMessages = 10000;
+    if (messages.size() > kMaxMessages) {
+        res.status = 400;
+        json err = {{"error",
+                     {{"message", "messages array exceeds maximum of 10000 entries"},
+                      {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return false;
+    }
 
     ctx.params.temperature = body.value("temperature", 0.7f);
     ctx.params.top_p_explicit = body.contains("top_p");
@@ -3108,6 +3119,17 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Bound the array before allocating buf = tokens.size()*32 + 256: a ~100 MiB
+    // JSON array of small ints would otherwise force a multi-GB host allocation.
+    if (body["tokens"].size() > 1000000) {
+        res.status = 400;
+        json err = {{"error",
+                     {{"message", "tokens array exceeds maximum of 1000000 entries"},
+                      {"type", "invalid_request_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;
     }

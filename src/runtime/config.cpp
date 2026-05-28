@@ -122,6 +122,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.fp8_fmha = val;
     else if (eq("attention.fmha_sm120"))
         cfg.attention.fmha_sm120 = val;
+    else if (eq("attention.fmha_prefill_threshold"))
+        cfg.attention.fmha_prefill_threshold = parse_int(val, cfg.attention.fmha_prefill_threshold);
     else if (eq("attention.mxfp4"))
         cfg.attention.mxfp4 = val;
     else if (eq("attention.mxfp4_fp16_fallback"))

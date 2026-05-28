@@ -132,7 +132,15 @@ int main(int argc, char** argv) {
         if (!state.api_key.empty()) {
             std::string auth = req.get_header_value("Authorization");
             std::string expected = "Bearer " + state.api_key;
-            if (auth != expected) {
+            // Constant-time comparison: std::string::operator!= short-circuits on
+            // the first differing byte, which leaks the key prefix via response
+            // timing. Accumulate over the full expected length instead.
+            unsigned char diff = static_cast<unsigned char>(auth.size() != expected.size());
+            for (size_t i = 0; i < expected.size(); ++i) {
+                unsigned char ac = (i < auth.size()) ? static_cast<unsigned char>(auth[i]) : 0;
+                diff |= ac ^ static_cast<unsigned char>(expected[i]);
+            }
+            if (diff != 0) {
                 res.status = 401;
                 json err = {{"error", {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
                 res.set_content(err.dump(), "application/json");
