@@ -18,8 +18,21 @@
   now BEATS GGUF same-model and crushes llama.cpp. All correctness gates green.
 
 **NEXT (priority order):**
-1. **LEAD-2: NVFP4 MoE decode.** Qwen3-30B-A3B NVFP4 175 vs imp-Q4_K_M 276 vs llama.cpp 317.
-   lm_head fix only gave +2.9% → gap is in per-expert GEMVs. PROFILE NEXT to find cause.
+1. **LEAD-2: NVFP4 MoE decode — PROFILED + ROOT-CAUSED, PARKED (hard).** Qwen3-30B-A3B NVFP4 175
+   vs imp-Q4_K_M 276 vs llama.cpp 317. nsys (eager): CUTLASS grouped GEMM 35.4% + paged-attn GQA
+   25.2% + ~15% fragmented scale-staging (convert_scales_sfatom, build_grouped_3x_staging,
+   compute_sfa_offsets, bzero_sfa_active, build_sfa_bases). Native-NVFP4 M=1 expert decode runs
+   the PREFILL grouped-GEMM path. ROOT CAUSE: `cache_moe_native_nvfp4` (pre_dequant_phase3) early-
+   returns when experts are in cutlass_nvfp4 — a DELIBERATE VRAM tradeoff (a duplicate standard-
+   packed NVFP4 expert cache for the fast gemv_nvfp4_moe_* path = ~15 GiB on 35B, won't fit on
+   32 GB alongside the CUTLASS cache). `can_decode_fast` accepts NVFP4 but needs expert_*_packed
+   (null for native NVFP4). FIX OPTIONS (all multi-hour, risky): (a) gemv that reads CUTLASS-
+   swizzled NVFP4 layout in-place (zero extra VRAM, ideal, hard); (b) precompute static per-step
+   scale-staging once at load (reclaims ~3-10%, medium); (c) free CUTLASS expert cache + use packed
+   for both decode AND prefill (but prefill wants grouped GEMM). Circle back after easier wins.
+   NOTE competitor reality: for Qwen3-30B-A3B the user's fastest imp option is Q4_K_M (276), which
+   still loses to llama.cpp Q4_K_M (317). NVFP4 MoE (175) is uncontested by NVFP4 rivals (vLLM
+   broken on sm_120) but slower than its own Q4_K_M.
 2. MoE/hybrid GGUF decode loss to llama.cpp (Qwen3.6-35B 158 vs 229).
 3. GGUF prefill 1.3-2.4× behind llama.cpp (hard: custom MMQ kernel).
 4. Stand up vLLM NVFP4 to confirm imp's NVFP4 prefill/decode lead is real.
