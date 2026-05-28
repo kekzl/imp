@@ -7,15 +7,17 @@
 
 ## RESUME HERE (always current)
 
-**Session:** 2026-05-29. Branch `mission/sm120-best` (off main).
-**Phase:** Optimization loop. LEAD-1 LANDED (commit 817fa25). Attacking LEAD-2 next.
-**Build:** `imp:test` green w/ LEAD-1. Tests green. Scoreboard + llama.cpp measured (below).
+**Session:** 2026-05-29. Work lands via PRs off main (branch then `gh pr create --base main`).
+**Phase:** Optimization loop, iteration 1 complete. LEAD-1 MERGED to main (#465, commit d009bbd).
+**Build:** main green w/ LEAD-1. Full scoreboard + measured llama.cpp head-to-head (below).
+**On resume:** re-read this journal + `competitive_ground_truth_2026_05_29` memory. Rebuild
+`make build`. Re-run `scripts/scoreboard.sh` if trusting absolute numbers. Then pick from NEXT.
 
-**LANDED this session:**
-- **LEAD-1 (817fa25): NVFP4 decode cache for FP16/BF16 lm_head.** Broad decode win across
+**LANDED this session (MERGED to main):**
+- **LEAD-1 (#465, d009bbd): NVFP4 decode cache for FP16/BF16 lm_head.** Broad decode win across
   non-hybrid NVFP4 fleet: Qwen3-8B +16%, Qwen3-14B +12.6%, Phi-4 +8.3%, Gemma-4-26B +11.3%,
   Qwen3-30B-A3B +2.9%. Hybrid Qwen3.6-35B correctly excluded (unchanged). NVFP4 dense decode
-  now BEATS GGUF same-model and crushes llama.cpp. All correctness gates green.
+  now BEATS GGUF same-model and crushes llama.cpp. All correctness gates green; CI build green.
 
 **NEXT (priority order):**
 1. **LEAD-2: NVFP4 MoE decode — PROFILED + ROOT-CAUSED, PARKED (hard).** Qwen3-30B-A3B NVFP4 175
