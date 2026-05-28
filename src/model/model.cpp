@@ -224,11 +224,11 @@ void apply_arch_defaults(ModelConfig& cfg) {
     // Gemma-3/4 computes embed_scale from d_model
     if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
         cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
-    // Gemma-3 stores norm weights as (w - 1) so add 1.0 back at runtime.
-    // Gemma 4 stores them as actual values (verified against llama.cpp build_norm,
-    // which never adds an offset). q_norm values around 1.0234 ARE the actual scale.
-    if (cfg.arch == ModelArch::GEMMA3)
-        cfg.norm_weight_offset = 1.0f;
+    // Gemma norm weights store (1 + learned) directly: the GGUF converter bakes
+    // the +1 into every *norm.weight (see gguf_loader.cpp "already baked"), so the
+    // runtime must use the weight as-is (offset 0), same as Gemma-4 and Qwen3.5.
+    // Verified on gemma-3-12b-it-Q4_K_M: attn_norm min≈0.99 (== learned≈0 + 1), not
+    // centered at 0. Applying a +1 offset here double-counts → garbage output.
     if (e.ffn_activation >= 0)
         cfg.ffn_activation = static_cast<FFNActivation>(e.ffn_activation);
     if (e.norm_placement >= 0)

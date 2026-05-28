@@ -199,6 +199,10 @@ struct RuntimeConfig {
         // the GEMM through mmq_q4k_imma_tile. Detailed wrap-up:
         // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
         bool q4k_imma_enabled = false;
+        // Q4_K x FP16 HMMA GEMM: in-SMEM nibble decode + FP16 tensor core
+        // m16n8k16 tile kernel. Phase 0 scaffold (default off). When enabled,
+        // prefill (M >= 32) Q4_K weights bypass dequant-to-FP16 + cuBLAS.
+        bool q4k_hmma_enabled = false;
         // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
         // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode
         // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV

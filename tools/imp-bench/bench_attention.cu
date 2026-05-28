@@ -130,7 +130,7 @@ void bench_attention() {
         {"Qwen3-Coder-30B", 32, 4, 128}, {"DS-R1-14B", 40, 8, 128},        {"Llama-3-70B", 64, 8, 128},
     };
 
-    std::vector<int> seq_lens = {512, 1024, 2048, 4096, 8192};
+    std::vector<int> seq_lens = {512, 1024, 2048, 4096, 8192, 16384, 32768};
 
     for (const auto& cfg : configs) {
         printf("%-24s  nh=%2d nkv=%2d hd=%3d (GQA %dx)\n", cfg.name, cfg.n_heads, cfg.n_kv_heads,

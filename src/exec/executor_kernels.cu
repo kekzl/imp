@@ -18,6 +18,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
+#include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
@@ -1770,6 +1771,18 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         StorageTier prefill = h.prefill_tier;
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
+
+        // Q4_K HMMA GEMM: in-SMEM dequant + FP16 HMMA m16n8k16 tile kernel.
+        // Config-gated (gemm.q4k_hmma_enabled, default false). Bypasses
+        // dequant-to-FP16 + cuBLAS by decoding Q4_K nibbles directly in SMEM.
+        if (ctx.q4k_hmma_enabled && h.source_qtype == QType::Q4_K &&
+            prefill == StorageTier::FP16 && ctx.beta == 0.0f && M >= 32) {
+            int N = static_cast<int>(h.shape[0]);
+            int K = static_cast<int>(h.shape[1]);
+            if (try_q4k_hmma_dispatch(input.data, h.source_data, output.data,
+                                      M, N, K, ctx.stream))
+                return;
+        }
 
         // dp4a dense: compute directly from Q4_K/Q5_K blocks (0.55 B/elem)
         // instead of the FP16 cache (2.0 B/elem). Weight-stationary with
