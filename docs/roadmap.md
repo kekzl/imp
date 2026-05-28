@@ -20,7 +20,7 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 ## Open performance work
 
-- **Q4_K_M prefill gap** (-38% vs llama.cpp) -- needs a custom in-SMEM Q4_K MMQ kernel with FP16 HMMA. Design spec: [`specs/2026-05-28-q4k-mmq-kernel-design.md`](superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md). Prior INT8 IMMA and FP16 HMMA v2 approaches were both refuted. Estimated 2-3 weeks.
+- **Q4_K_M prefill gap** (-38% vs llama.cpp) -- the in-SMEM Q4_K MMQ + FP16 HMMA approach is now **evidence-refuted**: the `feat/q4k-mmq-hmma` forge experiment built exactly this kernel and ncu-proved it's decode-throughput-bound, *tying* (not beating) cuBLAS — and the gap is vs llama.cpp beating cuBLAS, so closing it needs to beat cuBLAS (decode-tax-blocked) or pay 2× weight VRAM via pre-shuffle (rejected). The biggest gaps are also MoE-expert (small-M) which a dense tile kernel doesn't touch. See the "Evidence from the forge experiment" section in [`specs/2026-05-28-q4k-mmq-kernel-design.md`](superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md). Practical resolution: recommend NVFP4 SafeTensors for fast Q4_K-class prefill.
 
 - **Sawtooth Wavefront Reordering** (PR #456) -- alternate KV scan direction per Q tile for L2 locality. Implemented in both FMHA kernels. Expected +5-15% prefill at 32k+ context.
 
