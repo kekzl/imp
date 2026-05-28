@@ -469,7 +469,6 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
                 int q_rows = mc.n_heads * hd;
                 int kv_rows = mc.n_kv_heads * hd;
-                int64_t cols = t.shape[1];
                 size_t row_bytes = t.nbytes() / static_cast<size_t>(t.shape[0]);
                 if (t.shape[0] == q_rows + 2 * kv_rows) {
                     layer.wq = t;

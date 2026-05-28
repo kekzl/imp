@@ -197,11 +197,15 @@ void Engine::init_resolve_quant_flags_() {
         const bool sub8bit_qtype = (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
                                      wq_qtype == QType::Q2_K);
         if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && !sub8bit_qtype) {
-            // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (additive — both FP8
-            // prefill and NVFP4 decode caches populated) measures +4% decode
-            // over mode 2 on Qwen3-14B Q6_K @ ctx=2048 (151 vs 145.6 tok/s,
-            // PR #364), at -9% prefill (5080 vs 5540). GOAL.md ranks decode #1
-            // for the north-star, so dense Q*_K defaults to mode 1.
+            // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (additive — high-
+            // precision prefill cache (FP8 1 B/elem, or FP16 2 B/elem when FP8 is
+            // unavailable) PLUS an NVFP4 decode cache (0.5 B/elem)). Prefill stays
+            // high-precision (prefill-on-NVFP4 corrupts the prompt context and
+            // degenerates output for 8-bit GGUF — that is why mode 2 is reserved
+            // for sub-8-bit weights below). Decode uses the NVFP4 cache, which is
+            // both fast and coherent. Measures +4% decode over mode 2 on Qwen3-14B
+            // Q6_K @ ctx=2048 (151 vs 145.6 tok/s, PR #364). GOAL.md ranks decode
+            // #1 for the north-star, so dense Q*_K defaults to mode 1.
             config_.use_nvfp4_decode = 1;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");
         } else if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && sub8bit_qtype) {

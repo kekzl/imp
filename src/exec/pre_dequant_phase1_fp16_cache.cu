@@ -22,6 +22,7 @@
 
 using imp::pre_dequant_internal::create_fused_weight_pair;
 using imp::pre_dequant_internal::deduct_budget;
+using imp::pre_dequant_internal::nvfp4_beneficial;
 
 namespace imp {
 
@@ -66,6 +67,19 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
         if (wcache_.fp16.count(w.data))
             return;  // already cached
         if (budget_exhausted)
+            return;
+        // Phase 3 (the NVFP4 decode cache) owns nvfp4_beneficial weights
+        // (Q8_0/Q6_K/Q5_K) whenever the decode cache is active. Never FP16-cache
+        // those here — not even when FP8 is unavailable. Doing so consumes the
+        // VRAM budget Phase 3 needs and starves the decode cache to ~2 of ~252
+        // tensors → decode falls back to heavy FP16 weights. That FP8-disable
+        // (PR #428) × FP16-widen (PR #434) interaction regressed Qwen3-8B Q8_0
+        // tg128 284→146 and Qwen3-14B Q6_K 157→93. These weights instead get a
+        // compact NVFP4 decode cache (0.5 B/elem, fast + coherent) and prefill
+        // via on-the-fly Q*_K→FP16 dequant (executor_kernels gemm_via_handle_) —
+        // far less VRAM than double-caching FP16+NVFP4, leaving headroom for KV.
+        if (wcache_.nvfp4_decode_mode > 0 &&
+            nvfp4_beneficial(qtype, runtime_config().gemm.nvfp4_decode_all))
             return;
         if (!fp8_unavailable && !plan_routes_to_fp16(kind, qtype))
             return;  // Phase 3 (NVFP4) or native FP4 owns this weight

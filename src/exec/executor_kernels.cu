@@ -1841,6 +1841,25 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
     }
 
+    // ---- GGUF source with an NVFP4 *decode* overlay: dequant for prefill ----
+    // A weight whose primary tier is NVFP4/CUTLASS_NVFP4 but whose source is a
+    // dequantable GGUF quant (Q8_0/Q6_K/Q5_K) carries the NVFP4 cache as a
+    // DECODE-ONLY overlay (mode 1 additive). For prefill (M>1) we must dequant
+    // the ORIGINAL Q*_K source to FP16 — running prefill on the 4-bit NVFP4
+    // overlay corrupts the prompt context and degenerates output. This path is
+    // reached only when no FP16/FP8 prefill cache exists (the checks above
+    // return first when one does), i.e. on sm_120 where FP8 prefill is disabled
+    // (PR #428). Decode (M=1, handled earlier) still uses the fast NVFP4 cache.
+    // Native NVFP4 SafeTensors models are excluded: their source_qtype is
+    // NVFP4/F16, which dequant_gpu_supported() rejects → they use the CUTLASS
+    // path below as before.
+    if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
+        (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
+        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx);
+        return;
+    }
+
     // ---- CUTLASS NVFP4 prefill via GemmKernelRegistry (qscratch buffers) ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
         const auto* qs = ctx.qscratch;

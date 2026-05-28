@@ -127,3 +127,42 @@ jobs:
           chmod +x build/imp-tests || true
           chmod +x build/test-* 2>/dev/null || true
           cd build && ctest --output-on-failure --timeout 120
+
+      # Perf regression gate against tests/perf_baseline.json (decode 3% / prefill 5%).
+      # Previously this gate lived ONLY in the local pre-push hook (scripts/verify.sh),
+      # so a decode regression could reach main unflagged — exactly what happened with
+      # the FP8-disable × FP16-widen interaction (Qwen3-8B Q8_0 tg128 284→146). This
+      # step closes that gap. Skips (does not fail) when the baseline model isn't on
+      # the runner — set IMP_MODELS_DIR to the directory holding the baseline GGUF.
+      - name: Perf regression gate
+        run: |
+          chmod +x build/imp-cli || true
+          BASELINE=tests/perf_baseline.json
+          MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
+          BL_MODEL=$(jq -r '.model' "$BASELINE")
+          MODEL_PATH="$MODELS_DIR/$BL_MODEL"
+          if [ ! -f "$MODEL_PATH" ]; then
+            echo "::warning::perf gate skipped — baseline model $MODEL_PATH not on runner (set IMP_MODELS_DIR)"
+            exit 0
+          fi
+          BL_TG=$(jq -r '.metrics.decode_tps.tg128' "$BASELINE")
+          BL_PP=$(jq -r '.metrics.prefill_tps.pp512' "$BASELINE")
+          DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
+          PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
+          ERR=$(mktemp)
+          CUBLAS_WORKSPACE_CONFIG=:4096:8 build/imp-cli --model "$MODEL_PATH" --bench \
+            --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
+            --temperature 0 >/dev/null 2>"$ERR"
+          PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+          TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+          if [ -z "$PP" ] || [ -z "$TG" ]; then echo "could not parse bench output"; tail -15 "$ERR"; exit 1; fi
+          DEC_DELTA=$(awk -v c="$TG" -v b="$BL_TG" 'BEGIN{printf "%.2f",(c-b)/b*100}')
+          PRE_DELTA=$(awk -v c="$PP" -v b="$BL_PP" 'BEGIN{printf "%.2f",(c-b)/b*100}')
+          echo "decode tg128=$TG (baseline $BL_TG, delta ${DEC_DELTA}%); prefill pp512=$PP (baseline $BL_PP, delta ${PRE_DELTA}%)"
+          if awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{exit !(-d > t)}'; then
+            echo "::error::decode regression > ${DEC_THR}% (if intended: scripts/gen_perf_baseline.sh)"; exit 1
+          fi
+          if awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{exit !(-d > t)}'; then
+            echo "::warning::prefill regression > ${PRE_THR}% (often cuBLAS variance)"
+          fi
+          echo "perf gate passed"
