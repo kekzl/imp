@@ -208,6 +208,16 @@ struct RuntimeConfig {
         // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV
         // at 130 tok/s → NVFP4 kpar GEMV target ~165 tok/s).
         bool nvfp4_decode_all = false;
+        // Quantize a native-precision (FP16/BF16) LM head to an NVFP4 decode
+        // cache. Native-NVFP4 checkpoints (llm-compressor/Modelopt) store
+        // lm_head in BF16, so decode pays a cuBLAS FP16 GEMV over the
+        // vocab×d_model matrix (~0.78 ms/token, ~19% of decode on Qwen3-8B).
+        // The GGUF path already NVFP4-caches a Q*_K/Q8_0 output_proj; this
+        // extends the same win to native-NVFP4 dense models. Excluded for
+        // GDN/SSM-hybrid models (LM-head NVFP4 degrades recurrent-state
+        // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted). Legacy
+        // env: IMP_NO_NVFP4_LM_HEAD=1 to disable.
+        bool nvfp4_lm_head = true;
     } gemm;
 
     // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture

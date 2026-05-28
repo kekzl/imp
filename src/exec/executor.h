@@ -757,6 +757,11 @@ private:
     // on a shared Nvfp4DecodeContext; the orchestrator above calls them in
     // sequence, mirroring the legacy monolithic body.
     void nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
+    // Quantize a native-precision (FP16/BF16) LM head to an NVFP4 decode cache
+    // entry in wcache_.nvfp4. No-op when the LM head is already a quantized
+    // source (GGUF path handles it via collect_candidates) or when the model is
+    // GDN/SSM-hybrid. See RuntimeConfig::Gemm::nvfp4_lm_head.
+    void nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx);
     void nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
                                       Nvfp4DecodeContext& dctx);
