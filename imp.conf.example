@@ -47,6 +47,10 @@ fp8_auto_legacy             = false
 fp8_prefill          = "auto"
 fp8_fmha             = "auto"
 fmha_sm120           = "auto"
+# Prefill chunk length (tokens) at/above which attention routes to FMHA
+# (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
+# -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
+fmha_prefill_threshold = -1
 mxfp4                = "auto"
 mxfp4_fp16_fallback  = false
 force_cublas_decode  = false

@@ -257,12 +257,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 
     // Auto-derive fmha_prefill_threshold from S-matrix capacity.
-    // Sequences longer than attn_seq route to FMHA (no materialized S-matrix).
+    // Route to FMHA only when the materialized S-matrix does NOT fit, i.e.
+    // n > cap. The dispatch uses `prefer_fmha = (n >= threshold)`, so the
+    // threshold must be cap+1 — otherwise the largest prefill chunk (n == cap),
+    // for which the S-matrix fits exactly, mis-routes to FMHA. Measured: cuBLAS
+    // is ~30% faster than FMHA at n == cap for dense NVFP4 (Qwen3-8B pp2048:
+    // 28.3k vs 21.6k tok/s), so the boundary belongs to cuBLAS.
     if (runtime_config().attention.fmha_prefill_threshold == -1) {
-        int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() : 1;
+        int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() + 1 : 1;
         const_cast<RuntimeConfig::Attention&>(runtime_config().attention).fmha_prefill_threshold =
             auto_threshold;
-        IMP_LOG_INFO("auto fmha_prefill_threshold = %d (S-matrix cap)", auto_threshold);
+        IMP_LOG_INFO("auto fmha_prefill_threshold = %d (S-matrix cap + 1)", auto_threshold);
     }
 
     // MoE dequant and staging buffers
