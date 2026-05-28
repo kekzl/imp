@@ -288,8 +288,9 @@ TEST(EndToEndModelTest, LongContext16k_NVFP4KV) {
     size_t output_len = 0;
     err = imp_generate(ctx, prompt.c_str(), &params, output, sizeof(output), &output_len);
     EXPECT_EQ(err, IMP_SUCCESS) << "16k context generation failed: " << imp_error_string(err);
-    if (err == IMP_SUCCESS)
+    if (err == IMP_SUCCESS) {
         EXPECT_GT(output_len, 0u);
+    }
 
     imp_context_free(ctx);
     imp_model_free(model);

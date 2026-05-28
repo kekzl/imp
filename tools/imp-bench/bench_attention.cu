@@ -2,6 +2,7 @@
 #include "compute/attention_tc.h"
 #include "compute/attention_paged.h"
 #include "core/tensor.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -67,11 +68,14 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     Tensor V(d_v, QType::F16, 4, kv_shape, true);
     Tensor O(d_o, QType::F16, 4, o_shape, true);
 
+    // Default runtime config for the dispatch (microbench — no overrides).
+    const RuntimeConfig rcfg;
+
     // Select kernel path
     auto run_kernel = [&]() {
         if (use_cutlass) {
             // Use runtime dispatch (tries MXFP4 -> FP8 -> FP16 FMHA -> Blackwell WMMA)
-            attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream);
+            attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream, rcfg);
             return;
         }
         flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream);
