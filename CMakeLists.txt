@@ -180,6 +180,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/hadamard.cu
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
+    src/compute/mmq_q4k_hmma.cu
 )
 
 if(IMP_USE_CUTLASS)
@@ -251,6 +252,7 @@ set(IMP_EXEC_SOURCES
     src/exec/gemm_kernel_gguf.cu
     src/exec/gemm_kernel_generic_dequant.cu
     src/exec/gemm_kernel_q4k_imma.cu
+    src/exec/gemm_kernel_q4k_hmma.cu
     src/exec/gemm_scratch.cu
     src/exec/executor_workspace.cu
     src/exec/executor_workspace_buffers.cu
@@ -502,6 +504,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_bench.cu
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
+        tests/test_mmq_q4k_hmma.cu
         tests/test_weight_dispatch.cu
     )
 
