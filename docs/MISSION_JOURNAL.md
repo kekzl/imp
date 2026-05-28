@@ -7,11 +7,25 @@
 
 ## RESUME HERE (always current)
 
-**Session start:** 2026-05-29
-**Phase:** Ground-truth establishment (build + scoreboard not yet up).
-**GPU at start:** RTX 5090, 29°C, 3% util, 907 MiB used — cold/idle, good baseline.
-**Build:** kicked off `docker build -t imp:test .` in background (log `/tmp/imp_build.log`).
-**No prior journal/scoreboard existed** — this is a fresh mission start.
+**Session:** 2026-05-29. Branch `mission/sm120-best` (off main).
+**Phase:** Optimization loop. LEAD-1 LANDED (commit 817fa25). Attacking LEAD-2 next.
+**Build:** `imp:test` green w/ LEAD-1. Tests green. Scoreboard + llama.cpp measured (below).
+
+**LANDED this session:**
+- **LEAD-1 (817fa25): NVFP4 decode cache for FP16/BF16 lm_head.** Broad decode win across
+  non-hybrid NVFP4 fleet: Qwen3-8B +16%, Qwen3-14B +12.6%, Phi-4 +8.3%, Gemma-4-26B +11.3%,
+  Qwen3-30B-A3B +2.9%. Hybrid Qwen3.6-35B correctly excluded (unchanged). NVFP4 dense decode
+  now BEATS GGUF same-model and crushes llama.cpp. All correctness gates green.
+
+**NEXT (priority order):**
+1. **LEAD-2: NVFP4 MoE decode.** Qwen3-30B-A3B NVFP4 175 vs imp-Q4_K_M 276 vs llama.cpp 317.
+   lm_head fix only gave +2.9% → gap is in per-expert GEMVs. PROFILE NEXT to find cause.
+2. MoE/hybrid GGUF decode loss to llama.cpp (Qwen3.6-35B 158 vs 229).
+3. GGUF prefill 1.3-2.4× behind llama.cpp (hard: custom MMQ kernel).
+4. Stand up vLLM NVFP4 to confirm imp's NVFP4 prefill/decode lead is real.
+
+**GPU at start:** RTX 5090, 29°C idle. Host nsys works (recipe in memory nsys-host-to-container;
+use `--no-cuda-graphs` imp flag + `--trace=cuda`, --user root, /tmp/nsys_out chmod 777).
 
 **Next actions:**
 1. ✅ Build green, tests green, scoreboard measured (see below). llama.cpp bench bg-agent running.
