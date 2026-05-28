@@ -78,7 +78,14 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
         // compact NVFP4 decode cache (0.5 B/elem, fast + coherent) and prefill
         // via on-the-fly Q*_K→FP16 dequant (executor_kernels gemm_via_handle_) —
         // far less VRAM than double-caching FP16+NVFP4, leaving headroom for KV.
-        if (wcache_.nvfp4_decode_mode > 0 &&
+        // GEMMA3 exception: keep its nvfp4_beneficial weights FP16-cached so the
+        // Phase-3 NVFP4 decode cache is built FROM the FP16 copy, not from scratch
+        // (source Q*_K dequant). Skipping FP16 here forces the from-scratch NVFP4
+        // build, which corrupts Gemma-3 decode (first decode step emits token 0 /
+        // <pad> — verified: pre-#461 FP16-backed Gemma-3 is coherent, #461's skip
+        // regressed gemma-3-12b-it-Q4_K_M to "The"→<pad>). Qwen3 Q6_K/Q8_0 build
+        // NVFP4 from scratch fine, so this is GEMMA3-arch-specific.
+        if (wcache_.nvfp4_decode_mode > 0 && cfg.arch != ModelArch::GEMMA3 &&
             nvfp4_beneficial(qtype, runtime_config().gemm.nvfp4_decode_all))
             return;
         if (!fp8_unavailable && !plan_routes_to_fp16(kind, qtype))
