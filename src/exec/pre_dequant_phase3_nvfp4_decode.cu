@@ -104,6 +104,66 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
 }
 
+void GraphExecutor::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
+    if (!runtime_config().gemm.nvfp4_lm_head)
+        return;
+
+    const Tensor& lm = model_->output_proj();
+    // Only handle a native-precision (FP16/BF16) LM head that lives on device.
+    // A quantized-source LM head (Q*_K/Q8_0) is already routed through
+    // collect_candidates → nvfp4_beneficial, so skip it here.
+    if (!lm.data || !lm.on_device)
+        return;
+    if (lm.qtype != QType::F16 && lm.qtype != QType::BF16)
+        return;
+    if (lm.ndim != 2)
+        return;
+    const int rows = static_cast<int>(lm.shape[0]);  // vocab_size
+    const int cols = static_cast<int>(lm.shape[1]);  // d_model
+    if (cols % 16 != 0)
+        return;
+    // Already cached (e.g. tied embeddings already promoted, or re-entry).
+    if (wcache_.nvfp4.count(lm.data))
+        return;
+
+    // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the
+    // recurrent state; NVFP4 there degrades coherence (memory
+    // lm_head_only_nvfp4_qwen3_6_refuted). Detect via any GDN/SSM layer.
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        if (L.ssm_in.data || L.ssm_out.data || L.gdn_gate.data) {
+            IMP_LOG_INFO("NVFP4 LM head: skipped (GDN/SSM-hybrid model)");
+            return;
+        }
+    }
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
+    NvFP4QuantResult result;
+    quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+    float h_tscale = 1.0f;
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+    result.tensor_scale = h_tscale;
+    result.N = rows;
+    result.K = cols;
+    wcache_.nvfp4[lm.data] = result;
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    const double nvfp4_mib =
+        (static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16) /
+        (1024.0 * 1024.0);
+    IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
+                 rows, cols, nvfp4_mib);
+}
+
 void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
     const ModelConfig& cfg, const VRAMBudget& budget,
     size_t& remaining_budget, cudaStream_t stream) {
@@ -162,6 +222,12 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
     if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
         nvfp4_decode_second_pass_(budget, stream, dctx);
     }
+
+    // Native-NVFP4 models store the LM head in FP16/BF16 — quantize it to an
+    // NVFP4 decode-cache entry so decode uses the fast GEMV instead of a cuBLAS
+    // FP16 GEMV over vocab×d_model (~0.78 ms/token, ~19% of decode on Qwen3-8B).
+    // Run after dense quantize so the entry is committed before CUTLASS convert.
+    nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
     if (!wcache_.nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
         nvfp4_decode_convert_cutlass_(remaining_budget, stream);
