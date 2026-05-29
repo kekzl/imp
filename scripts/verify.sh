@@ -244,6 +244,29 @@ else
                 else
                     pass "prefill within ${PRE_THR}% threshold"
                 fi
+
+                # ---- long-context prefill (pp4096, single-chunk) ----
+                # Crosses the cuBLAS→FMHA threshold so it exercises the
+                # register-resident FA2 kernel (attention.fmha_fa2=on default).
+                # Guards the FA2 prefill win; warn-only like pp512 (prefill noise).
+                BL_PP4096=$(jq -r '.metrics.prefill_tps.pp4096 // empty' "$BASELINE")
+                if [ -n "$BL_PP4096" ]; then
+                    ERR2=$(mktemp)
+                    "$BIN" --model "$MODEL_PATH" --bench --bench-pp 4096 --bench-reps $REPS \
+                          --prefill-chunk-size 0 --max-tokens 1 --temperature 0 >/dev/null 2>"$ERR2"
+                    PP4096=$(grep -oP '^pp\s+4096\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR2" | head -1)
+                    rm -f "$ERR2"
+                    if [ -n "$PP4096" ]; then
+                        P4_DELTA=$(awk -v cur="$PP4096" -v base="$BL_PP4096" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                        P4_REG=$(awk -v d="$P4_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+                        printf "  prefill pp4096= %7.2f tok/s  (baseline %7.2f, delta %+s%%, FA2)\n" "$PP4096" "$BL_PP4096" "$P4_DELTA"
+                        if [ "$P4_REG" = "1" ]; then
+                            echo "${YLW}WARN${RST} long-ctx prefill (pp4096/FA2) regression > ${PRE_THR}% — check attention.fmha_fa2"
+                        else
+                            pass "long-ctx prefill (pp4096/FA2) within ${PRE_THR}% threshold"
+                        fi
+                    fi
+                fi
             fi
         fi
     fi

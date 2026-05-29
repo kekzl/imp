@@ -53,20 +53,28 @@ median() {
 # `imp-cli --bench` invocation so cuBLAS algo selection resets between.
 run_trial() {
     local pp_size="$1"
-    local prefix="$2"  # "pp" or "tg"
+    local prefix="$2"      # "pp" or "tg"
+    local chunk="${3:-}"   # optional --prefill-chunk-size
+    local chunk_arg=()
+    [ -n "$chunk" ] && chunk_arg=(--prefill-chunk-size "$chunk")
     $CLI --model "$MODEL" --bench --bench-pp "$pp_size" --bench-reps "$REPS" \
-        --max-tokens 128 --temperature 0 2>&1 | extract_tps "^$prefix"
+        "${chunk_arg[@]}" --max-tokens 128 --temperature 0 2>&1 | extract_tps "^$prefix"
 }
 
 pp128_samples=$(mktemp)
 pp512_samples=$(mktemp)
+pp4096_samples=$(mktemp)
 tg128_samples=$(mktemp)
-trap 'rm -f "$pp128_samples" "$pp512_samples" "$tg128_samples"' EXIT
+trap 'rm -f "$pp128_samples" "$pp512_samples" "$pp4096_samples" "$tg128_samples"' EXIT
 
 for trial in $(seq 1 "$N_TRIALS"); do
     echo "  trial $trial/$N_TRIALS..."
     run_trial 128 pp >> "$pp128_samples"
     run_trial 512 pp >> "$pp512_samples"
+    # pp4096 with single-chunk (--prefill-chunk-size 0) so it crosses the
+    # cuBLAS→FMHA threshold and exercises the register-resident FA2 kernel
+    # (attention.fmha_fa2=on default). verify.sh benches it the same way.
+    run_trial 4096 pp 0 >> "$pp4096_samples"
     run_trial 128 tg >> "$tg128_samples"
     if [ "$trial" -lt "$N_TRIALS" ]; then
         sleep "$COOLDOWN_SEC"
@@ -75,10 +83,12 @@ done
 
 pp128=$(median < "$pp128_samples")
 pp512=$(median < "$pp512_samples")
+pp4096=$(median < "$pp4096_samples")
 tg128=$(median < "$tg128_samples")
 
 echo "  pp128 samples: $(paste -sd, "$pp128_samples")  → median $pp128"
 echo "  pp512 samples: $(paste -sd, "$pp512_samples")  → median $pp512"
+echo "  pp4096 samples: $(paste -sd, "$pp4096_samples")  → median $pp4096"
 echo "  tg128 samples: $(paste -sd, "$tg128_samples")  → median $tg128"
 
 # Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
@@ -108,7 +118,8 @@ cat > "$OUTPUT" << EOF
   "metrics": {
     "prefill_tps": {
       "pp128": $pp128,
-      "pp512": $pp512
+      "pp512": $pp512,
+      "pp4096": $pp4096
     },
     "decode_tps": {
       "tg128": $tg128

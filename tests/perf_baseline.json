@@ -3,14 +3,15 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-05-29T13:04:49Z",
+  "timestamp": "2026-05-29T15:12:50Z",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
   "reps": 5,
   "n_trials": 5,
   "metrics": {
     "prefill_tps": {
-      "pp128": 3419.78,
-      "pp512": 7579.79
+      "pp128": 3647.36,
+      "pp512": 8259.59,
+      "pp4096": 8300.55
     },
     "decode_tps": {
       "tg128": 258.87
