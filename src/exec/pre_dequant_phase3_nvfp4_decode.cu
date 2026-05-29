@@ -1250,11 +1250,97 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
             return false;
         if (packed.data && wcache_.nvfp4_moe.count(packed.data))
             return false;
-        // Phase 0 already registered per-expert NVFP4+CUTLASS entries —
-        // skip the contiguous copy (saves ~15 GiB VRAM on 35B MoE).
-        // Batch MoE decode uses per-expert dispatch instead.
-        if (wcache_.cutlass_nvfp4.count(experts[0].data))
-            return true;
+        // ZERO-COPY decode cache (LEAD-2): NVFP4-prequant SafeTensors upload the
+        // per-expert weights AND scales into contiguous VRAM (one buffer per
+        // projection, sliced per expert). When that holds we point an
+        // NvFP4MoEQuantResult directly at the existing buffers — no 15 GiB
+        // contiguous duplicate, no per-expert copy. Only the tiny per-expert
+        // tensor_scales array is allocated. This engages the fast
+        // gemv_nvfp4_moe_* decode kernels (base + expert_stride) instead of the
+        // CUTLASS grouped GEMM, which under-utilizes the GPU at M=1 decode.
+        // Guarded by a strict contiguity + shape check; on any mismatch we fall
+        // through to leaving the experts on the CUTLASS path (prior behavior).
+        if (wcache_.cutlass_nvfp4.count(experts[0].data)) {
+          if (runtime_config().gemm.nvfp4_moe_decode) {
+            const int ne_z = static_cast<int>(experts.size());
+            const int64_t N_z = experts[0].shape[0];
+            const int64_t Kp_z = experts[0].shape[1];
+            const int64_t K_z = Kp_z * 2;
+            if (K_z % 16 == 0 && N_z > 0 && experts[0].scales) {
+                const size_t e_packed = static_cast<size_t>(N_z) * Kp_z;
+                const size_t e_ms = static_cast<size_t>(N_z) * (K_z / 16);
+                // Data must be contiguous to borrow it zero-copy (the big ~15 GiB
+                // win). Scales are small (~1/16 of weights) — copy them into a
+                // contiguous buffer if they aren't already, so non-contiguous
+                // scale uploads still take the fast path.
+                bool data_contig = true, scales_contig = true, shapes_ok = true;
+                std::vector<float> h_ts(ne_z);
+                for (int e = 0; e < ne_z; ++e) {
+                    const auto& w = experts[e];
+                    if (!w.data || !w.scales || w.shape[0] != N_z || w.shape[1] != Kp_z) {
+                        shapes_ok = false;
+                        break;
+                    }
+                    if (static_cast<const char*>(w.data) !=
+                        static_cast<const char*>(experts[0].data) + static_cast<size_t>(e) * e_packed)
+                        data_contig = false;
+                    if (static_cast<const char*>(w.scales) !=
+                        static_cast<const char*>(experts[0].scales) + static_cast<size_t>(e) * e_ms)
+                        scales_contig = false;
+                    h_ts[e] = w.tensor_scale;
+                }
+                if (shapes_ok && data_contig) {
+                    const size_t total_ms = static_cast<size_t>(ne_z) * e_ms;
+                    void* ms_base = experts[0].scales;
+                    void* d_ms_copy = nullptr;
+                    if (!scales_contig) {
+                        d_ms_copy = vram_alloc_force(vram_alloc_, total_ms, "nvfp4_moe_ms_ref");
+                        if (d_ms_copy) {
+                            for (int e = 0; e < ne_z; ++e)
+                                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                    static_cast<char*>(d_ms_copy) + static_cast<size_t>(e) * e_ms,
+                                    experts[e].scales, e_ms, cudaMemcpyDeviceToDevice, stream));
+                            ms_base = d_ms_copy;
+                        }
+                    }
+                    float* d_ts = static_cast<float*>(
+                        vram_alloc_force(vram_alloc_, static_cast<size_t>(ne_z) * sizeof(float),
+                                         "nvfp4_moe_ts_ref"));
+                    if ((scales_contig || d_ms_copy) && d_ts) {
+                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(),
+                                                           static_cast<size_t>(ne_z) * sizeof(float),
+                                                           cudaMemcpyHostToDevice, stream));
+                        NvFP4MoEQuantResult r;
+                        r.packed_data = experts[0].data;  // borrowed (resident, contiguous)
+                        r.micro_scales = ms_base;         // borrowed or small contiguous copy
+                        r.tensor_scales = d_ts;
+                        r.n_experts = ne_z;
+                        r.N = N_z;
+                        r.K = K_z;
+                        r.expert_stride_packed = e_packed;
+                        r.expert_stride_ms = e_ms;
+                        r.borrowed = true;  // data borrowed from model; scales/ts via VRAMAllocator
+                        int64_t shp[3] = {static_cast<int64_t>(ne_z), N_z, K_z};
+                        packed = Tensor(experts[0].data, QType::NVFP4, 3, shp, /*on_device=*/true);
+                        wcache_.nvfp4_moe[experts[0].data] = r;
+                        dctx.nvfp4_moe_count++;
+                        IMP_LOG_INFO("NVFP4 MoE native: data-borrow decode cache (ne=%d N=%lld K=%lld, "
+                                     "scales_contig=%d; gemv_nvfp4_moe fast decode)",
+                                     ne_z, (long long)N_z, (long long)K_z, (int)scales_contig);
+                        return true;
+                    }
+                    if (d_ms_copy)
+                        vram_free(vram_alloc_, d_ms_copy);
+                }
+                IMP_LOG_INFO("NVFP4 MoE native: zero-copy decode declined (shapes_ok=%d data_contig=%d) — "
+                             "leaving on CUTLASS path",
+                             (int)shapes_ok, (int)data_contig);
+            }
+          }
+          // Flag off, non-contiguous data, or alloc failed: leave experts on the
+          // CUTLASS path (Phase-0 already registered per-expert NVFP4+CUTLASS).
+          return true;
+        }
         if (moe_budget_exhausted)
             return false;
 

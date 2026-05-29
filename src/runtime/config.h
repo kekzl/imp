@@ -218,6 +218,13 @@ struct RuntimeConfig {
         // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted). Legacy
         // env: IMP_NO_NVFP4_LM_HEAD=1 to disable.
         bool nvfp4_lm_head = true;
+        // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
+        // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the
+        // already-resident contiguous expert data + scales, instead of the
+        // CUTLASS grouped-GEMM (which under-utilizes the GPU at M=1). +54-80%
+        // MoE decode on Qwen3-30B-A3B / Coder-30B / Gemma-4-26B. Prefill stays
+        // on CUTLASS. Legacy env: IMP_NO_NVFP4_MOE_DECODE=1 to disable.
+        bool nvfp4_moe_decode = true;
     } gemm;
 
     // (RuntimeConfig::Gemma4 lived here through Phase 4 of the architecture
