@@ -210,6 +210,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.nvfp4_decode_all = parse_bool(val, cfg.gemm.nvfp4_decode_all);
     else if (eq("gemm.nvfp4_lm_head"))
         cfg.gemm.nvfp4_lm_head = parse_bool(val, cfg.gemm.nvfp4_lm_head);
+    else if (eq("gemm.nvfp4_moe_decode"))
+        cfg.gemm.nvfp4_moe_decode = parse_bool(val, cfg.gemm.nvfp4_moe_decode);
 
     // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5
     // Track A of the architecture refactor. Per-model knobs no longer live
@@ -322,6 +324,11 @@ void seed_from_env(RuntimeConfig& cfg) {
     // NVFP4 decode cache (default ON).
     if (const char* e = std::getenv("IMP_NO_NVFP4_LM_HEAD"))
         cfg.gemm.nvfp4_lm_head = (std::atoi(e) == 0);
+
+    // gemm.nvfp4_moe_decode — IMP_NO_NVFP4_MOE_DECODE: '1' disables the fast
+    // per-expert NVFP4 MoE decode path (default ON).
+    if (const char* e = std::getenv("IMP_NO_NVFP4_MOE_DECODE"))
+        cfg.gemm.nvfp4_moe_decode = (std::atoi(e) == 0);
 
     // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))
