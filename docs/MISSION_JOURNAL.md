@@ -294,3 +294,18 @@ NEXT: re-sweep NVFP4 dense models to capture the win; then LEAD-2 (NVFP4 MoE dec
 - **CONCLUSION this session: decode WON on NVFP4 (shipped #465+#469). All remaining gaps are
   hard/research (GGUF prefill MMQ architecturally capped; GGUF Q4_K decode dp4a-bound) or pending
   (vLLM NVFP4 prefill comparison, GPU-occupied). Next concrete action gated on vLLM result.**
+
+### 2026-05-29 — Iteration 5: vLLM measured → NVFP4 PREFILL is the next real gap
+vLLM 0.21.0 (FlashInfer-CUTLASS NVFP4, sm_120 verified) batch=1, measured this session:
+- **DECODE: imp NVFP4 BEATS vLLM on all (with LEAD-1/2 shipped):** Qwen3-8B 277 vs 142 (+95%),
+  Qwen3-14B 166 vs 97 (+71%), **Qwen3-30B-A3B MoE 307 vs 203 (+51%)**. LEAD-2 FLIPPED the MoE
+  (vLLM beat imp 203 vs 158 PRE-fix). imp NVFP4 decode = best-in-class vs llama.cpp AND vLLM. ✅
+- **CORRECTION: vLLM MoE-NVFP4 is NOT broken on sm_120** (vLLM 0.21.0 uses FLASHINFER_CUTLASS MoE,
+  not Marlin — the prior research/memory "broken on sm_120" is STALE). imp still beats it on decode.
+- **PREFILL: imp NVFP4 LOSES to vLLM** (imp pp2048 vs vLLM ~2267-tok prompt):
+  Qwen3-8B 26780 vs 35080 (−24%), **Qwen3-14B 14581 vs 24440 (−40%)**, Qwen3-30B 25800 vs 29450 (−12%).
+  imp Qwen3-14B pp512=17961 but pp2048=14581 (DROPS) → attention quadratic cost dominates long prefill;
+  vLLM's FlashInfer prefill attention likely the edge. **THIS is the next target: NVFP4 prefill, esp.
+  the dense attention prefill path.** (Caveat: re-measure imp with cooldown/multi-trial — cuBLAS/CUTLASS
+  prefill ±2.6× — but the gap is consistent + large.)
+- Decode mission goal essentially MET on NVFP4 (recommended path). Frontier now = NVFP4 prefill.
