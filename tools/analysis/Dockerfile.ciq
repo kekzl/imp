@@ -1,0 +1,9 @@
+# Reusable CompileIQ tuning image: 13.3 toolkit (ptxas/nvcc/tileiras) + compileiq.
+# Used for ptxas-control auto-tuning of imp's hand-written hot kernels.
+# Build: docker build -f tools/analysis/Dockerfile.ciq -t imp:ciq .
+FROM imp:builder-133
+RUN apt-get update -qq && apt-get install -y -qq python3-venv git >/dev/null && \
+    python3 -m venv /opt/ciq && \
+    /opt/ciq/bin/pip install --quiet --no-cache-dir compileiq && \
+    /opt/ciq/bin/python -c "import compileiq; print('compileiq OK')"
+ENV PATH=/opt/ciq/bin:${PATH}

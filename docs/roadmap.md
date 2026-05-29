@@ -67,6 +67,17 @@ for imp's profile (batch=1, few dominant hotspots). **Plan:** after the FA2 pref
 kernel has a measured baseline, run CompileIQ on it (and on the NVFP4 GEMV/GEMM hotspots)
 as a last-mile squeeze; ship the ACF if it survives the perf gate + cooldown methodology.
 
+**RESULT (2026-05-29) — REFUTED, no win.** CompileIQ is operable (v1.0.0; `PtxasSearchSpace(version="13.3")`
+downloads its search space). But the ptxas space is *flat* on imp's hotspots. Direct sweep of the
+search space's decisive axes on the FA2 kernel (`maxrregcount` 64–200, `--def-load-cache` ca/cg/cs,
+`--allow-expensive-optimizations`, `--use_fast_math`) → all within **±0.4%** of baseline (pp4096 ≈
+19.6k tok/s, Qwen3-14B-NVFP4). The kernel is **smem-occupancy-bound** (REG:144 but SHARED:40 KiB; cutting
+regs 144→64 moved pp by 0%) + barrier-bound — ptxas codegen touches neither. NVFP4 decode is CUTLASS-
+generated + HBM-bandwidth-bound (M=1, 64–73% peak) → ptxas cannot add bandwidth. So imp's hand kernels are
+already at their structural limits; CompileIQ's Triton/CUTLASS-style codegen slack isn't there. Reusable
+harness left in tree: `tools/analysis/Dockerfile.ciq` (→ `imp:ciq`) + `tools/analysis/ptxas_sweep.sh` for
+any future codegen-bound kernel. Memory: `compileiq_ptxas_native_refuted_2026_05_29`.
+
 ## Known limitations
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
