@@ -60,11 +60,43 @@ docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
 3. **Online softmax in Tile:** FA2 needs running max/sum + rescale across KV tiles. Determine the cuTile idiom
    (tile-axis reductions, `ct::` exp/max/reduce ops) — official "Tuning Flash Attention ... CUDA Tile" blog + TileGym.
 
-## Status: Phase 0 (Investigation §5) COMPLETE — viability GO, runnable path confirmed.
+## FA2 algorithm → C++ cuda::tiles op mapping (Phase 2 design, grounded in official FA-tuning blog + header)
+Online softmax (FA2), per KV tile j, all ops confirmed present in `crt/cuda_tile.h` C++ API:
+```
+acc  = ct::full<tile<float, shape<TILE_M, TILE_D>>>(0);     // O accumulator
+m_i  = ct::full<tile<float, shape<TILE_M,1>>>(-INF);        // running row max
+l_i  = ct::full<tile<float, shape<TILE_M,1>>>(0);           // running row sum
+q    = qView.load_masked(...);                              // Q tile (once)
+for j in ct::irange(0, Tc):
+  k   = kView.load_masked(..., order transpose);            // K^T tile
+  qk  = ct::mma(q, k, ct::full<...>(0));                    // QK^T  (HMMA.16816 on sm_120)
+  // mask: ct::select(cond_from_ct::iota(), qk, -INF)       // causal/SWA
+  mij = ct::max(m_i, ct::reduce_max(qk, axis=last));        // reduce_max (line 2304) + broadcast
+  alpha = ct::exp2(m_i - mij);                              // exp2 (line 2869)
+  acc = acc * ct::broadcast(alpha);                         // rescale (mutual_broadcast operator*)
+  p   = ct::exp2(qk - ct::broadcast(mij));
+  l_i = l_i * alpha + reduce_sum(p, axis=last);             // reduction-family
+  v   = vView.load_masked(...);
+  acc = ct::mma(p, v, acc);                                 // P·V
+out = acc / ct::broadcast(l_i);                             // ct::div / operator/
+```
+Confirmed C++ builtins: `mma`, `matmul`, `reduce_max`, reduction_result_t family (sum), `exp2`/`exp`, `tanh`
+(softcap), `rsqrt`/`sqrt`, `select`, `iota`, `broadcast`, `reshape`, `extract`, `full`/`ones`, `div`,
+`fma`, `abs`, mutual-broadcast arithmetic operators, `load`/`load_masked`/`store`/`atomic_*`, `partition_view`.
+Tile sizes from blog: 64×64 baseline, 256×128 optimized (autotuned per seqlen). CC 8.x/10.x/11.x/12.x (sm_120 ✓).
 
-## Next step
-Phase 1 (§4.1): establish baselines BEFORE writing the Tile FA2 —
-`git tag baseline/fa2-tile-pre`, freeze `bench/baseline.json` (decode/prefill/long-ctx for the reference
-models incl. Qwen3.6-35B-A3B-NVFP4 decode, Qwen3-Coder MoE prefill, Qwen3-14B-NVFP4 pp4096), capture golden
-logits + a perplexity reference. Then resolve AOT-build-integration (open Q1) with a hello-world tile object
-linked + launched from a host harness, run on GPU, verify correct. Only then start the Tile FA2 kernel skeleton.
+## Status: Phase 0 (Investigation §5) COMPLETE — viability GO (HMMA, runs correctly) + C++ API completeness GO.
+
+## Next step (Phase 1 → 2)
+Investigation + design grounding done. Remaining (multi-week, in order):
+1. **Phase 1 baselines (§4.1):** freeze `bench/baseline.json` (decode/prefill/long-ctx: Qwen3.6-35B-A3B-NVFP4
+   decode, Qwen3-Coder MoE prefill, Qwen3-14B-NVFP4 pp4096, plus a dense + MoE), capture golden logits +
+   perplexity reference. (`baseline/fa2-tile-pre` tag already placed.)
+2. **Decide JIT-vs-AOT deploy + CMake recipe** (open Q1) — a standalone host harness that builds a tile
+   attention kernel TU and launches it on GPU (dev recipe in BREAKTHROUGH section), verified correct.
+3. **Phase 2 — Tile FA2 prefill kernel** (`compute/attention_tile_fa2.cu`, new `--attn-backend=tile` /
+   `attention.attn_backend` flag, default `native`): implement the op-mapping above for fp16 first, numeric
+   parity vs the CPU oracle (reuse `tests/test_fmha_fp8.cu` harness) + vs native; gate on §4.2.
+4. **Phase 3 — paged-decode** path; **Phase 4** — fp8/bf16 dtypes; **Phase 5** — autotune/CompileIQ; report.
+The hand-written register-resident FA2 (PR #477, +20% pp4096, HMMA.16816) is the native baseline the Tile
+path must beat — same HW instruction, so the contest is cuTile codegen/scheduling vs hand-tuned.
