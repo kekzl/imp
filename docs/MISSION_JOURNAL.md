@@ -140,6 +140,43 @@ product gap is "make NVFP4 (recommended path) ≥ GGUF speed" (LEAD-1/2) + prefi
 
 ## Log (timestamped, append-only)
 
+### 2026-05-29 — Iteration 2: attention lead investigated (non-issue) + LEAD-2 de-risked
+**Attention "lead" REFUTED as a real-context win (good — avoided optimizing a non-problem):**
+- pp128 profile showed paged_attention_gqa = 25% at 33µs/call. Root: gqa kernel grid =
+  (batch × n_kv_heads); Qwen3-30B has 4 KV heads → only 4 blocks on 170 SMs (under-occupancy).
+- Diagnostic build confirmed: at ctx128, num_ctx_blocks=5 → max_useful_splits=5/4=1 → num_splits=1
+  → split-K declines (correctly — too few KV blocks) → slow gqa kernel.
+- BUT at ctx≥512 (scoreboard + real usage), num_ctx_blocks≥32 → split-K fires → attention fast.
+- **Lesson: profile MoE decode at pp512, NOT pp128 (short ctx mis-attributes time to attention).**
+  The gqa under-occupancy only hurts the first ~256 decode tokens after a very short prompt — low
+  real impact, not worth a risky kernel change. Diagnostic reverted; tree clean.
+
+**LEAD-2 (NVFP4 MoE decode) DE-RISKED — the "15 GiB blocker" was a misread:**
+- `convert_nvfp4_to_cutlass` does `dst.data = src.packed_data // borrowed, not owned` — the
+  standard-packed per-expert NVFP4 DATA is already resident (CUTLASS only adds sfatom scales).
+  The ~15 GiB "blocker" in `cache_moe_native_nvfp4` was the cost of a redundant CONTIGUOUS COPY,
+  not a fundamental need. Per-expert data pointers already exist (CUTLASS device-args d_B_ptrs).
+- So the real fix is a **gemv_nvfp4_moe variant taking per-expert POINTER ARRAYS** (no contiguous
+  copy, ~0 extra data VRAM), reading the existing per-expert packed data + native micro-scales.
+- DATA MAP (confirmed): per-expert registry handle (CUTLASS_NVFP4 tier) `payload.cutlass_nvfp4.weight`
+  = the packed FP4 data (borrowed from native src.packed_data — resident). NATIVE per-row FP8
+  micro-scales are at the original expert Tensor's `.scales` sidecar (Phase-0 set `tmp.micro_scales
+  = w.scales`, pre_dequant_phase0:363) + `.tensor_scale`. payload.cutlass_nvfp4.sf is sfatom layout
+  (WRONG for gemv — need the native .scales).
+- IMPLEMENTATION SPEC (next session, ~300-400 LOC, bounded):
+  1. Confirm native expert `.scales` sidecars are still resident at decode (diagnostic: non-null +
+     plausible). Nothing obvious frees them; Phase-0 promotes, CUTLASS borrows.
+  2. At load build device pointer arrays per layer per projection: {packed_data_ptr[e],
+     native_ms_ptr[e], tensor_scale[e]} for e in 0..n_experts. Tiny VRAM (~128×3×24 B/layer).
+  3. Add gemv_nvfp4_moe_{decode,gate_up,swiglu}_ptrs kernels: index expert via expert_indices →
+     pointer array (vs current contiguous base+stride). Reuse the existing dot_micro_block /
+     warp_k_loop math from nvfp4_gemm.cu verbatim.
+  4. Wire run_moe_decode_fast / can_decode_fast to take this path when experts are CUTLASS_NVFP4
+     (native NVFP4) + M==1. Pointer arrays are static → CUDA-graph safe.
+  5. Validate at **pp512** (not pp128): decode tok/s + 200-tok coherence + no degeneration.
+- Expected: NVFP4 MoE decode ~175 → toward/past Q4_K_M's ~276 (lm_head already NVFP4 via #465).
+
+
 ### 2026-05-29 — Session start
 - Re-read GOAL.md, CLAUDE.md, perf_baseline.json. No existing journal.
 - GPU idle & cool. Kicked off Docker build.
