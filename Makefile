@@ -1,6 +1,11 @@
 # imp test runner targets
 # Usage: make test-unit, make test-gpu, make test-all, make bench
 
+# Fail loudly: a failure anywhere in a piped recipe (e.g. `cmd | tee`) must
+# propagate, never get masked by the exit code of the last pipe stage.
+SHELL := bash
+.SHELLFLAGS := -o pipefail -c
+
 DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
