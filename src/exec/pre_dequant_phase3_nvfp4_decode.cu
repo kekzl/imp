@@ -129,11 +129,14 @@ void GraphExecutor::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the
     // recurrent state; NVFP4 there degrades coherence (memory
     // lm_head_only_nvfp4_qwen3_6_refuted). Detect via any GDN/SSM layer.
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        if (L.ssm_in.data || L.ssm_out.data || L.gdn_gate.data) {
-            IMP_LOG_INFO("NVFP4 LM head: skipped (GDN/SSM-hybrid model)");
-            return;
+    // Opt-in override (gemm.nvfp4_lm_head_gdn) to re-measure the tradeoff.
+    if (!runtime_config().gemm.nvfp4_lm_head_gdn) {
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.ssm_in.data || L.ssm_out.data || L.gdn_gate.data) {
+                IMP_LOG_INFO("NVFP4 LM head: skipped (GDN/SSM-hybrid model)");
+                return;
+            }
         }
     }
 
