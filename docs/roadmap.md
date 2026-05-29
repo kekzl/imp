@@ -28,6 +28,45 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 - **MLA (DeepSeek-V2/V3)** -- latent-vector KV for 64x compression. Design spec: [`specs/2026-05-28-mla-deepseeek-architecture-design.md`](superpowers/specs/2026-05-28-mla-deepseeek-architecture-design.md). Blocked on no local MLA model. Estimated 3-4 weeks.
 
+## Tooling watch -- CUDA Tile for C++ (re-evaluate on 13.3)
+
+NVIDIA CUDA Tile (cuTile / Tile-IR) -- tile-level kernel authoring in C++ where the
+compiler orchestrates the tensor-core MMA + smem layout (Triton-style, but native
+C++). Long-term this could replace imp's hand-written `mma.sync` + smem-layout kernels
+(the FA2 prefill kernel, the NVFP4 grouped GEMM) with far less code.
+
+**CUDA 13.3 flips the two blockers that pinned the prior defer:**
+- **C++ surface shipped** -- was "planned, no date" through 13.2 (Python-only DSL).
+- **sm_120 + FP4** -- 13.3 adds `f4E2M1FN` (FP4 E2M1) and `i4` Tile types for sm_120,
+  i.e. the block-scaled bleeding-edge imp actually uses is now in scope on paper.
+
+**The gate is perf on consumer Blackwell, and the prior evidence is bad:** the only
+published sm_120 measurement (Yadav et al. 2026-05, RTX PRO 6000 = same sm_120a arch)
+showed cuTile fused attention at **0.53× FA2**, while the *same* kernel hit 2.5× FA2 on
+B200 -- a 4.7× cross-arch gap. imp's hand-written FMHA already matches/beats FA2 on
+sm_120. So Tile is not a hot-path migration until a 13.3 cuTile-vs-FA2/CUTLASS
+benchmark **on sm_120** shows ≥parity.
+
+C++ header confirmed in-toolkit: `/usr/local/cuda-13.3/include/cuda_tile.h` (2026-05-29).
+
+**Action (not blocking current FMHA/NVFP4 work):** once 13.3 is in, (1) ~~confirm the C++
+headers ship in-toolkit~~ ✓ done, (2) prototype one *non-hot-path* kernel (e.g. a rowsum/reduce)
+to assess C++ ergonomics + debuggability, (3) micro-benchmark a Tile NVFP4 GEMM and a
+Tile FP4 attention vs the current hand-written kernels on the 5090. Migrate only the
+kernels that win. Full research note + re-eval triggers: memory `tile_ir_readiness_2026_05_09`.
+
+### CompileIQ auto-tuning (CUDA 13.3) -- low-risk, near-term
+
+NVIDIA's new compiler auto-tuner: evolutionary/genetic search over ptxas/nvcc configs
+per kernel, emitting an Advanced Controls File. NVIDIA reports **up to 15% on
+already-optimized Triton-attention + CUTLASS-GEMM kernels**. Unlike CUDA Tile this is
+*not* a rewrite -- it tunes codegen for existing kernels, so it composes with imp's
+hand-written `mma.sync` kernels (mechanism = ptxas/nvcc params; applicability to
+hand-written CUDA C++ to be confirmed, headline examples are Triton/CUTLASS). Strong fit
+for imp's profile (batch=1, few dominant hotspots). **Plan:** after the FA2 prefill
+kernel has a measured baseline, run CompileIQ on it (and on the NVFP4 GEMV/GEMM hotspots)
+as a last-mile squeeze; ship the ACF if it survives the perf gate + cooldown methodology.
+
 ## Known limitations
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.

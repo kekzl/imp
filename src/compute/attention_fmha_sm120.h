@@ -31,4 +31,17 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
                             int q_offset = 0);
 
+// FA2 variant ("echtes FA"): true register-resident FlashAttention-2.
+// QK^T in FP8 E4M3 (m16n8k32), softmax + P kept in REGISTERS (no S/P/O smem
+// round-trip), PV via hand-written mma.sync.m16n8k16 (f16) — exploiting the
+// layout identity between the m16n8 accumulator output and the m16n8k16 A
+// operand, so P feeds PV with no transpose. Only K (fp8) + V (f16) are staged
+// in smem → one __syncthreads per KV tile. Each warp owns 16 query rows and
+// runs its online softmax independently (no cross-warp reduction).
+// Target: long-context prefill where the smem-materializing fp8 kernel is
+// barrier-bound (ncu: 14.5% compute, 75.7% L1/TEX). Head dims: 128 (first).
+bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                            bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                            int q_offset = 0);
+
 }  // namespace imp

@@ -122,6 +122,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.fp8_fmha = val;
     else if (eq("attention.fmha_sm120"))
         cfg.attention.fmha_sm120 = val;
+    else if (eq("attention.fmha_fa2"))
+        cfg.attention.fmha_fa2 = val;
     else if (eq("attention.fmha_prefill_threshold"))
         cfg.attention.fmha_prefill_threshold = parse_int(val, cfg.attention.fmha_prefill_threshold);
     else if (eq("attention.attn_scores_mib"))
@@ -337,6 +339,11 @@ void seed_from_env(RuntimeConfig& cfg) {
         int v = std::atoi(e);
         if (v > 0) cfg.attention.attn_scores_mib = v;
     }
+
+    // attention.fmha_fa2 — IMP_FMHA_FA2: '1' enables the register-resident FA2
+    // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
+    if (const char* e = std::getenv("IMP_FMHA_FA2"))
+        cfg.attention.fmha_fa2 = (std::atoi(e) != 0) ? "on" : "never";
 
     // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))

@@ -386,3 +386,33 @@ tile in shared memory (`S_tile` float[Bq×Bkv], `P_half`) and round-trips it bet
 and close the long-context NVFP4-prefill gap to vLLM/FlashInfer. Also note: header says "WGMMA" but
 sm_120 has no WGMMA — it's WMMA m16n16k16 (→ HMMA), another reason for excess smem traffic; the QK
 already uses mma.sync f8f6f4 but PV still uses WMMA. Multi-day, well-scoped, flag-gate it.
+
+### 2026-05-29 — Iteration 9: "echtes FA" — register-resident FA2 SHIPPED (+20% prefill) + CUDA 13.3 switch
+Picked up the iter8b lever: rewrite the smem-materializing fp8 FMHA into a true FlashAttention-2.
+- **New kernel `fmha_sm120_fa2_kernel<HD>`** (`attention_fmha_sm120.cu`): 8 warps × 16 query rows
+  (Bq=128), each warp runs an INDEPENDENT online softmax — **S, P, and O stay in REGISTERS**, only
+  K(fp8)+V(f16) staged in smem → **1 `__syncthreads`/KV tile** (vs the fp8 kernel's smem-materialized
+  S/P/O + 4 barriers). The transpose-free trick: the m16n8 QK accumulator layout is byte-identical to
+  the m16n8k16 PV A-operand layout, so two adjacent 16×8 S tiles assemble directly into the PV A-frag
+  after in-register softmax. PV via hand-written `mma.sync.m16n8k16` (not `nvcuda::wmma`/HMMA). 144 reg,
+  0 spill, 40 KB smem (vs ~81 KB). head_dim=128 first cut; other HD fall through to fp8 (safe).
+- **Flag-gated** `attention.fmha_fa2` (default "never") / env `IMP_FMHA_FA2=1`; wired into
+  `attention_dispatch.cu` before the fp8 path. Default-off = zero risk until enabled.
+- **Correct:** 7/7 new `FmhaFA2Test` cases vs CPU oracle <5% (causal/non-causal/GQA/multi-tile/long-ctx/
+  SWA/softcap); coherent long-ctx generation (FA2 fires at seq_kv=2582/6328, no degeneration); full
+  attention + GPU suites green.
+- **+20% prefill:** Qwen3-14B NVFP4 pp4096, interleaved ×3 (cuBLAS-drift-controlled, 10 reps): median
+  **15746 → 18915 tok/s (+20.1%)**, all trials +18–22% (>> ±2.6% noise).
+- **ncu confirms the diagnosis + fix** (pp4096, identical 13.3 conditions): fp8 = SM 16.2% / L1TEX 68.0%;
+  **FA2 = SM 23.3% / L1TEX 52.9%** — the smem-round-trip bottleneck (iter8b: 14.5%/75.7%) is relieved
+  exactly as predicted. NOT yet compute-bound (23%): now occupancy-limited (16.6%, 1 block/SM @144 reg)
+  + residual L1TEX (53%, K/V staging + scattered V loads). Headroom remains → next levers: register
+  reduction/CompileIQ (→2 blocks/SM), `ldmatrix.trans` for V, cp.async K/V pipeline, mxf4nvf4 QK (2.6×).
+- **CUDA 13.3 switch (whole project):** Dockerfile builder+runtime → `cuda-toolkit-13-3` (V13.3.33, PTX
+  ISA 9.3; host driver UMD 13.3 + host toolkit 13.3). Full PTX survey 13.2 vs 13.3 @compute_120a =
+  **0 of 247 instructions flipped** (sm_120 ISA is silicon-fixed; no tcgen05/wgmma/TMA from a toolkit
+  bump; cp.async.bulk/.ignore_oob/st.async.b128 stay ❌). Baselines: `docs/ptx-status-2026-05-29-cuda13*-sm120a.md`.
+  Entire GPU suite green under 13.3, 0 regressions. FA2 reg count identical under 13.3 ptxas (no free win).
+- **Roadmap (13.3 tooling):** CUDA Tile **for C++** shipped (`cuda_tile.h` confirmed in-toolkit) — gated
+  on the sm_120 perf question (Yadav et al.: cuTile = 0.53× FA2 on sm_120); CompileIQ auto-tuner (~15%
+  on optimized kernels) queued as last-mile pass on the FA2 kernel. Both in `docs/roadmap.md`.
