@@ -60,6 +60,10 @@ struct NvFP4MoEQuantResult {
     int64_t K = 0;                    // inner dim
     size_t expert_stride_packed = 0;  // N * K/2 bytes per expert
     size_t expert_stride_ms = 0;      // N * K/16 bytes per expert
+    // When true, packed_data/micro_scales/tensor_scales are BORROWED (model
+    // weights or VRAMAllocator sub-allocations), not cudaMalloc'd — so
+    // free_nvfp4_moe_result must NOT cudaFree them (the owner reclaims them).
+    bool borrowed = false;
 };
 
 // Quantize packed 3D expert weights (raw GGML format) to NVFP4.

@@ -700,6 +700,15 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
 }
 
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result) {
+    if (result.borrowed) {
+        // Borrowed (model weights / VRAMAllocator sub-allocations) — the owner
+        // reclaims this memory; cudaFree here would be invalid / a double-free.
+        result.packed_data = nullptr;
+        result.micro_scales = nullptr;
+        result.tensor_scales = nullptr;
+        result.n_experts = 0;
+        return;
+    }
     if (result.packed_data) {
         IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
         result.packed_data = nullptr;

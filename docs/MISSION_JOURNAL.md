@@ -140,6 +140,30 @@ product gap is "make NVFP4 (recommended path) ≥ GGUF speed" (LEAD-1/2) + prefi
 
 ## Log (timestamped, append-only)
 
+### 2026-05-29 — Iteration 3: LEAD-2 LANDED (NVFP4 MoE decode, zero-copy fast path) ✅
+The "15 GiB blocker" was a misread (data is borrowed by CUTLASS = already resident). Diagnostic
+proved per-expert NVFP4 packed DATA is contiguous in VRAM; native scales resident but NOT
+contiguous. Fix: `cache_moe_native_nvfp4` now BORROWS the contiguous expert data (zero copy) +
+copies only the small scales (~1/16) into a contiguous buffer + a tiny per-expert tensor_scales
+array, building an NvFP4MoEQuantResult that points at the existing data. This engages the existing
+fast `gemv_nvfp4_moe_*` decode kernels (base+stride) instead of the CUTLASS grouped GEMM (which
+under-utilizes the GPU at M=1). Added `borrowed` flag to NvFP4MoEQuantResult so free_nvfp4_moe_result
+skips cudaFree on borrowed/VRAMAllocator pointers (fixed a teardown double-free). Config
+`gemm.nvfp4_moe_decode` (default on); `IMP_NO_NVFP4_MOE_DECODE=1` disables.
+
+**Measured (pp512, reps 6-8) — decode tok/s before → after:**
+- Qwen3-30B-A3B NVFP4: 170.7 → **307.5 (+80%)** — now > Q4_K_M 276, ≈ llama.cpp 317.
+- Qwen3-Coder-30B NVFP4: 170.9 → **307.8 (+80%)**.
+- Gemma-4-26B NVFP4: 160.2 → **258.1 (+61%)** — **beats llama.cpp Q4_K_M 212 by +22%**.
+- Qwen3.6-35B-A3B hybrid NVFP4: 150.2 → **228.5 (+52%)** — **now matches llama.cpp 229** (was −31%).
+
+**Correctness ALL GREEN:** greedy output token-for-token IDENTICAL ON(gemv) vs OFF(CUTLASS) on 30B
+(numerically equivalent path); all models coherent incl. hybrid (GDN state intact) + Gemma-4 ("Paris");
+zero error-scan hits; full GPU test suite PASS; flag A/B clean (307 vs 167); prefill unaffected; no OOM.
+**Finding: MoE expert decode (not just FP16 SSM) was the dominant hybrid bottleneck — corrects
+qwen3_6_35b_a3b_nvfp4_full_profile.** NVFP4 MoE/hybrid decode is now competitive-to-winning vs llama.cpp.
+
+
 ### 2026-05-29 — Iteration 2: attention lead investigated (non-issue) + LEAD-2 de-risked
 **Attention "lead" REFUTED as a real-context win (good — avoided optimizing a non-problem):**
 - pp128 profile showed paged_attention_gqa = 25% at 33µs/call. Root: gqa kernel grid =
