@@ -118,3 +118,12 @@ path must beat — same HW instruction, so the contest is cuTile codegen/schedul
 - **Open: head-to-head vs the hand-written FA2 (PR #477) at identical shape** — needs the hand kernel
   standalone or both wired in imp. THIS decides default-switch vs `--attn-backend=tile`-only. Next: tile-size
   sweep (exp2/fast-math, 128×128 / 256×128) to find naive-tuned ceiling, then the head-to-head.
+
+### Tuning probes (2026-05-29) — naive knobs don't lift it; needs the autotuner
+- `exp2` + `--use_fast_math` (vs `ct::exp`): **flat** (24.1 vs 24.4 TFLOPS) → softmax math is NOT the bottleneck.
+- TN 64→256 (bigger KV tile): **worse** (14.6 TFLOPS) → larger tiles raise smem pressure / cut occupancy.
+- ⇒ The ~24 TFLOPS naive ceiling is structural (occupancy / smem / scheduling), not knob-tunable by hand.
+  Reaching competitiveness needs the cuTile **autotuner (TileGym)** + **CompileIQ**, i.e. the real Phase-5
+  tuning effort — consistent with the prior datapoint (Yadav: cuTile ≈ 0.53× FA2 on sm_120). 
+- **Provisional steer:** Tile likely lands as optional `--attn-backend=tile` (NOT default) unless autotuning
+  closes the gap to the hand-written FA2 (PR #477). Exactly the conditional GOAL §1/§4.4 anticipated.
