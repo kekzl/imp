@@ -136,6 +136,28 @@ product gap is "make NVFP4 (recommended path) ≥ GGUF speed" (LEAD-1/2) + prefi
 
 ## Log (timestamped, append-only)
 
+### 2026-05-29 — Iteration 4: GGUF prefill profiled; vLLM bringup dispatched
+- **GGUF prefill profile (Qwen3-8B Q8_0 pp512, eager):** CUTLASS f16 GEMM 40.5% + 64x256/64x64
+  variants ~17% (≈58% GEMM total) + **dequant_q8_0_kernel 30.3%** (Q8_0→FP16 before the GEMM).
+  llama.cpp MMQ matmuls on quantized data directly → skips the 30% dequant AND halves weight
+  bandwidth. Structural gap = need a direct quantized-matmul (MMQ) prefill kernel. Prior imp MMQ
+  attempts (mmq_q4k_v2) gave −4% e2e for DECODE; PREFILL (M=512) is the untried regime where INT8
+  IMMA / CUTLASS mixed-input could win — but it's multi-day. DEPRIORITIZED: NVFP4 prefill (imp
+  16-24k) already crushes llama GGUF and is the recommended path; GGUF prefill only affects
+  GGUF-only users. Documented for a future dedicated MMQ-prefill effort.
+- Dispatched bg agent to stand up **vLLM NVFP4** (dense Qwen3-8B/14B + MoE 30B) for the one
+  NVFP4-capable competitor comparison — defines whether imp's NVFP4 prefill lead is real.
+- **Gemma-3-12B Q4_K_M degeneration memory is STALE — model works** ("Paris. It's also its
+  largest city and a global center for art, fashion, gastronomy, and culture", 126 tok/s). Bogus
+  scoreboard tg=1588 was a transient artifact. True: tg128=126, pp512=4181. But imp LOSES it to
+  llama.cpp (decode 126 vs 142 −11%, prefill 4181 vs 8850). Profile: all-Q4_K, decode is dp4a FFN
+  GEMVs (53%, bandwidth-bound ~roofline) + Q4_K lm_head dp4a. `nvfp4_decode_all` REFUTED here —
+  Q4_K is already 4.5 bits, NVFP4 gives 0 bandwidth win ("no eligible weights, all ≤4.5 bits").
+  So Gemma-3-12B decode gap = dp4a-kernel efficiency vs llama MMQ-decode (large vocab + sliding
+  window) — hard, model-specific, no clean win. Same class as Qwen3-30B Q4_K_M decode (276 vs 317).
+- **Decode front status: WON on NVFP4 (recommended path) across the fleet. Remaining decode losses
+  are GGUF-Q4_K-only (dp4a vs MMQ) and modest. Remaining clear gap = GGUF prefill (MMQ, multi-day).**
+
 ### 2026-05-29 — Iteration 3: LEAD-2 LANDED (NVFP4 MoE decode, zero-copy fast path) ✅
 The "15 GiB blocker" was a misread (data is borrowed by CUTLASS = already resident). Diagnostic
 proved per-expert NVFP4 packed DATA is contiguous in VRAM; native scales resident but NOT
