@@ -83,10 +83,14 @@ struct RuntimeConfig {
         int fmha_prefill_threshold = -1;  // -1 = auto (derived from S-matrix capacity)
         std::string fmha_sm120 = "auto";
         // Register-resident FA2 prefill kernel (fmha_sm120_fa2_kernel). When "on"
-        // it replaces the smem-materializing FP8 FMHA for supported configs
-        // (head_dim=128) — keeps S/P/O in registers, 1 __syncthreads/KV tile.
-        // "never" (default) keeps the legacy FP8 FMHA. Legacy env: IMP_FMHA_FA2.
-        std::string fmha_fa2 = "never";
+        // (default) it replaces the smem-materializing FP8 FMHA for supported
+        // configs (F16, head_dim=128) — keeps S/P/O in registers, 1
+        // __syncthreads/KV tile. Measured +13-19% long-ctx NVFP4 prefill
+        // (Qwen3-14B, seq>=4096) at chunk=512; greedy output token-identical to
+        // the FP8 path (validated 2026-05-29). Declines (-> FP8 FMHA) for
+        // hd!=128 (Gemma), non-F16, or insufficient smem, so it's safe by
+        // default. "never" forces the legacy FP8 FMHA. Legacy env: IMP_FMHA_FA2.
+        std::string fmha_fa2 = "on";
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
