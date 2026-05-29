@@ -31,15 +31,36 @@ CUDA Tile C++ structural viability for FA2 on sm_120a, evidence-based:
 - Probes: `tools/analysis/tile_probe.cu` (fp32 tiny → scalar FMA, ran but WSL-JIT no-op), `tile_probe_mma.cu`
   (fp16 → HMMA, AOT SASS inspected). Both committed as investigation artifacts.
 
+### BREAKTHROUGH — Tile kernel RUNS CORRECTLY on sm_120a (2026-05-29)
+Tile matmul executed on the RTX 5090, `max_abs_err=0`, `launch err: no error`. The earlier
+"PTX JIT compiler library not found" was a **WSL2 driver-injection mismatch**: `--gpus all` injected a
+STALE WSL driver path (`nv_dispi.inf_amd64_c8bc842500fab35b`) while the live host driver is
+`...b7cca8360c0d57e9`. Fix = mount the live WSL driver tree + point the loader at it.
+
+**WORKING DEV RUN RECIPE (Tile JIT path, for build/test loop):**
+```
+CUR=/usr/lib/wsl/drivers/nv_dispi.inf_amd64_b7cca8360c0d57e9   # = `ls -d /usr/lib/wsl/drivers/nv_dispi*` (live one)
+docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -v /usr/lib/wsl:/usr/lib/wsl:ro -e LD_LIBRARY_PATH="$CUR:/usr/lib/wsl/lib" \
+  -w /src impdev:ncu  ./build/<binary>
+```
+(Note: the inf hash can change across host driver updates — recompute `CUR` each session.)
+- Compile: `nvcc -std=c++20 --enable-tile -arch=sm_120a` (image `imp:builder-133`, toolkit 13.3.33).
+- Host toolkit is only 13.2 (no 13.3) → cannot compile tile on host; Docker `imp:builder-133` is the only tile-capable toolchain.
+
 ### Open integration questions (resolve in Phase 1)
-1. **AOT build integration:** how to embed tileiras-assembled SASS into a linkable object the host can launch
-   (the default `--enable-tile` embeds tile IR → JIT). `--tilecubin`/`--tilefatbin` produce device-only artifacts;
-   need the host-linkable form (separate compile + `cuModuleLoad`, or an nvcc flag that embeds AOT tile SASS in the
-   fatbin). MUST be solved before any perf claim — and CMake must do it for `sm_120a` (+ `sm_120f` fallback).
-2. **Tile execution model:** `<<<grid,1>>>` launch; tile maps across a warp/block via SHFL.BFLY (seen in SASS).
-   Confirm block/warp mapping + smem usage for an attention tile (Bq×Bkv scores + online softmax in the tile model).
+1. **AOT vs JIT for production:** dev/test works via JIT (recipe above). For shipping, imp wants AOT (§10) —
+   `--tilecubin` produces a device-only cubin with AOT HMMA SASS (`.text._Z..`, 25 KB smem, `.note.nv.tkinfo`).
+   Decide: ship JIT (embed tile IR, requires the driver JIT lib at runtime — fine on a correctly-provisioned box)
+   vs AOT (separate tile-cubin compile + `cuModuleLoad`, or find the nvcc flag that embeds AOT tile SASS in the
+   linked fatbin). Resolve before any perf/CI claim; CMake must build tile TUs for `sm_120a` (+`sm_120f`).
+2. **Tile execution model:** `<<<grid,1>>>` launch; the tile compiler rewrites the launch + maps the tile across
+   threads/warps (SASS shows SHFL.BFLY + 25 KB smem for the 64×64 fp16 tile). Confirm block/warp mapping + smem
+   budget for an attention tile (Bq×Bkv scores + online softmax).
 3. **Online softmax in Tile:** FA2 needs running max/sum + rescale across KV tiles. Determine the cuTile idiom
-   (reductions over a tile axis, `ct::` reduce/exp ops) — see the official "Tuning Flash Attention ... CUDA Tile" blog + TileGym.
+   (tile-axis reductions, `ct::` exp/max/reduce ops) — official "Tuning Flash Attention ... CUDA Tile" blog + TileGym.
+
+## Status: Phase 0 (Investigation §5) COMPLETE — viability GO, runnable path confirmed.
 
 ## Next step
 Phase 1 (§4.1): establish baselines BEFORE writing the Tile FA2 —
