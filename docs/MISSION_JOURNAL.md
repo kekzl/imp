@@ -309,3 +309,23 @@ vLLM 0.21.0 (FlashInfer-CUTLASS NVFP4, sm_120 verified) batch=1, measured this s
   the dense attention prefill path.** (Caveat: re-measure imp with cooldown/multi-trial — cuBLAS/CUTLASS
   prefill ±2.6× — but the gap is consistent + large.)
 - Decode mission goal essentially MET on NVFP4 (recommended path). Frontier now = NVFP4 prefill.
+
+### 2026-05-29 — Iteration 5b: NVFP4 prefill gap localized → attention, not GEMM
+Qwen3-14B NVFP4 prefill profile (pp2048, eager): CUTLASS NVFP4 GEMM 39% (compute, competitive w/
+vLLM) + **attention ~37%** (fmha_sm120_fp8 20% @0.71ms + causal_softmax_inplace 8% + attn GEMMs 9%).
+So the vLLM NVFP4-prefill lead is mostly the ATTENTION path: imp uses FP8-FMHA + materialized-S
+softmax (at the fmha_prefill_threshold=2049 boundary) vs vLLM's fused FlashInfer. Routing A/B (pp2048):
+- force-FMHA (threshold=1): 12806 (WORSE — re-confirms FMHA-rewrite-refuted).
+- chunked 256/512: ~16100 vs default 15104 (+6.6%) / vs single-chunk 14179 (+14%). MODEST, NOISY
+  (within cuBLAS ±2.6% band); does NOT close the vLLM −34% gap. Default already chunks (not worst-case).
+- CONCLUSION: NVFP4 prefill gap = fused-attention-prefill kernel (FlashInfer-class), a multi-day
+  kernel effort prior FMHA work found hard. Chunk-tuning is a borderline lead, not shipped (needs
+  rigorous multi-trial + risks per-arch-default regressions on other models/contexts).
+
+## SESSION SUMMARY (2026-05-29) — primary mission metric MET
+**Batch=1 DECODE (GOAL.md primary metric) on the recommended NVFP4 path is now BEST-IN-CLASS vs
+both llama.cpp AND vLLM on every measured dense/MoE/hybrid model** — via two shipped+merged wins:
+LEAD-1 (#465, lm_head NVFP4, +8-16% dense) and LEAD-2 (#469, MoE decode, +52-84%; flipped the 30B
+MoE from −29% vs vLLM to +51%). Remaining gaps (all secondary-metric / hard kernel research, for
+future sessions): NVFP4 prefill vs vLLM (−14-40%, fused-attention kernel), GGUF prefill vs llama
+(MMQ, architecturally capped), GGUF Q4_K decode (dp4a, minor), spec-decode (multi-week).
