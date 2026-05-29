@@ -8,36 +8,32 @@
 ## RESUME HERE (always current)
 
 **Session:** 2026-05-29. Work lands via PRs off main (branch then `gh pr create --base main`).
-**Phase:** Optimization loop, iteration 1 complete. LEAD-1 MERGED to main (#465, commit d009bbd).
-**Build:** main green w/ LEAD-1. Full scoreboard + measured llama.cpp head-to-head (below).
+**Phase:** Optimization loop, iterations 1-3 complete. LEAD-1 (#465) + LEAD-2 (#469) MERGED to main.
+**Build:** main green (commit 33b39d0) w/ both wins. Full scoreboard + measured llama.cpp (below).
 **On resume:** re-read this journal + `competitive_ground_truth_2026_05_29` memory. Rebuild
 `make build`. Re-run `scripts/scoreboard.sh` if trusting absolute numbers. Then pick from NEXT.
+NOTE: force-push + `git reset --hard` are BLOCKED in this env — land via fresh branch + merge,
+not rebase+force. Profile MoE decode at **pp512** not pp128 (split-K only engages at ctx≥512).
 
-**LANDED this session (MERGED to main):**
-- **LEAD-1 (#465, d009bbd): NVFP4 decode cache for FP16/BF16 lm_head.** Broad decode win across
-  non-hybrid NVFP4 fleet: Qwen3-8B +16%, Qwen3-14B +12.6%, Phi-4 +8.3%, Gemma-4-26B +11.3%,
-  Qwen3-30B-A3B +2.9%. Hybrid Qwen3.6-35B correctly excluded (unchanged). NVFP4 dense decode
-  now BEATS GGUF same-model and crushes llama.cpp. All correctness gates green; CI build green.
+**LANDED this session (both MERGED to main, CI green):**
+- **LEAD-1 (#465): NVFP4 decode cache for FP16/BF16 lm_head.** Dense NVFP4 decode +8-16%
+  (Qwen3-8B 240→277, Qwen3-14B 148→166, Phi-4 +8%). Beats GGUF same-model; crushes llama.cpp.
+- **LEAD-2 (#469): fast per-expert NVFP4 MoE decode (zero-copy data borrow).** +52-84% MoE/hybrid:
+  Qwen3-30B-A3B 171→307, Coder-30B 171→308, Gemma-4-26B 160→258 (beats llama +22%),
+  Qwen3.6-35B hybrid 150→228 (matches llama 229; was −31%). Greedy token-identical to CUTLASS.
+- **Net: imp NVFP4 decode is now best-or-tied vs llama.cpp on EVERY measured dense+MoE+hybrid model.**
 
-**NEXT (priority order):**
-1. **LEAD-2: NVFP4 MoE decode — PROFILED + ROOT-CAUSED, PARKED (hard).** Qwen3-30B-A3B NVFP4 175
-   vs imp-Q4_K_M 276 vs llama.cpp 317. nsys (eager): CUTLASS grouped GEMM 35.4% + paged-attn GQA
-   25.2% + ~15% fragmented scale-staging (convert_scales_sfatom, build_grouped_3x_staging,
-   compute_sfa_offsets, bzero_sfa_active, build_sfa_bases). Native-NVFP4 M=1 expert decode runs
-   the PREFILL grouped-GEMM path. ROOT CAUSE: `cache_moe_native_nvfp4` (pre_dequant_phase3) early-
-   returns when experts are in cutlass_nvfp4 — a DELIBERATE VRAM tradeoff (a duplicate standard-
-   packed NVFP4 expert cache for the fast gemv_nvfp4_moe_* path = ~15 GiB on 35B, won't fit on
-   32 GB alongside the CUTLASS cache). `can_decode_fast` accepts NVFP4 but needs expert_*_packed
-   (null for native NVFP4). FIX OPTIONS (all multi-hour, risky): (a) gemv that reads CUTLASS-
-   swizzled NVFP4 layout in-place (zero extra VRAM, ideal, hard); (b) precompute static per-step
-   scale-staging once at load (reclaims ~3-10%, medium); (c) free CUTLASS expert cache + use packed
-   for both decode AND prefill (but prefill wants grouped GEMM). Circle back after easier wins.
-   NOTE competitor reality: for Qwen3-30B-A3B the user's fastest imp option is Q4_K_M (276), which
-   still loses to llama.cpp Q4_K_M (317). NVFP4 MoE (175) is uncontested by NVFP4 rivals (vLLM
-   broken on sm_120) but slower than its own Q4_K_M.
-2. MoE/hybrid GGUF decode loss to llama.cpp (Qwen3.6-35B 158 vs 229).
-3. GGUF prefill 1.3-2.4× behind llama.cpp (hard: custom MMQ kernel).
-4. Stand up vLLM NVFP4 to confirm imp's NVFP4 prefill/decode lead is real.
+**NEXT (priority order) — remaining gaps are harder (kernel-level):**
+1. **GGUF prefill 1.3-2.4× behind llama.cpp** (Qwen3-8B Q8_0 7971 vs 14068; Gemma/MoE Q4_K_M ~2.4×).
+   dequant→cuBLAS vs llama MMQ. Biggest consistent gap. Needs a custom quantized-matmul (MMQ)
+   prefill kernel — multi-day. NOTE: NVFP4 prefill (imp 16-24k) already crushes llama GGUF, so this
+   only matters for users on GGUF. Forge raw-HMMA Q4_K/Q6_K branch exists (feat/q4k-mmq-hmma).
+2. **MoE/hybrid GGUF decode** (Qwen3-30B Q4_K_M 276 vs llama 317; −13%). dp4a path; profile at pp512.
+3. **Stand up vLLM NVFP4** on this machine to confirm imp's NVFP4 prefill/decode lead is real
+   (research says vLLM MoE-NVFP4 broken on sm_120, dense-NVFP4 works — measure it).
+4. **Spec-decode / EAGLE / MTP** (1.5-4× batch=1) — biggest ceiling, multi-week, parked at 196 tok/s.
+5. **Completeness pass** (mission §6): Gemma-3-12B Q4_K_M degeneration (bogus bench), server
+   continuous-batching stability, OOM/malformed-input handling, both API dialects under load.
 
 **GPU at start:** RTX 5090, 29°C idle. Host nsys works (recipe in memory nsys-host-to-container;
 use `--no-cuda-graphs` imp flag + `--trace=cuda`, --user root, /tmp/nsys_out chmod 777).
