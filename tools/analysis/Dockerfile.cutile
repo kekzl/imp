@@ -1,0 +1,5 @@
+# cuTile autotune image: imp:ciq (13.3 toolkit) + cuda-tile + cupy (device arrays/stream).
+# Build: docker build -f tools/analysis/Dockerfile.cutile -t imp:cutile .
+FROM imp:ciq
+RUN /opt/ciq/bin/pip install --quiet --no-cache-dir cuda-tile cupy-cuda12x && \
+    /opt/ciq/bin/python -c "import cuda.tile, cupy; print('cuda-tile+cupy OK')"

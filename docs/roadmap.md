@@ -22,7 +22,7 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 - **Q4_K_M prefill gap** (-38% vs llama.cpp) -- the in-SMEM Q4_K MMQ + FP16 HMMA approach is now **evidence-refuted**: the `feat/q4k-mmq-hmma` forge experiment built exactly this kernel and ncu-proved it's decode-throughput-bound, *tying* (not beating) cuBLAS — and the gap is vs llama.cpp beating cuBLAS, so closing it needs to beat cuBLAS (decode-tax-blocked) or pay 2× weight VRAM via pre-shuffle (rejected). The biggest gaps are also MoE-expert (small-M) which a dense tile kernel doesn't touch. See the "Evidence from the forge experiment" section in [`specs/2026-05-28-q4k-mmq-kernel-design.md`](superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md). Practical resolution: recommend NVFP4 SafeTensors for fast Q4_K-class prefill.
 
-- **Sawtooth Wavefront Reordering** (PR #456) -- alternate KV scan direction per Q tile for L2 locality. Implemented in both FMHA kernels. Expected +5-15% prefill at 32k+ context.
+- **Sawtooth Wavefront Reordering** (PR #456) -- alternate KV scan direction per Q tile for L2 locality. **MEASURED 2026-05-29 — no realized benefit, REFUTED.** (1) It lives ONLY in `flash_attention_blackwell` (the WMMA *fallback*), not in the cuBLAS / FP8-FMHA / FA2 paths (the "both FMHA kernels" claim was wrong). (2) That kernel is **unreachable on the NVFP4 prefill hot path**: prefill routes to `attention_cublas_prefill` (≈30% faster than FMHA per the in-tree note), and the per-attention-call seq stays under the auto `fmha_prefill_threshold` (~cap+1) — blackwell only runs if you force `threshold=1` + `fp8_fmha=never` + `fmha_sm120=never`. (3) Even force-routed, A/B is flat-to-slightly-negative (pp8192 13.10k ON vs 13.14k OFF; pp16384 12.45k vs 12.49k; ON ~0.3% slower, within noise). Left in place (harmless, 32k+ untested due to OOM on single-chunk 14B). A/B harness: `tools/analysis/sawtooth_ab.sh`. Memory: `sawtooth_reordering_refuted_2026_05_29`.
 
 ## Architecture support
 
@@ -49,6 +49,8 @@ benchmark **on sm_120** shows ≥parity.
 
 C++ header confirmed in-toolkit: `/usr/local/cuda-13.3/include/cuda_tile.h` (2026-05-29).
 
+**RESOLVED (2026-05-29) — benchmarked on sm_120, does NOT reach parity → SHELVED.** Built a real Python cuTile FA2 (causal fp16, correct: max_rel_err=0.0) and ran `cuda.tile.tune.exhaustive_search`. **Autotuned ceiling = 26.5 eff-TFLOPS = 3.2% of the 838 roofline** (naive 18; autotune lift only ~1.1–1.5×; tile-size the sole lever). That's ~order-of-magnitude below competitive and far below the native hand-FA2 — confirming Yadav (0.53× FA2, same arch). The "≥parity" gate fails, so **the multi-week Tile FA2 integration (Phase 2-5) is NOT being built** (it would ship a backend slower than native). Tile stays investigated-and-shelved. Harness: `tools/analysis/cutile_fa2.py` (+ `Dockerfile.cutile`). Memory: `cutile_autotune_ceiling_shelve_2026_05_29`.
+
 **Action (not blocking current FMHA/NVFP4 work):** once 13.3 is in, (1) ~~confirm the C++
 headers ship in-toolkit~~ ✓ done, (2) prototype one *non-hot-path* kernel (e.g. a rowsum/reduce)
 to assess C++ ergonomics + debuggability, (3) micro-benchmark a Tile NVFP4 GEMM and a
@@ -66,6 +68,17 @@ hand-written CUDA C++ to be confirmed, headline examples are Triton/CUTLASS). St
 for imp's profile (batch=1, few dominant hotspots). **Plan:** after the FA2 prefill
 kernel has a measured baseline, run CompileIQ on it (and on the NVFP4 GEMV/GEMM hotspots)
 as a last-mile squeeze; ship the ACF if it survives the perf gate + cooldown methodology.
+
+**RESULT (2026-05-29) — REFUTED, no win.** CompileIQ is operable (v1.0.0; `PtxasSearchSpace(version="13.3")`
+downloads its search space). But the ptxas space is *flat* on imp's hotspots. Direct sweep of the
+search space's decisive axes on the FA2 kernel (`maxrregcount` 64–200, `--def-load-cache` ca/cg/cs,
+`--allow-expensive-optimizations`, `--use_fast_math`) → all within **±0.4%** of baseline (pp4096 ≈
+19.6k tok/s, Qwen3-14B-NVFP4). The kernel is **smem-occupancy-bound** (REG:144 but SHARED:40 KiB; cutting
+regs 144→64 moved pp by 0%) + barrier-bound — ptxas codegen touches neither. NVFP4 decode is CUTLASS-
+generated + HBM-bandwidth-bound (M=1, 64–73% peak) → ptxas cannot add bandwidth. So imp's hand kernels are
+already at their structural limits; CompileIQ's Triton/CUTLASS-style codegen slack isn't there. Reusable
+harness left in tree: `tools/analysis/Dockerfile.ciq` (→ `imp:ciq`) + `tools/analysis/ptxas_sweep.sh` for
+any future codegen-bound kernel. Memory: `compileiq_ptxas_native_refuted_2026_05_29`.
 
 ## Known limitations
 
