@@ -41,6 +41,13 @@ __tile_global__ void fa2(__half* __restrict__ Q, __half* __restrict__ K, __half*
         auto qk0 = ct::full<ct::tile<float, ct::shape<TM, TN>>>(0.0f);
         auto qk = ct::mma(q, kt, qk0) * scale;  // [TM, TN] fp32, scaled
 
+        // causal mask: drop keys whose global col > query global row
+        auto idx = ct::iota<ct::tile<int, ct::shape<TM, TN>>>();  // flat row-major 0..TM*TN-1
+        auto grow = idx / TN + (qb * TM);                  // global query row per element
+        auto gcol = idx % TN + (j * TN);                   // global key col per element
+        auto neg = ct::full<ct::tile<float, ct::shape<TM, TN>>>(-1e30f);
+        qk = ct::select(gcol > grow, neg, qk);
+
         auto rmax = ct::reduce_max(qk, 1_ic);              // [TM,1]
         auto mij = ct::select(m > rmax, m, rmax);          // elementwise max → [TM,1]
         auto alpha = ct::exp(m - mij);                     // [TM,1]
@@ -75,7 +82,7 @@ int main() {
         for (int kk = 0; kk < S; kk++) {
             float d = 0;
             for (int x = 0; x < D; x++) d += Qf[q * D + x] * Kf[kk * D + x];
-            s[kk] = d * scale;
+            s[kk] = (kk > q) ? -1e30f : d * scale;  // causal
             mx = fmaxf(mx, s[kk]);
         }
         float sum = 0;

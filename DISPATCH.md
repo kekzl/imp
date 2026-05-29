@@ -88,9 +88,8 @@ Tile sizes from blog: 64×64 baseline, 256×128 optimized (autotuned per seqlen)
 ## Status: Phase 0 COMPLETE + Phase 2 PROTOTYPE CORRECT (non-causal).
 - §11 viability GO (HMMA on sm_120, runs correctly) + C++ API completeness GO.
 - **`tools/analysis/tile_fa2_probe.cu`: standalone CUDA Tile C++ FA2 prefill kernel, fp16, S=128 D=64,
-  RUNS CORRECTLY on sm_120a, `max_rel_err=0.00000` vs CPU softmax-attention oracle.** The full
-  online-softmax op-mapping works: `mma → reduce_max(1_ic) → select(m>rmax) → exp → auto-broadcast
-  (acc*alpha, qk-mij, acc/l) → mma(P·V)`. Arithmetic auto-broadcasts [TM,D] op [TM,1]; binary max via
+  RUNS CORRECTLY on sm_120a (NON-CAUSAL **and** CAUSAL), `max_rel_err=0.00000` vs CPU oracle.** The full
+  online-softmax op-mapping works: `mma → causal-mask(iota/`/`,`%`/select) → reduce_max(1_ic) → select(m>rmax) → exp → auto-broadcast (acc*alpha, qk-mij, acc/l) → mma(P·V)`. Causal mask: `ct::iota<tile<int,shape>>()` flat idx → row=idx/TN col=idx%TN, `select(gcol>grow, -inf, qk)`. Arithmetic auto-broadcasts [TM,D] op [TM,1]; binary max via
   `ct::select` (no binary-max builtin); fp32→fp16 via explicit `ct::tile<__half,shape>(p)` ctor; view
   dims need `_ic` literals. Built with `nvcc -std=c++20 --enable-tile -arch=sm_120a`, run via WSL recipe.
 - Standalone proto — NOT yet integrated into imp (zero degeneration risk; native path untouched).
