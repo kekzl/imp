@@ -127,3 +127,18 @@ path must beat — same HW instruction, so the contest is cuTile codegen/schedul
   tuning effort — consistent with the prior datapoint (Yadav: cuTile ≈ 0.53× FA2 on sm_120). 
 - **Provisional steer:** Tile likely lands as optional `--attn-backend=tile` (NOT default) unless autotuning
   closes the gap to the hand-written FA2 (PR #477). Exactly the conditional GOAL §1/§4.4 anticipated.
+
+### CompileIQ applicability (2026-05-29) — ptxas/nvcc only, NOT tileiras
+Installed `compileiq` v1.0.0 (NVIDIA, public PyPI). Its compiler search spaces are
+`compiler: Literal["ptxas", "nvcc"]` (`search_spaces/compilers.py`: `PtxasSearchSpace`,
+`NvccSearchSpace`) — **no `tileiras` provider.** It emits an ACF consumed by
+`ptxas --apply-controls` / `nvcc --apply-controls`.
+- **⇒ CompileIQ CANNOT tune the Tile FA2 kernel** — that codegen is done by `tileiras`, which
+  CompileIQ has no search space for. The ~24 TFLOPS Tile ceiling needs the cuTile autotuner
+  (TileGym), NOT CompileIQ. (Structural gap, documented per GOAL §5.6.)
+- **CompileIQ IS applicable to the hand-written FA2 (PR #477)** and imp's other nvcc→ptxas hot
+  kernels (NVFP4 GEMV/GEMM, etc.) — standard ptxas path. That is the productive CompileIQ target:
+  last-mile ptxas tuning of the +20% hand-written kernel (Worker = build imp attn TU with candidate
+  ACF → imp-cli pp4096 tok/s as score). Deferred to a focused session (per-candidate imp rebuild ~13s).
+- API: `compileiq.ciq.Search` (pydantic) + `.start()`; `Worker` ABC = build+run+score; search spaces
+  are GitHub-release-backed per (compiler, version) — verify an sm_120/13.3 ptxas space exists first.
