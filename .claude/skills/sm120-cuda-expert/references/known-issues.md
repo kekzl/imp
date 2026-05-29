@@ -15,12 +15,19 @@ For small edits (parameter tweak, kernel-signature change, fusing two existing k
 
 ## Version-dependent dead ends (worth retrying when CUDA version changes)
 
+> **CUDA 13.3 re-test (2026-05-29, PTX ISA 9.3): NO new sm_120a capability.** Full
+> `ptx_survey_all.sh` at `compute_120a` under 13.2 vs 13.3 = **0 of 247 instructions
+> flipped** (none unlocked, none regressed). The "retry on CUDA 13.3+" rows below were
+> re-probed and stay ❌. sm_120's ISA surface is silicon-fixed; toolkit bumps don't add
+> tcgen05/wgmma/TMA. Baselines: `docs/ptx-status-2026-05-29-cuda13{2,3}-sm120a.md`.
+> 13.3's value is tooling (CUDA Tile C++, CompileIQ) + cuBLAS perf, not instructions.
+
 | Dead end | Blocked by | Retry on |
 |----------|-----------|----------|
 | cuBLASLt grouped layout sm_120 | Zero algorithms for consumer Blackwell | New cuBLAS release (check algorithm count) |
 | CUTLASS TC GEMM at M=1 | Activation quant + TMA overhead | CUTLASS 4.5+ |
-| `cp.async.bulk` with `.ignore_oob` | Requires TMA descriptor rewrite | CUDA 13.3+ |
-| `st.async .b128` to global | PTX 9.2 only targets `shared::cluster` | New PTX ISA |
+| `cp.async.bulk` with `.ignore_oob` | Requires TMA descriptor rewrite | ~~CUDA 13.3+~~ still ❌ on 13.3 — TMA not on sm_120; next major |
+| `st.async .b128` to global | PTX 9.2 only targets `shared::cluster` | ~~New PTX ISA~~ still ❌ on PTX ISA 9.3 (13.3) |
 | CUTLASS NVFP4 sm_120 graph-determinism | Universally non-deterministic for `cudaGraphExecUpdate` re-capture (verified 2026-05-05) | Future CUTLASS NVFP4 deterministic mode |
 | Native FP4 GEMM faster than dequant→cuBLAS on sm_120 | Marlin-style dequant→cuBLAS measured *faster* than FlashInfer-CUTLASS-NVFP4 on consumer Blackwell. Storage-format wins (4× VRAM) but compute-speed parity is open. | Future custom kernel or upstream CUTLASS fix |
 
@@ -71,7 +78,8 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 ## Negative results (don't repeat)
 
 - **Generic `compute_120` PTX fallback.** Lacks FP8 MMA + block-scale. Always pin `compute_120a/sm_120a`.
-- **WMMA / `wgmma`-style on consumer Blackwell.** Not available — sm_120 is register-`mma.sync` only. `tcgen05` / TMEM are SM100 (B200) exclusives.
+- **Async `wgmma` / `tcgen05` / TMEM on consumer Blackwell.** Not available — SM100 (B200) exclusives. sm_120 peak path is register `mma.sync`. (Note: the *synchronous* `nvcuda::wmma` API *does* compile on sm_120 but lowers to **HMMA** — it is not async wgmma and not the peak path; it costs extra smem traffic and a smem round-trip vs hand-written `mma.sync` with register-resident fragments.)
+- **Materializing the attention score tile (S/P) in shared memory.** A FA-style kernel that writes S to smem, runs softmax over smem, then reads P back for the PV MMA becomes **barrier- / L1-TEX-bound** (tensor cores idle, compute util in the teens) — the smem round-trip + `__syncthreads` dominate, not the MMAs. True FA2 keeps row max/sum and the S/P fragments **register-resident** and fuses softmax into the QK→PV handoff. Don't trust a kernel header that *claims* register-based softmax — verify against the code (some in-tree kernels are mislabeled).
 - **`__noinline__` on device inner-loop helpers.** Spills to Local Memory (DRAM). Use `__forceinline__`.
 - **`reinterpret_cast` on Q8_0 blocks.** 34-byte blocks NOT 4-aligned. Use `memcpy()`.
 - **Skipping graph re-bench after a hot-path patch.** Compute speedup alone often shows ~0% in tok/s — the win is graph-replay-mediated. Always re-bench graphs ON.

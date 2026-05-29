@@ -3,6 +3,10 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
+# Base provides the NVIDIA CUDA apt repo; we install the CUDA 13.3 toolkit on
+# top (no 13.3 devel image on Docker Hub yet) and make it the default. The host
+# driver (UMD 13.3) supports it. sm_120 gains the 13.3 ptxas/PTX-ISA-9.3
+# codegen; no new tensor-core HW (still mma.sync, no tcgen05/wgmma).
 FROM nvidia/cuda:13.2.1-devel-ubuntu24.04 AS builder
 
 ARG CMAKE_BUILD_TYPE=Release
@@ -10,14 +14,20 @@ ARG CMAKE_BUILD_TYPE=Release
 RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.com|de.archive.ubuntu.com|g' \
           /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; } \
     && apt-get update \
-    && apt-get install -y --only-upgrade --allow-change-held-packages \
-        $(dpkg-query -W -f='${Package}\n' | grep -E '^(cuda-|libcublas|libcudnn|libnvjitlink|libnvjpeg|libnpp|libcurand|libcusolver|libcusparse|libcufft|libnccl|libnvfatbin|libnvptxcompiler|libnvvm|libcufile|libcuobjclient)') \
+    && apt-get install -y --no-install-recommends --allow-change-held-packages \
+        cuda-toolkit-13-3 \
+    && ln -sfn /usr/local/cuda-13.3 /usr/local/cuda \
     && apt-get install -y --no-install-recommends \
         g++ git ninja-build ca-certificates python3 wget \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
     && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
+
+# Pin CUDA 13.3 as the toolchain for nvcc/cmake (override the base image's 13.2 paths).
+ENV CUDA_HOME=/usr/local/cuda-13.3
+ENV PATH=/usr/local/cuda-13.3/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64:${LD_LIBRARY_PATH}
 
 # Pre-clone third-party deps into their own layer. Only invalidated when the
 # pinned tags below change — code-only edits keep this layer cached, saving
@@ -64,11 +74,18 @@ RUN cmake -B build -G Ninja \
 # =============================================================================
 FROM nvidia/cuda:13.2.1-runtime-ubuntu24.04
 
+# Install CUDA 13.3 runtime libs to match the 13.3-built binaries (cudart +
+# cuBLAS). apt resolves the transitive deps (libnvjitlink, etc.).
 RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libcublas-13-2 \
+        cuda-cudart-13-3 \
+        libcublas-13-3 \
         curl \
         jq \
+    && ln -sfn /usr/local/cuda-13.3 /usr/local/cuda \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PATH=/usr/local/cuda-13.3/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64:${LD_LIBRARY_PATH}
 
 # Copy built binaries
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server

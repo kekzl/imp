@@ -175,5 +175,96 @@ TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
 // (Sq=Skv=32, zero-padded V) masked by having the reference also near zero.
 TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 16, 4, 256, true); }
 
+// ---------------------------------------------------------------------------
+// FA2 register-resident kernel: same oracle, but exercises fmha_sm120_fa2_prefill.
+// Unlike the fp8 fixture (which SKIPs on unsupported configs), this fixture
+// ASSERTs the fa2 path actually ran — a perf rewrite must not silently fall
+// through. Target config: head_dim=128.
+// ---------------------------------------------------------------------------
+class FmhaFA2Test : public FmhaFP8Test {
+protected:
+    void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
+                 float softcap = 0.0f) {
+        float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+        size_t q_elems = B * Sq * NH * HD;
+        size_t kv_elems = B * Skv * NKV * HD;
+
+        std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+        for (size_t i = 0; i < q_elems; i++)
+            Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+        for (size_t i = 0; i < kv_elems; i++) {
+            K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
+            V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+        }
+
+        std::vector<float> O_ref(q_elems, 0.0f);
+        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sw, softcap);
+
+        std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
+        for (size_t i = 0; i < q_elems; i++)
+            Q_h[i] = __float2half(Q_f[i]);
+        for (size_t i = 0; i < kv_elems; i++) {
+            K_h[i] = __float2half(K_f[i]);
+            V_h[i] = __float2half(V_f[i]);
+        }
+
+        size_t q_bytes = q_elems * sizeof(half);
+        size_t kv_bytes = kv_elems * sizeof(half);
+        void *d_q, *d_k, *d_v, *d_o;
+        cudaMalloc(&d_q, q_bytes);
+        cudaMalloc(&d_k, kv_bytes);
+        cudaMalloc(&d_v, kv_bytes);
+        cudaMalloc(&d_o, q_bytes);
+        cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+        cudaMemset(d_o, 0, q_bytes);
+
+        int64_t q_shape[] = {B, Sq, NH, HD};
+        int64_t kv_shape[] = {B, Skv, NKV, HD};
+        Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+        Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+        Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+        Tensor Ot(d_o, QType::F16, 4, q_shape, true);
+
+        bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_);
+        ASSERT_TRUE(ok) << "fmha_sm120_fa2_prefill returned false (config must be supported)";
+        cudaStreamSynchronize(stream_);
+        cudaError_t err = cudaGetLastError();
+        ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+        std::vector<half> O_h(q_elems);
+        cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
+
+        float max_err = 0.0f;
+        int nan_count = 0;
+        for (size_t i = 0; i < q_elems; i++) {
+            float got = __half2float(O_h[i]);
+            float ref = O_ref[i];
+            if (std::isnan(got)) {
+                nan_count++;
+                continue;
+            }
+            float err = std::abs(got - ref);
+            float denom = std::max(1.0f, std::abs(ref));
+            max_err = std::max(max_err, err / denom);
+        }
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_o);
+        EXPECT_EQ(nan_count, 0) << "NaN values in FA2 FMHA output";
+        EXPECT_LT(max_err, 0.05f) << "Max relative error too high: " << max_err;
+    }
+};
+
+TEST_F(FmhaFA2Test, CausalHD128) { run_fa2(1, 64, 64, 4, 4, 128, true); }
+TEST_F(FmhaFA2Test, NonCausalHD128) { run_fa2(1, 32, 64, 4, 4, 128, false); }
+TEST_F(FmhaFA2Test, GQA_HD128) { run_fa2(1, 64, 64, 8, 2, 128, true); }
+TEST_F(FmhaFA2Test, CausalMultiTile_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true); }
+TEST_F(FmhaFA2Test, LongCtx_HD128) { run_fa2(1, 256, 256, 8, 2, 128, true); }
+TEST_F(FmhaFA2Test, SlidingWindow_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true, 64); }
+TEST_F(FmhaFA2Test, Softcap_HD128) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f); }
+
 }  // namespace
 }  // namespace imp

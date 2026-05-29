@@ -39,6 +39,18 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
     }
 
+    // Register-resident FA2 ("echtes FA"): keeps S/P/O in registers, 1 barrier per
+    // KV tile (vs the FP8 FMHA's smem-materialized S/P/O + 4 barriers). Opt-in via
+    // [attention] fmha_fa2: "on" | "never" (default), env IMP_FMHA_FA2. head_dim=128.
+    if (rcfg.attention.fmha_fa2 == "on") {
+        if (fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+            IMP_LOG_DEBUG("FMHA dispatch: using FA2 register-resident kernel (hd=%d)",
+                          static_cast<int>(Q.shape[3]));
+            return;
+        }
+        // unsupported config (hd!=128) → fall through to FP8/FP16 path
+    }
+
     // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.
     // PV stays FP16. [attention] fp8_fmha: "auto" (default ON) | "never"
     const bool use_fp8_fmha = rcfg.attention.fp8_fmha != "never";
