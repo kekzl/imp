@@ -267,6 +267,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_workspace_config.cu
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
+    src/exec/executor_perplexity.cu
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_forward_moe.cu
