@@ -100,6 +100,18 @@ struct RuntimeConfig {
         bool no_qknorm_fused = false;
         bool splitk_pipe = true;
         bool gate_concat = false;
+        // Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix. Caps the
+        // prefill context length that uses the fast cuBLAS attention path before
+        // falling back to FMHA (auto fmha_prefill_threshold = S-matrix cap + 1).
+        // 256 MiB caps ~32-head models at seq 2048 but high-head-count models
+        // (e.g. Qwen3-14B, 40 heads → ~1824) drop to the slower FMHA at 2048.
+        // Larger = longer prefill on the fast path, at the cost of KV headroom.
+        // Legacy env: IMP_ATTN_SCORES_MIB. Auto-shrinks if the alloc fails.
+        // 384 keeps the fast cuBLAS attention path up to seq 2048 for up to
+        // 48-head models (e.g. Qwen3-14B, 40 heads: +21% pp2048 vs the old 256
+        // cap which dropped it to FMHA at ~1824). Only allocates what the
+        // model's max_tokens×heads needs (capped here); +128 MiB vs 256 at most.
+        int attn_scores_mib = 384;
     } attention;
 
     struct MoE {
