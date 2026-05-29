@@ -94,6 +94,18 @@ Tile sizes from blog: 64×64 baseline, 256×128 optimized (autotuned per seqlen)
   dims need `_ic` literals. Built with `nvcc -std=c++20 --enable-tile -arch=sm_120a`, run via WSL recipe.
 - Standalone proto — NOT yet integrated into imp (zero degeneration risk; native path untouched).
 
+## IMMEDIATE NEXT STEP (decisive experiment — fresh context)
+**Autotuned cuTile perf ceiling** — the one experiment that decides whether Tile is worth productionizing:
+write the FA2 in **Python cuTile** (`import cuda.tile as ct`; `@ct.kernel`; `ct.load/ct.mma/ct.exp2/ct.store`;
+native `ct.Array`, no PyTorch needed — `cuda.tile.tune` is a toolkit module, TileGym/torch optional) and run
+`cuda.tile.tune` over tile sizes (64×64 … 256×128) for S∈{2048,4096} D=128 causal. Measure best eff-TFLOPS,
+run via the WSL-driver recipe.
+- If tuned cuTile ≥ hand-written native → productionize (port configs to C++ via ct::shape<> + hints; build
+  AOT CMake integration; `--attn-backend=tile` then default-switch).
+- If tuned cuTile < native (likely per Yadav 0.53×) → Tile stays a documented optional backend / shelved;
+  redirect effort to CompileIQ on the native hand-FA2 (ptxas ACF, the real near-term win).
+Entry points: `cuda.tile` submodules `tune`, `compilation`, `_execution`, `_load_libcuda`, `jax`.
+
 ## Next step (Phase 1 → 2)
 Investigation + design grounding done. Remaining (multi-week, in order):
 1. **Phase 1 baselines (§4.1):** freeze `bench/baseline.json` (decode/prefill/long-ctx: Qwen3.6-35B-A3B-NVFP4
