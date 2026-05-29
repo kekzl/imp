@@ -342,3 +342,14 @@ Probed imp-server (Qwen3-8B NVFP4, port 8081) for the §6 completeness bar:
 - VERDICT: server robustness/completeness is solid — claimed behavior is TRUE. No fix needed.
   (Not stress-tested: multi-hour sustained-load memory stability, SSE-stream edge cases, true-OOM
   model-load path — candidates for a future deeper soak test.)
+
+### 2026-05-29 — Iteration 7: NVFP4 prefill win SHIPPED (#474, S-matrix cap 256→384)
+First crack at the NVFP4-prefill frontier landed. Root cause: the cuBLAS-attention prefill path
+(faster than FMHA at the boundary) is gated by the S-matrix buffer (was hard-capped 256 MiB), which
+caps the cuBLAS seq per head count — 40-head Qwen3-14B only reached ~1824, so pp2048 dropped to the
+slower FMHA. Raised cap to 384 MiB (config `attention.attn_scores_mib`, default 384; sizes to
+min(need,cap) so +128 MiB max). **Qwen3-14B NVFP4 pp2048: 14402 → 17517 (+21.6%)**, vLLM gap −40%→−29%.
+8B unchanged, Q8_0 gate unchanged, 35B fine, GPU suite green, coherent. cuBLAS path is the validated
+default (FP32 S-matrix) → no quality change. THREE wins shipped this session: #465, #469, #474.
+Remaining NVFP4 prefill gap (still −29% on 14B) = the FMHA/fused-attention kernel itself for n>cap
+(FlashInfer-class, multi-day) — next frontier.
