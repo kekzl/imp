@@ -353,3 +353,36 @@ min(need,cap) so +128 MiB max). **Qwen3-14B NVFP4 pp2048: 14402 → 17517 (+21.6
 default (FP32 S-matrix) → no quality change. THREE wins shipped this session: #465, #469, #474.
 Remaining NVFP4 prefill gap (still −29% on 14B) = the FMHA/fused-attention kernel itself for n>cap
 (FlashInfer-class, multi-day) — next frontier.
+
+### 2026-05-29 — Iteration 8: prefill FMHA precisely diagnosed (ncu) — needs kernel rewrite
+- Confirmed #474's cap=384 default is OPTIMAL: cuBLAS attention wins ≤~2560 tok (pp2048 +21%), but
+  FMHA wins BEYOND (pp4096: FMHA 15027 vs forced-cuBLAS 12750 — O(n²) S-matrix materialization
+  dominates at long ctx). So the threshold routing is correct; DON'T raise the cap further.
+- **ncu on fmha_sm120_fp8 (14B pp4096):** Compute(SM) **14.5%**, DRAM **1.1%**, L1/TEX **75.7%**,
+  block-limit=barriers(24), 1.88 ms. NOT compute- or DRAM-bound — bottlenecked on shared-memory
+  traffic + __syncthreads. ~85% of tensor-core throughput unused → large headroom, but realizing it
+  is a FlashAttention-2-class kernel rewrite (fewer barriers, better smem tiling + cp.async pipeline,
+  higher TC occupancy). This is THE long-context NVFP4-prefill lever vs vLLM/FlashInfer, and the
+  GGUF-prefill story shares the same attention path. Multi-day, prior FMHA attempts refuted — needs
+  a dedicated focused effort, not a tail-of-session attempt.
+
+### SESSION CLOSE STATUS (2026-05-29)
+THREE wins shipped+merged: #465 (lm_head NVFP4 decode +8-16%), #469 (NVFP4 MoE decode +52-84%),
+#474 (S-matrix cap → NVFP4 prefill +21% on 40-head). imp NVFP4 DECODE = best-in-class vs llama.cpp
+AND vLLM across the fleet (primary metric WON). Server robustness audited (§6 PASS). All tractable
+single-session wins HARVESTED + verified. Remaining gaps precisely scoped, all multi-day kernel work:
+(1) FMHA fused prefill-attention rewrite (ncu: 14.5% compute util, the NVFP4 long-ctx + GGUF prefill
+lever), (2) GGUF-prefill MMQ (IMMA capped at 4.3% peak), (3) spec-decode (multi-week). Decode is
+near-roofline/maxed. Next session: pick up the FMHA rewrite as a dedicated effort (sm120-cuda-expert).
+
+### 2026-05-29 — Iteration 8b: FMHA root cause PINPOINTED (smem S materialization)
+launch_bounds tweak (fp8 FMHA minBlocks 1→2) REFUTED (15051 vs 14995, noise) — not occupancy-bound.
+Code read: `fmha_sm120_fp8_kernel` (attention_fmha_sm120.cu) — the header comment claims "register-based
+online softmax (no shared-memory materialization of S)" but the impl ACTUALLY materializes the score
+tile in shared memory (`S_tile` float[Bq×Bkv], `P_half`) and round-trips it between the QK mma.sync
+(f8f6f4 m16n8k32) and the PV WMMA. THAT smem round-trip is the ncu-measured L1/TEX 75.7% bottleneck
+(compute only 14.5%). EXACT FIX for the next session: rewrite the fp8 path to keep S/P in registers
+(true FA2 online softmax, accumulate row max/sum in regs, no S_tile), which should lift compute util
+and close the long-context NVFP4-prefill gap to vLLM/FlashInfer. Also note: header says "WGMMA" but
+sm_120 has no WGMMA — it's WMMA m16n16k16 (→ HMMA), another reason for excess smem traffic; the QK
+already uses mma.sync f8f6f4 but PV still uses WMMA. Multi-day, well-scoped, flag-gate it.
