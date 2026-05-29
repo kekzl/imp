@@ -107,3 +107,14 @@ Investigation + design grounding done. Remaining (multi-week, in order):
 4. **Phase 3 — paged-decode** path; **Phase 4** — fp8/bf16 dtypes; **Phase 5** — autotune/CompileIQ; report.
 The hand-written register-resident FA2 (PR #477, +20% pp4096, HMMA.16816) is the native baseline the Tile
 path must beat — same HW instruction, so the contest is cuTile codegen/scheduling vs hand-tuned.
+
+## Perf datapoint (2026-05-29) — naive Tile FA2 ≈ 24 eff-TFLOPS (un-tuned)
+`tools/analysis/tile_fa2_bench.cu`: causal fp16 S=2048 D=128, 32 heads, device memory, cudaEvent.
+- **1.41 ms/iter, 24.4 eff-TFLOPS (2.9% of 838 FP16 roofline). Correctness OK (max_rel_err=0.0000).**
+- ⚠ **Bench lesson:** first run with `cudaMallocManaged` reported a bogus 0.44 TFLOPS (200× too slow) —
+  WSL2 page-migration artifact. Use device `cudaMalloc`+memcpy for all Tile benches (benchmark-cuda skill).
+- 24 TFLOPS is NAIVE (TM=TN=64, `ct::exp` not exp2, no autotuned tile sizes, no fast-math, no smem-pipeline
+  hints via `__applicable_tile_hints__`). Blog reports 256×128 tiles + fast-math + autotune = much higher.
+- **Open: head-to-head vs the hand-written FA2 (PR #477) at identical shape** — needs the hand kernel
+  standalone or both wired in imp. THIS decides default-switch vs `--attn-backend=tile`-only. Next: tile-size
+  sweep (exp2/fast-math, 128×128 / 256×128) to find naive-tuned ceiling, then the head-to-head.
