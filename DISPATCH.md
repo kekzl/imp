@@ -85,7 +85,15 @@ Confirmed C++ builtins: `mma`, `matmul`, `reduce_max`, reduction_result_t family
 `fma`, `abs`, mutual-broadcast arithmetic operators, `load`/`load_masked`/`store`/`atomic_*`, `partition_view`.
 Tile sizes from blog: 64×64 baseline, 256×128 optimized (autotuned per seqlen). CC 8.x/10.x/11.x/12.x (sm_120 ✓).
 
-## Status: Phase 0 (Investigation §5) COMPLETE — viability GO (HMMA, runs correctly) + C++ API completeness GO.
+## Status: Phase 0 COMPLETE + Phase 2 PROTOTYPE CORRECT (non-causal).
+- §11 viability GO (HMMA on sm_120, runs correctly) + C++ API completeness GO.
+- **`tools/analysis/tile_fa2_probe.cu`: standalone CUDA Tile C++ FA2 prefill kernel, fp16, S=128 D=64,
+  RUNS CORRECTLY on sm_120a, `max_rel_err=0.00000` vs CPU softmax-attention oracle.** The full
+  online-softmax op-mapping works: `mma → reduce_max(1_ic) → select(m>rmax) → exp → auto-broadcast
+  (acc*alpha, qk-mij, acc/l) → mma(P·V)`. Arithmetic auto-broadcasts [TM,D] op [TM,1]; binary max via
+  `ct::select` (no binary-max builtin); fp32→fp16 via explicit `ct::tile<__half,shape>(p)` ctor; view
+  dims need `_ic` literals. Built with `nvcc -std=c++20 --enable-tile -arch=sm_120a`, run via WSL recipe.
+- Standalone proto — NOT yet integrated into imp (zero degeneration risk; native path untouched).
 
 ## Next step (Phase 1 → 2)
 Investigation + design grounding done. Remaining (multi-week, in order):
