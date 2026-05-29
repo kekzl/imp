@@ -164,6 +164,40 @@ int main(int argc, char** argv) {
         config.max_batch_size = 1;
     }
 
+    // Perplexity mode: read + tokenize the corpus up front so we can size KV and
+    // force single-chunk prefill (all-position hidden must survive for the PPL pass).
+    std::vector<int32_t> ppl_tokens;
+    if (!args.perplexity_file.empty()) {
+        FILE* f = std::fopen(args.perplexity_file.c_str(), "rb");
+        if (!f) {
+            fprintf(stderr, "Error: cannot open --perplexity file %s\n", args.perplexity_file.c_str());
+            imp_model_free(model);
+            return 1;
+        }
+        std::string text;
+        char buf[4096];
+        size_t r;
+        while ((r = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            text.append(buf, r);
+        std::fclose(f);
+        int vocab_size = imp_model_vocab_size(model);
+        (void)vocab_size;
+        int max_tok = static_cast<int>(text.size()) + 16;
+        ppl_tokens.resize(max_tok);
+        int n_tok = 0;
+        ImpError te = imp_tokenize(model, text.c_str(), ppl_tokens.data(), &n_tok, max_tok);
+        if (te != IMP_SUCCESS || n_tok < 2) {
+            fprintf(stderr, "Error tokenizing perplexity corpus (%s, n=%d)\n", imp_error_string(te), n_tok);
+            imp_model_free(model);
+            return 1;
+        }
+        ppl_tokens.resize(n_tok);
+        config.prefill_chunk_size = 0;  // single-chunk: keep all-position hidden
+        config.max_batch_size = 1;
+        config.max_seq_len = n_tok + 16;
+        fprintf(stderr, "Perplexity: %d tokens from %s\n", n_tok, args.perplexity_file.c_str());
+    }
+
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
     if (err == IMP_SUCCESS && args.mtp_spec_decode_k > 0) {
@@ -210,6 +244,21 @@ int main(int argc, char** argv) {
     // Determine chat template override from --chat-template flag
     if (args.chat_template == "none") {
         params.apply_chat_template = 0;
+    }
+
+    if (!args.perplexity_file.empty()) {
+        double ppl = -1.0;
+        ImpError pe = imp_perplexity(ctx, ppl_tokens.data(), static_cast<int>(ppl_tokens.size()), &ppl);
+        if (pe != IMP_SUCCESS) {
+            fprintf(stderr, "perplexity failed: %s\n", imp_error_string(pe));
+            imp_context_free(ctx);
+            imp_model_free(model);
+            return 1;
+        }
+        printf("perplexity: %.4f  (%zu tokens)\n", ppl, ppl_tokens.size());
+        imp_context_free(ctx);
+        imp_model_free(model);
+        return 0;
     }
 
     if (args.bench) {

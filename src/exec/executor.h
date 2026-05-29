@@ -605,6 +605,12 @@ public:
     // logits_out will be a view into the internal logits buffer.
     void forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream = nullptr);
 
+    // Teacher-forced perplexity over tokens[0..n-1]. Call AFTER a prefill of the
+    // same tokens (uses the persistent-workspace hidden_, which holds all-position
+    // final hidden after forward_logits). Applies the tier-aware LM head to every
+    // position in chunks and returns exp(mean NLL of next tokens). Bench/eval only.
+    double perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream = nullptr);
+
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
                                             cudaStream_t stream = nullptr);

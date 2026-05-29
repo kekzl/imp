@@ -105,6 +105,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.model_path = argv[++i];
         } else if (std::strcmp(arg, "--revision") == 0 && i + 1 < argc) {
             args.revision = argv[++i];
+        } else if (std::strcmp(arg, "--perplexity") == 0 && i + 1 < argc) {
+            args.perplexity_file = argv[++i];
         } else if (std::strcmp(arg, "--prompt") == 0 && i + 1 < argc) {
             args.prompt = argv[++i];
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {

@@ -241,12 +241,13 @@ struct RuntimeConfig {
         bool nvfp4_lm_head = true;
         // Allow NVFP4 LM head even on GDN/SSM-hybrid models (normally excluded —
         // an older NVFP4 method degraded recurrent-state coherence, memory
-        // lm_head_only_nvfp4_qwen3_6_refuted). Re-measured 2026-05-29 with the
-        // current quantize-FP16→NVFP4 path: Qwen3.6-35B stays coherent (math /
-        // primes / explanations match FP16) AND decode is +11.4% (219.6→244.7
-        // tok/s) — the 248k-vocab lm_head is ~14% of decode. Kept opt-in
-        // (default false) pending exhaustive (perplexity / long multi-turn)
-        // quality eval before any default flip on hybrids.
+        // lm_head_only_nvfp4_qwen3_6_refuted). Quantified 2026-05-29 with the
+        // current quantize-FP16→NVFP4 path + the new `imp-cli --perplexity` tool
+        // on Qwen3.6-35B: decode +11.4% (219.6→244.7 tok/s; the 248k-vocab
+        // lm_head is ~14% of decode) at a small but REAL quality cost —
+        // perplexity 15.90 (FP16) → 16.25 (NVFP4), +2.2% (FP16 PPL is stable
+        // run-to-run, so it's signal not noise). Kept opt-in (default false):
+        // a deliberate speed/quality tradeoff to opt into, not a forced default.
         bool nvfp4_lm_head_gdn = false;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the

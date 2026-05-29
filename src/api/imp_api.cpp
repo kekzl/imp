@@ -1,4 +1,6 @@
 #include "api/imp_internal.h"
+#include "exec/executor.h"
+#include "runtime/engine.h"
 #include "model/gguf_loader.h"
 #include "model/safetensors_loader.h"
 #include "model/tokenizer.h"
@@ -705,6 +707,36 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
 // imp_decode_step.
 ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     return imp_prefill_with_params(ctx, tokens, n_tokens, nullptr);
+}
+
+ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, double* out_ppl) {
+    if (!ctx || !tokens || n_tokens < 2 || !out_ppl) {
+        return IMP_ERROR_INVALID_ARG;
+    }
+    if (!ctx->engine) {
+        return IMP_ERROR_INTERNAL;
+    }
+    *out_ppl = -1.0;
+    try {
+        // Fresh context so hidden_ holds exactly this corpus after prefill.
+        imp_context_reset(ctx);
+        // Single-chunk prefill (caller must configure prefill_chunk_size=0 / corpus
+        // <= chunk size) so the persistent hidden_ retains all n positions.
+        ImpError e = imp_prefill(ctx, tokens, n_tokens);
+        if (e != IMP_SUCCESS)
+            return e;
+        double ppl = ctx->engine->executor()->perplexity_nll(tokens, n_tokens);
+        // Release the prefill request's KV.
+        ctx->active_request = nullptr;
+        imp_context_reset(ctx);
+        if (ppl < 0.0)
+            return IMP_ERROR_INTERNAL;
+        *out_ppl = ppl;
+        return IMP_SUCCESS;
+    } catch (const std::exception& ex) {
+        IMP_LOG_ERROR("imp_perplexity: %s", ex.what());
+        return IMP_ERROR_INTERNAL;
+    }
 }
 
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token) {

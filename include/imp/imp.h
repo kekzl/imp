@@ -114,6 +114,12 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
 // Decode: generate one token
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token);
 
+// Teacher-forced perplexity over tokens[0..n_tokens-1] (eval/bench).
+// Resets context, runs a SINGLE-CHUNK prefill (so all-position hidden survives),
+// applies the LM head to every position, and returns PPL in *out_ppl.
+// Requires n_tokens <= the model's max prefill length. *out_ppl < 0 on failure.
+ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, double* out_ppl);
+
 // Reset context state (clear KV cache etc.)
 ImpError imp_context_reset(ImpContext ctx);
 
