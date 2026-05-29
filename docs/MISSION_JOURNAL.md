@@ -329,3 +329,16 @@ LEAD-1 (#465, lm_head NVFP4, +8-16% dense) and LEAD-2 (#469, MoE decode, +52-84%
 MoE from −29% vs vLLM to +51%). Remaining gaps (all secondary-metric / hard kernel research, for
 future sessions): NVFP4 prefill vs vLLM (−14-40%, fused-attention kernel), GGUF prefill vs llama
 (MMQ, architecturally capped), GGUF Q4_K decode (dp4a, minor), spec-decode (multi-week).
+
+### 2026-05-29 — Iteration 6: server robustness audit (mission §6) — PASS, no bugs
+Probed imp-server (Qwen3-8B NVFP4, port 8081) for the §6 completeness bar:
+- Malformed JSON / missing messages / empty body / wrong content-type / negative max_tokens → graceful
+  HTTP 400 (no crash). Normal chat → 200. Huge max_tokens (1e9) → 200 (clamped to context).
+- **Both API dialects work:** /v1/chat/completions AND /v1/messages (Anthropic) → 200.
+- **Context overflow → clean 400** with proper OpenAI error format: `{"error":{"message":"Prompt
+  exceeds context window (60009 tokens >= 40960 max)","type":"invalid_request_error"}}`.
+- **Continuous-batching under concurrent load: 12/12 simultaneous requests → 200, server stable,
+  health green throughout.** No crashes, no hangs.
+- VERDICT: server robustness/completeness is solid — claimed behavior is TRUE. No fix needed.
+  (Not stress-tested: multi-hour sustained-load memory stability, SSE-stream edge cases, true-OOM
+  model-load path — candidates for a future deeper soak test.)
