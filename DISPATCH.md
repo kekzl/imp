@@ -142,3 +142,21 @@ Installed `compileiq` v1.0.0 (NVIDIA, public PyPI). Its compiler search spaces a
   ACF → imp-cli pp4096 tok/s as score). Deferred to a focused session (per-candidate imp rebuild ~13s).
 - API: `compileiq.ciq.Search` (pydantic) + `.start()`; `Worker` ABC = build+run+score; search spaces
   are GitHub-release-backed per (compiler, version) — verify an sm_120/13.3 ptxas space exists first.
+
+### Tuning ecosystem (2026-05-29) — autotuners are Python; C++ path is manual
+- **TileGym 1.3.0** (pip): the cuTile autotuner — but **requires PyTorch** and tunes the **Python** cuTile
+  (`@ct.kernel` / `cuda.tile`) path, NOT C++ `cuda::tiles`. `cuda.tile` Python DSL is present (has `.tune`).
+- **C++ `cuda::tiles` has no shipping autotuner.** Tuning knobs there: (a) tile shapes via `ct::shape<>`
+  (manual; my 64×64→64×256 sweep got WORSE), (b) `__applicable_tile_hints__("latency"|...)` string hints
+  (not tile sizes). Manual C++ exploration is the only in-mandate lever and was limited (~24 TFLOPS ceiling).
+- **Bridge for competitive C++ perf (Phase 5):** use Python cuTile + TileGym/`cuda.tile.tune` to *discover*
+  optimal (tile sizes, hints) for the FA2 shapes, then hand-port those configs into the C++ kernel. Requires
+  PyTorch at dev time (not shipped — OK), plus a port step. Substantial + uncertain to beat hand-tuned native.
+
+### STRATEGIC CONCLUSION (honest, per GOAL §1/§4.4/§6)
+Tile FA2 in C++ is **viable + correct** but **naive perf (~24 TFLOPS, 2.9% roofline) does not beat the
+hand-written FA2** (PR #477, +20%, same HMMA.16816), and the in-C++ tuning levers are weak. Reaching
+competitive perf needs a Python-autotune→C++-port workflow (Phase 5), uncertain to win. Therefore the
+realistic landing is **`--attn-backend=tile` as an OPTIONAL, non-default path with the native fallback
+preserved** — exactly the GOAL §4.4 conditional. CompileIQ tunes the *native* ptxas kernels (incl. hand-FA2),
+not Tile. No production code touched; native path intact. DoD remains multi-week (autotune-bridge + integration).
