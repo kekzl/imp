@@ -279,3 +279,18 @@ NEXT: re-sweep NVFP4 dense models to capture the win; then LEAD-2 (NVFP4 MoE dec
   reps=8, CUBLAS_WORKSPACE_CONFIG=:4096:8 → `docs/scoreboard.tsv`.
 - Launched sweep (bg) + llama.cpp-on-sm120 build/bench agent (bg, builds CUDA 12.8 image).
 - Early results: Qwen3-8B Q8_0 pp512=7970/tg128=274 · Qwen3-8B-NVFP4 pp512=21581/tg128=239.
+
+### 2026-05-29 — Iteration 4b: GGUF prefill via IMMA scoped — architecturally capped
+- The existing INT8 IMMA Q4_K MMQ kernel (`gemm.q4k_imma_enabled`, default off) ONLY engages at
+  **M≥1024** (dense, %64). At pp512 it never fires (my first A/B showed no change — M=512).
+- At **pp2048** it DOES fire: Gemma-3-12B 4983 → **5375 (+7.9%)** prefill. Real but modest; coherent.
+  Variance-sensitive (cuBLAS prefill ±2.6×) — NOT shipped without rigorous cooldown/multi-trial/
+  multi-model validation (defer until GPU free; vLLM agent holds it).
+- **Phase-2B ceiling doc** (docs/archive/.../2026-05-18-q4k-imma-phase2b-ceiling.md): IMMA caps at
+  **40 TOPS = 4.3% of 931 TOPS peak** — scale-apply (FP16→FP32 + FMA between MMAs) serializes and
+  under-issues the tensor cores. Reaches ~dequant→cuBLAS parity only; beating llama MMQ (which
+  defers/batches scale-apply) needs a FUNDAMENTALLY different kernel. So GGUF prefill = genuine
+  multi-day kernel research, not a quick win.
+- **CONCLUSION this session: decode WON on NVFP4 (shipped #465+#469). All remaining gaps are
+  hard/research (GGUF prefill MMQ architecturally capped; GGUF Q4_K decode dp4a-bound) or pending
+  (vLLM NVFP4 prefill comparison, GPU-occupied). Next concrete action gated on vLLM result.**
