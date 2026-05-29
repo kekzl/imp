@@ -49,6 +49,8 @@ benchmark **on sm_120** shows ≥parity.
 
 C++ header confirmed in-toolkit: `/usr/local/cuda-13.3/include/cuda_tile.h` (2026-05-29).
 
+**RESOLVED (2026-05-29) — benchmarked on sm_120, does NOT reach parity → SHELVED.** Built a real Python cuTile FA2 (causal fp16, correct: max_rel_err=0.0) and ran `cuda.tile.tune.exhaustive_search`. **Autotuned ceiling = 26.5 eff-TFLOPS = 3.2% of the 838 roofline** (naive 18; autotune lift only ~1.1–1.5×; tile-size the sole lever). That's ~order-of-magnitude below competitive and far below the native hand-FA2 — confirming Yadav (0.53× FA2, same arch). The "≥parity" gate fails, so **the multi-week Tile FA2 integration (Phase 2-5) is NOT being built** (it would ship a backend slower than native). Tile stays investigated-and-shelved. Harness: `tools/analysis/cutile_fa2.py` (+ `Dockerfile.cutile`). Memory: `cutile_autotune_ceiling_shelve_2026_05_29`.
+
 **Action (not blocking current FMHA/NVFP4 work):** once 13.3 is in, (1) ~~confirm the C++
 headers ship in-toolkit~~ ✓ done, (2) prototype one *non-hot-path* kernel (e.g. a rowsum/reduce)
 to assess C++ ergonomics + debuggability, (3) micro-benchmark a Tile NVFP4 GEMM and a

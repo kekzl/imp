@@ -172,3 +172,11 @@ competitive perf needs a Python-autotune→C++-port workflow (Phase 5), uncertai
 realistic landing is **`--attn-backend=tile` as an OPTIONAL, non-default path with the native fallback
 preserved** — exactly the GOAL §4.4 conditional. CompileIQ tunes the *native* ptxas kernels (incl. hand-FA2),
 not Tile. No production code touched; native path intact. DoD remains multi-week (autotune-bridge + integration).
+
+## DECISIVE EXPERIMENT DONE (2026-05-29) — autotuned cuTile ceiling = 26.5 TFLOPS → SHELVE
+Ran the pinned experiment: a real Python cuTile FA2 (causal fp16 S=2048 D=128) + `cuda.tile.tune.exhaustive_search`.
+- **Correctness:** max_rel_err=0.0 vs CPU causal oracle. cuTile DSL FA2 works on sm_120a (cupy arrays, live-driver mount).
+- **Autotuned best = TM32/TN64 @ 40.5 µs/head → 26.5 eff-TFLOPS = 3.2% of the 838 FP16 roofline** (naive 64×64 = 59.5 µs ≈ 18 TFLOPS; autotune lift ~1.1–1.5×; 128-row tiles 5–7× worse). Tile-size is the only real lever, as predicted.
+- **DECISION: SHELVE the Tile backend.** 3.2% roofline is ~order-of-magnitude below competitive and far below the native hand-FA2 (PR #477). Confirms Yadav (0.53× FA2 on sm_120a, same arch) + the naive 24-TFLOPS datapoint. The GOAL §4.4 conditional resolves to the negative branch.
+- **Multi-week Tile FA2 integration (Phase 2-5): NOT BUILT — intentionally.** A production Tile prefill/decode backend would be strictly slower than native; building it would violate the "only if ≥ parity" contract. Tile remains investigated-and-shelved; the standalone prototype + this autotune ceiling are the deliverables. Native path untouched throughout.
+- Harness: `tools/analysis/Dockerfile.cutile` (→ imp:cutile), `cutile_fa2.py`, `cutile_smoke.py`. Memory: `cutile_autotune_ceiling_shelve_2026_05_29`.
