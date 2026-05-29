@@ -222,7 +222,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
         // 32-head models). Longer sequences auto-route to FMHA via the
         // fmha_prefill_threshold. Reduced from 1024 to free ~768 MiB for KV.
-        constexpr size_t kMaxAttnScoresMiB = 256;
+        int cfg_mib = runtime_config().attention.attn_scores_mib;
+        size_t kMaxAttnScoresMiB = (cfg_mib > 0) ? static_cast<size_t>(cfg_mib) : 256;
         size_t max_s_sz = kMaxAttnScoresMiB << 20;
         // max seq = sqrt(budget / (n_heads * sizeof(half)))
         int attn_seq = max_tokens_;

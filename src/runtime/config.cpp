@@ -124,6 +124,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.fmha_sm120 = val;
     else if (eq("attention.fmha_prefill_threshold"))
         cfg.attention.fmha_prefill_threshold = parse_int(val, cfg.attention.fmha_prefill_threshold);
+    else if (eq("attention.attn_scores_mib"))
+        cfg.attention.attn_scores_mib = parse_int(val, cfg.attention.attn_scores_mib);
     else if (eq("attention.mxfp4"))
         cfg.attention.mxfp4 = val;
     else if (eq("attention.mxfp4_fp16_fallback"))
@@ -329,6 +331,12 @@ void seed_from_env(RuntimeConfig& cfg) {
     // per-expert NVFP4 MoE decode path (default ON).
     if (const char* e = std::getenv("IMP_NO_NVFP4_MOE_DECODE"))
         cfg.gemm.nvfp4_moe_decode = (std::atoi(e) == 0);
+
+    // attention.attn_scores_mib — IMP_ATTN_SCORES_MIB: cuBLAS attention S-matrix cap.
+    if (const char* e = std::getenv("IMP_ATTN_SCORES_MIB")) {
+        int v = std::atoi(e);
+        if (v > 0) cfg.attention.attn_scores_mib = v;
+    }
 
     // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))
