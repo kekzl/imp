@@ -21,6 +21,11 @@ struct NvFP4QuantResult {
     float tensor_scale = 1.0f;     // global tensor scale
     int64_t N = 0;
     int64_t K = 0;
+    // True when packed_data/micro_scales were allocated by this result (the
+    // quantize_* paths) and must be cudaFree'd on teardown. False when they
+    // BORROW resident model weight storage (the data-borrow decode cache) —
+    // cudaFree on a borrowed pointer fails with "invalid argument".
+    bool owned = true;
 };
 
 // Quantize FP16 tensor to NVFP4 with two-level scaling.

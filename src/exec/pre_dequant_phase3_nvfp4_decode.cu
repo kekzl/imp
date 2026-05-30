@@ -1651,6 +1651,7 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
                             NvFP4QuantResult nv = nit->second;
                             nv.packed_data = data_slice;
                             nv.micro_scales = w.scales;
+                            nv.owned = false;  // borrows resident model storage — don't cudaFree on teardown
                             wcache_.nvfp4.erase(nit);
                             wcache_.nvfp4[data_slice] = nv;
                         }
