@@ -3,6 +3,9 @@
 #include "vision/image_processor.h"
 #include "model/model.h"
 
+#include <cmath>
+#include <vector>
+
 namespace imp {
 
 VisionPipeline::~VisionPipeline() {
@@ -60,16 +63,22 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     Tokenizer* tok = text_model->tokenizer();
     if (tok) {
         const auto& mcfg = text_model->config();
+        // Gemma-3: <image_soft_token> / <start_of_image> / <end_of_image>.
+        // Gemma-4: <|image|> (repeated soft) / <|image> (begin) / <image|> (end).
         soft_token_id_ = tok->find_token("<image_soft_token>");
-        if (soft_token_id_ < 0) {
-            if (mcfg.vocab_size > 262144) {
-                soft_token_id_ = 262144;
-            }
+        if (soft_token_id_ < 0)
+            soft_token_id_ = tok->find_token("<|image|>");
+        if (soft_token_id_ < 0 && mcfg.vocab_size > 262144) {
+            soft_token_id_ = 262144;
         }
         boi_id_ = tok->find_token("<start_of_image>");
+        if (boi_id_ < 0)
+            boi_id_ = tok->find_token("<|image>");
         if (boi_id_ < 0 && mcfg.vocab_size > 255999)
             boi_id_ = 255999;
         eoi_id_ = tok->find_token("<end_of_image>");
+        if (eoi_id_ < 0)
+            eoi_id_ = tok->find_token("<image|>");
         if (eoi_id_ < 0 && mcfg.vocab_size > 256000)
             eoi_id_ = 256000;
         IMP_LOG_INFO("Vision tokens: soft=%d, boi=%d, eoi=%d", soft_token_id_, boi_id_, eoi_id_);

@@ -38,6 +38,9 @@ private:
     half* d_attn_scores_ = nullptr;  // [num_heads, num_patches, num_patches]
     half* d_ffn_ = nullptr;          // [num_patches, intermediate_size]
     half* d_pooled_ = nullptr;       // [num_image_tokens, hidden_size]
+    half* d_gate_ = nullptr;         // [num_patches, intermediate_size] (gemma4v GeGLU gate)
+    int* d_pos_x_ = nullptr;         // [num_patches] axial column index (gemma4v)
+    int* d_pos_y_ = nullptr;         // [num_patches] axial row index (gemma4v)
 
     // CUDA graph for the full encoder forward. Topology is fixed once model
     // and workspace sizes are known; only the input/output pointers change
@@ -48,6 +51,7 @@ private:
     half* graph_d_output_ = nullptr;
 
     bool encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream);
+    bool encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream);
 
     void free_buffers();
 };

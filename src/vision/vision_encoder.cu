@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cfloat>
 #include <cmath>
+#include <vector>
 
 namespace imp {
 
@@ -31,8 +32,12 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
     auto handle = get_vision_cublas_handle();
     cublasSetStream(handle, stream);
 
-    half h_alpha = __float2half(alpha);
-    half h_beta = __float2half(beta);
+    // FP32 accumulation (FP16 in/out): the FFN down-projection sums thousands of
+    // terms; FP16 accumulation overflows for high-magnitude tokens (→ inf, then
+    // RMSNorm turns inf×0 into NaN). FP32 compute keeps the encoder numerically
+    // robust. alpha/beta must be float for COMPUTE_32F.
+    float f_alpha = alpha;
+    float f_beta = beta;
 
     // cuBLAS uses column-major, so we compute C^T = B @ A^T
     // C^T [N, M] = B [N, K] @ A^T [K, M]
@@ -40,10 +45,10 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
                  CUBLAS_OP_T,                 // A^T
                  CUBLAS_OP_N,                 // B
                  N, M, K,                     // m, n, k in col-major terms
-                 &h_alpha, B, CUDA_R_16F, K,  // B [N, K] col-major stride = K
+                 &f_alpha, B, CUDA_R_16F, K,  // B [N, K] col-major stride = K
                  A, CUDA_R_16F, K,            // A [M, K] col-major stride = K
-                 &h_beta, C, CUDA_R_16F, N,   // C [M, N] col-major stride = N
-                 CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT);
+                 &f_beta, C, CUDA_R_16F, N,   // C [M, N] col-major stride = N
+                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 }
 
 // ---- Helper: Batched strided GEMM for attention ----
@@ -252,6 +257,122 @@ __global__ void avg_pool_spatial_kernel(const half* __restrict__ in,  // [grid_h
     }
 }
 
+// RMSNorm over contiguous rows of width D, optional weight (null = no weight).
+// Used by gemma4v for per-head q/k/v norm (D=head_dim, n_rows=np*nh) and the
+// weightless pre-projection norm (D=hidden, n_rows=n_tokens).
+__global__ void vision_rmsnorm_opt_kernel(const half* __restrict__ x, const half* __restrict__ weight,
+                                          half* __restrict__ out, int D, float eps) {
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
+
+    __shared__ float s_buf[32];
+    float ss = 0.0f;
+    for (int i = tid; i < D; i += blockDim.x) {
+        float v = __half2float(x_row[i]);
+        ss += v * v;
+    }
+    float inv_rms = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
+
+    for (int i = tid; i < D; i += blockDim.x) {
+        float v = __half2float(x_row[i]) * inv_rms;
+        if (weight)
+            v *= __half2float(weight[i]);
+        o_row[i] = __float2half(v);
+    }
+}
+
+// 2D axial NEOX RoPE for gemma4v vision attention. qk: [np, nh, head_dim].
+// The head_dim is split in half: first half rotated by the patch column (pos_x),
+// second half by the patch row (pos_y); each half is NEOX (pairs i, i+half/2).
+__global__ void vision_rope2d_neox_kernel(half* __restrict__ qk, const int* __restrict__ pos_x,
+                                          const int* __restrict__ pos_y, int np, int nh, int head_dim,
+                                          float base) {
+    int half_dim = head_dim / 2;       // dims rotated per axis
+    int pairs = half_dim / 2;          // rotation pairs per axis
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = np * nh * pairs;
+    if (idx >= total)
+        return;
+    int j = idx % pairs;          // 0..pairs-1
+    int hp = idx / pairs;         // patch*nh + head
+    int p = hp / nh;
+    half* vec = qk + static_cast<int64_t>(hp) * head_dim;
+
+    float inv = powf(base, -2.0f * j / half_dim);
+    // first half: column position
+    {
+        float ang = pos_x[p] * inv;
+        float c = cosf(ang), s = sinf(ang);
+        float a = __half2float(vec[j]);
+        float b = __half2float(vec[j + pairs]);
+        vec[j] = __float2half(a * c - b * s);
+        vec[j + pairs] = __float2half(a * s + b * c);
+    }
+    // second half: row position
+    {
+        int o = half_dim;
+        float ang = pos_y[p] * inv;
+        float c = cosf(ang), s = sinf(ang);
+        float a = __half2float(vec[o + j]);
+        float b = __half2float(vec[o + j + pairs]);
+        vec[o + j] = __float2half(a * c - b * s);
+        vec[o + j + pairs] = __float2half(a * s + b * c);
+    }
+}
+
+// Add the two axial learned position tables (x=col, y=row) to the patch grid.
+// tbl is v.position_embd laid out [2, pos_size, D]: x-table at offset 0, y-table
+// at offset pos_size*D.
+__global__ void axial_pos_add_kernel(half* __restrict__ x, const half* __restrict__ tbl,
+                                     const int* __restrict__ pos_x, const int* __restrict__ pos_y, int np,
+                                     int D, int pos_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= np * D)
+        return;
+    int p = idx / D;
+    int d = idx % D;
+    float ex = __half2float(tbl[static_cast<int64_t>(pos_x[p]) * D + d]);
+    float ey = __half2float(tbl[(static_cast<int64_t>(pos_size) + pos_y[p]) * D + d]);
+    x[idx] = __float2half(__half2float(x[idx]) + ex + ey);
+}
+
+// gemma4v projector tail fused in FP32: out = rmsnorm((x*scale_factor - std_bias) * std_scale).
+// Gemma vision activations are large (absmax ~3000); the ×√D scale would overflow
+// FP16 (→ inf → NaN) if materialized, so the whole tail runs in FP32 registers and
+// only the RMS-normalized (small) result is written back as FP16.
+__global__ void gemma4v_tail_norm_kernel(const half* __restrict__ x, const half* __restrict__ std_bias,
+                                         const half* __restrict__ std_scale, half* __restrict__ out, int D,
+                                         float scale_factor, float eps) {
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
+    extern __shared__ float sv[];  // [D] FP32 scratch
+    __shared__ float s_buf[32];
+    float ss = 0.0f;
+    for (int i = tid; i < D; i += blockDim.x) {
+        float v = __half2float(x_row[i]) * scale_factor;
+        if (std_bias && std_scale)
+            v = (v - __half2float(std_bias[i])) * __half2float(std_scale[i]);
+        sv[i] = v;
+        ss += v * v;
+    }
+    float inv = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
+    for (int i = tid; i < D; i += blockDim.x)
+        o_row[i] = __float2half(sv[i] * inv);
+}
+
+// Element-wise multiply: out = a * b (GeGLU gate combine).
+__global__ void mul_tensors_kernel(const half* __restrict__ a, const half* __restrict__ b,
+                                   half* __restrict__ out, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N)
+        return;
+    out[idx] = __float2half(__half2float(a[idx]) * __half2float(b[idx]));
+}
+
 // Replace vision token embeddings in the hidden state
 __global__ void replace_vision_embeddings_kernel(
     half* __restrict__ hidden,              // [n_tokens, d_model]
@@ -337,6 +458,15 @@ void VisionEncoder::free_buffers() {
     safe_free(d_attn_scores_);
     safe_free(d_ffn_);
     safe_free(d_pooled_);
+    safe_free(d_gate_);
+    if (d_pos_x_) {
+        cudaFree(d_pos_x_);
+        d_pos_x_ = nullptr;
+    }
+    if (d_pos_y_) {
+        cudaFree(d_pos_y_);
+        d_pos_y_ = nullptr;
+    }
 }
 
 bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
@@ -368,6 +498,26 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
         IMP_LOG_ERROR("Vision encoder: workspace allocation failed");
         free_buffers();
         return false;
+    }
+
+    // gemma4v needs a separate GeGLU gate buffer and precomputed axial position
+    // indices (column = patch % grid, row = patch / grid).
+    if (cfg.is_gemma4v) {
+        int grid = cfg.image_size / cfg.patch_size;
+        if (!alloc(d_gate_, np * ff) ||
+            cudaMalloc(&d_pos_x_, np * sizeof(int)) != cudaSuccess ||
+            cudaMalloc(&d_pos_y_, np * sizeof(int)) != cudaSuccess) {
+            IMP_LOG_ERROR("Vision encoder: gemma4v workspace allocation failed");
+            free_buffers();
+            return false;
+        }
+        std::vector<int> hx(np), hy(np);
+        for (int i = 0; i < np; i++) {
+            hx[i] = i % grid;
+            hy[i] = i / grid;
+        }
+        cudaMemcpy(d_pos_x_, hx.data(), np * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_pos_y_, hy.data(), np * sizeof(int), cudaMemcpyHostToDevice);
     }
 
     size_t total_mb = (np * pd + np * hd * 4 +
@@ -412,6 +562,9 @@ bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t st
 }
 
 bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream) {
+    if (model_->config.is_gemma4v)
+        return encode_impl_gemma4v(d_pixels, d_output, stream);
+
     const auto& cfg = model_->config;
     int np = cfg.num_patches;
     int hd = cfg.hidden_size;
@@ -648,6 +801,151 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         vision_rmsnorm_kernel<<<n_pooled, 256, 0, stream>>>(
             d_output, static_cast<const half*>(model_->mm_post_norm_w.data), d_output, lm_d_model_, eps);
     }
+
+    return true;
+}
+
+// ======================================================================
+//  gemma4v encoder — RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX
+//  RoPE, sandwich post-norms, GeGLU FFN, scale-1 attention, avg-pool(3)
+//  + ×√D + std-affine + pre-proj RMSNorm + linear projector.
+//  See docs/vision_gemma4v_spec.md.
+// ======================================================================
+bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream) {
+    const auto& cfg = model_->config;
+    int np = cfg.num_patches;
+    int hd = cfg.hidden_size;
+    int ff = cfg.intermediate_size;
+    int nh = cfg.num_heads;
+    int head_dim = cfg.head_dim;
+    int ps = cfg.patch_size;
+    int img = cfg.image_size;
+    int grid = img / ps;
+    int patch_dim = ps * ps * 3;
+    float eps = 1e-6f;
+    float rope_base = cfg.rope_theta;
+
+    // ---- Patch embed (no bias) ----
+    extract_patches_kernel<<<np, 256, 0, stream>>>(d_pixels, d_patches_, img, img, ps, grid, grid, patch_dim);
+    vision_gemm(d_patches_, static_cast<const half*>(model_->patch_embd_w.data), d_hidden_, np, hd, patch_dim,
+                1.0f, 0.0f, stream);
+
+    // ---- Axial learned position embeddings (x=col, y=row tables) ----
+    {
+        int pos_size = static_cast<int>(model_->position_embd.shape[1]);  // 10240
+        int total = np * hd;
+        axial_pos_add_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+            d_hidden_, static_cast<const half*>(model_->position_embd.data), d_pos_x_, d_pos_y_, np, hd,
+            pos_size);
+    }
+
+    // ---- 27 transformer layers ----
+    for (int layer = 0; layer < cfg.num_layers; layer++) {
+        const auto& lw = model_->layers[layer];
+        int rows = np * nh;
+
+        // pre-attention RMSNorm (full-width, weighted)
+        vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
+            d_hidden_, static_cast<const half*>(lw.ln1_w.data), d_residual_, hd, eps);
+
+        // Q, K, V projections (no bias)
+        vision_gemm(d_residual_, static_cast<const half*>(lw.wq.data), d_q_, np, hd, hd, 1.0f, 0.0f, stream);
+        vision_gemm(d_residual_, static_cast<const half*>(lw.wk.data), d_k_, np, hd, hd, 1.0f, 0.0f, stream);
+        vision_gemm(d_residual_, static_cast<const half*>(lw.wv.data), d_v_, np, hd, hd, 1.0f, 0.0f, stream);
+
+        // per-head q/k RMSNorm (weighted [head_dim]) → 2D RoPE; per-head v RMSNorm (weightless)
+        vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(
+            d_q_, static_cast<const half*>(lw.q_norm.data), d_q_, head_dim, eps);
+        vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(
+            d_k_, static_cast<const half*>(lw.k_norm.data), d_k_, head_dim, eps);
+        {
+            int pairs = (head_dim / 2) / 2;
+            int total = np * nh * pairs;
+            int blocks = (total + 127) / 128;
+            vision_rope2d_neox_kernel<<<blocks, 128, 0, stream>>>(d_q_, d_pos_x_, d_pos_y_, np, nh, head_dim,
+                                                                  rope_base);
+            vision_rope2d_neox_kernel<<<blocks, 128, 0, stream>>>(d_k_, d_pos_x_, d_pos_y_, np, nh, head_dim,
+                                                                  rope_base);
+        }
+        vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(d_v_, nullptr, d_v_, head_dim, eps);
+
+        // attention: scores = Q @ K^T, kq_scale = 1.0 (q/k-norm controls magnitude)
+        {
+            auto handle = get_vision_cublas_handle();
+            cublasSetStream(handle, stream);
+            float f_alpha = 1.0f;  // kq_scale = 1.0; FP32 accumulate to avoid FP16 overflow
+            float f_beta = 0.0f;
+            cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, np, np, head_dim, &f_alpha, d_k_,
+                                       CUDA_R_16F, nh * head_dim, head_dim, d_q_, CUDA_R_16F, nh * head_dim,
+                                       head_dim, &f_beta, d_attn_scores_, CUDA_R_16F, np,
+                                       static_cast<long long>(np) * np, nh, CUBLAS_COMPUTE_32F,
+                                       CUBLAS_GEMM_DEFAULT);
+        }
+        softmax_2d_kernel<<<nh * np, 256, 0, stream>>>(d_attn_scores_, np);
+        {
+            auto handle = get_vision_cublas_handle();
+            cublasSetStream(handle, stream);
+            float f_one = 1.0f;
+            float f_zero = 0.0f;
+            cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, np, np, &f_one, d_v_,
+                                       CUDA_R_16F, nh * head_dim, head_dim, d_attn_scores_, CUDA_R_16F, np,
+                                       static_cast<long long>(np) * np, &f_zero, d_attn_out_, CUDA_R_16F,
+                                       nh * head_dim, head_dim, nh, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        }
+
+        // output projection (no bias) → d_residual_
+        vision_gemm(d_attn_out_, static_cast<const half*>(lw.wo.data), d_residual_, np, hd, hd, 1.0f, 0.0f,
+                    stream);
+        // sandwich: post-attention RMSNorm BEFORE residual add
+        vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
+            d_residual_, static_cast<const half*>(lw.attn_post_norm.data), d_residual_, hd, eps);
+        {
+            int total = np * hd;
+            add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
+                                                                        total);
+        }
+
+        // pre-FFN RMSNorm → GeGLU(up, gate) → down
+        vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
+            d_hidden_, static_cast<const half*>(lw.ln2_w.data), d_residual_, hd, eps);
+        vision_gemm(d_residual_, static_cast<const half*>(lw.ffn_up_w.data), d_ffn_, np, ff, hd, 1.0f, 0.0f,
+                    stream);
+        vision_gemm(d_residual_, static_cast<const half*>(lw.ffn_gate_w.data), d_gate_, np, ff, hd, 1.0f, 0.0f,
+                    stream);
+        {
+            int total = np * ff;
+            gelu_tanh_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_gate_, total);
+            mul_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_gate_, d_ffn_, d_ffn_, total);
+        }
+        vision_gemm(d_ffn_, static_cast<const half*>(lw.ffn_down_w.data), d_residual_, np, hd, ff, 1.0f, 0.0f,
+                    stream);
+        // sandwich: post-FFN RMSNorm BEFORE residual add
+        vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
+            d_residual_, static_cast<const half*>(lw.ffn_post_norm.data), d_residual_, hd, eps);
+        {
+            int total = np * hd;
+            add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
+                                                                        total);
+        }
+    }
+
+    // ---- Pooler: avg-pool(n_merge) ----
+    int pool = cfg.n_merge;
+    int out_h = grid / pool, out_w = grid / pool;
+    int n_pooled = out_h * out_w;
+    avg_pool_spatial_kernel<<<n_pooled, 256, 0, stream>>>(d_hidden_, d_pooled_, grid, grid, hd, pool, out_h,
+                                                          out_w);
+
+    // ---- Fused FP32 tail: ×√hd → (x-std_bias)*std_scale → pre-projection RMSNorm.
+    // Gemma vision activations reach ~3000; ×√hd would overflow FP16 if stored, so
+    // the whole tail runs in FP32 and only the RMS-normalized result is written. ----
+    gemma4v_tail_norm_kernel<<<n_pooled, 256, hd * sizeof(float), stream>>>(
+        d_pooled_, static_cast<const half*>(model_->std_bias.data),
+        static_cast<const half*>(model_->std_scale.data), d_pooled_, hd, sqrtf(static_cast<float>(hd)), eps);
+
+    // ---- Linear projection ----
+    vision_gemm(d_pooled_, static_cast<const half*>(model_->mm_proj_w.data), d_output, n_pooled, lm_d_model_,
+                hd, 1.0f, 0.0f, stream);
 
     return true;
 }

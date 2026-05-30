@@ -449,6 +449,39 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         cfg.image_size, cfg.patch_size, cfg.hidden_size, cfg.num_heads, cfg.num_layers, cfg.num_patches,
         cfg.num_image_tokens);
 
+    // Detect projector type. gemma4v is a structurally different encoder
+    // (RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX RoPE, sandwich
+    // post-norms, GeGLU FFN, scale-1 attention) — configure it here; the encoder
+    // branches on cfg.is_gemma4v. See docs/vision_gemma4v_spec.md.
+    {
+        std::string projector;
+        auto it = metadata.find("clip.projector_type");
+        if (it == metadata.end())
+            it = metadata.find("clip.vision.projector_type");
+        if (it != metadata.end())
+            projector = it->second.str_val;
+        if (projector == "gemma4v") {
+            cfg.is_gemma4v = true;
+            cfg.n_merge = 3;
+            cfg.rope_theta = 100.0f;
+            // Use a budget-valid square (768² = 589824 px, within gemma4v's
+            // 252..280 token band at 48px alignment) so the existing square
+            // preprocessing yields a 48x48 patch grid → 16x16 = 256 tokens.
+            cfg.image_size = 768;
+            int side = cfg.image_size / cfg.patch_size;  // 48
+            cfg.num_patches = side * side;
+            int merged = side / cfg.n_merge;  // 16
+            cfg.num_image_tokens = merged * merged;
+            // gemma4v wants pixels in [-1,1] = 2*(px/255)-1; fold into mean/std=0.5.
+            for (int c = 0; c < 3; c++) {
+                cfg.image_mean[c] = 0.5f;
+                cfg.image_std[c] = 0.5f;
+            }
+            IMP_LOG_INFO("Vision: gemma4v encoder (768px, grid=%d, n_merge=3, tokens=%d, rope_theta=100)",
+                         side, cfg.num_image_tokens);
+        }
+    }
+
     // 7. Allocate layers
     model->layers.resize(cfg.num_layers);
 
@@ -467,18 +500,36 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         for (uint32_t d = 0; d < info.n_dims; d++)
             shape[d] = info.dims[info.n_dims - 1 - d];
 
-        // Gemma-3 multimodal projector (clip.projector_type = gemma3): stored as
-        // [ne0=out, ne1=in], the transpose of vision_gemm's [N=out, K=in] contract.
-        // Upload transposed and record [out, in] so mm_proj_w drives lm_d_model.
+        // Multimodal projector (mm.input_projection.weight): vision_gemm wants
+        // B=[N=out, K=in] (contiguous along in=hidden). Orientation differs by
+        // export: Gemma-3 stores [ne0=out, ne1=in] (transpose needed), while the
+        // LLaVA-style convention stores [ne0=in, ne1=out] (already correct).
+        // Pick by which dim equals the SigLIP hidden size, then record [out, in]
+        // so mm_proj_w drives lm_d_model.
         if (info.name == "mm.input_projection.weight" && info.n_dims == 2) {
-            int64_t out_dim = info.dims[0];  // ne0 = LLM d_model
-            int64_t in_dim = info.dims[1];   // ne1 = SigLIP hidden
+            int64_t ne0 = info.dims[0];
+            int64_t ne1 = info.dims[1];
             void* dp = nullptr;
-            if (!upload_tensor_fp16_transposed(tensor_data, info.type, in_dim, out_dim, &dp,
-                                               model->gpu_allocs)) {
-                IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight");
-                munmap(mmap_base, file_size);
-                return nullptr;
+            int64_t out_dim, in_dim;
+            if (ne1 == cfg.hidden_size) {
+                // ne0=out, ne1=in (gemma3): transpose into [out, in].
+                out_dim = ne0;
+                in_dim = ne1;
+                if (!upload_tensor_fp16_transposed(tensor_data, info.type, in_dim, out_dim, &dp,
+                                                   model->gpu_allocs)) {
+                    IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight (transposed)");
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
+            } else {
+                // ne0=in=hidden (LLaVA convention): raw layout already matches.
+                out_dim = ne1;
+                in_dim = ne0;
+                if (!upload_tensor_fp16(tensor_data, info.type, ne0 * ne1, &dp, model->gpu_allocs)) {
+                    IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight");
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
             }
             int64_t pshape[4] = {out_dim, in_dim, 1, 1};
             model->mm_proj_w = Tensor(dp, QType::F16, 2, pshape, true);
@@ -536,6 +587,14 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
             model->mm_post_norm_w = t;
             assigned++;
         }
+        // gemma4v projector-tail affine
+        else if (name == "v.std_scale") {
+            model->std_scale = t;
+            assigned++;
+        } else if (name == "v.std_bias") {
+            model->std_bias = t;
+            assigned++;
+        }
         // Layer weights: "v.blk.{i}.{field}"
         else if (name.substr(0, 6) == "v.blk.") {
             // Parse layer index
@@ -586,6 +645,17 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
                 layer.ffn_down_w = t;
             else if (field == "ffn_down.bias")
                 layer.ffn_down_b = t;
+            // gemma4v-only block tensors
+            else if (field == "attn_q_norm.weight")
+                layer.q_norm = t;
+            else if (field == "attn_k_norm.weight")
+                layer.k_norm = t;
+            else if (field == "attn_post_norm.weight")
+                layer.attn_post_norm = t;
+            else if (field == "ffn_post_norm.weight")
+                layer.ffn_post_norm = t;
+            else if (field == "ffn_gate.weight")
+                layer.ffn_gate_w = t;
             else {
                 IMP_LOG_DEBUG("Vision: unrecognized layer tensor: %s", name.c_str());
                 continue;
