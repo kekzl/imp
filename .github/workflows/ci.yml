@@ -40,7 +40,8 @@ jobs:
         # making it the default toolchain. The verify step below fails the build
         # if nvcc is not the pinned version, so an older base toolkit can't leak in.
         run: |
-          pkg="cuda-toolkit-${CUDA_VERSION//./-}"   # 13.3 -> cuda-toolkit-13-3
+          # POSIX sh (the step runs under sh, not bash): turn 13.3 into 13-3 via tr.
+          pkg="cuda-toolkit-$(echo "$CUDA_VERSION" | tr . -)"   # -> cuda-toolkit-13-3
           cuda_home="/usr/local/cuda-${CUDA_VERSION}"
           apt-get update
           apt-get install -y --no-install-recommends --allow-change-held-packages "$pkg"
