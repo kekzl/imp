@@ -252,6 +252,37 @@ struct RuntimeConfig {
         // lm_head for maximum coherence. Env IMP_NO_NVFP4_LM_HEAD=1 still kills
         // the NVFP4 lm_head entirely (dense + GDN) via gemm.nvfp4_lm_head.
         bool nvfp4_lm_head_gdn = true;
+        // Hybrid GDN/SSM models (Nemotron-3-Nano-30B, Qwen3.6-35B-A3B) keep the
+        // recurrent in_proj/out_proj (ssm_in/ssm_out) OUT of the NVFP4 decode
+        // cache by default: they feed the GDN/SSM recurrent scan, which
+        // accumulates quantization error in the state H across tokens, so 4-bit
+        // was thought to degrade quality on 9B+ models. At decode they therefore
+        // GGUF hybrid models (e.g. Qwen3.6-35B-A3B Q4_K_M): the GDN/SSM
+        // in_proj/out_proj are excluded from the NVFP4 decode cache (Q4_K source
+        // is not nvfp4_beneficial), so decode runs them via Q4_K→FP16→cuBLAS — a
+        // memory-bound tax. This opt-in forces them into the NVFP4 decode cache.
+        // MEASURED (2026-05-30): Qwen3.6-35B Q4_K_M **+53% decode** (161→248
+        // tok/s), perplexity flat (−0.01%), coherent — reverses the documented
+        // −31% GGUF-hybrid-decode loss vs llama.cpp. No-op on native-NVFP4 models
+        // (their SSM projections are already NVFP4-cached). Default false.
+        bool nvfp4_ssm_proj = false;
+        // Native-NVFP4 hybrid models store SOME projections BF16 because the
+        // Modelopt/llm-compressor recipe excluded them from NVFP4. At decode these
+        // run as FP16 GEMVs (gemv_fp16_kernel). This opt-in quantizes the
+        // recipe-excluded BF16 **attention q/k/v/o** to an NVFP4 decode-cache
+        // entry at init (direct quantize_fp16_to_nvfp4_async, mirroring
+        // nvfp4_lm_head_gdn). q/k/v/o are stateless within a step → low quality
+        // risk. MEASURED (2026-05-30): Nemotron-3-Nano-30B **+3.8% decode**,
+        // perplexity-neutral (within noise). No-op on models whose attention is
+        // already NVFP4 (e.g. Qwen3.6-35B). Default false.
+        //
+        // NOTE: the analogous lever for the BF16 GDN/Mamba in_proj/out_proj was
+        // built and MEASURED to REGRESS decode −9% (Nemotron) to −20% (Qwen3.6) —
+        // the tuned FP16 GEMV (70-81% HBM) beats the NVFP4 GEMV for the wide
+        // GDN-output shapes, so the bandwidth saving never materializes. Keeping
+        // those projections FP16 is correct for SPEED (not just quality); no flag
+        // is provided for them. (See docs/MTP/SafeTensors profiling notes.)
+        bool nvfp4_attn_proj = false;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the
         // already-resident contiguous expert data + scales, instead of the

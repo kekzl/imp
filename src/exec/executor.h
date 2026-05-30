@@ -768,6 +768,11 @@ private:
     // source (GGUF path handles it via collect_candidates) or when the model is
     // GDN/SSM-hybrid. See RuntimeConfig::Gemm::nvfp4_lm_head.
     void nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream);
+    // Quantize the recipe-excluded BF16/FP16 attention q/k/v/o projections of a
+    // native-NVFP4 hybrid into wcache_.nvfp4 so M=1 decode uses the fast NVFP4
+    // GEMV. Opt-in via gemm.nvfp4_attn_proj. No-op unless the flag is set.
+    // (The GDN in/out analog was measured to regress decode and was dropped.)
+    void nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx);
     void nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
                                       Nvfp4DecodeContext& dctx);

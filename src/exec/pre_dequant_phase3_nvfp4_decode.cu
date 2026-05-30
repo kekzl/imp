@@ -58,7 +58,11 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4.
     // These feed the recurrent scan which accumulates quantization error
     // in state H across tokens. 4-bit degrades quality on 9B+ models.
-    {
+    // Opt-in gemm.nvfp4_ssm_proj keeps them IN the cache to measure the
+    // speed/quality tradeoff (mirrors nvfp4_lm_head_gdn). This gate covers the
+    // GGUF-source hybrids (Qwen3.6-35B-A3B Q4_K_M); native-NVFP4 SSM weights
+    // are handled identically by the phase0b register gate.
+    if (!runtime_config().gemm.nvfp4_ssm_proj) {
         int n_ssm_excluded = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
@@ -73,13 +77,18 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         }
         if (n_ssm_excluded > 0)
             IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
+    } else {
+        IMP_LOG_INFO("GDN/SSM: nvfp4_ssm_proj ON — recurrent projections eligible for NVFP4 cache");
     }
 
     const bool decode_all = runtime_config().gemm.nvfp4_decode_all;
-    auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
+    // force_beneficial bypasses the nvfp4_beneficial(qtype) gate — used by the
+    // opt-in SSM path so a Q4_K/Q5_K recurrent projection (normally only
+    // eligible under nvfp4_decode_all) can be cached on its own merit.
+    auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype, bool force_beneficial) {
         if (!w.data)
             return;
-        if (!nvfp4_beneficial(qtype, decode_all))
+        if (!force_beneficial && !nvfp4_beneficial(qtype, decode_all))
             return;
         if (wcache_.nvfp4.count(w.data))
             return;
@@ -98,10 +107,28 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     };
 
     // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
-    collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
+    collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype, false);
 
     // Dense attention + FFN: every tensor benefits every decode step.
-    for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
+    for_each_dense_weight(*model_, cfg, [&](const Tensor& w, QType qtype) {
+        collect_weight_nvfp4(w, qtype, false);
+    });
+
+    // GGUF-source GDN/SSM recurrent projections (opt-in). For native-NVFP4
+    // hybrids the SSM weights are already cached in phase0b (no FP16/quant
+    // source), so this loop is a no-op there; it only fires for quantized-
+    // source hybrids (e.g. Qwen3.6-35B-A3B Q4_K_M), where it forces the Q4_K
+    // recurrent projections into the NVFP4 decode cache to remove the FP16
+    // dequant→cuBLAS SSM tax. Quality risk is highest here (recurrent scan).
+    if (runtime_config().gemm.nvfp4_ssm_proj) {
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.ssm_in.data)
+                collect_weight_nvfp4(L.ssm_in, L.ssm_in.qtype, true);
+            if (L.ssm_out.data)
+                collect_weight_nvfp4(L.ssm_out, L.ssm_out.qtype, true);
+        }
+    }
 }
 
 void GraphExecutor::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
@@ -165,6 +192,86 @@ void GraphExecutor::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
                  rows, cols, nvfp4_mib);
+}
+
+// Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a
+// native-NVFP4 hybrid model into NVFP4 decode-cache entries. Mirrors
+// nvfp4_decode_cache_fp16_lm_head_ exactly (same quantize call, same wcache
+// insertion, same guards: weight on device, qtype F16/BF16, ndim 2, cols%16==0,
+// not already cached) — phase 4 then auto-routes M=1 decode through gemv_nvfp4
+// because the weight lands in wcache_.nvfp4 (decode_tier → NVFP4). Prefill is
+// untouched: the unfused originals stay BF16 and the prefill tier still uses the
+// full-precision GEMM path. Opt-in via gemm.nvfp4_attn_proj → the recipe-excluded
+// BF16 attention q/k/v/o (stateless within a step, low quality risk).
+//
+// The analogous lever for the BF16 GDN/Mamba in_proj/out_proj was built and
+// measured to REGRESS decode (−9% Nemotron, −20% Qwen3.6) — the tuned FP16 GEMV
+// (70-81% HBM) beats the NVFP4 GEMV for the wide GDN-output shapes — so it was
+// removed; keeping those projections FP16 is correct for speed, not just quality.
+void GraphExecutor::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
+                                                         cudaStream_t stream) {
+    const bool do_attn = runtime_config().gemm.nvfp4_attn_proj;
+    if (!do_attn)
+        return;
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    int n_attn = 0;
+    size_t bytes_attn = 0;
+
+    // Quantize one native-precision (F16/BF16) device weight into wcache_.nvfp4.
+    // Returns the NVFP4 byte cost on success, 0 if skipped. Same guard set as the
+    // LM-head path; idempotent (skips weights already cached).
+    auto quantize_one = [&](const Tensor& w) -> size_t {
+        if (!w.data || !w.on_device)
+            return 0;
+        if (w.qtype != QType::F16 && w.qtype != QType::BF16)
+            return 0;  // already NVFP4/quantized, or a non-2-byte source
+        if (w.ndim != 2)
+            return 0;
+        const int rows = static_cast<int>(w.shape[0]);
+        const int cols = static_cast<int>(w.shape[1]);
+        if (cols % 16 != 0)
+            return 0;
+        if (wcache_.nvfp4.count(w.data))
+            return 0;  // already cached (e.g. re-entry)
+
+        Tensor fp16_view(w.data, QType::F16, 2, w.shape, /*on_device=*/true);
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale = 1.0f;
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        result.N = rows;
+        result.K = cols;
+        wcache_.nvfp4[w.data] = result;
+        return static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    };
+
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        for (const Tensor* w : {&L.wq, &L.wk, &L.wv, &L.wo}) {
+            size_t b = quantize_one(*w);
+            if (b) {
+                n_attn++;
+                bytes_attn += b;
+            }
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    if (n_attn > 0)
+        IMP_LOG_INFO("NVFP4 attn proj: quantized %d BF16 q/k/v/o weights -> NVFP4 (%.1f MiB), decode GEMV fast path",
+                     n_attn, bytes_attn / (1024.0 * 1024.0));
+    else
+        IMP_LOG_INFO("NVFP4 attn proj: no eligible BF16 q/k/v/o (flag on but model has none)");
 }
 
 void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
@@ -231,6 +338,12 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
     // FP16 GEMV over vocab×d_model (~0.78 ms/token, ~19% of decode on Qwen3-8B).
     // Run after dense quantize so the entry is committed before CUTLASS convert.
     nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
+
+    // Native-NVFP4 hybrids store some attention projections BF16 (recipe
+    // exclusion). Opt-in (gemm.nvfp4_attn_proj) quantizes the q/k/v/o into the
+    // same NVFP4 decode cache. Run after the LM head, before CUTLASS convert so
+    // these entries get the same block-scaled treatment.
+    nvfp4_decode_cache_fp16_projections_(cfg, stream);
 
     if (!wcache_.nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
         nvfp4_decode_convert_cutlass_(remaining_budget, stream);
