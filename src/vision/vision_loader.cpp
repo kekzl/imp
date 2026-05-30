@@ -248,6 +248,53 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
     return true;
 }
 
+// Upload a 2D weight transposed: `src` is row-major [rows, cols]; the device
+// result is row-major [cols, rows]. Gemma-3's mm.input_projection.weight is
+// stored with ne0=out (the transpose of vision_gemm's [N=out, K=in] contract,
+// where the LLaVA-style projectors store ne0=in). Transposing at load lets the
+// same vision_gemm projection path consume it unchanged.
+bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t rows, int64_t cols,
+                                   void** d_out, std::vector<void*>& gpu_allocs) {
+    int64_t n = rows * cols;
+    std::vector<half> h_src(static_cast<size_t>(n));
+    if (type == GgufWireType::F16) {
+        std::memcpy(h_src.data(), src, static_cast<size_t>(n) * sizeof(half));
+    } else if (type == GgufWireType::F32) {
+        const float* f32 = static_cast<const float*>(src);
+        for (int64_t i = 0; i < n; i++)
+            h_src[i] = __float2half(f32[i]);
+    } else if (type == GgufWireType::BF16) {
+        const uint16_t* bf16 = static_cast<const uint16_t*>(src);
+        for (int64_t i = 0; i < n; i++) {
+            uint32_t bits = static_cast<uint32_t>(bf16[i]) << 16;
+            float f;
+            std::memcpy(&f, &bits, sizeof(float));
+            h_src[i] = __float2half(f);
+        }
+    } else {
+        IMP_LOG_ERROR("Vision: unsupported GGML type %u for transposed upload",
+                      static_cast<uint32_t>(type));
+        return false;
+    }
+
+    std::vector<half> h_dst(static_cast<size_t>(n));
+    for (int64_t r = 0; r < rows; r++)
+        for (int64_t c = 0; c < cols; c++)
+            h_dst[c * rows + r] = h_src[r * cols + c];
+
+    half* d_ptr = nullptr;
+    if (cudaMalloc(&d_ptr, static_cast<size_t>(n) * sizeof(half)) != cudaSuccess) {
+        IMP_LOG_ERROR("Vision: cudaMalloc failed for transposed %zu bytes",
+                      static_cast<size_t>(n) * sizeof(half));
+        return false;
+    }
+    gpu_allocs.push_back(d_ptr);
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpy(d_ptr, h_dst.data(), static_cast<size_t>(n) * sizeof(half), cudaMemcpyHostToDevice));
+    *d_out = d_ptr;
+    return true;
+}
+
 }  // anonymous namespace
 
 std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
@@ -420,6 +467,25 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         for (uint32_t d = 0; d < info.n_dims; d++)
             shape[d] = info.dims[info.n_dims - 1 - d];
 
+        // Gemma-3 multimodal projector (clip.projector_type = gemma3): stored as
+        // [ne0=out, ne1=in], the transpose of vision_gemm's [N=out, K=in] contract.
+        // Upload transposed and record [out, in] so mm_proj_w drives lm_d_model.
+        if (info.name == "mm.input_projection.weight" && info.n_dims == 2) {
+            int64_t out_dim = info.dims[0];  // ne0 = LLM d_model
+            int64_t in_dim = info.dims[1];   // ne1 = SigLIP hidden
+            void* dp = nullptr;
+            if (!upload_tensor_fp16_transposed(tensor_data, info.type, in_dim, out_dim, &dp,
+                                               model->gpu_allocs)) {
+                IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight");
+                munmap(mmap_base, file_size);
+                return nullptr;
+            }
+            int64_t pshape[4] = {out_dim, in_dim, 1, 1};
+            model->mm_proj_w = Tensor(dp, QType::F16, 2, pshape, true);
+            assigned++;
+            continue;
+        }
+
         // Upload to GPU as FP16
         void* d_ptr = nullptr;
         if (!upload_tensor_fp16(tensor_data, info.type, n_elements, &d_ptr, model->gpu_allocs)) {
@@ -460,6 +526,10 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
             model->mm_proj_b = t;
             assigned++;
         } else if (name == "mm.pre_norm.weight") {
+            model->mm_pre_norm_w = t;
+            assigned++;
+        } else if (name == "mm.soft_emb_norm.weight") {
+            // Gemma-3 pre-projection RMSNorm (applied before mm.input_projection).
             model->mm_pre_norm_w = t;
             assigned++;
         } else if (name == "mm.post_norm.weight") {
