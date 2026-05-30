@@ -566,7 +566,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // *before* this wrapper — captured region is forward_logits only,
         // analogous to the decode graph pattern.
         const bool prefill_graph_enabled = runtime_config_.runtime.prefill_graph;
-        const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs;
+        // The M>1 NVFP4 dequant fallback lazy-cudaMallocs when its workspace
+        // couldn't be pre-allocated (largest weight > cap) — illegal under CUDA
+        // graph capture (cublasLt status 14 → cascading "previous error during
+        // capture"). Run prefill eager for those models (Qwen3.6-35B pp>=4096).
+        const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
+                                 !executor_->nvfp4_dequant_uncapturable();
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
             if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {
