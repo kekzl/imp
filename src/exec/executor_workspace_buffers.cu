@@ -870,15 +870,18 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     if (max_bytes > kCap) {
         IMP_LOG_WARN(
             "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap, "
-            "skipping pre-alloc. M>1 fallback during graph capture will fail-loud.",
+            "skipping pre-alloc — prefill graph capture disabled (M>1 fallback runs eager).",
             max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0));
+        nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
         return false;
     }
 
     nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, max_bytes, "nvfp4_dequant");
     if (!nvfp4_dequant_ws_buf_) {
-        IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes)", max_bytes);
+        IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes) — prefill graph "
+                     "capture disabled (M>1 fallback runs eager).", max_bytes);
         nvfp4_dequant_ws_size_ = 0;
+        nvfp4_dequant_uncapturable_ = true;
         return false;
     }
     nvfp4_dequant_ws_size_ = max_bytes;

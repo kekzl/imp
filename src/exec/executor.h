@@ -888,6 +888,18 @@ private:
     void* nvfp4_dequant_ws_buf_ = nullptr;
     size_t nvfp4_dequant_ws_size_ = 0;
 
+    // Set when allocate_nvfp4_dequant_workspace() could NOT pre-allocate the
+    // M>1 dequant scratch (largest NVFP4 weight exceeds the cap, or alloc
+    // failed). The fallback then lazy-cudaMallocs, which is illegal inside
+    // CUDA graph capture (cublasLt status 14 → cascading capture failure).
+    // The scheduler reads this to skip prefill-graph capture (run eager).
+    bool nvfp4_dequant_uncapturable_ = false;
+
+public:
+    bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
+
+private:
+
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
     WeightCaches wcache_;
 
