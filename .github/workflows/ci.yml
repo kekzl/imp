@@ -8,10 +8,14 @@ on:
 
 jobs:
   build:
-    name: Build (CUDA 13.2)
+    name: Build (CUDA 13.3)
     runs-on: ubuntu-24.04
 
     container:
+      # Base image only — it provides the NVIDIA CUDA apt repo. There is no 13.3
+      # devel image on Docker Hub yet, so (like the Dockerfile) the first step
+      # installs cuda-toolkit-13-3 on top and that is what nvcc actually uses.
+      # The build does NOT compile with the base image's 13.2.1 toolkit.
       image: nvidia/cuda:13.2.1-devel-ubuntu24.04
 
     env:
@@ -24,10 +28,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install dependencies
+      - name: Install CUDA 13.3 toolkit + build deps
+        # No 13.3 devel image on Docker Hub yet, so — exactly like the Dockerfile —
+        # start from the 13.2.1 base (which provides the NVIDIA CUDA apt repo) and
+        # install cuda-toolkit-13-3 on top, making it the default toolchain. CUDA
+        # 13.2 is no longer a supported toolchain for imp; the verify step below
+        # fails the build if nvcc is anything other than 13.3.
         run: |
           apt-get update
+          apt-get install -y --no-install-recommends --allow-change-held-packages \
+            cuda-toolkit-13-3
+          ln -sfn /usr/local/cuda-13.3 /usr/local/cuda
           apt-get install -y cmake g++ git python3 ccache
+          echo "/usr/local/cuda-13.3/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-13.3" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64" >> "$GITHUB_ENV"
+
+      - name: Verify nvcc is 13.3
+        run: |
+          nvcc --version
+          nvcc --version | grep -q "release 13.3" \
+            || { echo "::error::nvcc is not CUDA 13.3 — 13.2 is not a supported toolchain"; exit 1; }
 
       # ccache caches per-TU compile output by content hash. On a header
       # change that invalidates many TUs (typical refactor), ccache hits
@@ -37,10 +58,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /github/home/.ccache
-          key: ${{ runner.os }}-cuda13.2.1-ccache-${{ github.sha }}
+          key: ${{ runner.os }}-cuda13.3-ccache-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-cuda13.2.1-ccache-
-            ${{ runner.os }}-cuda13.2-ccache-
+            ${{ runner.os }}-cuda13.3-ccache-
 
       - name: Reset ccache stats
         run: |
@@ -56,12 +76,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build
-          key: imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
+          key: imp-build-${{ runner.os }}-cuda13.3-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
           restore-keys: |
-            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda13.2.1-
-            imp-build-${{ runner.os }}-cuda13.2-
+            imp-build-${{ runner.os }}-cuda13.3-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
+            imp-build-${{ runner.os }}-cuda13.3-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda13.3-
 
       - name: Configure
         run: |
