@@ -98,9 +98,19 @@ void push_assistant_turn(json& out, const json& anth_msg) {
                      {"arguments", input.dump()},
                  }},
             });
+        } else if (type == "thinking") {
+            // Map Anthropic thinking blocks back onto OpenAI's
+            // reasoning_content so a prior assistant turn's chain of
+            // thought round-trips through the OpenAI code path.
+            std::string th = block.value("thinking", "");
+            if (!th.empty()) {
+                if (oai_msg.contains("reasoning_content"))
+                    oai_msg["reasoning_content"] =
+                        oai_msg["reasoning_content"].get<std::string>() + "\n" + th;
+                else
+                    oai_msg["reasoning_content"] = th;
+            }
         }
-        // thinking blocks: drop for OpenAI (no equivalent, imp side
-        // exposes them through reasoning_content independently).
     }
     oai_msg["content"] = text_accum.empty() ? json(nullptr) : json(text_accum);
     if (!tool_calls.empty())
@@ -342,8 +352,15 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     }
     const json& msg = choice.contains("message") ? choice["message"] : json::object();
 
-    // Build content[] blocks. Text first, then tool_use entries.
+    // Build content[] blocks. Thinking first (Anthropic emits the thinking
+    // block before the visible answer), then text, then tool_use entries.
     json content = json::array();
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+        std::string thinking = msg["reasoning_content"].get<std::string>();
+        if (!thinking.empty()) {
+            content.push_back({{"type", "thinking"}, {"thinking", thinking}});
+        }
+    }
     if (msg.contains("content") && msg["content"].is_string()) {
         std::string text = msg["content"].get<std::string>();
         if (!text.empty()) {
@@ -398,8 +415,21 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         {"output_tokens", 0},
     };
     if (oai.contains("usage") && oai["usage"].is_object()) {
-        usage_out["input_tokens"] = oai["usage"].value("prompt_tokens", 0);
-        usage_out["output_tokens"] = oai["usage"].value("completion_tokens", 0);
+        const auto& u = oai["usage"];
+        int prompt_tokens = u.value("prompt_tokens", 0);
+        usage_out["output_tokens"] = u.value("completion_tokens", 0);
+        // Anthropic splits the prompt token count: tokens served from the
+        // prefix cache are reported separately (cache_read_input_tokens) and
+        // excluded from input_tokens. imp surfaces the prefix-cache hit count
+        // via OpenAI's prompt_tokens_details.cached_tokens — pass it through.
+        int cached = 0;
+        if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object())
+            cached = u["prompt_tokens_details"].value("cached_tokens", 0);
+        if (cached > prompt_tokens)
+            cached = prompt_tokens;
+        usage_out["input_tokens"] = prompt_tokens - cached;
+        usage_out["cache_read_input_tokens"] = cached;
+        usage_out["cache_creation_input_tokens"] = 0;
     }
 
     // Use the OpenAI id if present; otherwise synthesize one.

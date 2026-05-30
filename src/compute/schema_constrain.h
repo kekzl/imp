@@ -29,6 +29,7 @@ enum class SchemaPhase : uint8_t {
     ARRAY_OPEN,          // After [, expecting first item or ]
     ARRAY_AFTER_ITEM,    // After item, expecting , or ]
     STRING_VALUE,        // Inside a free string value
+    STRING_PATTERN,      // Inside a string value constrained by a regex pattern
     STRING_ESCAPE,       // After \ inside string
     NUMBER_VALUE,        // Inside a number
     LITERAL_VALUE,       // Generating true/false/null
@@ -47,6 +48,12 @@ struct SchemaFrame {
 
     // Enum tracking
     std::string enum_buffer;  // accumulated enum value characters
+
+    // String pattern / length tracking (for JSON-Schema "pattern"/min/maxLength).
+    // Active NFA state set for the regex over chars emitted so far in the
+    // current string value; refreshed as characters are consumed.
+    std::vector<int> regex_states;
+    int string_len = 0;  // number of content chars emitted in the current string
 
     // Literal tracking
     std::string literal_target;  // "true", "false", "null"
@@ -141,6 +148,18 @@ private:
 
     // Check if prefix matches any enum value
     bool is_valid_enum_prefix(const std::vector<std::string>& values, const std::string& prefix) const;
+
+    // Pattern/length helpers. Returns true if appending `text` (the content
+    // chars of a candidate token, excluding a trailing closing quote) keeps the
+    // regex prefix alive and does not exceed maxLength. `out_states` receives
+    // the resulting NFA state set. For a token that closes the string (contains
+    // the closing quote), pass only the content before the quote and use
+    // can_close_string to validate the closing quote separately.
+    bool token_keeps_pattern_alive(const SchemaFrame& f, const std::string& content,
+                                   std::vector<int>& out_states, int& out_len) const;
+    // True if the current string can legally close: regex accepts and length
+    // constraints satisfied.
+    bool can_close_string(const SchemaFrame& f, const std::vector<int>& states, int len) const;
 };
 
 }  // namespace imp

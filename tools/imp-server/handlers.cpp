@@ -1107,6 +1107,24 @@ static bool snapshot_state_and_tokenize_(
 
     ctx.snap.n_prompt_tokens = static_cast<int>(ctx.snap.tokens.size());
 
+    // Server-side input-token limit (--max-input-tokens). Reject before
+    // prefill so an oversized prompt never reaches the engine.
+    if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
+        if (ctx.snap.has_vision_request) {
+            std::lock_guard<std::timed_mutex> lock(state.mtx);
+            if (state.batching)
+                state.batching->start(state.ctx);
+        }
+        res.status = 400;
+        json error = {{"error",
+                       {{"message", "Prompt exceeds max input tokens (" +
+                                        std::to_string(ctx.snap.n_prompt_tokens) + " > " +
+                                        std::to_string(state.max_input_tokens) + ")"},
+                        {"type", "invalid_request_error"}}}};
+        res.set_content(error.dump(), "application/json");
+        return false;
+    }
+
     // Validate prompt length against context window
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
         if (ctx.snap.has_vision_request) {
@@ -1518,6 +1536,7 @@ static void nonstream_chat_response_(
         // family-specific close marker as a stop token). The parser is
         // tolerant of trailing garbage after the closing marker.
         std::vector<ParsedToolCall> tool_calls;
+        std::string tool_validation_error;
         if (ctx.params.has_tools) {
             auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family, content,
                                                                 state.next_tool_call_id);
@@ -1525,6 +1544,17 @@ static void nonstream_chat_response_(
                 tool_calls = std::move(parsed_calls);
                 content = pre_content;
                 finish = "tool_calls";
+                // Validate parsed arguments against each tool's input schema.
+                // A failure means the model hallucinated/garbled the call —
+                // surface it rather than silently shipping bad arguments.
+                for (auto& tc : tool_calls) {
+                    validate_tool_call(tc, ctx.params.tools);
+                    if (!tc.valid) {
+                        if (!tool_validation_error.empty())
+                            tool_validation_error += "; ";
+                        tool_validation_error += tc.name + ": " + tc.error;
+                    }
+                }
             }
         }
 
@@ -1534,9 +1564,12 @@ static void nonstream_chat_response_(
             msg["content"] = content.empty() ? json(nullptr) : json(content);
             json tc_array = json::array();
             for (const auto& tc : tool_calls) {
-                tc_array.push_back({{"id", tc.id},
-                                    {"type", "function"},
-                                    {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}});
+                json tc_json = {{"id", tc.id},
+                                {"type", "function"},
+                                {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}};
+                if (!tc.valid)
+                    tc_json["invalid_arguments"] = tc.error;
+                tc_array.push_back(std::move(tc_json));
             }
             msg["tool_calls"] = tc_array;
         } else {
@@ -1544,6 +1577,9 @@ static void nonstream_chat_response_(
         }
         if (!reasoning_content.empty()) {
             msg["reasoning_content"] = reasoning_content;
+        }
+        if (!tool_validation_error.empty()) {
+            msg["tool_call_validation_error"] = tool_validation_error;
         }
 
         json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
@@ -1567,6 +1603,7 @@ static void nonstream_chat_response_(
     state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
     state.metrics.tokens_completion_total += total_output_tokens;
     state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+    state.metrics.request_duration.observe(ms / 1000.0);
 
     json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                   {"completion_tokens", total_output_tokens},
@@ -2037,13 +2074,29 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                                                     nullptr);
                         sink.write(sse.data(), sse.size());
 
-                        // Emit arguments chunk
-                        json args_delta = {
-                            {"tool_calls",
-                             json::array({{{"index", idx},
-                                           {"function", {{"arguments", tc.arguments}}}}})}};
-                        sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
-                        sink.write(sse.data(), sse.size());
+                        // Emit arguments incrementally as partial-JSON deltas
+                        // (Task 6) so OpenAI streaming clients see the tool
+                        // arguments grow rather than land in one block.
+                        constexpr size_t kArgChunk = 48;
+                        const std::string& full_args = tc.arguments;
+                        if (full_args.empty()) {
+                            json args_delta = {
+                                {"tool_calls",
+                                 json::array({{{"index", idx},
+                                               {"function", {{"arguments", ""}}}}})}};
+                            sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
+                            sink.write(sse.data(), sse.size());
+                        }
+                        for (size_t aoff = 0; aoff < full_args.size(); aoff += kArgChunk) {
+                            size_t an = std::min(kArgChunk, full_args.size() - aoff);
+                            json args_delta = {
+                                {"tool_calls",
+                                 json::array(
+                                     {{{"index", idx},
+                                       {"function", {{"arguments", full_args.substr(aoff, an)}}}}})}};
+                            sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
+                            sink.write(sse.data(), sse.size());
+                        }
 
                         stream_tool_calls.push_back(std::move(tc));
                         tool_calls_emitted = true;
@@ -2412,6 +2465,9 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     state.metrics.tokens_cached_total += cached;
     state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
     state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+    state.metrics.request_duration.observe(ms / 1000.0);
+    if (n_output_tokens > 0)
+        state.metrics.ttft.observe(ttft_ms / 1000.0);
 
     // Streaming response content is not accumulated across SSE
     // chunks, so the JSONL `response` field stays null. The
@@ -2636,6 +2692,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Tokenize raw prompt (no chat template)
     std::vector<int32_t> tokens = snap_tok->encode(prompt);
     int n_prompt_tokens = static_cast<int>(tokens.size());
+
+    // Server-side input-token limit (--max-input-tokens). Reject pre-prefill.
+    if (state.max_input_tokens > 0 && n_prompt_tokens > state.max_input_tokens) {
+        res.status = 400;
+        json error = {{"error",
+                       {{"message", "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) +
+                                        " > " + std::to_string(state.max_input_tokens) + ")"},
+                        {"type", "invalid_request_error"}}}};
+        res.set_content(error.dump(), "application/json");
+        return;
+    }
 
     if (n_prompt_tokens >= snap_max_seq_len) {
         res.status = 400;
@@ -3186,6 +3253,45 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
+
+    // Latency histograms (Prometheus histogram: cumulative _bucket{le=...},
+    // plus _sum and _count). Buckets are in seconds.
+    auto emit_histogram = [&out](const char* name, const char* help, const LatencyHistogram& h) {
+        out += "# HELP ";
+        out += name;
+        out += ' ';
+        out += help;
+        out += "\n# TYPE ";
+        out += name;
+        out += " histogram\n";
+        for (int i = 0; i < LatencyHistogram::kNumBuckets; ++i) {
+            char le[32];
+            std::snprintf(le, sizeof(le), "%g", LatencyHistogram::kBounds[i]);
+            out += name;
+            out += "_bucket{le=\"";
+            out += le;
+            out += "\"} ";
+            out += std::to_string(h.buckets[i].load());
+            out += "\n";
+        }
+        out += name;
+        out += "_bucket{le=\"+Inf\"} ";
+        out += std::to_string(h.count.load());
+        out += "\n";
+        char sum[48];
+        std::snprintf(sum, sizeof(sum), "%g", h.sum_us.load() / 1e6);
+        out += name;
+        out += "_sum ";
+        out += sum;
+        out += "\n";
+        out += name;
+        out += "_count ";
+        out += std::to_string(h.count.load());
+        out += "\n";
+    };
+    emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
+                   m.request_duration);
+    emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded;
@@ -3435,16 +3541,702 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 }
 
 // ===========================================================================
-// Anthropic /v1/messages — Phase 1: non-streaming shim
+// Anthropic /v1/messages — native SSE streaming
 // ===========================================================================
 //
-// The generation path is identical to /v1/chat/completions. We only need
-// to transform the JSON envelope on the way in (Anthropic → OpenAI) and on
-// the way out (OpenAI → Anthropic), then delegate to handle_chat_completions.
-//
-// Streaming is intentionally rejected here; Phase 2 will add a parallel
-// handler that emits native Anthropic SSE events.
+// Non-streaming reuses the OpenAI code path (Anthropic→OpenAI body in,
+// OpenAI→Anthropic response out). Streaming drives the same real per-token
+// batching-engine loop the OpenAI streaming path uses (pop_token), but emits
+// native Anthropic SSE events incrementally so TTFT == real first-token
+// latency rather than full-generation latency.
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// Anthropic SSE event writer. Emits "event: <name>\ndata: <json>\n\n".
+struct AnthropicSSE {
+    httplib::DataSink& sink;
+    bool emit(const char* event_name, const json& payload) {
+        std::string buf = "event: ";
+        buf += event_name;
+        buf += "\ndata: ";
+        buf += payload.dump();
+        buf += "\n\n";
+        return sink.write(buf.data(), buf.size());
+    }
+};
+
+// Tracks which content block (if any) is currently open in the stream so we
+// can close it before opening one of a different kind. Anthropic requires a
+// content_block_start before deltas and a content_block_stop after.
+enum class AnthBlock { NONE, THINKING, TEXT, TOOL_USE };
+
+// Drives the real token loop and emits native Anthropic SSE events. Mirrors
+// the token-handling of run_chat_stream_ (reasoning extraction, channel
+// filter, tool-call tag state machine) but maps it onto Anthropic blocks:
+//   reasoning -> thinking block (thinking_delta)
+//   content   -> text block (text_delta)
+//   tool call -> tool_use block (input_json_delta, chunked)
+static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
+                                  std::shared_ptr<ServerRequest> server_req,
+                                  const std::string& anth_model, const std::string& msg_id) {
+    AnthropicSSE out{sink};
+
+    const auto& stop_sequences = ctx.params.stop_sequences;
+    size_t max_stop_len = static_cast<size_t>(ctx.params.max_stop_len);
+    bool enable_thinking = ctx.snap.enable_thinking;
+    bool has_tools = ctx.params.has_tools;
+    auto tpl_family = ctx.snap.tpl_family;
+    float think_budget = ctx.params.think_budget;
+    auto snap_tok = ctx.snap.tok;
+    bool snap_have_template = ctx.snap.have_template;
+    bool snap_is_think_model = ctx.snap.is_think_model;
+    int snap_think_start_id = ctx.snap.think_start_id;
+    int snap_think_end_id = ctx.snap.think_end_id;
+    int snap_channel_open_id = ctx.snap.channel_open_id;
+    int snap_channel_close_id = ctx.snap.channel_close_id;
+    int snap_channel_newline_id = ctx.snap.channel_newline_id;
+    const auto& snap_stop_token_ids = ctx.snap.stop_token_ids;
+    auto active_req = server_req->request;
+    auto t_start = ctx.t_start;
+    int n_prompt_tokens = ctx.snap.n_prompt_tokens;
+
+    // ---- message_start ----------------------------------------------------
+    {
+        json msg = {
+            {"id", msg_id},
+            {"type", "message"},
+            {"role", "assistant"},
+            {"content", json::array()},
+            {"model", anth_model},
+            {"stop_reason", nullptr},
+            {"stop_sequence", nullptr},
+            {"usage", {{"input_tokens", n_prompt_tokens}, {"output_tokens", 0}}},
+        };
+        if (!out.emit("message_start", json{{"type", "message_start"}, {"message", std::move(msg)}}))
+            return false;
+    }
+
+    int block_index = -1;
+    AnthBlock open_block = AnthBlock::NONE;
+
+    auto stop_block = [&]() -> bool {
+        if (open_block == AnthBlock::NONE)
+            return true;
+        bool ok = out.emit("content_block_stop",
+                           json{{"type", "content_block_stop"}, {"index", block_index}});
+        open_block = AnthBlock::NONE;
+        return ok;
+    };
+    auto start_text_block = [&]() -> bool {
+        if (open_block == AnthBlock::TEXT)
+            return true;
+        if (!stop_block())
+            return false;
+        ++block_index;
+        open_block = AnthBlock::TEXT;
+        return out.emit("content_block_start",
+                        json{{"type", "content_block_start"},
+                             {"index", block_index},
+                             {"content_block", {{"type", "text"}, {"text", ""}}}});
+    };
+    auto start_thinking_block = [&]() -> bool {
+        if (open_block == AnthBlock::THINKING)
+            return true;
+        if (!stop_block())
+            return false;
+        ++block_index;
+        open_block = AnthBlock::THINKING;
+        return out.emit("content_block_start",
+                        json{{"type", "content_block_start"},
+                             {"index", block_index},
+                             {"content_block", {{"type", "thinking"}, {"thinking", ""}}}});
+    };
+    auto emit_text = [&](const std::string& text) -> bool {
+        if (text.empty())
+            return true;
+        if (!start_text_block())
+            return false;
+        return out.emit("content_block_delta",
+                        json{{"type", "content_block_delta"},
+                             {"index", block_index},
+                             {"delta", {{"type", "text_delta"}, {"text", text}}}});
+    };
+    auto emit_thinking = [&](const std::string& text) -> bool {
+        if (text.empty())
+            return true;
+        if (!start_thinking_block())
+            return false;
+        return out.emit("content_block_delta",
+                        json{{"type", "content_block_delta"},
+                             {"index", block_index},
+                             {"delta", {{"type", "thinking_delta"}, {"thinking", text}}}});
+    };
+    // Open a tool_use block and stream its arguments as chunked
+    // input_json_delta events (Task 6: incremental arg deltas).
+    auto emit_tool_use = [&](const ParsedToolCall& tc) -> bool {
+        if (!stop_block())
+            return false;
+        ++block_index;
+        open_block = AnthBlock::TOOL_USE;
+        namespace anth = imp_server::anthropic;
+        if (!out.emit("content_block_start",
+                      json{{"type", "content_block_start"},
+                           {"index", block_index},
+                           {"content_block",
+                            {{"type", "tool_use"},
+                             {"id", anth::tool_call_id_to_anthropic(tc.id)},
+                             {"name", tc.name},
+                             {"input", json::object()}}}}))
+            return false;
+        const std::string& args = tc.arguments;
+        constexpr size_t kChunk = 48;
+        for (size_t off = 0; off < args.size(); off += kChunk) {
+            size_t n = std::min(kChunk, args.size() - off);
+            if (!out.emit("content_block_delta",
+                          json{{"type", "content_block_delta"},
+                               {"index", block_index},
+                               {"delta",
+                                {{"type", "input_json_delta"},
+                                 {"partial_json", args.substr(off, n)}}}}))
+                return false;
+        }
+        return stop_block();
+    };
+
+    int n_output_tokens = 0;
+    int n_reasoning_tokens = 0;
+    const char* finish = nullptr;
+    double ttft_ms = 0.0;
+
+    std::string utf8_buf;        // confirmed-UTF8 content buffer
+    std::string pending_text;    // stop-sequence holdback
+    bool text_stop_matched = false;
+
+    // Tool call detection state machine (same shape as run_chat_stream_).
+    enum class ToolPhase { CONTENT, TAG_SCANNING, TOOL_CALL_BODY };
+    ToolPhase tool_phase = ToolPhase::CONTENT;
+    std::string tool_tag_buf, tool_body_buf, tool_close_tag, tool_fn_name;
+    std::vector<ParsedToolCall> stream_tool_calls;
+    bool tool_calls_emitted = false;
+
+    // Reasoning extraction (DeepSeek <think>).
+    enum class ThinkPhase { SCAN, REASONING, CONTENT };
+    bool use_reasoning = (state.default_args.reasoning_format == "deepseek" && snap_is_think_model);
+    ThinkPhase think_phase;
+    if (enable_thinking)
+        think_phase = ThinkPhase::REASONING;
+    else if (use_reasoning && think_budget > 0.0f)
+        think_phase = ThinkPhase::SCAN;
+    else
+        think_phase = ThinkPhase::CONTENT;
+    std::string reasoning_utf8_buf, think_scan_buf;
+    int think_scan_count = 0;
+    bool content_started = (think_phase == ThinkPhase::CONTENT);
+    int think_reentries = 0;
+    const int kMaxThinkReentries = 1;
+    const int kThinkScanLimit = 8;
+    bool channel_header_active = false;
+
+    auto flush_text = [&](size_t up_to) -> bool {
+        if (up_to == 0)
+            return true;
+        bool ok = emit_text(pending_text.substr(0, up_to));
+        pending_text.erase(0, up_to);
+        return ok;
+    };
+
+    auto request_start = std::chrono::steady_clock::now();
+    for (;;) {
+        if (!sink.is_writable()) {
+            server_req->cancel();
+            finish = "cancelled";
+            break;
+        }
+        if (state.request_timeout > 0) {
+            auto elapsed = std::chrono::steady_clock::now() - request_start;
+            if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                server_req->cancel();
+                finish = "length";
+                break;
+            }
+        }
+
+        TokenEvent evt;
+        if (!server_req->pop_token(evt))
+            continue;
+
+        if (evt.token_id < 0) {
+            finish = evt.finish_reason ? evt.finish_reason : "stop";
+            break;
+        }
+        int32_t token = evt.token_id;
+
+        if (!evt.is_last) {
+            bool is_structural_stop = (token == snap_tok->eos_id());
+            if (!is_structural_stop && snap_have_template) {
+                for (int32_t stop_id : snap_stop_token_ids)
+                    if (token == stop_id) {
+                        is_structural_stop = true;
+                        break;
+                    }
+            }
+            if (is_structural_stop)
+                continue;
+        }
+        if (evt.is_last) {
+            if (token == snap_tok->eos_id()) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
+                break;
+            }
+            bool is_stop = false;
+            if (snap_have_template) {
+                for (int32_t stop_id : snap_stop_token_ids)
+                    if (token == stop_id) {
+                        is_stop = true;
+                        break;
+                    }
+            }
+            if (is_stop) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
+                break;
+            }
+            finish = evt.finish_reason ? evt.finish_reason : "length";
+        }
+
+        n_output_tokens++;
+        if (n_output_tokens == 1)
+            ttft_ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::high_resolution_clock::now() - t_start)
+                          .count();
+        std::string piece = snap_tok->decode_token(token);
+
+        // Gemma-4 channel filter.
+        if (snap_channel_open_id >= 0) {
+            if (channel_header_active) {
+                if (token == snap_channel_newline_id || (!piece.empty() && piece.back() == '\n'))
+                    channel_header_active = false;
+                continue;
+            }
+            if (token == snap_channel_open_id) {
+                channel_header_active = true;
+                continue;
+            }
+            if (token == snap_channel_close_id)
+                continue;
+        }
+
+        // Reasoning extraction.
+        if (think_phase == ThinkPhase::SCAN) {
+            if (token == snap_think_start_id) {
+                think_phase = ThinkPhase::REASONING;
+                n_reasoning_tokens++;
+                continue;
+            }
+            think_scan_buf += piece;
+            think_scan_count++;
+            if (think_scan_buf.find("<think>") != std::string::npos) {
+                think_phase = ThinkPhase::REASONING;
+                n_reasoning_tokens += think_scan_count;
+                auto pos = think_scan_buf.find("<think>");
+                std::string after = think_scan_buf.substr(pos + 7);
+                think_scan_buf.clear();
+                if (!after.empty())
+                    reasoning_utf8_buf += after;
+                continue;
+            }
+            if (think_scan_count == 1 && piece.empty()) {
+                think_phase = ThinkPhase::REASONING;
+                n_reasoning_tokens++;
+                continue;
+            }
+            if (think_scan_count >= kThinkScanLimit) {
+                think_phase = ThinkPhase::CONTENT;
+                piece = think_scan_buf;
+                think_scan_buf.clear();
+            } else {
+                continue;
+            }
+        }
+
+        if (think_phase == ThinkPhase::REASONING) {
+            n_reasoning_tokens++;
+            if (token == snap_think_end_id) {
+                size_t complete = utf8_complete_len(reasoning_utf8_buf);
+                if (!emit_thinking(reasoning_utf8_buf.substr(0, complete)))
+                    return false;
+                reasoning_utf8_buf.clear();
+                think_phase = ThinkPhase::CONTENT;
+                continue;
+            }
+            if (token == snap_think_start_id)
+                continue;
+            reasoning_utf8_buf += piece;
+            for (;;) {
+                auto tp = reasoning_utf8_buf.find("<think>");
+                if (tp == std::string::npos)
+                    break;
+                reasoning_utf8_buf.erase(tp, 7);
+            }
+            auto end_pos = reasoning_utf8_buf.find("</think>");
+            if (end_pos != std::string::npos) {
+                if (!emit_thinking(reasoning_utf8_buf.substr(0, end_pos)))
+                    return false;
+                think_phase = ThinkPhase::CONTENT;
+                std::string after = reasoning_utf8_buf.substr(end_pos + 8);
+                reasoning_utf8_buf.clear();
+                auto start = after.find_first_not_of("\n\r\t ");
+                if (start != std::string::npos)
+                    piece = after.substr(start);
+                else
+                    continue;
+            } else {
+                constexpr size_t kOverlap = 7;
+                size_t complete = utf8_complete_len(reasoning_utf8_buf);
+                if (complete > kOverlap) {
+                    size_t emit_end = complete - kOverlap;
+                    while (emit_end > 0 &&
+                           (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) == 0x80)
+                        --emit_end;
+                    if (emit_end > 0) {
+                        std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
+                        reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
+                        if (!emit_thinking(to_emit))
+                            return false;
+                    }
+                }
+                continue;
+            }
+        }
+
+        if (!content_started && think_phase == ThinkPhase::CONTENT) {
+            auto ns = piece.find_first_not_of("\n\r\t ");
+            if (ns == std::string::npos)
+                continue;
+            piece = piece.substr(ns);
+            content_started = true;
+        }
+
+        if (use_reasoning) {
+            if (token == snap_think_start_id) {
+                if (think_reentries < kMaxThinkReentries) {
+                    think_phase = ThinkPhase::REASONING;
+                    n_reasoning_tokens++;
+                    think_reentries++;
+                }
+                continue;
+            }
+            if (token == snap_think_end_id) {
+                n_reasoning_tokens++;
+                continue;
+            }
+            for (;;) {
+                auto p = piece.find("<think>");
+                if (p != std::string::npos) {
+                    piece.erase(p, 7);
+                    continue;
+                }
+                p = piece.find("</think>");
+                if (p != std::string::npos) {
+                    piece.erase(p, 8);
+                    continue;
+                }
+                break;
+            }
+            if (piece.empty())
+                continue;
+        }
+
+        // Tool call body accumulation.
+        if (has_tools && tool_phase == ToolPhase::TOOL_CALL_BODY) {
+            tool_body_buf += piece;
+            auto close_pos = tool_body_buf.find(tool_close_tag);
+            if (close_pos != std::string::npos) {
+                std::string body = tool_body_buf.substr(0, close_pos);
+                auto bs = body.find_first_not_of("\n\r\t ");
+                auto be = body.find_last_not_of("\n\r\t ");
+                if (bs != std::string::npos && be != std::string::npos)
+                    body = body.substr(bs, be - bs + 1);
+                try {
+                    json j = json::parse(body);
+                    ParsedToolCall tc;
+                    tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                    if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
+                        tc.name = tool_fn_name;
+                        tc.arguments = j.dump();
+                    } else {
+                        tc.name = j.value("name", "");
+                        if (j.contains("arguments"))
+                            tc.arguments = j["arguments"].dump();
+                        else {
+                            json args = j;
+                            args.erase("name");
+                            tc.arguments = args.dump();
+                        }
+                    }
+                    if (!tc.name.empty()) {
+                        validate_tool_call(tc, ctx.params.tools);
+                        if (!tc.valid) {
+                            fprintf(stderr, "[%s] tool-call arg validation failed: %s: %s\n",
+                                    msg_id.c_str(), tc.name.c_str(), tc.error.c_str());
+                        }
+                        if (!emit_tool_use(tc))
+                            return false;
+                        stream_tool_calls.push_back(std::move(tc));
+                        tool_calls_emitted = true;
+                    }
+                } catch (...) {
+                }
+                std::string after = tool_body_buf.substr(close_pos + tool_close_tag.size());
+                tool_body_buf.clear();
+                tool_phase = ToolPhase::CONTENT;
+                if (!after.empty()) {
+                    auto ws = after.find_first_not_of("\n\r\t ");
+                    if (ws != std::string::npos)
+                        piece = after.substr(ws);
+                    else
+                        continue;
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        if (has_tools && tool_phase == ToolPhase::TAG_SCANNING) {
+            tool_tag_buf += piece;
+            if (tpl_family != imp::ChatTemplateFamily::LLAMA3) {
+                if (tool_tag_buf.size() >= 11) {
+                    auto pos = tool_tag_buf.find("<tool_call>");
+                    if (pos != std::string::npos) {
+                        std::string before = tool_tag_buf.substr(0, pos);
+                        if (!before.empty() && !emit_text(before))
+                            return false;
+                        tool_body_buf = tool_tag_buf.substr(pos + 11);
+                        tool_close_tag = "</tool_call>";
+                        tool_tag_buf.clear();
+                        tool_phase = ToolPhase::TOOL_CALL_BODY;
+                        continue;
+                    }
+                    const char* tc_tag = "<tool_call>";
+                    bool could_match = true;
+                    for (size_t k = 0; k < tool_tag_buf.size() && k < 11; k++)
+                        if (tool_tag_buf[k] != tc_tag[k]) {
+                            could_match = false;
+                            break;
+                        }
+                    if (!could_match) {
+                        piece = tool_tag_buf;
+                        tool_tag_buf.clear();
+                        tool_phase = ToolPhase::CONTENT;
+                    } else {
+                        continue;
+                    }
+                } else {
+                    const char* tc_tag = "<tool_call>";
+                    bool could_match = true;
+                    for (size_t k = 0; k < tool_tag_buf.size() && k < 11; k++)
+                        if (tool_tag_buf[k] != tc_tag[k]) {
+                            could_match = false;
+                            break;
+                        }
+                    if (!could_match) {
+                        piece = tool_tag_buf;
+                        tool_tag_buf.clear();
+                        tool_phase = ToolPhase::CONTENT;
+                    } else {
+                        continue;
+                    }
+                }
+            } else {
+                if (tool_tag_buf.size() >= 10) {
+                    auto fn_pos = tool_tag_buf.find("<function=");
+                    if (fn_pos != std::string::npos) {
+                        auto gt = tool_tag_buf.find('>', fn_pos + 10);
+                        if (gt != std::string::npos) {
+                            std::string before = tool_tag_buf.substr(0, fn_pos);
+                            if (!before.empty() && !emit_text(before))
+                                return false;
+                            tool_fn_name = tool_tag_buf.substr(fn_pos + 10, gt - (fn_pos + 10));
+                            tool_body_buf = tool_tag_buf.substr(gt + 1);
+                            tool_close_tag = "</function>";
+                            tool_tag_buf.clear();
+                            tool_phase = ToolPhase::TOOL_CALL_BODY;
+                            continue;
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+                const char* fn_tag = "<function=";
+                bool could_match = true;
+                for (size_t k = 0; k < tool_tag_buf.size() && k < 10; k++)
+                    if (tool_tag_buf[k] != fn_tag[k]) {
+                        could_match = false;
+                        break;
+                    }
+                if (!could_match) {
+                    piece = tool_tag_buf;
+                    tool_tag_buf.clear();
+                    tool_phase = ToolPhase::CONTENT;
+                } else {
+                    continue;
+                }
+            }
+        }
+
+        if (has_tools && tool_phase == ToolPhase::CONTENT) {
+            size_t lt_pos = piece.find('<');
+            if (lt_pos != std::string::npos) {
+                if (lt_pos > 0) {
+                    std::string before = piece.substr(0, lt_pos);
+                    if (stop_sequences.empty())
+                        utf8_buf += before;
+                    else
+                        pending_text += before;
+                }
+                tool_tag_buf = piece.substr(lt_pos);
+                tool_phase = ToolPhase::TAG_SCANNING;
+                if (stop_sequences.empty() && !utf8_buf.empty()) {
+                    size_t complete = utf8_complete_len(utf8_buf);
+                    if (complete > 0) {
+                        if (!emit_text(utf8_buf.substr(0, complete)))
+                            return false;
+                        utf8_buf.erase(0, complete);
+                    }
+                } else if (!stop_sequences.empty()) {
+                    bool stop_found = false;
+                    for (const auto& stop : stop_sequences) {
+                        auto pos = pending_text.find(stop);
+                        if (pos != std::string::npos) {
+                            if (!flush_text(pos))
+                                return false;
+                            stop_found = true;
+                            break;
+                        }
+                    }
+                    if (stop_found) {
+                        text_stop_matched = true;
+                        finish = "stop";
+                        break;
+                    }
+                    if (pending_text.size() > max_stop_len) {
+                        size_t safe = pending_text.size() - max_stop_len + 1;
+                        if (!flush_text(safe))
+                            return false;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Normal content emission.
+        if (stop_sequences.empty()) {
+            utf8_buf += piece;
+            size_t complete = utf8_complete_len(utf8_buf);
+            if (complete > 0) {
+                if (!emit_text(utf8_buf.substr(0, complete)))
+                    return false;
+                utf8_buf.erase(0, complete);
+            }
+        } else {
+            pending_text += piece;
+            bool stop_found = false;
+            for (const auto& stop : stop_sequences) {
+                auto pos = pending_text.find(stop);
+                if (pos != std::string::npos) {
+                    if (!flush_text(pos))
+                        return false;
+                    stop_found = true;
+                    break;
+                }
+            }
+            if (stop_found) {
+                text_stop_matched = true;
+                finish = "stop";
+                break;
+            }
+            if (pending_text.size() > max_stop_len) {
+                size_t safe = pending_text.size() - max_stop_len + 1;
+                if (!flush_text(safe))
+                    return false;
+            }
+        }
+
+        if (finish)
+            break;
+    }
+
+    // Flush trailing buffers.
+    if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
+        utf8_buf += think_scan_buf;
+        think_scan_buf.clear();
+    }
+    if (!reasoning_utf8_buf.empty()) {
+        emit_thinking(reasoning_utf8_buf);
+        reasoning_utf8_buf.clear();
+    }
+    if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
+        std::string leftover = tool_tag_buf + tool_body_buf;
+        if (!leftover.empty())
+            utf8_buf += leftover;
+    }
+    if (!utf8_buf.empty() && !text_stop_matched && !tool_calls_emitted)
+        emit_text(utf8_buf);
+    if (!pending_text.empty() && !text_stop_matched && !tool_calls_emitted)
+        emit_text(pending_text);
+
+    // Close any block still open.
+    stop_block();
+
+    if (!finish)
+        finish = tool_calls_emitted ? "tool_calls" : "length";
+    else if (tool_calls_emitted && strcmp(finish, "stop") == 0)
+        finish = "tool_calls";
+
+    // Map finish_reason -> Anthropic stop_reason.
+    std::string stop_reason;
+    if (strcmp(finish, "stop") == 0)
+        stop_reason = "end_turn";
+    else if (strcmp(finish, "length") == 0)
+        stop_reason = "max_tokens";
+    else if (strcmp(finish, "tool_calls") == 0)
+        stop_reason = "tool_use";
+    else if (strcmp(finish, "cancelled") == 0)
+        stop_reason = "end_turn";
+    else
+        stop_reason = finish;
+
+    // ---- message_delta + message_stop ------------------------------------
+    out.emit("message_delta",
+             json{{"type", "message_delta"},
+                  {"delta", {{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
+                  {"usage", {{"output_tokens", n_output_tokens}}}});
+    out.emit("message_stop", json{{"type", "message_stop"}});
+    sink.done();
+
+    // Metrics + log.
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+    state.metrics.requests_total++;
+    state.metrics.tokens_prompt_total += n_prompt_tokens;
+    state.metrics.tokens_completion_total += n_output_tokens;
+    state.metrics.tokens_cached_total += cached;
+    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+    state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+    state.metrics.request_duration.observe(ms / 1000.0);
+    if (n_output_tokens > 0)
+        state.metrics.ttft.observe(ttft_ms / 1000.0);
+    log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, msg_id, ctx.log_endpoint, ctx.log_client_ip,
+                      ctx.log_raw_body, ms, n_prompt_tokens, n_output_tokens, finish, json());
+    fprintf(stderr, "[%s] messages stream: %d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms)\n",
+            msg_id.c_str(), n_prompt_tokens, n_output_tokens, ms, ttft_ms);
+    return true;
+}
+
+}  // namespace
 
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     namespace anth = imp_server::anthropic;
@@ -3498,11 +4290,129 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
-    // Shim: reuse the OpenAI handler with a cloned request carrying the
-    // transformed body. httplib::Request is a plain struct, safe to copy.
-    // Force stream=false on the inner OpenAI call — we re-serialize the
-    // response as native Anthropic SSE events below (Phase 2 "synthetic
-    // streaming"). Full event-by-event streaming is tracked as Phase 3.
+    // ---- Real streaming path -------------------------------------------
+    // For stream=true we drive the same per-token batching-engine loop the
+    // OpenAI streaming path uses and emit native Anthropic SSE events as
+    // tokens arrive — TTFT is real first-token latency, not full-gen latency.
+    if (want_stream) {
+        // Build the chat request context from the transformed OpenAI body.
+        httplib::Request shim_req = req;
+        json shim_body = oai_body;
+        shim_body["stream"] = true;
+        shim_req.body = shim_body.dump();
+        shim_req.headers.erase("Content-Length");
+        shim_req.headers.erase("content-length");
+
+        ChatRequestContext ctx;
+        g_in_anthropic_shim = true;  // suppress inner request-log (we log here)
+        bool ok = parse_chat_request_params(shim_req, res, state, ctx) &&
+                  snapshot_state_and_tokenize_(res, state, ctx);
+        g_in_anthropic_shim = false;
+        if (!ok) {
+            // parse/snapshot set an OpenAI-shaped error on res; re-wrap as
+            // an Anthropic error envelope.
+            json parsed;
+            try {
+                parsed = json::parse(res.body);
+            } catch (...) {
+                parsed = {{"error", {{"message", res.body}, {"type", "invalid_request_error"}}}};
+            }
+            json out = {{"type", "error"},
+                        {"error", parsed.value("error",
+                                               json{{"type", "invalid_request_error"}, {"message", "bad request"}})}};
+            res.set_content(out.dump(), "application/json");
+            return;
+        }
+
+        // Restore Anthropic logging context (parse_chat_request_params set
+        // these from the shim request; we log the outer Anthropic request).
+        ctx.log_skip = false;
+        ctx.log_endpoint = log_endpoint;
+        ctx.log_client_ip = log_client_ip;
+        ctx.log_raw_body = log_raw_body;
+        ctx.t_log_start = t_log_start;
+
+        // Vision streaming is unsupported (state is per-engine, not per-req).
+        // snapshot_state_and_tokenize_ stops the batching engine for exclusive
+        // vision access — restart it before bailing out.
+        if (ctx.snap.has_vision_request) {
+            {
+                std::lock_guard<std::timed_mutex> lock(state.mtx);
+                if (state.batching)
+                    state.batching->start(state.ctx);
+            }
+            res.status = 400;
+            json err = {{"type", "error"},
+                        {"error",
+                         {{"type", "invalid_request_error"},
+                          {"message", "Streaming is not supported for vision/image requests"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        auto imp_req = std::make_shared<imp::Request>();
+        imp_req->input_tokens = ctx.snap.tokens;
+        imp_req->max_tokens = ctx.params.max_tokens;
+        imp_req->temperature = ctx.params.temperature;
+        imp_req->top_p = ctx.params.top_p;
+        imp_req->top_k = ctx.params.top_k;
+        imp_req->seed = ctx.params.seed;
+        imp_req->min_p = ctx.params.min_p;
+        imp_req->typical_p = ctx.params.typical_p;
+        imp_req->repetition_penalty = ctx.params.repetition_penalty;
+        imp_req->frequency_penalty = ctx.params.frequency_penalty;
+        imp_req->presence_penalty = ctx.params.presence_penalty;
+        imp_req->repeat_last_n = ctx.params.repeat_last_n;
+        imp_req->dry_multiplier = ctx.params.dry_multiplier;
+        imp_req->dry_base = ctx.params.dry_base;
+        imp_req->dry_allowed_length = ctx.params.dry_allowed_length;
+        imp_req->dry_penalty_last_n = ctx.params.dry_penalty_last_n;
+        imp_req->mirostat = ctx.params.mirostat;
+        imp_req->mirostat_tau = ctx.params.mirostat_tau;
+        imp_req->mirostat_eta = ctx.params.mirostat_eta;
+        imp_req->logprobs = ctx.params.req_logprobs;
+        imp_req->top_logprobs = ctx.params.top_logprobs;
+        imp_req->json_mode = ctx.params.json_mode;
+        imp_req->json_schema = ctx.params.json_schema_str;
+        imp_req->has_tools = ctx.params.has_tools;
+        imp_req->tpl_family = ctx.snap.tpl_family;
+        imp_req->logit_bias = ctx.params.logit_bias;
+        imp_req->think_budget = ctx.params.think_budget;
+        imp_req->status = imp::RequestStatus::PENDING;
+
+        auto server_req = std::make_shared<ServerRequest>();
+        server_req->request = imp_req;
+        {
+            std::lock_guard<std::timed_mutex> lock(state.mtx);
+            if (!state.batching || !state.batching->is_running()) {
+                res.status = 503;
+                json err = {{"type", "error"},
+                            {"error",
+                             {{"type", "server_error"}, {"message", "Inference engine not ready. Please retry."}}}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            state.batching->submit(server_req);
+        }
+
+        std::string msg_id = anth::make_message_id(static_cast<uint64_t>(state.next_id.fetch_add(1)));
+        ctx.t_start = std::chrono::high_resolution_clock::now();
+
+        res.status = 200;
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [stream_ctx = std::move(ctx), &state, server_req, anth_model, msg_id](
+                size_t /*offset*/, httplib::DataSink& sink) mutable -> bool {
+                return run_anthropic_stream_(sink, stream_ctx, state, server_req, anth_model, msg_id);
+            });
+        return;
+    }
+
+    // ---- Non-streaming path: reuse the OpenAI handler via a shim --------
+    // httplib::Request is a plain struct, safe to copy. Force stream=false on
+    // the inner OpenAI call — we re-serialize the response as Anthropic JSON.
     httplib::Request shim_req = req;
     json shim_body = oai_body;
     shim_body["stream"] = false;
@@ -3563,174 +4473,8 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                           stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response);
     }
 
-    if (!want_stream) {
-        res.status = 200;
-        res.set_content(anth_response.dump(), "application/json");
-        return;
-    }
-
-    // ---- Phase 2 synthetic streaming -----------------------------------
-    // The full response is already computed above; we replay it as a
-    // well-formed Anthropic SSE stream so clients that set `stream: true`
-    // get the events they expect. TTFT is the full-generation latency for
-    // now — Phase 3 will plumb this through a real event-loop emitter.
+    // Non-streaming requests are fully assembled above (the want_stream path
+    // returned earlier with a native incremental SSE stream).
     res.status = 200;
-    res.set_header("Cache-Control", "no-cache");
-    res.set_header("Connection", "keep-alive");
-
-    // Capture everything needed by value (lambda outlives this function).
-    auto stream_data = std::make_shared<json>(std::move(anth_response));
-    res.set_chunked_content_provider(
-        "text/event-stream", [stream_data](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-            auto emit = [&](const char* event_name, const json& payload) -> bool {
-                std::string buf = "event: ";
-                buf += event_name;
-                buf += "\ndata: ";
-                buf += payload.dump();
-                buf += "\n\n";
-                return sink.write(buf.data(), buf.size());
-            };
-
-            const json& anth = *stream_data;
-
-            // 1) message_start — mirrors the assembled message envelope but
-            //    with empty content[] and output_tokens=0 (per Anthropic spec).
-            {
-                json msg_start_msg = anth;  // copy
-                msg_start_msg["content"] = json::array();
-                msg_start_msg["stop_reason"] = nullptr;
-                if (msg_start_msg.contains("usage")) {
-                    msg_start_msg["usage"]["output_tokens"] = 0;
-                }
-                json ev = {
-                    {"type", "message_start"},
-                    {"message", std::move(msg_start_msg)},
-                };
-                if (!emit("message_start", ev)) {
-                    sink.done();
-                    return true;
-                }
-            }
-
-            // 2) Content blocks — one pair of content_block_start/stop per
-            //    block, with deltas in between. Text blocks are split into
-            //    modest chunks so progressive-UI clients render nicely; tool
-            //    input is sent as a single input_json_delta.
-            int block_index = 0;
-            if (anth.contains("content") && anth["content"].is_array()) {
-                for (const auto& block : anth["content"]) {
-                    std::string type = block.value("type", "");
-
-                    if (type == "text") {
-                        json cb = {
-                            {"type", "content_block_start"},
-                            {"index", block_index},
-                            {"content_block", {{"type", "text"}, {"text", ""}}},
-                        };
-                        if (!emit("content_block_start", cb)) {
-                            sink.done();
-                            return true;
-                        }
-
-                        const std::string text = block.value("text", "");
-                        // Split into ~32-char deltas — arbitrary but gives
-                        // progressive-rendering UIs something to do.
-                        constexpr size_t kChunk = 32;
-                        for (size_t off = 0; off < text.size(); off += kChunk) {
-                            size_t n = std::min(kChunk, text.size() - off);
-                            json d = {
-                                {"type", "content_block_delta"},
-                                {"index", block_index},
-                                {"delta",
-                                 {
-                                     {"type", "text_delta"},
-                                     {"text", text.substr(off, n)},
-                                 }},
-                            };
-                            if (!emit("content_block_delta", d)) {
-                                sink.done();
-                                return true;
-                            }
-                        }
-                    } else if (type == "tool_use") {
-                        json cb_start = {
-                            {"type", "content_block_start"},
-                            {"index", block_index},
-                            {"content_block",
-                             {
-                                 {"type", "tool_use"},
-                                 {"id", block.value("id", "")},
-                                 {"name", block.value("name", "")},
-                                 {"input", json::object()},
-                             }},
-                        };
-                        if (!emit("content_block_start", cb_start)) {
-                            sink.done();
-                            return true;
-                        }
-
-                        // Emit the full input JSON as a single input_json_delta.
-                        std::string partial = block.value("input", json::object()).dump();
-                        json d = {
-                            {"type", "content_block_delta"},
-                            {"index", block_index},
-                            {"delta",
-                             {
-                                 {"type", "input_json_delta"},
-                                 {"partial_json", std::move(partial)},
-                             }},
-                        };
-                        if (!emit("content_block_delta", d)) {
-                            sink.done();
-                            return true;
-                        }
-                    } else {
-                        // Unknown block type — start+stop with no deltas.
-                        json cb = {
-                            {"type", "content_block_start"},
-                            {"index", block_index},
-                            {"content_block", block},
-                        };
-                        if (!emit("content_block_start", cb)) {
-                            sink.done();
-                            return true;
-                        }
-                    }
-
-                    json cb_stop = {
-                        {"type", "content_block_stop"},
-                        {"index", block_index},
-                    };
-                    if (!emit("content_block_stop", cb_stop)) {
-                        sink.done();
-                        return true;
-                    }
-                    ++block_index;
-                }
-            }
-
-            // 3) message_delta — final stop_reason + per-spec output_tokens.
-            {
-                json delta = {{"stop_reason", anth.value("stop_reason", "end_turn")},
-                              {"stop_sequence", anth.value("stop_sequence", json(nullptr))}};
-                int output_tokens = 0;
-                if (anth.contains("usage")) {
-                    output_tokens = anth["usage"].value("output_tokens", 0);
-                }
-                json ev = {
-                    {"type", "message_delta"},
-                    {"delta", std::move(delta)},
-                    {"usage", {{"output_tokens", output_tokens}}},
-                };
-                if (!emit("message_delta", ev)) {
-                    sink.done();
-                    return true;
-                }
-            }
-
-            // 4) message_stop — terminator.
-            emit("message_stop", json{{"type", "message_stop"}});
-            sink.done();
-            return true;
-        });
+    res.set_content(anth_response.dump(), "application/json");
 }

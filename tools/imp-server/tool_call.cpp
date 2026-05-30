@@ -626,6 +626,98 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Tool-call argument validation (self-contained; no engine constraint code).
+// ---------------------------------------------------------------------------
+
+// Does a parsed JSON value match a JSON-schema "type" string? Only the
+// top-level scalar/container kinds are checked — enough to catch the common
+// hallucination failure modes (string where a number is required, missing
+// object, etc.) without reimplementing a full validator.
+static bool json_type_matches(const json& v, const std::string& type) {
+    if (type == "string")
+        return v.is_string();
+    if (type == "integer")
+        return v.is_number_integer() || v.is_number_unsigned();
+    if (type == "number")
+        return v.is_number();
+    if (type == "boolean")
+        return v.is_boolean();
+    if (type == "object")
+        return v.is_object();
+    if (type == "array")
+        return v.is_array();
+    if (type == "null")
+        return v.is_null();
+    return true;  // unknown/compound type ("any", union via array) — accept
+}
+
+// Locate the tool definition for `name` and return its `parameters` schema.
+// Returns an empty object if not found.
+static json find_tool_schema(const json& tools, const std::string& name) {
+    if (!tools.is_array())
+        return json::object();
+    for (const auto& t : tools) {
+        if (!t.is_object())
+            continue;
+        // OpenAI shape: {"type":"function","function":{"name","parameters"}}
+        if (t.contains("function") && t["function"].is_object()) {
+            const auto& fn = t["function"];
+            if (fn.value("name", "") == name)
+                return fn.value("parameters", json::object());
+        }
+        // Bare shape: {"name","parameters"}
+        if (t.value("name", "") == name)
+            return t.value("parameters", json::object());
+    }
+    return json::object();
+}
+
+void validate_tool_call(ParsedToolCall& tc, const json& tools) {
+    json schema = find_tool_schema(tools, tc.name);
+    if (!schema.is_object() || schema.empty())
+        return;  // no schema to validate against — leave as-is
+
+    json args = json::parse(tc.arguments, nullptr, false);
+    if (args.is_discarded() || !args.is_object()) {
+        tc.valid = false;
+        tc.error = "arguments are not a valid JSON object";
+        return;
+    }
+
+    // Required properties must be present.
+    if (schema.contains("required") && schema["required"].is_array()) {
+        for (const auto& r : schema["required"]) {
+            if (!r.is_string())
+                continue;
+            const std::string key = r.get<std::string>();
+            if (!args.contains(key)) {
+                tc.valid = false;
+                tc.error = "missing required argument \"" + key + "\"";
+                return;
+            }
+        }
+    }
+
+    // Top-level property types (best-effort).
+    if (schema.contains("properties") && schema["properties"].is_object()) {
+        const auto& props = schema["properties"];
+        for (auto it = args.begin(); it != args.end(); ++it) {
+            if (!props.contains(it.key()))
+                continue;  // additional property — don't reject
+            const auto& pschema = props[it.key()];
+            if (pschema.is_object() && pschema.contains("type") && pschema["type"].is_string()) {
+                if (!json_type_matches(it.value(), pschema["type"].get<std::string>())) {
+                    tc.valid = false;
+                    tc.error = "argument \"" + it.key() + "\" has wrong type (expected " +
+                               pschema["type"].get<std::string>() + ")";
+                    return;
+                }
+            }
+        }
+    }
+}
+
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {
     // Tool responses arrive either as a plain string (OpenAI canonical) or as
     // a structured JSON object/array (some clients pass through tool output

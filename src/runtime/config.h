@@ -24,6 +24,19 @@ namespace imp {
 struct RuntimeConfig {
     struct Runtime {
         bool deterministic_gemm = false;
+        // Opt-in full reproducibility mode for temperature=0 agent evals.
+        // When true, run-to-run non-determinism in MoE token routing
+        // (atomic expert-bucket scatter ordering) and top-k sampling
+        // (atomicMax/atomicAdd softmax-stat races) is eliminated by
+        // selecting deterministic kernel variants. It ALSO implies
+        // deterministic_gemm (timing-based cuBLAS algo selection is itself
+        // a non-determinism source), so a single switch covers GEMM +
+        // routing + sampling. Costs a little throughput (serial / ordered
+        // reductions), so it is strictly OFF by default — the default code
+        // path runs the exact same kernels as before with zero overhead.
+        // Legacy env: IMP_DETERMINISTIC=1. See audit B-9
+        // (docs/audit/performance_agent_readiness_2026_05_31.md).
+        bool deterministic = false;
         std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
         bool warmup = false;               // opt-in for prod rollout; off in dev/CI
         int max_seq_len = 0;               // 0 = use model default

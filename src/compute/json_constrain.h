@@ -1,11 +1,13 @@
 #pragma once
 
 #include "compute/preamble_gate.h"
+#include "compute/json_schema.h"  // RegexNfa (for GrammarConstrainer)
 #include "model/tokenizer.h"
 #include <cuda_runtime.h>
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <memory>
 
 namespace imp {
 
@@ -128,6 +130,47 @@ private:
 
     // Advance FSM by one character
     void advance_char(char c);
+};
+
+// ---------------------------------------------------------------------------
+// GrammarConstrainer (Part B, non-recursive GBNF subset) — drives a compiled
+// RegexNfa as a token-mask FSM. Allows a candidate token only if its bytes
+// keep the grammar NFA alive; EOS is allowed once the NFA is in an accepting
+// state. Uses the per-token allow-mask kernel from constrain_common.h.
+//
+// Wiring into the executor/sampling path is left to the owning agent (this
+// class mirrors SchemaConstrainer's apply_mask/update/reset surface so it can
+// drop in identically). compile_gbnf_grammar() lives in json_schema.h.
+// ---------------------------------------------------------------------------
+class GrammarConstrainer {
+public:
+    GrammarConstrainer() = default;
+    ~GrammarConstrainer();
+
+    // Classify tokens and attach a compiled grammar NFA. Returns false if the
+    // NFA is null/uncompiled.
+    bool init(const Tokenizer& tok, std::shared_ptr<RegexNfa> grammar);
+
+    void apply_mask(float* d_logits, int vocab_size, cudaStream_t stream);
+    void update(int32_t token);
+    void reset();
+    bool is_initialized() const { return initialized_; }
+
+    // True once the grammar NFA is in an accepting state (generation may stop).
+    bool accepts_now() const;
+
+private:
+    bool initialized_ = false;
+    int vocab_size_ = 0;
+
+    std::shared_ptr<RegexNfa> grammar_;
+    std::vector<int> active_states_;  // current NFA state set
+
+    std::vector<std::string> token_texts_;
+    std::vector<uint8_t> token_allow_;
+    uint8_t* d_token_allow_ = nullptr;
+
+    void compute_token_allow_mask();
 };
 
 }  // namespace imp

@@ -2,6 +2,11 @@
 #include "core/logging.h"
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
+#include <algorithm>
+#include <map>
+#include <set>
+#include <sstream>
 
 namespace imp {
 
@@ -97,6 +102,25 @@ private:
         if (peek() == '"')
             pos_++;
         return s;
+    }
+
+    // Parse a (possibly negative) integer literal. Returns false if none.
+    bool parse_int(long& out) {
+        skip_ws();
+        size_t start = pos_;
+        if (peek() == '-')
+            pos_++;
+        bool any = false;
+        while (!eof() && peek() >= '0' && peek() <= '9') {
+            pos_++;
+            any = true;
+        }
+        if (!any) {
+            pos_ = start;
+            return false;
+        }
+        out = std::strtol(data_ + start, nullptr, 10);
+        return true;
     }
 
     bool parse_bool() {
@@ -260,6 +284,16 @@ private:
                 }
                 if (!has_type)
                     node->type = SchemaType::OBJECT;
+            } else if (key == "pattern") {
+                node->pattern = parse_string();
+            } else if (key == "minLength") {
+                long v = 0;
+                if (parse_int(v))
+                    node->min_length = static_cast<int>(v);
+            } else if (key == "maxLength") {
+                long v = 0;
+                if (parse_int(v))
+                    node->max_length = static_cast<int>(v);
             } else if (key == "required") {
                 node->required = parse_string_array();
             } else if (key == "additionalProperties") {
@@ -324,6 +358,28 @@ private:
     }
 };
 
+// Recursively compile any `pattern` fields into NFAs. Unsupported patterns
+// leave pattern_nfa null (enforcement is then skipped for that node).
+static void compile_patterns(SchemaNode* node) {
+    if (!node)
+        return;
+    if (!node->pattern.empty() && !node->pattern_nfa) {
+        auto nfa = std::make_shared<RegexNfa>();
+        if (nfa->compile(node->pattern)) {
+            node->pattern_nfa = std::move(nfa);
+        } else {
+            IMP_LOG_WARN("JSON schema: unsupported regex pattern '%s' — pattern not enforced",
+                         node->pattern.c_str());
+        }
+    }
+    for (auto& [name, prop] : node->properties)
+        compile_patterns(prop.get());
+    if (node->items)
+        compile_patterns(node->items.get());
+    for (auto& sub : node->any_of)
+        compile_patterns(sub.get());
+}
+
 std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
     SchemaParser parser(json.c_str(), json.size());
     auto root = parser.parse();
@@ -331,6 +387,7 @@ std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
         IMP_LOG_ERROR("Failed to parse JSON schema");
         return nullptr;
     }
+    compile_patterns(root.get());
     return root;
 }
 
@@ -340,6 +397,10 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->additional_properties = additional_properties;
     c->required = required;
     c->enum_values = enum_values;
+    c->pattern = pattern;
+    c->min_length = min_length;
+    c->max_length = max_length;
+    c->pattern_nfa = pattern_nfa;  // shared; compiled NFA is immutable
     for (auto& [name, prop] : properties)
         c->properties.emplace_back(name, prop->clone());
     if (items)
@@ -347,6 +408,804 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     for (auto& sub : any_of)
         c->any_of.push_back(sub->clone());
     return c;
+}
+
+// ===========================================================================
+// RegexNfa — Thompson-construction NFA over bytes for the supported subset.
+// All host-side; never compiled into device code.
+// ===========================================================================
+
+int RegexNfa::new_state() {
+    states_.emplace_back();
+    return static_cast<int>(states_.size()) - 1;
+}
+
+void RegexNfa::add_epsilon(int from, int to) {
+    NfaEdge e;
+    e.to = to;
+    e.is_epsilon = true;
+    states_[from].edges.push_back(std::move(e));
+}
+
+void RegexNfa::add_edge(int from, int to, const std::vector<uint8_t>& cls) {
+    NfaEdge e;
+    e.to = to;
+    e.is_epsilon = false;
+    e.char_class = cls;
+    states_[from].edges.push_back(std::move(e));
+}
+
+bool RegexNfa::make_shorthand(char esc, std::vector<uint8_t>& cls) {
+    cls.assign(256, 0);
+    auto set_digit = [&](bool neg) {
+        for (int c = 0; c < 256; c++) {
+            bool d = (c >= '0' && c <= '9');
+            cls[c] = (d != neg) ? 1 : 0;
+        }
+    };
+    auto set_word = [&](bool neg) {
+        for (int c = 0; c < 256; c++) {
+            bool w = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            cls[c] = (w != neg) ? 1 : 0;
+        }
+    };
+    auto set_space = [&](bool neg) {
+        for (int c = 0; c < 256; c++) {
+            bool s = (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v');
+            cls[c] = (s != neg) ? 1 : 0;
+        }
+    };
+    switch (esc) {
+        case 'd':
+            set_digit(false);
+            return true;
+        case 'D':
+            set_digit(true);
+            return true;
+        case 'w':
+            set_word(false);
+            return true;
+        case 'W':
+            set_word(true);
+            return true;
+        case 's':
+            set_space(false);
+            return true;
+        case 'S':
+            set_space(true);
+            return true;
+        default:
+            return false;
+    }
+}
+
+// atom := '(' alt ')' | '[' class ']' | '.' | escape | literal
+bool RegexNfa::parse_atom(Frag& out) {
+    if (pos_ >= src_->size()) {
+        error_ = true;
+        return false;
+    }
+    char c = (*src_)[pos_];
+
+    if (c == '(') {
+        pos_++;  // consume '('
+        if (!parse_alt(out))
+            return false;
+        if (pos_ >= src_->size() || (*src_)[pos_] != ')') {
+            error_ = true;
+            return false;
+        }
+        pos_++;  // consume ')'
+        return true;
+    }
+
+    if (c == '[') {
+        return parse_class(out);
+    }
+
+    if (c == ')' || c == '|') {
+        // empty atom — caller handles
+        error_ = true;
+        return false;
+    }
+
+    std::vector<uint8_t> cls(256, 0);
+
+    if (c == '.') {
+        pos_++;
+        for (int i = 0; i < 256; i++)
+            cls[i] = (i == '\n') ? 0 : 1;  // any except newline
+    } else if (c == '\\') {
+        pos_++;
+        if (pos_ >= src_->size()) {
+            error_ = true;
+            return false;
+        }
+        char esc = (*src_)[pos_++];
+        std::vector<uint8_t> sc;
+        if (make_shorthand(esc, sc)) {
+            cls = sc;
+        } else {
+            // escaped literal (\. \\ \+ \{ etc.) — also map common control escapes
+            unsigned char lit;
+            switch (esc) {
+                case 'n':
+                    lit = '\n';
+                    break;
+                case 't':
+                    lit = '\t';
+                    break;
+                case 'r':
+                    lit = '\r';
+                    break;
+                case 'f':
+                    lit = '\f';
+                    break;
+                case 'v':
+                    lit = '\v';
+                    break;
+                default:
+                    lit = static_cast<unsigned char>(esc);
+                    break;
+            }
+            cls[lit] = 1;
+        }
+    } else if (c == '^' || c == '$') {
+        // Anchors: JSON-Schema pattern matching is treated as whole-string here
+        // (token masking cannot enforce sub-string matches), so a leading ^ /
+        // trailing $ are no-ops. Emit an epsilon fragment.
+        pos_++;
+        int s = new_state();
+        int a = new_state();
+        add_epsilon(s, a);
+        out.start = s;
+        out.accept = a;
+        return true;
+    } else {
+        // literal byte
+        pos_++;
+        cls[static_cast<unsigned char>(c)] = 1;
+    }
+
+    int s = new_state();
+    int a = new_state();
+    add_edge(s, a, cls);
+    out.start = s;
+    out.accept = a;
+    return true;
+}
+
+// class := '[' '^'? ( range | shorthand | char )+ ']'
+bool RegexNfa::parse_class(Frag& out) {
+    pos_++;  // consume '['
+    bool negate = false;
+    if (pos_ < src_->size() && (*src_)[pos_] == '^') {
+        negate = true;
+        pos_++;
+    }
+    std::vector<uint8_t> cls(256, 0);
+    bool any = false;
+
+    while (pos_ < src_->size() && (*src_)[pos_] != ']') {
+        char c = (*src_)[pos_];
+        if (c == '\\') {
+            pos_++;
+            if (pos_ >= src_->size()) {
+                error_ = true;
+                return false;
+            }
+            char esc = (*src_)[pos_++];
+            std::vector<uint8_t> sc;
+            if (make_shorthand(esc, sc)) {
+                for (int i = 0; i < 256; i++)
+                    if (sc[i])
+                        cls[i] = 1;
+                any = true;
+                continue;
+            }
+            unsigned char lit;
+            switch (esc) {
+                case 'n':
+                    lit = '\n';
+                    break;
+                case 't':
+                    lit = '\t';
+                    break;
+                case 'r':
+                    lit = '\r';
+                    break;
+                default:
+                    lit = static_cast<unsigned char>(esc);
+                    break;
+            }
+            cls[lit] = 1;
+            any = true;
+            continue;
+        }
+        // range a-z ?
+        if (pos_ + 2 < src_->size() && (*src_)[pos_ + 1] == '-' && (*src_)[pos_ + 2] != ']') {
+            unsigned char lo = static_cast<unsigned char>(c);
+            unsigned char hi = static_cast<unsigned char>((*src_)[pos_ + 2]);
+            pos_ += 3;
+            if (lo > hi) {
+                error_ = true;
+                return false;
+            }
+            for (int i = lo; i <= hi; i++)
+                cls[i] = 1;
+            any = true;
+        } else {
+            cls[static_cast<unsigned char>(c)] = 1;
+            pos_++;
+            any = true;
+        }
+    }
+
+    if (pos_ >= src_->size() || (*src_)[pos_] != ']' || !any) {
+        error_ = true;
+        return false;
+    }
+    pos_++;  // consume ']'
+
+    if (negate) {
+        for (int i = 0; i < 256; i++)
+            cls[i] = cls[i] ? 0 : 1;
+    }
+
+    int s = new_state();
+    int a = new_state();
+    add_edge(s, a, cls);
+    out.start = s;
+    out.accept = a;
+    return true;
+}
+
+// repeat := atom ('*' | '+' | '?' | '{n}' | '{n,}' | '{n,m}')?
+bool RegexNfa::parse_repeat(Frag& out) {
+    // Snapshot the atom's source start here so {n,m} can re-parse the exact
+    // source span of *this* atom (parse_atom may advance pos_ arbitrarily for
+    // groups / classes).
+    size_t atom_begin = pos_;
+    Frag atom;
+    if (!parse_atom(atom))
+        return false;
+
+    if (pos_ >= src_->size())
+        return (out = atom, true);
+
+    char q = (*src_)[pos_];
+
+    if (q == '*' || q == '+' || q == '?') {
+        pos_++;
+        int s = new_state();
+        int a = new_state();
+        if (q == '*') {
+            add_epsilon(s, atom.start);
+            add_epsilon(s, a);
+            add_epsilon(atom.accept, atom.start);
+            add_epsilon(atom.accept, a);
+        } else if (q == '+') {
+            add_epsilon(s, atom.start);
+            add_epsilon(atom.accept, atom.start);
+            add_epsilon(atom.accept, a);
+        } else {  // '?'
+            add_epsilon(s, atom.start);
+            add_epsilon(s, a);
+            add_epsilon(atom.accept, a);
+        }
+        out.start = s;
+        out.accept = a;
+        return true;
+    }
+
+    if (q == '{') {
+        // {n} {n,} {n,m}
+        size_t save = pos_;
+        pos_++;  // consume '{'
+        long n = 0, m = -1;
+        auto scan_int = [&](long& out_val) -> bool {
+            long v = 0;
+            bool any = false;
+            while (pos_ < src_->size() && (*src_)[pos_] >= '0' && (*src_)[pos_] <= '9') {
+                v = v * 10 + ((*src_)[pos_] - '0');
+                pos_++;
+                any = true;
+            }
+            if (any)
+                out_val = v;
+            return any;
+        };
+        bool has_n = scan_int(n);
+        bool comma = false;
+        if (pos_ < src_->size() && (*src_)[pos_] == ',') {
+            comma = true;
+            pos_++;
+            long mm = 0;
+            if (scan_int(mm))
+                m = mm;  // {n,m}; else {n,} -> m stays -1 (unbounded)
+        }
+        if (!has_n || pos_ >= src_->size() || (*src_)[pos_] != '}') {
+            // Not a valid quantifier — treat '{' as literal: rewind.
+            pos_ = save;
+            return (out = atom, true);
+        }
+        pos_++;  // consume '}'
+        if (!comma)
+            m = n;  // {n}
+
+        // Build: n mandatory copies, then either unbounded (*) or (m-n) optional.
+        int s = new_state();
+        int cur = s;
+        // We need fresh copies of the atom sub-pattern. Re-parse its exact
+        // source span [atom_begin, save) for each additional copy. `save` is
+        // the position right after the atom (the '{').
+        std::string atom_src = src_->substr(atom_begin, save - atom_begin);
+
+        auto clone_atom = [&](Frag& f) -> bool {
+            const std::string* prev_src = src_;
+            size_t prev_pos = pos_;
+            bool prev_err = error_;
+            // Parse the captured atom text in isolation.
+            std::string local = atom_src;
+            src_ = &local;
+            pos_ = 0;
+            error_ = false;
+            bool ok = parse_repeat(f);  // atom may itself be a repeat-free atom
+            // restore
+            src_ = prev_src;
+            pos_ = prev_pos;
+            error_ = prev_err;
+            return ok && !error_;
+        };
+
+        // first mandatory copy is the already-built `atom`
+        long built = 0;
+        if (n >= 1) {
+            add_epsilon(cur, atom.start);
+            cur = atom.accept;
+            built = 1;
+        } else {
+            // n == 0: atom is optional/unbounded from the start
+        }
+
+        for (long i = built; i < n; i++) {
+            Frag f;
+            if (!clone_atom(f))
+                return false;
+            add_epsilon(cur, f.start);
+            cur = f.accept;
+        }
+
+        int a = new_state();
+        if (m < 0) {
+            // {n,} -> after n mandatory, a Kleene star of the atom
+            Frag f;
+            if (!clone_atom(f))
+                return false;
+            int ls = new_state();
+            add_epsilon(cur, ls);
+            add_epsilon(ls, f.start);
+            add_epsilon(ls, a);
+            add_epsilon(f.accept, f.start);
+            add_epsilon(f.accept, a);
+        } else {
+            // {n,m} -> (m-n) optional copies
+            for (long i = n; i < m; i++) {
+                Frag f;
+                if (!clone_atom(f))
+                    return false;
+                add_epsilon(cur, f.start);
+                add_epsilon(cur, a);  // optional: skip the rest
+                cur = f.accept;
+            }
+            add_epsilon(cur, a);
+        }
+        out.start = s;
+        out.accept = a;
+        return true;
+    }
+
+    out = atom;
+    return true;
+}
+
+// concat := repeat*
+bool RegexNfa::parse_concat(Frag& out) {
+    int s = new_state();
+    int cur = s;
+    bool any = false;
+    while (pos_ < src_->size() && (*src_)[pos_] != '|' && (*src_)[pos_] != ')') {
+        Frag f;
+        if (!parse_repeat(f))
+            return false;
+        add_epsilon(cur, f.start);
+        cur = f.accept;
+        any = true;
+    }
+    if (!any) {
+        // empty concatenation matches empty string
+        int a = new_state();
+        add_epsilon(s, a);
+        out.start = s;
+        out.accept = a;
+        return true;
+    }
+    out.start = s;
+    out.accept = cur;
+    return true;
+}
+
+// alt := concat ('|' concat)*
+bool RegexNfa::parse_alt(Frag& out) {
+    Frag first;
+    if (!parse_concat(first))
+        return false;
+    if (pos_ >= src_->size() || (*src_)[pos_] != '|') {
+        out = first;
+        return true;
+    }
+    int s = new_state();
+    int a = new_state();
+    add_epsilon(s, first.start);
+    add_epsilon(first.accept, a);
+    while (pos_ < src_->size() && (*src_)[pos_] == '|') {
+        pos_++;  // consume '|'
+        Frag next;
+        if (!parse_concat(next))
+            return false;
+        add_epsilon(s, next.start);
+        add_epsilon(next.accept, a);
+    }
+    out.start = s;
+    out.accept = a;
+    return true;
+}
+
+bool RegexNfa::compile(const std::string& pattern) {
+    states_.clear();
+    compiled_ = false;
+    error_ = false;
+    src_ = &pattern;
+    pos_ = 0;
+
+    Frag root;
+    if (!parse_alt(root)) {
+        src_ = nullptr;
+        return false;
+    }
+    // Must have consumed the whole pattern.
+    if (pos_ != pattern.size() || error_) {
+        src_ = nullptr;
+        return false;
+    }
+    src_ = nullptr;
+
+    start_ = root.start;
+    accept_ = root.accept;
+    states_[accept_].accepting = true;
+    compiled_ = true;
+    return true;
+}
+
+void RegexNfa::epsilon_closure(std::vector<int>& set) const {
+    std::vector<int> stack(set.begin(), set.end());
+    std::vector<uint8_t> in(states_.size(), 0);
+    for (int s : set)
+        in[s] = 1;
+    while (!stack.empty()) {
+        int s = stack.back();
+        stack.pop_back();
+        for (const auto& e : states_[s].edges) {
+            if (e.is_epsilon && !in[e.to]) {
+                in[e.to] = 1;
+                set.push_back(e.to);
+                stack.push_back(e.to);
+            }
+        }
+    }
+    std::sort(set.begin(), set.end());
+}
+
+std::vector<int> RegexNfa::start_set() const {
+    std::vector<int> set;
+    if (!compiled_)
+        return set;
+    set.push_back(start_);
+    epsilon_closure(set);
+    return set;
+}
+
+std::vector<int> RegexNfa::step(const std::vector<int>& states, unsigned char c) const {
+    std::vector<int> next;
+    if (!compiled_)
+        return next;
+    std::vector<uint8_t> in(states_.size(), 0);
+    for (int s : states) {
+        for (const auto& e : states_[s].edges) {
+            if (!e.is_epsilon && e.char_class[c] && !in[e.to]) {
+                in[e.to] = 1;
+                next.push_back(e.to);
+            }
+        }
+    }
+    epsilon_closure(next);
+    return next;
+}
+
+bool RegexNfa::accepts(const std::vector<int>& states) const {
+    for (int s : states)
+        if (states_[s].accepting)
+            return true;
+    return false;
+}
+
+// ===========================================================================
+// GBNF grammar -> regex-string translation (Part B, non-recursive subset).
+//
+// Strategy: parse rules into raw RHS strings, then translate the root rule's
+// RHS into an anchored regex string by inlining rule references (detecting
+// recursion). The result is fed to RegexNfa::compile, reusing the whole
+// pattern engine. This is intentionally limited to the non-recursive fragment
+// (see header). True recursion needs a pushdown/Earley machine.
+//
+// TODO(part-b): replace the NFA backend with a proper recursive grammar
+// engine (e.g. an LL/Earley state stack like llama.cpp's grammar parser) to
+// support recursive rules and {n,m} counts. Until then recursion is rejected.
+// ===========================================================================
+
+namespace {
+
+// Translate one GBNF RHS expression into a regex string, inlining references.
+// `rules` maps rule name -> RHS text. `active` tracks the inlining chain to
+// detect recursion. Returns false (sets *err) on unsupported / recursive input.
+bool gbnf_expr_to_regex(const std::string& expr, const std::map<std::string, std::string>& rules,
+                        std::set<std::string>& active, std::string& out, std::string* err);
+
+// Translate a single rule by name (with recursion detection).
+bool gbnf_rule_to_regex(const std::string& name, const std::map<std::string, std::string>& rules,
+                        std::set<std::string>& active, std::string& out, std::string* err) {
+    if (active.count(name)) {
+        *err = "recursive rule '" + name + "' is not supported by the NFA backend";
+        return false;
+    }
+    auto it = rules.find(name);
+    if (it == rules.end()) {
+        *err = "undefined rule '" + name + "'";
+        return false;
+    }
+    active.insert(name);
+    std::string sub;
+    bool ok = gbnf_expr_to_regex(it->second, rules, active, sub, err);
+    active.erase(name);
+    if (!ok)
+        return false;
+    out = "(" + sub + ")";
+    return true;
+}
+
+void append_escaped_literal_char(char c, std::string& out) {
+    // Escape regex metacharacters so a GBNF literal is matched verbatim.
+    if (std::strchr(".^$*+?()[]{}|\\", c))
+        out += '\\';
+    out += c;
+}
+
+bool gbnf_expr_to_regex(const std::string& expr, const std::map<std::string, std::string>& rules,
+                        std::set<std::string>& active, std::string& out, std::string* err) {
+    size_t i = 0;
+    const size_t n = expr.size();
+    out.clear();
+
+    auto skip_ws = [&]() {
+        while (i < n && (expr[i] == ' ' || expr[i] == '\t'))
+            i++;
+    };
+
+    while (i < n) {
+        char c = expr[i];
+        if (c == ' ' || c == '\t') {
+            i++;
+            continue;  // concatenation = adjacency in regex
+        }
+        if (c == '|') {
+            out += '|';
+            i++;
+            continue;
+        }
+        if (c == '(') {
+            // find matching ')'
+            int depth = 1;
+            size_t start = ++i;
+            while (i < n && depth > 0) {
+                if (expr[i] == '(')
+                    depth++;
+                else if (expr[i] == ')')
+                    depth--;
+                if (depth == 0)
+                    break;
+                i++;
+            }
+            if (depth != 0) {
+                *err = "unbalanced '(' in grammar";
+                return false;
+            }
+            std::string inner = expr.substr(start, i - start);
+            i++;  // consume ')'
+            std::string sub;
+            if (!gbnf_expr_to_regex(inner, rules, active, sub, err))
+                return false;
+            out += "(" + sub + ")";
+            // optional trailing quantifier
+            if (i < n && (expr[i] == '*' || expr[i] == '+' || expr[i] == '?'))
+                out += expr[i++];
+            continue;
+        }
+        if (c == '"') {
+            // literal string
+            i++;
+            std::string lit;
+            while (i < n && expr[i] != '"') {
+                if (expr[i] == '\\' && i + 1 < n) {
+                    i++;
+                    char e = expr[i++];
+                    switch (e) {
+                        case 'n':
+                            lit += '\n';
+                            break;
+                        case 't':
+                            lit += '\t';
+                            break;
+                        case 'r':
+                            lit += '\r';
+                            break;
+                        case '"':
+                            lit += '"';
+                            break;
+                        case '\\':
+                            lit += '\\';
+                            break;
+                        default:
+                            lit += e;
+                            break;
+                    }
+                } else {
+                    lit += expr[i++];
+                }
+            }
+            if (i >= n) {
+                *err = "unterminated string literal in grammar";
+                return false;
+            }
+            i++;  // consume closing quote
+            std::string esc;
+            for (char lc : lit)
+                append_escaped_literal_char(lc, esc);
+            out += "(" + esc + ")";
+            if (i < n && (expr[i] == '*' || expr[i] == '+' || expr[i] == '?'))
+                out += expr[i++];
+            continue;
+        }
+        if (c == '[') {
+            // char class — pass through verbatim to RegexNfa (it shares syntax)
+            size_t start = i++;
+            while (i < n && expr[i] != ']') {
+                if (expr[i] == '\\')
+                    i++;  // skip escaped char
+                i++;
+            }
+            if (i >= n) {
+                *err = "unterminated character class in grammar";
+                return false;
+            }
+            i++;  // consume ']'
+            out += expr.substr(start, i - start);
+            if (i < n && (expr[i] == '*' || expr[i] == '+' || expr[i] == '?'))
+                out += expr[i++];
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '-') {
+            // rule reference
+            size_t start = i;
+            while (i < n && (std::isalnum(static_cast<unsigned char>(expr[i])) || expr[i] == '_' ||
+                             expr[i] == '-'))
+                i++;
+            std::string name = expr.substr(start, i - start);
+            std::string sub;
+            if (!gbnf_rule_to_regex(name, rules, active, sub, err))
+                return false;
+            out += sub;
+            if (i < n && (expr[i] == '*' || expr[i] == '+' || expr[i] == '?'))
+                out += expr[i++];
+            continue;
+        }
+        if (c == '{') {
+            *err = "{n,m} repetition in grammar is not supported";
+            return false;
+        }
+        // Unknown / unsupported token.
+        *err = std::string("unsupported grammar token '") + c + "'";
+        return false;
+    }
+    (void)skip_ws;
+    return true;
+}
+
+}  // namespace
+
+std::shared_ptr<RegexNfa> compile_gbnf_grammar(const std::string& gbnf) {
+    // 1) Tokenize into rule definitions: `name ::= rhs` (one logical rule per
+    //    `name ::=`; RHS may span the rest of the line). Comments start with #.
+    std::map<std::string, std::string> rules;
+    std::istringstream in(gbnf);
+    std::string line;
+    std::string cur_name;
+    std::string cur_rhs;
+    auto flush = [&]() {
+        if (!cur_name.empty())
+            rules[cur_name] = cur_rhs;
+        cur_name.clear();
+        cur_rhs.clear();
+    };
+    while (std::getline(in, line)) {
+        // strip comments
+        size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line = line.substr(0, hash);
+        // does this line start a new rule? look for "::="
+        size_t assign = line.find("::=");
+        // detect a leading "name ::=" pattern
+        size_t name_end = std::string::npos;
+        if (assign != std::string::npos) {
+            std::string lhs = line.substr(0, assign);
+            // trim
+            size_t b = lhs.find_first_not_of(" \t");
+            size_t e = lhs.find_last_not_of(" \t");
+            if (b != std::string::npos) {
+                std::string nm = lhs.substr(b, e - b + 1);
+                bool valid = !nm.empty();
+                for (char ch : nm)
+                    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-'))
+                        valid = false;
+                if (valid)
+                    name_end = assign;
+            }
+        }
+        if (name_end != std::string::npos) {
+            flush();
+            std::string lhs = line.substr(0, name_end);
+            size_t b = lhs.find_first_not_of(" \t");
+            size_t e = lhs.find_last_not_of(" \t");
+            cur_name = lhs.substr(b, e - b + 1);
+            cur_rhs = line.substr(name_end + 3);
+        } else {
+            // continuation line
+            cur_rhs += " " + line;
+        }
+    }
+    flush();
+
+    if (rules.find("root") == rules.end()) {
+        IMP_LOG_ERROR("GBNF: no 'root' rule found");
+        return nullptr;
+    }
+
+    // 2) Translate root rule into a regex string (inlining non-recursive refs).
+    std::set<std::string> active;
+    std::string regex;
+    std::string err;
+    if (!gbnf_rule_to_regex("root", rules, active, regex, &err)) {
+        IMP_LOG_ERROR("GBNF: %s", err.c_str());
+        return nullptr;
+    }
+
+    // 3) Compile via the shared RegexNfa engine.
+    auto nfa = std::make_shared<RegexNfa>();
+    if (!nfa->compile(regex)) {
+        IMP_LOG_ERROR("GBNF: translated grammar regex failed to compile: %s", regex.c_str());
+        return nullptr;
+    }
+    IMP_LOG_INFO("GBNF: compiled grammar (%zu rules) into NFA", rules.size());
+    return nfa;
 }
 
 }  // namespace imp

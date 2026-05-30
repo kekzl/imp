@@ -84,7 +84,15 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [runtime]
     if (eq("runtime.deterministic_gemm"))
         cfg.runtime.deterministic_gemm = parse_bool(val, cfg.runtime.deterministic_gemm);
-    else if (eq("runtime.cuda_graphs"))
+    else if (eq("runtime.deterministic")) {
+        cfg.runtime.deterministic = parse_bool(val, cfg.runtime.deterministic);
+        // Full determinism implies deterministic GEMM algo selection — the
+        // compute kernels gate routing/sampling determinism on the same
+        // process_diag_deterministic_gemm() snapshot, so this one switch
+        // covers GEMM + MoE routing + top-k sampling.
+        if (cfg.runtime.deterministic)
+            cfg.runtime.deterministic_gemm = true;
+    } else if (eq("runtime.cuda_graphs"))
         cfg.runtime.cuda_graphs = val;
     else if (eq("runtime.warmup"))
         cfg.runtime.warmup = parse_bool(val, cfg.runtime.warmup);
@@ -318,6 +326,14 @@ std::string home_dir() {
 // fields before [imp.conf] file overrides. Semantics preserved exactly
 // per original call-site checks (see review/phase3_maint.md §9.1).
 void seed_from_env(RuntimeConfig& cfg) {
+    // runtime.deterministic — IMP_DETERMINISTIC: '1'/'true' enables full
+    // reproducibility (also implies deterministic_gemm).
+    if (const char* e = std::getenv("IMP_DETERMINISTIC")) {
+        cfg.runtime.deterministic = parse_bool(e, cfg.runtime.deterministic);
+        if (cfg.runtime.deterministic)
+            cfg.runtime.deterministic_gemm = true;
+    }
+
     // moe.reserve_mib — IMP_MOE_RESERVE_MIB: integer MiB.
     if (const char* e = std::getenv("IMP_MOE_RESERVE_MIB"))
         cfg.moe.reserve_mib = parse_int(e, cfg.moe.reserve_mib);

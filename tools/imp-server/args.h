@@ -42,6 +42,7 @@ struct ServerArgs {
     int max_concurrent = 64;        // --max-concurrent: max simultaneous requests (0=unlimited)
     int request_timeout = 300;      // --request-timeout: per-request timeout in seconds (0=unlimited)
     int rate_limit = 0;             // --rate-limit: max requests per minute per IP (0=unlimited)
+    int max_input_tokens = 0;       // --max-input-tokens: reject prompts longer than this (0=unlimited)
     std::string prefix_cache_path;  // --prefix-cache: path to persist prefix cache
     std::string log_requests_path;  // --log-requests: append JSONL of every chat/messages request
 };

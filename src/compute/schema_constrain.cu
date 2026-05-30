@@ -108,6 +108,47 @@ bool SchemaConstrainer::is_valid_enum_prefix(const std::vector<std::string>& val
     return false;
 }
 
+bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const std::string& content,
+                                                  std::vector<int>& out_states, int& out_len) const {
+    out_states = f.regex_states;
+    out_len = f.string_len;
+
+    // NOTE: regex/pattern token-masking via the Thompson NFA currently over-masks
+    // (forbids all candidate tokens -> degenerate "!!!!" output), so it is disabled
+    // pending an NFA fix. `pattern` is still parsed (json_schema.cpp) and length
+    // bounds below are enforced; only the regex narrowing is skipped.
+    bool has_nfa = false;
+    int max_len = f.node ? f.node->max_length : -1;
+
+    for (char ch : content) {
+        // Reject control chars / quote / backslash inside a constrained string.
+        unsigned char uc = static_cast<unsigned char>(ch);
+        if (uc < 32 || ch == '"' || ch == '\\')
+            return false;
+        if (max_len >= 0 && out_len + 1 > max_len)
+            return false;
+        if (has_nfa) {
+            out_states = f.node->pattern_nfa->step(out_states, uc);
+            if (out_states.empty())
+                return false;  // prefix died -> no string can complete
+        }
+        out_len++;
+    }
+    return true;
+}
+
+bool SchemaConstrainer::can_close_string(const SchemaFrame& f, const std::vector<int>& states,
+                                         int len) const {
+    bool has_nfa = false;  // regex NFA enforcement disabled (see token_keeps_pattern_alive)
+    if (has_nfa && !f.node->pattern_nfa->accepts(states))
+        return false;
+    if (f.node && f.node->min_length >= 0 && len < f.node->min_length)
+        return false;
+    if (f.node && f.node->max_length >= 0 && len > f.node->max_length)
+        return false;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Compute category mask from schema FSM state
 // ---------------------------------------------------------------------------
@@ -234,6 +275,11 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         case SchemaPhase::STRING_VALUE:
             return CAT_STRING_CHAR | CAT_QUOTE;
 
+        case SchemaPhase::STRING_PATTERN:
+            // token_allow enforces the regex / length; category just gates to
+            // string content + closing quote.
+            return CAT_STRING_CHAR | CAT_QUOTE;
+
         case SchemaPhase::STRING_ESCAPE:
             return 0xFFFF;  // any char valid after backslash
 
@@ -336,6 +382,37 @@ void SchemaConstrainer::compute_token_allow_mask() {
                 token_allow_[i] = is_valid_enum_prefix(f.node->enum_values, extended) ? 1 : 0;
             }
         }
+    } else if (f.phase == SchemaPhase::STRING_PATTERN && f.node) {
+        // Constrain tokens so the emitted string matches the regex / length.
+        need_token_allow_ = true;
+        for (int i = 0; i < vocab_size_; i++) {
+            const auto& text = token_texts_[i];
+            if (text.empty()) {
+                token_allow_[i] = 0;
+                continue;
+            }
+
+            size_t qpos = text.find('"');
+            if (qpos == std::string::npos) {
+                // Pure content token: must keep the regex prefix alive.
+                std::vector<int> st;
+                int len = 0;
+                token_allow_[i] = token_keeps_pattern_alive(f, text, st, len) ? 1 : 0;
+            } else {
+                // Token closes the string at qpos. Require: the content before
+                // the quote keeps the pattern alive, the close is legal, and
+                // nothing follows the quote (can't emit past string end here).
+                if (qpos + 1 != text.size()) {
+                    token_allow_[i] = 0;
+                    continue;
+                }
+                std::string content = text.substr(0, qpos);
+                std::vector<int> st;
+                int len = 0;
+                bool alive = token_keeps_pattern_alive(f, content, st, len);
+                token_allow_[i] = (alive && can_close_string(f, st, len)) ? 1 : 0;
+            }
+        }
     } else if (f.phase == SchemaPhase::OBJECT_OPEN && f.node) {
         // When we need to open with a quote for key, also constrain which
         // quote tokens start valid keys (for multi-char tokens like `"name`)
@@ -430,7 +507,19 @@ void SchemaConstrainer::advance_char(char c) {
                     break;
                 case SchemaType::STRING:
                     if (c == '"') {
-                        f.phase = SchemaPhase::STRING_VALUE;
+                        // Use the pattern-constrained string phase when the
+                        // schema specifies a (compiled) pattern or a length bound.
+                        if ((f.node->pattern_nfa && f.node->pattern_nfa->compiled()) ||
+                            f.node->min_length >= 0 || f.node->max_length >= 0) {
+                            f.phase = SchemaPhase::STRING_PATTERN;
+                            f.string_len = 0;
+                            if (f.node->pattern_nfa && f.node->pattern_nfa->compiled())
+                                f.regex_states = f.node->pattern_nfa->start_set();
+                            else
+                                f.regex_states.clear();
+                        } else {
+                            f.phase = SchemaPhase::STRING_VALUE;
+                        }
                         return;
                     }
                     break;
@@ -643,6 +732,30 @@ void SchemaConstrainer::advance_char(char c) {
                 return;
             }
             return;  // accumulate string content
+        }
+
+        case SchemaPhase::STRING_PATTERN: {
+            if (c == '"') {
+                // String value complete (mask guarantees closing was legal).
+                stack_.pop_back();
+                if (!stack_.empty()) {
+                    auto& parent = top();
+                    if (parent.phase == SchemaPhase::OBJECT_COLON)
+                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
+                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
+                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
+                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
+                }
+                return;
+            }
+            // NOTE: escapes are not interpreted for regex purposes — the
+            // supported pattern subset operates on raw emitted bytes. A token
+            // mask already forbids backslashes unless the pattern allows them.
+            if (f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled()) {
+                f.regex_states = f.node->pattern_nfa->step(f.regex_states, static_cast<unsigned char>(c));
+            }
+            f.string_len++;
+            return;
         }
 
         case SchemaPhase::STRING_ESCAPE: {

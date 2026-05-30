@@ -38,6 +38,7 @@ void print_server_usage(const char* prog) {
             "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
             "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
             "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
+            "  --max-input-tokens <n> Reject prompts longer than n tokens with HTTP 400 (0=unlimited)\n"
             "  --log-requests <path> Append per-request JSONL with prompt + response content\n"
             "  --help                Show this help message\n",
             prog);
@@ -122,6 +123,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.request_timeout = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--rate-limit") == 0 && i + 1 < argc) {
             args.rate_limit = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-input-tokens") == 0 && i + 1 < argc) {
+            args.max_input_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
             args.prefix_cache_path = argv[++i];
         } else if (std::strcmp(arg, "--log-requests") == 0 && i + 1 < argc) {
