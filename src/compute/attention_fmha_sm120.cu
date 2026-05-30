@@ -1069,6 +1069,12 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 //
 //   per KV tile: load K+V → smem → __syncthreads → QK(reg) → softmax(reg) →
 //                PV(reg) → __syncthreads.  (2 barriers/tile, 0 S/P/O round-trips)
+//
+// cp.async double-buffer: K/V for tile j+1 are prefetched (raw f16, cp.async)
+// into the alternate smem slot while tile j computes — the KV-load latency that
+// previously serialized behind __syncthreads now overlaps the prior tile's
+// QK/softmax/PV. K is converted f16→fp8 inline at QK operand-fetch (spare ALU on
+// this barrier-bound kernel). Targets the 23% SM-util / barrier-bound ceiling.
 
 __device__ __forceinline__ uint32_t pack2_f2h(float a, float b) {
     __half2 h = __floats2half2_rn(a, b);
@@ -1091,6 +1097,37 @@ __device__ __forceinline__ float quad_sum(float v) {
     v += __shfl_xor_sync(0xFFFFFFFF, v, 1);
     v += __shfl_xor_sync(0xFFFFFFFF, v, 2);
     return v;
+}
+
+// cp.async primitives (cp_async_cg_16 / cp_async_commit / cp_async_wait_group)
+// come from compute/attention_paged_common.cuh (included above).
+
+// Prefetch one Bkv×HD KV tile (raw f16, no conversion) into double-buffer slots
+// via cp.async. K stays f16 in smem and is converted to fp8 inline at QK-MMA
+// operand-fetch time (the kernel is barrier-bound, not compute-bound — spare ALU).
+// Out-of-range rows: K left stale (masked out in the score step), V zero-filled
+// (P=0 for those cols, but 0*NaN=NaN would poison O, so V must be finite).
+template <int HD>
+__device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const half* K_ptr,
+                                                  const half* V_ptr, int kv_start, int seq_kv,
+                                                  int64_t kv_row_stride, int tid) {
+    constexpr int Bkv = 64;
+    constexpr int VEC = 8;                       // 8 halfs = 16 B per cp.async
+    constexpr int vecs_per_row = HD / VEC;       // 16
+    constexpr int total_vecs = Bkv * vecs_per_row;
+#pragma unroll
+    for (int vi = tid; vi < total_vecs; vi += SM120_BLOCK_THREADS) {
+        int r = vi / vecs_per_row;
+        int c = (vi % vecs_per_row) * VEC;
+        if (kv_start + r < seq_kv) {
+            const half* ks = K_ptr + (int64_t)(kv_start + r) * kv_row_stride + c;
+            const half* vs = V_ptr + (int64_t)(kv_start + r) * kv_row_stride + c;
+            cp_async_cg_16(&K_dst[r * HD + c], ks);
+            cp_async_cg_16(&V_dst[r * HD + c], vs);
+        } else {
+            *reinterpret_cast<uint4*>(&V_dst[r * HD + c]) = make_uint4(0, 0, 0, 0);
+        }
+    }
 }
 
 template <int HD>
@@ -1131,8 +1168,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 
     extern __shared__ char smem[];
     uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);
-    uint8_t* K_fp8 = Q_fp8 + Bq * head_dim;
-    half* V_sh = reinterpret_cast<half*>(K_fp8 + Bkv * head_dim);
+    half* K_buf = reinterpret_cast<half*>(Q_fp8 + Bq * head_dim);  // [2][Bkv*head_dim] f16
+    half* V_buf = K_buf + 2 * Bkv * head_dim;                      // [2][Bkv*head_dim] f16
 
     // ---- load Q → fp8 once (4 halves → 4 e4m3 per thread) ----
     {
@@ -1159,39 +1196,33 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     int num_kv_tiles, first_kv_tile;
     compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
                            num_kv_tiles, q_offset);
-    __syncthreads();
+    // prologue: kick off the first KV tile's load into buffer slot 0
+    if (first_kv_tile < num_kv_tiles)
+        prefetch_kv_tile<head_dim>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv, kv_row_stride,
+                                   tid);
+    cp_async_commit();
+    __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
 
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
+        const int slot = (j - first_kv_tile) & 1;
         const int kv_start = j * Bkv;
 
-        // ---- load K → fp8, V → f16 into smem ----
-        {
-            const int total_vec4 = (Bkv * head_dim) / 4;
-            for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
-                int i = vi * 4;
-                int r = i / head_dim;
-                int d = i % head_dim;
-                if (kv_start + r >= seq_kv)
-                    reinterpret_cast<uint32_t*>(K_fp8)[vi] = 0;
-                else
-                    reinterpret_cast<uint32_t*>(K_fp8)[vi] =
-                        cvt_4xfp16_to_4xe4m3(&K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
-            }
-            const int total_vec8 = (Bkv * head_dim) / 8;
-            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
-                int i = vi * 8;
-                int r = i / head_dim;
-                int d = i % head_dim;
-                float4* dst = reinterpret_cast<float4*>(&V_sh[i]);
-                if (kv_start + r < seq_kv)
-                    *dst = *reinterpret_cast<const float4*>(&V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
-                else
-                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            }
+        // prefetch tile j+1 into the alternate slot, overlapping this tile's compute
+        if (j + 1 < num_kv_tiles) {
+            const int nslot = slot ^ 1;
+            prefetch_kv_tile<head_dim>(K_buf + nslot * Bkv * head_dim, V_buf + nslot * Bkv * head_dim,
+                                       K_ptr, V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid);
+            cp_async_commit();
+            cp_async_wait_group<1>();  // this tile (slot) landed; tile j+1 still in flight
+        } else {
+            cp_async_wait_group<0>();
         }
-        __syncthreads();
+        __syncthreads();  // this tile's K/V fully landed for all threads
 
-        // ---- QK: S[n] = Q(warp rows) @ K[n-tile]^T, fp8 m16n8k32 ----
+        const half* K_cur = K_buf + slot * Bkv * head_dim;
+        const half* V_cur = V_buf + slot * Bkv * head_dim;
+
+        // ---- QK: S[n] = Q(warp rows) @ K[n-tile]^T, fp8 m16n8k32 (K cvt f16→fp8 inline) ----
         float S[N_S][4];
 #pragma unroll
         for (int n = 0; n < N_S; n++) {
@@ -1203,9 +1234,9 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                 uint32_t a1 = *reinterpret_cast<const uint32_t*>(qb + rl * head_dim + cl * 2 + 16);
                 uint32_t a2 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * head_dim + cl * 2);
                 uint32_t a3 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * head_dim + cl * 2 + 16);
-                const uint8_t* kb = K_fp8 + n * 8 * head_dim + k * 32;
-                uint32_t b0 = *reinterpret_cast<const uint32_t*>(kb + rl * head_dim + cl * 2);
-                uint32_t b1 = *reinterpret_cast<const uint32_t*>(kb + rl * head_dim + cl * 2 + 16);
+                const half* kb = K_cur + n * 8 * head_dim + k * 32;
+                uint32_t b0 = cvt_4xfp16_to_4xe4m3(kb + rl * head_dim + cl * 2);
+                uint32_t b1 = cvt_4xfp16_to_4xe4m3(kb + rl * head_dim + cl * 2 + 16);
 #if __CUDA_ARCH__ >= 1200
                 asm volatile(
                     "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
@@ -1302,8 +1333,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 #pragma unroll
             for (int hn = 0; hn < N_O; hn++) {
                 int ncol = hn * 8 + rl;  // HD col
-                uint32_t rb0 = pack2_hh(V_sh[(kr0) * head_dim + ncol], V_sh[(kr0 + 1) * head_dim + ncol]);
-                uint32_t rb1 = pack2_hh(V_sh[(kr0 + 8) * head_dim + ncol], V_sh[(kr0 + 9) * head_dim + ncol]);
+                uint32_t rb0 = pack2_hh(V_cur[(kr0) * head_dim + ncol], V_cur[(kr0 + 1) * head_dim + ncol]);
+                uint32_t rb1 = pack2_hh(V_cur[(kr0 + 8) * head_dim + ncol], V_cur[(kr0 + 9) * head_dim + ncol]);
                 float o0 = O_frag[hn][0], o1 = O_frag[hn][1], o2 = O_frag[hn][2], o3 = O_frag[hn][3];
 #if __CUDA_ARCH__ >= 1200
                 asm volatile(
@@ -1343,9 +1374,9 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 
 static size_t compute_smem_fa2(int head_dim) {
     constexpr int Bq = 128, Bkv = 64;
-    return (size_t)Bq * head_dim * sizeof(uint8_t)    // Q_fp8
-           + (size_t)Bkv * head_dim * sizeof(uint8_t)  // K_fp8
-           + (size_t)Bkv * head_dim * sizeof(half);    // V_f16
+    return (size_t)Bq * head_dim * sizeof(uint8_t)       // Q_fp8
+           + (size_t)2 * Bkv * head_dim * sizeof(half)    // K_buf[2] f16 (double-buffer)
+           + (size_t)2 * Bkv * head_dim * sizeof(half);   // V_buf[2] f16 (double-buffer)
 }
 
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
