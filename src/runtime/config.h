@@ -246,9 +246,12 @@ struct RuntimeConfig {
         // on Qwen3.6-35B: decode +11.4% (219.6→244.7 tok/s; the 248k-vocab
         // lm_head is ~14% of decode) at a small but REAL quality cost —
         // perplexity 15.90 (FP16) → 16.25 (NVFP4), +2.2% (FP16 PPL is stable
-        // run-to-run, so it's signal not noise). Kept opt-in (default false):
-        // a deliberate speed/quality tradeoff to opt into, not a forced default.
-        bool nvfp4_lm_head_gdn = false;
+        // run-to-run, so it's signal not noise). Default ON: the +11.4% decode
+        // gain serves the primary mission metric (best batch=1 tok/s on the
+        // 5090) and the +2.2% PPL cost is small; set false to keep the FP16
+        // lm_head for maximum coherence. Env IMP_NO_NVFP4_LM_HEAD=1 still kills
+        // the NVFP4 lm_head entirely (dense + GDN) via gemm.nvfp4_lm_head.
+        bool nvfp4_lm_head_gdn = true;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the
         // already-resident contiguous expert data + scales, instead of the
