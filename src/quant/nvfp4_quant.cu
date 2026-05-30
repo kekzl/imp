@@ -595,14 +595,17 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* outpu
 }
 
 void free_nvfp4_result(NvFP4QuantResult& result) {
-    if (result.packed_data) {
-        IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
-        result.packed_data = nullptr;
+    // Borrowed results (data-borrow decode cache) point packed_data/micro_scales
+    // at resident model weights owned elsewhere — cudaFree'ing those is an
+    // invalid-argument error. Only free storage this result allocated.
+    if (result.owned) {
+        if (result.packed_data)
+            IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
+        if (result.micro_scales)
+            IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
     }
-    if (result.micro_scales) {
-        IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
-        result.micro_scales = nullptr;
-    }
+    result.packed_data = nullptr;
+    result.micro_scales = nullptr;
     result.tensor_scale = 1.0f;
     result.N = 0;
     result.K = 0;

@@ -361,6 +361,7 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
             NvFP4QuantResult tmp;
             tmp.packed_data = w.data;
             tmp.micro_scales = w.scales;
+            tmp.owned = false;  // borrows resident model weight storage — don't cudaFree on teardown
             tmp.tensor_scale = w.tensor_scale;
             tmp.N = w.shape[0];
             tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
