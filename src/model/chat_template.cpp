@@ -232,11 +232,19 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             stop_token_ids_.push_back(end_of_turn_id_);
             stop_token_ids_.push_back(static_cast<int32_t>(tokenizer.eos_id()));
 
-            // Vision tokens (optional — only present in Gemma-3 multimodal)
+            // Vision tokens (optional — Gemma-3 and Gemma-4 multimodal).
             // Resolved from vocabulary; stays -1 if not found (disables vision).
+            // Gemma-3: <start_of_image>/<image_soft_token>/<end_of_image>.
+            // Gemma-4: <|image>/<|image|>/<image|> (begin / repeated soft / end).
             boi_id_ = tokenizer.find_token("<start_of_image>");
+            if (boi_id_ < 0)
+                boi_id_ = tokenizer.find_token("<|image>");
             eoi_id_ = tokenizer.find_token("<end_of_image>");
+            if (eoi_id_ < 0)
+                eoi_id_ = tokenizer.find_token("<image|>");
             img_soft_token_id_ = tokenizer.find_token("<image_soft_token>");
+            if (img_soft_token_id_ < 0)
+                img_soft_token_id_ = tokenizer.find_token("<|image|>");
             break;
         }
         case ChatTemplateFamily::DEEPSEEK_R1: {
