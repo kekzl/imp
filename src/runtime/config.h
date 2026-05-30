@@ -252,6 +252,18 @@ struct RuntimeConfig {
         // lm_head for maximum coherence. Env IMP_NO_NVFP4_LM_HEAD=1 still kills
         // the NVFP4 lm_head entirely (dense + GDN) via gemm.nvfp4_lm_head.
         bool nvfp4_lm_head_gdn = true;
+        // Hybrid GDN/SSM models (Nemotron-3-Nano-30B, Qwen3.6-35B-A3B) keep the
+        // recurrent in_proj/out_proj (ssm_in/ssm_out) OUT of the NVFP4 decode
+        // cache by default: they feed the GDN/SSM recurrent scan, which
+        // accumulates quantization error in the state H across tokens, so 4-bit
+        // was thought to degrade quality on 9B+ models. At decode they therefore
+        // run as FP16/dequant GEMVs (gemv_fp16_kernel) — a measured ~16.8% of
+        // Nemotron decode (~1.78 GB/token vs ~490 MB in NVFP4). This opt-in
+        // (mirroring nvfp4_lm_head_gdn) re-tests the speed/quality tradeoff:
+        // quantizing the SSM projections to NVFP4 plausibly buys +15-25% decode
+        // IF perplexity holds. Default false (quality-locked); set true to
+        // measure / ship if the PPL cost is small.
+        bool nvfp4_ssm_proj = false;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the
         // already-resident contiguous expert data + scales, instead of the

@@ -58,7 +58,11 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4.
     // These feed the recurrent scan which accumulates quantization error
     // in state H across tokens. 4-bit degrades quality on 9B+ models.
-    {
+    // Opt-in gemm.nvfp4_ssm_proj keeps them IN the cache to measure the
+    // speed/quality tradeoff (mirrors nvfp4_lm_head_gdn). This gate covers the
+    // GGUF-source hybrids (Qwen3.6-35B-A3B Q4_K_M); native-NVFP4 SSM weights
+    // are handled identically by the phase0b register gate.
+    if (!runtime_config().gemm.nvfp4_ssm_proj) {
         int n_ssm_excluded = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
@@ -73,13 +77,18 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         }
         if (n_ssm_excluded > 0)
             IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
+    } else {
+        IMP_LOG_INFO("GDN/SSM: nvfp4_ssm_proj ON — recurrent projections eligible for NVFP4 cache");
     }
 
     const bool decode_all = runtime_config().gemm.nvfp4_decode_all;
-    auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
+    // force_beneficial bypasses the nvfp4_beneficial(qtype) gate — used by the
+    // opt-in SSM path so a Q4_K/Q5_K recurrent projection (normally only
+    // eligible under nvfp4_decode_all) can be cached on its own merit.
+    auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype, bool force_beneficial) {
         if (!w.data)
             return;
-        if (!nvfp4_beneficial(qtype, decode_all))
+        if (!force_beneficial && !nvfp4_beneficial(qtype, decode_all))
             return;
         if (wcache_.nvfp4.count(w.data))
             return;
@@ -98,10 +107,28 @@ void GraphExecutor::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     };
 
     // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
-    collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
+    collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype, false);
 
     // Dense attention + FFN: every tensor benefits every decode step.
-    for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
+    for_each_dense_weight(*model_, cfg, [&](const Tensor& w, QType qtype) {
+        collect_weight_nvfp4(w, qtype, false);
+    });
+
+    // GGUF-source GDN/SSM recurrent projections (opt-in). For native-NVFP4
+    // hybrids the SSM weights are already cached in phase0b (no FP16/quant
+    // source), so this loop is a no-op there; it only fires for quantized-
+    // source hybrids (e.g. Qwen3.6-35B-A3B Q4_K_M), where it forces the Q4_K
+    // recurrent projections into the NVFP4 decode cache to remove the FP16
+    // dequant→cuBLAS SSM tax. Quality risk is highest here (recurrent scan).
+    if (runtime_config().gemm.nvfp4_ssm_proj) {
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.ssm_in.data)
+                collect_weight_nvfp4(L.ssm_in, L.ssm_in.qtype, true);
+            if (L.ssm_out.data)
+                collect_weight_nvfp4(L.ssm_out, L.ssm_out.qtype, true);
+        }
+    }
 }
 
 void GraphExecutor::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {

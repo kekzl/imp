@@ -14,6 +14,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "quant/nvfp4_quant.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cstdlib>
@@ -353,6 +354,16 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
     if (cutlass_sm120_nvfp4_available()) {
         int ct_count = 0;
         size_t ct_total = 0;
+        // NOTE on the GDN/SSM quality lock and gemm.nvfp4_ssm_proj:
+        // For NATIVE-NVFP4 checkpoints the in_proj/out_proj (ssm_in/ssm_out)
+        // weights only EXIST as NVFP4 bytes — there is no FP16 copy and
+        // dequant_gpu has no NVFP4 path, so they MUST be registered here or
+        // decode produces garbage (the uncached fallback would run cuBLAS on
+        // raw NVFP4 bytes). They are therefore ALREADY in the NVFP4 decode
+        // cache and already use the fast gemv_nvfp4_kpar path — the "FP16 SSM
+        // tax" does not apply to native-NVFP4 hybrids. The gemm.nvfp4_ssm_proj
+        // opt-in is meaningful only for GGUF-quant hybrids (Qwen3.6-35B Q4_K_M),
+        // gated in pre_dequant_phase3's collect_candidates. Always register.
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
                 return;
@@ -403,6 +414,18 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
             wcache_.cutlass_nvfp4_bytes += ct_total;
             IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
                          ct_total / (1024.0 * 1024.0));
+        }
+        {
+            int n_ssm = 0;
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = mut_model->layer(i);
+                if (L.ssm_in.data) n_ssm++;
+                if (L.ssm_out.data) n_ssm++;
+            }
+            if (n_ssm > 0)
+                IMP_LOG_INFO("GDN/SSM (native NVFP4): %d recurrent projections IN NVFP4 decode cache "
+                             "(no FP16 source exists; fast gemv_nvfp4_kpar at decode)",
+                             n_ssm);
         }
     }
 }
