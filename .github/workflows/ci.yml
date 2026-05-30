@@ -8,13 +8,22 @@ on:
 
 jobs:
   build:
-    name: Build (CUDA 13.2)
+    name: Build
     runs-on: ubuntu-24.04
 
     container:
+      # Base image only — it provides the NVIDIA CUDA apt repo. There is no devel
+      # image for the pinned toolkit version on Docker Hub yet, so (like the
+      # Dockerfile) the first step installs cuda-toolkit-$CUDA_VERSION on top and
+      # that is what nvcc actually uses. The build does NOT compile with the base
+      # image's bundled toolkit.
       image: nvidia/cuda:13.2.1-devel-ubuntu24.04
 
     env:
+      # Single source of truth for the CUDA toolchain. Bump this one line to move
+      # CI to a new toolkit; the apt package, paths, verify and cache keys below
+      # all derive from it.
+      CUDA_VERSION: "13.3"
       CCACHE_DIR: /github/home/.ccache
       CCACHE_MAXSIZE: 8G
       CCACHE_COMPILERCHECK: content
@@ -24,10 +33,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install dependencies
+      - name: Install CUDA toolkit + build deps
+        # No devel image for the pinned toolkit on Docker Hub yet, so — exactly
+        # like the Dockerfile — start from the base image (which only provides the
+        # NVIDIA CUDA apt repo) and install cuda-toolkit-$CUDA_VERSION on top,
+        # making it the default toolchain. The verify step below fails the build
+        # if nvcc is not the pinned version, so an older base toolkit can't leak in.
         run: |
+          # POSIX sh (the step runs under sh, not bash): turn 13.3 into 13-3 via tr.
+          pkg="cuda-toolkit-$(echo "$CUDA_VERSION" | tr . -)"   # -> cuda-toolkit-13-3
+          cuda_home="/usr/local/cuda-${CUDA_VERSION}"
           apt-get update
+          apt-get install -y --no-install-recommends --allow-change-held-packages "$pkg"
+          ln -sfn "$cuda_home" /usr/local/cuda
           apt-get install -y cmake g++ git python3 ccache
+          echo "$cuda_home/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=$cuda_home" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$cuda_home/lib64" >> "$GITHUB_ENV"
+
+      - name: Verify nvcc version
+        run: |
+          nvcc --version
+          nvcc --version | grep -q "release ${CUDA_VERSION}" \
+            || { echo "::error::nvcc is not CUDA ${CUDA_VERSION} (the pinned toolchain)"; exit 1; }
 
       # ccache caches per-TU compile output by content hash. On a header
       # change that invalidates many TUs (typical refactor), ccache hits
@@ -37,10 +65,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /github/home/.ccache
-          key: ${{ runner.os }}-cuda13.2.1-ccache-${{ github.sha }}
+          key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-cuda13.2.1-ccache-
-            ${{ runner.os }}-cuda13.2-ccache-
+            ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-
 
       - name: Reset ccache stats
         run: |
@@ -56,12 +83,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build
-          key: imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
+          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
           restore-keys: |
-            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda13.2.1-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda13.2.1-
-            imp-build-${{ runner.os }}-cuda13.2-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
 
       - name: Configure
         run: |
