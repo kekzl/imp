@@ -214,19 +214,70 @@ void Engine::upload_penalties(const Request& req, InferenceState& state, cudaStr
     state.n_penalty_tokens = static_cast<int>(n);
 }
 
+// Recurrent state-slot allocator. One slot per concurrent sequence; slots must
+// be UNIQUE among live sequences (the recurrent state is the sequence memory).
+// The free list is sized lazily from the state capacity (== max_batch_size).
+int Engine::acquire_recurrent_slot_(int req_id) {
+    const int cap = ssm_state_ ? ssm_state_->max_sequences()
+                               : (gdn_state_ ? gdn_state_->max_sequences() : 0);
+    if (cap <= 0)
+        return 0;
+    auto it = recurrent_slot_of_.find(req_id);
+    if (it != recurrent_slot_of_.end())
+        return it->second;  // already holds a slot (multi-chunk prefill)
+    if (!recurrent_slots_initialized_) {
+        free_recurrent_slots_.clear();
+        for (int s = cap - 1; s >= 0; --s)
+            free_recurrent_slots_.push_back(s);
+        recurrent_slots_initialized_ = true;
+    }
+    int slot;
+    if (!free_recurrent_slots_.empty()) {
+        slot = free_recurrent_slots_.back();
+        free_recurrent_slots_.pop_back();
+    } else {
+        // Should not happen: the scheduler caps concurrency at capacity. Fall
+        // back to the legacy aliasing scheme rather than crash.
+        slot = req_id % cap;
+        IMP_LOG_WARN("recurrent slot pool exhausted (cap=%d) — falling back to id%%cap for req %d", cap,
+                     req_id);
+    }
+    recurrent_slot_of_[req_id] = slot;
+    return slot;
+}
+
+void Engine::release_recurrent_slot_(int req_id) {
+    auto it = recurrent_slot_of_.find(req_id);
+    if (it == recurrent_slot_of_.end())
+        return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
+    free_recurrent_slots_.push_back(it->second);
+    recurrent_slot_of_.erase(it);
+}
+
 void Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
                                   cudaStream_t stream) {
+    if (!ssm_state_ && !gdn_state_)
+        return;
+    int slot;
+    if (reset) {
+        slot = acquire_recurrent_slot_(req.id);  // fresh slot for a new sequence
+    } else {
+        auto it = recurrent_slot_of_.find(req.id);
+        // Decode / later prefill chunks reuse the slot acquired at offset==0.
+        const int cap = ssm_state_ ? ssm_state_->max_sequences() : gdn_state_->max_sequences();
+        slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? req.id % cap : 0);
+    }
     if (ssm_state_) {
         state.ssm_state = ssm_state_.get();
-        state.ssm_seq_id = req.id % ssm_state_->max_sequences();
+        state.ssm_seq_id = slot;
         if (reset)
-            ssm_state_->reset_sequence(state.ssm_seq_id, stream);
+            ssm_state_->reset_sequence(slot, stream);
     }
     if (gdn_state_) {
         state.gdn_state = gdn_state_.get();
-        state.gdn_seq_id = req.id % gdn_state_->max_sequences();
+        state.gdn_seq_id = slot;
         if (reset)
-            gdn_state_->reset_sequence(state.gdn_seq_id, stream);
+            gdn_state_->reset_sequence(slot, stream);
     }
 }
 

@@ -20,6 +20,8 @@
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
 #include <memory>
+#include <vector>
+#include <unordered_map>
 #include <string>
 #include <cuda_runtime.h>
 
@@ -276,6 +278,16 @@ private:
     // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;
     std::unique_ptr<GDNState> gdn_state_;
+
+    // Recurrent (SSM/GDN) state-slot allocator. One slot per concurrent
+    // sequence (capacity == config.max_batch_size). Slots MUST be unique among
+    // live sequences — the recurrent state IS the sequence's memory, so a shared
+    // slot leaks one request's context into another. The previous
+    // `req.id % capacity` scheme aliased slots whenever two live request ids
+    // differed by a multiple of capacity; allocate a distinct free slot instead.
+    std::vector<int> free_recurrent_slots_;           // available slot ids
+    std::unordered_map<int, int> recurrent_slot_of_;  // req.id -> slot
+    bool recurrent_slots_initialized_ = false;
     bool has_pure_ssm_layers_ = false;  // true if model has Mamba2 SSM layers (not GDN)
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
@@ -435,6 +447,8 @@ private:
     void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
     void fill_sampling_params(const Request& req, InferenceState& state) const;
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
+    int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
+    void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────
