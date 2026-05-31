@@ -54,3 +54,32 @@ recent, echoes early context"). That is single-request (no eviction) and Phi-spe
 whereas this issue is global + multi-turn + eviction-suspected — likely **distinct**,
 but both are "recent input ignored in favor of earlier context" and worth checking for
 a shared position/attention root cause.
+
+## Update — CUDA-graph-reset hypothesis investigated (user's lead)
+User strongly suspects a **missing graph reset**. Traced every decode-graph reset path:
+- `async_graph_runner_` (conditional full-loop graph, `engine.h:269`): `setup()` calls
+  `cleanup()` + fresh `cudaMalloc` per request (`cuda_graph.cu`), and `step_async_graph_resume`
+  (`engine_scheduler.cpp:84-137`) binds pending tokens to `async_graph_req_` and clears on
+  completion. Reset logic present.
+- `decode_graph_pool_`: **deliberately preserved across requests** (`engine.cpp invalidate_graphs`
+  comment) — recapture only when bucketed `max_blocks_per_seq` changes (`engine_scheduler.cpp:1066-1073`).
+  Correctness relies entirely on the per-step batch upload (token/position/**block-table**) landing
+  in the fixed pool buffers before each replay. **This is the architecturally most suspicious spot**:
+  two same-bucket requests reuse the captured graph, and a stale/late block-table upload (e.g. under
+  a batch-size transition or stream-ordering race) would make the replayed graph read the previous
+  request's KV → "answers previous question".
+- `prefill_graph_runner_`: recapture on `chunk_len`/`block_count` change (`engine_scheduler.cpp:570-576`).
+- `invalidate_graphs()` is called only on the worker **exception** path, NOT on normal completion
+  (`batching_engine.cpp:123,140`) — but it preserves `decode_graph_pool_` anyway.
+
+**Reproduction status:** NOT reproduced across sequential, 4-/12-way concurrent, streaming,
+long→short, multi-turn, and forced-StreamingLLM-eviction (~250 requests, all answered their own
+question). Note: 12-way concurrency surfaced sporadic **empty** responses for some requests — a
+*separate* phenomenon (not wrong-answer carryover), worth a follow-up.
+
+**Decisive next experiment (run in the actual failing long-multi-turn scenario):**
+`--no-cuda-graphs`. If carryover disappears → confirmed graph issue → fix target is the
+`decode_graph_pool_` cross-request reuse / per-step block-table upload ordering. If it persists →
+graphs are exonerated. A defensive fix (force decode-graph recapture or unconditional block-table
+re-upload per new request) is available but should be gated on this confirmation + a perf check
+(recapture ≈ 5–100 ms/request).
