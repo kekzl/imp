@@ -410,10 +410,48 @@ void SchemaConstrainer::compute_token_allow_mask() {
             }
         }
     } else if (f.phase == SchemaPhase::OBJECT_OPEN && f.node) {
-        // When we need to open with a quote for key, also constrain which
-        // quote tokens start valid keys (for multi-char tokens like `"name`)
-        // Only activate if there are tokens that start with quote + key prefix
-        // For single " token, category mask handles it. No need for token_allow.
+        // Multi-char tokens beginning with the opening quote (e.g. `"code`,
+        // `"id"`) open the key string AND emit key chars in a single step,
+        // bypassing the OBJECT_KEY prefix narrowing above. Constrain them here:
+        // the chars after the opening `"` must form a valid key prefix (or, if
+        // the token also carries the closing quote, a complete unemitted key).
+        // Without this, a quote-prefixed non-key token (`"Why`) slips through
+        // on its CAT_QUOTE bit alone and the FSM gets stuck mid-key → "!!!!".
+        //
+        // Non-quote tokens (whitespace, `}`) are gated by the category mask; we
+        // leave them allowed (=1) so the kernel's category-AND-allow is a no-op.
+        need_token_allow_ = true;
+        for (int i = 0; i < vocab_size_; i++) {
+            const auto& text = token_texts_[i];
+            if (text.empty() || text[0] != '"') {
+                token_allow_[i] = 1;
+                continue;
+            }
+            const std::string rest = text.substr(1);
+            bool valid = false;
+            if (rest.empty()) {
+                // Bare opening quote — always a legal key start.
+                valid = true;
+            } else {
+                size_t qpos = rest.find('"');
+                if (qpos == std::string::npos) {
+                    // Quote + partial key chars: must stay a valid key prefix.
+                    valid = is_valid_key_prefix(f.node, rest, f.emitted_keys);
+                } else if (qpos + 1 == rest.size()) {
+                    // Quote + complete key + closing quote (e.g. `"id"`).
+                    std::string key_part = rest.substr(0, qpos);
+                    for (auto& [name, _] : f.node->properties) {
+                        if (!f.emitted_keys.count(name) && name == key_part) {
+                            valid = true;
+                            break;
+                        }
+                    }
+                }
+                // A closing quote with trailing chars (`"id":`) is left masked;
+                // the model can take the bare-quote path instead.
+            }
+            token_allow_[i] = valid ? 1 : 0;
+        }
     }
 }
 

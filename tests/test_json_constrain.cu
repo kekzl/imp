@@ -610,5 +610,47 @@ TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
     EXPECT_FALSE(allowed(10)) << "'abc' (lowercase) must be masked by the pattern";
 }
 
+// At OBJECT_OPEN, a multi-char token that begins with the opening quote
+// (`"code`, `"Why`) opens the key string AND fills key chars in one step.
+// Such tokens must be narrowed to valid key prefixes — otherwise a non-key
+// token (`"Why`) slips through on its CAT_QUOTE bit and the FSM gets stuck
+// mid-key, degenerating into "!!!!". No model / preamble gate involved.
+TEST(SchemaConstrainTest, ObjectOpenQuotePrefixedKeyMasked) {
+    SKIP_IF_NO_CUDA();
+
+    //          0        1      2       3    4    5     6        7       8     9
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "}", "\"", "\"code", "\"Why", ":", "code"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
+    ASSERT_TRUE(schema != nullptr);
+
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+
+    sc.update(3);  // "{"  → OBJECT_OPEN
+
+    const int vocab = static_cast<int>(toks.size());
+    std::vector<float> h(vocab, 1.0f);
+    float* d = nullptr;
+    cudaMalloc(&d, vocab * sizeof(float));
+    cudaMemcpy(d, h.data(), vocab * sizeof(float), cudaMemcpyHostToDevice);
+    sc.apply_mask(d, vocab, 0);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h.data(), d, vocab * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d);
+
+    auto allowed = [&](int i) { return h[i] > -1e30f; };
+
+    EXPECT_TRUE(allowed(5)) << "bare opening quote must be allowed";
+    EXPECT_TRUE(allowed(6)) << "'\"code' (quote + valid complete key) must be allowed";
+    EXPECT_FALSE(allowed(7)) << "'\"Why' (quote + invalid key) must be masked — the OBJECT_OPEN hole";
+    EXPECT_FALSE(allowed(9)) << "'code' without opening quote must be masked at OBJECT_OPEN (category)";
+    EXPECT_FALSE(allowed(4)) << "'}' must be masked: required key 'code' not yet emitted";
+}
+
 }  // namespace
 }  // namespace imp
