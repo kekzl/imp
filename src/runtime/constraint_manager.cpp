@@ -78,7 +78,7 @@ ToolDialect resolve_tool_dialect(Tokenizer* tokenizer, ChatTemplateFamily family
 }  // namespace
 
 void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
-                                bool has_tools, ChatTemplateFamily tpl_family) {
+                                bool has_tools, ChatTemplateFamily tpl_family, bool thinking_open) {
     active_json_ = false;
     active_schema_ = false;
 
@@ -115,9 +115,9 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         if (has_tools) {
             constrainer->set_preamble_with_tools(think_close, preamble_budget,
                                                  dialect.open_tokens, dialect.close_tokens,
-                                                 dialect.open_prefix, dialect.close_suffix);
+                                                 dialect.open_prefix, dialect.close_suffix, thinking_open);
         } else {
-            constrainer->set_preamble(think_close, preamble_budget);
+            constrainer->set_preamble(think_close, preamble_budget, thinking_open);
         }
     };
 

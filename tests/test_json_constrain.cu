@@ -509,5 +509,33 @@ TEST(PreambleGateTest, ToolModeReasoningBudgetResetsAfterThinkClose) {
     EXPECT_FALSE(g.active());
 }
 
+TEST(PreambleGateTest, ThinkingAlreadyClosedStartsEnforcing) {
+    // Reasoning model, but the prompt already closed <think> (e.g. /no_think):
+    // there is no </think> to wait for, so the gate must enforce immediately.
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192, /*thinking_open=*/false);
+    EXPECT_FALSE(g.active()) << "thinking already closed -> mask enforced from token 0";
+    EXPECT_FALSE(g.absorb(TOK_TEXT, "Okay")) << "must not absorb a free-form preamble";
+}
+
+TEST(PreambleGateTest, ThinkingOpenStillAbsorbsUntilClose) {
+    // Normal reasoning request (thinking open) is unchanged: absorb until </think>.
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192, /*thinking_open=*/true);
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "reasoning..."));
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, BudgetOnlyModeUnaffectedByThinkingFlag) {
+    // Non-reasoning model (close_token < 0) keeps the small budget window even
+    // when thinking_open=false (the flag only matters in close-token mode).
+    PreambleGate g;
+    g.configure(/*close_token=*/-1, /*max_tokens=*/8, /*thinking_open=*/false);
+    EXPECT_TRUE(g.active());
+}
+
 }  // namespace
 }  // namespace imp
