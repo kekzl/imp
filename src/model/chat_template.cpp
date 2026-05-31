@@ -125,6 +125,36 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     return ChatTemplateFamily::RAW;
 }
 
+// imp's minimal Jinja2 engine has no {% generation %}/{% endgeneration %} block
+// tags — a HuggingFace chat-template extension that marks the assistant-response
+// span for training-time loss masking (render-neutral). Phi-4-reasoning places
+// them inside the assistant branch; the unknown opening tag derails block nesting
+// so the trailing {% if add_generation_prompt %} is dropped → the assistant
+// generation prompt is never appended → the model emits role markers as text.
+// Strip the (render-neutral) tags before parsing.
+static std::string strip_generation_tags(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] == '{' && i + 1 < s.size() && s[i + 1] == '%') {
+            size_t close = s.find("%}", i + 2);
+            if (close != std::string::npos) {
+                std::string inner = s.substr(i + 2, close - (i + 2));
+                size_t a = inner.find_first_not_of(" \t\r\n-");
+                size_t b = inner.find_last_not_of(" \t\r\n-");
+                std::string kw = (a == std::string::npos) ? std::string() : inner.substr(a, b - a + 1);
+                if (kw == "generation" || kw == "endgeneration") {
+                    i = close + 2;  // drop the whole tag, render its inner body as-is
+                    continue;
+                }
+            }
+        }
+        out.push_back(s[i++]);
+    }
+    return out;
+}
+
 bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str) {
     family_ = family;
     stop_token_ids_.clear();
@@ -132,8 +162,9 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
+        std::string cleaned = strip_generation_tags(jinja_str);
         auto tpl = std::make_shared<jinja::Template>();
-        if (tpl->parse(jinja_str)) {
+        if (tpl->parse(cleaned)) {
             jinja_tpl_ = std::move(tpl);
             use_jinja_ = true;
             build_control_token_map(tokenizer);
