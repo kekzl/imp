@@ -1122,14 +1122,13 @@ constexpr int FA2_KV_PAD = 8;   // extra halfs per K/V row (16 B, cp.async-align
 template <int HD>
 __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const half* K_ptr,
                                                   const half* V_ptr, int kv_start, int seq_kv,
-                                                  int64_t kv_row_stride, int tid) {
+                                                  int64_t kv_row_stride, int tid, int nthreads) {
     constexpr int Bkv = 64;
     constexpr int VEC = 8;                       // 8 halfs = 16 B per cp.async
     constexpr int vecs_per_row = HD / VEC;       // 16
     constexpr int total_vecs = Bkv * vecs_per_row;
     constexpr int KVS = HD + FA2_KV_PAD;         // padded smem row stride (halfs)
-#pragma unroll
-    for (int vi = tid; vi < total_vecs; vi += SM120_BLOCK_THREADS) {
+    for (int vi = tid; vi < total_vecs; vi += nthreads) {
         int r = vi / vecs_per_row;
         int c = (vi % vecs_per_row) * VEC;
         if (kv_start + r < seq_kv) {
@@ -1143,14 +1142,18 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
     }
 }
 
-template <int HD>
+template <int Bq, int HD>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset) {
-    constexpr int Bq = 128;
     constexpr int Bkv = 64;
     constexpr int head_dim = HD;
+    // Each warp owns one 16-row tile (mma m16) → warps = Bq/16, threads = warps*32.
+    // Bq=128 → 8 warps/256 thr (large seq, max latency-hiding); Bq=64 → 4 warps/128 thr
+    // (small seq: 2× more q-tiles → more CTAs → fills the 170 SMs instead of one short wave).
+    constexpr int NWARPS = Bq / 16;
+    constexpr int NTHREADS = NWARPS * 32;
     constexpr int N_S = Bkv / 8;    // QK N-tiles (8-col groups) per row tile = 8
     constexpr int N_O = HD / 8;     // PV N-tiles (8 HD-col groups)
     constexpr int N_KG = Bkv / 16;  // PV K-groups (16 Bkv-col groups) = 4
@@ -1191,7 +1194,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     // ---- load Q → fp8 once (4 halves → 4 e4m3 per thread) ----
     {
         const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+        for (int vi = tid; vi < total_vec4; vi += NTHREADS) {
             int i = vi * 4;
             int r = i / head_dim;
             int d = i % head_dim;  // multiple of 4 → uint32-aligned into the padded row
@@ -1217,7 +1220,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     // prologue: kick off the first KV tile's load into buffer slot 0
     if (first_kv_tile < num_kv_tiles)
         prefetch_kv_tile<head_dim>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv, kv_row_stride,
-                                   tid);
+                                   tid, NTHREADS);
     cp_async_commit();
     __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
 
@@ -1229,7 +1232,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
         if (j + 1 < num_kv_tiles) {
             const int nslot = slot ^ 1;
             prefetch_kv_tile<head_dim>(K_buf + nslot * Bkv * KVSTRIDE, V_buf + nslot * Bkv * KVSTRIDE,
-                                       K_ptr, V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid);
+                                       K_ptr, V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid, NTHREADS);
             cp_async_commit();
             cp_async_wait_group<1>();  // this tile (slot) landed; tile j+1 still in flight
         } else {
@@ -1390,8 +1393,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 }
 
-static size_t compute_smem_fa2(int head_dim) {
-    constexpr int Bq = 128, Bkv = 64;
+static size_t compute_smem_fa2(int Bq, int head_dim) {
+    constexpr int Bkv = 64;
     const size_t qstride = head_dim + FA2_Q_PAD;    // bytes (bank-conflict pad)
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
     return (size_t)Bq * qstride * sizeof(uint8_t)        // Q_fp8 (padded)
@@ -1422,16 +1425,27 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     cudaGetDevice(&device);
     int max_smem = 0;
     cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    const size_t smem = compute_smem_fa2(head_dim);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    // Bq selection: the kernel is SMEM-bound to ~1 CTA/SM, so grid = (q_tiles × batch×heads)
+    // must alone fill the SMs. Bq=128 gives ceil(seq_q/128) q-tiles; at short context that is
+    // fewer CTAs than SMs → one partial wave, idle SMs, exposed tail. Dropping to Bq=64 doubles
+    // the q-tiles (2× CTAs) to fill the GPU. Large context already fills with Bq=128 (more
+    // latency-hiding per CTA via 8 warps), so keep 128 there.
+    const long blocks_128 = (long)((seq_q + 127) / 128) * batch_size * n_heads;
+    const bool use_bq64 = blocks_128 < (long)sm_count;
+    const int Bq = use_bq64 ? 64 : 128;
+
+    const size_t smem = compute_smem_fa2(Bq, head_dim);
     if (smem > (size_t)max_smem)
         return false;
 
-    constexpr int Bq = 128;
     const int num_q_tiles = (seq_q + Bq - 1) / Bq;
     dim3 grid(num_q_tiles, batch_size * n_heads);
-    dim3 block(SM120_WARP_SIZE, SM120_NUM_WARPS);
+    dim3 block(SM120_WARP_SIZE, Bq / 16);  // warps = Bq/16
 
-    auto kern = fmha_sm120_fa2_kernel<128>;
+    auto kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
     cudaError_t aerr =
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
     if (aerr != cudaSuccess)
@@ -1440,8 +1454,8 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     static bool logged_once = false;
     if (!logged_once) {
         logged_once = true;
-        IMP_LOG_INFO("FMHA FA2 register-resident kernel ACTIVE (hd=128, smem=%zu B, seq_q=%d seq_kv=%d)", smem,
-                     seq_q, seq_kv);
+        IMP_LOG_INFO("FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, smem=%zu B, seq_q=%d seq_kv=%d)",
+                     Bq, smem, seq_q, seq_kv);
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
