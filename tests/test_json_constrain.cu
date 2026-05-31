@@ -3,6 +3,9 @@
 #include "compute/json_constrain.h"
 #include "compute/constrain_common.h"
 #include "compute/preamble_gate.h"
+#include "compute/json_schema.h"
+#include "compute/schema_constrain.h"
+#include "model/tokenizer.h"
 
 #include <string>
 #include <cfloat>
@@ -507,6 +510,104 @@ TEST(PreambleGateTest, ToolModeReasoningBudgetResetsAfterThinkClose) {
     // Fourth post-think token exhausts the fresh budget.
     EXPECT_TRUE(g.absorb(TOK_TEXT, "g"));
     EXPECT_FALSE(g.active());
+}
+
+// ---------------------------------------------------------------------------
+// RegexNfa — direct unit tests for JSON-schema `pattern` enforcement.
+// Isolated from the model / preamble gate to pinpoint over-masking.
+// ---------------------------------------------------------------------------
+
+// Feed a whole string; return final state set ({} if it died).
+static std::vector<int> nfa_run(const RegexNfa& n, const std::string& s) {
+    std::vector<int> st = n.start_set();
+    for (char c : s) {
+        st = n.step(st, static_cast<unsigned char>(c));
+        if (st.empty())
+            return st;
+    }
+    return st;
+}
+
+TEST(RegexNfaTest, Literal) {
+    RegexNfa n;
+    ASSERT_TRUE(n.compile("abc"));
+    EXPECT_FALSE(n.start_set().empty());
+    EXPECT_TRUE(n.accepts(nfa_run(n, "abc")));
+    EXPECT_TRUE(nfa_run(n, "abx").empty());        // diverges at 3rd char
+    EXPECT_FALSE(n.accepts(nfa_run(n, "ab")));     // prefix alive but not accepting
+    EXPECT_TRUE(nfa_run(n, "x").empty());          // wrong first char dies
+}
+
+TEST(RegexNfaTest, CharClassRange) {
+    RegexNfa n;
+    ASSERT_TRUE(n.compile("[A-Z]"));
+    EXPECT_FALSE(n.start_set().empty());
+    EXPECT_TRUE(n.accepts(nfa_run(n, "D")));
+    EXPECT_TRUE(nfa_run(n, "d").empty());          // lowercase not in class
+}
+
+TEST(RegexNfaTest, CountedRepeat) {
+    RegexNfa n;
+    ASSERT_TRUE(n.compile("[A-Z]{3}"));
+    EXPECT_FALSE(n.start_set().empty());
+    EXPECT_FALSE(n.step(n.start_set(), 'D').empty());  // first char must survive
+    EXPECT_TRUE(n.accepts(nfa_run(n, "DEU")));
+    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));     // only 2 — not yet accepting
+    EXPECT_TRUE(nfa_run(n, "DEUX").empty());       // 4th char dies
+    EXPECT_TRUE(nfa_run(n, "Dx").empty());         // 2nd char wrong class
+}
+
+TEST(RegexNfaTest, Anchored) {
+    RegexNfa n;
+    ASSERT_TRUE(n.compile("^[A-Z]{3}$"));
+    EXPECT_FALSE(n.start_set().empty());
+    EXPECT_FALSE(n.step(n.start_set(), 'D').empty());
+    EXPECT_TRUE(n.accepts(nfa_run(n, "DEU")));
+    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));
+}
+
+// End-to-end SchemaConstrainer: a `pattern` value must allow pattern-valid tokens
+// and mask the rest — and crucially must NOT mask everything (the over-masking
+// regression that produced "!!!!"). No model / preamble gate involved.
+TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
+    SKIP_IF_NO_CUDA();
+
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code",
+                                     ":",     "}",   "D",    "DEU", "abc"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"code":{"type":"string","pattern":"^[A-Z]{3}$"}},"required":["code"]})");
+    ASSERT_TRUE(schema != nullptr);
+
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+
+    // Walk the FSM to the string value: {  "code"  :  "
+    for (int t : {3, 4, 5, 4, 6, 4})
+        sc.update(t);
+
+    const int vocab = static_cast<int>(toks.size());
+    std::vector<float> h(vocab, 1.0f);
+    float* d = nullptr;
+    cudaMalloc(&d, vocab * sizeof(float));
+    cudaMemcpy(d, h.data(), vocab * sizeof(float), cudaMemcpyHostToDevice);
+    sc.apply_mask(d, vocab, 0);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h.data(), d, vocab * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d);
+
+    auto allowed = [&](int i) { return h[i] > -1e30f; };
+    int n_allowed = 0;
+    for (int i = 0; i < vocab; i++)
+        if (allowed(i)) n_allowed++;
+
+    EXPECT_GT(n_allowed, 0) << "over-masking regression: every token forbidden in STRING_PATTERN";
+    EXPECT_TRUE(allowed(8)) << "'D' (uppercase, pattern-alive) must be allowed";
+    EXPECT_TRUE(allowed(9)) << "'DEU' (full ^[A-Z]{3}$ match) must be allowed";
+    EXPECT_FALSE(allowed(10)) << "'abc' (lowercase) must be masked by the pattern";
 }
 
 }  // namespace

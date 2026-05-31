@@ -113,11 +113,7 @@ bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const st
     out_states = f.regex_states;
     out_len = f.string_len;
 
-    // NOTE: regex/pattern token-masking via the Thompson NFA currently over-masks
-    // (forbids all candidate tokens -> degenerate "!!!!" output), so it is disabled
-    // pending an NFA fix. `pattern` is still parsed (json_schema.cpp) and length
-    // bounds below are enforced; only the regex narrowing is skipped.
-    bool has_nfa = false;
+    bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();
     int max_len = f.node ? f.node->max_length : -1;
 
     for (char ch : content) {
@@ -139,7 +135,7 @@ bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const st
 
 bool SchemaConstrainer::can_close_string(const SchemaFrame& f, const std::vector<int>& states,
                                          int len) const {
-    bool has_nfa = false;  // regex NFA enforcement disabled (see token_keeps_pattern_alive)
+    bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();
     if (has_nfa && !f.node->pattern_nfa->accepts(states))
         return false;
     if (f.node && f.node->min_length >= 0 && len < f.node->min_length)
