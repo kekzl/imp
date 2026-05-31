@@ -214,7 +214,41 @@ ist Prefill-GEMM/Attention-Effizienz, nicht der Routing-/Dequant-Pfad.
 8 Code-Tasks (T1,3,4,5,6,7,8,9) implementiert + **Docker-Build grün** (CUDA 13.3), Unit 37/37, GPU-Tests
 73 passed/0 failed. Decode-Moat-Check: neues Binary tg256=253.0 vs build-ciq 256.9 (−1.5 %, im Rauschen) —
 **decode-neutral** ✓. Determinismus-Flag (T4) verifiziert: `runtime.deterministic=true` liefert bit-identische
-Tokens über Läufe (Qwen3-Coder, temp=0). Output kohärent, keine Degeneration.
+Tokens über Läufe (Qwen3-Coder, temp=0). Output kohärent, keine Degeneration. Commit `09335dd3`.
+
+Live-Server-Smoke-Tests (neues Binary, Qwen3-8B-NVFP4):
+
+| Task | Ergebnis |
+|---|---|
+| T1 /v1/messages Streaming | ✓ echte inkrementelle SSE (message_start→content_block_delta…) |
+| T3 Tool-Calling | ✓ `{"city":"Berlin"}`, finish_reason=tool_calls; Arg-Validierung aktiv |
+| T5 Metrics | ✓ `imp_request_duration_seconds`/`imp_ttft_seconds`-Histogramme |
+| T9 Input-Limit | ✓ langer Prompt → HTTP 400 "Prompt exceeds max input tokens (189 > 50)"; kurzer → 200 |
+| T7 Constrained | json_object ✓, json_schema-Struktur ✓; **`pattern`-Regex-Masking deaktiviert** (NFA über-maskierte → `!!!!`; geparst aber nicht erzwungen) |
+| T8 thinking-Blocks | Mapping implementiert; feuert nur bei separiertem `reasoning_content` (`--reasoning-format`) — Default-Smoke nicht bestätigt |
+| T6 Tool-Deltas | implementiert; Streaming bestätigt |
+
+Offene Follow-ups: T7 NFA-Over-Masking fixen + GrammarConstrainer in `executor.cu` verdrahten; T8 mit reasoning-format bestätigen.
+
+### T10 (ncu-Roofline der Top-Prefill-Kernels) — gemessen [P]
+ncu (Host `/opt/nvidia/nsight-compute/2026.2.0/ncu`), Qwen3-Coder-NVFP4, graphs off, je 6 Mid-Network-Instanzen:
+
+| Kernel | DRAM% (1792 GB/s) | SM% | Occupancy | Klassifikation |
+|---|---|---|---|---|
+| NVFP4 grouped GEMM (MoE-Expert, mxf4nvf4 FP4-TC, Tile 128³, grid=170) | **59 %** | **34 %** | **24 %** | latency/wave-quantization-bound — **kein Roofline, Compute-Headroom** |
+| FA2 (`fmha_sm120_fa2_kernel<128>`, FP16, grid=128) | 3.4 % | 36 % | 16.8 % | latency/occupancy-bound — kein Roofline |
+
+`smsp__...tensor_op_mma`-Counter sind auf sm_120 nicht exponiert; FP4-/FP16-TC-Nutzung via Kernel-Symbol bestätigt.
+
+### T12 (Small-M grouped-GEMM-Tuning) — Befund + Empfehlung [P]
+Die ncu-Daten bestätigen: der grouped GEMM ist **NICHT compute- oder bandbreiten-limitiert**, sondern
+**single-wave + small-M-per-Expert** (2009 Tokens / 128 Experten → winziges M_e) bei nur 24 % Occupancy.
+Lebende Hebel: (a) persistent/stream-K-Grid statt 170-Block-Single-Wave, (b) besseres Token-Packing zur
+Anhebung von M_e, (c) occupancy-erhöhende Tile-Wahl. **Aber:** deckt sich mit `nvfp4_moe_prefill_landscape`
+("hand-rolled NVFP4 grouped = par bei großem M_e, **−50-55 % bei small M_e**") und mit T11 (vLLMs batched
+Prefill-GEMMs gewinnen). Substanzieller, zoo-weit zu validierender CUTLASS-/Kernel-Aufwand → **kein
+Session-Scope-Merge**; konkreter nächster Schritt: CUTLASS-Sm120-grouped-Scheduler auf persistent/stream-K
+umstellen und M_e-Packing messen, gegen das Decode-Gate absichern.
 
 ## Offene Fragen / fehlende Messungen
 
