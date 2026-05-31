@@ -51,6 +51,32 @@ struct RequestLogger {
     }
 };
 
+// Prometheus-style latency histogram (cumulative buckets, in seconds).
+// Lock-free: each observation bumps the matching cumulative buckets + sum +
+// count. Bucket upper bounds are shared by request-duration and TTFT; both
+// are sub-second-to-minutes scale so the same ladder fits.
+struct LatencyHistogram {
+    // le upper bounds in seconds; the implicit +Inf bucket is `count`.
+    static constexpr int kNumBuckets = 11;
+    static constexpr double kBounds[kNumBuckets] = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                                                    0.5,   1.0,  2.5,   5.0,  10.0};
+    std::atomic<int64_t> buckets[kNumBuckets] = {};
+    std::atomic<int64_t> count{0};
+    // Sum of observed seconds, stored as micros to keep an integer atomic.
+    std::atomic<int64_t> sum_us{0};
+
+    void observe(double seconds) {
+        if (seconds < 0)
+            seconds = 0;
+        for (int i = 0; i < kNumBuckets; ++i) {
+            if (seconds <= kBounds[i])
+                buckets[i].fetch_add(1, std::memory_order_relaxed);
+        }
+        count.fetch_add(1, std::memory_order_relaxed);
+        sum_us.fetch_add(static_cast<int64_t>(seconds * 1e6), std::memory_order_relaxed);
+    }
+};
+
 // Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
 struct ServerMetrics {
     std::atomic<int64_t> requests_total{0};
@@ -61,6 +87,8 @@ struct ServerMetrics {
     std::atomic<int64_t> last_request_duration_ms{0};
     std::atomic<int64_t> last_ttft_ms{0};  // Time to first token (ms)
     std::atomic<int64_t> model_loads_total{0};
+    LatencyHistogram request_duration;  // end-to-end request latency
+    LatencyHistogram ttft;              // time to first token
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
 
@@ -103,7 +131,8 @@ struct ServerState {
     // Server limits
     int max_concurrent = 64;
     int request_timeout = 300;
-    int rate_limit = 0;  // requests per minute per IP (0=unlimited)
+    int rate_limit = 0;        // requests per minute per IP (0=unlimited)
+    int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
 
     // Rate limiter state: IP → list of request timestamps
     std::mutex rate_mutex;
@@ -151,8 +180,9 @@ void handle_health(const httplib::Request& req, httplib::Response& res, ServerSt
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
-// Anthropic-compatible Messages API. For non-streaming requests this is a
-// thin shim over handle_chat_completions; streaming reserved for Phase 2.
+// Anthropic-compatible Messages API. Non-streaming requests are a thin shim
+// over handle_chat_completions; streaming requests drive the real per-token
+// batching-engine loop and emit native Anthropic SSE events incrementally.
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);

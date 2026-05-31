@@ -1,6 +1,7 @@
 #include "compute/moe_routing.h"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -520,6 +521,37 @@ __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
     }
 }
 
+// Deterministic scatter-add: one block per OUTPUT token. Each block scans the
+// sorted rows in ascending row order and accumulates (in FP32 registers, fixed
+// order) every row that belongs to its token, then writes once. Avoids the FP
+// atomicAdd of moe_scatter_kernel_impl whose accumulation order is
+// scheduling-dependent (non-reproducible). Opt-in only (deterministic mode);
+// the default path keeps the faster atomic scatter.
+template <typename T>
+__global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expert_output,
+                                                      const int32_t* __restrict__ sorted_token_ids,
+                                                      const int32_t* __restrict__ sorted_flat_idx,
+                                                      const float* __restrict__ expert_weights,
+                                                      float* __restrict__ output, int total_rows,
+                                                      int n_tokens, int d_model) {
+    const int token = blockIdx.x;
+    if (token >= n_tokens)
+        return;
+
+    for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
+        float sum = 0.0f;
+        // Scan rows in fixed ascending order; accumulate the ones mapping to
+        // this token. Deterministic regardless of routing/scheduling.
+        for (int row = 0; row < total_rows; ++row) {
+            if (sorted_token_ids[row] != token)
+                continue;
+            float weight = expert_weights[sorted_flat_idx[row]];
+            sum += weight * to_float(expert_output[static_cast<int64_t>(row) * d_model + col]);
+        }
+        output[static_cast<int64_t>(token) * d_model + col] = sum;
+    }
+}
+
 // ============================================================================
 // Fused count + scan + scatter kernel (single launch)
 //
@@ -578,6 +610,77 @@ __global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* _
         sorted_flat_idx[dest] = idx;
         if (token_to_expanded)
             token_to_expanded[idx] = dest;
+    }
+}
+
+// ============================================================================
+// Deterministic fused count + scan + scatter kernel (opt-in).
+//
+// Same outputs as moe_fused_permute_kernel, but the per-expert bucket slot a
+// token lands in is a pure function of (expert, flat_idx) — independent of
+// warp scheduling. The default kernel uses atomicAdd on s_write_pos, so the
+// order of tokens within an expert bucket varies run-to-run; that ordering
+// feeds the gather/grouped-GEMM and (for the atomic scatter path) the FP
+// accumulation order, breaking reproducibility.
+//
+// Strategy: thread 0 does the scan (as before), then walks flat_idx in
+// ascending order, appending each assignment to its expert bucket. Because
+// flat_idx is visited in a fixed sequential order, slot assignment is stable.
+// n_experts and total are small for decode/short prefill, so the single-thread
+// scatter is acceptable for an opt-in reproducibility mode (default path is
+// untouched).
+// ============================================================================
+
+__global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
+    const int32_t* __restrict__ expert_indices, int n_tokens, int top_k, int n_experts,
+    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
+    int32_t* __restrict__ expert_offsets, int32_t* __restrict__ token_to_expanded) {
+    extern __shared__ int32_t smem[];
+    int32_t* s_counts = smem;
+    int32_t* s_write_pos = smem + n_experts;
+
+    const int tid = threadIdx.x;
+    const int total = n_tokens * top_k;
+
+    // Phase 1: Zero counts
+    for (int i = tid; i < n_experts; i += blockDim.x)
+        s_counts[i] = 0;
+    __syncthreads();
+
+    // Phase 2: Count tokens per expert (atomics in shared memory — counts are
+    // order-independent, so this stays parallel).
+    for (int i = tid; i < total; i += blockDim.x) {
+        int expert = expert_indices[i];
+        atomicAdd(&s_counts[expert], 1);
+    }
+    __syncthreads();
+
+    // Phase 3: Exclusive scan + initialize write positions (thread 0).
+    if (tid == 0) {
+        int32_t running = 0;
+        for (int i = 0; i < n_experts; i++) {
+            expert_offsets[i] = running;
+            s_write_pos[i] = 0;
+            running += s_counts[i];
+        }
+        expert_offsets[n_experts] = running;
+    }
+    __syncthreads();
+
+    // Phase 4: Deterministic scatter — single thread walks flat_idx in order
+    // so a token's slot within its expert bucket is fixed regardless of warp
+    // scheduling.
+    if (tid == 0) {
+        for (int idx = 0; idx < total; idx++) {
+            int token = idx / top_k;
+            int expert = expert_indices[idx];
+            int pos = s_write_pos[expert]++;
+            int dest = expert_offsets[expert] + pos;
+            sorted_token_ids[dest] = token;
+            sorted_flat_idx[dest] = idx;
+            if (token_to_expanded)
+                token_to_expanded[idx] = dest;
+        }
     }
 }
 
@@ -705,10 +808,16 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 
     // ---- Fused count + scan + scatter (single kernel) ----
     size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
-    moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(d_expert_indices, n_tokens, top_k,
-                                                                      n_experts, d_sorted_token_ids,
-                                                                      d_sorted_flat_idx, d_expert_offsets,
-                                                                      nullptr);
+    if (process_diag_deterministic_gemm()) {
+        moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(
+            d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
+            d_expert_offsets, nullptr);
+    } else {
+        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(d_expert_indices, n_tokens, top_k,
+                                                                          n_experts, d_sorted_token_ids,
+                                                                          d_sorted_flat_idx, d_expert_offsets,
+                                                                          nullptr);
+    }
 
     // ---- Fill result struct ----
     result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32, n_tokens, top_k, true);
@@ -763,6 +872,26 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
 
     // Output is always FP32 for the scatter-add (atomicAdd on float)
     float* d_output = static_cast<float*>(output.data);
+
+    if (process_diag_deterministic_gemm()) {
+        // Deterministic mode: one block per output token, fixed-order FP32
+        // accumulation over its rows. Writes output directly (no atomics, no
+        // pre-zero needed). total_tokens here is the number of expanded rows.
+        if (expert_output.qtype == QType::F16) {
+            const half* d_expert_out = static_cast<const half*>(expert_output.data);
+            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
+                d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
+                n_tokens, d_model);
+        } else {
+            const float* d_expert_out = static_cast<const float*>(expert_output.data);
+            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
+                d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
+                n_tokens, d_model);
+        }
+        return;
+    }
+
+    // Zero the output first (scatter-add accumulates into it)
     zero_float_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_output, total_out_elems);
 
     if (expert_output.qtype == QType::F16) {
@@ -873,10 +1002,17 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
         size_t smem_bytes = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
 
-        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_expert_indices, n_tokens, top_k,
-                                                                        n_experts, d_sorted_token_ids,
-                                                                        d_sorted_flat_idx, d_expert_offsets,
-                                                                        buffers.token_to_expanded);
+        if (process_diag_deterministic_gemm()) {
+            moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
+                d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
+                d_expert_offsets, buffers.token_to_expanded);
+        } else {
+            moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_expert_indices, n_tokens, top_k,
+                                                                            n_experts, d_sorted_token_ids,
+                                                                            d_sorted_flat_idx,
+                                                                            d_expert_offsets,
+                                                                            buffers.token_to_expanded);
+        }
     }
 
     // Fill result struct (no ownership -- memory belongs to buffers)

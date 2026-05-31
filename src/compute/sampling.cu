@@ -1,6 +1,7 @@
 #include "compute/sampling.h"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cub/cub.cuh>
@@ -669,6 +670,36 @@ __global__ void softmax_sum_device_max_kernel(const float* __restrict__ logits, 
     }
 }
 
+// Deterministic single-block variant of softmax_sum_device_max_kernel.
+// A single block strides the whole vocab and reduces via a fixed-order
+// shared-memory tree, writing the sum directly. This removes the cross-block
+// FP atomicAdd of the multi-block path whose accumulation order varies
+// run-to-run. Opt-in (deterministic mode) only.
+__global__ void softmax_sum_device_max_single_block_kernel(const float* __restrict__ logits, int vocab_size,
+                                                          float inv_temperature,
+                                                          const float* __restrict__ d_max,
+                                                          float* __restrict__ d_sum) {
+    __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
+
+    float global_max = *d_max;
+    float local_sum = 0.0f;
+    for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
+        local_sum += expf((logits[i] - global_max) * inv_temperature);
+    }
+    local_sum = warp_reduce_sum(local_sum);
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0)
+        s_sum[warp_id] = local_sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
+            sm += s_sum[w];
+        d_sum[0] = sm;
+    }
+}
+
 // Kernel: top-p filter + sample from the first k sorted candidates
 __global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_probs,
                                                const int32_t* __restrict__ sorted_indices, int top_k,
@@ -813,13 +844,24 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
-    // Phase 1: global max (result in d_max_sum[0])
+    const bool deterministic = process_diag_deterministic_gemm();
+
+    // Phase 1: global max (result in d_max_sum[0]). atomicMax on the int-bitcast
+    // of the max is order-independent and exact, so it is already deterministic.
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
 
-    // Phase 2: sum of exp — reads max from device memory (no D2H sync)
-    softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
-                                                                           inv_temperature, sc.d_max_sum,
-                                                                           sc.d_max_sum + 1);
+    // Phase 2: sum of exp — reads max from device memory (no D2H sync).
+    // The default multi-block kernel sums via cross-block FP atomicAdd, whose
+    // accumulation order varies run-to-run. In deterministic mode use a single
+    // block with a fixed-order tree reduction instead.
+    if (deterministic) {
+        softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
+            d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
+    } else {
+        softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
+                                                                               inv_temperature, sc.d_max_sum,
+                                                                               sc.d_max_sum + 1);
+    }
 
     // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
     int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -829,6 +871,20 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
 
     // Step 3: extract top_k via DeviceTopK (unsorted), then sort just those k.
     // Much faster than a full radix sort over the whole vocab when k << vocab.
+    //
+    // TODO(determinism): even in deterministic mode the candidate SET and the
+    // subsequent descending radix sort by probability are reproducible (the
+    // FP sum above is now fixed-order, and the probs are a pure function of the
+    // logits), so the sampled token is reproducible for distinct
+    // probabilities. The one residual gap is exact ties: DeviceTopK is invoked
+    // with determinism::not_guaranteed and SortPairsDescending on equal keys is
+    // not guaranteed stable on the int32 value, so two tokens with bit-identical
+    // probability could swap order between runs. For a fully tie-stable top-k
+    // here, fold the vocab index into the sort key (e.g. sort by (prob, -index))
+    // or request cub determinism::guaranteed when this stochastic path needs
+    // bit-exact reproducibility under ties. The single-block path
+    // (top_k <= MAX_TOP_K) already tie-breaks by index and is fully
+    // deterministic; this CUB path only runs for top_k > MAX_TOP_K (128).
     {
         size_t tk_bytes = sc.temp_bytes;
         cub::DeviceTopK::MaxPairs(sc.d_temp, tk_bytes, sc.d_keys_in, sc.d_keys_out, sc.d_vals_in,
@@ -1368,6 +1424,12 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
         float dev = fabsf(surprise - H);
         int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
         float p = expf(logits[i] - gmax) / sum_exp;
+        // TODO(determinism): this shared-memory FP atomicAdd accumulates bucket
+        // mass in scheduling-dependent order, so the cumulative cutoff bucket
+        // can flip when typical_p lands near a bucket boundary. typical_p is a
+        // sampling FILTER (not the greedy / top-k core covered by the
+        // deterministic flag); make this an ordered per-bucket reduction if
+        // typical_p ever needs bit-exact reproducibility.
         atomicAdd(&s_buckets[bucket], p);
     }
     __syncthreads();

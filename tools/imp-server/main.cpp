@@ -9,6 +9,8 @@
 
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 
 using json = nlohmann::json;
@@ -80,6 +82,10 @@ int main(int argc, char** argv) {
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
     state.rate_limit = args.rate_limit;
+
+    // --max-input-tokens <n>: reject prompts whose tokenized length exceeds
+    // <n> with HTTP 400 before prefill (0 = disabled).
+    state.max_input_tokens = args.max_input_tokens;
     if (!args.log_requests_path.empty()) {
         if (state.request_logger.open(args.log_requests_path)) {
             printf("Request logging: appending JSONL to %s\n", args.log_requests_path.c_str());
@@ -170,8 +176,8 @@ int main(int argc, char** argv) {
         handle_completions(req, res, state);
     });
 
-    // Anthropic-compatible Messages API. Non-streaming only in Phase 1;
-    // streaming requests are rejected with 501 until Phase 2 ships.
+    // Anthropic-compatible Messages API. Supports both non-streaming and
+    // native incremental SSE streaming (real per-token, not synthetic replay).
     svr.Post("/v1/messages", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res, state);
     });
@@ -211,6 +217,8 @@ int main(int argc, char** argv) {
         printf("Request timeout: %ds\n", state.request_timeout);
     if (state.rate_limit > 0)
         printf("Rate limit: %d req/min per IP\n", state.rate_limit);
+    if (state.max_input_tokens > 0)
+        printf("Max input tokens: %d\n", state.max_input_tokens);
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
@@ -218,7 +226,7 @@ int main(int argc, char** argv) {
     printf("  GET    /v1/models\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/completions\n");
-    printf("  POST   /v1/messages          Anthropic-compatible (non-streaming)\n");
+    printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
