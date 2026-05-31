@@ -809,10 +809,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
             // Chunked prefill: choose FMHA or cuBLAS
             const int fmha_threshold = runtime_config().attention.fmha_prefill_threshold;
+            // FA2 (register-resident, hd=128, seq-adaptive Bq) beats the materialized
+            // cuBLAS path at every measured context length → prefer it for hd=128
+            // regardless of the S-matrix-capacity threshold (non-128 / Gemma-4 stay cuBLAS).
+            const bool fa2_capable = (hd == 128) && (runtime_config().attention.fmha_fa2 == "on");
             const bool chunked_use_fmha =
                 !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
-                fmha_threshold > 0 &&
-                ctx_len >= fmha_threshold;
+                (fa2_capable || (fmha_threshold > 0 && ctx_len >= fmha_threshold));
 
             if (chunked_use_fmha) {
                 // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
@@ -846,8 +849,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
-        const bool prefer_fmha = (n >= runtime_config().attention.fmha_prefill_threshold) &&
-                                 !force_cublas_attn;
+        // Prefer FA2 for hd=128 regardless of threshold (see chunked path above).
+        const bool fa2_capable = (hd == 128) && (runtime_config().attention.fmha_fa2 == "on");
+        const bool prefer_fmha = !force_cublas_attn &&
+                                 (fa2_capable || n >= runtime_config().attention.fmha_prefill_threshold);
 
         if (s_matrix_fits && !non_gemma4_sliding && !prefer_fmha) {
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
