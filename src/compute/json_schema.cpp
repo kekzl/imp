@@ -354,6 +354,14 @@ private:
         }
         expect('}');
 
+        // Enum takes precedence over a co-declared "type". Key order in the
+        // object is not significant in JSON, and clients commonly emit
+        // {"type":"string","enum":[...]} — a later "type":"string" must NOT
+        // demote the node back to a free string (the constrainer would then
+        // accept any value). Resolve this order-independently.
+        if (!node->enum_values.empty())
+            node->type = SchemaType::ENUM;
+
         return node;
     }
 };

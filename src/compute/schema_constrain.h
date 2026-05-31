@@ -61,6 +61,16 @@ struct SchemaFrame {
 
     // Array item count
     int item_count = 0;
+
+    // True right after a ',' inside an object: a key is now mandatory, so the
+    // object may not close (`}`) until another key/value is emitted — prevents
+    // trailing commas (`{"a":1,}`).
+    bool after_comma = false;
+
+    // True while the current number's integer part is the single digit '0'
+    // (JSON forbids leading zeros: `0` is fine, `09` is not). Cleared once a
+    // '.'/'e' is seen. Guards integer/number degeneration like `0999...`.
+    bool num_leading_zero = false;
 };
 
 class SchemaConstrainer {
@@ -125,6 +135,10 @@ private:
     // Schema FSM state
     std::vector<SchemaFrame> stack_;
 
+    // EOS token ids — forced (everything else masked) once the root value is
+    // complete, so generation stops cleanly instead of trailing free text.
+    std::vector<int32_t> eos_tokens_;
+
     // Preamble pass-through (reasoning models emit <think>...</think> first)
     PreambleGate preamble_;
 
@@ -137,7 +151,17 @@ private:
     uint16_t compute_category_mask() const;
     void compute_token_allow_mask();
 
-    void advance_char(char c);
+    // Single-char transition over a frame stack. Returns false when c is not a
+    // legal transition for the current phase. Drives both the real update path
+    // (on stack_) and per-token mask simulation (on a cloned stack), so there
+    // is one source of truth for the schema grammar.
+    bool sim_advance(std::vector<SchemaFrame>& stk, char c) const;
+
+    // True iff emitting the whole token keeps the schema satisfiable: every
+    // char is a legal transition and nothing trails past the root close. This
+    // catches multi-char tokens that span phase transitions (`{}`, `":"`,
+    // `"Why`, integer `0.98`) which the first-char category mask misses.
+    bool token_legal(const std::string& text) const;
 
     // Find property schema by key name
     const SchemaNode* find_property(const SchemaNode* obj, const std::string& key) const;
