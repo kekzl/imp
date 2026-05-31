@@ -43,12 +43,12 @@ namespace imp {
 class PreambleGate {
 public:
     // Existing two-arg overload — preserved for non-tool callers.
-    void configure(int32_t close_token, int max_tokens) {
+    void configure(int32_t close_token, int max_tokens, bool thinking_open = true) {
         configure_with_tools(close_token, max_tokens,
                              /*open_tokens=*/{},
                              /*close_tokens=*/{},
                              /*open_prefix=*/"",
-                             /*close_suffix=*/"");
+                             /*close_suffix=*/"", thinking_open);
     }
 
     // Tool-aware configure. open_tokens/close_tokens are token IDs of
@@ -62,19 +62,31 @@ public:
                               std::vector<int32_t> open_tokens,
                               std::vector<int32_t> close_tokens,
                               std::string open_prefix,
-                              std::string close_suffix) {
+                              std::string close_suffix,
+                              bool thinking_open = true) {
         max_tokens_ = max_tokens > 0 ? max_tokens : 0;
         close_token_ = close_token;
         open_tokens_ = std::move(open_tokens);
         close_tokens_ = std::move(close_tokens);
         open_prefix_ = std::move(open_prefix);
         close_suffix_ = std::move(close_suffix);
+        thinking_open_ = thinking_open;
         configured_ = (close_token >= 0) || (max_tokens_ > 0);
         reset();
     }
 
     void reset() {
-        state_ = configured_ ? State::ACTIVE : State::OFF;
+        // Reasoning models gate on </think>. But if generation begins with the
+        // thinking block ALREADY closed (e.g. /no_think — the template emits an
+        // empty <think></think> in the prompt, so no </think> is ever generated),
+        // there is nothing to absorb: waiting for a close token that never comes
+        // would let the model ramble unconstrained until the budget. Start OFF so
+        // the structural mask enforces immediately. Tool-aware mode keeps ACTIVE
+        // (tool openers may still appear post-think) and budget-only mode is
+        // unaffected (close_token_ < 0).
+        const bool reasoning_already_closed =
+            (close_token_ >= 0) && !thinking_open_ && !tool_detection_active();
+        state_ = (configured_ && !reasoning_already_closed) ? State::ACTIVE : State::OFF;
         seen_ = 0;
         char_buf_.clear();
     }
@@ -211,6 +223,7 @@ private:
     }
 
     bool configured_ = false;
+    bool thinking_open_ = true;  // false = thinking already closed at gen start (e.g. /no_think)
     State state_ = State::OFF;
     int32_t close_token_ = -1;
     int max_tokens_ = 0;

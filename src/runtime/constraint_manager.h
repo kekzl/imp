@@ -29,7 +29,8 @@ public:
     //   for (only consulted when has_tools is true)
     void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
                  bool has_tools = false,
-                 ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML);
+                 ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML,
+                 bool thinking_open = true);
 
     // Get current constrainer pointers (nullptr if not active).
     JsonConstrainer* json_constrainer() const noexcept {

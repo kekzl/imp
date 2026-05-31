@@ -532,8 +532,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     fill_sampling_params(*req, state);
 
     // Constraints via ConstraintManager
+    // thinking_open = req->in_think_block: if the prompt already closed the
+    // <think> block (e.g. /no_think emits an empty <think></think> in the
+    // prompt), no </think> is ever generated — the preamble gate must enforce
+    // immediately instead of absorbing prose until the budget.
     constraints_.prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
-                         req->tpl_family);
+                         req->tpl_family, /*thinking_open=*/req->in_think_block);
     state.json_constrainer = constraints_.json_constrainer();
     state.schema_constrainer = constraints_.schema_constrainer();
 

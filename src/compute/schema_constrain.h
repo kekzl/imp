@@ -94,8 +94,8 @@ public:
 
     // See JsonConstrainer::set_preamble for semantics — close-token mode for
     // reasoning models (</think>) or budget-only mode for markdown fences.
-    void set_preamble(int32_t close_token, int max_tokens = 8192) {
-        preamble_.configure(close_token, max_tokens);
+    void set_preamble(int32_t close_token, int max_tokens = 8192, bool thinking_open = true) {
+        preamble_.configure(close_token, max_tokens, thinking_open);
     }
 
     // Tool-aware preamble: when configured, the gate stays "no-mask" through
@@ -106,12 +106,13 @@ public:
                                  std::vector<int32_t> open_tokens,
                                  std::vector<int32_t> close_tokens,
                                  std::string open_prefix,
-                                 std::string close_suffix) {
+                                 std::string close_suffix,
+                                 bool thinking_open = true) {
         preamble_.configure_with_tools(close_token, max_tokens,
                                        std::move(open_tokens),
                                        std::move(close_tokens),
                                        std::move(open_prefix),
-                                       std::move(close_suffix));
+                                       std::move(close_suffix), thinking_open);
     }
 
 private:
