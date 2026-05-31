@@ -645,10 +645,27 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             else if (proj == "o_proj")
                 slot = "wo";
             else if (proj == "qkv_proj") {
-                // Route weight_scale to wq only (Phase 0 splits to wk/wv).
-                // Scalars (weight_scale_2, input_scale) go to all three.
+                // Scalars (weight_scale_2, input_scale) are per-tensor → route to all
+                // three. weight_scale is per-group [Q+K+V, K/16]; slice it by output-row
+                // range so wk/wv each receive their own per-group scale and get promoted
+                // to NVFP4. (Previously the full fused scale went to wq only → wk/wv had
+                // no weight_scale in the scratch map → Phase 0 skipped promoting them →
+                // garbage K/V projections → degenerate output.)
                 if (kind == "weight_scale") {
-                    route_nvfp4_scale(model, layer_key_prefix + "wq", kind, t);
+                    const auto& mc = model.config_;
+                    int hd = mc.head_dim > 0 ? mc.head_dim : (mc.d_model / mc.n_heads);
+                    int q_rows = mc.n_heads * hd;
+                    int kv_rows = mc.n_kv_heads * hd;
+                    size_t srow = static_cast<size_t>(t.shape[1]);  // UE4M3: 1 byte/group
+                    Tensor sq = t, sk = t, sv = t;
+                    sq.shape[0] = q_rows;
+                    sk.shape[0] = kv_rows;
+                    sk.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows) * srow;
+                    sv.shape[0] = kv_rows;
+                    sv.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows + kv_rows) * srow;
+                    route_nvfp4_scale(model, layer_key_prefix + "wq", kind, sq);
+                    route_nvfp4_scale(model, layer_key_prefix + "wk", kind, sk);
+                    route_nvfp4_scale(model, layer_key_prefix + "wv", kind, sv);
                 } else {
                     route_nvfp4_scale(model, layer_key_prefix + "wq", kind, t);
                     route_nvfp4_scale(model, layer_key_prefix + "wk", kind, t);
@@ -674,10 +691,18 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             else if (proj == "down_proj")
                 slot = "w_down";
             else if (proj == "gate_up_proj") {
-                // Route weight_scale to w_gate only (Phase 0 splits to w_up).
-                // Scalars (weight_scale_2, input_scale) go to both.
+                // weight_scale [2*ff, K/16] → slice into gate/up halves so w_up gets
+                // its own per-group scale and is promoted (was routed to w_gate only →
+                // w_up unpromoted → garbage up-projection). Scalars go to both.
                 if (kind == "weight_scale") {
-                    route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, t);
+                    int64_t half = t.shape[0] / 2;
+                    size_t srow = static_cast<size_t>(t.shape[1]);
+                    Tensor sg = t, su = t;
+                    sg.shape[0] = half;
+                    su.shape[0] = half;
+                    su.data = static_cast<char*>(t.data) + static_cast<size_t>(half) * srow;
+                    route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, sg);
+                    route_nvfp4_scale(model, layer_key_prefix + "w_up", kind, su);
                 } else {
                     route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, t);
                     route_nvfp4_scale(model, layer_key_prefix + "w_up", kind, t);
