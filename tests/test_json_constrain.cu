@@ -652,5 +652,142 @@ TEST(SchemaConstrainTest, ObjectOpenQuotePrefixedKeyMasked) {
     EXPECT_FALSE(allowed(4)) << "'}' must be masked: required key 'code' not yet emitted";
 }
 
+// Key order in a JSON object is not significant: {"type":"string","enum":[...]}
+// and the alphabetically-reordered {"enum":[...],"type":"string"} (what a
+// request round-trip through a JSON library produces) must both parse to ENUM.
+// A later "type":"string" must not demote the node back to a free string.
+TEST(SchemaConstrainTest, EnumPrecedenceIsOrderIndependent) {
+    auto a = parse_json_schema(R"({"type":"string","enum":["en","de","fr"]})");
+    ASSERT_TRUE(a != nullptr);
+    EXPECT_EQ(a->type, SchemaType::ENUM) << "type-then-enum must be ENUM";
+
+    auto b = parse_json_schema(R"({"enum":["en","de","fr"],"type":"string"})");
+    ASSERT_TRUE(b != nullptr);
+    EXPECT_EQ(b->type, SchemaType::ENUM) << "enum-then-type must still be ENUM";
+    EXPECT_EQ(b->enum_values.size(), 3u);
+}
+
+// Run apply_mask over a vocab of `n` tokens and return which token ids survive.
+static std::vector<bool> schema_allowed(SchemaConstrainer& sc, int n) {
+    std::vector<float> h(n, 1.0f);
+    float* d = nullptr;
+    cudaMalloc(&d, n * sizeof(float));
+    cudaMemcpy(d, h.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    sc.apply_mask(d, n, 0);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h.data(), d, n * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d);
+    std::vector<bool> out(n);
+    for (int i = 0; i < n; i++)
+        out[i] = h[i] > -1e30f;
+    return out;
+}
+
+// A combined token like `{}` opens AND closes an object in one step; it must be
+// rejected while required keys are unmet (the first-char category mask only
+// sees CAT_OPEN_BRACE and would let it through → empty object, schema violated).
+TEST(SchemaConstrainTest, PrematureObjectCloseRejected) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5     6     7
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "}", "{}", "\"", "code"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    // Fresh root: phase VALUE_START expecting the object to open.
+    auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(a[3]) << "'{' must open the object";
+    EXPECT_FALSE(a[4]) << "bare '}' masked by category (not a value start)";
+    EXPECT_FALSE(a[5]) << "'{}' combined token must be rejected — required 'code' unmet";
+}
+
+// After the last property's value, a comma would dangle (no key can follow) —
+// it must be masked, leaving only the closing brace. Prevents `{"a":"x",}`.
+TEST(SchemaConstrainTest, TrailingCommaRejected) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5    6    7    8    9
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "a", "x", ":", "}", ","};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    for (int t : {3, 4, 5, 4, 7, 4, 6, 4})  // { "a" : "x"  -> OBJECT_AFTER_VALUE
+        sc.update(t);
+    auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(a[8]) << "'}' must close the object after the only property";
+    EXPECT_FALSE(a[9]) << "',' must be masked — no further property can follow";
+}
+
+// JSON forbids leading zeros: after a single '0' the integer part is done, so
+// another digit is illegal (also bounds `0999...` degeneration).
+TEST(SchemaConstrainTest, IntegerLeadingZeroRejected) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5    6    7    8    9
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", ":", "0", "5", "}"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    for (int t : {3, 4, 5, 4, 6, 7})  // { "n" : 0  -> NUMBER_VALUE (leading zero)
+        sc.update(t);
+    auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(a[8]) << "digit after a leading '0' must be masked";
+    EXPECT_TRUE(a[9]) << "'}' must be allowed to close the number/object";
+}
+
+// A combined value token must be validated against an enum/integer constraint,
+// not just its opening quote/digit category.
+TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
+    SKIP_IF_NO_CUDA();
+    //          0       1     2      3   4    5            6    7      8       9      10     11    12     13
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "sentiment", ":", "\"en\"", "\":\"", "\"x", "5", "5.", "5.0", "}"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    // --- enum property ---
+    {
+        auto schema = parse_json_schema(
+            R"({"type":"object","properties":{"sentiment":{"type":"string","enum":["en","de","fr"]}},"required":["sentiment"]})");
+        ASSERT_TRUE(schema != nullptr);
+        SchemaConstrainer sc;
+        ASSERT_TRUE(sc.init(tok, std::move(schema)));
+        for (int t : {3, 4, 5, 4, 6})  // { " sentiment " :  -> value frame (enum)
+            sc.update(t);
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[7]) << "'\"en\"' (exact enum value in one token) must be allowed";
+        EXPECT_TRUE(a[4]) << "bare opening '\"' must be allowed";
+        EXPECT_FALSE(a[8]) << "'\":\"' (quote+colon+quote, not an enum value) must be masked";
+        EXPECT_FALSE(a[9]) << "'\"x' (invalid enum prefix) must be masked";
+    }
+
+    // --- integer property: reject float-shaped combined tokens ---
+    {
+        auto schema = parse_json_schema(
+            R"({"type":"object","properties":{"sentiment":{"type":"integer"}},"required":["sentiment"]})");
+        ASSERT_TRUE(schema != nullptr);
+        SchemaConstrainer sc;
+        ASSERT_TRUE(sc.init(tok, std::move(schema)));
+        for (int t : {3, 4, 5, 4, 6})  // { " sentiment " :  -> value frame (integer)
+            sc.update(t);
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[10]) << "'5' must be allowed for an integer";
+        EXPECT_FALSE(a[11]) << "'5.' must be masked for an integer";
+        EXPECT_FALSE(a[12]) << "'5.0' must be masked for an integer";
+    }
+}
+
 }  // namespace
 }  // namespace imp
