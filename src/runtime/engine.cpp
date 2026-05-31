@@ -336,6 +336,7 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
         kv_manager_->register_block_hashes(req->id, req->input_tokens);
     }
     kv_manager_->free_sequence(req->id);
+    release_recurrent_slot_(req->id);
     constraints_.reset();
 }
 
