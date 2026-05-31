@@ -29,6 +29,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
         return false;
 
     vocab_size_ = tok.vocab_size();
+    eos_tokens_ = tok.eos_ids();
 
     // Classify all tokens (same logic as JsonConstrainer)
     token_categories_.resize(vocab_size_, 0);
@@ -113,11 +114,7 @@ bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const st
     out_states = f.regex_states;
     out_len = f.string_len;
 
-    // NOTE: regex/pattern token-masking via the Thompson NFA currently over-masks
-    // (forbids all candidate tokens -> degenerate "!!!!" output), so it is disabled
-    // pending an NFA fix. `pattern` is still parsed (json_schema.cpp) and length
-    // bounds below are enforced; only the regex narrowing is skipped.
-    bool has_nfa = false;
+    bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();
     int max_len = f.node ? f.node->max_length : -1;
 
     for (char ch : content) {
@@ -139,7 +136,7 @@ bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const st
 
 bool SchemaConstrainer::can_close_string(const SchemaFrame& f, const std::vector<int>& states,
                                          int len) const {
-    bool has_nfa = false;  // regex NFA enforcement disabled (see token_keeps_pattern_alive)
+    bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();
     if (has_nfa && !f.node->pattern_nfa->accepts(states))
         return false;
     if (f.node && f.node->min_length >= 0 && len < f.node->min_length)
@@ -160,7 +157,11 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
     const auto& f = top();
     switch (f.phase) {
         case SchemaPhase::VALUE_START: {
-            uint16_t mask = CAT_WHITESPACE;
+            // No insignificant whitespace: a reasoning model whose top token is
+            // a newline would otherwise stall forever (whitespace is always
+            // re-allowed, never forcing structural progress). Compact JSON only
+            // — whitespace *inside* string values is CAT_STRING_CHAR, untouched.
+            uint16_t mask = 0;
             if (!f.node)
                 return mask | CAT_VALUE_START;
             switch (f.node->type) {
@@ -197,7 +198,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         }
 
         case SchemaPhase::OBJECT_OPEN: {
-            uint16_t mask = CAT_WHITESPACE | CAT_QUOTE;  // " for key
+            uint16_t mask = CAT_QUOTE;  // " for key (compact JSON, no whitespace)
             // Allow } only if all required keys are emitted
             bool all_required = true;
             if (f.node) {
@@ -217,13 +218,13 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return CAT_STRING_CHAR | CAT_QUOTE;  // token_allow handles key constraining
 
         case SchemaPhase::OBJECT_AFTER_KEY:
-            return CAT_COLON | CAT_WHITESPACE;
+            return CAT_COLON;
 
         case SchemaPhase::OBJECT_COLON:
-            return CAT_COLON | CAT_WHITESPACE;
+            return CAT_COLON;
 
         case SchemaPhase::OBJECT_AFTER_VALUE: {
-            uint16_t mask = CAT_WHITESPACE | CAT_COMMA;
+            uint16_t mask = CAT_COMMA;
             bool all_required = true;
             if (f.node) {
                 for (auto& req : f.node->required) {
@@ -239,7 +240,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         }
 
         case SchemaPhase::ARRAY_OPEN: {
-            uint16_t mask = CAT_WHITESPACE | CAT_CLOSE_BRACKET;
+            uint16_t mask = CAT_CLOSE_BRACKET;
             // Allow value start for first item
             if (f.node && f.node->items) {
                 switch (f.node->items->type) {
@@ -270,7 +271,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         }
 
         case SchemaPhase::ARRAY_AFTER_ITEM:
-            return CAT_WHITESPACE | CAT_COMMA | CAT_CLOSE_BRACKET;
+            return CAT_COMMA | CAT_CLOSE_BRACKET;
 
         case SchemaPhase::STRING_VALUE:
             return CAT_STRING_CHAR | CAT_QUOTE;
@@ -284,7 +285,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return 0xFFFF;  // any char valid after backslash
 
         case SchemaPhase::NUMBER_VALUE:
-            return CAT_NUMBER_CONT | CAT_WHITESPACE | CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+            return CAT_NUMBER_CONT | CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
 
         case SchemaPhase::LITERAL_VALUE:
             return CAT_LITERAL_CONT;
@@ -307,117 +308,19 @@ void SchemaConstrainer::compute_token_allow_mask() {
 
     if (stack_.empty())
         return;
-    const auto& f = top();
 
-    if (f.phase == SchemaPhase::OBJECT_KEY && f.node) {
-        // Constrain tokens to valid property name prefixes/completions
-        need_token_allow_ = true;
-        const auto& prefix = f.key_buffer;
-
-        for (int i = 0; i < vocab_size_; i++) {
-            const auto& text = token_texts_[i];
-            if (text.empty()) {
-                token_allow_[i] = 0;
-                continue;
-            }
-
-            // Check if this token could be part of a valid key
-            std::string extended = prefix + text;
-            bool valid = false;
-
-            // Check if token is the closing quote
-            if (text == "\"") {
-                // Allow quote only if current prefix is a complete valid key
-                for (auto& [name, _] : f.node->properties) {
-                    if (!f.emitted_keys.count(name) && name == prefix) {
-                        valid = true;
-                        break;
-                    }
-                }
-            } else {
-                // Check if extended prefix matches any remaining property name
-                // Handle tokens that contain the closing quote (e.g. `name"`)
-                bool has_quote = text.find('"') != std::string::npos;
-                if (has_quote) {
-                    // Token contains quote — check if text before quote is a complete key
-                    size_t qpos = text.find('"');
-                    std::string key_part = prefix + text.substr(0, qpos);
-                    for (auto& [name, _] : f.node->properties) {
-                        if (!f.emitted_keys.count(name) && name == key_part) {
-                            valid = true;
-                            break;
-                        }
-                    }
-                } else {
-                    valid = is_valid_key_prefix(f.node, extended, f.emitted_keys);
-                }
-            }
-
-            token_allow_[i] = valid ? 1 : 0;
-        }
-    } else if (f.phase == SchemaPhase::ENUM_VALUE && f.node) {
-        // Constrain tokens to valid enum value prefixes
-        need_token_allow_ = true;
-        const auto& prefix = f.enum_buffer;
-
-        for (int i = 0; i < vocab_size_; i++) {
-            const auto& text = token_texts_[i];
-            if (text.empty()) {
-                token_allow_[i] = 0;
-                continue;
-            }
-
-            if (text == "\"") {
-                // Allow closing quote only if prefix is a complete enum value
-                bool complete = false;
-                for (auto& v : f.node->enum_values) {
-                    if (v == prefix) {
-                        complete = true;
-                        break;
-                    }
-                }
-                token_allow_[i] = complete ? 1 : 0;
-            } else {
-                std::string extended = prefix + text;
-                token_allow_[i] = is_valid_enum_prefix(f.node->enum_values, extended) ? 1 : 0;
-            }
-        }
-    } else if (f.phase == SchemaPhase::STRING_PATTERN && f.node) {
-        // Constrain tokens so the emitted string matches the regex / length.
-        need_token_allow_ = true;
-        for (int i = 0; i < vocab_size_; i++) {
-            const auto& text = token_texts_[i];
-            if (text.empty()) {
-                token_allow_[i] = 0;
-                continue;
-            }
-
-            size_t qpos = text.find('"');
-            if (qpos == std::string::npos) {
-                // Pure content token: must keep the regex prefix alive.
-                std::vector<int> st;
-                int len = 0;
-                token_allow_[i] = token_keeps_pattern_alive(f, text, st, len) ? 1 : 0;
-            } else {
-                // Token closes the string at qpos. Require: the content before
-                // the quote keeps the pattern alive, the close is legal, and
-                // nothing follows the quote (can't emit past string end here).
-                if (qpos + 1 != text.size()) {
-                    token_allow_[i] = 0;
-                    continue;
-                }
-                std::string content = text.substr(0, qpos);
-                std::vector<int> st;
-                int len = 0;
-                bool alive = token_keeps_pattern_alive(f, content, st, len);
-                token_allow_[i] = (alive && can_close_string(f, st, len)) ? 1 : 0;
-            }
-        }
-    } else if (f.phase == SchemaPhase::OBJECT_OPEN && f.node) {
-        // When we need to open with a quote for key, also constrain which
-        // quote tokens start valid keys (for multi-char tokens like `"name`)
-        // Only activate if there are tokens that start with quote + key prefix
-        // For single " token, category mask handles it. No need for token_allow.
+    // Full per-token legality: a candidate token is allowed only if simulating
+    // its entire text from the current FSM state stays legal at every char.
+    // This is what the first-char category mask cannot do — it catches
+    // multi-char tokens that span phase transitions (`{}` closing an object
+    // with unmet required keys, `":"` as a bogus enum value, `"Why` opening a
+    // non-existent key, `0.98` for an integer). The category mask still runs
+    // alongside (it governs EOS / whitespace / structural first-char), so a
+    // token must pass BOTH. token_legal() handles empty (EOS/special) tokens by
+    // deferring to the category mask.
+    need_token_allow_ = true;
+    for (int i = 0; i < vocab_size_; i++) {
+        token_allow_[i] = token_legal(token_texts_[i]) ? 1 : 0;
     }
 }
 
@@ -426,11 +329,32 @@ void SchemaConstrainer::compute_token_allow_mask() {
 // ---------------------------------------------------------------------------
 
 void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || stack_.empty())
+    if (!initialized_)
         return;
 
     if (preamble_.active())
         return;
+
+    // Root value complete (stack drained): force EOS so generation stops cleanly
+    // instead of trailing free text after the closing brace/bracket. Mask
+    // everything except the EOS token(s) via the allow path (category = all).
+    if (stack_.empty()) {
+        if (eos_tokens_.empty())
+            return;  // no EOS to force — leave the model unconstrained
+        std::fill(token_allow_.begin(), token_allow_.end(), (uint8_t)0);
+        for (int32_t e : eos_tokens_)
+            if (e >= 0 && e < vocab_size_)
+                token_allow_[e] = 1;
+        uint16_t all_cats = 0xFFFF;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &all_cats, sizeof(uint16_t),
+                                           cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(),
+                                           vocab_size_ * sizeof(uint8_t), cudaMemcpyHostToDevice, stream));
+        int t = 256, b = (vocab_size + t - 1) / t;
+        constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
+                                                         d_allowed_mask_, vocab_size, /*use_allow=*/true);
+        return;
+    }
 
     // Compute masks
     uint16_t cat_mask = compute_category_mask();
@@ -469,7 +393,8 @@ void SchemaConstrainer::update(int32_t token) {
         return;
     SchemaPhase before = top().phase;
     for (char c : text) {
-        advance_char(c);
+        if (!sim_advance(stack_, c))
+            break;  // illegal char (mask should have prevented this) — stop early
     }
     if (!stack_.empty()) {
         IMP_LOG_DEBUG("SchemaConstrainer::update token=%d [%s] phase %d->%d stack=%zu", token, text.c_str(),
@@ -477,38 +402,73 @@ void SchemaConstrainer::update(int32_t token) {
     }
 }
 
-void SchemaConstrainer::advance_char(char c) {
-    if (stack_.empty())
+// After a value frame pops, advance the parent frame's phase. Shared by the
+// transition simulator below.
+static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {
+    if (stk.empty())
         return;
+    SchemaFrame& parent = stk.back();
+    if (parent.phase == SchemaPhase::OBJECT_COLON)
+        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
+    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
+             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
+        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
+}
 
-    auto& f = top();
+// ---------------------------------------------------------------------------
+// Transition simulator — the single source of truth for the schema grammar.
+// Drives the real update path (on stack_) and per-token mask legality (on a
+// cloned stack). Returns false on any illegal transition, so a multi-char
+// token that spans phase transitions (`{}`, `":"`, `"Why`, integer `0.98`,
+// trailing comma) is rejected as a whole rather than slipping past the
+// first-char category mask.
+// ---------------------------------------------------------------------------
+bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const {
+    if (stk.empty())
+        return false;  // trailing content after the root value completed
+
+    SchemaFrame& f = stk.back();
+    auto push_value = [&](const SchemaNode* node) {
+        SchemaFrame nf;
+        nf.node = node;
+        nf.phase = SchemaPhase::VALUE_START;
+        stk.push_back(std::move(nf));
+    };
+    auto required_satisfied = [](const SchemaFrame& fr) {
+        if (!fr.node)
+            return true;
+        for (auto& req : fr.node->required)
+            if (!fr.emitted_keys.count(req))
+                return false;
+        return true;
+    };
+    auto has_unemitted_property = [](const SchemaFrame& fr) {
+        if (!fr.node)
+            return true;  // unknown object — can't tell, allow another key
+        for (auto& [name, _] : fr.node->properties)
+            if (!fr.emitted_keys.count(name))
+                return true;
+        return false;
+    };
+    const bool space = std::isspace(static_cast<unsigned char>(c)) != 0;
 
     switch (f.phase) {
         case SchemaPhase::VALUE_START: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (!f.node) {
-                stack_.pop_back();
-                return;
+                stk.pop_back();  // unconstrained value — accept opaquely
+                return true;
             }
-
             switch (f.node->type) {
                 case SchemaType::OBJECT:
-                    if (c == '{') {
-                        f.phase = SchemaPhase::OBJECT_OPEN;
-                        return;
-                    }
-                    break;
+                    if (c == '{') { f.phase = SchemaPhase::OBJECT_OPEN; return true; }
+                    return false;
                 case SchemaType::ARRAY:
-                    if (c == '[') {
-                        f.phase = SchemaPhase::ARRAY_OPEN;
-                        return;
-                    }
-                    break;
+                    if (c == '[') { f.phase = SchemaPhase::ARRAY_OPEN; return true; }
+                    return false;
                 case SchemaType::STRING:
                     if (c == '"') {
-                        // Use the pattern-constrained string phase when the
-                        // schema specifies a (compiled) pattern or a length bound.
                         if ((f.node->pattern_nfa && f.node->pattern_nfa->compiled()) ||
                             f.node->min_length >= 0 || f.node->max_length >= 0) {
                             f.phase = SchemaPhase::STRING_PATTERN;
@@ -520,306 +480,275 @@ void SchemaConstrainer::advance_char(char c) {
                         } else {
                             f.phase = SchemaPhase::STRING_VALUE;
                         }
-                        return;
+                        return true;
                     }
-                    break;
+                    return false;
                 case SchemaType::NUMBER:
                 case SchemaType::INTEGER:
                     if (c == '-' || (c >= '0' && c <= '9')) {
                         f.phase = SchemaPhase::NUMBER_VALUE;
-                        return;
+                        f.string_len = (c >= '0' && c <= '9') ? 1 : 0;  // digit count
+                        f.num_leading_zero = (c == '0');  // "0..." forbids more int digits
+                        return true;
                     }
-                    break;
+                    return false;
                 case SchemaType::BOOLEAN:
-                    if (c == 't') {
-                        f.phase = SchemaPhase::LITERAL_VALUE;
-                        f.literal_target = "true";
-                        f.literal_pos = 1;
-                        return;
-                    }
-                    if (c == 'f') {
-                        f.phase = SchemaPhase::LITERAL_VALUE;
-                        f.literal_target = "false";
-                        f.literal_pos = 1;
-                        return;
-                    }
-                    break;
+                    if (c == 't') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "true"; f.literal_pos = 1; return true; }
+                    if (c == 'f') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "false"; f.literal_pos = 1; return true; }
+                    return false;
                 case SchemaType::NULL_TYPE:
-                    if (c == 'n') {
-                        f.phase = SchemaPhase::LITERAL_VALUE;
-                        f.literal_target = "null";
-                        f.literal_pos = 1;
-                        return;
-                    }
-                    break;
+                    if (c == 'n') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "null"; f.literal_pos = 1; return true; }
+                    return false;
                 case SchemaType::ENUM:
-                    if (c == '"') {
-                        f.phase = SchemaPhase::ENUM_VALUE;
-                        f.enum_buffer.clear();
-                        return;
-                    }
-                    break;
+                    if (c == '"') { f.phase = SchemaPhase::ENUM_VALUE; f.enum_buffer.clear(); return true; }
+                    return false;
                 case SchemaType::ANY_OF:
-                    // For anyOf, we can't easily constrain — treat as unconstrained value
+                    // anyOf is hard to constrain precisely — accept as free string.
                     f.phase = SchemaPhase::STRING_VALUE;
-                    return;
+                    return true;
                 default:
-                    break;
+                    return false;
             }
-            break;
         }
 
         case SchemaPhase::OBJECT_OPEN: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (c == '}') {
-                stack_.pop_back();  // object complete
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                }
-                return;
+                // After a comma a key is mandatory — closing here is a trailing
+                // comma. Otherwise close only once required keys are present.
+                if (f.after_comma || !required_satisfied(f))
+                    return false;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
             if (c == '"') {
                 f.phase = SchemaPhase::OBJECT_KEY;
                 f.key_buffer.clear();
-                return;
+                f.after_comma = false;
+                return true;
             }
-            break;
+            return false;
         }
 
         case SchemaPhase::OBJECT_KEY: {
             if (c == '"') {
-                // Key complete
+                // Close the key only if it is a complete, not-yet-emitted property.
+                bool complete = false;
+                if (f.node) {
+                    for (auto& [name, _] : f.node->properties) {
+                        if (!f.emitted_keys.count(name) && name == f.key_buffer) { complete = true; break; }
+                    }
+                }
+                if (!complete)
+                    return false;
                 f.current_key = f.key_buffer;
                 f.emitted_keys.insert(f.current_key);
                 f.phase = SchemaPhase::OBJECT_AFTER_KEY;
-                return;
+                return true;
             }
             if (c == '\\')
-                return;  // escape in key (rare but valid)
+                return true;  // key escape (rare)
+            if (!f.node || !is_valid_key_prefix(f.node, f.key_buffer + c, f.emitted_keys))
+                return false;
             f.key_buffer += c;
-            return;
+            return true;
         }
 
         case SchemaPhase::OBJECT_AFTER_KEY: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (c == ':') {
                 f.phase = SchemaPhase::OBJECT_COLON;
-                // Push value frame for this property
-                const SchemaNode* prop_schema = find_property(f.node, f.current_key);
-                if (prop_schema) {
-                    push_value_frame(prop_schema);
-                } else {
-                    // Unknown property — allow any value (permissive)
-                    push_value_frame(nullptr);
-                }
-                return;
+                const SchemaNode* prop = f.node ? find_property(f.node, f.current_key) : nullptr;
+                push_value(prop);
+                return true;
             }
-            break;
+            return false;
         }
 
         case SchemaPhase::OBJECT_COLON: {
-            // Value was pushed as a sub-frame — this phase is re-entered
-            // when the value completes and the sub-frame is popped.
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
-            // Should not reach here in normal flow (value frame handles it)
-            // but handle comma/brace for robustness
+            // The value is normally handled by the pushed sub-frame; this branch
+            // only fires for robustness if a comma/brace reaches the colon frame.
+            if (space)
+                return true;
             if (c == ',') {
-                f.phase = SchemaPhase::OBJECT_OPEN;  // next key
-                return;
+                if (!has_unemitted_property(f))
+                    return false;  // no more keys possible — comma would dangle
+                f.phase = SchemaPhase::OBJECT_OPEN;
+                f.after_comma = true;
+                return true;
             }
             if (c == '}') {
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                }
-                return;
+                if (!required_satisfied(f))
+                    return false;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            break;
+            return false;
         }
 
         case SchemaPhase::OBJECT_AFTER_VALUE: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (c == ',') {
-                f.phase = SchemaPhase::OBJECT_OPEN;  // back to expecting key
-                return;
+                if (!has_unemitted_property(f))
+                    return false;  // every property emitted — comma would dangle
+                f.phase = SchemaPhase::OBJECT_OPEN;
+                f.after_comma = true;
+                return true;
             }
             if (c == '}') {
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                }
-                return;
+                if (!required_satisfied(f))
+                    return false;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            break;
+            return false;
         }
 
         case SchemaPhase::ARRAY_OPEN: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (c == ']') {
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                }
-                return;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            // Start first item — push item schema frame
             if (f.node && f.node->items) {
-                push_value_frame(f.node->items.get());
-                // Re-process this char in the new frame
-                advance_char(c);
+                push_value(f.node->items.get());
+                return sim_advance(stk, c);  // process first-item char in new frame
             }
-            return;
+            return true;  // array without an items schema — accept opaquely
         }
 
         case SchemaPhase::ARRAY_AFTER_ITEM: {
-            if (std::isspace(static_cast<unsigned char>(c)))
-                return;
+            if (space)
+                return true;
             if (c == ',') {
-                f.item_count++;
-                // Push next item frame
-                if (f.node && f.node->items) {
-                    push_value_frame(f.node->items.get());
-                }
-                return;
+                if (f.node && f.node->items)
+                    push_value(f.node->items.get());
+                return true;
             }
             if (c == ']') {
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                }
-                return;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            break;
+            return false;
         }
 
         case SchemaPhase::STRING_VALUE: {
-            if (c == '\\') {
-                f.phase = SchemaPhase::STRING_ESCAPE;
-                return;
-            }
+            if (c == '\\') { f.phase = SchemaPhase::STRING_ESCAPE; return true; }
             if (c == '"') {
-                // String value complete
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                }
-                return;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            return;  // accumulate string content
+            return true;  // any content char
         }
 
         case SchemaPhase::STRING_PATTERN: {
             if (c == '"') {
-                // String value complete (mask guarantees closing was legal).
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                }
-                return;
+                if (!can_close_string(f, f.regex_states, f.string_len))
+                    return false;
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
-            // NOTE: escapes are not interpreted for regex purposes — the
-            // supported pattern subset operates on raw emitted bytes. A token
-            // mask already forbids backslashes unless the pattern allows them.
+            if (f.node && f.node->max_length >= 0 && f.string_len + 1 > f.node->max_length)
+                return false;
             if (f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled()) {
-                f.regex_states = f.node->pattern_nfa->step(f.regex_states, static_cast<unsigned char>(c));
+                std::vector<int> next =
+                    f.node->pattern_nfa->step(f.regex_states, static_cast<unsigned char>(c));
+                if (next.empty())
+                    return false;  // pattern prefix died
+                f.regex_states = std::move(next);
             }
             f.string_len++;
-            return;
+            return true;
         }
 
         case SchemaPhase::STRING_ESCAPE: {
             f.phase = SchemaPhase::STRING_VALUE;
-            return;
+            return true;
         }
 
         case SchemaPhase::NUMBER_VALUE: {
-            if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')
-                return;  // continue number
-            // Number ended — pop and re-process char in parent
-            stack_.pop_back();
-            if (!stack_.empty()) {
-                auto& parent = top();
-                if (parent.phase == SchemaPhase::OBJECT_COLON)
-                    parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                         parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                    parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                advance_char(c);
+            const bool is_int = f.node && f.node->type == SchemaType::INTEGER;
+            if (c >= '0' && c <= '9') {
+                if (f.string_len == 0) {  // first digit (came after a leading '-')
+                    f.num_leading_zero = (c == '0');
+                    f.string_len = 1;
+                    return true;
+                }
+                if (f.num_leading_zero)
+                    return false;  // JSON forbids leading zeros: `0` then digit
+                f.string_len++;
+                return true;
             }
-            return;
+            if (!is_int && (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
+                f.num_leading_zero = false;  // fractional/exponent part — int rule done
+                return true;
+            }
+            // Any other char ends the number — legal only if >=1 digit was seen.
+            if (f.string_len == 0)
+                return false;
+            stk.pop_back();
+            sim_fixup_parent(stk);
+            return sim_advance(stk, c);  // reprocess the terminator in the parent
         }
 
         case SchemaPhase::LITERAL_VALUE: {
-            if (f.literal_pos < static_cast<int>(f.literal_target.size())) {
-                f.literal_pos++;
-                if (f.literal_pos >= static_cast<int>(f.literal_target.size())) {
-                    // Literal complete
-                    stack_.pop_back();
-                    if (!stack_.empty()) {
-                        auto& parent = top();
-                        if (parent.phase == SchemaPhase::OBJECT_COLON)
-                            parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                        else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                                 parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                            parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-                    }
-                }
+            if (f.literal_pos >= static_cast<int>(f.literal_target.size()))
+                return false;
+            if (c != f.literal_target[f.literal_pos])
+                return false;  // wrong char for true/false/null
+            f.literal_pos++;
+            if (f.literal_pos >= static_cast<int>(f.literal_target.size())) {
+                stk.pop_back();
+                sim_fixup_parent(stk);
             }
-            return;
+            return true;
         }
 
         case SchemaPhase::ENUM_VALUE: {
             if (c == '"') {
-                // Enum value complete
-                stack_.pop_back();
-                if (!stack_.empty()) {
-                    auto& parent = top();
-                    if (parent.phase == SchemaPhase::OBJECT_COLON)
-                        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-                    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-                             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
-                        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
+                bool exact = false;
+                if (f.node) {
+                    for (auto& v : f.node->enum_values)
+                        if (v == f.enum_buffer) { exact = true; break; }
                 }
-                return;
+                if (!exact)
+                    return false;  // close only on an exact enum value
+                stk.pop_back();
+                sim_fixup_parent(stk);
+                return true;
             }
+            if (!f.node || !is_valid_enum_prefix(f.node->enum_values, f.enum_buffer + c))
+                return false;
             f.enum_buffer += c;
-            return;
+            return true;
         }
 
         case SchemaPhase::DONE:
-            return;
+            return false;
     }
+    return false;
+}
+
+bool SchemaConstrainer::token_legal(const std::string& text) const {
+    if (text.empty())
+        return true;  // EOS / special tokens — governed by the category mask
+    std::vector<SchemaFrame> sim = stack_;  // deep copy of the frame stack
+    for (char c : text) {
+        if (!sim_advance(sim, c))
+            return false;
+    }
+    return true;
 }
 
 }  // namespace imp
