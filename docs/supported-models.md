@@ -15,11 +15,12 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 | [Qwen3-14B](https://huggingface.co/unsloth/Qwen3-14B-GGUF) | Q6_K | 12 GB | **158** | GGUF |
 | [Qwen3-14B](https://huggingface.co/nvidia/Qwen3-14B-NVFP4) | NVFP4 | 10 GB | 105 | SafeTensors (nvidia) |
 | [Qwen3-32B](https://huggingface.co/unsloth/Qwen3-32B-GGUF) | Q4_K_M | 19 GB | — | GGUF |
-| [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 115 | SafeTensors (nvidia), fused projections |
 | [Llama-3.2-3B-Instruct](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF) | Q8_0 | 3.2 GB | 306 | GGUF |
 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | Q6_K | 19 GB | — | GGUF |
 | [DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF) | Q8_0 | 7.6 GB | — | GGUF |
 | [DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF) | Q6_K | 12 GB | — | GGUF |
+
+> **Known issue — Phi-4-reasoning-plus NVFP4 (Phi3ForCausalLM, fused projections):** loads and benches at full speed (pp512 ≈ 21k tok/s, tg ≈ 157 tok/s) but produces incoherent, prompt-blind output (e.g. `2 plus 2 equals` → `0.5, 0.`, repetition loops). Not the `k_scale`/`v_scale` load error or the `nvfp4_quant.cu:603 cudaFree` crash (both fixed in #494/#487). The fused `qkv_proj`/`gate_up_proj` `weight_scale` split from #494 promotes all 7 weights/layer and the per-row weights dequantize bit-correctly, but the **early-layer FFN output explodes** (hidden-state L2 ≈ 6 → 110 at layer-1 FFN, runaway) — a forward-compute bug specific to fused-projection (Phi-3/Phi-4) models. Qwen3-style separate-q/k/v NVFP4 models are unaffected.
 
 ## Hybrid (Gated DeltaNet + attention)
 
