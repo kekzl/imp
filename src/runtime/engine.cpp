@@ -291,9 +291,23 @@ cudaStream_t Engine::decode_stream() const {
 }
 
 void Engine::reset_ssm_state(int seq_id) {
+    // Public teardown entry point (API re-prefill / context reset / server
+    // cancellation). Reset the sequence's ACTUAL allocated recurrent slot, then
+    // return it to the free list — otherwise the slot leaks (these paths bypass
+    // finish_request) and the pool exhausts, forcing every later request onto
+    // the legacy id%cap aliasing fallback.
+    auto it = recurrent_slot_of_.find(seq_id);
     if (ssm_state_) {
-        ssm_state_->reset_sequence(seq_id % ssm_state_->max_sequences(), stream_);
+        const int cap = ssm_state_->max_sequences();
+        int slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? seq_id % cap : 0);
+        ssm_state_->reset_sequence(slot, stream_);
     }
+    if (gdn_state_) {
+        const int cap = gdn_state_->max_sequences();
+        int slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? seq_id % cap : 0);
+        gdn_state_->reset_sequence(slot, stream_);
+    }
+    release_recurrent_slot_(seq_id);
 }
 
 void Engine::reset_batch_pool_cache() { decode_batch_pool_.reset_upload_cache(); }
