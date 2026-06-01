@@ -1036,6 +1036,20 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // 4. Apply arch-specific defaults
     apply_arch_defaults(cfg);
 
+    // SafeTensors store Q/K in HuggingFace-native layout, which uses NeoX-style
+    // (rotate-half) RoPE: pairs (i, i+rope_dim/2). The arch table defaults
+    // LLAMA/MISTRAL/MIXTRAL/LLAMA4 to interleaved RoPE (rope_neox=0) because the
+    // GGUF converter pre-permutes Q/K so interleaved reproduces NeoX. That
+    // permutation is NOT applied to SafeTensors weights, so the interleaved
+    // default scrambles positional encoding (e.g. Phi-3/Phi-4 -> coherent but
+    // prompt-blind output with preserved magnitudes). Force NeoX for the
+    // SafeTensors path so HF-native Q/K rotate correctly. Arches that already
+    // keep the default (rope_neox=true: QWEN3/GEMMA/...) are unaffected.
+    if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL ||
+        cfg.arch == ModelArch::MIXTRAL || cfg.arch == ModelArch::LLAMA4) {
+        cfg.rope_neox = true;
+    }
+
     IMP_LOG_INFO("Architecture: %s", model_arch_name(cfg.arch));
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d", cfg.n_layers,
                  cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads, cfg.vocab_size, cfg.max_seq_len);
