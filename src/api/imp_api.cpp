@@ -174,7 +174,8 @@ static imp::QType map_dtype(ImpDType dt) {
 
 // --- Model Loading ---
 
-ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_model) {
+ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp_head,
+                           ImpModel* out_model) {
     if (!path || !out_model) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -188,7 +189,7 @@ ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_m
                 model = imp::load_gguf(path);
                 break;
             case IMP_FORMAT_SAFETENSORS:
-                model = imp::load_safetensors(path);
+                model = imp::load_safetensors(path, load_mtp_head != 0);
                 break;
             default:
                 return IMP_ERROR_INVALID_ARG;
@@ -214,6 +215,12 @@ ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_m
     } catch (...) {
         return IMP_ERROR_INTERNAL;
     }
+}
+
+ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_model) {
+    // Default load path: do NOT load the MTP head (saves ~1.57 GiB VRAM on
+    // Qwen3.6). Callers that want spec-decode use imp_model_load_ex(.., 1, ..).
+    return imp_model_load_ex(path, format, /*load_mtp_head=*/0, out_model);
 }
 
 void imp_model_free(ImpModel model) { delete model; }

@@ -851,7 +851,7 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
 
 // ---- Main SafeTensors loader ----
 
-std::unique_ptr<Model> load_safetensors(const std::string& path) {
+std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
     std::string model_dir;
@@ -924,10 +924,14 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // continues to skip the `mtp.` prefix; this sidecar load builds a separate
     // host tensor_map keyed by raw `mtp.*` names and dispatches to MtpHead fields.
     // Mmap is retained via Model::split_mmaps_ so Tensor pointers stay valid.
+    //
+    // Gated on load_mtp_head: the head is ~1.57 GiB BF16 (Qwen3.6) of dead VRAM
+    // unless the caller actually enables MTP spec-decode. Default-off skips it
+    // entirely so the model behaves as if no sidecar existed.
     std::optional<imp::MtpHead> mtp_local;
     std::unordered_map<std::string, Tensor> mtp_tensor_map;
     ShardInfo mtp_shard{};
-    if (!model_dir.empty()) {
+    if (load_mtp_head && !model_dir.empty()) {
         std::string mtp_path = model_dir + "/model_mtp.safetensors";
         std::error_code ec;
         auto sz = fs::file_size(mtp_path, ec);

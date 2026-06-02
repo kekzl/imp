@@ -12,7 +12,14 @@ namespace imp {
 // path can be:
 //   - A single .safetensors file
 //   - A directory containing .safetensors files (+ config.json, etc.)
-std::unique_ptr<Model> load_safetensors(const std::string& path);
+//
+// load_mtp_head: when true, a `model_mtp.safetensors` sidecar (DeepSeek-V3
+// family, e.g. Qwen3.6) is parsed and retained (~1.57 GiB BF16 on Qwen3.6,
+// later uploaded to VRAM). Default false: the sidecar is skipped entirely, so
+// the model behaves as if it had no MTP head (spec-decode unavailable). Only
+// callers that actually intend to enable MTP spec-decode should pass true —
+// the head is wasted VRAM otherwise (server + normal CLI never use it).
+std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head = false);
 
 // ---- Test-visible validation helpers ----
 //

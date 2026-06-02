@@ -33,6 +33,15 @@ typedef struct ImpContext_T* ImpContext;
 
 ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_model);
 
+// Like imp_model_load, but lets the caller opt into loading the MTP
+// (multi-token-prediction) head sidecar for SafeTensors models that ship one
+// (DeepSeek-V3 family, e.g. Qwen3.6). The head is ~1.57 GiB BF16 of VRAM and is
+// only useful when MTP spec-decode is subsequently enabled via
+// imp_enable_mtp_spec_decode. imp_model_load() is equivalent to passing
+// load_mtp_head=0. Has no effect for GGUF or models without an MTP sidecar.
+ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp_head,
+                           ImpModel* out_model);
+
 void imp_model_free(ImpModel model);
 
 // Query model metadata
