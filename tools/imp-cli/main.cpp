@@ -70,7 +70,10 @@ int main(int argc, char** argv) {
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(resolved_model.c_str(), format, &model);
+    // Only load the MTP head sidecar (~1.57 GiB BF16 on Qwen3.6) when the user
+    // actually requested MTP spec-decode. Otherwise it is dead VRAM.
+    ImpError err = imp_model_load_ex(resolved_model.c_str(), format,
+                                     /*load_mtp_head=*/args.mtp_spec_decode_k > 0, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return 1;
