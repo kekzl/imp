@@ -48,12 +48,32 @@ So it is NOT triggered by simple sequential/concurrent/streaming/2-turn flows. T
 3. Once reproduced, bisect: `--no-cuda-graphs` (tests hypothesis 2) and disabling
    middle-eviction (tests hypothesis 1).
 
-## Possible relation to the Phi-4 long-context finding
+## Possible relation to the Phi-4 long-context finding — RESOLVED (PR #503)
 PR #494 surfaced a Phi-4-specific single-prefill degradation >~256 tokens ("ignores
 recent, echoes early context"). That is single-request (no eviction) and Phi-specific,
-whereas this issue is global + multi-turn + eviction-suspected — likely **distinct**,
-but both are "recent input ignored in favor of earlier context" and worth checking for
-a shared position/attention root cause.
+whereas this issue is global + multi-turn + eviction-suspected.
+
+**Root cause found and fixed (PR #503, commit `e75d51b9`).** The Phi-4 finding was the
+**interleaved-vs-NeoX RoPE** bug: SafeTensors LLAMA/MISTRAL/MIXTRAL/LLAMA4 models
+(Phi-3/Phi-4 map to `ModelArch::LLAMA`) were using interleaved RoPE while HF-native Q/K
+require NeoX/rotate-half, scrambling per-position encoding → prompt-blind / position-
+agnostic output. `load_safetensors` now forces `cfg.rope_neox=true` for those families.
+
+**Re-verified on RTX 5090 (sm_120a) 2026-06-03**, with an `imp:test` image rebuilt after
+the #503 commit. Single-prefill prompts well past the 256-token boundary (337 / 345 / 417
+tokens, greedy temp=0, no eviction) now answer from the **recent** end of the prompt, not
+early context:
+- 417-tok Q/A, needle at end ("charter placed by the miller's son") → "the miller's son". ✓
+- 337-tok Q/A, needle at end ("hidden in the attic of the Hartwell mill") → "In the attic of
+  the miller's house". ✓
+- 345-tok passage, recent mayor topic → answers about the mayor/governance (recent), not the
+  1631 founders / Josiah-Hartwell early context.
+- Discriminator: with a raw (non-chat-templated) format the extraction is weak, but that weakness
+  is **position-invariant and reproduces on the healthy Qwen3-8B-NVFP4 path too** (needle-at-start
+  and needle-at-end give the *same* wrong answer) — i.e. a prompt-format/reasoning artifact, NOT a
+  Phi-specific positional-RoPE bug. The "echoes early context" signature is gone.
+
+So this carryover issue and the Phi-4 finding turned out **distinct**; the Phi-4 half is **closed**.
 
 ## Update — CUDA-graph-reset hypothesis investigated (user's lead)
 User strongly suspects a **missing graph reset**. Traced every decode-graph reset path:
