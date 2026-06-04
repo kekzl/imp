@@ -18,6 +18,7 @@
 #include "runtime/batch.h"
 #include "model/chat_template.h"
 #include "core/logging.h"
+#include <cstdlib>
 
 #include <algorithm>
 #include <string>
@@ -174,7 +175,10 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     if (req.think_budget > 0.0f && think_end_id_ >= 0 && !req.output_tokens.empty()) {
         int think_limit = static_cast<int>(req.max_tokens * req.think_budget);
         int n_reasoning = 0;
-        bool currently_thinking = false;
+        // Injected <think> prefixes live in the PROMPT — the output then has
+        // no opener, so the recount must start in-think or the budget never
+        // fires (model thinks until max_tokens, content stays empty).
+        bool currently_thinking = req.started_in_think;
         for (int32_t t : req.output_tokens) {
             if (t == think_start_id_)
                 currently_thinking = true;

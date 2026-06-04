@@ -35,6 +35,17 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
         token_categories_[i] = classify_token(text);
     }
 
+    // EOS gets a dedicated category: classify_token sees the rendered text
+    // ("<|im_end|>" → STRING_CHAR), so in the DONE state (whitespace-only
+    // mask) EOS was blocked and a completed JSON could never terminate —
+    // every json_mode request ran to max_tokens and finished with "length".
+    // CAT_EOS is allowed ONLY in DONE — allowing it everywhere lets a
+    // json-reluctant model emit EOS as its very first token (0 completions).
+    for (int32_t eid : tok.eos_ids()) {
+        if (eid >= 0 && eid < vocab_size_)
+            token_categories_[eid] = CAT_EOS;  // reachable only where the mask says so
+    }
+
     // Upload to device
     cudaError_t err = cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t));
     if (err != cudaSuccess) {
@@ -66,11 +77,15 @@ void JsonConstrainer::reset() {
     current_state_ = JsonState::START;
     partial_literal_.clear();
     target_literal_.clear();
+    ws_run_ = 0;
     preamble_.reset();
 }
 
 uint16_t JsonConstrainer::compute_allowed_mask() const {
-    uint16_t mask = CAT_WHITESPACE;  // whitespace is always allowed
+    // Whitespace is legal between any JSON tokens, but cap the run length —
+    // see advance_char. (EOS has its own CAT_EOS bit, allowed in DONE only.)
+    constexpr int kMaxWsRun = 64;
+    uint16_t mask = (ws_run_ < kMaxWsRun) ? CAT_WHITESPACE : 0;
 
     switch (current_state_) {
         case JsonState::START:
@@ -133,7 +148,11 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
             break;
 
         case JsonState::DONE:
-            // Parsing complete — only allow EOS / whitespace
+            // Parsing complete — only EOS (and capped whitespace). CAT_EOS
+            // must stay allowed even when the WS-run cap zeroes whitespace,
+            // otherwise every token is -inf and greedy argmax degenerates to
+            // token id 0 ('!' on byte-level BPE vocabs).
+            mask |= CAT_EOS;
             break;
 
         default:
@@ -146,11 +165,17 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
 }
 
 void JsonConstrainer::advance_char(char c) {
-    // Skip whitespace in non-string states
+    // Skip whitespace in non-string states — but count the run. JSON allows
+    // unlimited inter-token whitespace, and a model that doesn't want to emit
+    // JSON exploits that as an escape hatch (greedy decode emits newlines
+    // until max_tokens). compute_allowed_mask() drops CAT_WHITESPACE once the
+    // run exceeds the cap, forcing a structural token (or EOS) instead.
     if (current_state_ != JsonState::IN_STRING && current_state_ != JsonState::IN_STRING_ESCAPE &&
         (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+        ws_run_++;
         return;
     }
+    ws_run_ = 0;
 
     switch (current_state_) {
         case JsonState::START:

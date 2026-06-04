@@ -46,6 +46,7 @@ enum JsonTokenCat : uint16_t {
     CAT_WHITESPACE = 1 << 12,    // space, tab, newline
     CAT_LITERAL_CONT = 1 << 13,  // continuation of a partial literal (r, u, e, a, l, s)
     CAT_NUMBER_CONT = 1 << 14,   // 0-9, ., e, E, +, - (continuation of number)
+    CAT_EOS = 1 << 15,           // EOS token ids — allowed only in the DONE state
 };
 
 // Mask for tokens that can start a JSON value
@@ -117,6 +118,9 @@ private:
     // FSM state
     std::vector<JsonState> state_stack_;
     JsonState current_state_ = JsonState::START;
+    // Consecutive whitespace chars in non-string states (escape-hatch cap,
+    // see advance_char/compute_allowed_mask).
+    int ws_run_ = 0;
     std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
     std::string target_literal_;   // full expected literal
 

@@ -1342,6 +1342,13 @@ static void nonstream_chat_response_(
         req->tpl_family = ctx.snap.tpl_family;
         req->logit_bias = ctx.params.logit_bias;
         req->think_budget = ctx.params.think_budget;
+        // Generation starts INSIDE the think block when the prompt carries the
+        // <think> prefix (template-injected or server-appended). Without this
+        // the engine's think-budget enforcement never sees an opener in the
+        // output, counts zero reasoning tokens, and lets the model think until
+        // max_tokens (content empty, finish=length).
+        req->started_in_think = ctx.snap.enable_thinking;
+        req->in_think_block = ctx.snap.enable_thinking;
         req->status = imp::RequestStatus::PENDING;
         return req;
     };
@@ -2550,6 +2557,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->tpl_family = ctx.snap.tpl_family;
         req->logit_bias = ctx.params.logit_bias;
         req->think_budget = ctx.params.think_budget;
+        // Generation starts INSIDE the think block when the prompt carries the
+        // <think> prefix (template-injected or server-appended). Without this
+        // the engine's think-budget enforcement never sees an opener in the
+        // output, counts zero reasoning tokens, and lets the model think until
+        // max_tokens (content empty, finish=length).
+        req->started_in_think = ctx.snap.enable_thinking;
+        req->in_think_block = ctx.snap.enable_thinking;
         req->status = imp::RequestStatus::PENDING;
         return req;
     };

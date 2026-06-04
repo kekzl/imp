@@ -36,7 +36,9 @@ struct ServerArgs {
     std::string api_key;                        // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
     float think_budget =
-        1.0f;  // --think-budget: fraction of max_tokens for reasoning (1.0=unlimited, 0=disabled)
+        0.5f;  // --think-budget: fraction of max_tokens for reasoning (1.0=unlimited, 0=disabled).
+               // 0.5 matches docs/usage.md and guarantees answer headroom — at 1.0 a
+               // rambling reasoning model eats max_tokens and returns empty content.
     int min_kv_tokens = 0;  // --min-kv-tokens: minimum KV cache capacity (0=auto)
     // Server limits
     int max_concurrent = 64;        // --max-concurrent: max simultaneous requests (0=unlimited)

@@ -600,7 +600,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         bool has_qk_norm = (ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr);
         // Determine if we can fuse K-RoPE into KV cache write
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
-                                 state.kv_cache->qtype() == QType::F16);
+                                 state.kv_cache->qtype() == QType::F16 && !cfg.rope_attn_disabled);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -612,7 +612,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
-        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused) {
+        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused &&
+            !cfg.rope_attn_disabled) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -673,9 +674,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
-            rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
-                         layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                         cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs);
+            // NoPE attention (Nemotron-H): position lives in the Mamba layers,
+            // rotating Q/K here scrambles positional binding (bag-of-words
+            // prompts). QK-norm above still applies; only the rotation is skipped.
+            if (!cfg.rope_attn_disabled) {
+                rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
+                             layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                             cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs);
+            }
         }
     }
 
