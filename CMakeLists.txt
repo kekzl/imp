@@ -493,6 +493,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-quant SOURCES
         tests/test_quant.cu
         tests/test_quant_integration.cu
+        tests/test_gguf_dequant_ref.cu
         tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
