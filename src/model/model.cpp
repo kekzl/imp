@@ -237,6 +237,17 @@ void apply_arch_defaults(ModelConfig& cfg) {
         cfg.moe_sigmoid_gating = true;
     if (e.expert_weights_norm)
         cfg.expert_weights_norm = true;
+
+    // Nemotron-H family attention is NoPE: the Mamba layers carry position,
+    // the attention layers are trained WITHOUT rotary embeddings. The HF
+    // config still ships rope_theta=10000 / partial_rotary_factor=1.0 (class
+    // defaults), and applying RoPE scrambles positional binding — the model
+    // reads prompts as a bag of words ("17 + 25" → "25 + 17"/"15 + 7";
+    // "ALPHA BRAVO CHARLIE" → hallucinated different prompt). Verified by
+    // disabling rotation (rope_theta=1e12 config patch): prompt reading
+    // becomes exact.
+    if (cfg.arch == ModelArch::NEMOTRON_H_MOE)
+        cfg.rope_attn_disabled = true;
 }
 
 }  // namespace imp

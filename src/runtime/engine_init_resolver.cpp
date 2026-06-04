@@ -272,6 +272,22 @@ void Engine::init_resolve_quant_flags_() {
         IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
         config_.use_fp8_prefill = 0;
     }
+    // DENSE Gemma (3 and 4) from GGUF: the mode-2 NVFP4 prequant conversion
+    // is broken for these shapes. Two manifestations, same lever:
+    //   - gemma-4-31B: NaN logits from decode step 2, greedy argmax lands on
+    //     <pad> (NaN beats the -inf ban mask) → 1-token answers (#516).
+    //   - gemma-3-12b: server-only IMA race in the step-decode path
+    //     truncating every chat response after the first token; vanishes
+    //     with the NVFP4 decode cache off or at mode 1 (#514).
+    // Mode 1 (additive, few tensors) and the FP16 cache are verified clean
+    // on both models; the MoE 26B-A4B (degen-suite green) keeps mode 2.
+    if (config_.use_nvfp4_decode == 2 && !model_->config().is_nvfp4_prequant &&
+        model_->config().n_experts == 0 &&
+        (model_->config().arch == ModelArch::GEMMA3 || model_->config().arch == ModelArch::GEMMA4)) {
+        config_.use_nvfp4_decode = 1;
+        IMP_LOG_INFO("Dense Gemma (GGUF): NVFP4 decode capped at mode 1 "
+                     "(mode-2 prequant conversion broken for dense Gemma — #514/#516)");
+    }
     if (model_->config().arch == ModelArch::GEMMA4) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.

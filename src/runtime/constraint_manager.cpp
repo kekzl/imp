@@ -84,13 +84,17 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 
     const int32_t think_close = detect_think_close(tokenizer);
 
-    // Reasoning models always get the large think-close budget. Otherwise:
+    // The large think-close budget applies only when THIS REQUEST is actually
+    // reasoning (thinking_open). Keying it off tokenizer capability alone gave
+    // every request on a think-capable tokenizer an 8192-token unmasked
+    // preamble — a non-thinking json_mode request never emits </think>, so the
+    // grammar never engaged and the output was unconstrained garbage.
     //   - has_tools: 64-token slack so short verbal preambles ("Sure! ")
     //     don't squeeze out the tool-tag opener.
     //   - no tools: 8-token slack for markdown fences, matches today's
     //     non-reasoning default.
     int preamble_budget;
-    if (think_close >= 0) {
+    if (thinking_open && think_close >= 0) {
         preamble_budget = 8192;
     } else if (has_tools) {
         preamble_budget = 64;

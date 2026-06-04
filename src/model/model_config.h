@@ -46,6 +46,9 @@ struct ModelConfig {
     bool gdn_grouped_head_layout = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
+    // NoPE attention (Nemotron-H family): attention layers use NO rotary
+    // embedding — position is carried by the recurrent (Mamba) layers.
+    bool rope_attn_disabled = false;
 
     // YaRN / Dynamic NTK RoPE scaling
     float yarn_ext_factor = 0.0f;   // 0 = linear/none, 1.0 = YaRN blending

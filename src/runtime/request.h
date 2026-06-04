@@ -52,6 +52,10 @@ struct Request {
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;          // Don't stop on EOS (benchmark mode)
     bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
+    // Generation began inside an injected <think> prefix (the opener lives in
+    // the PROMPT, not the output) — seeds the think-budget recount loop and
+    // the CUDA-graph decode config so the budget engages from token 0.
+    bool started_in_think = false;
     // Sliding-window decoded-text buffer for multi-token </think> detection.
     // Required for tokenizers that ship <think>/</think> as added_tokens with
     // special=False (Qwen3.6, Qwen3-Coder NVFP4 SafeTensors): the model emits

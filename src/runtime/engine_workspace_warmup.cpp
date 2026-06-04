@@ -79,8 +79,15 @@ bool Engine::init_features() {
             int32_t ts = ptok->find_token("<think>");
             int32_t te = ptok->find_token("</think>");
             int vocab = ptok->vocab_size();
+            // Accept CONTROL *and* USER_DEFINED token types: Qwen3 GGUFs tag
+            // <think>/</think> as USER_DEFINED (type 4), and requiring CONTROL
+            // left think_end_id_ at -1 — the think-budget enforcement
+            // (force </think> via logit manipulation) could then never fire,
+            // so models thought until max_tokens (empty content under
+            // json_mode/short budgets). Nemotron's "<think>" at ID 12 is type
+            // NORMAL text and stays excluded.
             bool is_special = (ts >= 0) &&
-                              (ptok->has_token_types() ? ptok->is_control_token(ts) : ts > vocab * 99 / 100);
+                              (ptok->has_token_types() ? ptok->is_special_token(ts) : ts > vocab * 99 / 100);
             if (is_special) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
