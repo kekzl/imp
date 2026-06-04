@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "stream_pipeline.h"
 
 #include <cstdio>
 
@@ -55,28 +56,8 @@ json token_bytes_json(const std::string& text) {
 }
 
 size_t utf8_complete_len(const std::string& s) {
-    size_t len = s.size();
-    if (len == 0)
-        return 0;
-    // Walk back from end to find the start of the last codepoint
-    size_t i = len - 1;
-    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80)
-        --i;
-    unsigned char lead = static_cast<unsigned char>(s[i]);
-    int expected;
-    if (lead < 0x80)
-        expected = 1;
-    else if ((lead & 0xE0) == 0xC0)
-        expected = 2;
-    else if ((lead & 0xF0) == 0xE0)
-        expected = 3;
-    else if ((lead & 0xF8) == 0xF0)
-        expected = 4;
-    else
-        return i;  // invalid byte — emit up to it
-    if (i + static_cast<size_t>(expected) <= len)
-        return len;  // complete
-    return i;        // incomplete — emit up to start of this sequence
+    // Single source of truth lives in stream_pipeline.h (pure, unit-tested).
+    return imp::stream::utf8_complete_len(s);
 }
 
 void json_escape_into(std::string& out, const char* s, size_t len) {

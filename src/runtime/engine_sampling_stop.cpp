@@ -16,6 +16,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/batch.h"
+#include "runtime/think_stop_logic.h"
 #include "model/chat_template.h"
 #include "core/logging.h"
 #include <cstdlib>
@@ -70,23 +71,18 @@ void Engine::track_think_state(Request& req, int32_t token) const {
     const std::string piece = ptok->decode_token(token);
     if (piece.empty())
         return;
-    req.think_text_tail += piece;
-    constexpr size_t kThinkTailWindow = 32;
-    if (req.think_text_tail.size() > kThinkTailWindow) {
-        req.think_text_tail.erase(0, req.think_text_tail.size() - kThinkTailWindow);
-    }
-    if (req.in_think_block) {
-        if (req.think_text_tail.find("</think>") != std::string::npos) {
-            req.in_think_block = false;
-            req.think_exit_idx = static_cast<int>(req.output_tokens.size());
-            req.think_text_tail.clear();
-        }
-    } else {
-        if (req.think_text_tail.find("<think>") != std::string::npos &&
-            req.think_text_tail.find("</think>") == std::string::npos) {
-            req.in_think_block = true;
-            req.think_text_tail.clear();
-        }
+    // Drive the pure text-tail state machine (see think_stop_logic.h) on the
+    // Request's mirrored fields, then sync back. On a block EXIT, record the
+    // output index for the post-</think> grace period in should_stop().
+    think_logic::TextThinkState ts;
+    ts.in_think_block = req.in_think_block;
+    ts.think_text_tail = std::move(req.think_text_tail);
+    bool was_in_think = ts.in_think_block;
+    bool transitioned = ts.feed_piece(piece);
+    req.in_think_block = ts.in_think_block;
+    req.think_text_tail = std::move(ts.think_text_tail);
+    if (transitioned && was_in_think && !req.in_think_block) {
+        req.think_exit_idx = static_cast<int>(req.output_tokens.size());
     }
 }
 
@@ -124,9 +120,8 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     // </think> are all stops, accept the finish; if any content token
     // appeared in between, reset the counter.
     if (req.think_exit_idx >= 0 && is_stop_token(token)) {
-        int tokens_since_exit = static_cast<int>(req.output_tokens.size()) - req.think_exit_idx;
-        constexpr int kMinAnswerAfterThink = 16;
-        if (tokens_since_exit < kMinAnswerAfterThink)
+        if (think_logic::grace_blocks_stop(req.think_exit_idx,
+                                           static_cast<int>(req.output_tokens.size())))
             return false;
     }
     return is_stop_token(token);
@@ -171,25 +166,15 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     // The model generates </think> itself so it lands in the KV cache correctly.
     // Think budget: force </think> via logit manipulation when budget exceeded.
     // Scan output_tokens directly (no dependency on in_think_block tracking).
+    // Injected <think> prefixes live in the PROMPT — the output then has no
+    // opener, so the recount must start in-think (req.started_in_think) or the
+    // budget never fires (model thinks until max_tokens, content stays empty).
+    // See think_stop_logic.h for the pure recount logic.
     state.force_token = -1;
-    if (req.think_budget > 0.0f && think_end_id_ >= 0 && !req.output_tokens.empty()) {
-        int think_limit = static_cast<int>(req.max_tokens * req.think_budget);
-        int n_reasoning = 0;
-        // Injected <think> prefixes live in the PROMPT — the output then has
-        // no opener, so the recount must start in-think or the budget never
-        // fires (model thinks until max_tokens, content stays empty).
-        bool currently_thinking = req.started_in_think;
-        for (int32_t t : req.output_tokens) {
-            if (t == think_start_id_)
-                currently_thinking = true;
-            else if (t == think_end_id_)
-                currently_thinking = false;
-            else if (currently_thinking)
-                n_reasoning++;
-        }
-        if (currently_thinking && n_reasoning >= think_limit) {
-            state.force_token = think_end_id_;
-        }
+    if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
+                                            req.output_tokens, think_start_id_,
+                                            req.started_in_think)) {
+        state.force_token = think_end_id_;
     }
 }
 

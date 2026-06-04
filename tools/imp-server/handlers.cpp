@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "tool_call.h"
 #include "anthropic.h"
+#include "stream_pipeline.h"
 
 #include "api/imp_internal.h"
 #include "model/hf_hub.h"
@@ -2318,25 +2319,14 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                         utf8_buf.erase(0, complete);
                     }
                 } else if (!stop_sequences.empty()) {
-                    bool stop_found = false;
-                    for (const auto& stop : stop_sequences) {
-                        auto pos = pending_text.find(stop);
-                        if (pos != std::string::npos) {
-                            if (!flush_text(pos))
-                                return false;
-                            stop_found = true;
-                            break;
-                        }
-                    }
-                    if (stop_found) {
+                    auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
+                                                            stop_sequences);
+                    if (!flush_text(d.flush_len))
+                        return false;
+                    if (d.complete_match) {
                         text_stop_matched = true;
                         finish = "stop";
                         break;
-                    }
-                    if (pending_text.size() > max_stop_len) {
-                        size_t safe = pending_text.size() - max_stop_len + 1;
-                        if (!flush_text(safe))
-                            return false;
                     }
                 }
                 continue;
@@ -2382,33 +2372,17 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                 }
             }
         } else {
-            // Buffer text and check for stop matches
+            // Buffer text and check for stop matches via the pure holdback
+            // pipeline (stream_pipeline.h). It returns the safe-to-emit prefix
+            // and whether a complete stop sequence is present.
             pending_text += piece;
-
-            // Check for complete stop match
-            bool stop_found = false;
-            for (const auto& stop : stop_sequences) {
-                auto pos = pending_text.find(stop);
-                if (pos != std::string::npos) {
-                    // Flush text before the stop string
-                    if (!flush_text(pos))
-                        return false;
-                    stop_found = true;
-                    break;
-                }
-            }
-            if (stop_found) {
+            auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
+            if (!flush_text(d.flush_len))
+                return false;
+            if (d.complete_match) {
                 text_stop_matched = true;
                 finish = "stop";
                 break;
-            }
-
-            // Flush text that can't be part of a partial stop match.
-            // Keep only the last (max_stop_len - 1) chars as potential prefix.
-            if (pending_text.size() > max_stop_len) {
-                size_t safe = pending_text.size() - max_stop_len + 1;
-                if (!flush_text(safe))
-                    return false;
             }
         }
 
@@ -2951,25 +2925,14 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                         }
                     } else {
                         pending_text += piece;
-                        bool stop_found = false;
-                        for (const auto& stop : stop_sequences) {
-                            auto pos = pending_text.find(stop);
-                            if (pos != std::string::npos) {
-                                if (!flush_text(pos))
-                                    return false;
-                                stop_found = true;
-                                break;
-                            }
-                        }
-                        if (stop_found) {
+                        auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
+                                                                stop_sequences);
+                        if (!flush_text(d.flush_len))
+                            return false;
+                        if (d.complete_match) {
                             text_stop_matched = true;
                             finish = "stop";
                             break;
-                        }
-                        if (pending_text.size() > max_stop_len) {
-                            size_t safe = pending_text.size() - max_stop_len + 1;
-                            if (!flush_text(safe))
-                                return false;
                         }
                     }
 
@@ -4170,25 +4133,14 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
                         utf8_buf.erase(0, complete);
                     }
                 } else if (!stop_sequences.empty()) {
-                    bool stop_found = false;
-                    for (const auto& stop : stop_sequences) {
-                        auto pos = pending_text.find(stop);
-                        if (pos != std::string::npos) {
-                            if (!flush_text(pos))
-                                return false;
-                            stop_found = true;
-                            break;
-                        }
-                    }
-                    if (stop_found) {
+                    auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
+                                                            stop_sequences);
+                    if (!flush_text(d.flush_len))
+                        return false;
+                    if (d.complete_match) {
                         text_stop_matched = true;
                         finish = "stop";
                         break;
-                    }
-                    if (pending_text.size() > max_stop_len) {
-                        size_t safe = pending_text.size() - max_stop_len + 1;
-                        if (!flush_text(safe))
-                            return false;
                     }
                 }
                 continue;
@@ -4206,25 +4158,13 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             }
         } else {
             pending_text += piece;
-            bool stop_found = false;
-            for (const auto& stop : stop_sequences) {
-                auto pos = pending_text.find(stop);
-                if (pos != std::string::npos) {
-                    if (!flush_text(pos))
-                        return false;
-                    stop_found = true;
-                    break;
-                }
-            }
-            if (stop_found) {
+            auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
+            if (!flush_text(d.flush_len))
+                return false;
+            if (d.complete_match) {
                 text_stop_matched = true;
                 finish = "stop";
                 break;
-            }
-            if (pending_text.size() > max_stop_len) {
-                size_t safe = pending_text.size() - max_stop_len + 1;
-                if (!flush_text(safe))
-                    return false;
             }
         }
 
