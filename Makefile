@@ -10,7 +10,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -138,6 +138,24 @@ install-hooks:
 CLANG_FORMAT_IMG ?= silkeh/clang:18
 CLANG_FORMAT_RUN = docker run --rm -v $(PWD):/work -w /work $(CLANG_FORMAT_IMG) clang-format
 CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh')
+
+# compute-sanitizer (memcheck) over the GPU-numeric test binaries
+# (TEST_AUDIT.md §4.4). Runs inside the BUILDER stage (the runtime image has
+# no CUDA toolkit, hence no compute-sanitizer; the builder keeps build/).
+#
+# DOES NOT WORK ON WSL2: the WDDM driver model exposes no debugger interface,
+# compute-sanitizer reports "Error: Failed to initialize" (verified
+# 2026-06-04 on the WSL2 dev host). Run this target on a native-Linux GPU
+# host (e.g. a future self-hosted CI runner). Listed here so the invocation
+# is documented and ready, not because it runs on the dev box.
+sanitize:
+	docker build --target builder $(BUILD_ARGS) -t imp:sanitize .
+	@for b in test-attention test-quant test-kv; do \
+		echo "== compute-sanitizer memcheck: $$b =="; \
+		docker run --rm --gpus all -v $(PWD)/models:/models imp:sanitize \
+			/usr/local/cuda/bin/compute-sanitizer --tool memcheck --error-exitcode 1 \
+			/src/build/$$b || exit 1; \
+	done
 
 # Apply clang-format in place across src/, include/, tools/, tests/.
 format:
