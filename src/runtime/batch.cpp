@@ -160,8 +160,7 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllo
 
     max_batch_size_ = max_batch_size;
     max_blocks_per_seq_ = max_blocks_per_seq;
-    last_upload_n_blocks_ = -1;
-    last_upload_first_block_ = -1;
+    last_upload_block_tables_.clear();
 
     // Compute sizes with 256-byte alignment per sub-buffer
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
@@ -233,23 +232,19 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
     }
 
     if (batch.max_blocks_per_seq > 0 && !batch.block_tables.empty()) {
-        // For single-seq decode, skip block_table re-upload when block count and
-        // first block ID are unchanged. Within a request, existing block IDs are
-        // stable (only new blocks appended). Between requests, the first block ID
-        // changes (different physical page), forcing a re-upload.
-        int n_blocks = batch.actual_blocks_per_seq > 0
-                           ? batch.actual_blocks_per_seq
-                           : static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
-        int first_block = batch.block_tables[0];
-        if (batch.n_sequences == 1 && n_blocks == last_upload_n_blocks_ &&
-            first_block == last_upload_first_block_) {
+        // For single-seq decode, skip the block_table re-upload only when the
+        // CONTENT matches the last upload exactly. Size/first-block proxies are
+        // NOT sufficient — see last_upload_block_tables_ in batch.h (#536).
+        if (batch.n_sequences == 1 && batch.block_tables == last_upload_block_tables_) {
             // Skip — block_table content is identical to last upload
         } else {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_, batch.block_tables.data(),
                                                batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
                                                cudaMemcpyHostToDevice, stream));
-            last_upload_n_blocks_ = (batch.n_sequences == 1) ? n_blocks : -1;
-            last_upload_first_block_ = (batch.n_sequences == 1) ? first_block : -1;
+            if (batch.n_sequences == 1)
+                last_upload_block_tables_ = batch.block_tables;
+            else
+                last_upload_block_tables_.clear();
         }
     }
 
@@ -271,8 +266,7 @@ void GPUBatchPool::free_pool() {
     d_block_tables_ = nullptr;
     d_context_lens_ = nullptr;
     d_sample_result_ = nullptr;
-    last_upload_n_blocks_ = -1;
-    last_upload_first_block_ = -1;
+    last_upload_block_tables_.clear();
 }
 
 }  // namespace imp

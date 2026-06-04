@@ -64,10 +64,7 @@ public:
 
     bool is_allocated() const { return pool_ != nullptr; }
     int max_blocks_per_seq() const { return max_blocks_per_seq_; }
-    void reset_upload_cache() {
-        last_upload_n_blocks_ = -1;
-        last_upload_first_block_ = -1;
-    }
+    void reset_upload_cache() { last_upload_block_tables_.clear(); }
 
     // Pre-allocated single int32 result buffer for sampling kernels
     int32_t* d_sample_result() const { return d_sample_result_; }
@@ -88,12 +85,18 @@ private:
     int max_batch_size_ = 0;
     int max_blocks_per_seq_ = 0;
 
-    // Track block_table changes for single-seq decode: skip re-upload when unchanged.
-    // We track both block count and first block ID — the count only changes when a new
-    // KV block is allocated, and the first block ID changes between requests (different
-    // physical pages), preventing cross-request stale reads.
-    int last_upload_n_blocks_ = -1;
-    int last_upload_first_block_ = -1;
+    // Track block_table changes for single-seq decode: skip re-upload when the
+    // CONTENT is unchanged. The previous proxy (block count + first block ID)
+    // broke under prefix caching: a prefix-HIT request starts with the SAME
+    // reused first block and can have the same count as the previous request
+    // while differing in the middle (e.g. [0,1,4,3,2] after reuse+eviction vs
+    // [0,1,2,3,4]) — the skip then left the decode running on the previous
+    // request's table, writing KV into the wrong physical blocks (issue #536:
+    // greedy prefix-hit diverged from fresh prefill; the same silent-stale
+    // class was misdiagnosed as "FP rounding from different physical
+    // addresses" when prefix caching was first turned off). A host-side
+    // vector compare of <=max_blocks ints costs nanoseconds per decode step.
+    std::vector<int> last_upload_block_tables_;
 };
 
 class BatchBuilder {
