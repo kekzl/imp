@@ -72,6 +72,10 @@ struct Request {
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
     int prefill_offset = 0;     // Chunked prefill: tokens processed so far
     int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
+    // Pin this request's full prompt blocks in the prefix cache at finish
+    // (Anthropic cache_control / OpenAI-route cache_prompt). Pinned blocks
+    // survive eviction until the pin budget recycles them (FIFO).
+    bool pin_kv_prefix = false;
 
     // Logprobs
     bool logprobs = false;                          // Return logprobs for sampled tokens

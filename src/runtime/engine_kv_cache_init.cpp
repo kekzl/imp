@@ -126,7 +126,13 @@ bool Engine::init_kv_cache() {
                 "SSM/GDN state requires full sequential prefill");
         } else {
             kv_manager_->set_prefix_caching_enabled(true);
-            IMP_LOG_INFO("Prefix caching enabled");
+            // cache_control/cache_prompt pin budget: percent of the pool,
+            // floor of 1 block when enabled at all.
+            int pin_pct = std::min(std::max(config_.prefix_pin_budget_pct, 0), 100);
+            int pin_budget =
+                pin_pct > 0 ? std::max(1, kv_manager_->kv_cache()->total_blocks() * pin_pct / 100) : 0;
+            kv_manager_->set_pin_budget_blocks(pin_budget);
+            IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
             if (!config_.prefix_cache_path.empty()) {
                 int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
                 if (restored > 0)

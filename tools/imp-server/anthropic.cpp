@@ -256,6 +256,32 @@ std::string flatten_system(const json& system_field) {
 
 }  // namespace
 
+// Any cache_control marker anywhere in the request? Anthropic allows it on
+// system blocks, message content blocks, and tool definitions. imp maps the
+// marker to prompt-KV pinning (block-granular prefix cache), so the marker's
+// exact position doesn't matter — any marker pins the request's prompt
+// prefix against eviction.
+static bool has_cache_control(const json& anth) {
+    auto any_block = [](const json& blocks) {
+        if (!blocks.is_array())
+            return false;
+        for (const auto& b : blocks)
+            if (b.is_object() && b.contains("cache_control"))
+                return true;
+        return false;
+    };
+    if (anth.contains("system") && any_block(anth["system"]))
+        return true;
+    if (anth.contains("tools") && any_block(anth["tools"]))
+        return true;
+    if (anth.contains("messages") && anth["messages"].is_array()) {
+        for (const auto& m : anth["messages"])
+            if (m.is_object() && m.contains("content") && any_block(m["content"]))
+                return true;
+    }
+    return false;
+}
+
 json anthropic_to_openai_body(const json& anth) {
     json oai = json::object();
 
@@ -310,6 +336,11 @@ json anthropic_to_openai_body(const json& anth) {
     if (anth.contains("tool_choice")) {
         oai["tool_choice"] = convert_tool_choice(anth["tool_choice"]);
     }
+
+    // cache_control → prompt-KV pinning (internal "cache_prompt" field,
+    // same name the OpenAI route accepts directly).
+    if (has_cache_control(anth))
+        oai["cache_prompt"] = true;
 
     return oai;
 }
@@ -423,13 +454,16 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         // excluded from input_tokens. imp surfaces the prefix-cache hit count
         // via OpenAI's prompt_tokens_details.cached_tokens — pass it through.
         int cached = 0;
-        if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object())
+        int creation = 0;
+        if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object()) {
             cached = u["prompt_tokens_details"].value("cached_tokens", 0);
+            creation = u["prompt_tokens_details"].value("cache_creation_tokens", 0);
+        }
         if (cached > prompt_tokens)
             cached = prompt_tokens;
         usage_out["input_tokens"] = prompt_tokens - cached;
         usage_out["cache_read_input_tokens"] = cached;
-        usage_out["cache_creation_input_tokens"] = 0;
+        usage_out["cache_creation_input_tokens"] = creation;
     }
 
     // Use the OpenAI id if present; otherwise synthesize one.

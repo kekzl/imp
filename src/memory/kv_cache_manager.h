@@ -102,15 +102,27 @@ public:
     // never freed by evict_lru(), reclaim_cached_block(), or
     // free_sequence(). After free_sequence(), pinned blocks stay in the
     // cache pool with ref_count=1 for reuse by future sequences.
+    // Re-pinning the same seq_id replaces its previous pin set. When a
+    // pin budget is set, the oldest pin owners are unpinned (FIFO) until
+    // the new pin fits; their blocks degrade to normal cached blocks.
     void pin_prefix(int seq_id, int num_blocks);
 
     // Remove pinning for all blocks that were pinned via pin_prefix()
     // for the given sequence. Does NOT free the blocks — they remain
     // allocated as normal (or cached if the sequence was already freed).
+    // Blocks shared with other pin owners stay pinned.
     void unpin_prefix(int seq_id);
 
     // Number of blocks currently pinned across all sequences.
     int num_pinned_blocks() const;
+
+    // Cap on unique pin_prefix-pinned blocks. 0 = unlimited (default).
+    void set_pin_budget_blocks(int blocks) { pin_budget_blocks_ = blocks; }
+    int pin_budget_blocks() const { return pin_budget_blocks_; }
+
+    // Cached (unreferenced) blocks that are actually reclaimable, i.e.
+    // excluding pinned blocks. O(1).
+    int num_reclaimable_cached_blocks() const { return reclaimable_cached_count_; }
 
     // ── Speculative decoding rollback ────────────────────────────────
 
@@ -284,9 +296,19 @@ private:
 
     // ── Prefix pinning state ─────────────────────────────────────────
     // Block IDs that are pinned and must never be evicted or freed.
+    // Two writers: pin_prefix() (refcounted below) and evict_middle_blocks()
+    // (StreamingLLM sinks, registered through pin_prefix as well).
     std::unordered_set<int> pinned_blocks_;
-    // seq_id -> number of pinned blocks (for unpin_prefix to know which blocks).
-    std::unordered_map<int, int> pinned_seqs_;
+    // Pin owner -> exact block IDs it pinned. Survives free_sequence()
+    // (seq_blocks_ is erased there; pins usually belong to finished seqs).
+    std::unordered_map<int, std::vector<int>> pinned_seq_blocks_;
+    // block_id -> number of pin owners. A block leaves pinned_blocks_
+    // only when its last owner unpins.
+    std::unordered_map<int, int> pin_refcount_;
+    // Pin owners in pin order; budget eviction unpins from the front.
+    std::list<int> pin_fifo_;
+    // Cap on unique pinned blocks (0 = unlimited).
+    int pin_budget_blocks_ = 0;
 
     // Incrementally maintained count of reclaimable cached blocks
     // (cached_blocks_lru_.size() minus pinned cached blocks).

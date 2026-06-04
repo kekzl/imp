@@ -86,6 +86,9 @@ struct EngineConfig {
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
     std::string prefix_cache_path;  // path to persist prefix cache (empty = disabled)
+    // Cap on cache_control/cache_prompt-pinned blocks, percent of the KV
+    // pool (0 = pin requests are ignored).
+    int prefix_pin_budget_pct = 25;
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only

@@ -1357,5 +1357,169 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksZeroArgsAreNoOp) {
     mgr->free_sequence(0);
 }
 
+// ============================================================================
+// Prefix pinning v2 — owner bookkeeping, budget FIFO (Anthropic cache_control)
+// ============================================================================
+
+// Helper: allocate a prefix-cached sequence of `n_full_blocks` distinct full
+// blocks, register hashes, optionally pin the whole prompt, then free it —
+// the cache_control lifecycle (pin happens at finish, before free_sequence).
+static void MakePinnedFreedSeq(KVCacheManager* mgr, int seq_id, int n_full_blocks, int token_base,
+                               bool pin = true) {
+    std::vector<int32_t> tokens(n_full_blocks * 16);
+    std::iota(tokens.begin(), tokens.end(), token_base);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(seq_id, tokens), 0);
+    mgr->register_block_hashes(seq_id, tokens);
+    if (pin)
+        mgr->pin_prefix(seq_id, n_full_blocks);
+    mgr->free_sequence(seq_id);
+}
+
+// 47. UnpinFreedSeqKeepsOtherFreedSeqPins — unpinning one already-freed owner
+// must not drop pins held by OTHER already-freed owners. (The old rebuild
+// path reconstructed pinned_blocks_ from seq_blocks_, which free_sequence
+// erases — so every freed owner's pins silently vanished.)
+TEST(KVCacheManagerTest, UnpinFreedSeqKeepsOtherFreedSeqPins) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    MakePinnedFreedSeq(mgr.get(), 0, 2, 100);
+    MakePinnedFreedSeq(mgr.get(), 1, 2, 900);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 4);
+
+    mgr->unpin_prefix(0);
+
+    // Seq 1's pins must survive.
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+    // Exactly seq 0's two blocks became reclaimable; seq 1's stay protected.
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_FALSE(mgr->evict_cached_block());
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+}
+
+// 48. PinBudgetEvictsOldestPinFifo — pinning beyond the budget unpins the
+// oldest owner first; its blocks degrade to normal (reclaimable) cached
+// blocks instead of leaking pinned VRAM.
+TEST(KVCacheManagerTest, PinBudgetEvictsOldestPinFifo) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+    mgr->set_pin_budget_blocks(4);
+
+    MakePinnedFreedSeq(mgr.get(), 0, 2, 100);
+    MakePinnedFreedSeq(mgr.get(), 1, 2, 900);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 4);
+
+    // Third pin exceeds the budget — seq 0 (oldest) must be unpinned.
+    MakePinnedFreedSeq(mgr.get(), 2, 2, 1700);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 4);
+
+    // Seq 0's two blocks are reclaimable now; seq 1+2 remain pinned.
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_FALSE(mgr->evict_cached_block());
+    EXPECT_EQ(mgr->num_pinned_blocks(), 4);
+}
+
+// 49. PinLargerThanBudgetIsCappedAndEvictsAll — a single pin larger than the
+// whole budget caps to the budget after evicting every older pin.
+TEST(KVCacheManagerTest, PinLargerThanBudgetIsCapped) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+    mgr->set_pin_budget_blocks(3);
+
+    MakePinnedFreedSeq(mgr.get(), 0, 2, 100);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+
+    // 5-block pin: budget 3 → old pin evicted, new pin capped to 3.
+    MakePinnedFreedSeq(mgr.get(), 1, 5, 900);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 3);
+}
+
+// 50. RePinSameSeqReplaces — re-pinning the same owner replaces its pin set
+// (no accumulation); one unpin releases everything.
+TEST(KVCacheManagerTest, RePinSameSeqReplaces) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    std::vector<int32_t> tokens(3 * 16);
+    std::iota(tokens.begin(), tokens.end(), 100);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+    mgr->register_block_hashes(0, tokens);
+
+    mgr->pin_prefix(0, 1);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 1);
+    mgr->pin_prefix(0, 3);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 3);
+
+    mgr->unpin_prefix(0);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 0);
+    mgr->free_sequence(0);
+}
+
+// 51. SharedPinnedBlockSurvivesUnpinOfOneOwner — two owners pinning the same
+// physical prefix blocks (cache-hit reuse): unpinning one owner must keep
+// the shared blocks pinned for the other.
+TEST(KVCacheManagerTest, SharedPinnedBlockSurvivesUnpinOfOneOwner) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    std::vector<int32_t> tokens(2 * 16);
+    std::iota(tokens.begin(), tokens.end(), 100);
+
+    MakePinnedFreedSeq(mgr.get(), 0, 2, 100);
+
+    // Seq 1: identical tokens — full reuse of the pinned blocks.
+    EXPECT_EQ(mgr->allocate_blocks_with_prefix(1, tokens), 2);
+    mgr->register_block_hashes(1, tokens);
+    mgr->pin_prefix(1, 2);
+    mgr->free_sequence(1);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+
+    mgr->unpin_prefix(0);
+    // Still pinned by owner 1 — nothing reclaimable.
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+    EXPECT_FALSE(mgr->evict_cached_block());
+
+    mgr->unpin_prefix(1);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 0);
+    EXPECT_TRUE(mgr->evict_cached_block());
+}
+
+// 52. CacheHitOnCachedBlockKeepsReclaimableCountExact — a prefix HIT on an
+// unreferenced cached block removes it from the cached LRU; the reclaimable
+// counter must follow. An inflated counter makes can_allocate() drift
+// optimistic and lets reclaim_cached_block() spin on a pinned-only LRU.
+TEST(KVCacheManagerTest, CacheHitOnCachedBlockKeepsReclaimableCountExact) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(4);
+    mgr->set_prefix_caching_enabled(true);
+
+    // Seq 0: 2 full blocks, cached on free (2 reclaimable).
+    MakePinnedFreedSeq(mgr.get(), 0, 2, 100, /*pin=*/false);
+    EXPECT_EQ(mgr->num_reclaimable_cached_blocks(), 2);
+
+    // Seq 1: identical prefix — HIT takes both blocks out of the cached LRU.
+    std::vector<int32_t> tokens(2 * 16);
+    std::iota(tokens.begin(), tokens.end(), 100);
+    EXPECT_EQ(mgr->allocate_blocks_with_prefix(1, tokens), 2);
+    EXPECT_EQ(mgr->num_reclaimable_cached_blocks(), 0);
+
+    // Free again — both blocks return to the cached LRU exactly once.
+    mgr->free_sequence(1);
+    EXPECT_EQ(mgr->num_reclaimable_cached_blocks(), 2);
+}
+
 }  // namespace
 }  // namespace imp

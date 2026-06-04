@@ -77,6 +77,7 @@ typedef struct {
     // Prefix caching
     int use_prefix_caching;       // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
     char prefix_cache_path[512];  // path to save/load prefix cache (empty = disabled)
+    int prefix_pin_budget_pct;    // cap on cache_control-pinned blocks, % of KV pool (default 25)
 
     // StreamingLLM smart KV cache (Xiao et al., 2023):
     // attention sinks + sliding window. Reduces decode KV bandwidth and frees
