@@ -25,6 +25,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
+#include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
 
@@ -86,8 +87,9 @@ bool Engine::init_features() {
             // so models thought until max_tokens (empty content under
             // json_mode/short budgets). Nemotron's "<think>" at ID 12 is type
             // NORMAL text and stays excluded.
-            bool is_special = (ts >= 0) &&
-                              (ptok->has_token_types() ? ptok->is_special_token(ts) : ts > vocab * 99 / 100);
+            bool is_special = think_logic::accept_think_token(
+                ts, ptok->has_token_types(), ptok->has_token_types() && ptok->is_special_token(ts),
+                vocab);
             if (is_special) {
                 think_start_id_ = ts;
                 think_end_id_ = te;

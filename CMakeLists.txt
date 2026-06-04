@@ -438,7 +438,12 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_think_stop_logic.cpp
+        tests/test_stream_pipeline.cpp
     )
+    # test_stream_pipeline.cpp includes the self-contained pure header
+    # tools/imp-server/stream_pipeline.h (no httplib/json deps).
+    target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
 
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
