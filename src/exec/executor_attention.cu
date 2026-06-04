@@ -807,15 +807,22 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
 
-            // Chunked prefill: choose FMHA or cuBLAS
+            // Chunked prefill: choose FMHA or cuBLAS.
+            //
+            // REVERTED (#493 routed ALL hd=128 prefill into FA2 "regardless of
+            // the threshold" for +7-25% pp512): both fp8-quantizing FMHA
+            // kernels (FA2 and the fp8 FMHA) carry per-layer e4m3 score noise
+            // that compounds across layers into prompt-blind/degenerate output
+            // — every hd=128 model failed the degen suite at short prompts
+            // (Qwen3-8B answered "What is 17 + 25?" with "2 5 2 5 2 5...").
+            // The FP16 cuBLAS path is the accuracy reference; FMHA stays
+            // gated behind the S-matrix-capacity threshold where it has
+            // history in production. fp8-attention quality above the
+            // threshold is tracked separately (see issue #511).
             const int fmha_threshold = runtime_config().attention.fmha_prefill_threshold;
-            // FA2 (register-resident, hd=128, seq-adaptive Bq) beats the materialized
-            // cuBLAS path at every measured context length → prefer it for hd=128
-            // regardless of the S-matrix-capacity threshold (non-128 / Gemma-4 stay cuBLAS).
-            const bool fa2_capable = (hd == 128) && (runtime_config().attention.fmha_fa2 == "on");
             const bool chunked_use_fmha =
                 !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
-                (fa2_capable || (fmha_threshold > 0 && ctx_len >= fmha_threshold));
+                (fmha_threshold > 0 && ctx_len >= fmha_threshold);
 
             if (chunked_use_fmha) {
                 // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
@@ -849,10 +856,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
-        // Prefer FA2 for hd=128 regardless of threshold (see chunked path above).
-        const bool fa2_capable = (hd == 128) && (runtime_config().attention.fmha_fa2 == "on");
+        // FMHA only above the S-matrix threshold — see the chunked path above
+        // for why the #493 prefer-FA2-at-every-length override was reverted.
         const bool prefer_fmha = !force_cublas_attn &&
-                                 (fa2_capable || n >= runtime_config().attention.fmha_prefill_threshold);
+                                 (n >= runtime_config().attention.fmha_prefill_threshold);
 
         if (s_matrix_fits && !non_gemma4_sliding && !prefer_fmha) {
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,

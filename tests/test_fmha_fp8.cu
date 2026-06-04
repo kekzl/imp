@@ -184,16 +184,16 @@ TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 
 class FmhaFA2Test : public FmhaFP8Test {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                 float softcap = 0.0f) {
+                 float softcap = 0.0f, float amplitude = 1.0f) {
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
         size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
         for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+            Q_f[i] = amplitude * 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
         for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
+            K_f[i] = amplitude * 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
             V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
         }
 
@@ -259,6 +259,30 @@ protected:
 };
 
 TEST_F(FmhaFA2Test, CausalHD128) { run_fa2(1, 64, 64, 4, 4, 128, true); }
+
+// Engine-realistic SHORT prefill shapes. Since the executor prefers FA2 for
+// hd=128 at every length (executor_attention.cu fa2_capable), short chat
+// prompts hit this kernel too — production corruption (prompt-blind models,
+// degenerate output) appeared exactly there. Qwen3-8B GQA is 32 Q / 8 KV.
+TEST_F(FmhaFA2Test, CausalShortSeq24_GQA32_8) { run_fa2(1, 24, 24, 32, 8, 128, true); }
+TEST_F(FmhaFA2Test, CausalSeq32_GQA32_8) { run_fa2(1, 32, 32, 32, 8, 128, true); }
+TEST_F(FmhaFA2Test, CausalShortSeq24) { run_fa2(1, 24, 24, 4, 4, 128, true); }
+TEST_F(FmhaFA2Test, CausalOddSeq136_GQA32_8) { run_fa2(1, 136, 136, 32, 8, 128, true); }
+TEST_F(FmhaFA2Test, CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true); }
+
+// Realistic Q/K magnitudes. QK-normed models (Qwen3 family) produce Q/K values
+// far beyond the ±0.12 of the synthetic fill above; the FA2 kernel converts
+// Q and K to FP8 e4m3 WITHOUT a scale factor, so large inputs lose precision
+// or saturate (e4m3 max ±448) — production symptom: prompt-blind models on
+// every hd=128 architecture while the FP16 cuBLAS path stays correct.
+// amplitude=80 → |Q|,|K| up to ~9.6, QK dots up to ~118 pre-scale (still
+// within e4m3 range per element, but only ~2 mantissa bits at that scale).
+TEST_F(FmhaFA2Test, RealisticMagnitude_Seq24) {
+    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
+}
+TEST_F(FmhaFA2Test, RealisticMagnitude_Seq64) {
+    run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
+}
 TEST_F(FmhaFA2Test, NonCausalHD128) { run_fa2(1, 32, 64, 4, 4, 128, false); }
 TEST_F(FmhaFA2Test, GQA_HD128) { run_fa2(1, 64, 64, 8, 2, 128, true); }
 TEST_F(FmhaFA2Test, CausalMultiTile_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true); }
