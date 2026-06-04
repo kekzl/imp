@@ -33,31 +33,23 @@ NVFP4 prequant (from [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Op
 
 ## Performance
 
-Single RTX 5090, water-cooled, greedy (temp = 0), CUDA 13.3, CUDA Graphs on. Decode is the reliable A/B signal (10-rep, isolated, clocks warmed); prefill varies up to 2.6× across container restarts (cuBLAS autotuning), so it is not used for comparisons here. Numbers below are from 2026-05-30 / 2026-06-04 runs; `Qwen3-8B Q8_0 tg128` is the CI-gated baseline in [`tests/perf_baseline.json`](tests/perf_baseline.json). Full methodology and per-model VRAM: [`docs/performance.md`](docs/performance.md).
+Single RTX 5090, greedy, CUDA 13.3, CUDA Graphs on. Headline numbers
+(decode, the reliable A/B signal — see [BENCHMARKS.md](BENCHMARKS.md) for
+dated, commit-anchored measurements with exact commands):
 
-**GGUF decode** — tok/s, where imp's dequant-to-NVFP4 decode cache wins:
+- **GGUF dense decode:** Qwen3-8B Q8_0 at **~258 tok/s** (CI-gated baseline) —
+  **+37–72% over llama.cpp** with full offload and flash attention.
+- **NVFP4 SafeTensors decode:** 30B-class MoE at **~245–307 tok/s**
+  (Qwen3-30B/Coder-30B 307, Qwen3.6-35B 245, Gemma-4-26B 259) — effectively
+  uncontested on `sm_120`, where vLLM's NVFP4 path needs `tcgen05` and
+  llama.cpp has no native NVFP4 support.
+- Honest losses: GGUF prefill (1.3–2.4× behind llama.cpp), NVFP4 prefill
+  (~1.4× behind vLLM, attention-bound), Qwen3.6-35B GGUF decode (−31%,
+  structural FP16 GDN-projection tax).
 
-| Model | Quant | imp tg128 | Notes |
-|---|---|---:|---|
-| Qwen3-8B | Q8_0 | **257** | CI baseline (258.87) |
-| Qwen3-14B | Q6_K | **158** | north-star model, ctx 2048 |
-| Gemma-4-26B-A4B | Q4_K_M | **259** | MoE, GGUF |
-
-Against llama.cpp (`b8445+`, full offload, flash-attention on), imp wins dense GGUF decode by **+37–72%**. It **loses** GGUF prefill by 1.3–2.4× (no custom IMMA prefill kernel yet) and loses MoE/hybrid GGUF decode on Qwen3.6-35B-A3B (~−31%, a structural FP16-projection tax on the GDN/attention path that NVFP4 cannot close).
-
-**NVFP4 SafeTensors decode** — tok/s (`tg256`), the format imp is built around:
-
-| Model | Params (active) | imp tg256 |
-|---|---|---:|
-| Qwen3-8B-cortecs | 8.2B | **277** |
-| Qwen3-14B | 12B | **168** |
-| Qwen3-30B-A3B-Modelopt | 30B (3B) | **307** |
-| Qwen3-Coder-30B-A3B | 30B (3B) | **307** |
-| Qwen3.6-35B-A3B | 35B (3B) | **245** |
-| Gemma-4-26B-A4B | 26B (4B) | **259** |
-| Nemotron-3-Nano-30B | 30B (3B) | **126** |
-
-On `sm_120`, imp's native-NVFP4 decode is effectively uncontested: vLLM gates its NVFP4 path on `tcgen05` and falls back to Marlin or fails to load these models on the 5090, and llama.cpp has no native NVFP4 path. For NVFP4 **prefill**, imp trails vLLM by roughly 1.4× (the gap is in attention, not the grouped GEMM, which is near roofline). Nemotron-3-Nano is arch-limited by its hybrid Mamba2+attention+MoE projection mix.
+Every number, with date, commit SHA, CUDA version, quant and the exact
+command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
+[`docs/performance.md`](docs/performance.md).
 
 ## Should I use this?
 
