@@ -271,18 +271,25 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                 }
             }
 
-            // Step 6: Convert SP_float → SP_half with 1/l_new baked in
+            // Step 6: Convert SP_float → SP_half with 1/l_new baked in.
+            // SP_half aliases SP_float COMPACTLY: half row r lives in the
+            // bytes of float row r/2, so in-place stores clobber float scores
+            // other threads have not read yet (deterministic even intra-warp;
+            // padding rows skip Steps 1-5 and race ahead zero-filling valid
+            // rows' scores — issue #528). Stage this thread's halves in
+            // registers, barrier, then store.
+            constexpr int CPT = BW_Bc / TPR;  // columns per thread
             float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
-            if (row_valid) {
-                for (int c = sm_lane; c < BW_Bc; c += TPR) {
-                    SP_half[r * BW_Bc + c] = __float2half(SP_float[r * BW_Bc + c] * spv);
-                }
-            } else if (r < Br) {
-                // Zero out invalid rows for clean WMMA input
-                for (int c = sm_lane; c < BW_Bc; c += TPR) {
-                    SP_half[r * BW_Bc + c] = __float2half(0.0f);
-                }
+            half hbuf[CPT];
+#pragma unroll
+            for (int i = 0; i < CPT; i++) {
+                int c = sm_lane + i * TPR;
+                hbuf[i] = __float2half(row_valid ? SP_float[r * BW_Bc + c] * spv : 0.0f);
             }
+            __syncthreads();  // all float reads of SP_float complete before any half write
+#pragma unroll
+            for (int i = 0; i < CPT; i++)
+                SP_half[r * BW_Bc + sm_lane + i * TPR] = hbuf[i];
         }
         __syncthreads();
 

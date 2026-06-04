@@ -143,14 +143,14 @@ protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
     void TearDown() override { cudaStreamDestroy(stream_); }
 
-    // Strictness model (measured 2026-06-04, see tests/refs/README.md):
-    // only the f32-score-chain paths (cuBLAS FP32-S, FA2-f16) reproduce the
-    // fp64 reference at 1e-2 on realistic uncorrelated data — they are held
-    // strict in BOTH tiers, plus pairwise agreement. The fp8-QK paths
-    // (score-quantization noise, worst at short rows where no averaging
-    // happens — the #512 mechanism) and the WMMA paths (fmha_sm120,
-    // blackwell: up to 0.86 rel on MILD data despite f32 accumulators —
-    // under investigation, tracked in the cross-path divergence issue) are
+    // Strictness model (see tests/refs/README.md):
+    // the f32-score-chain paths (cuBLAS FP32-S, FA2-f16) and — since the
+    // #528 fix (in-place float→half S/P-tile compaction raced across rows;
+    // post-fix ~4e-4 max_rel) — the WMMA paths (fmha_sm120, blackwell)
+    // reproduce the fp64 reference at 1e-2 on realistic uncorrelated data.
+    // All four are held strict in BOTH tiers; the f32 pair additionally has
+    // pairwise agreement. The fp8-QK paths (score-quantization noise, worst
+    // at short rows where no averaging happens — the #512 mechanism) are
     // CHARACTERIZED: stats printed, only gross breakage (NaN, envelope
     // exceeded) fails. mild=true selects the tighter envelope.
     void run_config(int cfg_idx, const char* name, int Sq, int Skv, int NH, int NKV, int HD, bool causal,
@@ -279,12 +279,17 @@ protected:
         // f32-score-chain paths: exact-ish QK accumulation + f32 softmax —
         // these track the fp64 reference even on sharp data.
         auto f32_chain = [](const PathResult& r) { return r.name == "cublas" || r.name == "fa2_f16"; };
+        // f16-class strict: f16 QK with f32 accumulators + f32 softmax + f16 P.
+        // Held to 1e-2 vs fp64 since the #528 race fix (measured ~4e-4).
+        auto f16_strict = [&](const PathResult& r) {
+            return f32_chain(r) || r.name == "fmha_sm120_f16" || r.name == "blackwell";
+        };
 
         // ---- each path vs the verified fp64 reference ----
         for (auto& r : results) {
             if (!r.ran)
                 continue;
-            const bool strict = f32_chain(r);
+            const bool strict = f16_strict(r);
             const float tol = strict ? 1e-2f : (mild ? 1.5f : 4.0f);
             ErrStats e = err_stats(r.O, ref, strict ? tol : 1e-2f);
             EXPECT_EQ(e.nan_count, 0) << r.name << ": NaN in output";
@@ -339,10 +344,15 @@ protected:
 // all numbers = max_rel vs fp64 ref, denom max(1,|ref|)):
 //   mild (amp=2, score sigma ~0.6):  fp8-QK 0.58-0.71 (worst at SHORT rows —
 //     e4m3 score noise with no averaging, the #512 mechanism), WMMA paths
-//     0.15-0.86 DESPITE f32 accumulators (worst at short rows; under
-//     investigation — cross-path divergence issue). f32-chain: < 1e-2.
+//     0.15-0.86 DESPITE f32 accumulators (worst at short rows). f32-chain:
+//     < 1e-2.
 //   sharp (amp=8, near-one-hot softmax): fp8 ~2.3 (76% of elements past
 //     5e-2), WMMA ~1.0-1.2. f32-chain still < 1e-2.
+// RESOLVED 2026-06-05 (#528): the WMMA divergence was the in-place
+// float→half S/P-tile compaction clobbering neighbor rows' float scores
+// (half row r aliases the bytes of float row r/2; padding rows raced ahead
+// zero-filling valid rows — hence worst at short seq). Post-fix the WMMA
+// paths measure ~4e-4 on all four configs and are held strict at 1e-2.
 // Production survives the characterized paths because real activations are
 // correlated and long-context averaging dilutes per-row flips (#511) — but
 // SHORT prefill must stay on the f32 chain (#512, #525), and the old %13

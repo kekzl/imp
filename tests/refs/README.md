@@ -18,9 +18,12 @@ ground truth). Rules (TEST_AUDIT.md §4):
      #512 mechanism). These paths are CHARACTERIZED (envelope assert +
      printed stats), never blessed at 5e-2; E2E token-level locks carry the
      real quality gate.
-   - WMMA attention (fmha_sm120, flash_attention_blackwell): measured
-     0.15-0.86 rel on mild realistic data despite f32 accumulators — under
-     investigation (cross-path divergence issue); characterized like fp8.
+   - WMMA attention (fmha_sm120, flash_attention_blackwell): **≤ 1e-2 rel**
+     vs fp64, same class as the f32 chain (f16 QK with f32 accumulators +
+     f32 softmax + f16 P). The 0.15-0.86 rel measured at the suite's birth
+     was the #528 in-place float→half S/P-tile compaction race (half row r
+     aliases the bytes of float row r/2); post-fix both paths measure ~4e-4
+     on all configs and are held strict.
    - NVFP4: **≤ 1e-1 rel** single-op, plus E2E locks.
    - fp64-vs-fp64 generator cross-checks (numpy vs C++ double loops):
      **≤ 1e-9 rel** — summation-order ulps only; anything larger means the
