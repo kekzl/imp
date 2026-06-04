@@ -194,8 +194,11 @@ Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
 non-streaming), `/tokenize`, `/detokenize`, `/health`. Tool/function
 calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
-`/v1/models` lists available GGUF and SafeTensors models in the models
-directory.
+`/v1/models` lists the model the server is serving (OpenAI semantics: the
+server exposes exactly what it can serve). Requests must name that model —
+any other `model` value gets `404 model_not_found`; inference requests never
+trigger a model load/swap. To switch models, restart the server with a
+different `--model`.
 
 Server-only flags (not on `imp-cli`):
 
@@ -209,15 +212,18 @@ Server-only flags (not on `imp-cli`):
 | `--think-budget <f>` | Fraction of `max_tokens` reserved for reasoning (default 0.5, 0 = disabled) |
 
 ```bash
+# The model id is the served model's name (= /v1/models data[0].id)
+MODEL=$(curl -s http://localhost:8080/v1/models | jq -r '.data[0].id')
+
 # OpenAI chat completion
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"max_tokens\":64}"
 
 # Streaming
 curl -N http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":true}"
 ```
 
 Works with the OpenAI Python SDK:
@@ -225,8 +231,9 @@ Works with the OpenAI Python SDK:
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
+model = client.models.list().data[0].id
 for chunk in client.chat.completions.create(
-    model="imp", messages=[{"role": "user", "content": "Hi"}],
+    model=model, messages=[{"role": "user", "content": "Hi"}],
     stream=True, max_tokens=64
 ):
     print(chunk.choices[0].delta.content or "", end="", flush=True)

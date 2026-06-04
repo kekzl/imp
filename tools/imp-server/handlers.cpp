@@ -172,24 +172,18 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     json data = json::array();
 
     // Snapshot state fields under lock
-    std::string models_dir;
     bool loaded;
     std::string model_name;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        models_dir = state.models_dir;
         loaded = state.model_loaded();
         model_name = state.model_name;
     }
 
-    // Scan models directory for all available models (GGUF + SafeTensors)
-    auto available = scan_model_files(models_dir);
-    if (!available.empty()) {
-        for (const auto& [name, path] : available) {
-            data.push_back({{"id", name}, {"object", "model"}, {"owned_by", "imp"}, {"path", path}});
-        }
-    } else if (loaded) {
-        // Fallback: only show loaded model if no models_dir configured
+    // OpenAI semantics: expose only what this server can actually serve —
+    // the loaded model. Listing the whole models directory invited clients
+    // to request models the server then had to swap in mid-flight.
+    if (loaded) {
         data.push_back({{"id", model_name}, {"object", "model"}, {"owned_by", "imp"}});
     }
 
@@ -219,10 +213,18 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
     return "";
 }
 
-// Auto-swap model if a different one is requested and available as GGUF.
-// Returns true if the model is now loaded (either already loaded or swapped).
-// Returns false if the model couldn't be found or loaded (caller should 404).
-// Must be called with state.mtx held.
+// Serve only the loaded model (OpenAI semantics): requesting any other model
+// name gets 404 model_not_found. Inference requests never trigger a model
+// swap — the old auto-swap tore down the engine mid-stream, cancelling every
+// in-flight request (and the whole process if the new model didn't fit).
+// Switching models is an operator action: restart with a different --model.
+//
+// The one lifecycle action that remains on this path: if the server was
+// started without a model, the first request's model is resolved from the
+// models directory and loaded.
+//
+// Returns true if the requested model is loaded. Must be called with
+// state.mtx held.
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
     if (!state.model_loaded()) {
         // No model loaded — try to load the requested one
@@ -236,7 +238,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
             res.set_content(err.dump(), "application/json");
             return false;
         }
-        printf("[auto-swap] Loading %s...\n", requested_model.c_str());
+        printf("[auto-load] Loading %s...\n", requested_model.c_str());
         fflush(stdout);
         std::string error = load_model_into_state(state, path, json::object());
         if (!error.empty()) {
@@ -245,7 +247,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
             res.set_content(err.dump(), "application/json");
             return false;
         }
-        printf("[auto-swap] %s loaded successfully\n", requested_model.c_str());
+        printf("[auto-load] %s loaded successfully\n", requested_model.c_str());
         fflush(stdout);
         return true;
     }
@@ -254,31 +256,15 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         return true;  // Already loaded
     }
 
-    // Different model requested — try to swap
-    std::string path = find_model_path(state, requested_model);
-    if (path.empty()) {
-        // Model not found in models dir — serve with current model anyway
-        // (matches llama.cpp behavior for unknown model names)
-        return true;
-    }
-
-    printf("[auto-swap] Swapping %s → %s...\n", state.model_name.c_str(), requested_model.c_str());
-    fflush(stdout);
-    std::string error = load_model_into_state(state, path, json::object());
-    if (!error.empty()) {
-        // Swap failed — try to keep serving with whatever is loaded
-        printf("[auto-swap] Swap failed: %s\n", error.c_str());
-        fflush(stdout);
-        if (state.model_loaded())
-            return true;  // Old model still works
-        res.status = 500;
-        json err = {{"error", {{"message", "Model swap failed: " + error}, {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return false;
-    }
-    printf("[auto-swap] %s loaded successfully\n", requested_model.c_str());
-    fflush(stdout);
-    return true;
+    res.status = 404;
+    json err = {{"error",
+                 {{"message", "The model '" + requested_model + "' does not exist; this server is serving '" +
+                                  state.model_name + "'"},
+                  {"type", "invalid_request_error"},
+                  {"param", "model"},
+                  {"code", "model_not_found"}}}};
+    res.set_content(err.dump(), "application/json");
+    return false;
 }
 
 // Build ImpConfig from default args + optional JSON overrides.
@@ -414,8 +400,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
 
     // Create context (engine auto-detects config from model metadata).
     // Re-stash the runtime config so Engine::init's take_pending_runtime_config()
-    // picks it up. The server may swap models at runtime; each swap rebuilds the
-    // Engine and consumes the pending slot.
+    // picks it up. The server may load a model at runtime (auto-load on first
+    // request); each load rebuilds the Engine and consumes the pending slot.
     imp::set_pending_runtime_config(state.runtime_config);
     ImpConfig config = build_config(state.default_args, state.runtime_config, path, config_overrides,
                                     state.model);
