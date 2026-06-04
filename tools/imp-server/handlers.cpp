@@ -36,7 +36,8 @@ struct ChatRequestParams {
     int n_completions = 1, top_logprobs = 0;
     bool stream = false, json_mode = false, req_logprobs = false, include_usage = false;
     bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
-    bool enable_thinking_requested = false;  // true iff body contained "enable_thinking": true
+    bool enable_thinking_requested = false;  // value of "enable_thinking" if present
+    bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
     // Stop sequences
     std::vector<std::string> stop_sequences;
     size_t max_stop_len = 0;
@@ -356,7 +357,7 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     config.use_prefix_caching = runtime_cfg.server.prefix_cache ? 1 : 0;
 
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
-    config.enable_green_contexts = 1;
+    config.enable_green_contexts = runtime_cfg.server.green_contexts ? 1 : 0;
     if (!args.prefix_cache_path.empty()) {
         snprintf(config.prefix_cache_path, sizeof(config.prefix_cache_path), "%s",
                  args.prefix_cache_path.c_str());
@@ -869,6 +870,7 @@ static bool parse_chat_request_params(
 
     // Parse enable_thinking (only meaningful for think models; checked in orchestrator)
     ctx.params.enable_thinking_requested = body.value("enable_thinking", false);
+    ctx.params.enable_thinking_set = body.contains("enable_thinking") && body["enable_thinking"].is_boolean();
 
     return true;
 }
@@ -969,12 +971,21 @@ static bool snapshot_state_and_tokenize_(
         }
     }
 
-    // Thinking mode: only enable when explicitly requested via "enable_thinking": true.
-    // The model is free to generate <think> on its own if it wants to reason —
-    // forcing <think> into the prompt breaks structured output (JSON) because the
-    // model enters reasoning mode instead of generating the requested format.
+    // Thinking mode default: ON for think models in plain chat. These models
+    // are trained with the <think> prefix; serving them without it produces
+    // bare reasoning that cannot be separated and leaks into user-visible
+    // content ("Okay, let's see. The user is asking..." as the answer — the
+    // recurring think-leak bug class). Exceptions, where entering reasoning
+    // mode breaks the requested output format: structured output (json_mode)
+    // and tool calls keep the old default OFF. An explicit "enable_thinking"
+    // in the request always wins in both directions.
+    const bool thinking_default =
+        ctx.snap.is_think_model && !ctx.params.json_mode && !ctx.params.has_tools;
+    const bool want_thinking = ctx.params.enable_thinking_set
+                                   ? ctx.params.enable_thinking_requested
+                                   : thinking_default;
     ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 &&
-                               ctx.params.enable_thinking_requested;
+                               want_thinking;
     ctx.snap.suppress_thinking = ctx.snap.is_think_model && !ctx.snap.enable_thinking && ctx.params.think_budget <= 0.0f;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
@@ -1073,7 +1084,11 @@ static bool snapshot_state_and_tokenize_(
         }
         return tail_text.find(needle) != std::string::npos;
     };
-    if (ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 && !ctx.snap.enable_thinking) {
+    // No special-token requirement here: Nemotron-style models think at TEXT
+    // level ("<think>" renders as plain text pieces, "</think>" closes it) —
+    // when their chat template injects the prefix, the output is reasoning
+    // from token 0 and must flow into reasoning_content, not content.
+    if (!ctx.snap.enable_thinking) {
         if (prompt_tail_contains("<think>", 8)) {
             ctx.snap.enable_thinking = true;
         }
@@ -1468,9 +1483,13 @@ static void nonstream_chat_response_(
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty() ? output_text : ctx.snap.tok->decode(output_ids);
 
-        // Extract reasoning content (DeepSeek format) or strip think blocks
+        // Extract reasoning content (DeepSeek format) or strip think blocks.
+        // enable_thinking also covers text-level thinkers (Nemotron) whose
+        // template injects "<think>" as plain text — is_think_model is false
+        // but the output is reasoning until the literal "</think>".
         std::string reasoning_content;
-        if (ctx.snap.is_think_model && state.default_args.reasoning_format == "deepseek") {
+        if ((ctx.snap.is_think_model || ctx.snap.enable_thinking) &&
+            state.default_args.reasoning_format == "deepseek") {
             // Generation that started inside an injected <think> prefix
             // (chat-template or server-appended; see prompt_tail_contains
             // above) carries no opener in its output. If it also never
@@ -1739,10 +1758,13 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     // The full accumulated output (only used when has_tools, for fallback)
     std::string full_output;
 
-    // Reasoning content extraction (DeepSeek format)
+    // Reasoning content extraction (DeepSeek format). enable_thinking also
+    // covers text-level thinkers (Nemotron: template-injected "<think>" as
+    // plain text, no special token — is_think_model is false but the output
+    // starts mid-reasoning and exits via the literal "</think>").
     enum class ThinkPhase { SCAN, REASONING, CONTENT };
     bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
-                          snap_is_think_model);
+                          (snap_is_think_model || enable_thinking));
     ThinkPhase think_phase;
     if (enable_thinking) {
         think_phase = ThinkPhase::REASONING;  // <think> in prefill -> start reasoning
@@ -3733,9 +3755,11 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
     std::vector<ParsedToolCall> stream_tool_calls;
     bool tool_calls_emitted = false;
 
-    // Reasoning extraction (DeepSeek <think>).
+    // Reasoning extraction (DeepSeek <think>). enable_thinking also covers
+    // text-level thinkers (Nemotron) — see the chat streaming path.
     enum class ThinkPhase { SCAN, REASONING, CONTENT };
-    bool use_reasoning = (state.default_args.reasoning_format == "deepseek" && snap_is_think_model);
+    bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
+                          (snap_is_think_model || enable_thinking));
     ThinkPhase think_phase;
     if (enable_thinking)
         think_phase = ThinkPhase::REASONING;

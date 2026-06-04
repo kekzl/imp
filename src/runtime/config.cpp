@@ -253,6 +253,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [server]
     else if (eq("server.prefix_cache"))
         cfg.server.prefix_cache = parse_bool(val, cfg.server.prefix_cache);
+    else if (eq("server.green_contexts"))
+        cfg.server.green_contexts = parse_bool(val, cfg.server.green_contexts);
 
     // [bench]
     else if (eq("bench.generate"))

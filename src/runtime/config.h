@@ -324,6 +324,10 @@ struct RuntimeConfig {
 
     struct Server {
         bool prefix_cache = false;
+        // Green Contexts / prefill-decode overlap streams in the server engine.
+        // [server] green_contexts = false to disable (diagnostic: suspected
+        // memSyncDomain race on sm_120 fallback streams — gemma-3-12b IMA).
+        bool green_contexts = true;
     } server;
 
     struct Bench {
