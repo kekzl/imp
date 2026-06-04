@@ -433,6 +433,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
         tests/test_gguf_loader.cpp
+        tests/test_gguf_fault_injection.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
@@ -447,6 +448,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
+        tests/test_tokenizer_robustness.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_chat_template.cpp
         tests/test_jinja.cpp

@@ -308,8 +308,12 @@ public:
     size_t remaining() const { return size_ - pos_; }
     const uint8_t* ptr() const { return data_ + pos_; }
     bool failed() const { return failed_; }
+    void fail() { failed_ = true; }
 
-    bool check(size_t n) const { return pos_ + n <= size_; }
+    // Bounds check for an n-byte read at the current cursor. Guards against
+    // pos_ + n overflowing on attacker-controlled u64 lengths (a wrapped sum
+    // would otherwise compare <= size_ and admit an out-of-bounds read).
+    bool check(size_t n) const { return n <= size_ - pos_; }
 
     void skip(size_t n) {
         if (!check(n)) {
@@ -356,8 +360,14 @@ public:
 
     std::string read_string() {
         uint64_t len = read_u64();
-        if (!check(len))
+        // A length that runs past EOF (incl. an absurd 2^60-style value) is a
+        // hard parse error, not a recoverable empty string: returning "" here
+        // would leave the cursor desynced and let the caller keep parsing
+        // garbage. Flag failure so the surrounding loop stops.
+        if (failed_ || len > remaining()) {
+            failed_ = true;
             return "";
+        }
         std::string s(reinterpret_cast<const char*>(data_ + pos_), static_cast<size_t>(len));
         pos_ += static_cast<size_t>(len);
         return s;
@@ -457,9 +467,11 @@ static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
                     r, count, v.int_array,
                     [](BinaryReader& br) { return static_cast<int32_t>(br.read_u8()); }, 1);
             } else {
-                // Skip unknown array element types
-                for (uint64_t i = 0; i < count && !r.failed(); i++)
-                    read_gguf_value(r, arr_type);
+                // Unknown/unsupported array element type. read_gguf_value()'s
+                // switch has no default, so it would consume zero bytes per
+                // element — a `count` of 2^60 would then spin ~forever without
+                // ever tripping the EOF guard. Treat it as a parse error.
+                r.fail();
             }
             break;
         }
@@ -828,6 +840,44 @@ static void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
     }
 }
 
+// ---- Tensor on-disk byte span ----
+
+// Total bytes a tensor occupies in the file, with saturating arithmetic so a
+// crafted dim product (e.g. ne[0]*ne[1] overflowing int64) can never wrap to a
+// small value that then passes the bounds check. Returns SIZE_MAX on overflow,
+// which makes the caller reject the tensor.
+static size_t gguf_tensor_byte_size(const GGUFTensorInfo& info) {
+    uint64_t n_elements = 1;
+    for (uint32_t d = 0; d < info.n_dims && d < 4; d++) {
+        int64_t dim = info.dims[d];
+        if (dim < 0)
+            return SIZE_MAX;  // negative/huge dim — reject
+        uint64_t ud = static_cast<uint64_t>(dim);
+        if (ud != 0 && n_elements > UINT64_MAX / ud)
+            return SIZE_MAX;  // multiply would overflow
+        n_elements *= ud;
+    }
+    int bs = gguf_blck_size(info.type);
+    size_t ts = gguf_type_size(info.type);
+    if (bs <= 0 || ts == 0)
+        return SIZE_MAX;  // unknown / unsupported quant type
+    uint64_t n_blocks = (n_elements + static_cast<uint64_t>(bs) - 1) / static_cast<uint64_t>(bs);
+    if (n_blocks != 0 && ts > UINT64_MAX / n_blocks)
+        return SIZE_MAX;
+    return static_cast<size_t>(n_blocks * ts);
+}
+
+// True iff the tensor's [offset, offset+size) window lies fully inside its
+// shard's data region (data_limit bytes from data_base).
+static bool gguf_tensor_in_bounds(const GGUFTensorInfo& info) {
+    size_t size = gguf_tensor_byte_size(info);
+    if (size == SIZE_MAX)
+        return false;
+    if (info.offset > info.data_limit)
+        return false;
+    return size <= info.data_limit - info.offset;
+}
+
 // ---- Main GGUF loader ----
 
 std::unique_ptr<Model> load_gguf(const std::string& path) {
@@ -894,7 +944,11 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // 3. Parse metadata key-value pairs
     std::unordered_map<std::string, GGUFValue> metadata;
-    metadata.reserve(static_cast<size_t>(kv_count));
+    // Clamp the reserve to what the file could physically hold (each KV pair is
+    // at least a 8-byte string-length prefix + 4-byte type tag = 12 bytes).
+    // Without this, a corrupt kv_count=2^60 would reserve petabytes and OOM
+    // before a single read ever fails.
+    metadata.reserve(std::min<uint64_t>(kv_count, reader.remaining() / 12));
 
     for (uint64_t i = 0; i < kv_count && !reader.failed(); i++) {
         std::string key = reader.read_string();
@@ -911,7 +965,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // 4. Parse tensor info entries
     std::vector<GGUFTensorInfo> tensor_infos;
-    tensor_infos.reserve(static_cast<size_t>(tensor_count));
+    // Clamp like the metadata reserve above: a tensor-info entry is at least
+    // name-len(8) + n_dims(4) + type(4) + offset(8) = 24 bytes, so a corrupt
+    // tensor_count cannot drive an unbounded allocation.
+    tensor_infos.reserve(std::min<uint64_t>(tensor_count, reader.remaining() / 24));
     parse_tensor_infos(reader, tensor_count, tensor_infos);
 
     if (reader.failed()) {
@@ -934,9 +991,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     IMP_LOG_DEBUG("Tensor data starts at offset %zu (alignment=%zu)", tensor_data_start, alignment);
 
-    // Set data_base for primary shard tensors
+    // Set data_base for primary shard tensors. data_limit = bytes of mapped
+    // file available past the tensor-data section, used to bounds-check each
+    // tensor's [offset, offset+size) window before we hand out a raw pointer.
+    size_t primary_data_avail = (tensor_data_start <= file_size) ? file_size - tensor_data_start : 0;
     for (auto& info : tensor_infos) {
         info.data_base = data + tensor_data_start;
+        info.data_limit = primary_data_avail;
     }
 
     // 5b. Handle split GGUF files (multiple shards)
@@ -1024,8 +1085,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
                 // Set data_base for this shard's tensors
                 size_t shard_tensor_start = tensor_infos.size() - static_cast<size_t>(stensor_count);
+                size_t shard_data_avail = (shard_data_start <= shard_size) ? shard_size - shard_data_start : 0;
                 for (size_t ti = shard_tensor_start; ti < tensor_infos.size(); ti++) {
                     tensor_infos[ti].data_base = sdata + shard_data_start;
+                    tensor_infos[ti].data_limit = shard_data_avail;
                 }
 
                 IMP_LOG_INFO("  Shard %d: %lu tensors, %.1f MiB", shard, (unsigned long)stensor_count,
@@ -1357,6 +1420,20 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     int assigned = 0, skipped = 0;
 
     for (const auto& info : tensor_infos) {
+        // Reject tensors whose [offset, offset+size) window escapes the mapped
+        // file before we ever form a pointer into it. A corrupt offset or a
+        // dim product that overflows would otherwise yield a wild pointer that
+        // weight_upload later reads — an out-of-bounds read / crash on a
+        // malformed file. Skipping leaves the slot null; downstream load fails
+        // cleanly (missing-weight path) instead of faulting.
+        if (!gguf_tensor_in_bounds(info)) {
+            IMP_LOG_ERROR(
+                "GGUF tensor '%s' out of bounds (offset=%lu, limit=%zu) — skipping; file is corrupt",
+                info.name.c_str(), (unsigned long)info.offset, info.data_limit);
+            skipped++;
+            continue;
+        }
+
         // Compute pointer into mmap'd data (supports split GGUF via per-tensor data_base)
         auto* tensor_data = const_cast<void*>(static_cast<const void*>(info.data_base + info.offset));
 
