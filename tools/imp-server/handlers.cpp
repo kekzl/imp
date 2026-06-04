@@ -1673,7 +1673,15 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     int                n_prompt_tokens  = ctx.snap.n_prompt_tokens;
     auto               t_start          = ctx.t_start;
     const auto&        stop_sequences   = ctx.params.stop_sequences;
-    size_t             max_stop_len     = static_cast<size_t>(ctx.params.max_stop_len);
+    // Derive max_stop_len from the FINAL stop list, not ctx.params.max_stop_len:
+    // the snapshot phase may inject server-side stops ("\nHuman" turn guard for
+    // think models) AFTER request parsing computed max_stop_len. A stale 0 made
+    // the partial-match holdback `size - max_stop_len + 1` flush one byte PAST
+    // pending_text's end — emitting the std::string NUL terminator into every
+    // SSE content delta ("4 ") and disabling cross-token stop matching.
+    size_t             max_stop_len     = 0;
+    for (const auto& s : stop_sequences)
+        max_stop_len = std::max(max_stop_len, s.size());
     int                req_logprobs     = ctx.params.req_logprobs;
     bool               include_usage    = ctx.params.include_usage;
     bool               enable_thinking  = ctx.snap.enable_thinking;
@@ -1765,6 +1773,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
 
     // Helper: flush confirmed text up to a byte position
     auto flush_text = [&](size_t up_to) {
+        up_to = std::min(up_to, pending_text.size());  // never read past the buffer
         if (up_to == 0)
             return true;
         bool ok = sse_writer.write_content(pending_text.data(), up_to, sink);
@@ -3583,7 +3592,11 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
     AnthropicSSE out{sink};
 
     const auto& stop_sequences = ctx.params.stop_sequences;
-    size_t max_stop_len = static_cast<size_t>(ctx.params.max_stop_len);
+    // Derive from the FINAL stop list (server-injected stops update it late) —
+    // see the matching comment in the chat streaming path.
+    size_t max_stop_len = 0;
+    for (const auto& s : stop_sequences)
+        max_stop_len = std::max(max_stop_len, s.size());
     bool enable_thinking = ctx.snap.enable_thinking;
     bool has_tools = ctx.params.has_tools;
     auto tpl_family = ctx.snap.tpl_family;
