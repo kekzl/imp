@@ -1471,9 +1471,23 @@ static void nonstream_chat_response_(
         // Extract reasoning content (DeepSeek format) or strip think blocks
         std::string reasoning_content;
         if (ctx.snap.is_think_model && state.default_args.reasoning_format == "deepseek") {
-            auto [reasoning, cleaned] = extract_reasoning(content);
-            reasoning_content = reasoning;
-            content = cleaned;
+            // Generation that started inside an injected <think> prefix
+            // (chat-template or server-appended; see prompt_tail_contains
+            // above) carries no opener in its output. If it also never
+            // reached </think> — budget exhausted mid-think, or the model
+            // stopped while reasoning — the WHOLE text is reasoning.
+            // extract_reasoning() can't tell that from text alone and would
+            // spill it into user-visible content (the streaming path gets
+            // this right via its in-think state machine).
+            if (ctx.snap.enable_thinking && content.find("</think>") == std::string::npos &&
+                content.find("<think>") == std::string::npos) {
+                reasoning_content = std::move(content);
+                content.clear();
+            } else {
+                auto [reasoning, cleaned] = extract_reasoning(content);
+                reasoning_content = reasoning;
+                content = cleaned;
+            }
         } else if (ctx.snap.is_think_model && state.default_args.reasoning_format != "none") {
             strip_think_block(content);
         }
