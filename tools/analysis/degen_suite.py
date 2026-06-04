@@ -450,7 +450,14 @@ def main():
     suite = Suite(srv, args.quick, args.skip_deterministic)
 
     t0 = time.time()
-    suite.probe_reasoning()
+    try:
+        suite.probe_reasoning()
+    except urllib.error.HTTPError as e:
+        body = e.read()[:300].decode("utf-8", "replace")
+        print(f"Reasoning probe failed: HTTP {e.code}: {body}", file=sys.stderr)
+        print("Server is up but cannot serve chat requests — check model state "
+              "and docker logs.", file=sys.stderr)
+        return 2
     for cat in selected:
         print(f"\n== {cat} ==")
         try:
