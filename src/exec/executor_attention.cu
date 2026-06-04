@@ -17,6 +17,7 @@
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
+#include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged.h"
 #include "compute/kv_gather.h"
 #include "compute/moe_routing.h"
@@ -50,6 +51,29 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 // is_dp4a_qtype() and dispatch_dp4a_gemv() are defined in executor_kernels.h
+
+// FP16-QK FA2 for SHORT prefill (seq below fmha_prefill_threshold): replaces
+// the materialized cuBLAS+softmax path with the register-resident FA2 kernel
+// in f16-QK mode. Same numerical class as the cuBLAS reference (f16 inputs,
+// f32 accumulate) — the short-seq e4m3 quality cliff (#511/#512) does not
+// apply, and no [n × ctx] S-matrix is materialized. Declined configs
+// (hd!=128, non-F16) return false → caller stays on cuBLAS; the fp8 FMHA
+// family is intentionally NOT a fallback here.
+static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, const Tensor& k,
+                                   const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
+                                   float scale, int sliding_window, float softcap, int q_offset,
+                                   cudaStream_t stream) {
+    if (rcfg.attention.fa2_fp16qk == "never" || hd != 128)
+        return false;
+    int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+    int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
+    Tensor q4 = q.reshape(4, q4s);
+    Tensor k4 = k.reshape(4, kv4s);
+    Tensor v4 = v.reshape(4, kv4s);
+    Tensor o4 = o.reshape(4, q4s);
+    return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
+                                  q_offset, /*fp16_qk=*/true);
+}
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).
 static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_k, const void* W_v,
@@ -311,11 +335,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool nv_k_secondary = (nv_k_it != wcache_.nvfp4.end());
         const bool nv_v_secondary = (nv_v_it != wcache_.nvfp4.end());
         const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
-                                  nv_q_secondary;
+                                 nv_q_secondary;
         const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
-                                  nv_k_secondary;
+                                 nv_k_secondary;
         const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4) ||
-                                  nv_v_secondary;
+                                 nv_v_secondary;
         bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && wq_is_nvfp4 && wk_is_nvfp4 && wv_is_nvfp4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
@@ -612,8 +636,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
-        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused &&
-            !cfg.rope_attn_disabled) {
+        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused && !cfg.rope_attn_disabled) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -714,9 +737,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             QType kvt = cache->qtype();
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
             // so this code only runs for FP16 / FP8 / NVFP4 / MXFP4_KV KV.
-            const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 ||
-                                  kvt == QType::NVFP4 || kvt == QType::MXFP4_KV ||
-                                  kvt == QType::INT4);
+            const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4 ||
+                                 kvt == QType::MXFP4_KV || kvt == QType::INT4);
             // sliding_active and attn_shapes_vary are now both supported:
             //   - cuBLAS softmax accepts a sliding_window argument (PR feat(attn): sw),
             //   - the rectangular cuBLAS path dispatches per-layer with nh/nkv/hd.
@@ -743,13 +765,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // guard the FP16 footprint here.
             int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
             int64_t fp16_elems_needed = static_cast<int64_t>(n) * ctx_len;
-            int64_t fp16_elems_avail  = static_cast<int64_t>(s_cap) * s_cap;
+            int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
             if (s_cap == 0 || fp16_elems_needed > fp16_elems_avail || n > s_cap) {
                 IMP_LOG_ERROR(
                     "chunked_prefill: attn_scores_ capacity %d×%d=%lld too small for "
                     "n=%d × ctx_len=%d = %lld at L%d — engine should have prevented this",
-                    s_cap, s_cap, (long long)fp16_elems_avail, n, ctx_len,
-                    (long long)fp16_elems_needed, layer);
+                    s_cap, s_cap, (long long)fp16_elems_avail, n, ctx_len, (long long)fp16_elems_needed,
+                    layer);
                 std::abort();
             }
             size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
@@ -767,40 +789,37 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                      state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             } else if (kvt == QType::FP8_E4M3) {
                 float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
-                                     ? kv_scales_[kv_layer] : 1.0f;
-                paged_kv_gather_fp8_to_fp16(
-                    k_full, static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                    state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
-                paged_kv_gather_fp8_to_fp16(
-                    v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-                    state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+                                     ? kv_scales_[kv_layer]
+                                     : 1.0f;
+                paged_kv_gather_fp8_to_fp16(k_full,
+                                            static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
+                                            state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_fp8_to_fp16(v_full,
+                                            static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
+                                            state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
             } else if (kvt == QType::NVFP4) {
-                paged_kv_gather_nvfp4_to_fp16(
-                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                    static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
-                paged_kv_gather_nvfp4_to_fp16(
-                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                    static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                              state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_nvfp4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                              static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                              state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             } else if (kvt == QType::MXFP4_KV) {
-                paged_kv_gather_mxfp4_kv_to_fp16(
-                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                    static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
-                paged_kv_gather_mxfp4_kv_to_fp16(
-                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                    static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_mxfp4_kv_to_fp16(k_full,
+                                                 static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                                 static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                                 state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_mxfp4_kv_to_fp16(v_full,
+                                                 static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                                 static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                                 state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
-                paged_kv_gather_int4_to_fp16(
-                    k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                    static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
-                paged_kv_gather_int4_to_fp16(
-                    v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                    static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                    state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                             static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
+                                             state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                paged_kv_gather_int4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                             static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
+                                             state.block_tables, q_offset, kv_bs, nkv, hd, stream);
             }
 
             // Append current chunk's K/V at offset q_offset.
@@ -826,22 +845,25 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // history in production. fp8-attention quality above the
             // threshold is tracked separately (see issue #511).
             const int fmha_threshold = runtime_config().attention.fmha_prefill_threshold;
-            const bool chunked_use_fmha =
-                !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
-                (fmha_threshold > 0 && ctx_len >= fmha_threshold);
+            const bool chunked_use_fmha = !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
+                                          (fmha_threshold > 0 && ctx_len >= fmha_threshold);
 
             if (chunked_use_fmha) {
                 // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
-                int64_t q4s[4]  = {1, (int64_t)n,       (int64_t)nh,  (int64_t)hd};
+                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
-                int64_t o4s[4]  = {1, (int64_t)n,       (int64_t)nh,  (int64_t)hd};
-                Tensor q4  = qv.reshape(4, q4s);
-                Tensor k4  = k_full_t.reshape(4, kv4s);
-                Tensor v4  = v_full_t.reshape(4, kv4s);
-                Tensor o4  = ao.reshape(4, o4s);
-                attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
-                                           layer_sliding_window, cfg.attn_logit_softcap,
-                                           stream, runtime_config(), q_offset);
+                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                Tensor q4 = qv.reshape(4, q4s);
+                Tensor k4 = k_full_t.reshape(4, kv4s);
+                Tensor v4 = v_full_t.reshape(4, kv4s);
+                Tensor o4 = ao.reshape(4, o4s);
+                attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
+                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
+            } else if (!per_layer_shapes &&
+                       try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
+                                              nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
+                                              q_offset, stream)) {
+                // short chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
             } else {
                 // cuBLAS: needs S-matrix for [n × ctx_len]
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
@@ -868,14 +890,23 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                  (n >= runtime_config().attention.fmha_prefill_threshold);
 
         if (s_matrix_fits && !non_gemma4_sliding && !prefer_fmha) {
-            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
-                                     /*causal=*/true, cfg.attn_logit_softcap,
-                                     /*q_offset=*/0, stream, layer_sliding_window);
+            // Below the FMHA threshold: prefer the FP16-QK FA2 kernel over the
+            // materialized cuBLAS path (same f16/f32 numerics, O(n) memory).
+            if (!force_cublas_attn &&
+                try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
+                                       layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
+                                       stream)) {
+                // handled by FA2 f16
+            } else {
+                attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                                         /*causal=*/true, cfg.attn_logit_softcap,
+                                         /*q_offset=*/0, stream, layer_sliding_window);
+            }
         } else {
             // FMHA fallback: tiled O(n) memory chain.
-            int64_t q4s[4]  = {1, (int64_t)n,   (int64_t)nh,  (int64_t)hd};
-            int64_t kv4s[4] = {1, (int64_t)n,   (int64_t)nkv, (int64_t)hd};
-            int64_t o4s[4]  = {1, (int64_t)n,   (int64_t)nh,  (int64_t)hd};
+            int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+            int64_t kv4s[4] = {1, (int64_t)n, (int64_t)nkv, (int64_t)hd};
+            int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
             Tensor q4 = qv.reshape(4, q4s);
             Tensor k4 = kk.reshape(4, kv4s);
             Tensor v4 = vv.reshape(4, kv4s);
@@ -1017,15 +1048,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 // null-check. Default path (residual_on=false) uses the
                 // function's default arguments — no explicit nullptr/0 marshalling
                 // at the call site, no dead per-layer state lookups.
-                const bool residual_on = state.kv_manager != nullptr &&
-                                         state.kv_manager->residual_enabled();
+                const bool residual_on = state.kv_manager != nullptr && state.kv_manager->residual_enabled();
                 const uint8_t* k_scales = static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0));
                 const uint8_t* v_scales = static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0));
                 if (!residual_on) {
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales,
-                                                    state.block_tables, state.context_lens, kv_bs, scale,
-                                                    state.max_context_len, layer_sliding_window,
-                                                    cfg.attn_logit_softcap, stream,
+                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, state.block_tables,
+                                                    state.context_lens, kv_bs, scale, state.max_context_len,
+                                                    layer_sliding_window, cfg.attn_logit_softcap, stream,
                                                     state.max_blocks_per_seq);
                 } else {
                     // Phase 3b residual read. Two activation paths:
@@ -1061,16 +1090,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                         res_count = rs.fill_count;
                         res_widx = rs.write_idx;
                     }
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales,
-                                                    state.block_tables, state.context_lens, kv_bs, scale,
-                                                    state.max_context_len, layer_sliding_window,
-                                                    cfg.attn_logit_softcap, stream,
-                                                    state.max_blocks_per_seq, 0,
-                                                    k_res, v_res, res_count, res_n, res_widx,
-                                                    k_res_base, v_res_base, res_seq_stride_elems,
-                                                    state.d_residual_seq_slots,
-                                                    state.d_residual_counts,
-                                                    state.d_residual_write_idxes,
+                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, state.block_tables,
+                                                    state.context_lens, kv_bs, scale, state.max_context_len,
+                                                    layer_sliding_window, cfg.attn_logit_softcap, stream,
+                                                    state.max_blocks_per_seq, 0, k_res, v_res, res_count,
+                                                    res_n, res_widx, k_res_base, v_res_base,
+                                                    res_seq_stride_elems, state.d_residual_seq_slots,
+                                                    state.d_residual_counts, state.d_residual_write_idxes,
                                                     state.kv_manager->d_residual_fc_ptr(),
                                                     state.kv_manager->d_residual_widx_ptr());
                 }
@@ -1087,11 +1113,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // BitDecoding TC path not supported for MXFP4_KV in Slice 2 — always scalar.
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
-                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, state.context_lens, kv_bs, scale,
-                                             state.max_context_len, layer_sliding_window,
-                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+                                            static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                            static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                            state.block_tables, state.context_lens, kv_bs, scale,
+                                            state.max_context_len, layer_sliding_window,
+                                            cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);

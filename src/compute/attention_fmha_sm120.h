@@ -40,8 +40,14 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 // runs its online softmax independently (no cross-warp reduction).
 // Target: long-context prefill where the smem-materializing fp8 kernel is
 // barrier-bound (ncu: 14.5% compute, 75.7% L1/TEX). Head dims: 128 (first).
+//
+// fp16_qk=true switches QK^T to mma.m16n8k16.f16 (Q staged as f16 in smem,
+// K read from f16 smem directly): half the score throughput, but NO e4m3
+// score noise — safe below fmha_prefill_threshold where the fp8 variants
+// compound per-layer noise into prompt-blind output (#511/#512). Bq=64 only
+// (f16 Q tile at Bq=128 exceeds the sm_120 smem opt-in).
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                            int q_offset = 0);
+                            int q_offset = 0, bool fp16_qk = false);
 
 }  // namespace imp

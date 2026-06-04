@@ -72,11 +72,16 @@ protected:
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+        // NOTE: the int cast before the -6 is load-bearing. `(i*7+3)%13 - 6`
+        // with size_t i underflows unsigned whenever %13 < 6, producing
+        // ±3.7e17 (→ ±inf as half) at ~46% of positions. The e4m3 satfinite
+        // convert masked that in the fp8 kernel, and the NaN-poisoned CPU
+        // reference made std::max() drop every comparison → vacuous pass.
         for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+            Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
-            V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+            K_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
+            V_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 13 + 7) % 13) - 6);
         }
 
         std::vector<float> O_ref(q_elems, 0.0f);
@@ -128,10 +133,14 @@ protected:
 
         // FP8 QK^T has lower precision than FP16 — use relaxed tolerance
         float max_err = 0.0f;
-        int nan_count = 0;
+        int nan_count = 0, ref_nan_count = 0;
         for (size_t i = 0; i < q_elems; i++) {
             float got = __half2float(O_h[i]);
             float ref = O_ref[i];
+            if (!std::isfinite(ref)) {
+                ref_nan_count++;  // poisoned reference would silently skip comparisons
+                continue;
+            }
             if (std::isnan(got)) {
                 nan_count++;
                 continue;
@@ -140,6 +149,7 @@ protected:
             float denom = std::max(1.0f, std::abs(ref));
             max_err = std::max(max_err, err / denom);
         }
+        EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
         EXPECT_EQ(nan_count, 0) << "NaN values in FP8 FMHA output";
         // FP8 E4M3 has ~0.1% precision loss in scores, allow 5% relative error
         EXPECT_LT(max_err, 0.05f) << "Max relative error too high: " << max_err;
@@ -184,17 +194,18 @@ TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 
 class FmhaFA2Test : public FmhaFP8Test {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                 float softcap = 0.0f, float amplitude = 1.0f) {
+                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false) {
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
         size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+        // int cast before -6 is load-bearing — see run_test above.
         for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = amplitude * 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+            Q_f[i] = amplitude * 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = amplitude * 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
-            V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+            K_f[i] = amplitude * 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
+            V_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 13 + 7) % 13) - 6);
         }
 
         std::vector<float> O_ref(q_elems, 0.0f);
@@ -227,7 +238,8 @@ protected:
         Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-        bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_);
+        bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_,
+                                         /*q_offset=*/0, fp16_qk);
         ASSERT_TRUE(ok) << "fmha_sm120_fa2_prefill returned false (config must be supported)";
         cudaStreamSynchronize(stream_);
         cudaError_t err = cudaGetLastError();
@@ -237,10 +249,14 @@ protected:
         cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
 
         float max_err = 0.0f;
-        int nan_count = 0;
+        int nan_count = 0, ref_nan_count = 0;
         for (size_t i = 0; i < q_elems; i++) {
             float got = __half2float(O_h[i]);
             float ref = O_ref[i];
+            if (!std::isfinite(ref)) {
+                ref_nan_count++;  // poisoned reference would silently skip comparisons
+                continue;
+            }
             if (std::isnan(got)) {
                 nan_count++;
                 continue;
@@ -253,8 +269,14 @@ protected:
         cudaFree(d_k);
         cudaFree(d_v);
         cudaFree(d_o);
+        EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
         EXPECT_EQ(nan_count, 0) << "NaN values in FA2 FMHA output";
-        EXPECT_LT(max_err, 0.05f) << "Max relative error too high: " << max_err;
+        // fp16 QK has no e4m3 score quantization — hold it to a 1% bound
+        // (inputs are half-rounded vs the float reference; ~2^-11 per element
+        // over a 128-dot + f16 P/V rounding in PV). fp8 QK keeps the
+        // historical 5%.
+        const float tol = fp16_qk ? 0.01f : 0.05f;
+        EXPECT_LT(max_err, tol) << "Max relative error too high: " << max_err;
     }
 };
 
@@ -289,6 +311,34 @@ TEST_F(FmhaFA2Test, CausalMultiTile_HD128) { run_fa2(1, 128, 128, 4, 4, 128, tru
 TEST_F(FmhaFA2Test, LongCtx_HD128) { run_fa2(1, 256, 256, 8, 2, 128, true); }
 TEST_F(FmhaFA2Test, SlidingWindow_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true, 64); }
 TEST_F(FmhaFA2Test, Softcap_HD128) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f); }
+
+// ---------------------------------------------------------------------------
+// FP16-QK variant (mma.m16n8k16.f16): the short-prefill replacement for the
+// materialized cuBLAS path. No e4m3 quantization anywhere in QK → verified
+// at 1% tolerance (5x tighter than the fp8 tests). The realistic-magnitude
+// cases are the exact regime where the fp8 QK loses mantissa bits (#511) —
+// fp16 must hold the tight bound there too.
+// ---------------------------------------------------------------------------
+TEST_F(FmhaFA2Test, FP16QK_CausalShortSeq24_GQA32_8) {
+    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
+}
+TEST_F(FmhaFA2Test, FP16QK_CausalSeq64) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq136_GQA32_8) {
+    run_fa2(1, 136, 136, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
+}
+TEST_F(FmhaFA2Test, FP16QK_RealisticMagnitude_Seq24) {
+    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f, true);
+}
+TEST_F(FmhaFA2Test, FP16QK_RealisticMagnitude_Seq64) {
+    run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f, true);
+}
+TEST_F(FmhaFA2Test, FP16QK_NonCausal) { run_fa2(1, 32, 64, 4, 4, 128, false, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_GQA) { run_fa2(1, 64, 64, 8, 2, 128, true, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_MultiTile) { run_fa2(1, 128, 128, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_LongCtx) { run_fa2(1, 256, 256, 8, 2, 128, true, 0, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_SlidingWindow) { run_fa2(1, 128, 128, 4, 4, 128, true, 64, 0.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f, 1.0f, true); }
 
 }  // namespace
 }  // namespace imp
