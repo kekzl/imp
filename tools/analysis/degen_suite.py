@@ -49,6 +49,10 @@ SPECIAL_MARKERS = [
     "<|channel>", "<channel|>", "<start_of_turn>", "<end_of_turn>",
     "[INST]", "[/INST]", "<<SYS>>", "<|user|>", "<|assistant|>",
     "<think>", "</think>",
+    # NUL byte: byte-level-BPE models can emit the 0x00 byte token —
+    # observed live on Qwen3.6-NVFP4 (alternating token/NUL right after
+    # server start). Never valid in text output.
+    "\x00",
 ]
 
 # Meta-reasoning openers: if a *reasoning* model puts these at the start of
@@ -205,11 +209,19 @@ class Suite:
         print(f"  [\033[33mSKIP\033[0m] {name} — {why}")
 
     def probe_reasoning(self):
-        """One short probe: does this model emit reasoning_content?"""
-        r = self.srv.chat_stream(
-            [{"role": "user", "content": "What is 2+2? Answer with the number only."}],
-            max_tokens=200,
-        )
+        """Probe: does this model emit reasoning_content?
+
+        Two attempts (stream + non-stream) — reasoning models are not
+        deterministic about WHEN they think (Qwen3.6 sometimes answers a
+        trivial question with zero reasoning tokens), so a single probe
+        misclassifies and downstream categories then use too-small budgets.
+        """
+        q = [{"role": "user", "content":
+              "Is 17 a prime number? Explain briefly, then answer yes or no."}]
+        r = self.srv.chat_stream(q, max_tokens=400)
+        if not r["reasoning"]:
+            r2 = self.srv.chat(q, max_tokens=400, seed=7)
+            r["reasoning"] = r["reasoning"] or r2["reasoning"]
         self.is_reasoning = bool(r["reasoning"])
         print(f"Model emits reasoning_content: {self.is_reasoning}")
         return r
@@ -311,7 +323,7 @@ class Suite:
 
     # -- adherence (prompt-blindness / gross hallucination) ------------------
     def cat_adherence(self):
-        n = 600 if self.is_reasoning else 80
+        n = 1000 if self.is_reasoning else 80
         tasks = [
             ("echo literal", "Reply with exactly this string and nothing else: BANANA42", "BANANA42"),
             ("arithmetic", "What is 17 + 25? Reply with the number only.", "42"),
@@ -341,7 +353,7 @@ class Suite:
             + filler_unit * reps
             + "\n\nWhat was the code I asked you to remember? Reply with the code only."
         )
-        n = 600 if self.is_reasoning else 60
+        n = 1000 if self.is_reasoning else 60
         try:
             r = self.srv.chat([{"role": "user", "content": prompt}], max_tokens=n)
         except urllib.error.HTTPError as e:
@@ -353,7 +365,7 @@ class Suite:
 
     # -- multi-turn state ----------------------------------------------------
     def cat_multi_turn(self):
-        n = 600 if self.is_reasoning else 100
+        n = 1000 if self.is_reasoning else 100
         msgs = [{"role": "user", "content": "My lucky number is 271. Just acknowledge briefly."}]
         r1 = self.srv.chat(msgs, max_tokens=n)
         msgs.append({"role": "assistant", "content": r1["content"] or "Noted."})
@@ -373,7 +385,7 @@ class Suite:
     # -- stream protocol -----------------------------------------------------
     def cat_stream(self):
         q = [{"role": "user", "content": "List the numbers from 1 to 10, comma separated."}]
-        n = 700 if self.is_reasoning else 120
+        n = 1000 if self.is_reasoning else 120
         s = self.srv.chat_stream(q, max_tokens=n)
         self.record("stream", "SSE terminates with [DONE]", s["done"])
         self.record("stream", "finish_reason chunk present",
