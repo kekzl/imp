@@ -472,6 +472,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-attention SOURCES
         tests/test_attention_tc.cu
         tests/test_attention_fmha_sm120.cu
+        tests/test_attention_crosspath.cu
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
