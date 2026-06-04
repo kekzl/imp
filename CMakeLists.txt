@@ -525,6 +525,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_green_ctx.cu
+        tests/test_prefix_cache_equiv.cpp
     )
 
     imp_add_test_module(test-moe-gdn SOURCES
@@ -550,6 +551,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_forward.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
+        tests/test_prefix_cache_e2e.cpp
     )
 
     set(IMP_TEST_BINARIES
