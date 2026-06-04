@@ -17,6 +17,10 @@ JsonConstrainer::~JsonConstrainer() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
         d_token_categories_ = nullptr;
     }
+    if (d_token_allow_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
+        d_token_allow_ = nullptr;
+    }
     if (d_allowed_mask_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
         d_allowed_mask_ = nullptr;
@@ -41,7 +45,8 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     // every json_mode request ran to max_tokens and finished with "length".
     // CAT_EOS is allowed ONLY in DONE — allowing it everywhere lets a
     // json-reluctant model emit EOS as its very first token (0 completions).
-    for (int32_t eid : tok.eos_ids()) {
+    eos_ids_ = tok.eos_ids();
+    for (int32_t eid : eos_ids_) {
         if (eid >= 0 && eid < vocab_size_)
             token_categories_[eid] = CAT_EOS;  // reachable only where the mask says so
     }
@@ -84,12 +89,15 @@ void JsonConstrainer::reset() {
 uint16_t JsonConstrainer::compute_allowed_mask() const {
     // Whitespace is legal between any JSON tokens, but cap the run length —
     // see advance_char. (EOS has its own CAT_EOS bit, allowed in DONE only.)
-    constexpr int kMaxWsRun = 64;
+    constexpr int kMaxWsRun = 32;
     uint16_t mask = (ws_run_ < kMaxWsRun) ? CAT_WHITESPACE : 0;
 
     switch (current_state_) {
         case JsonState::START:
-            // Must start with { or [
+            // Must start with { or [. (Forcing object-only at the root was
+            // tried and reverted: a json-reluctant model then fights the
+            // mask with whitespace floods instead of emitting a minimal
+            // valid document.)
             mask |= CAT_OPEN_BRACE | CAT_OPEN_BRACKET;
             break;
 
@@ -164,16 +172,22 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
     return mask;
 }
 
-void JsonConstrainer::advance_char(char c) {
+bool JsonConstrainer::advance_char(char c) {
     // Skip whitespace in non-string states — but count the run. JSON allows
     // unlimited inter-token whitespace, and a model that doesn't want to emit
     // JSON exploits that as an escape hatch (greedy decode emits newlines
     // until max_tokens). compute_allowed_mask() drops CAT_WHITESPACE once the
     // run exceeds the cap, forcing a structural token (or EOS) instead.
+    //
+    // Returns true when the char is a legal continuation in the current FSM
+    // state. update() ignores the result (tolerant, as before); the
+    // whole-token simulation in apply_mask() uses it to reject tokens whose
+    // FIRST char passes the category mask but whose tail violates the
+    // grammar (e.g. the single token "[]." — '.' after a completed value).
     if (current_state_ != JsonState::IN_STRING && current_state_ != JsonState::IN_STRING_ESCAPE &&
         (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
         ws_run_++;
-        return;
+        return true;
     }
     ws_run_ = 0;
 
@@ -185,6 +199,8 @@ void JsonConstrainer::advance_char(char c) {
             } else if (c == '[') {
                 state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::ARRAY_START;
+            } else {
+                return false;
             }
             break;
 
@@ -196,12 +212,16 @@ void JsonConstrainer::advance_char(char c) {
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+            } else {
+                return false;
             }
             break;
 
         case JsonState::AFTER_KEY:
             if (c == ':') {
                 current_state_ = JsonState::AFTER_COLON;
+            } else {
+                return false;
             }
             break;
 
@@ -230,6 +250,8 @@ void JsonConstrainer::advance_char(char c) {
                 current_state_ = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 current_state_ = JsonState::IN_NUMBER;
+            } else {
+                return false;
             }
             break;
 
@@ -241,6 +263,8 @@ void JsonConstrainer::advance_char(char c) {
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+            } else {
+                return false;
             }
             break;
 
@@ -272,6 +296,8 @@ void JsonConstrainer::advance_char(char c) {
                 current_state_ = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 current_state_ = JsonState::IN_NUMBER;
+            } else {
+                return false;
             }
             break;
 
@@ -282,6 +308,8 @@ void JsonConstrainer::advance_char(char c) {
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+            } else {
+                return false;
             }
             break;
 
@@ -312,12 +340,16 @@ void JsonConstrainer::advance_char(char c) {
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
-                advance_char(c);  // re-process
-                return;
+                return advance_char(c);  // re-process in parent context
             }
             break;
 
         case JsonState::IN_LITERAL:
+            // Strict: the char must be the literal's next expected char
+            // ("tru"+'x' was silently accepted before).
+            if (partial_literal_.size() >= target_literal_.size() ||
+                c != target_literal_[partial_literal_.size()])
+                return false;
             partial_literal_ += c;
             if (partial_literal_.size() >= target_literal_.size()) {
                 // Literal complete — transition to parent
@@ -328,8 +360,37 @@ void JsonConstrainer::advance_char(char c) {
             break;
 
         case JsonState::DONE:
-            break;
+            // Any non-whitespace after a complete document is invalid.
+            return false;
     }
+    return true;
+}
+
+bool JsonConstrainer::sim_token_valid(const std::string& text) {
+    // Snapshot → strict-advance over the whole token text → restore.
+    // advance_char is the single grammar source of truth (no parallel FSM).
+    const JsonState st = current_state_;
+    const size_t depth = state_stack_.size();
+    const std::string plit = partial_literal_;
+    const std::string tlit = target_literal_;
+    const int ws = ws_run_;
+    std::vector<JsonState> stack_copy = state_stack_;
+
+    bool ok = true;
+    for (char c : text) {
+        if (!advance_char(c)) {
+            ok = false;
+            break;
+        }
+    }
+
+    current_state_ = st;
+    state_stack_ = std::move(stack_copy);
+    (void)depth;
+    partial_literal_ = plit;
+    target_literal_ = tlit;
+    ws_run_ = ws;
+    return ok;
 }
 
 void JsonConstrainer::update(int32_t token) {
@@ -352,15 +413,65 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
 
     uint16_t mask = compute_allowed_mask();
 
-    // Upload mask to device
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_allowed_mask_, &mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+    // Whole-token validation: the category bitmask only inspects a token's
+    // FIRST character class, so multi-char tokens could smuggle grammar
+    // violations past it (the single token "[]." closes the document and
+    // appends an illegal '.'). Simulate every category-passing candidate
+    // through the FSM (advance_char strict mode) and build a per-token
+    // allow list. Hot-path shortcut: inside strings, tokens without '"'
+    // or '\\' can never change FSM state — skip the simulation.
+    if (token_allow_.size() != static_cast<size_t>(vocab_size))
+        token_allow_.assign(vocab_size, 0);
+    const bool in_string =
+        current_state_ == JsonState::IN_STRING || current_state_ == JsonState::IN_STRING_ESCAPE;
+    size_t n_allowed = 0;
+    for (int i = 0; i < vocab_size; i++) {
+        uint8_t allow = 0;
+        if ((token_categories_[i] & mask) != 0) {
+            const std::string& text = token_texts_[i];
+            if (token_categories_[i] == CAT_EOS) {
+                allow = 1;  // EOS already gated by the mask (DONE state only)
+            } else if (in_string && text.find('"') == std::string::npos &&
+                       text.find('\\') == std::string::npos) {
+                allow = 1;
+            } else {
+                allow = sim_token_valid(text) ? 1 : 0;
+            }
+        }
+        token_allow_[i] = allow;
+        n_allowed += allow;
+    }
 
-    // Launch masking kernel
+    // Empty-allow guard: if NOTHING passes (over-tight schema/state combo),
+    // every logit would be -FLT_MAX and greedy argmax degenerates to token
+    // id 0 — the "!!!!!" spam. Force a clean finish instead by allowing EOS.
+    if (n_allowed == 0) {
+        for (int32_t eid : eos_ids_) {
+            if (eid >= 0 && eid < vocab_size)
+                token_allow_[eid] = 1;
+        }
+        IMP_LOG_WARN("JsonConstrainer: no token satisfies the grammar in state %d — allowing EOS",
+                     static_cast<int>(current_state_));
+    }
+
+    if (!d_token_allow_) {
+        if (cudaMalloc(&d_token_allow_, vocab_size) != cudaSuccess) {
+            d_token_allow_ = nullptr;
+            return;
+        }
+    }
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size, cudaMemcpyHostToDevice, stream));
+
+    uint16_t any_mask = 0xFFFF;  // per-token allow already encodes the category mask
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(d_allowed_mask_, &any_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    constrain_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_, d_allowed_mask_,
-                                                          vocab_size);
+    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_,
+                                                                d_token_allow_, d_allowed_mask_, vocab_size,
+                                                                /*use_token_allow=*/true);
 }
 
 // ============================================================================

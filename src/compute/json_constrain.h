@@ -126,6 +126,10 @@ private:
 
     // Device buffer for allowed mask (1 uint16_t, stable address)
     uint16_t* d_allowed_mask_ = nullptr;
+    // Per-token whole-token-validated allow list (host + device)
+    std::vector<uint8_t> token_allow_;
+    uint8_t* d_token_allow_ = nullptr;
+    std::vector<int32_t> eos_ids_;
 
     // Preamble pass-through (reasoning models emit <think>...</think> first)
     PreambleGate preamble_;
@@ -133,8 +137,12 @@ private:
     // Compute allowed category mask from current FSM state
     uint16_t compute_allowed_mask() const;
 
+    // Whole-token strict validation: snapshot the FSM, advance over the
+    // token text, restore. True iff every char is a legal continuation.
+    bool sim_token_valid(const std::string& text);
+
     // Advance FSM by one character
-    void advance_char(char c);
+    bool advance_char(char c);
 };
 
 // ---------------------------------------------------------------------------
