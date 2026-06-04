@@ -117,23 +117,24 @@ TEST_F(PrefixCacheE2ETest, ControlNoCacheBackToBackIsDeterministic) {
 }
 
 // =============================================================================
-// Tests 1-3 are DISABLED: they FAIL against the current engine — the
-// prefix-cache hit DIVERGES from the fresh prefill under greedy decoding
-// (verified 2026-06-04, Qwen3-8B-Q8_0, CUDA graphs ON; diverges ~15 tokens
-// in: "...computing starting from ancient times up to the" vs "...computing.
-// Let me start by recalling the"). The control test above passes, so the
-// divergence is attributable to the cache path, and the unit tests prove the
-// manager returns the right blocks with intact bytes — the corruption is in
-// the engine integration of a cache hit (partial-block resume / position
-// bookkeeping are the prime suspects). Tracked in issue #536; flip DISABLED_ off when fixing — these tests ARE the
-// feature's ship gate (TEST_AUDIT risk #7: "the test IS the enabler").
+// History: tests 1-3 initially FAILED (issue #536) — the prefix-cache HIT
+// diverged from the fresh prefill under greedy decoding. Root cause was NOT
+// the cache or FP rounding: GPUBatchPool::upload_into_pool skipped the
+// block-table re-upload based on a (count + first-block-ID) proxy, which a
+// prefix hit defeats (same first reused block, same count, different middle
+// after reuse+eviction, e.g. [0,1,4,3,2]) — the first eager decode step then
+// ran on the PREVIOUS request's table, writing the new token's KV into the
+// wrong physical block while the async graph read garbage at the self-token
+// position. Fixed by content-comparing the table (batch.cpp). These tests
+// are the feature's ship gate (TEST_AUDIT risk #7: "the test IS the
+// enabler") — they must stay green for prefix caching to be enabled.
 // =============================================================================
 // 1. Fresh-prefill vs prefix-cache-HIT must be token-identical.
 //    Same context, prefix caching ON, NO reset between calls: call 1 prefills
 //    fresh and caches its prefix on finish; call 2 hits the cached prefix.
 //    Greedy ⇒ the two outputs must be byte-identical. A mismatch is exactly the
 //    silent-determinism failure that keeps the feature off-by-default.
-TEST_F(PrefixCacheE2ETest, DISABLED_FreshVsPrefixHitTokenEqual) {
+TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
     MakeContext(/*prefix_cache=*/true);
 
     std::string first = gen(kPrompt, kGen);   // fresh prefill, caches prefix on finish
@@ -150,7 +151,7 @@ TEST_F(PrefixCacheE2ETest, DISABLED_FreshVsPrefixHitTokenEqual) {
 // 2. Cross-context equivalence: prefix-cache-ON output == prefix-cache-OFF
 //    output for the same greedy request. This pins the cache path to the
 //    canonical fresh-prefill result, not merely to "self-consistent".
-TEST_F(PrefixCacheE2ETest, DISABLED_PrefixCacheMatchesNoCacheBaseline) {
+TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
     // Baseline: caching OFF.
     MakeContext(/*prefix_cache=*/false);
     std::string baseline = gen(kPrompt, kGen);
@@ -173,7 +174,7 @@ TEST_F(PrefixCacheE2ETest, DISABLED_PrefixCacheMatchesNoCacheBaseline) {
 //    request that shares the long kPrompt prefix but appends a distinct suffix.
 //    The result must be (a) non-empty/coherent and (b) reproducible 2× — proving
 //    the partial prefix hit feeds a correct, deterministic continuation.
-TEST_F(PrefixCacheE2ETest, DISABLED_SharedPrefixDifferentSuffixStable) {
+TEST_F(PrefixCacheE2ETest, SharedPrefixDifferentSuffixStable) {
     MakeContext(/*prefix_cache=*/true);
     (void)gen(kPrompt, kGen);  // warm: cache kPrompt's blocks
 
