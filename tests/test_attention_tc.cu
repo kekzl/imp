@@ -52,10 +52,12 @@ TEST_F(AttentionTCTest, SmallPrefill) {
     cudaMalloc(&d_v, kv_bytes);
     cudaMalloc(&d_o, qo_bytes);
 
-    // Initialize Q,K,V with small values that won't cause overflow
+    // Initialize Q,K,V with small values that won't cause overflow.
+    // int cast is load-bearing: `(i % 7) - 3` with size_t i underflows
+    // unsigned whenever %7 < 3 → ±inf fills (#525/#528).
     std::vector<half> h_qkv(B * S * NH * HD);
     for (size_t i = 0; i < h_qkv.size(); i++) {
-        h_qkv[i] = __float2half(0.02f * static_cast<float>((i % 7) - 3));
+        h_qkv[i] = __float2half(0.02f * static_cast<float>(static_cast<int>(i % 7) - 3));
     }
     cudaMemcpy(d_q, h_qkv.data(), qo_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_k, h_qkv.data(), kv_bytes, cudaMemcpyHostToDevice);
@@ -212,11 +214,16 @@ protected:
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+        // NOTE: the int cast before the -6 is load-bearing (#525/#528). With
+        // size_t i the subtraction underflows unsigned → ±inf fills → NaN
+        // reference → vacuous pass. The old V multiplier 13 made V CONSTANT
+        // (i*13 % 13 == 0), hiding any attention-weight error from P@V; 17
+        // (coprime to 13) restores coverage.
         for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+            Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
-            V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+            K_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
+            V_f[i] = 0.2f * static_cast<float>(static_cast<int>((i * 17 + 7) % 13) - 6);
         }
 
         // CPU reference
@@ -264,14 +271,21 @@ protected:
         cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
 
         float max_err = 0.0f;
+        int non_finite = 0;
         for (size_t i = 0; i < q_elems; i++) {
             float got = __half2float(O_h[i]);
             float ref = O_ref[i];
-            float err_val = std::abs(got - ref);
-            // Relative tolerance for larger values
-            float denom = std::max(std::abs(ref), 1e-6f);
-            max_err = std::max(max_err, err_val / denom);
+            if (!std::isfinite(got) || !std::isfinite(ref)) {
+                non_finite++;  // NaN would silently fall out of std::max below
+                continue;
+            }
+            // denom max(1,|ref|) as in test_attention_crosspath.cu: outputs
+            // are O(1)-bounded weighted averages of V; an |ref|-relative error
+            // with a 1e-6 floor explodes at sign crossings of correct kernels.
+            float denom = std::max(std::abs(ref), 1.0f);
+            max_err = std::max(max_err, std::abs(got - ref) / denom);
         }
+        EXPECT_EQ(non_finite, 0) << "non-finite output/reference elements";
 
         // FP16 WMMA with online softmax: allow 1e-2 relative tolerance
         EXPECT_LT(max_err, 1e-2f) << "Max relative error " << max_err << " exceeds threshold 1e-2"
@@ -338,11 +352,12 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     size_t kv_elems = B * Skv * NKV * HD;
 
     std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+    // int cast + V multiplier 17: see run_test() above (#525/#528).
     for (size_t i = 0; i < q_elems; i++)
-        Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+        Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
     for (size_t i = 0; i < kv_elems; i++) {
-        K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
-        V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+        K_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
+        V_f[i] = 0.2f * static_cast<float>(static_cast<int>((i * 17 + 7) % 13) - 6);
     }
 
     // CPU reference with sliding window mask
@@ -424,12 +439,18 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
 
     float max_err = 0.0f;
+    int non_finite = 0;
     for (size_t i = 0; i < q_elems; i++) {
         float got = __half2float(O_h[i]);
         float ref = O_ref[i];
-        float denom = std::max(std::abs(ref), 1e-6f);
+        if (!std::isfinite(got) || !std::isfinite(ref)) {
+            non_finite++;  // NaN would silently fall out of std::max below
+            continue;
+        }
+        float denom = std::max(std::abs(ref), 1.0f);
         max_err = std::max(max_err, std::abs(got - ref) / denom);
     }
+    EXPECT_EQ(non_finite, 0) << "non-finite output/reference elements";
     EXPECT_LT(max_err, 1e-2f) << "Sliding window max relative error " << max_err;
 
     cudaFree(d_q);

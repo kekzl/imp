@@ -90,11 +90,17 @@ protected:
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+        // NOTE: the int cast before the -6 is load-bearing (#525/#528). With
+        // size_t i, `(i*7+3)%13 - 6` underflows unsigned whenever %13 < 6 —
+        // ~46% of fills became ±inf, the reference went NaN and the NaN-
+        // dropping comparator passed vacuously. Also: the old V multiplier 13
+        // made V CONSTANT (i*13 % 13 == 0), so P@V was insensitive to the
+        // attention weights entirely; 17 (coprime to 13) restores coverage.
         for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+            Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
-            V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+            K_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
+            V_f[i] = 0.2f * static_cast<float>(static_cast<int>((i * 17 + 7) % 13) - 6);
         }
 
         // CPU reference
@@ -147,12 +153,21 @@ protected:
         cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
 
         float max_err = 0.0f;
+        int non_finite = 0;
         for (size_t i = 0; i < q_elems; i++) {
             float got = __half2float(O_h[i]);
             float ref = O_ref[i];
-            float denom = std::max(std::abs(ref), 1e-6f);
+            if (!std::isfinite(got) || !std::isfinite(ref)) {
+                non_finite++;  // NaN would silently fall out of std::max below
+                continue;
+            }
+            // denom max(1,|ref|) as in test_attention_crosspath.cu: outputs
+            // are O(1)-bounded weighted averages of V; an |ref|-relative error
+            // with a 1e-6 floor explodes at sign crossings of correct kernels.
+            float denom = std::max(std::abs(ref), 1.0f);
             max_err = std::max(max_err, std::abs(got - ref) / denom);
         }
+        EXPECT_EQ(non_finite, 0) << "non-finite output/reference elements";
 
         EXPECT_LT(max_err, tol) << "Max relative error " << max_err << " exceeds threshold " << tol
                                 << " (B=" << B << " Sq=" << Sq << " Skv=" << Skv << " NH=" << NH
@@ -259,19 +274,12 @@ TEST_F(FmhaSm120Test, DispatchSelectsSm120FMHA) {
     run_test(1, 64, 64, 4, 4, 128, true, 0, 0.0f);
 }
 
-TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
-    // INVESTIGATION 2026-05-14: when called via this manual path, the kernel
-    // produces NaN output even with the IDENTICAL data pattern as run_test()
-    // which works for the same shape (B=1, S=64, NH=4, HD=128, causal). Both
-    // paths route through fmha_sm120_prefill → fmha_sm120_kernel with the
-    // same arguments. Diff is the surrounding setup; likely a CUDA stream /
-    // initialization state issue specific to invoking the kernel from a
-    // top-level TEST_F body rather than the run_test() helper. Reproduced
-    // via gtest_also_run_disabled_tests; debug prints show Q=correct, kernel
-    // returns true, no CUDA error, but O[0..7]=NaN. The kernel works fine
-    // when called via run_test() — see e.g. DispatchSelectsSm120FMHA which
-    // exercises this exact shape and passes.
-    // Leaving DISABLED until someone reproduces under nsys/compute-sanitizer.
+TEST_F(FmhaSm120Test, DispatchManual) {
+    // RESOLVED 2026-06-05 (#528): the 2026-05-14 "NaN mystery" (this manual
+    // path produced NaN while run_test() 'worked' on the same shape) was the
+    // size_t underflow in the %13 fills — ~46% of inputs were ±inf, so NaN
+    // output was CORRECT; run_test() only looked green because its comparator
+    // silently dropped NaNs via std::max. With the int cast both paths agree.
     const int B = 1, S = 64, NH = 4, HD = 128;
     size_t bytes = B * S * NH * HD * sizeof(half);
 
@@ -283,11 +291,11 @@ TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
 
     std::vector<half> h_q(B * S * NH * HD), h_k(B * S * NH * HD), h_v(B * S * NH * HD);
     for (size_t i = 0; i < h_q.size(); i++) {
-        h_q[i] = __float2half(0.02f * static_cast<float>(((i * 7 + 3) % 13) - 6));
+        h_q[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6));
     }
     for (size_t i = 0; i < h_k.size(); i++) {
-        h_k[i] = __float2half(0.02f * static_cast<float>(((i * 11 + 5) % 13) - 6));
-        h_v[i] = __float2half(0.02f * static_cast<float>(((i * 13 + 7) % 13) - 6));
+        h_k[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6));
+        h_v[i] = __float2half(0.2f * static_cast<float>(static_cast<int>((i * 17 + 7) % 13) - 6));
     }
     cudaMemcpy(d_q, h_q.data(), bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_k, h_k.data(), bytes, cudaMemcpyHostToDevice);
@@ -320,12 +328,15 @@ TEST_F(FmhaSm120Test, DISABLED_DispatchManual) {
     // Check output has finite, non-zero values
     std::vector<half> h_o(B * S * NH * HD);
     cudaMemcpy(h_o.data(), d_o, bytes, cudaMemcpyDeviceToHost);
-    int finite_nonzero = 0;
+    int finite_nonzero = 0, nan_count = 0;
     for (auto& v : h_o) {
         float fv = __half2float(v);
         if (std::isfinite(fv) && fv != 0.0f)
             finite_nonzero++;
+        if (std::isnan(fv))
+            nan_count++;
     }
+    EXPECT_EQ(nan_count, 0) << "NaN in output with finite inputs";
     // Debug: check Q input is non-zero too
     std::vector<half> h_q_check(B * S * NH * HD);
     cudaMemcpy(h_q_check.data(), d_q, bytes, cudaMemcpyDeviceToHost);

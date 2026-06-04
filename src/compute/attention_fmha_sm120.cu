@@ -297,17 +297,26 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                 }
             }
 
-            // Step 6: Fused softmax normalize + float->half conversion
+            // Step 6: Fused softmax normalize + float->half conversion.
+            // SP_half aliases S_tile COMPACTLY: half row r lives in the bytes
+            // of float row r/2, so in-place stores clobber float scores other
+            // threads have not read yet (row 2r+1's halves land in row r's
+            // cols >= Bkv/2 — deterministic even intra-warp — and padding
+            // rows skip Steps 1-5 and race ahead zero-filling valid rows'
+            // scores, worst at short seq_q; issue #528). Stage this thread's
+            // halves in registers, barrier, then store.
+            constexpr int CPT = Bkv / TPR;  // columns per thread
             float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
-            if (row_valid) {
-                for (int c = sm_lane; c < Bkv; c += TPR) {
-                    SP_half[r * Bkv + c] = __float2half(S_tile[r * Bkv + c] * spv);
-                }
-            } else if (r < Bq) {
-                for (int c = sm_lane; c < Bkv; c += TPR) {
-                    SP_half[r * Bkv + c] = __float2half(0.0f);
-                }
+            half hbuf[CPT];
+#pragma unroll
+            for (int i = 0; i < CPT; i++) {
+                int c = sm_lane + i * TPR;
+                hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
             }
+            __syncthreads();  // all float reads of S_tile complete before any half write
+#pragma unroll
+            for (int i = 0; i < CPT; i++)
+                SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
         }
         __syncthreads();
 
@@ -842,14 +851,21 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                     O_acc[r * head_dim + d] *= rescale;
             }
 
+            // In-place float→half compaction: stage in registers + barrier
+            // (SP_half row r aliases the bytes of float row r/2 — issue #528,
+            // see the f16 kernel above).
+            constexpr int CPT = Bkv / TPR;
             float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
-            if (row_valid) {
-                for (int c = sm_lane; c < Bkv; c += TPR)
-                    SP_half[r * Bkv + c] = __float2half(S_tile[r * Bkv + c] * spv);
-            } else if (r < Bq) {
-                for (int c = sm_lane; c < Bkv; c += TPR)
-                    SP_half[r * Bkv + c] = __float2half(0.0f);
+            half hbuf[CPT];
+#pragma unroll
+            for (int i = 0; i < CPT; i++) {
+                int c = sm_lane + i * TPR;
+                hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
             }
+            __syncthreads();  // all float reads of S_tile complete before any half write
+#pragma unroll
+            for (int i = 0; i < CPT; i++)
+                SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
         }
         __syncthreads();
 

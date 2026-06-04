@@ -826,15 +826,23 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 }
             }
 
-            // Step 6: Normalize + float→half for P
+            // Step 6: Normalize + float→half for P.
+            // In-place float→half compaction: stage in registers + barrier
+            // (SP_half row r aliases the bytes of float row r/2 — unsynced
+            // stores clobber float scores other threads have not read yet,
+            // issue #528; see attention_fmha_sm120.cu).
+            constexpr int CPT = Bkv / TPR;
             float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
-            if (row_valid) {
-                for (int c = sm_lane; c < Bkv; c += TPR)
-                    SP_half[r * Bkv + c] = __float2half(S_tile[r * Bkv + c] * spv);
-            } else if (r < Bq) {
-                for (int c = sm_lane; c < Bkv; c += TPR)
-                    SP_half[r * Bkv + c] = __float2half(0.0f);
+            half hbuf[CPT];
+#pragma unroll
+            for (int i = 0; i < CPT; i++) {
+                int c = sm_lane + i * TPR;
+                hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
             }
+            __syncthreads();  // all float reads of S_tile complete before any half write
+#pragma unroll
+            for (int i = 0; i < CPT; i++)
+                SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
         }
 
         // Wait for V prefetch to complete, then sync all SMEM writes (P + V)
