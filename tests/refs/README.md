@@ -40,6 +40,16 @@ Generators:
 | file | golden | consumed by |
 |---|---|---|
 | `gen_attention_crosspath_golden.py` | `attention_crosspath_golden.h` | `tests/test_attention_crosspath.cu` |
+| `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
+
+NVFP4 outlier goldens (risk #2): the generator reimplements NVFP4's two-level
+dequant (E2M1 + UE4M3 micro-scale + f32 tensor-scale, incl. the 1/512 floor)
+in fp64 from the format definition — never from imp. Adversarial weight
+distributions (Gaussian, 64× outliers, a single 512× outlier, all-tiny) probe
+the per-tensor-scale floor that collapsed Gemma mode-2 (#514/#516). The test
+asserts the NVFP4 **1e-1 rel** class tolerance on quantize→dequant and
+quantize→dequant→GEMV (`gemv_nvfp4_kpar`) spot values, PLUS a hard
+no-NaN/Inf guard on every distribution (the real Gemma-class assert).
 
 Run a generator inside any container with numpy (the host stays clean):
 
