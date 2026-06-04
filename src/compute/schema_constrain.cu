@@ -360,6 +360,28 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
     uint16_t cat_mask = compute_category_mask();
     compute_token_allow_mask();
 
+    // Empty-allow guard: an over-tight schema/state combination (e.g.
+    // {"type":"object"} without properties — the key phase knows no legal
+    // key) can reject every token. All logits then go to -FLT_MAX and greedy
+    // argmax degenerates to token id 0 ("!!!!" spam on byte-level BPE
+    // vocabs). Force a clean EOS finish instead.
+    if (need_token_allow_) {
+        size_t n_allowed = 0;
+        for (int i = 0; i < vocab_size_ && n_allowed == 0; i++) {
+            if (token_allow_[i] && (token_categories_[i] & cat_mask) != 0)
+                n_allowed++;
+        }
+        if (n_allowed == 0) {
+            std::fill(token_allow_.begin(), token_allow_.end(), (uint8_t)0);
+            for (int32_t e : eos_tokens_)
+                if (e >= 0 && e < vocab_size_)
+                    token_allow_[e] = 1;
+            cat_mask = 0xFFFF;
+            IMP_LOG_WARN("SchemaConstrainer: no token satisfies the schema in phase %d — allowing EOS",
+                         static_cast<int>(top().phase));
+        }
+    }
+
     IMP_LOG_DEBUG("SchemaConstrainer::apply_mask phase=%d cat_mask=0x%04x need_allow=%d stack=%zu",
                   static_cast<int>(top().phase), cat_mask, need_token_allow_, stack_.size());
 

@@ -91,15 +91,17 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     // grammar never engaged and the output was unconstrained garbage.
     //   - has_tools: 64-token slack so short verbal preambles ("Sure! ")
     //     don't squeeze out the tool-tag opener.
-    //   - no tools: 8-token slack for markdown fences, matches today's
-    //     non-reasoning default.
+    //   - no tools: 0 — the old 8-token "markdown fence" slack let the model
+    //     open ```json fences that then leaked into content around otherwise
+    //     perfect JSON. With the mask active from token 1 the model starts
+    //     at '{' directly (whitespace is still legal in the START state).
     int preamble_budget;
     if (thinking_open && think_close >= 0) {
         preamble_budget = 8192;
     } else if (has_tools) {
         preamble_budget = 64;
     } else {
-        preamble_budget = 8;
+        preamble_budget = 0;
     }
 
     ToolDialect dialect;
@@ -125,7 +127,23 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         }
     };
 
-    if (!json_schema.empty()) {
+    // Free-form object schema ({"type":"object"} without properties/enum):
+    // the schema FSM knows no legal key, rejects every token in the key
+    // phase, and the empty-allow guard force-finishes right after "{".
+    // Semantically this IS json_object — route to the any-JSON constrainer,
+    // which is whole-token validated.
+    bool use_schema = !json_schema.empty();
+    if (use_schema) {
+        auto probe = parse_json_schema(json_schema);
+        if (probe && probe->type == SchemaType::OBJECT && probe->properties.empty() &&
+            probe->enum_values.empty()) {
+            IMP_LOG_INFO("ConstraintManager: free-form object schema → any-JSON constrainer");
+            use_schema = false;
+            json_mode = true;
+        }
+    }
+
+    if (use_schema) {
         if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
             json_schema == cached_schema_string_) {
             configure_gate(schema_constrainer_.get());

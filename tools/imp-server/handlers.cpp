@@ -726,7 +726,20 @@ static bool parse_chat_request_params(
                 body["response_format"]["json_schema"].is_object()) {
                 auto& js = body["response_format"]["json_schema"];
                 if (js.contains("schema") && js["schema"].is_object()) {
-                    ctx.params.json_schema_str = js["schema"].dump();
+                    const auto& sch = js["schema"];
+                    // Free-form object schema ({"type":"object"} without
+                    // properties/enum) carries no structure the schema
+                    // constrainer could enforce — its key phase would reject
+                    // every token. Semantically this is json_object: leave
+                    // json_schema_str empty so the whole request (scheduler
+                    // included) takes the any-JSON constrainer path.
+                    const bool free_form = sch.value("type", "") == "object" &&
+                                           (!sch.contains("properties") ||
+                                            sch["properties"].empty()) &&
+                                           !sch.contains("enum");
+                    if (!free_form) {
+                        ctx.params.json_schema_str = sch.dump();
+                    }
                 }
             }
         }
