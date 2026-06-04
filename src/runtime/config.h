@@ -104,6 +104,15 @@ struct RuntimeConfig {
         // hd!=128 (Gemma), non-F16, or insufficient smem, so it's safe by
         // default. "never" forces the legacy FP8 FMHA. Legacy env: IMP_FMHA_FA2.
         std::string fmha_fa2 = "on";
+        // FP16-QK FA2 for SHORT prefill (seq < fmha_prefill_threshold, hd=128):
+        // replaces the materialized cuBLAS+softmax path with the register-
+        // resident FA2 kernel running QK^T in f16 (mma.m16n8k16) instead of
+        // e4m3 — same numerical class as the cuBLAS reference (f16 inputs,
+        // f32 accumulate), so the short-seq e4m3 quality cliff (#511/#512)
+        // does not apply. O(n) memory: no S-matrix alloc. Declined configs
+        // (hd!=128, dual-head-dim Gemma-4) fall back to cuBLAS, never to the
+        // fp8 FMHA family. "never" restores the materialized cuBLAS path.
+        std::string fa2_fp16qk = "on";
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16

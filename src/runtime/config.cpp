@@ -132,6 +132,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.attention.fmha_sm120 = val;
     else if (eq("attention.fmha_fa2"))
         cfg.attention.fmha_fa2 = val;
+    else if (eq("attention.fa2_fp16qk"))
+        cfg.attention.fa2_fp16qk = val;
     else if (eq("attention.fmha_prefill_threshold"))
         cfg.attention.fmha_prefill_threshold = parse_int(val, cfg.attention.fmha_prefill_threshold);
     else if (eq("attention.attn_scores_mib"))
@@ -361,7 +363,8 @@ void seed_from_env(RuntimeConfig& cfg) {
     // attention.attn_scores_mib — IMP_ATTN_SCORES_MIB: cuBLAS attention S-matrix cap.
     if (const char* e = std::getenv("IMP_ATTN_SCORES_MIB")) {
         int v = std::atoi(e);
-        if (v > 0) cfg.attention.attn_scores_mib = v;
+        if (v > 0)
+            cfg.attention.attn_scores_mib = v;
     }
 
     // attention.fmha_fa2 — IMP_FMHA_FA2: '1' enables the register-resident FA2
@@ -376,8 +379,10 @@ void seed_from_env(RuntimeConfig& cfg) {
     // moe.nvfp4_smallM_threshold — IMP_NVFP4_SMALLM_THRESHOLD: clamped int.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM_THRESHOLD")) {
         int v = std::atoi(e);
-        if (v < 0) v = 0;
-        if (v > 128) v = 128;
+        if (v < 0)
+            v = 0;
+        if (v > 128)
+            v = 128;
         cfg.moe.nvfp4_smallM_threshold = v;
     }
 
