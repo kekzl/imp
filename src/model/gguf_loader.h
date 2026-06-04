@@ -89,6 +89,7 @@ struct GGUFTensorInfo {
     GgufWireType type;
     uint64_t offset;                     // relative to start of tensor data section
     const uint8_t* data_base = nullptr;  // shard data base pointer (for split GGUF)
+    size_t data_limit = 0;               // bytes available from data_base (for bounds checks)
 };
 
 // Load a model from a GGUF file.
