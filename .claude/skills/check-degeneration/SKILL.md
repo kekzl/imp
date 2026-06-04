@@ -32,6 +32,25 @@ A run **passes** only when ALL of these hold:
 
 Use existing tooling — do **not** write parallel inline checks.
 
+### 0. Extended server-level suite (covers think-leak / hallucination / adherence / long-context / multi-turn / streaming)
+
+The deepest battery — probes a **running imp-server** through the OpenAI API,
+where the recurring production failures live (reasoning/think separation,
+channel stripping, stop handling, truncated-think spill, prompt-blindness):
+
+```bash
+# server must be running (any model); stdlib-only, runs on the host
+python3 tools/analysis/degen_suite.py --url http://localhost:8080
+# Qwen3.6 is non-deterministic at temp=0 — skip the equality check:
+python3 tools/analysis/degen_suite.py --skip-deterministic
+# focused / fast / machine-readable:
+python3 tools/analysis/degen_suite.py --only think-leak,adherence --quick --json /tmp/degen.json
+```
+
+Source: `tools/analysis/degen_suite.py`. Exit 0 = clean, 1 = failures
+(printed with evidence), 2 = server unreachable. Run this whenever output
+quality is in question — it catches what the C-API GTest battery cannot see.
+
 ### 1. GTest battery (covers Short / Second-request / Long / NoLeakedSpecialTokens)
 
 ```bash
