@@ -32,9 +32,10 @@ int main(int argc, char** argv) {
 
     // Load imp.conf (if present) + apply --set overrides, then stash for
     // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
-    // RuntimeConfig::install() process-wide singleton). The server may
-    // reload models at runtime via /v1/models POST; load_model_into_state
-    // re-stashes the same config snapshot before each Engine construction.
+    // RuntimeConfig::install() process-wide singleton). The server may load
+    // a model at runtime (auto-load on first request when started without
+    // --model); load_model_into_state re-stashes the same config snapshot
+    // before each Engine construction.
     state.runtime_config = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
     imp::process_diag_install(state.runtime_config);
     imp::set_pending_runtime_config(state.runtime_config);

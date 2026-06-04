@@ -537,6 +537,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chunked_prefill.cu
         tests/test_mtp_forward.cpp
         tests/test_api_generate.cpp
+        tests/test_engine_relaunch.cpp
     )
 
     set(IMP_TEST_BINARIES

@@ -46,6 +46,13 @@ void attention_cublas_prewarm() {
     // calls inside captured streams find everything ready and don't
     // trigger any cudaMalloc (illegal under capture).
     cublasHandle_t h = get_attn_cublas_handle();
+    // The handle is process-global and outlives engines. Its last
+    // cublasSetStream() may reference a stream the previous engine destroyed
+    // (server model auto-swap) — issuing the dummy GEMM there segfaults inside
+    // cuBLAS algo selection (cuStreamGetGreenCtx on the dangling stream).
+    // Rebind to the default stream; real callers set their own stream before
+    // every use.
+    cublasSetStream(h, nullptr);
     ensure_attn_ptr_arrays(/*n_heads=*/256);
 
     constexpr int kM = 8, kN = 8, kK = 8;
