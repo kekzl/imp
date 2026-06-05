@@ -115,10 +115,15 @@ think_budget         = 0
 force_bos            = false
 
 [server]
-# OpenAI-compatible HTTP server: prefix caching breaks per-request
-# determinism (cached blocks get different physical KV addresses); off
-# by default.
-prefix_cache         = false
+# Prefix caching: reuse KV blocks for shared prompt prefixes (system
+# prompts, multi-turn history). Default ON since the #536/#538
+# stale-block-table fix; PrefixCacheE2ETest guards hit==fresh equality.
+# Auto-disabled for recurrent (SSM/GDN) models.
+prefix_cache         = true
+# Cap on KV blocks pinned by Anthropic cache_control / "cache_prompt"
+# requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
+# requests are ignored.
+prefix_pin_budget_pct = 25
 
 [bench]
 # imp-cli --bench: also run Engine::generate() loop for accurate timing.

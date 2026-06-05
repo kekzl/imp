@@ -348,6 +348,15 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     req->status = RequestStatus::FINISHED;
     if (kv_manager_->prefix_caching_enabled()) {
         kv_manager_->register_block_hashes(req->id, req->input_tokens);
+        // cache_control / cache_prompt: protect the prompt's full blocks
+        // from eviction (must happen before free_sequence — pinning needs
+        // the live block table).
+        if (req->pin_kv_prefix) {
+            int full_blocks =
+                static_cast<int>(req->input_tokens.size()) / kv_manager_->kv_cache()->block_size();
+            if (full_blocks > 0)
+                kv_manager_->pin_prefix(req->id, full_blocks);
+        }
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);

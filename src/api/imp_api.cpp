@@ -100,6 +100,7 @@ ImpConfig imp_config_default(void) {
     config.min_kv_tokens = 0;                 // auto (pick reasonable minimum based on model)
     config.use_prefix_caching = 0;            // off by default
     config.prefix_cache_path[0] = '\0';       // no persistence by default
+    config.prefix_pin_budget_pct = 25;        // cache_control pins capped at 25% of the KV pool
     config.num_cpu_threads = 0;               // auto
     config.mmproj_path = NULL;                // no vision model
     config.turboquant_sketch_multiplier = 2;  // sketch_dim = 2 * head_dim
@@ -333,6 +334,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;
+        ecfg.prefix_pin_budget_pct = config->prefix_pin_budget_pct;
         ecfg.turboquant_sketch_multiplier = config->turboquant_sketch_multiplier;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;

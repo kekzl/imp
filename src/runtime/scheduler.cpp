@@ -82,6 +82,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         if (skip >= total)
                             skip = total - 1;
                         req->prefill_offset = skip;
+                        // Reporting: usage prompt_tokens_details / Anthropic
+                        // cache_read_input_tokens read this off the request.
+                        req->cached_tokens = skip;
                     }
                 } else {
                     if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {

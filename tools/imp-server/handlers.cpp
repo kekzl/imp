@@ -5,6 +5,7 @@
 #include "stream_pipeline.h"
 
 #include "api/imp_internal.h"
+#include "memory/kv_cache.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 
@@ -37,6 +38,10 @@ struct ChatRequestParams {
     int n_completions = 1, top_logprobs = 0;
     bool stream = false, json_mode = false, req_logprobs = false, include_usage = false;
     bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
+    // Pin the prompt's KV blocks against eviction (Anthropic cache_control →
+    // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
+    // "cache_prompt" body field on the OpenAI route).
+    bool cache_prompt = false;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
     // Stop sequences
@@ -89,6 +94,16 @@ struct ChatRequestContext {
     std::shared_ptr<imp::Request> imp_req;
     std::shared_ptr<ServerRequest> server_req;
 };
+
+// cache_creation_input_tokens (Anthropic): full prompt blocks newly written
+// and pinned by this request — block-rounded prompt minus prefix-cache hits.
+int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {
+    if (!req || !req->pin_kv_prefix)
+        return 0;
+    int rounded = (n_prompt_tokens / imp::kKVBlockSize) * imp::kKVBlockSize;
+    int creation = rounded - req->cached_tokens;
+    return creation > 0 ? creation : 0;
+}
 
 }  // anonymous namespace
 
@@ -351,11 +366,13 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 
-    // Prefix caching: enable with [server] prefix_cache = true (off by default —
-    // cached blocks get different physical KV addresses, causing FP rounding
-    // differences in attention kernels and breaking determinism for identical
-    // requests).
+    // Prefix caching: [server] prefix_cache, default ON since the #536/#538
+    // stale-block-table fix (the historical "FP rounding / physical address"
+    // off-by-default rationale was a misattribution of that bug —
+    // PrefixCacheE2ETest is the ship gate). Disabled automatically for
+    // recurrent (SSM/GDN) models in the engine.
     config.use_prefix_caching = runtime_cfg.server.prefix_cache ? 1 : 0;
+    config.prefix_pin_budget_pct = runtime_cfg.server.prefix_pin_budget_pct;
 
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
     config.enable_green_contexts = runtime_cfg.server.green_contexts ? 1 : 0;
@@ -763,6 +780,10 @@ static bool parse_chat_request_params(
     if (body.contains("stream_options") && body["stream_options"].is_object()) {
         ctx.params.include_usage = body["stream_options"].value("include_usage", false);
     }
+
+    // Prompt KV pinning: Anthropic cache_control (mapped to "cache_prompt"
+    // by anthropic_to_openai_body) or a direct llama.cpp-style field.
+    ctx.params.cache_prompt = body.value("cache_prompt", false);
 
     // Parse tool calling parameters
     ctx.params.tools = body.value("tools", json::array());
@@ -1335,6 +1356,7 @@ static void nonstream_chat_response_(
         req->top_p = ctx.params.top_p;
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
+        req->pin_kv_prefix = ctx.params.cache_prompt;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -1648,6 +1670,16 @@ static void nonstream_chat_response_(
     json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                   {"completion_tokens", total_output_tokens},
                   {"total_tokens", ctx.snap.n_prompt_tokens + total_output_tokens}};
+    // Prefix-cache reporting (OpenAI prompt_tokens_details; the Anthropic
+    // converter maps these to cache_read/cache_creation_input_tokens).
+    if (imp_req && (imp_req->cached_tokens > 0 || imp_req->pin_kv_prefix)) {
+        json details = {{"cached_tokens", imp_req->cached_tokens}};
+        int creation = cache_creation_tokens_(imp_req, ctx.snap.n_prompt_tokens);
+        if (creation > 0)
+            details["cache_creation_tokens"] = creation;
+        usage["prompt_tokens_details"] = std::move(details);
+        state.metrics.tokens_cached_total += imp_req->cached_tokens;
+    }
 
     json response = {{"id", comp_id},      {"object", "chat.completion"},
                      {"created", created}, {"model", ctx.snap.model_name},
@@ -2457,8 +2489,12 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                       {"completion_tokens", n_output_tokens},
                       {"total_tokens", n_prompt_tokens + n_output_tokens}};
         // Report prefix cache hit (OpenAI-compatible prompt_tokens_details)
-        if (active_req && active_req->cached_tokens > 0) {
-            usage["prompt_tokens_details"] = {{"cached_tokens", active_req->cached_tokens}};
+        if (active_req && (active_req->cached_tokens > 0 || active_req->pin_kv_prefix)) {
+            json details = {{"cached_tokens", active_req->cached_tokens}};
+            int creation = cache_creation_tokens_(active_req, n_prompt_tokens);
+            if (creation > 0)
+                details["cache_creation_tokens"] = creation;
+            usage["prompt_tokens_details"] = std::move(details);
         }
         if (n_reasoning_tokens > 0) {
             usage["completion_tokens_details"] = {{"reasoning_tokens", n_reasoning_tokens}};
@@ -2523,6 +2559,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->top_p = ctx.params.top_p;
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
+        req->pin_kv_prefix = ctx.params.cache_prompt;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -2777,6 +2814,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->top_logprobs = top_logprobs;
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
+    imp_req->pin_kv_prefix = body.value("cache_prompt", false);
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();
@@ -4213,10 +4251,22 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
         stop_reason = finish;
 
     // ---- message_delta + message_stop ------------------------------------
+    // Cache accounting is only known after prefill ran, so it rides on the
+    // final usage update instead of message_start.
+    json delta_usage = {{"output_tokens", n_output_tokens}};
+    {
+        int cached_now = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+        int creation = cache_creation_tokens_(active_req, n_prompt_tokens);
+        if (cached_now > 0 || creation > 0) {
+            delta_usage["input_tokens"] = n_prompt_tokens - cached_now;
+            delta_usage["cache_read_input_tokens"] = cached_now;
+            delta_usage["cache_creation_input_tokens"] = creation;
+        }
+    }
     out.emit("message_delta",
              json{{"type", "message_delta"},
                   {"delta", {{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
-                  {"usage", {{"output_tokens", n_output_tokens}}}});
+                  {"usage", std::move(delta_usage)}});
     out.emit("message_stop", json{{"type", "message_stop"}});
     sink.done();
 
@@ -4361,6 +4411,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         imp_req->top_p = ctx.params.top_p;
         imp_req->top_k = ctx.params.top_k;
         imp_req->seed = ctx.params.seed;
+        imp_req->pin_kv_prefix = ctx.params.cache_prompt;
         imp_req->min_p = ctx.params.min_p;
         imp_req->typical_p = ctx.params.typical_p;
         imp_req->repetition_penalty = ctx.params.repetition_penalty;

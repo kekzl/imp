@@ -332,7 +332,12 @@ struct RuntimeConfig {
     } generation;
 
     struct Server {
-        bool prefix_cache = false;
+        // Prefix caching: default ON since the #536/#538 stale-block-table fix
+        // (the historical "FP rounding" off-by-default rationale was a
+        // misattribution of that bug; PrefixCacheE2ETest is the ship gate).
+        bool prefix_cache = true;
+        // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
+        int prefix_pin_budget_pct = 25;
         // Green Contexts / prefill-decode overlap streams in the server engine.
         // [server] green_contexts = false to disable (diagnostic: suspected
         // memSyncDomain race on sm_120 fallback streams — gemma-3-12b IMA).
