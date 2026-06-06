@@ -8,7 +8,9 @@
 namespace imp {
 
 // FFN activation function type
-enum class FFNActivation { SWIGLU, GEGLU, RELU_SQR };
+// GPT_OSS_GLU (gpt-oss): gate/up clamped to ±limit (gate only from above),
+// glu = gate·sigmoid(1.702·gate), out = (up + 1)·glu — plus per-expert biases.
+enum class FFNActivation { SWIGLU, GEGLU, RELU_SQR, GPT_OSS_GLU };
 
 // Norm placement relative to residual connection
 enum class NormPlacement { PRE_NORM, POST_NORM };
@@ -166,6 +168,12 @@ struct NvFP4PreQuantWeight {
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
     Tensor q_bias, k_bias, v_bias;         // Attention biases (Qwen2)
+    Tensor o_bias;                         // Output-projection bias (gpt-oss)
+    Tensor attn_sinks;                     // Per-head sink logits [n_heads] (gpt-oss)
+    Tensor router_bias;                    // Router logits bias [n_experts] (gpt-oss)
+    Tensor expert_gate_bias;               // Per-expert gate bias [ne, d_ff] (gpt-oss)
+    Tensor expert_up_bias;                 // Per-expert up bias [ne, d_ff] (gpt-oss)
+    Tensor expert_down_bias;               // Per-expert down bias [ne, d_model] (gpt-oss)
     Tensor attn_q_norm, attn_k_norm;       // QK-norm (Qwen3-style per-head RMSNorm)
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     // Gemma 4 extras

@@ -116,6 +116,7 @@ enum {
     kApiQwen35Moe = 11,
     kApiGemma4 = 12,
     kApiQwen36Moe = 13,
+    kApiGptOss = 14,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -132,6 +133,7 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
     {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+    {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0, 3 /*GPT_OSS_GLU*/, -1, false, false, 1.0f, 1.0f, 0},
     {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
     {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
@@ -172,6 +174,8 @@ ModelArch parse_model_arch(const std::string& s) {
         {"qwen36moe", ModelArch::QWEN36_MOE},
         {"qwen3.6_moe", ModelArch::QWEN36_MOE},
         {"qwen3.6moe", ModelArch::QWEN36_MOE},
+        {"gpt_oss", ModelArch::GPT_OSS},
+        {"gpt-oss", ModelArch::GPT_OSS},
         {"gemma3", ModelArch::GEMMA3},
         {"gemma", ModelArch::GEMMA3},
         {"gemma2", ModelArch::GEMMA3},
