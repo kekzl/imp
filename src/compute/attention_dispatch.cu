@@ -26,6 +26,12 @@ int get_device_sm_version() {
     return cached_sm_version;
 }
 
+// NOTE: the path-selection ORDER + config gates below are mirrored as a pure
+// host function `select_attn_prefill_path` in attention_dispatch_decision.h and
+// pinned by test_attention_dispatch_table.cpp (R2 / P1.4). The kernels are
+// called lazily here (each launches on accept, falls through on decline), so
+// this can't simply delegate to the pure function — but any reorder or gate
+// change MUST be reflected in that header or the unit test will diverge.
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
                                 const RuntimeConfig& rcfg, int q_offset) {

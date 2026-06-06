@@ -442,6 +442,7 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
         tests/test_vision_preprocess.cpp
