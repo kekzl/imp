@@ -1014,8 +1014,20 @@ static bool snapshot_state_and_tokenize_(
     // mode breaks the requested output format: structured output (json_mode)
     // and tool calls keep the old default OFF. An explicit "enable_thinking"
     // in the request always wins in both directions.
-    const bool thinking_default =
-        ctx.snap.is_think_model && !ctx.params.json_mode && !ctx.params.has_tools;
+    // Template evidence guard: vocab-level <think> specials alone are not
+    // proof of a think-trained model — Qwen3-*-Instruct-2507 ships the Qwen3
+    // vocab (incl. <think>) but never opens a think block; defaulting it to
+    // thinking traps the entire answer in reasoning_content (content "").
+    // Default ON only when the chat template itself references thinking.
+    // Models without a Jinja template keep the previous default (no evidence
+    // either way); an explicit "enable_thinking" still wins in both cases.
+    // Only a present-but-silent Jinja template counts as evidence AGAINST
+    // thinking; hardcoded families / templateless runs keep the old default.
+    const bool template_think_evidence = !ctx.snap.have_template ||
+                                         !ctx.snap.chat_tpl.has_jinja() ||
+                                         ctx.snap.chat_tpl.mentions_thinking();
+    const bool thinking_default = ctx.snap.is_think_model && template_think_evidence &&
+                                  !ctx.params.json_mode && !ctx.params.has_tools;
     const bool want_thinking = ctx.params.enable_thinking_set
                                    ? ctx.params.enable_thinking_requested
                                    : thinking_default;
