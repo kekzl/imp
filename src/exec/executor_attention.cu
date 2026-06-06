@@ -536,6 +536,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         debug_tensor_stats("L0_step1_after_qkv_k", kk, stream);
     }
 
+
     // Per-layer RoPE theta and sliding window (Gemma-3: alternating local/global layers)
     float layer_rope_theta = cfg.rope_theta;
     float layer_rope_freq_scale = cfg.rope_freq_scale;
@@ -737,8 +738,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     float scale = (cfg.arch == ModelArch::GEMMA4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
 
     if (state.is_prefill) {
-        bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
-
         // Chunked prefill: when prefill_offset > 0, queries from this chunk must
         // attend to past chunks K/V already in the paged cache. Gather past
         // [0, prefill_offset) KV → contiguous, append current chunk, then run
@@ -908,13 +907,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
-        const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
         // FMHA only above the S-matrix threshold — see the chunked path above
         // for why the #493 prefer-FA2-at-every-length override was reverted.
         const bool prefer_fmha = !force_cublas_attn &&
                                  (n >= runtime_config().attention.fmha_prefill_threshold);
 
-        if (s_matrix_fits && !non_gemma4_sliding && !prefer_fmha) {
+        // NOTE (#566): sliding-window prefill used to be routed AWAY from the
+        // cuBLAS path here (`non_gemma4_sliding`) into the WMMA fallback
+        // chain — a relic from before attention_cublas_prefill grew its
+        // sliding_window softmax mask. The WMMA chain's hd=256 + window
+        // combination computes catastrophically wrong attention (gemma-3-12b
+        // at n>1024: teacher-forced PPL 42 vs llama.cpp 1.0; long-prompt
+        // recall answered '77' instead of '477'). The cuBLAS masked softmax
+        // is the correctness reference and handles the window — keep SWA
+        // prefill here whenever the S-matrix fits.
+        if (s_matrix_fits && !prefer_fmha) {
             // Below the FMHA threshold: prefer the FP16-QK FA2 kernel over the
             // materialized cuBLAS path (same f16/f32 numerics, O(n) memory).
             if (!force_cublas_attn &&
