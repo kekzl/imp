@@ -287,6 +287,14 @@ int imp_model_vocab_size(ImpModel model) {
     return model->model->config().vocab_size;
 }
 
+int32_t imp_model_bos_token(ImpModel model) {
+    if (!model || !model->model || !model->model->tokenizer()) {
+        return -1;
+    }
+    const auto* tok = model->model->tokenizer();
+    return tok->add_bos() ? tok->bos_id() : -1;
+}
+
 int imp_model_max_seq_len(ImpModel model) {
     if (!model || !model->model) {
         return 0;

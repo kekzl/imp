@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "exec/executor_gemv_helpers.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_debug.h"
@@ -52,33 +53,6 @@ namespace imp {
 // Shared helpers: executor_helpers.h (get_kv_layer, vram_alloc, etc.)
 // Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
 
-// LM head dp4a GEMV dispatch: y = W @ x (FP32 output for logits).
-static void dispatch_gemv_fp32(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8, float* y,
-                               int M, int K, cudaStream_t stream) {
-    switch (qtype) {
-        case QType::Q6_K:
-            gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        case QType::Q4_0:
-            gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        case QType::Q4_K:
-            gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        case QType::Q5_K:
-            gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        case QType::Q2_K:
-            gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        case QType::Q3_K:
-            gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-        default:
-            gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
-            break;
-    }
-}
 
 // Gemma 4: per-layer output scale. Multiplies all elements of `data` by the
 // scalar half stored at `scale_ptr` (device memory). Used at end of each layer
