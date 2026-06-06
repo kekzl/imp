@@ -71,23 +71,31 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 ## Quickstart
 
-Everything runs in Docker — no local CUDA toolkit needed.
+Everything runs in Docker — no local CUDA toolkit needed. Prebuilt images are on
+[GHCR](https://github.com/kekzl/imp/pkgs/container/imp) (built per release for
+x86-64 + sm_120a):
 
 ```bash
-git clone https://github.com/kekzl/imp.git && cd imp
-
 # Drop a GGUF or SafeTensors model into ./models/
 mkdir -p models
 
-# Build and run the server
-docker compose build imp-server
+# Run the server from the prebuilt image
 docker run --gpus all -v ./models:/models -p 8080:8080 \
-  imp:latest --model /models/your-model.gguf
+  ghcr.io/kekzl/imp:latest --model /models/your-model.gguf
 
 # Hit the OpenAI-compatible endpoint
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+```
+
+Or build from source (tracks `main` instead of the latest release):
+
+```bash
+git clone https://github.com/kekzl/imp.git && cd imp
+docker compose build imp-server
+docker run --gpus all -v ./models:/models -p 8080:8080 \
+  imp:latest --model /models/your-model.gguf
 ```
 
 CLI reference, server flags, config, and C API: [`docs/usage.md`](docs/usage.md).

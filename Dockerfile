@@ -73,6 +73,14 @@ RUN cmake -B build -G Ninja \
 # entrypoint/healthcheck helpers need adding.
 FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04
 
+# OCI image metadata — GHCR renders org.opencontainers.image.description on the
+# package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here
+# (not only via docker/metadata-action) so local builds carry it too.
+LABEL org.opencontainers.image.title="imp" \
+      org.opencontainers.image.description="LLM inference engine in C++/CUDA for NVIDIA Blackwell sm_120 (RTX 5090/5080/5070 Ti, RTX PRO 6000). Native NVFP4 + GGUF, OpenAI/Anthropic-compatible server. Written entirely by Claude Code." \
+      org.opencontainers.image.source="https://github.com/kekzl/imp" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
