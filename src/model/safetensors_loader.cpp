@@ -1343,6 +1343,46 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             "Inference may be incoherent.");
     }
 
+    // gpt-oss post-load pass (#547): de-interleave the fused gate_up expert
+    // bias (g0,u0,g1,u1,... along the column dim) into separate gate/up bias
+    // tensors so the standard per-projection bias plumbing applies. The
+    // packed MXFP4 expert weights stay host-mmap'd; the MXFP4→NVFP4
+    // conversion happens at executor pre-dequant (needs the executor's
+    // wcache). Host copies live in host_owned_buffers_ (freed in ~Model).
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        for (auto& layer : model->layers_) {
+            const Tensor& fused = layer.expert_gate_up_bias_fused;
+            if (!fused.data || fused.ndim != 2)
+                continue;
+            const int64_t ne = fused.shape[0];
+            const int64_t two_ff = fused.shape[1];
+            const int64_t ff = two_ff / 2;
+            const uint16_t* src = static_cast<const uint16_t*>(fused.data);  // BF16
+            auto* g = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * ne * ff));
+            auto* u = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * ne * ff));
+            if (!g || !u) {
+                std::free(g);
+                std::free(u);
+                IMP_LOG_ERROR("gpt-oss: bias de-interleave alloc failed");
+                return nullptr;
+            }
+            for (int64_t e = 0; e < ne; e++) {
+                const uint16_t* row = src + e * two_ff;
+                for (int64_t i = 0; i < ff; i++) {
+                    g[e * ff + i] = row[2 * i];
+                    u[e * ff + i] = row[2 * i + 1];
+                }
+            }
+            model->host_owned_buffers_.push_back(g);
+            model->host_owned_buffers_.push_back(u);
+            int64_t bshape[4] = {ne, ff, 0, 0};
+            layer.expert_gate_bias = Tensor(g, QType::BF16, 2, bshape, /*on_device=*/false);
+            layer.expert_up_bias = Tensor(u, QType::BF16, 2, bshape, /*on_device=*/false);
+        }
+        IMP_LOG_INFO("gpt-oss: expert gate_up biases de-interleaved for %zu layers",
+                     model->layers_.size());
+    }
+
     IMP_LOG_INFO("SafeTensors model loaded successfully from %s", path.c_str());
     return model;
 }

@@ -1121,7 +1121,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     }
 
     // Attention biases (Qwen2-style Q/K/V biases, F32)
-    for (auto* bias : {&L.q_bias, &L.k_bias, &L.v_bias}) {
+    for (auto* bias : {&L.q_bias, &L.k_bias, &L.v_bias, &L.o_bias, &L.attn_sinks, &L.router_bias,
+                       &L.expert_gate_bias, &L.expert_up_bias, &L.expert_down_bias}) {
         if (bias->data && !bias->on_device) {
             if (!upload_unquantized_weight(*bias, QType::NONE, ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
