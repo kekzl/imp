@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 #include "args.h"
 #include "batching_engine.h"
 #include "model/chat_template.h"
@@ -95,6 +97,11 @@ struct ServerMetrics {
 struct ServerState {
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
+    // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id.
+    // Selected per request via the "lora" body field; empty/absent = base.
+    // Swaps re-capture decode graphs — single-user semantics (imp's mission),
+    // the active adapter is engine-global between requests.
+    std::map<std::string, int32_t> lora_ids;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;

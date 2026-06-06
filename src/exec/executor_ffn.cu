@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "lora/lora_adapter.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_helpers.h"
@@ -240,6 +241,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
         }
 
+        // LoRA deltas on gate/up: every arm above materializes the normed FFN
+        // input in `no` (the fused dp4a arm side-writes it), and go/uo hold
+        // the raw projection outputs before the activation.
+        if (lora_) {
+            if (const LoraWeights* w = lora_->get(layer, LoraProj::GATE))
+                lora_delta_(*w, no.data, go.data, n, stream);
+            if (const LoraWeights* w = lora_->get(layer, LoraProj::UP))
+                lora_delta_(*w, no.data, uo.data, n, stream);
+        }
+
         // Instrumentation-only: measure contextual FFN sparsity (decode only).
         // Reads go and uo, counts rows with |silu(gate)*up| under each of 5
         // thresholds. Cheap (~1 µs / layer) when on, no-op when off.
@@ -456,6 +467,31 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 } else {
                     // No post-norm: h = fo + residual (fused add-store, no copy)
                     elementwise_add_store(fo, r, h, stream);
+                }
+            }
+        }
+    }
+
+    // LoRA delta on down_proj: h already holds residual + Wd·act from
+    // whichever arm ran. The fused arms never materialize `so`, but go/uo
+    // are intact — recompute the activation into `so` for the delta input
+    // (one extra kernel per adapted layer; PEFT semantics preserved).
+    // Sandwich-norm archs (post_ffn_norm) would need the delta inside the
+    // norm — declined in v1 with a log.
+    if (lora_) {
+        if (const LoraWeights* w = lora_->get(layer, LoraProj::DOWN)) {
+            if (!has_post_ffn_norm) {
+                if (cfg.ffn_activation == FFNActivation::GEGLU)
+                    geglu(go, uo, so, stream);
+                else
+                    swiglu(go, uo, so, stream);
+                lora_delta_(*w, so.data, h.data, n, stream);
+            } else {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN("LoRA: down_proj adapter on a post-ffn-norm arch is unsupported (v1) — "
+                                 "delta skipped");
                 }
             }
         }

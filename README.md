@@ -111,6 +111,7 @@ VRAM, decode tok/s, and per-model notes: [`docs/supported-models.md`](docs/suppo
 | | |
 |---|---|
 | **Quantization** | GGUF Q4_K_M/Q5_K_M/Q6_K/Q8_0 + IQ4_NL/IQ4_XS, SafeTensors NVFP4 (prequant), MXFP4. NVFP4 KV cache (`--kv-nvfp4`) for 4× context compression at decode parity. |
+| **LoRA** | PEFT adapter hot-swap (`--lora name=path`, per-request `"lora"` field) — runtime low-rank deltas, no weight patching, works with every quant path. |
 | **Attention** | Prefill: FP16 cuBLAS below the auto `fmha_prefill_threshold` (the largest chunk whose S-matrix fits, ~2.5k tokens), then the FMHA family above it — an `mma.sync` `m16n8k32` FP8-E4M3 score kernel and a register-resident FlashAttention-2 kernel (head_dim 128). Decode: paged attention (block_size 16) switching on KV dtype (FP16/FP8/INT8/INT4/NVFP4/MXFP4). Auto-dispatch per phase × dtype × layer — see [`docs/attention-dispatch.md`](docs/attention-dispatch.md). |
 | **Architectures** | Dense transformers, Mixture-of-Experts (top-k grouped GEMM), Gated DeltaNet (fused recurrent scan), Mamba2 (SSM), SigLIP/Gemma-4v vision encoders. |
 | **`sm_120a` kernels** | NVFP4 block-scaled `mma.sync mxf4nvf4` GEMM/GEMV (CUTLASS v4.5.1), FP8 `f8f6f4` attention scores, FA2 block-scaling, packed `cvt.e2m1`/`cvt.e4m3x2` dequant, PDL, Green Contexts. **No** `tcgen05`/TMEM/`wgmma`/TMA-WS — those are datacenter Blackwell only. |

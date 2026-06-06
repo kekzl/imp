@@ -27,6 +27,9 @@
 
 namespace imp {
 
+class LoraAdapter;
+struct LoraWeights;
+
 // ---------------------------------------------------------------------------
 // LRU cache for GPU-resident expert weights.
 // When MoE experts don't fit in VRAM, they reside on host (mmap/pinned).
@@ -740,6 +743,13 @@ public:
     int streaming_n_sinks() const { return streaming_n_sinks_; }
     int streaming_window() const { return streaming_window_; }
 
+    // LoRA runtime delta (issue #522): activation-path low-rank deltas, no
+    // weight patching — works with every quant tier. nullptr = base model.
+    // The caller (Engine) must invalidate decode graphs around swaps: the
+    // captured graph holds the adapter's kernel launches/pointers.
+    void set_lora(const LoraAdapter* adapter);
+    const LoraAdapter* lora() const { return lora_; }
+
     // Access the hidden state buffer after forward_logits().
     // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
     const Tensor& hidden_state() const { return hidden_; }
@@ -820,6 +830,12 @@ private:
     void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;
     int max_tokens_ = 0;
+
+    // LoRA (issue #522)
+    const LoraAdapter* lora_ = nullptr;
+    void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]
+    size_t lora_scratch_sz_ = 0;
+    void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max_batch_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging

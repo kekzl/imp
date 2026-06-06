@@ -56,6 +56,15 @@ int imp_model_max_seq_len(ImpModel model);
  * sequence. */
 int32_t imp_model_bos_token(ImpModel model);
 
+/* --- LoRA adapters (runtime low-rank deltas, no weight patching) ---
+ * imp_lora_load: load a HuggingFace PEFT adapter directory (or a bare
+ * adapter_model.safetensors). Returns an adapter id >= 1 via out_id.
+ * imp_lora_set: activate an adapter (0 = base model). Swapping re-captures
+ * decode CUDA graphs on the next request — swap between requests, not
+ * mid-generation. Adapters live until the context is freed. */
+ImpError imp_lora_load(ImpContext ctx, const char* path, int32_t* out_id);
+ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id);
+
 // --- Context / Runtime ---
 
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx);

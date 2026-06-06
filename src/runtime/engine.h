@@ -25,6 +25,8 @@
 #include <string>
 #include <cuda_runtime.h>
 
+#include "lora/lora_adapter.h"
+
 namespace imp {
 
 struct EngineConfig {
@@ -129,6 +131,15 @@ public:
     // Invalidate all cached CUDA graphs (call on context_reset to ensure
     // deterministic output — stale graph captures can produce different results)
     void invalidate_graphs();
+
+    // ---- LoRA hot-swap (issue #522) ----
+    // Adapters are activation-path low-rank deltas (no weight patching), so
+    // they compose with every quant tier. Swapping invalidates decode graphs
+    // (captures hold the adapter's kernels/pointers); swap between requests.
+    // Returns adapter id >= 1, or 0 on failure. id 0 = base model.
+    int lora_load(const std::string& path);
+    bool lora_set(int id);  // 0 deactivates
+    int lora_active() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -272,6 +283,8 @@ private:
     // few empty pointers until first capture).
     static constexpr int kMaxGraphPoolSize = 64;
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
+    std::vector<std::unique_ptr<LoraAdapter>> lora_adapters_;
+    int active_lora_ = 0;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
 
     // Prefill graph runner — captures forward_logits for non-last chunks of

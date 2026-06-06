@@ -249,6 +249,28 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
+### LoRA adapters (hot-swap)
+
+PEFT adapters are applied as runtime low-rank deltas on the activation path —
+no weight patching, so they compose with every quant tier (FP16 cache, NVFP4
+decode cache, raw-GGUF dp4a). Load at startup, select per request:
+
+```bash
+imp-server --model base.gguf --lora style=/adapters/style --lora med=/adapters/med
+```
+
+```jsonc
+// any /v1/chat/completions or /v1/completions body:
+{ "model": "base.gguf", "lora": "style", "messages": [...] }
+// "lora" absent or "" = base model; unknown names → 400.
+```
+
+Swapping re-captures decode CUDA graphs on the next request (~100 ms) —
+adapters are engine-global between requests (single-user semantics, imp's
+batch=1 mission). v1 scope: per-layer `q/k/v/o/gate/up/down_proj` adapters on
+standard pre-norm archs; sandwich-norm o/down (Gemma) and MoE-expert targets
+are declined with a log. C API: `imp_lora_load()` / `imp_lora_set()`.
+
 ## C API
 
 ```c

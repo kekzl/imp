@@ -268,6 +268,8 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_lora.cu
+    src/lora/lora_adapter.cpp
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_forward_moe.cu
@@ -565,6 +567,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_forward.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
+        tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp
     )
