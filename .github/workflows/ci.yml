@@ -113,6 +113,33 @@ jobs:
             build/test-e2e
             build/libimp.a
 
+  # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
+  # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
+  # the in-process mock_server.py — no GPU, no model, no CUDA toolchain. It was
+  # the cheapest CI-able coverage in the test audit but ran only manually
+  # (run_mock_tests.sh). Separate ubuntu job so it stays independent of the slow
+  # CUDA Build job; "not perf and not tools" deselects the real-model markers.
+  # NOTE: do NOT rename the `build` job's `name: Build` — a branch ruleset
+  # requires that exact check name.
+  mock-api:
+    name: Mock API contract
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: pip install -r tests/api/requirements.txt
+
+      - name: Run mock API suite
+        env:
+          IMP_USE_MOCK: "1"
+        run: python -m pytest tests/api -m "not perf and not tools" --tb=short -q
+
   test:
     name: Test
     needs: build
