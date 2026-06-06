@@ -604,6 +604,8 @@ if(IMP_BUILD_TESTS)
     # fixtures. Instead the split stays a filter, but `guard_e2e_lane_split` below
     # asserts the filter still resolves to the exact expected CPU-only set — a
     # rename can no longer silently shift a test into the wrong lane (R5/#580).
+    # NOTE: scripts/verify.sh carries a literal copy of this filter (container
+    # path has no build/ dir) — keep both in sync when changing it.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     add_test(NAME unit_core       COMMAND test-core)
