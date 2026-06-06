@@ -258,21 +258,336 @@ std::vector<float> read_o(void* d_o, size_t elems) {
 }
 
 // ===========================================================================
-// The fixture
+// Shared decode-path harness. Inputs, fp64 reference, block table, Q/O buffers
+// are built ONCE per (shape, kv_len); each KV-dtype "policy" then quantizes K/V
+// into its own cache layout, launches its kernel, and reports an ErrStats vs
+// the shared reference. This is the parametrization seam (R8): the skeleton
+// (reference + characterize) is shared, only the per-dtype quant+launch differs.
 // ===========================================================================
-class PagedOracleTest : public ::testing::Test {
+struct PathCtx {
+    cudaStream_t stream;
+    int kv_len, n_heads, n_kv_heads, head_dim, num_blocks;
+    float scale;
+    size_t q_elems;
+    const std::vector<half>* Kh;
+    const std::vector<half>* Vh;
+    const std::vector<double>* ref;
+    Tensor Q;
+    void* d_o;
+    int* d_bt;
+    int* d_ctx;
+    void clear_o() const { cudaMemset(d_o, 0, q_elems * sizeof(half)); }
+    Tensor O() const { return f16_tensor(d_o, {1, 1, n_heads, head_dim}); }
+};
+
+// ---------------------------------------------------------------------------
+// KV-dtype policies. Each exposes name(), envelope(), strict(), and run(ctx):
+// run() quantizes K/V into the kernel's exact layout, launches it, returns the
+// max_rel vs the shared fp64 reference (and asserts launch success + finiteness
+// inside, since those are dtype-agnostic guards). TYPED_TEST iterates them.
+// ---------------------------------------------------------------------------
+struct PathF16 {
+    static const char* name() { return "F16"; }
+    static bool strict() { return true; }
+    static float envelope() { return 1e-2f; }  // STRICT — no quantization at all.
+    static ErrStats run(const PathCtx& c) {
+        auto Kc = build_f16_cache(*c.Kh, c.kv_len, c.n_kv_heads, c.head_dim, c.num_blocks);
+        auto Vc = build_f16_cache(*c.Vh, c.kv_len, c.n_kv_heads, c.head_dim, c.num_blocks);
+        void* d_k = up(Kc.data(), Kc.size() * sizeof(half));
+        void* d_v = up(Vc.data(), Vc.size() * sizeof(half));
+        Tensor K = f16_tensor(d_k, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor V = f16_tensor(d_v, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f,
+                               c.stream, c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "F16 paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        return e;
+    }
+};
+
+struct PathFP8 {
+    static const char* name() { return "FP8"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.035f; }
+    // per-tensor kv_scale, layout == F16 (1 byte). Dequant: val = e4m3 * kv_scale.
+    static ErrStats run(const PathCtx& c) {
+        float amax = 0.0f;
+        for (auto& h : *c.Kh)
+            amax = std::max(amax, std::fabs(__half2float(h)));
+        for (auto& h : *c.Vh)
+            amax = std::max(amax, std::fabs(__half2float(h)));
+        float kv_scale = amax > 0 ? amax / 448.0f : 1.0f;
+        float inv = 1.0f / kv_scale;
+        auto quant = [&](const std::vector<half>& kv) {
+            std::vector<uint8_t> out((size_t)c.num_blocks * BLOCK_SIZE * c.n_kv_heads * c.head_dim, 0);
+            for (int s = 0; s < c.kv_len; s++) {
+                int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+                for (int kvh = 0; kvh < c.n_kv_heads; kvh++) {
+                    size_t dst = ((size_t)blk * BLOCK_SIZE + slot) * c.n_kv_heads * c.head_dim +
+                                 (size_t)kvh * c.head_dim;
+                    size_t src = ((size_t)s * c.n_kv_heads + kvh) * c.head_dim;
+                    for (int d = 0; d < c.head_dim; d++) {
+                        __nv_fp8_e4m3 q = __nv_fp8_e4m3(__half2float(kv[src + d]) * inv);
+                        memcpy(&out[dst + d], &q, 1);
+                    }
+                }
+            }
+            return out;
+        };
+        auto Kq = quant(*c.Kh), Vq = quant(*c.Vh);
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        Tensor K = raw_tensor(d_k, QType::FP8_E4M3, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_fp8(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, kv_scale, c.kv_len, 0,
+                                   0.0f, c.stream, c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        return e;
+    }
+};
+
+struct PathINT8 {
+    static const char* name() { return "INT8"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.007f; }
+    // per-(token,kv_head) FP16 scale; layout == F16 (1 byte). val = int8 * scale.
+    static ErrStats run(const PathCtx& c) {
+        const int scale_elems = c.num_blocks * BLOCK_SIZE * c.n_kv_heads;
+        auto quant = [&](const std::vector<half>& kv, std::vector<half>& scales) {
+            std::vector<int8_t> out((size_t)c.num_blocks * BLOCK_SIZE * c.n_kv_heads * c.head_dim, 0);
+            scales.assign(scale_elems, __float2half(0.0f));
+            for (int s = 0; s < c.kv_len; s++) {
+                int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+                for (int kvh = 0; kvh < c.n_kv_heads; kvh++) {
+                    size_t src = ((size_t)s * c.n_kv_heads + kvh) * c.head_dim;
+                    float amax = 0.0f;
+                    for (int d = 0; d < c.head_dim; d++)
+                        amax = std::max(amax, std::fabs(__half2float(kv[src + d])));
+                    float sc = amax > 0 ? amax / 127.0f : 1.0f;
+                    float inv = 1.0f / sc;
+                    scales[(blk * BLOCK_SIZE + slot) * c.n_kv_heads + kvh] = __float2half(sc);
+                    size_t dst = ((size_t)blk * BLOCK_SIZE + slot) * c.n_kv_heads * c.head_dim +
+                                 (size_t)kvh * c.head_dim;
+                    for (int d = 0; d < c.head_dim; d++) {
+                        int q = (int)std::lround(__half2float(kv[src + d]) * inv);
+                        q = std::max(-127, std::min(127, q));
+                        out[dst + d] = (int8_t)q;
+                    }
+                }
+            }
+            return out;
+        };
+        std::vector<half> ks, vs;
+        auto Kq = quant(*c.Kh, ks), Vq = quant(*c.Vh, vs);
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        void* d_ks = up(ks.data(), ks.size() * sizeof(half));
+        void* d_vs = up(vs.data(), vs.size() * sizeof(half));
+        Tensor K = raw_tensor(d_k, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor V = raw_tensor(d_v, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_int8(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
+                                    BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT8 paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_ks);
+        cudaFree(d_vs);
+        return e;
+    }
+};
+
+struct PathINT4 {
+    static const char* name() { return "INT4"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.10f; }
+    // per-(token,kv_head) FP16 scale; packed nibbles [head_dim/2] (lo=even,
+    // hi=odd). val = int4 * scale.
+    static ErrStats run(const PathCtx& c) {
+        const int half_hd = c.head_dim / 2;
+        const int scale_elems = c.num_blocks * BLOCK_SIZE * c.n_kv_heads;
+        auto quant = [&](const std::vector<half>& kv, std::vector<half>& scales) {
+            std::vector<uint8_t> out((size_t)c.num_blocks * BLOCK_SIZE * c.n_kv_heads * half_hd, 0);
+            scales.assign(scale_elems, __float2half(0.0f));
+            for (int s = 0; s < c.kv_len; s++) {
+                int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+                for (int kvh = 0; kvh < c.n_kv_heads; kvh++) {
+                    size_t src = ((size_t)s * c.n_kv_heads + kvh) * c.head_dim;
+                    float amax = 0.0f;
+                    for (int d = 0; d < c.head_dim; d++)
+                        amax = std::max(amax, std::fabs(__half2float(kv[src + d])));
+                    float sc = amax > 0 ? amax / 7.0f : 1.0f;
+                    float inv = 1.0f / sc;
+                    scales[(blk * BLOCK_SIZE + slot) * c.n_kv_heads + kvh] = __float2half(sc);
+                    size_t dst =
+                        ((size_t)blk * BLOCK_SIZE + slot) * c.n_kv_heads * half_hd + (size_t)kvh * half_hd;
+                    for (int d = 0; d < c.head_dim; d += 2) {
+                        int q0 = (int)std::lround(__half2float(kv[src + d]) * inv);
+                        int q1 = (int)std::lround(__half2float(kv[src + d + 1]) * inv);
+                        q0 = std::max(-8, std::min(7, q0));
+                        q1 = std::max(-8, std::min(7, q1));
+                        out[dst + d / 2] = (uint8_t)((q0 & 0xF) | ((q1 & 0xF) << 4));
+                    }
+                }
+            }
+            return out;
+        };
+        std::vector<half> ks, vs;
+        auto Kq = quant(*c.Kh, ks), Vq = quant(*c.Vh, vs);
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        void* d_ks = up(ks.data(), ks.size() * sizeof(half));
+        void* d_vs = up(vs.data(), vs.size() * sizeof(half));
+        Tensor K = raw_tensor(d_k, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor V = raw_tensor(d_v, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_int4(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
+                                    BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_ks);
+        cudaFree(d_vs);
+        return e;
+    }
+};
+
+// Shared NVFP4 host quantize (scalar + TC use the same cache). per-(token,
+// kv_head, group-of-16) UE4M3 micro-scale + E2M1 nibble [head_dim/2]. A CORRECT
+// host quantize is mandatory — random-byte NVFP4 drives the scalar kernel NaN.
+static std::vector<uint8_t> nvfp4_quant_kv(const PathCtx& c, const std::vector<half>& kv,
+                                           std::vector<uint8_t>& scales) {
+    const int half_hd = c.head_dim / 2;
+    const int sc_groups = c.head_dim / 16;
+    const int sc_elems = c.num_blocks * BLOCK_SIZE * c.n_kv_heads * sc_groups;
+    std::vector<uint8_t> out((size_t)c.num_blocks * BLOCK_SIZE * c.n_kv_heads * half_hd, 0);
+    scales.assign(sc_elems, 0);
+    for (int s = 0; s < c.kv_len; s++) {
+        int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+        for (int kvh = 0; kvh < c.n_kv_heads; kvh++) {
+            size_t src = ((size_t)s * c.n_kv_heads + kvh) * c.head_dim;
+            size_t pdst =
+                ((size_t)blk * BLOCK_SIZE + slot) * c.n_kv_heads * half_hd + (size_t)kvh * half_hd;
+            size_t sdst =
+                ((size_t)blk * BLOCK_SIZE + slot) * c.n_kv_heads * sc_groups + (size_t)kvh * sc_groups;
+            for (int g = 0; g < sc_groups; g++) {
+                float amax = 0.0f;
+                for (int d = 0; d < 16; d++)
+                    amax = std::max(amax, std::fabs(__half2float(kv[src + g * 16 + d])));
+                float sc = amax > 0 ? amax / 6.0f : 1.0f;  // E2M1 max magnitude = 6
+                uint8_t sc_byte = f_to_ue4m3(sc);
+                float sc_q = ue4m3_to_f(sc_byte);
+                if (sc_q <= 0.0f)
+                    sc_q = 1.0f;
+                scales[sdst + g] = sc_byte;
+                float inv = 1.0f / sc_q;
+                for (int d = 0; d < 16; d += 2) {
+                    int dd = g * 16 + d;
+                    uint8_t lo = f_to_e2m1(__half2float(kv[src + dd]) * inv);
+                    uint8_t hi = f_to_e2m1(__half2float(kv[src + dd + 1]) * inv);
+                    out[pdst + dd / 2] = (uint8_t)((lo & 0xF) | ((hi & 0xF) << 4));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+struct PathNVFP4 {
+    static const char* name() { return "NVFP4"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.11f; }
+    static ErrStats run(const PathCtx& c) {
+        std::vector<uint8_t> ks, vs;
+        auto Kq = nvfp4_quant_kv(c, *c.Kh, ks), Vq = nvfp4_quant_kv(c, *c.Vh, vs);
+        const int half_hd = c.head_dim / 2;
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        void* d_ks = up(ks.data(), ks.size());
+        void* d_vs = up(vs.data(), vs.size());
+        Tensor K = raw_tensor(d_k, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_nvfp4(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
+                                     c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream, c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 scalar paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_ks);
+        cudaFree(d_vs);
+        return e;
+    }
+};
+
+struct PathNVFP4TC {
+    static const char* name() { return "NVFP4-TC"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.11f; }
+    static ErrStats run(const PathCtx& c) {
+        std::vector<uint8_t> ks, vs;
+        auto Kq = nvfp4_quant_kv(c, *c.Kh, ks), Vq = nvfp4_quant_kv(c, *c.Vh, vs);
+        const int half_hd = c.head_dim / 2;
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        void* d_ks = up(ks.data(), ks.size());
+        void* d_vs = up(vs.data(), vs.size());
+        Tensor K = raw_tensor(d_k, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_nvfp4_tc(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
+                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream,
+                                        c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_ks);
+        cudaFree(d_vs);
+        return e;
+    }
+};
+
+// ===========================================================================
+// TYPED_TEST over KV dtypes (R8 / audit Phase-2 R8: "TYPED_TEST über KV-Dtypes
+// im paged-Oracle"). One typed fixture, one body; each KV dtype is a policy
+// type. The two production decode shapes (GQA 32x8 and MHA 8x8 at hd=128) and
+// the kv_len sweep {16, 64, 333, 1024} run inside the body. 333 is deliberately
+// NOT block-aligned (partial-tail block); 16/64 are the short rows where quant
+// score-noise has no averaging (#512); 1024 is the long-context dilution case.
+// ===========================================================================
+template <typename Path>
+class PagedOracle : public ::testing::Test {
 protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
     void TearDown() override { cudaStreamDestroy(stream_); }
     cudaStream_t stream_ = nullptr;
 
-    // Run all KV-dtype paths for one (config, kv_len) and assert/characterize.
-    void run(const char* cfg_name, int kv_len, int n_heads, int n_kv_heads, int head_dim,
-             // characterization envelopes (max_rel ceilings, frozen with margin)
-             float env_fp8, float env_int8, float env_int4, float env_nvfp4) {
+    void run_shape(const char* cfg, int kv_len, int n_heads, int n_kv_heads, int head_dim) {
         char trace[160];
-        snprintf(trace, sizeof(trace), "%s kv_len=%d nh=%d nkv=%d hd=%d", cfg_name, kv_len, n_heads,
-                 n_kv_heads, head_dim);
+        snprintf(trace, sizeof(trace), "%s %s kv_len=%d nh=%d nkv=%d hd=%d", Path::name(), cfg, kv_len,
+                 n_heads, n_kv_heads, head_dim);
         SCOPED_TRACE(trace);
 
         const float scale = 1.0f / std::sqrt((float)head_dim);
@@ -280,313 +595,38 @@ protected:
         const size_t q_elems = (size_t)n_heads * head_dim;
         const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
 
-        // ---- inputs (seed varies per config+len so paths don't alias) ----
         const uint32_t seed = 0xC0DEu + (uint32_t)kv_len * 131u + (uint32_t)n_kv_heads * 17u;
         std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
         lcg_fill(Qh, seed + 1, 2.0f);
         lcg_fill(Kh, seed + 2, 2.0f);
         lcg_fill(Vh, seed + 3, 1.0f);  // V not QK-normed
 
-        // ---- fp64 reference from the ORIGINAL f16 values ----
         std::vector<double> ref;
         ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
 
-        // ---- block table (identity) + ctx_len, on device ----
         std::vector<int> bt(num_blocks);
         for (int i = 0; i < num_blocks; i++)
             bt[i] = i;
         int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
         int ctx = kv_len;
         int* d_ctx = (int*)up(&ctx, sizeof(int));
-
         void* d_q = up(Qh.data(), q_elems * sizeof(half));
         void* d_o = nullptr;
         cudaMalloc(&d_o, q_elems * sizeof(half));
-        Tensor Q = f16_tensor(d_q, {1, 1, n_heads, head_dim});
 
-        auto clear_o = [&] { cudaMemset(d_o, 0, q_elems * sizeof(half)); };
+        PathCtx c{stream_, kv_len, n_heads,        n_kv_heads, head_dim, num_blocks,
+                  scale,   q_elems, &Kh,           &Vh,        &ref,
+                  f16_tensor(d_q, {1, 1, n_heads, head_dim}), d_o, d_bt, d_ctx};
 
-        // -------------------------------------------------------------------
-        // 1. F16 paged — strict 1e-2 vs fp64 (no score/value quantization).
-        // -------------------------------------------------------------------
-        {
-            auto Kc = build_f16_cache(Kh, kv_len, n_kv_heads, head_dim, num_blocks);
-            auto Vc = build_f16_cache(Vh, kv_len, n_kv_heads, head_dim, num_blocks);
-            void* d_k = up(Kc.data(), Kc.size() * sizeof(half));
-            void* d_v = up(Vc.data(), Vc.size() * sizeof(half));
-            Tensor K = f16_tensor(d_k, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor V = f16_tensor(d_v, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-            clear_o();
-            paged_attention_decode(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream_,
-                                   num_blocks);
-            cudaStreamSynchronize(stream_);
-            ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "F16 paged launch";
-            auto o = read_o(d_o, q_elems);
-            ErrStats e = err_stats(o, ref);
-            EXPECT_EQ(e.nan_count, 0) << "F16 paged: non-finite output";
-            EXPECT_LT(e.max_rel, 1e-2f) << "F16 paged vs fp64 (must be strict — no quant): " << e.str();
-            printf("[paged-oracle] %s F16:    %s\n", trace, e.str().c_str());
-            cudaFree(d_k);
-            cudaFree(d_v);
-        }
-
-        // -------------------------------------------------------------------
-        // 2. FP8-E4M3 paged — per-tensor kv_scale, layout == F16 (1 byte).
-        //    Dequant: val = e4m3(byte) * kv_scale. Quantize with a single
-        //    tensor-wide scale (the kernel's contract).
-        // -------------------------------------------------------------------
-        {
-            // per-tensor scale = absmax / 448 (e4m3 max), applied to both K and V
-            float amax = 0.0f;
-            for (auto& h : Kh)
-                amax = std::max(amax, std::fabs(__half2float(h)));
-            for (auto& h : Vh)
-                amax = std::max(amax, std::fabs(__half2float(h)));
-            float kv_scale = amax > 0 ? amax / 448.0f : 1.0f;
-            float inv = 1.0f / kv_scale;
-            auto quant = [&](const std::vector<half>& kv) {
-                std::vector<uint8_t> out((size_t)num_blocks * BLOCK_SIZE * n_kv_heads * head_dim, 0);
-                for (int s = 0; s < kv_len; s++) {
-                    int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
-                    for (int kvh = 0; kvh < n_kv_heads; kvh++) {
-                        size_t dst =
-                            ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * head_dim + (size_t)kvh * head_dim;
-                        size_t src = ((size_t)s * n_kv_heads + kvh) * head_dim;
-                        for (int d = 0; d < head_dim; d++) {
-                            __nv_fp8_e4m3 q = __nv_fp8_e4m3(__half2float(kv[src + d]) * inv);
-                            memcpy(&out[dst + d], &q, 1);
-                        }
-                    }
-                }
-                return out;
-            };
-            auto Kq = quant(Kh), Vq = quant(Vh);
-            void* d_k = up(Kq.data(), Kq.size());
-            void* d_v = up(Vq.data(), Vq.size());
-            Tensor K = raw_tensor(d_k, QType::FP8_E4M3, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-            clear_o();
-            paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_scale, kv_len, 0, 0.0f,
-                                       stream_, num_blocks);
-            cudaStreamSynchronize(stream_);
-            ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged launch";
-            auto o = read_o(d_o, q_elems);
-            ErrStats e = err_stats(o, ref);
-            EXPECT_EQ(e.nan_count, 0) << "FP8 paged: non-finite output (decode-corruption guard)";
-            EXPECT_LT(e.max_rel, env_fp8) << "FP8 paged envelope exceeded: " << e.str();
-            printf("[paged-oracle] %s FP8:    %s (env %.3g)\n", trace, e.str().c_str(), env_fp8);
-            cudaFree(d_k);
-            cudaFree(d_v);
-        }
-
-        // -------------------------------------------------------------------
-        // 3. INT8 paged — per-(token,kv_head) FP16 scale; layout == F16
-        //    (1 byte). Dequant: val = int8 * scale. (The kernel also quantizes
-        //    Q internally — its q_scale tax is part of the characterized error.)
-        // -------------------------------------------------------------------
-        {
-            const int scale_elems = num_blocks * BLOCK_SIZE * n_kv_heads;
-            auto quant = [&](const std::vector<half>& kv, std::vector<half>& scales) {
-                std::vector<int8_t> out((size_t)num_blocks * BLOCK_SIZE * n_kv_heads * head_dim, 0);
-                scales.assign(scale_elems, __float2half(0.0f));
-                for (int s = 0; s < kv_len; s++) {
-                    int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
-                    for (int kvh = 0; kvh < n_kv_heads; kvh++) {
-                        size_t src = ((size_t)s * n_kv_heads + kvh) * head_dim;
-                        float amax = 0.0f;
-                        for (int d = 0; d < head_dim; d++)
-                            amax = std::max(amax, std::fabs(__half2float(kv[src + d])));
-                        float sc = amax > 0 ? amax / 127.0f : 1.0f;
-                        float inv = 1.0f / sc;
-                        scales[(blk * BLOCK_SIZE + slot) * n_kv_heads + kvh] = __float2half(sc);
-                        size_t dst =
-                            ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * head_dim + (size_t)kvh * head_dim;
-                        for (int d = 0; d < head_dim; d++) {
-                            int q = (int)std::lround(__half2float(kv[src + d]) * inv);
-                            q = std::max(-127, std::min(127, q));
-                            out[dst + d] = (int8_t)q;
-                        }
-                    }
-                }
-                return out;
-            };
-            std::vector<half> ks, vs;
-            auto Kq = quant(Kh, ks), Vq = quant(Vh, vs);
-            void* d_k = up(Kq.data(), Kq.size());
-            void* d_v = up(Vq.data(), Vq.size());
-            void* d_ks = up(ks.data(), ks.size() * sizeof(half));
-            void* d_vs = up(vs.data(), vs.size() * sizeof(half));
-            Tensor K = raw_tensor(d_k, QType::INT8, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor V = raw_tensor(d_v, QType::INT8, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-            Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-            clear_o();
-            paged_attention_decode_int8(Q, K, V, O, (const half*)d_ks, (const half*)d_vs, d_bt, d_ctx,
-                                        BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream_, num_blocks);
-            cudaStreamSynchronize(stream_);
-            ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "INT8 paged launch";
-            auto o = read_o(d_o, q_elems);
-            ErrStats e = err_stats(o, ref);
-            EXPECT_EQ(e.nan_count, 0) << "INT8 paged: non-finite output";
-            EXPECT_LT(e.max_rel, env_int8) << "INT8 paged envelope exceeded: " << e.str();
-            printf("[paged-oracle] %s INT8:   %s (env %.3g)\n", trace, e.str().c_str(), env_int8);
-            cudaFree(d_k);
-            cudaFree(d_v);
-            cudaFree(d_ks);
-            cudaFree(d_vs);
-        }
-
-        // -------------------------------------------------------------------
-        // 4. INT4 paged — per-(token,kv_head) FP16 scale; packed nibbles
-        //    [head_dim/2] (lo=even, hi=odd). Dequant: val = int4 * scale.
-        // -------------------------------------------------------------------
-        {
-            const int half_hd = head_dim / 2;
-            const int scale_elems = num_blocks * BLOCK_SIZE * n_kv_heads;
-            auto quant = [&](const std::vector<half>& kv, std::vector<half>& scales) {
-                std::vector<uint8_t> out((size_t)num_blocks * BLOCK_SIZE * n_kv_heads * half_hd, 0);
-                scales.assign(scale_elems, __float2half(0.0f));
-                for (int s = 0; s < kv_len; s++) {
-                    int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
-                    for (int kvh = 0; kvh < n_kv_heads; kvh++) {
-                        size_t src = ((size_t)s * n_kv_heads + kvh) * head_dim;
-                        float amax = 0.0f;
-                        for (int d = 0; d < head_dim; d++)
-                            amax = std::max(amax, std::fabs(__half2float(kv[src + d])));
-                        float sc = amax > 0 ? amax / 7.0f : 1.0f;
-                        float inv = 1.0f / sc;
-                        scales[(blk * BLOCK_SIZE + slot) * n_kv_heads + kvh] = __float2half(sc);
-                        size_t dst = ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * half_hd +
-                                     (size_t)kvh * half_hd;
-                        for (int d = 0; d < head_dim; d += 2) {
-                            int q0 = (int)std::lround(__half2float(kv[src + d]) * inv);
-                            int q1 = (int)std::lround(__half2float(kv[src + d + 1]) * inv);
-                            q0 = std::max(-8, std::min(7, q0));
-                            q1 = std::max(-8, std::min(7, q1));
-                            out[dst + d / 2] = (uint8_t)((q0 & 0xF) | ((q1 & 0xF) << 4));
-                        }
-                    }
-                }
-                return out;
-            };
-            std::vector<half> ks, vs;
-            auto Kq = quant(Kh, ks), Vq = quant(Vh, vs);
-            void* d_k = up(Kq.data(), Kq.size());
-            void* d_v = up(Vq.data(), Vq.size());
-            void* d_ks = up(ks.data(), ks.size() * sizeof(half));
-            void* d_vs = up(vs.data(), vs.size() * sizeof(half));
-            Tensor K = raw_tensor(d_k, QType::INT8, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
-            Tensor V = raw_tensor(d_v, QType::INT8, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
-            Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-            clear_o();
-            paged_attention_decode_int4(Q, K, V, O, (const half*)d_ks, (const half*)d_vs, d_bt, d_ctx,
-                                        BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream_, num_blocks);
-            cudaStreamSynchronize(stream_);
-            ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged launch";
-            auto o = read_o(d_o, q_elems);
-            ErrStats e = err_stats(o, ref);
-            EXPECT_EQ(e.nan_count, 0) << "INT4 paged: non-finite output";
-            EXPECT_LT(e.max_rel, env_int4) << "INT4 paged envelope exceeded: " << e.str();
-            printf("[paged-oracle] %s INT4:   %s (env %.3g)\n", trace, e.str().c_str(), env_int4);
-            cudaFree(d_k);
-            cudaFree(d_v);
-            cudaFree(d_ks);
-            cudaFree(d_vs);
-        }
-
-        // -------------------------------------------------------------------
-        // 5. + 6. NVFP4 paged (scalar) and NVFP4-TC. Shared host quantize:
-        //    per-(token, kv_head, group-of-16) UE4M3 micro-scale + E2M1 nibble
-        //    [head_dim/2]. Dequant: e2m1(nibble) * ue4m3(scale). A CORRECT host
-        //    quantize is mandatory — the existing TC test documents that
-        //    random-byte NVFP4 drives the scalar kernel to all-NaN.
-        // -------------------------------------------------------------------
-        {
-            const int half_hd = head_dim / 2;
-            const int sc_groups = head_dim / 16;
-            const int sc_elems = num_blocks * BLOCK_SIZE * n_kv_heads * sc_groups;
-            auto quant = [&](const std::vector<half>& kv, std::vector<uint8_t>& scales) {
-                std::vector<uint8_t> out((size_t)num_blocks * BLOCK_SIZE * n_kv_heads * half_hd, 0);
-                scales.assign(sc_elems, 0);
-                for (int s = 0; s < kv_len; s++) {
-                    int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
-                    for (int kvh = 0; kvh < n_kv_heads; kvh++) {
-                        size_t src = ((size_t)s * n_kv_heads + kvh) * head_dim;
-                        size_t pdst = ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * half_hd +
-                                      (size_t)kvh * half_hd;
-                        size_t sdst = ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * sc_groups +
-                                      (size_t)kvh * sc_groups;
-                        for (int g = 0; g < sc_groups; g++) {
-                            // group of 16 elements -> one E2M1-grid scale.
-                            float amax = 0.0f;
-                            for (int d = 0; d < 16; d++)
-                                amax = std::max(amax, std::fabs(__half2float(kv[src + g * 16 + d])));
-                            // E2M1 max magnitude = 6; scale = amax/6, then round
-                            // through UE4M3 (the on-disk micro-scale).
-                            float sc = amax > 0 ? amax / 6.0f : 1.0f;
-                            uint8_t sc_byte = f_to_ue4m3(sc);
-                            float sc_q = ue4m3_to_f(sc_byte);
-                            if (sc_q <= 0.0f)
-                                sc_q = 1.0f;
-                            scales[sdst + g] = sc_byte;
-                            float inv = 1.0f / sc_q;
-                            for (int d = 0; d < 16; d += 2) {
-                                int dd = g * 16 + d;
-                                uint8_t lo = f_to_e2m1(__half2float(kv[src + dd]) * inv);
-                                uint8_t hi = f_to_e2m1(__half2float(kv[src + dd + 1]) * inv);
-                                out[pdst + dd / 2] = (uint8_t)((lo & 0xF) | ((hi & 0xF) << 4));
-                            }
-                        }
-                    }
-                }
-                return out;
-            };
-            std::vector<uint8_t> ks, vs;
-            auto Kq = quant(Kh, ks), Vq = quant(Vh, vs);
-            void* d_k = up(Kq.data(), Kq.size());
-            void* d_v = up(Vq.data(), Vq.size());
-            void* d_ks = up(ks.data(), ks.size());
-            void* d_vs = up(vs.data(), vs.size());
-            Tensor K = raw_tensor(d_k, QType::FP4_E2M1, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
-            Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
-
-            // 5. scalar
-            {
-                Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-                clear_o();
-                paged_attention_decode_nvfp4(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt,
-                                             d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream_, num_blocks);
-                cudaStreamSynchronize(stream_);
-                ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 scalar paged launch";
-                auto o = read_o(d_o, q_elems);
-                ErrStats e = err_stats(o, ref);
-                EXPECT_EQ(e.nan_count, 0)
-                    << "NVFP4 scalar paged: non-finite output (the all-NaN trap — correct quant must avoid)";
-                EXPECT_LT(e.max_rel, env_nvfp4) << "NVFP4 scalar paged envelope exceeded: " << e.str();
-                printf("[paged-oracle] %s NVFP4:  %s (env %.3g)\n", trace, e.str().c_str(), env_nvfp4);
-            }
-            // 6. tensor-core Q.K variant (only hd=128 is the production TC shape;
-            //    the kernel internally requires HEAD_DIM%16==0 — assert it runs).
-            {
-                Tensor O = f16_tensor(d_o, {1, 1, n_heads, head_dim});
-                clear_o();
-                paged_attention_decode_nvfp4_tc(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt,
-                                                d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream_,
-                                                num_blocks);
-                cudaStreamSynchronize(stream_);
-                ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged launch";
-                auto o = read_o(d_o, q_elems);
-                ErrStats e = err_stats(o, ref);
-                EXPECT_EQ(e.nan_count, 0) << "NVFP4-TC paged: non-finite output";
-                EXPECT_LT(e.max_rel, env_nvfp4) << "NVFP4-TC paged envelope exceeded: " << e.str();
-                printf("[paged-oracle] %s NVFP4-TC: %s (env %.3g)\n", trace, e.str().c_str(), env_nvfp4);
-            }
-            cudaFree(d_k);
-            cudaFree(d_v);
-            cudaFree(d_ks);
-            cudaFree(d_vs);
-        }
+        ErrStats e = Path::run(c);
+        EXPECT_EQ(e.nan_count, 0) << Path::name() << " paged: non-finite output (decode-corruption guard)";
+        if (Path::strict())
+            EXPECT_LT(e.max_rel, Path::envelope())
+                << Path::name() << " paged vs fp64 (STRICT — no quant): " << e.str();
+        else
+            EXPECT_LT(e.max_rel, Path::envelope())
+                << Path::name() << " paged envelope exceeded: " << e.str();
+        printf("[paged-oracle] %s: %s (env %.3g)\n", trace, e.str().c_str(), Path::envelope());
 
         cudaFree(d_q);
         cudaFree(d_o);
@@ -595,11 +635,16 @@ protected:
     }
 };
 
+using KVDtypes = ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathNVFP4TC>;
+TYPED_TEST_SUITE(PagedOracle, KVDtypes);
+
 // ===========================================================================
 // Measured characterization envelopes — MEASURED 2026-06-04 on RTX 5090
-// (sm_120a), first run of this suite (its birth certificate). All numbers are
-// max_rel vs the original-f16 fp64 reference, denom max(1,|ref|), worst across
-// both GQA32x8 and MHA8x8 configs at each kv_len. Ceilings below = worst
+// (sm_120a), first run of this suite (its birth certificate), re-confirmed
+// 2026-06-06 under the typed restructure (identical numbers — same quantizers
+// and kernels, only the dispatch changed). All numbers are max_rel vs the
+// original-f16 fp64 reference, denom max(1,|ref|), worst across both GQA32x8
+// and MHA8x8 configs at each kv_len. Ceilings (Path::envelope()) = worst
 // observed + ~50% margin.
 //
 //   kv_len:        16        64       333      1024     ceiling (frozen)
@@ -626,16 +671,13 @@ protected:
 //     the decode F16 path has no hidden score-precision tax.
 // ===========================================================================
 
-// GQA 32q/8kv, hd=128 — the production decode hot shape (Qwen3 / Llama family).
-TEST_F(PagedOracleTest, GQA32x8_HD128_Sweep) {
-    for (int kv_len : {16, 64, 333, 1024})
-        run("gqa32x8", kv_len, 32, 8, 128, /*fp8*/ 0.035f, /*int8*/ 0.007f, /*int4*/ 0.10f, /*nvfp4*/ 0.11f);
-}
-
-// MHA 8q/8kv, hd=128 — the no-GQA path (each q-head its own kv-head).
-TEST_F(PagedOracleTest, MHA8x8_HD128_Sweep) {
-    for (int kv_len : {16, 64, 333, 1024})
-        run("mha8x8", kv_len, 8, 8, 128, /*fp8*/ 0.035f, /*int8*/ 0.007f, /*int4*/ 0.10f, /*nvfp4*/ 0.11f);
+TYPED_TEST(PagedOracle, HD128_Sweep) {
+    for (int kv_len : {16, 64, 333, 1024}) {
+        // GQA 32q/8kv — production decode hot shape (Qwen3 / Llama family).
+        this->run_shape("gqa32x8", kv_len, 32, 8, 128);
+        // MHA 8q/8kv — the no-GQA path (each q-head its own kv-head).
+        this->run_shape("mha8x8", kv_len, 8, 8, 128);
+    }
 }
 
 }  // namespace
