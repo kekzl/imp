@@ -222,6 +222,23 @@ else
             fail "gtest (see /tmp/imp_verify_tests.log)"
             grep -E "FAIL|fatal" /tmp/imp_verify_tests.log | head -20
         fi
+
+        # test-e2e unit/gpu lane-split guard (R5/#580): the unit lane is a
+        # gtest_filter, so a rename could silently move a CPU test into the GPU
+        # lane. This asserts the filter still resolves to the frozen CPU set.
+        # Fail-open: skips cleanly if the binary or script isn't locatable.
+        _E2E_BIN="$(dirname "$TESTS_BIN")/test-e2e"
+        _LANE_FILTER="BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
+        if [ -x "$_E2E_BIN" ] && [ -x scripts/check_e2e_lane_split.sh ]; then
+            if scripts/check_e2e_lane_split.sh "$_E2E_BIN" "$_LANE_FILTER" >/tmp/imp_verify_lane.log 2>&1; then
+                pass "e2e unit/gpu lane split"
+            else
+                fail "e2e lane split (see /tmp/imp_verify_lane.log)"
+                cat /tmp/imp_verify_lane.log
+            fi
+        else
+            skip "e2e lane-split guard (test-e2e or guard script not found)"
+        fi
     fi
 fi
 

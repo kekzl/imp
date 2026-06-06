@@ -35,7 +35,10 @@ build:
 test-unit: build
 	$(DOCKER_RUN) imp-tests-unit
 
-# GPU tests: everything including CUDA kernels, < 30s
+# GPU tests: everything including CUDA kernels. ~4-5 min without models —
+# 7 of 8 binaries finish in <11s, but test-attention alone is ~241s (the
+# paged-/crosspath-oracle sweeps, TEST_AUDIT.md §8). The old "<30s" note was
+# stale.
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
 
