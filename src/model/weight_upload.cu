@@ -264,9 +264,25 @@ static bool upload_qtype_mxfp4_(Tensor& weight, QType qtype, QType compute_dtype
     const uint8_t* src = static_cast<const uint8_t*>(weight.data);
     std::vector<uint8_t> h_buf(total_bytes);
     if (weight.mxfp4_layout_v2) {
+        // GGML type-39 blocks differ from imp's legacy type 31 in TWO ways,
+        // not one: the scale byte leads, AND the nibble order inside qs[16]
+        // is SPLIT (ggml dequantize_row_mxfp4: element j = LOW nibble of
+        // qs[j], element j+16 = HIGH nibble of qs[j]) — not the LINEAR pair
+        // order (element 2i = low / 2i+1 = high of byte i) that every imp
+        // consumer (split dequant, mxf4 GEMM, decode GEMV) assumes from the
+        // type-31 layout. Copying the bytes verbatim permutes all 32 elements
+        // of every block → fluent garbage on llama.cpp-produced MXFP4 GGUFs
+        // (#551, Qwen3.5-4B-mxfp4). Normalize to linear order once, here.
         for (int i = 0; i < total_blocks; i++) {
+            const uint8_t* qs = src + static_cast<size_t>(i) * 17 + 1;
             h_buf[data_bytes + i] = src[static_cast<size_t>(i) * 17];
-            memcpy(h_buf.data() + static_cast<size_t>(i) * 16, src + static_cast<size_t>(i) * 17 + 1, 16);
+            uint8_t* dst = h_buf.data() + static_cast<size_t>(i) * 16;
+            for (int b = 0; b < 16; b++) {
+                const int e0 = 2 * b, e1 = 2 * b + 1;
+                const uint8_t n0 = (e0 < 16) ? (qs[e0] & 0xF) : (qs[e0 - 16] >> 4);
+                const uint8_t n1 = (e1 < 16) ? (qs[e1] & 0xF) : (qs[e1 - 16] >> 4);
+                dst[b] = static_cast<uint8_t>(n0 | (n1 << 4));
+            }
         }
     } else {
         for (int i = 0; i < total_blocks; i++) {
