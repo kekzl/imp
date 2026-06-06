@@ -46,6 +46,7 @@ Generators:
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
+| `tests/test_vision_golden.cu` (dump mode = its own generator) | `vision_encoder_golden.h` | `tests/test_vision_golden.cu` |
 
 gpt-oss YaRN goldens (P2.7): the generator reimplements YaRN-scaled RoPE
 (corr-dim ramp, freq blend, mscale) in fp64 from the YaRN/HF semantics for the
@@ -65,6 +66,18 @@ date:` line is normalized in both — documented in the test). Needs
 `transformers`, only the tokenizer/template (no weights):
 `docker run --rm -v $PWD:/work -v /home/kekz/models:/models -w /work
 python:3.12-slim sh -c "pip install -q transformers jinja2 && MODEL=/models/gpt-oss-20b python3 tests/refs/gen_harmony_golden.py"`.
+
+Vision encoder golden (R9 / #583) is the one exception to rule 1's "independent
+generator": there is no fp64 oracle for the SigLIP / gemma4v encoder + projector
+tail, so this is a **stability lock**, not an external truth. The generator is
+the test itself in dump mode (`IMP_VISION_GOLDEN_DUMP=1`), which prints the
+golden arrays measured on the current build; the header records the producing
+commit + model file sizes so a drift is attributable. Tolerance is the **f16
+class (≤ 1e-2 rel + 5e-3 abs floor)** on projector-output spot values, per-token
+L2 norms, and the global mean, PLUS a hard no-NaN/Inf guard over the full
+embedding (the real #489/#514-class assert). Regenerate via `make test-vision
+IMP_VISION_GOLDEN_DUMP=1` and paste the emitted blocks; needs the RTX 5090 +
+the gemma-3/gemma4v mmproj GGUFs (encoded standalone, no LM).
 
 NVFP4 outlier goldens (risk #2): the generator reimplements NVFP4's two-level
 dequant (E2M1 + UE4M3 micro-scale + f32 tensor-scale, incl. the 1/512 floor)

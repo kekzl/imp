@@ -10,7 +10,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize
+.PHONY: build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -55,6 +55,17 @@ test-e2e: build
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
 		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-Q4_K_M.gguf \
 		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*"
+
+# Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
+# Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.
+# Set IMP_VISION_GOLDEN_DUMP=1 to regenerate goldens instead of asserting.
+test-vision: build
+	docker run --rm --gpus all -v $(HOME)/models:/models -v $(PWD)/tests/fixtures:/fixtures \
+		-e IMP_TEST_MMPROJ=/models/gemma-3-4b-vl/mmproj-F16.gguf \
+		-e IMP_TEST_MMPROJ_GEMMA4=/models/gemma-3-4b-vl/mmproj-gemma4-26b-bf16.gguf \
+		-e IMP_VISION_TEST_IMAGE=/fixtures/vision_test_64.png \
+		-e IMP_VISION_GOLDEN_DUMP=$(IMP_VISION_GOLDEN_DUMP) \
+		$(DOCKER_IMG) imp-tests --gtest_filter="VisionGolden.*"
 
 # Full benchmark suite: all baseline models (requires GPU to be free)
 bench: build check-gpu
