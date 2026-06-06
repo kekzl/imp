@@ -186,8 +186,13 @@ void Engine::init_resolve_quant_flags_() {
 
     if (config_.use_nvfp4_decode < 0) {
         const auto wq_qtype = model_->layer(0).wq.qtype;
+        // IQ4_NL/IQ4_XS count as beneficial unconditionally: i-quants have no
+        // dp4a/MMVQ decode kernels, so the NVFP4 decode cache is their only
+        // fast (and graph-capturable) decode path.
+        const bool is_iq4 = (wq_qtype == QType::IQ4_NL || wq_qtype == QType::IQ4_XS);
         const bool nvfp4_beneficial_qtype = (wq_qtype == QType::Q8_0 || wq_qtype == QType::Q8_K ||
                                               wq_qtype == QType::Q6_K || wq_qtype == QType::Q5_K ||
+                                              is_iq4 ||
                                               (config_.nvfp4_decode_all &&
                                                (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
                                                 wq_qtype == QType::Q2_K)));
@@ -195,7 +200,7 @@ void Engine::init_resolve_quant_flags_() {
         const bool is_gdn = (n_gdn_auto > 0);
 
         const bool sub8bit_qtype = (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
-                                     wq_qtype == QType::Q2_K);
+                                     wq_qtype == QType::Q2_K || is_iq4);
         if (nvfp4_beneficial_qtype && !is_moe && !is_gdn && !sub8bit_qtype) {
             // Dense Q*_K (6-8 bit GGUF) on sm_120: mode 1 (additive — high-
             // precision prefill cache (FP8 1 B/elem, or FP16 2 B/elem when FP8 is

@@ -21,6 +21,8 @@ bool dequant_gpu_supported(QType qtype) {
         case QType::Q4_K:
         case QType::Q5_K:
         case QType::Q8_K:
+        case QType::IQ4_NL:
+        case QType::IQ4_XS:
             return true;
         default:
             return false;
@@ -696,6 +698,100 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
 }
 
 // ---------------------------------------------------------------------------
+// IQ4_NL GPU dequantization kernel
+//
+// Block format (18 bytes per 32 elements):
+//   d[2]   : fp16 scale
+//   qs[16] : packed 4-bit codebook indices (2 per byte)
+//
+// Non-linear 4-bit: the index selects from a fixed signed codebook
+// (kvalues_iq4nl, ggml-common.h). Element layout matches Q4_0: element e
+// (0..15) is the low nibble of qs[e]; element e+16 is the high nibble.
+// Dequantization: val = d * codebook[nibble].
+// ---------------------------------------------------------------------------
+
+__device__ __constant__ int8_t kvalues_iq4nl_gpu[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                                        1,    13,   25,  38,  53,  69,  89,  113};
+
+__global__ void dequant_iq4_nl_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
+                                      int cols) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total)
+        return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 32;
+    int i = col % 32;
+    int blocks_per_row = cols / 32;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 18;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    const uint8_t* qs = block_ptr + 2;
+
+    int byte_idx = i & 15;
+    uint8_t packed = qs[byte_idx];
+    int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+
+    float val = __half2float(d_val) * static_cast<float>(kvalues_iq4nl_gpu[nibble]);
+    dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
+// IQ4_XS GPU dequantization kernel
+//
+// Super-block format (136 bytes per 256 elements):
+//   d[2]        : fp16 super-block scale
+//   scales_h[2] : uint16, upper 2 bits of the 8 sub-block scales (2 bits each)
+//   scales_l[4] : lower 4 bits of the 8 sub-block scales (2 per byte)
+//   qs[128]     : packed 4-bit codebook indices (2 per byte)
+//
+// 8 sub-blocks of 32 elements, each with a 6-bit scale ls (bias 32) and the
+// same non-linear codebook as IQ4_NL. Within a sub-block the nibble layout
+// matches IQ4_NL: 16 bytes, element j low nibble, element j+16 high nibble
+// (ggml dequantize_row_iq4_xs). Dequantization:
+//   ls  = (scales_l nibble) | ((scales_h >> 2*sub) & 3) << 4
+//   val = d * (ls - 32) * codebook[nibble]
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
+                                      int cols) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total)
+        return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 256;
+    int i = col % 256;
+    int blocks_per_row = cols / 256;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 136;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    uint16_t scales_h;
+    memcpy(&scales_h, block_ptr + 2, 2);
+    const uint8_t* scales_l = block_ptr + 4;  // 4 bytes, 8 nibbles
+    const uint8_t* qs = block_ptr + 8;        // 128 bytes
+
+    int sub = i / 32;     // sub-block 0..7
+    int within = i & 31;  // 0..31 within the sub-block
+
+    int ls_low = (scales_l[sub / 2] >> (4 * (sub & 1))) & 0xF;
+    int ls_high = (scales_h >> (2 * sub)) & 3;
+    int ls = ls_low | (ls_high << 4);
+
+    int byte_idx = sub * 16 + (within & 15);
+    uint8_t packed = qs[byte_idx];
+    int nibble = (within < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+
+    float val = __half2float(d_val) * static_cast<float>(ls - 32) *
+                static_cast<float>(kvalues_iq4nl_gpu[nibble]);
+    dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
 // Q6_K → FP8 E4M3 dequantization kernel
 //
 // Same Q6_K block decoding as dequant_q6k_v2_kernel, but writes FP8 E4M3
@@ -792,6 +888,8 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             DEQUANT_CASE(Q4_K, dequant_q4k_kernel)
             DEQUANT_CASE(Q5_K, dequant_q5k_kernel)
             DEQUANT_CASE(Q8_K, dequant_q8k_kernel)
+            DEQUANT_CASE(IQ4_NL, dequant_iq4_nl_kernel)
+            DEQUANT_CASE(IQ4_XS, dequant_iq4_xs_kernel)
 
         default:
             IMP_LOG_ERROR("dequant_gpu: unsupported qtype %u", static_cast<unsigned>(qtype));

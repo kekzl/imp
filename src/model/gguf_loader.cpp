@@ -224,8 +224,12 @@ QType gguf_type_to_qtype(GgufWireType type) {
             return QType::INT8;
         case GgufWireType::I32:
             return QType::INT32;
+        case GgufWireType::IQ4_NL:
+            return QType::IQ4_NL;
+        case GgufWireType::IQ4_XS:
+            return QType::IQ4_XS;
         default:
-            // IQ4_NL/IQ4_XS/etc. — no native QType yet; mark unsupported.
+            // IQ1/IQ2/IQ3 i-quants — no native QType yet; mark unsupported.
             return QType::NONE;
     }
 }

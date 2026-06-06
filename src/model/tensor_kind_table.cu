@@ -104,7 +104,11 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
     // quality risk. Mirror the runtime `nvfp4_beneficial(qtype)` policy.
     const bool nvfp4_overlay_ok =
         (source_qtype == QType::Q8_0 || source_qtype == QType::Q8_K ||
-         source_qtype == QType::Q6_K || source_qtype == QType::Q5_K);
+         source_qtype == QType::Q6_K || source_qtype == QType::Q5_K ||
+         // i-quants: no dp4a/MMVQ kernels — the NVFP4 decode cache is the
+         // only fast decode path, so the overlay is allowed despite the
+         // similar bit-width (mirror nvfp4_beneficial).
+         source_qtype == QType::IQ4_NL || source_qtype == QType::IQ4_XS);
 
     if (!nvfp4_overlay_ok) {
         cap.supported = cap.supported & ~mask(StorageTier::NVFP4) &

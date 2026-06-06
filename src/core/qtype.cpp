@@ -53,6 +53,10 @@ size_t qtype_row_bytes(QType q, int64_t cols) {
             return static_cast<size_t>(cols / 256) * 176;
         case QType::Q8_K:
             return static_cast<size_t>(cols / 256) * 292;
+        case QType::IQ4_NL:
+            return static_cast<size_t>(cols / 32) * 18;
+        case QType::IQ4_XS:
+            return static_cast<size_t>(cols / 256) * 136;
         case QType::F16:
         case QType::BF16:
             return static_cast<size_t>(cols) * 2;
@@ -106,6 +110,10 @@ const char* qtype_name(QType q) {
             return "Q6_K";
         case QType::Q8_K:
             return "Q8_K";
+        case QType::IQ4_NL:
+            return "IQ4_NL";
+        case QType::IQ4_XS:
+            return "IQ4_XS";
         case QType::BF16:
             return "BF16";
         case QType::MXFP4:

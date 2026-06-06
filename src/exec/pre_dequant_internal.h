@@ -106,6 +106,13 @@ inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
         case QType::Q3_K:
         case QType::Q2_K:
             return decode_all;
+        case QType::IQ4_NL:
+        case QType::IQ4_XS:
+            // i-quants have no dp4a/MMVQ decode kernels — without the NVFP4
+            // decode cache they fall to dequant->cuBLAS GEMV (uncapturable
+            // under graph capture, ~2x slower). Similar bit-width to Q4_K,
+            // but here the conversion is the only fast decode path.
+            return true;
         default:
             return false;
     }

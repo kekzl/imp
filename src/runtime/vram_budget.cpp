@@ -117,6 +117,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             case Q3_K:
             case Q2_K:
                 return decode_all;
+            case IQ4_NL:
+            case IQ4_XS:
+                // No dp4a/MMVQ kernels for i-quants — NVFP4 decode cache is
+                // the only fast decode path (mirror pre_dequant_internal.h).
+                return true;
             default:
                 return false;
         }
