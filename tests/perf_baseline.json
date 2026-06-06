@@ -1,4 +1,5 @@
 {
+  "schema_version": "legacy-v1",
   "model": "Qwen3-8B-Q8_0.gguf",
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "unknown",

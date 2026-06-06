@@ -74,6 +74,92 @@ section() { echo; echo "${YLW}== $* ==${RST}"; }
 pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 skip()    { echo "${YLW}SKIP${RST} $*"; }
+warn()    { echo "${YLW}WARN${RST} $*"; }
+
+# --- Host-drift guard (#526) -------------------------------------------------
+# This WSL2 box has day-level "depressed host" states where decode reads 8-15%
+# low DESPITE full methodology (memory: q8_drift_host_artifact_2026_06_05). The
+# culprit is host/driver state, not code — but the perf gate cannot tell the two
+# apart from a single bench number. So we sample GPU clocks/power DURING the
+# decode bench and, if a regression coincides with the depressed-host signature,
+# we degrade FAIL→WARN (clearly labeled) instead of crying false-positive.
+#
+# Healthy under-load signature: ~2850 MHz SM / 13801 MHz mem / ~500 W.
+# Depressed         => mem-clock median < 13801 MHz, OR power max < 400 W.
+#   - mem-clock is the cleanest tell (GDDR7 either P0-clocks or it doesn't).
+#   - power uses MAX over the run (a robust upper bound) with a conservative
+#     400 W floor so a healthy ~500 W run never trips it.
+#   - The SM clock ramps ~1s at bench start (cold-start artifact, audit §5), so
+#     we drop the first 2 samples before aggregating to avoid a false depressed
+#     classification from the ramp.
+# Fail-open: if nvidia-smi is missing or errors, the sampler no-ops and the gate
+# behaves exactly as before (no degradation logic kicks in).
+GPU_DRIFT_MEM_FLOOR=13801   # mem clock (MHz) at/above which the host is healthy
+GPU_DRIFT_POWER_FLOOR=400   # power (W) max below which the host is depressed
+_SAMPLE_FILE=""
+_SAMPLE_PID=""
+
+# Start a background sampler writing "sm,mem,power" CSV rows every 1s.
+# No-op (leaves _SAMPLE_PID empty) if nvidia-smi can't be queried.
+gpu_sample_start() {
+    _SAMPLE_FILE=""; _SAMPLE_PID=""
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw \
+        --format=csv,noheader,nounits >/dev/null 2>&1 || return 0
+    _SAMPLE_FILE=$(mktemp)
+    ( while true; do
+        nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw \
+            --format=csv,noheader,nounits 2>/dev/null | head -1
+        sleep 1
+      done ) >>"$_SAMPLE_FILE" 2>/dev/null &
+    _SAMPLE_PID=$!
+}
+
+# Stop the sampler and classify the run. Sets globals:
+#   GPU_DRIFT_DEPRESSED = 0|1
+#   GPU_DRIFT_DESC      = human-readable "mem=… power=…" summary ("" if no data)
+gpu_sample_stop() {
+    GPU_DRIFT_DEPRESSED=0
+    GPU_DRIFT_DESC=""
+    [ -n "$_SAMPLE_PID" ] && kill "$_SAMPLE_PID" >/dev/null 2>&1
+    wait "$_SAMPLE_PID" 2>/dev/null
+    [ -n "$_SAMPLE_FILE" ] && [ -s "$_SAMPLE_FILE" ] || { _cleanup_sample; return 0; }
+    # Drop the first 2 samples (clock-ramp cold-start), then aggregate:
+    # median mem clock + max power over the steady portion of the run.
+    read -r MEM_MED PWR_MAX N < <(awk -F, '
+        { gsub(/ /,""); n++; sm[n]=$1+0; mem[n]=$2+0; pwr[n]=$3+0 }
+        END {
+            start = (n > 2) ? 3 : 1; cnt = 0; pmax = 0;
+            for (i = start; i <= n; i++) { m[++cnt] = mem[i]; if (pwr[i] > pmax) pmax = pwr[i]; }
+            if (cnt == 0) { print 0, 0, 0; exit }
+            # median of m[1..cnt]
+            for (a = 1; a <= cnt; a++) for (b = a+1; b <= cnt; b++) if (m[b] < m[a]) { t=m[a]; m[a]=m[b]; m[b]=t }
+            med = (cnt % 2) ? m[(cnt+1)/2] : (m[cnt/2] + m[cnt/2+1]) / 2;
+            printf "%.0f %.0f %d\n", med, pmax, cnt;
+        }' "$_SAMPLE_FILE")
+    _cleanup_sample
+    [ "${N:-0}" -gt 0 ] || return 0
+    GPU_DRIFT_DESC="mem=${MEM_MED}MHz(med) power=${PWR_MAX}W(max) n=${N}"
+    if [ "$MEM_MED" -lt "$GPU_DRIFT_MEM_FLOOR" ] || [ "$PWR_MAX" -lt "$GPU_DRIFT_POWER_FLOOR" ]; then
+        GPU_DRIFT_DEPRESSED=1
+    fi
+}
+
+_cleanup_sample() {
+    [ -n "$_SAMPLE_FILE" ] && rm -f "$_SAMPLE_FILE"
+    _SAMPLE_FILE=""; _SAMPLE_PID=""
+}
+
+# Report a decode regression, degrading FAIL→WARN under the depressed-host
+# signature (#526). $1 = context label for the message.
+decode_regression() {
+    local ctx="$1"
+    if [ "${GPU_DRIFT_DEPRESSED:-0}" = "1" ]; then
+        warn "$ctx: depressed-host signature ($GPU_DRIFT_DESC) — decode delta not attributable to code, FAIL degraded to WARN (#526)"
+    else
+        fail "$ctx"
+    fi
+}
 
 # Docker-only host (host has neither cmake nor a build/ directory): run
 # the canonical Docker build, then exit early — the test / perf / smoke
@@ -145,12 +231,14 @@ elif [ ! -x "$BIN" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
     skip "jq not installed (needed to parse $BASELINE)"
 else
-    # Detect baseline schema version.
-    # v1 (perf_baseline_chunked.json): has top-level "models" map + "regression_thresholds".
-    # legacy (perf_baseline.json): single model under "metrics.decode_tps".
+    # Detect baseline schema version (R4/#579: all three baselines now carry a
+    # common "schema_version" string — "legacy-v1" | "multi-model-v1"). Fall back
+    # to the historical numeric ".version" (multi-model == 1) for forward-tolerance
+    # if an older/regenerated file still lacks schema_version.
+    BL_SCHEMA=$(jq -r '.schema_version // empty' "$BASELINE")
     BL_VERSION=$(jq -r '.version // 0' "$BASELINE")
 
-    if [ "$BL_VERSION" = "1" ]; then
+    if [ "$BL_SCHEMA" = "multi-model-v1" ] || [ "$BL_VERSION" = "1" ]; then
         # ---- Multi-model v1 schema ----
         DEC_THR=$(jq -r '.regression_thresholds.decode_pct' "$BASELINE")
         PRE_THR=$(jq -r '.regression_thresholds.prefill_pct' "$BASELINE")
@@ -169,8 +257,10 @@ else
             fi
             ANY_MEASURED=1
             ERR=$(mktemp)
+            gpu_sample_start
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
                   --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR"
+            gpu_sample_stop
             PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
             TG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
             if [ -z "$PP" ] || [ -z "$TG" ]; then
@@ -184,8 +274,9 @@ else
                 PRE_REG=$(awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
                 printf "  %-42s  tg256=%7.2f (base %7.2f, %+.1f%%)  pp512=%7.1f (base %7.1f, %+.1f%%)\n" \
                     "$BL_MODEL" "$TG" "$BL_TG" "$DEC_DELTA" "$PP" "$BL_PP" "$PRE_DELTA"
+                [ -n "${GPU_DRIFT_DESC:-}" ] && echo "    GPU during bench: $GPU_DRIFT_DESC"
                 if [ "$DEC_REG" = "1" ]; then
-                    fail "$BL_MODEL: decode regression > ${DEC_THR}%"
+                    decode_regression "$BL_MODEL: decode regression > ${DEC_THR}%"
                 else
                     pass "$BL_MODEL: decode within ${DEC_THR}% threshold"
                 fi
@@ -213,8 +304,10 @@ else
             ERR=$(mktemp)
             # --prefill-chunk-size 0 forces single-chunk prefill so the baseline
             # remains apples-to-apples with the pre-chunked-prefill measurements.
+            gpu_sample_start
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
                   --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 >/dev/null 2>"$ERR"
+            gpu_sample_stop
             # Bench lines (stderr) have variable spacing inside parens for short numbers:
             #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
             #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
@@ -232,9 +325,10 @@ else
 
                 printf "  decode  tg128 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$TG" "$BL_TG" "$DEC_DELTA"
                 printf "  prefill pp512 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$PP" "$BL_PP" "$PRE_DELTA"
+                [ -n "${GPU_DRIFT_DESC:-}" ] && echo "  GPU during bench: $GPU_DRIFT_DESC"
 
                 if [ "$DEC_REG" = "1" ]; then
-                    fail "decode regression > ${DEC_THR}%  (if expected: ./scripts/gen_perf_baseline.sh $MODEL_PATH)"
+                    decode_regression "decode regression > ${DEC_THR}%  (if expected: ./scripts/gen_perf_baseline.sh $MODEL_PATH)"
                 else
                     pass "decode within ${DEC_THR}% threshold"
                 fi
