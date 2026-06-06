@@ -27,6 +27,8 @@ const char* chat_template_family_name(ChatTemplateFamily family) {
             return "deepseek_r1";
         case ChatTemplateFamily::PHI:
             return "phi";
+        case ChatTemplateFamily::HARMONY:
+            return "harmony";
     }
     return "unknown";
 }
@@ -61,6 +63,10 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
                         "User"
                         "\xef\xbd\x9c") != std::string::npos)
         return ChatTemplateFamily::DEEPSEEK_R1;
+    // Harmony (gpt-oss): <|channel|> is unique to the format. Must be checked
+    // BEFORE Phi — the Harmony template also contains the literal <|end|>.
+    if (jinja2_str.find("<|channel|>") != std::string::npos)
+        return ChatTemplateFamily::HARMONY;
     // Phi: <|end|> is literal in the Jinja2 template (role tags are dynamic)
     if (jinja2_str.find("<|end|>") != std::string::npos)
         return ChatTemplateFamily::PHI;
@@ -96,6 +102,8 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
             return ChatTemplateFamily::GEMMA;
         case ModelArch::LLAMA4:
             return ChatTemplateFamily::LLAMA3;
+        case ModelArch::GPT_OSS:
+            return ChatTemplateFamily::HARMONY;
         default:
             return ChatTemplateFamily::RAW;
     }
@@ -122,6 +130,8 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
         return ChatTemplateFamily::DEEPSEEK_R1;
     if (name == "phi")
         return ChatTemplateFamily::PHI;
+    if (name == "harmony")
+        return ChatTemplateFamily::HARMONY;
     return ChatTemplateFamily::RAW;
 }
 
@@ -330,6 +340,32 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             stop_token_ids_.push_back(phi_end_id_);
             break;
         }
+        case ChatTemplateFamily::HARMONY: {
+            hm_start_id_ = tokenizer.find_token("<|start|>");
+            hm_end_id_ = tokenizer.find_token("<|end|>");
+            hm_message_id_ = tokenizer.find_token("<|message|>");
+            hm_channel_id_ = tokenizer.find_token("<|channel|>");
+            hm_return_id_ = tokenizer.find_token("<|return|>");
+            hm_call_id_ = tokenizer.find_token("<|call|>");
+            if (hm_start_id_ < 0 || hm_end_id_ < 0 || hm_message_id_ < 0 || hm_channel_id_ < 0 ||
+                hm_return_id_ < 0) {
+                IMP_LOG_WARN(
+                    "Harmony template: missing tokens "
+                    "(start=%d, end=%d, message=%d, channel=%d, return=%d), falling back to raw",
+                    hm_start_id_, hm_end_id_, hm_message_id_, hm_channel_id_, hm_return_id_);
+                family_ = ChatTemplateFamily::RAW;
+                return false;
+            }
+            // The final-channel answer ends with <|return|>; tool calls end
+            // with <|call|>. <|end|> is deliberately NOT a stop token — it
+            // separates the analysis message from the final message inside
+            // one assistant turn (stopping there would truncate after the
+            // reasoning block).
+            stop_token_ids_.push_back(hm_return_id_);
+            if (hm_call_id_ >= 0)
+                stop_token_ids_.push_back(hm_call_id_);
+            break;
+        }
         default:
             break;
     }
@@ -412,6 +448,8 @@ std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector
             return apply_deepseek_r1(tok, eff_msgs);
         case ChatTemplateFamily::PHI:
             return apply_phi(tok, eff_msgs);
+        case ChatTemplateFamily::HARMONY:
+            return apply_harmony(tok, eff_msgs);
         default:
             break;
     }
@@ -730,6 +768,71 @@ std::vector<int32_t> ChatTemplate::apply_phi(const Tokenizer& tok,
             }
             fprintf(stderr, "|");
         }
+        fprintf(stderr, "\n");
+    }
+
+    return tokens;
+}
+
+// Harmony (gpt-oss): <|start|>role<|message|>content<|end|> blocks.
+// System turn carries the channel declaration the model was trained on;
+// a user-provided "system" message maps to the developer role per the
+// Harmony spec. Assistant history is rendered as the final channel.
+std::vector<int32_t> ChatTemplate::apply_harmony(const Tokenizer& tok,
+                                                 const std::vector<ChatMessage>& msgs) const {
+    std::vector<int32_t> tokens;
+
+    auto push_text = [&](const std::string& text) {
+        auto ids = tok.encode(text);
+        tokens.insert(tokens.end(), ids.begin(), ids.end());
+    };
+    auto open_role = [&](const char* role) {
+        tokens.push_back(hm_start_id_);
+        push_text(role);
+    };
+
+    // Fixed system turn (Harmony spec): identity + reasoning level + the
+    // channel contract. The model relies on this to route analysis vs final.
+    open_role("system");
+    tokens.push_back(hm_message_id_);
+    push_text(
+        "You are ChatGPT, a large language model trained by OpenAI.\n"
+        "Knowledge cutoff: 2024-06\n\n"
+        "Reasoning: medium\n\n"
+        "# Valid channels: analysis, commentary, final. "
+        "Channel must be included for every message.");
+    tokens.push_back(hm_end_id_);
+
+    for (const auto& msg : msgs) {
+        if (msg.role == "system") {
+            // User-supplied instructions → developer role (Harmony spec).
+            open_role("developer");
+            tokens.push_back(hm_message_id_);
+            push_text("# Instructions\n\n" + msg.content);
+            tokens.push_back(hm_end_id_);
+        } else if (msg.role == "assistant") {
+            open_role("assistant");
+            tokens.push_back(hm_channel_id_);
+            push_text("final");
+            tokens.push_back(hm_message_id_);
+            push_text(msg.content);
+            tokens.push_back(hm_end_id_);
+        } else {  // user (and any unknown role)
+            open_role(msg.role == "user" ? "user" : msg.role.c_str());
+            tokens.push_back(hm_message_id_);
+            push_text(msg.content);
+            tokens.push_back(hm_end_id_);
+        }
+    }
+
+    // Generation prompt: the model emits "<|channel|>analysis<|message|>..."
+    // itself, then "<|start|>assistant<|channel|>final<|message|>...<|return|>".
+    open_role("assistant");
+
+    if (imp::process_diag_debug_template()) {
+        fprintf(stderr, "[DEBUG_TPL] harmony %zu tokens:", tokens.size());
+        for (size_t i = 0; i < tokens.size(); i++)
+            fprintf(stderr, " %d", tokens[i]);
         fprintf(stderr, "\n");
     }
 

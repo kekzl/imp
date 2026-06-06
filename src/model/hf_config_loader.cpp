@@ -38,6 +38,7 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
         {"Gemma4ForCausalLM", ModelArch::GEMMA4},
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
+        {"GptOssForCausalLM", ModelArch::GPT_OSS},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
         {"Llama4ForCausalLM", ModelArch::LLAMA4},
@@ -194,10 +195,15 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         float factor = 1.0f;
         jobj_get_float(*rope_scaling, "factor", factor);
 
+        // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale
+        // stores the FACTOR (>1, e.g. 32); the kernel applies 1/factor itself.
+        // Storing 1/factor here double-inverted YaRN for gpt-oss (#547):
+        // interpolated dims rotated factor^2=1024x too fast and the mscale
+        // compensation flipped to 0.653 instead of 1.347.
         if (rope_type == "linear") {
-            cfg.rope_freq_scale = 1.0f / factor;
+            cfg.rope_freq_scale = factor;
         } else if (rope_type == "yarn") {
-            cfg.rope_freq_scale = 1.0f / factor;
+            cfg.rope_freq_scale = factor;
             jobj_get_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
             jobj_get_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
             jobj_get_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);
@@ -312,6 +318,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     }
     if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
         jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
+    }
+    // gpt-oss: no separate MoE intermediate key — intermediate_size IS the
+    // per-expert FFN width (2880); there is no dense FFN at all.
+    if (cfg.expert_d_ff == 0 && cfg.n_experts > 0 && cfg.arch == ModelArch::GPT_OSS) {
+        cfg.expert_d_ff = cfg.d_ff;
     }
 
     // Qwen3.5/3.6 GDN: linear-attention layer config. The HF config exposes
@@ -489,6 +500,22 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                      "scale=%.2f norm_topk=%d",
                      cfg.n_experts, cfg.n_experts_active, cfg.n_experts_shared,
                      cfg.expert_shared_d_ff, cfg.expert_weights_scale, (int) cfg.expert_weights_norm);
+    }
+
+    // gpt-oss: alternating attention — layer_types[] marks "sliding_attention"
+    // (window 128) on even layers, "full_attention" on odd. Uniform head_dim
+    // (64); the per-head sink logits + per-expert biases are tensor-level
+    // (weight_map.cpp). Router = topk-then-softmax (resolved in the MoE path).
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        const JValue* lt = jobj_find(eff, "layer_types");
+        if (lt && lt->type == JType::ARRAY) {
+            cfg.swa_layers.clear();
+            cfg.swa_layers.reserve(lt->arr.size());
+            for (const auto& v : lt->arr)
+                cfg.swa_layers.push_back(v.str_val == "sliding_attention" ? 1 : 0);
+        }
+        if (cfg.sliding_window <= 0)
+            cfg.sliding_window = 128;
     }
 
     // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and

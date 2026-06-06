@@ -15,6 +15,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "quant/dequant_gpu.h"
+#include "quant/gpt_oss_mxfp4_convert.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -355,6 +356,8 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);
     }
 
+    if (cfg.arch == ModelArch::GPT_OSS)
+        gpt_oss_convert_moe_experts_(cfg, dctx);
     nvfp4_decode_cache_moe_experts_(cfg, remaining_budget, stream, dctx);
 }
 
@@ -1230,6 +1233,76 @@ if (mx_native > 0) {
 //    per projection.
 //  - cache_moe_expert_nvfp4: GGUF / re-quant path, expert_*_packed is the
 //    3-D contiguous tensor.
+// ---------------------------------------------------------------------------
+// gpt-oss (#547): convert the HF-MXFP4 pre-packed experts (host-mmap'd
+// blocks/scales) into the native NVFP4 MoE cache. e2m1 nibbles are
+// bit-identical (linear pair order); ue8m0 scales expand 1→2 e4m3
+// micro-scales under a per-expert tensor scale. gate_up rows arrive
+// interleaved (g0,u0,g1,…) and are de-interleaved into separate gate/up
+// results, so the whole proven NVFP4-MoE machinery (CUTLASS grouped prefill,
+// gemv_nvfp4_moe decode, CUDA graphs) applies unchanged. Placeholder packed
+// tensors keyed on the converted device pointers let Phase 4 wire
+// nvfp4_moe_{gate,up,down}_ptr exactly like the Modelopt path.
+// ---------------------------------------------------------------------------
+void GraphExecutor::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx) {
+    int converted = 0;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
+        const Tensor& gu_b = L.expert_gate_up_packed_blocks;
+        const Tensor& gu_s = L.expert_gate_up_packed_scales;
+        const Tensor& dn_b = L.expert_down_packed_blocks;
+        const Tensor& dn_s = L.expert_down_packed_scales;
+        if (!gu_b.data || !gu_s.data || !dn_b.data || !dn_s.data)
+            continue;
+        if (gu_b.on_device || dn_b.on_device) {
+            IMP_LOG_ERROR("gpt-oss L%d: packed expert tensors unexpectedly on device — skipping", i);
+            continue;
+        }
+        const int ne = static_cast<int>(gu_b.shape[0]);
+        const int64_t gu_rows = gu_b.shape[1];           // 2*d_ff, interleaved
+        const int64_t gu_K = gu_b.shape[2] * 32;         // K from block count
+        const int64_t dn_rows = dn_b.shape[1];           // d_model
+        const int64_t dn_K = dn_b.shape[2] * 32;         // d_ff
+
+        NvFP4MoEQuantResult g{}, u{}, d{};
+        bool ok = gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
+                                                   static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
+                                                   gu_K, /*offset=*/0, /*stride=*/2, g) &&
+                  gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
+                                                   static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
+                                                   gu_K, /*offset=*/1, /*stride=*/2, u) &&
+                  // down: extra 2^-4 — residual-stream rescale (see arch
+                  // registry comment in model.cpp; bias scaled in the loader).
+                  gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
+                                                   static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
+                                                   dn_K, /*offset=*/0, /*stride=*/1, d,
+                                                   /*extra_scale=*/0.0625f);
+        if (!ok) {
+            IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
+            return;
+        }
+
+        auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
+            int64_t shp[3] = {r.n_experts, r.N, r.K};
+            packed_slot = Tensor(r.packed_data, QType::NVFP4, 3, shp, /*on_device=*/true);
+            wcache_.nvfp4_moe[r.packed_data] = r;
+            auto* m = const_cast<Model*>(model_);
+            m->gpu_allocations_.push_back(r.packed_data);
+            m->gpu_allocations_.push_back(r.micro_scales);
+            m->gpu_allocations_.push_back(r.tensor_scales);
+        };
+        install(g, L.expert_gate_packed);
+        install(u, L.expert_up_packed);
+        install(d, L.expert_down_packed);
+        dctx.nvfp4_moe_count += 3;
+        converted++;
+    }
+    if (converted)
+        IMP_LOG_INFO("gpt-oss: converted MXFP4→NVFP4 experts for %d layers "
+                     "(ne=%d, gate/up de-interleaved)",
+                     converted, cfg.n_experts);
+}
+
 void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
                                                     size_t& remaining_budget,
                                                     cudaStream_t stream,

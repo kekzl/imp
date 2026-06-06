@@ -365,6 +365,80 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
 }
 
 // ============================================================================
+// gpt-oss bias kernels (issue #547)
+// ============================================================================
+
+__global__ void moe_add_logit_bias_kernel(float* __restrict__ logits, const half* __restrict__ bias,
+                                          int64_t total, int ne) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < total)
+        logits[idx] += __half2float(bias[idx % ne]);
+}
+
+__global__ void moe_add_expert_bias_indexed_kernel(half* __restrict__ buf, const half* __restrict__ bias,
+                                                   const int32_t* __restrict__ expert_indices,
+                                                   int64_t total, int dim) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < total) {
+        int row = static_cast<int>(idx / dim);
+        int e = expert_indices[row];
+        buf[idx] = __hadd(buf[idx], bias[static_cast<int64_t>(e) * dim + idx % dim]);
+    }
+}
+
+__global__ void moe_add_expert_bias_sorted_kernel(half* __restrict__ buf, const half* __restrict__ bias,
+                                                  const int32_t* __restrict__ expert_offsets, int ne,
+                                                  int64_t total, int dim) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total)
+        return;
+    int row = static_cast<int>(idx / dim);
+    // Binary search: expert e with offsets[e] <= row < offsets[e+1]. ne is
+    // small (32 for gpt-oss-20b) — 5 iterations, all from L2/__ldg.
+    int lo = 0, hi = ne - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) >> 1;
+        if (__ldg(&expert_offsets[mid]) <= row)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    buf[idx] = __hadd(buf[idx], bias[static_cast<int64_t>(lo) * dim + idx % dim]);
+}
+
+void moe_add_logit_bias(float* logits_f32, const void* bias_fp16, int n, int ne, cudaStream_t stream) {
+    int64_t total = static_cast<int64_t>(n) * ne;
+    if (total == 0)
+        return;
+    int threads = 256;
+    int blocks = static_cast<int>((total + threads - 1) / threads);
+    moe_add_logit_bias_kernel<<<blocks, threads, 0, stream>>>(
+        logits_f32, static_cast<const half*>(bias_fp16), total, ne);
+}
+
+void moe_add_expert_bias_indexed(void* buf_fp16, const void* bias_fp16, const int32_t* expert_indices,
+                                 int n_rows, int dim, cudaStream_t stream) {
+    int64_t total = static_cast<int64_t>(n_rows) * dim;
+    if (total == 0)
+        return;
+    int threads = 256;
+    int blocks = static_cast<int>((total + threads - 1) / threads);
+    moe_add_expert_bias_indexed_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<half*>(buf_fp16), static_cast<const half*>(bias_fp16), expert_indices, total, dim);
+}
+
+void moe_add_expert_bias_sorted(void* buf_fp16, const void* bias_fp16, const int32_t* expert_offsets,
+                                int ne, int n_rows, int dim, cudaStream_t stream) {
+    int64_t total = static_cast<int64_t>(n_rows) * dim;
+    if (total == 0)
+        return;
+    int threads = 256;
+    int blocks = static_cast<int>((total + threads - 1) / threads);
+    moe_add_expert_bias_sorted_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<half*>(buf_fp16), static_cast<const half*>(bias_fp16), expert_offsets, ne, total, dim);
+}
+
+// ============================================================================
 // Kernel 2: Count tokens per expert
 //
 // Each token contributes top_k entries.  We atomically increment per-expert

@@ -187,7 +187,7 @@ std::string WeightMap::map_name(const std::string& name) const {
                 return prefix + "w_down_shared";
         }
 
-        // Attention biases: self_attn.{q,k,v}_proj.bias
+        // Attention biases: self_attn.{q,k,v,o}_proj.bias
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
             if (parts[4] == "q_proj")
                 return prefix + "q_bias";
@@ -195,6 +195,27 @@ std::string WeightMap::map_name(const std::string& name) const {
                 return prefix + "k_bias";
             if (parts[4] == "v_proj")
                 return prefix + "v_bias";
+            if (parts[4] == "o_proj")
+                return prefix + "o_bias";
+        }
+
+        // gpt-oss attention sinks: self_attn.sinks [n_heads]
+        if (parts.size() >= 5 && parts[3] == "self_attn" && parts[4] == "sinks") {
+            return prefix + "attn_sinks";
+        }
+
+        // gpt-oss MoE router: mlp.router.{weight,bias}
+        if (parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "router") {
+            if (parts[5] == "weight")
+                return prefix + "moe_gate";
+            if (parts[5] == "bias")
+                return prefix + "moe_router_bias";
+        }
+
+        // gpt-oss pre-packed MXFP4 experts:
+        //   mlp.experts.{gate_up,down}_proj_{blocks,scales,bias}
+        if (parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "experts") {
+            return prefix + "experts." + parts[5];
         }
 
         // QK-Norm: self_attn.{q,k}_norm.weight
@@ -914,6 +935,51 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 matched = true;
             } else if (proj == "v_proj") {
                 layer.v_bias = t;
+                matched = true;
+            } else if (proj == "o_proj") {
+                layer.o_bias = t;
+                matched = true;
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // gpt-oss: attention sinks, router (weight+bias), pre-packed MXFP4
+        // experts. Blocks/scales land in the *_packed slots verbatim; the
+        // upload stage converts them to the NVFP4 expert cache (e2m1 nibbles
+        // are bit-identical, ue8m0 scales convert to e4m3 + tensor scale).
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 5 && parts[3] == "self_attn" && parts[4] == "sinks") {
+            layer.attn_sinks = t;
+            matched = true;
+        }
+        if (!matched && parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "router") {
+            if (parts[5] == "weight") {
+                layer.moe_gate = t;
+                matched = true;
+            } else if (parts[5] == "bias") {
+                layer.router_bias = t;
+                matched = true;
+            }
+        }
+        if (!matched && parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "experts") {
+            const std::string& field = parts[5];
+            if (field == "gate_up_proj_blocks") {
+                layer.expert_gate_up_packed_blocks = t;
+                matched = true;
+            } else if (field == "gate_up_proj_scales") {
+                layer.expert_gate_up_packed_scales = t;
+                matched = true;
+            } else if (field == "gate_up_proj_bias") {
+                layer.expert_gate_up_bias_fused = t;
+                matched = true;
+            } else if (field == "down_proj_blocks") {
+                layer.expert_down_packed_blocks = t;
+                matched = true;
+            } else if (field == "down_proj_scales") {
+                layer.expert_down_packed_scales = t;
+                matched = true;
+            } else if (field == "down_proj_bias") {
+                layer.expert_down_bias = t;
                 matched = true;
             }
         }

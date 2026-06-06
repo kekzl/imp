@@ -13,6 +13,15 @@ static constexpr int BLOCK_THREADS = 256;
 static constexpr int NUM_WARPS = BLOCK_THREADS / WARP_SIZE;  // 8
 
 // cp.async helpers for pipelined Split-K attention
+// 4-byte async copy (2 halves): the only size legal for ELEMS=2 lanes
+// (head_dim=64 → per-lane offset is 4-byte aligned; an 8-byte cp.async from
+// odd lanes raises cudaErrorMisalignedAddress — found via gpt-oss #547,
+// the first hd=64 model through this path).
+__device__ __forceinline__ void cp_async_ca_4(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(s), "l"(glob));
+}
+
 __device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(s), "l"(glob));
@@ -344,12 +353,16 @@ __device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc,
 // Requires shared memory: float[NUM_WARPS + NUM_WARPS + NUM_WARPS * HEAD_DIM].
 // Only the first warp (warp_id==0) writes to global memory.
 // ---------------------------------------------------------------------------
+// attn_sinks (gpt-oss, #547): per-head learned sink logit — virtual extra
+// softmax column: joins the global max and adds exp(sink - max) to the
+// denominator; dropped from the numerator. nullptr = off.
 template <int HEAD_DIM>
 __device__ __forceinline__ void crosswarp_reduce_and_write(
     float* smem_base,      // shared memory region (warp_max | warp_l | warp_o)
     float m_w, float l_w,  // per-warp softmax state
     const float* o_reg,    // per-thread O accumulator [ELEMS]
-    int warp_id, int lane_id, int lane_offset, half* O, int batch_idx, int n_heads, int head_idx) {
+    int warp_id, int lane_id, int lane_offset, half* O, int batch_idx, int n_heads, int head_idx,
+    const half* attn_sinks = nullptr) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     float* warp_max = smem_base;
     float* warp_l = warp_max + NUM_WARPS;
@@ -368,10 +381,14 @@ __device__ __forceinline__ void crosswarp_reduce_and_write(
         float global_max = -FLT_MAX;
         for (int w = 0; w < NUM_WARPS; w++)
             global_max = fmaxf(global_max, warp_max[w]);
+        if (attn_sinks)
+            global_max = fmaxf(global_max, __half2float(attn_sinks[head_idx]));
 
         float global_l = 0.0f;
         for (int w = 0; w < NUM_WARPS; w++)
             global_l += expf(warp_max[w] - global_max) * warp_l[w];
+        if (attn_sinks)
+            global_l += expf(__half2float(attn_sinks[head_idx]) - global_max);
 
 #pragma unroll
         for (int i = 0; i < ELEMS; i++) {

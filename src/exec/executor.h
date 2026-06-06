@@ -809,6 +809,7 @@ private:
     void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, size_t& remaining_budget,
                                          cudaStream_t stream, Nvfp4DecodeContext& dctx);
+    void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 5 PR #1 Commit 5.1.4.b: mark Tensor.dropped_source for weights

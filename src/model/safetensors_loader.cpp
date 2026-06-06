@@ -1343,6 +1343,93 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             "Inference may be incoherent.");
     }
 
+    // gpt-oss post-load pass (#547): de-interleave the fused gate_up expert
+    // bias (g0,u0,g1,u1,... along the column dim) into separate gate/up bias
+    // tensors so the standard per-projection bias plumbing applies. The
+    // packed MXFP4 expert weights stay host-mmap'd; the MXFP4→NVFP4
+    // conversion happens at executor pre-dequant (needs the executor's
+    // wcache). Host copies live in host_owned_buffers_ (freed in ~Model).
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        for (auto& layer : model->layers_) {
+            const Tensor& fused = layer.expert_gate_up_bias_fused;
+            if (!fused.data || fused.ndim != 2)
+                continue;
+            const int64_t ne = fused.shape[0];
+            const int64_t two_ff = fused.shape[1];
+            const int64_t ff = two_ff / 2;
+            const uint16_t* src = static_cast<const uint16_t*>(fused.data);  // BF16
+            auto* g = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * ne * ff));
+            auto* u = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * ne * ff));
+            if (!g || !u) {
+                std::free(g);
+                std::free(u);
+                IMP_LOG_ERROR("gpt-oss: bias de-interleave alloc failed");
+                return nullptr;
+            }
+            for (int64_t e = 0; e < ne; e++) {
+                const uint16_t* row = src + e * two_ff;
+                for (int64_t i = 0; i < ff; i++) {
+                    g[e * ff + i] = row[2 * i];
+                    u[e * ff + i] = row[2 * i + 1];
+                }
+            }
+            model->host_owned_buffers_.push_back(g);
+            model->host_owned_buffers_.push_back(u);
+            int64_t bshape[4] = {ne, ff, 0, 0};
+            layer.expert_gate_bias = Tensor(g, QType::BF16, 2, bshape, /*on_device=*/false);
+            layer.expert_up_bias = Tensor(u, QType::BF16, 2, bshape, /*on_device=*/false);
+        }
+        IMP_LOG_INFO("gpt-oss: expert gate_up biases de-interleaved for %zu layers",
+                     model->layers_.size());
+
+        // Residual-stream 2^-4 rescale (#547): gpt-oss's massive BF16
+        // activations overflow the FP16 hidden state (hidden L2 jumps ~12x at
+        // L6 and reaches ±inf by L23 → NaN logits + garbage decode). Scaling
+        // every contributor to h by 2^-4 is exact for the model output: FP16
+        // scaling is an exponent shift (lossless), RMSNorm is scale-invariant,
+        // and lm_head reads only normed values. Contributors:
+        //   - embeddings: cfg.embed_scale = 2^-4 (arch registry)
+        //   - Wo + o_bias + expert down bias: scaled here (host BF16)
+        //   - expert down weights: tensor_scales inside the MXFP4→NVFP4
+        //     converter (pre_dequant_phase3_nvfp4_decode.cu)
+        auto scale_bf16_pow2 = [&](Tensor& t, int neg_exp) -> bool {
+            if (!t.data || t.on_device)
+                return true;
+            if (t.qtype != QType::BF16) {
+                IMP_LOG_ERROR("gpt-oss rescale: expected BF16, got qtype %d", (int)t.qtype);
+                return false;
+            }
+            int64_t n = t.numel();
+            auto* dst = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * n));
+            if (!dst)
+                return false;
+            const uint16_t* src = static_cast<const uint16_t*>(t.data);
+            for (int64_t i = 0; i < n; i++) {
+                uint16_t v = src[i];
+                int exp = (v >> 7) & 0xFF;
+                if (exp == 0xFF || exp == 0)
+                    dst[i] = v;  // inf/nan/zero/subnormal: keep as-is
+                else if (exp <= neg_exp)
+                    dst[i] = static_cast<uint16_t>(v & 0x8000);  // underflow → signed zero
+                else
+                    dst[i] = static_cast<uint16_t>(v - (neg_exp << 7));
+            }
+            model->host_owned_buffers_.push_back(dst);
+            t.data = dst;
+            return true;
+        };
+        bool rescale_ok = true;
+        for (auto& layer : model->layers_) {
+            rescale_ok = rescale_ok && scale_bf16_pow2(layer.wo, 4) &&
+                         scale_bf16_pow2(layer.o_bias, 4) && scale_bf16_pow2(layer.expert_down_bias, 4);
+        }
+        if (!rescale_ok) {
+            IMP_LOG_ERROR("gpt-oss: residual-stream rescale failed");
+            return nullptr;
+        }
+        IMP_LOG_INFO("gpt-oss: residual stream rescaled by 2^-4 (FP16 range headroom)");
+    }
+
     IMP_LOG_INFO("SafeTensors model loaded successfully from %s", path.c_str());
     return model;
 }

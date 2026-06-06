@@ -146,8 +146,14 @@ void Engine::build_banned_token_list() {
     }
     for (int32_t sid : chat_template_.stop_token_ids()) keep_ids.push_back(sid);
     if (tok) {
+        // Harmony (gpt-oss, #547): the model is TRAINED to emit its own
+        // structure tokens (<|channel|>analysis<|message|>...<|end|>
+        // <|start|>assistant<|channel|>final<|message|>...). Banning them
+        // traps generation in an endless analysis channel.
         for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>",
-                                  "<|channel>", "<channel|>"}) {
+                                  "<|channel>", "<channel|>",
+                                  "<|channel|>", "<|message|>", "<|start|>", "<|end|>",
+                                  "<|constrain|>"}) {
             int32_t tid = tok->find_token(name);
             if (tid >= 0) keep_ids.push_back(tid);
         }

@@ -138,6 +138,54 @@ __global__ void geglu_fp32_vec4_kernel(const float* __restrict__ gate, const flo
 }
 
 // --------------------------------------------------------------------------
+// gpt-oss clamped GLU kernels (issue #547):
+//   gate_c = min(gate, 7);  up_c = clamp(up, -7, 7)
+//   out = (up_c + 1) * gate_c * sigmoid(1.702 * gate_c)
+// --------------------------------------------------------------------------
+__device__ __forceinline__ float gpt_oss_glu_elem(float g, float u) {
+    constexpr float kLimit = 7.0f;
+    constexpr float kAlpha = 1.702f;
+    g = fminf(g, kLimit);
+    u = fminf(fmaxf(u, -kLimit), kLimit);
+    float glu = g / (1.0f + __expf(-kAlpha * g));
+    return (u + 1.0f) * glu;
+}
+
+__global__ void gpt_oss_glu_fp16_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
+                                        __half* __restrict__ out, int64_t n) {
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
+    if (idx + 1 < n) {
+        float2 gf = __half22float2(*reinterpret_cast<const __half2*>(gate + idx));
+        float2 uf = __half22float2(*reinterpret_cast<const __half2*>(up + idx));
+        *reinterpret_cast<__half2*>(out + idx) = __float22half2_rn(
+            make_float2(gpt_oss_glu_elem(gf.x, uf.x), gpt_oss_glu_elem(gf.y, uf.y)));
+    } else if (idx < n) {
+        out[idx] = __float2half(gpt_oss_glu_elem(__half2float(gate[idx]), __half2float(up[idx])));
+    }
+}
+
+__global__ void gpt_oss_glu_fp32_kernel(const float* __restrict__ gate, const float* __restrict__ up,
+                                        float* __restrict__ out, int64_t n) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n)
+        out[idx] = gpt_oss_glu_elem(gate[idx], up[idx]);
+}
+
+__global__ void gpt_oss_glu_fp32_vec4_kernel(const float* __restrict__ gate, const float* __restrict__ up,
+                                             float* __restrict__ out, int64_t n) {
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4;
+    if (idx + 3 < n) {
+        float4 g4 = reinterpret_cast<const float4*>(gate)[idx / 4];
+        float4 u4 = reinterpret_cast<const float4*>(up)[idx / 4];
+        float4 o4;
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+            (&o4.x)[i] = gpt_oss_glu_elem((&g4.x)[i], (&u4.x)[i]);
+        reinterpret_cast<float4*>(out)[idx / 4] = o4;
+    }
+}
+
+// --------------------------------------------------------------------------
 // GELU FP32 vectorized kernel
 // gelu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // --------------------------------------------------------------------------
@@ -272,6 +320,17 @@ void geglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t strea
         return;
     dispatch_gated_activation(gate, up, out, n, geglu_fp32_vec4_kernel, geglu_fp32_kernel, geglu_fp16_kernel,
                               true, stream);
+}
+
+// --------------------------------------------------------------------------
+// Host dispatch: gpt_oss_glu
+// --------------------------------------------------------------------------
+void gpt_oss_glu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream) {
+    const int64_t n = gate.numel();
+    if (n == 0)
+        return;
+    dispatch_gated_activation(gate, up, out, n, gpt_oss_glu_fp32_vec4_kernel, gpt_oss_glu_fp32_kernel,
+                              gpt_oss_glu_fp16_kernel, true, stream);
 }
 
 // --------------------------------------------------------------------------

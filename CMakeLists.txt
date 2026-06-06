@@ -270,6 +270,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_perplexity.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
+    src/quant/gpt_oss_mxfp4_convert.cu
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_forward_moe.cu

@@ -93,7 +93,7 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
     int batch_size, int n_heads, int n_kv_heads, int head_dim, int block_size, float scale,
     int max_context_len, int max_num_blocks, int n_q_per_kv, int warps_per_q, int sliding_window, int n_sinks,
-    float softcap) {
+    float softcap, const half* __restrict__ attn_sinks) {
     const int batch_idx = blockIdx.x;
     const int kv_head = blockIdx.y;
 
@@ -261,11 +261,17 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
         for (int w = 0; w < warps_per_q; w++) {
             global_max = fmaxf(global_max, red_max[base_w + w]);
         }
+        // gpt-oss learned sink (#547): virtual extra softmax column — joins
+        // max + denominator, dropped from the numerator.
+        if (attn_sinks)
+            global_max = fmaxf(global_max, __half2float(attn_sinks[head_idx]));
 
         float global_l = 0.0f;
         for (int w = 0; w < warps_per_q; w++) {
             global_l += expf(red_max[base_w + w] - global_max) * red_l[base_w + w];
         }
+        if (attn_sinks)
+            global_l += expf(__half2float(attn_sinks[head_idx]) - global_max);
 
         for (int i = 0; i < elems_per_thread; i++) {
             int d = lane_id + i * WARP_SIZE;
@@ -924,8 +930,12 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                     cp_async_ca_16(&k_buf0[lane_offset + chunk], &K_tok[lane_offset + chunk]);
                 }
             }
-            if constexpr (ELEMS < 8) {
+            if constexpr (ELEMS == 4) {
                 cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
+            } else if constexpr (ELEMS < 8) {
+                // ELEMS==2 (head_dim=64): per-lane offset is only 4-byte
+                // aligned — 8-byte cp.async faults (cudaErrorMisalignedAddress).
+                cp_async_ca_4(&k_buf0[lane_offset], &K_tok[lane_offset]);
             }
             cp_async_commit();
         }
@@ -949,9 +959,12 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                     cp_async_ca_16(&k_bufs[1 - cur][lane_offset + chunk], &K_next[lane_offset + chunk]);
                 }
             }
-            if constexpr (ELEMS < 8) {
+            if constexpr (ELEMS == 4) {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
                 cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
+            } else if constexpr (ELEMS < 8) {
+                cp_async_ca_4(&v_buf[lane_offset], &V_tok[lane_offset]);
+                cp_async_ca_4(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
             cp_async_commit();
 
@@ -1012,7 +1025,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
 __global__ void paged_attention_reduce_kernel(
     const float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2+head_dim)]
     half* __restrict__ O,                   // [batch, 1, n_heads, head_dim]
-    int n_heads, int head_dim, int num_splits) {
+    int n_heads, int head_dim, int num_splits, const half* __restrict__ attn_sinks) {
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
     const int tid = threadIdx.x;
@@ -1031,6 +1044,10 @@ __global__ void paged_attention_reduce_kernel(
             float m = base[s * partial_stride];
             gmax = fmaxf(gmax, m);
         }
+        // gpt-oss learned sink (#547): virtual extra softmax column — joins
+        // the global max and the denominator, dropped from the numerator.
+        if (attn_sinks)
+            gmax = fmaxf(gmax, __half2float(attn_sinks[head_idx]));
         s_global_max = gmax;
 
         // Step 2: Compute global denominator
@@ -1040,6 +1057,8 @@ __global__ void paged_attention_reduce_kernel(
             float l = base[s * partial_stride + 1];
             gl += expf(m - gmax) * l;
         }
+        if (attn_sinks)
+            gl += expf(__half2float(attn_sinks[head_idx]) - gmax);
         s_global_l = gl;
     }
     __syncthreads();
@@ -1088,7 +1107,8 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
                                    int num_splits, cudaStream_t stream) {
     dim3 grid(batch_size, n_heads);
     dim3 block(128);
-    paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits);
+    paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits,
+                                                              /*attn_sinks=*/nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,7 +1135,8 @@ __global__ void paged_attention_cluster_kernel(const half* __restrict__ Q, const
                                                const int* __restrict__ context_lens, int batch_size,
                                                int n_heads, int n_kv_heads, int block_size, float scale,
                                                int max_context_len, int max_num_blocks, int n_q_per_kv,
-                                               int sliding_window, int n_sinks, float softcap) {
+                                               int sliding_window, int n_sinks, float softcap,
+                                               const half* __restrict__ attn_sinks) {
     namespace cg = cooperative_groups;
     auto cluster = cg::this_cluster();
     const int q_local = cluster.block_rank();       // which Q-head in this KV group [0, n_q_per_kv)
@@ -1280,7 +1301,7 @@ __global__ void paged_attention_cluster_kernel(const half* __restrict__ Q, const
 
     // ---- Cross-warp reduction within this block ----
     crosswarp_reduce_and_write<HEAD_DIM>(warp_max, m_w, l_w, o_reg, warp_id, lane_id, lane_offset, O,
-                                         batch_idx, n_heads, head_idx);
+                                         batch_idx, n_heads, head_idx, attn_sinks);
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,7 +1310,8 @@ __global__ void paged_attention_cluster_kernel(const half* __restrict__ Q, const
 void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                             const int* block_tables, const int* context_lens, int block_size, float scale,
                             int max_context_len, int sliding_window, float softcap, cudaStream_t stream,
-                            int max_blocks_per_seq, int n_sinks) {
+                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+    const half* sinks_h = static_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
@@ -1437,7 +1459,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         dim3 block2(128);
 
         paged_attention_reduce_kernel<<<grid2, block2, 0, stream>>>(partial, reinterpret_cast<half*>(O.data),
-                                                                    n_heads, head_dim, num_splits);
+                                                                    n_heads, head_dim, num_splits, sinks_h);
     } else if (n_q_per_kv > 1) {
         // GQA path: try cluster kernel first, then fall back to cooperative GQA
         bool used_cluster = false;
@@ -1471,7 +1493,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                        reinterpret_cast<const half*>(K_cache.data),                                        \
                        reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),       \
                        block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale,     \
-                       max_context_len, max_num_blocks, n_q_per_kv, sliding_window, n_sinks, softcap)
+                       max_context_len, max_num_blocks, n_q_per_kv, sliding_window, n_sinks, softcap,      \
+                       sinks_h)
 
             switch (head_dim) {
                 case 64:
@@ -1531,13 +1554,21 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
                 reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,
                 context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_context_len,
-                max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap);
+                max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap, sinks_h);
         } else if (!used_cluster) {
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
             goto mha_fallback;
         }
     } else {
     mha_fallback:
+        if (sinks_h) {
+            static bool warned_sinks_mha = false;
+            if (!warned_sinks_mha) {
+                warned_sinks_mha = true;
+                IMP_LOG_WARN("paged_attention_decode: MHA fallback ignores learned attention sinks "
+                             "(gpt-oss) — output will be wrong for this config");
+            }
+        }
         // MHA fallback: simple per-head kernel (templated + vectorized)
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
