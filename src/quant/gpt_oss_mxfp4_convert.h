@@ -25,9 +25,11 @@ namespace imp {
 // ue8m0 scales (host memory) into a device NvFP4MoEQuantResult.
 // row_stride/row_offset select interleaved sub-matrices:
 //   gate: offset 0, stride 2;  up: offset 1, stride 2;  down: offset 0, stride 1.
-// Returns false on allocation failure.
+// extra_scale folds a constant into the per-expert tensor scale — used for the
+// gpt-oss residual-stream 2^-4 rescale on the down projection (see the arch
+// registry comment in model.cpp). Returns false on allocation failure.
 bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                       int64_t n_rows_total, int64_t K, int row_offset, int row_stride,
-                                      NvFP4MoEQuantResult& out);
+                                      NvFP4MoEQuantResult& out, float extra_scale = 1.0f);
 
 }  // namespace imp

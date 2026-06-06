@@ -1271,9 +1271,12 @@ void GraphExecutor::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                   gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
                                                    static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
                                                    gu_K, /*offset=*/1, /*stride=*/2, u) &&
+                  // down: extra 2^-4 — residual-stream rescale (see arch
+                  // registry comment in model.cpp; bias scaled in the loader).
                   gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
                                                    static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
-                                                   dn_K, /*offset=*/0, /*stride=*/1, d);
+                                                   dn_K, /*offset=*/0, /*stride=*/1, d,
+                                                   /*extra_scale=*/0.0625f);
         if (!ok) {
             IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
             return;

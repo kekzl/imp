@@ -670,6 +670,136 @@ TEST(PagedAttentionTest, GQALongContext) {
 }
 
 // =========================================================================
+// gpt-oss decode shape (#547): split-K + hd=64 + GQA 8:1 (+ learned sinks).
+// The split-K branch only activates when scratch is set — none of the older
+// tests set it, so the hd=64 split-K path was never covered (gpt-oss is the
+// first hd=64 model; the rest of the zoo is hd>=128).
+// =========================================================================
+
+void run_gptoss_shape_splitk_case(bool with_sinks) {
+    constexpr int batch = 1, n_heads = 64, n_kv_heads = 8, head_dim = 64;
+    constexpr int seq_len = 256;  // 16 blocks >= 8 → split-K heuristics fire
+    constexpr int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int max_blocks = num_blocks;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    std::vector<float> h_Q(n_heads * head_dim);
+    for (size_t i = 0; i < h_Q.size(); i++)
+        h_Q[i] = sinf(static_cast<float>(i) * 0.013f);
+    std::vector<float> h_K(seq_len * n_kv_heads * head_dim);
+    std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
+    for (size_t i = 0; i < h_K.size(); i++) {
+        h_K[i] = cosf(static_cast<float>(i) * 0.007f);
+        h_V[i] = sinf(static_cast<float>(i) * 0.011f + 0.5f);
+    }
+    std::vector<float> h_sinks(n_heads);
+    for (int h = 0; h < n_heads; h++)
+        h_sinks[h] = -1.0f + 0.05f * static_cast<float>(h);  // mix of weak/strong sinks
+
+    // CPU reference: softmax over [scores, sink]; sink column dropped.
+    std::vector<float> h_O(n_heads * head_dim, 0.0f);
+    for (int qh = 0; qh < n_heads; qh++) {
+        int kvh = qh / (n_heads / n_kv_heads);
+        std::vector<float> scores(seq_len);
+        float m = with_sinks ? h_sinks[qh] : -FLT_MAX;
+        for (int s = 0; s < seq_len; s++) {
+            float dot = 0.0f;
+            for (int d = 0; d < head_dim; d++)
+                dot += h_Q[qh * head_dim + d] * h_K[(s * n_kv_heads + kvh) * head_dim + d];
+            scores[s] = dot * scale;
+            m = std::max(m, scores[s]);
+        }
+        float denom = with_sinks ? expf(h_sinks[qh] - m) : 0.0f;
+        for (int s = 0; s < seq_len; s++)
+            denom += expf(scores[s] - m);
+        for (int d = 0; d < head_dim; d++) {
+            float acc = 0.0f;
+            for (int s = 0; s < seq_len; s++)
+                acc += expf(scores[s] - m) / denom * h_V[(s * n_kv_heads + kvh) * head_dim + d];
+            h_O[qh * head_dim + d] = acc;
+        }
+    }
+
+    std::vector<int> bt(num_blocks);
+    std::iota(bt.begin(), bt.end(), 0);
+    int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+    std::vector<float> h_K_cache(total_cache_elems, 0.0f);
+    std::vector<float> h_V_cache(total_cache_elems, 0.0f);
+    // Direct layout copy: cache[blk][slot][kvh][d] = K[s][kvh][d]
+    for (int s = 0; s < seq_len; s++) {
+        int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+        for (int h = 0; h < n_kv_heads; h++)
+            for (int d = 0; d < head_dim; d++) {
+                int dst = ((blk * BLOCK_SIZE + slot) * n_kv_heads + h) * head_dim + d;
+                int src = (s * n_kv_heads + h) * head_dim + d;
+                h_K_cache[dst] = h_K[src];
+                h_V_cache[dst] = h_V[src];
+            }
+    }
+
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int ctx = seq_len;
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    // Force split-K: provide scratch (64 blocks < 2*SMs on any modern GPU).
+    constexpr int kMaxSplits = 64;
+    size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
+    void* d_scratch = nullptr;
+    cudaMalloc(&d_scratch, scratch_size);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+
+    half* d_sinks = nullptr;
+    if (with_sinks) {
+        std::vector<half> hs(n_heads);
+        for (int h = 0; h < n_heads; h++)
+            hs[h] = __float2half(h_sinks[h]);
+        cudaMalloc(&d_sinks, n_heads * sizeof(half));
+        cudaMemcpy(d_sinks, hs.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    }
+
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
+                           /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
+                           /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    auto result = read_gpu_fp16(d_O);
+    double max_err = 0.0;
+    for (int qh = 0; qh < n_heads; qh++) {
+        for (int d = 0; d < head_dim; d++) {
+            int idx = qh * head_dim + d;
+            max_err = std::max(max_err, static_cast<double>(std::abs(result[idx] - h_O[idx])));
+            EXPECT_NEAR(result[idx], h_O[idx], 0.05f)
+                << "split-K hd64 mismatch at Q-head " << qh << " dim " << d
+                << " (with_sinks=" << with_sinks << ")";
+        }
+    }
+
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    if (d_sinks)
+        cudaFree(d_sinks);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+}
+
+TEST(PagedAttentionTest, GQA_SplitK_HD64) { run_gptoss_shape_splitk_case(/*with_sinks=*/false); }
+TEST(PagedAttentionTest, GQA_SplitK_HD64_Sinks) { run_gptoss_shape_splitk_case(/*with_sinks=*/true); }
+
+// =========================================================================
 // GQA with HD=256: exercises split-K and cluster paths for Gemma-3 config
 // =========================================================================
 

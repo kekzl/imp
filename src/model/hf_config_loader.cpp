@@ -195,10 +195,15 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         float factor = 1.0f;
         jobj_get_float(*rope_scaling, "factor", factor);
 
+        // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale
+        // stores the FACTOR (>1, e.g. 32); the kernel applies 1/factor itself.
+        // Storing 1/factor here double-inverted YaRN for gpt-oss (#547):
+        // interpolated dims rotated factor^2=1024x too fast and the mscale
+        // compensation flipped to 0.653 instead of 1.347.
         if (rope_type == "linear") {
-            cfg.rope_freq_scale = 1.0f / factor;
+            cfg.rope_freq_scale = factor;
         } else if (rope_type == "yarn") {
-            cfg.rope_freq_scale = 1.0f / factor;
+            cfg.rope_freq_scale = factor;
             jobj_get_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
             jobj_get_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
             jobj_get_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);

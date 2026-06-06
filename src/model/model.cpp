@@ -136,7 +136,12 @@ static constexpr ArchEntry kArchRegistry[] = {
     // ewnorm=true: gpt-oss routes softmax-after-topk — selection on biased
     // logits + renormalized top-k softmax is exactly imp's norm_weights path
     // once the router bias is added to the logits (compute_moe_routing).
-    {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0, 3 /*GPT_OSS_GLU*/, -1, false, true, 1.0f, 1.0f, 0},
+    // embed_scale=2^-4: residual-stream rescale — gpt-oss's massive BF16
+    // activations overflow the FP16 hidden state (±inf by L23). All other
+    // h-contributors (Wo, o_bias, expert down + bias) are scaled to match
+    // at load; RMSNorm scale-invariance makes the model output exact.
+    {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0.0625f, 3 /*GPT_OSS_GLU*/, -1, false, true, 1.0f, 1.0f,
+     0},
     {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
     {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
