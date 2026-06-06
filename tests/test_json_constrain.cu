@@ -817,5 +817,133 @@ TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
+// model, so this is the agent-framework path, not an exotic corner.
+// ---------------------------------------------------------------------------
+
+// Parse-level: $defs collected, $ref resolves, unsupported/unresolvable refs
+// fail the parse (decline constrained decoding instead of enforcing a wrong
+// grammar). No CUDA needed.
+TEST(SchemaConstrainTest, RefDefsParseAndResolve) {
+    // pydantic-style nested model
+    auto a = parse_json_schema(
+        R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
+        R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
+        R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
+    ASSERT_TRUE(a != nullptr);
+    ASSERT_EQ(a->properties.size(), 1u);
+    const SchemaNode* inner_ref = a->properties[0].second.get();
+    EXPECT_EQ(inner_ref->type, SchemaType::REF);
+    const SchemaNode* inner = resolve_schema_ref(a.get(), inner_ref);
+    ASSERT_TRUE(inner != nullptr);
+    EXPECT_EQ(inner->type, SchemaType::OBJECT);
+    ASSERT_EQ(inner->properties.size(), 1u);
+    EXPECT_EQ(inner->properties[0].first, "x");
+
+    // "definitions" spelling + clone preserves refs/defs
+    auto b = parse_json_schema(
+        R"({"definitions":{"S":{"type":"string"}},"type":"object",)"
+        R"("properties":{"s":{"$ref":"#/definitions/S"}}})");
+    ASSERT_TRUE(b != nullptr);
+    auto b2 = b->clone();
+    const SchemaNode* s_res = resolve_schema_ref(b2.get(), b2->properties[0].second.get());
+    ASSERT_TRUE(s_res != nullptr);
+    EXPECT_EQ(s_res->type, SchemaType::STRING);
+
+    // root self-ref "#"
+    auto c = parse_json_schema(
+        R"({"type":"object","properties":{"next":{"$ref":"#"}},"required":[]})");
+    ASSERT_TRUE(c != nullptr);
+    EXPECT_EQ(resolve_schema_ref(c.get(), c->properties[0].second.get()), c.get());
+
+    // unresolvable name → parse fails
+    EXPECT_EQ(parse_json_schema(
+                  R"({"type":"object","properties":{"a":{"$ref":"#/$defs/Missing"}}})"),
+              nullptr);
+    // external / deep-pointer refs → parse fails
+    EXPECT_EQ(parse_json_schema(
+                  R"({"properties":{"a":{"$ref":"https://example.com/s.json"}}})"),
+              nullptr);
+    EXPECT_EQ(parse_json_schema(
+                  R"({"properties":{"a":{"$ref":"#/properties/b"}}})"),
+              nullptr);
+    // pure ref->ref cycle → parse fails (no structure to terminate resolution)
+    EXPECT_EQ(parse_json_schema(
+                  R"({"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/B"},)"
+                  R"("B":{"$ref":"#/$defs/A"}}})"),
+              nullptr);
+}
+
+// Enforcement through a $ref: the referenced object's keys/required are
+// enforced exactly as an inline schema would be.
+TEST(SchemaConstrainTest, RefNestedModelEnforced) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5        6    7    8    9
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "inner", ":", "x", "5", "}"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
+        R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
+        R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    for (int t : {3, 4, 5, 4, 6})  // { "inner" :  → value frame is the REF target
+        sc.update(t);
+    {
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[3]) << "'{' must open the $ref'd inner object";
+        EXPECT_FALSE(a[8]) << "bare digit masked — inner value is an object, not a number";
+    }
+    for (int t : {3, 4, 7, 4, 6})  // { "x" :  → inner integer value
+        sc.update(t);
+    {
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[8]) << "'5' must be allowed for Inner.x (integer)";
+        EXPECT_FALSE(a[9]) << "'}' masked — required Inner.x not yet emitted";
+    }
+}
+
+// True recursion: a tree node whose children are arrays of itself. The frame
+// stack must follow $ref depth arbitrarily (here 2 levels) — the gap the old
+// NFA backend could not represent.
+TEST(SchemaConstrainTest, RecursiveSchemaEnforced) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5    6    7    8    9    10   11
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "v", ":", "1", ",", "kids", "[", "]"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object",)"
+        R"("properties":{"v":{"type":"integer"},"kids":{"type":"array",)"
+        R"("items":{"$ref":"#/$defs/Node"}}},"required":["v"]}}})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+
+    // { "v" : 1 , "kids" : [
+    for (int t : {3, 4, 5, 4, 6, 7, 8, 4, 9, 4, 6, 10})
+        sc.update(t);
+    {
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[3]) << "'{' must start a recursive child Node inside kids[]";
+        EXPECT_TRUE(a[11]) << "']' must be allowed (empty kids)";
+        EXPECT_FALSE(a[7]) << "bare digit masked — items are Node objects";
+    }
+    // open child: { "v" : 1 — the recursive frame enforces Node's grammar at
+    // depth 2: a second "kids" key (','+key) must be offered, digits must not.
+    for (int t : {3, 4, 5, 4, 6, 7})
+        sc.update(t);
+    {
+        auto a = schema_allowed(sc, static_cast<int>(toks.size()));
+        EXPECT_TRUE(a[8]) << "',' after child's v — 'kids' is still emittable at depth 2";
+        EXPECT_FALSE(a[4]) << "bare quote masked mid-number at depth 2";
+    }
+}
+
 }  // namespace
 }  // namespace imp

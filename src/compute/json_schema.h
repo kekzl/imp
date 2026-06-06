@@ -107,6 +107,7 @@ enum class SchemaType {
     ARRAY,
     ENUM,
     ANY_OF,
+    REF,  // $ref to a $defs/definitions entry (or "#" = schema root)
 };
 
 struct SchemaNode {
@@ -126,6 +127,16 @@ struct SchemaNode {
     // ANY_OF
     std::vector<std::unique_ptr<SchemaNode>> any_of;
 
+    // REF: name of the referenced definition ("#" = schema root). Resolution
+    // happens against the ROOT node's `defs` table at constrain time, so
+    // recursive and mutually-recursive schemas are representable without
+    // ownership cycles (frames hold non-owning resolved pointers).
+    std::string ref_name;
+
+    // Definitions table ($defs / definitions). Collected from anywhere in the
+    // schema document and attached to the ROOT node by parse_json_schema().
+    std::vector<std::pair<std::string, std::unique_ptr<SchemaNode>>> defs;
+
     // STRING constraints (JSON Schema "pattern" / "minLength" / "maxLength").
     std::string pattern;       // raw regex source; empty = no pattern
     int min_length = -1;       // -1 = unset
@@ -138,9 +149,19 @@ struct SchemaNode {
     std::unique_ptr<SchemaNode> clone() const;
 };
 
-// Parse a JSON Schema string into a SchemaNode tree.
-// Returns nullptr on parse failure.
+// Parse a JSON Schema string into a SchemaNode tree. Supports $defs /
+// definitions + "$ref": "#/$defs/<name>" | "#/definitions/<name>" | "#",
+// including recursive and mutually-recursive definitions (agent frameworks —
+// pydantic, zod — emit $defs+$ref for every nested model).
+// Returns nullptr on parse failure or when a $ref cannot be resolved (callers
+// then decline constrained decoding rather than enforcing a wrong grammar).
 std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json);
+
+// Resolve a (possibly REF) node against the root's defs table. Returns the
+// node itself when it is not a REF; nullptr on a missing target or a pure
+// ref->ref cycle (parse_json_schema validates both, so runtime hits are
+// defensive only).
+const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* node);
 
 // ---------------------------------------------------------------------------
 // GBNF-style grammar loader (Part B — PARTIAL / non-recursive subset).
