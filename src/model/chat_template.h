@@ -20,6 +20,7 @@ enum class ChatTemplateFamily {
     GEMMA,        // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
     DEEPSEEK_R1,  // <｜User｜>...<｜Assistant｜>...<｜end▁of▁sentence｜>
     PHI,          // <|user|>...<|end|>...<|assistant|>
+    HARMONY,      // gpt-oss: <|start|>role<|message|>...<|end|>, channels, <|return|> stop
 };
 
 const char* chat_template_family_name(ChatTemplateFamily family);
@@ -131,6 +132,14 @@ private:
     int32_t phi_assistant_id_ = -1;  // <|assistant|>
     int32_t phi_end_id_ = -1;        // <|end|>
 
+    // Harmony tokens (gpt-oss)
+    int32_t hm_start_id_ = -1;    // <|start|>
+    int32_t hm_end_id_ = -1;      // <|end|>     (message separator — NOT a stop token)
+    int32_t hm_message_id_ = -1;  // <|message|>
+    int32_t hm_channel_id_ = -1;  // <|channel|>
+    int32_t hm_return_id_ = -1;   // <|return|>  (stop)
+    int32_t hm_call_id_ = -1;     // <|call|>    (stop, tool call)
+
     // Vision tokens (Gemma-3)
     int32_t boi_id_ = -1;             // <start_of_image>
     int32_t eoi_id_ = -1;             // <end_of_image>
@@ -172,6 +181,7 @@ private:
     std::vector<int32_t> apply_gemma(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
     std::vector<int32_t> apply_deepseek_r1(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
     std::vector<int32_t> apply_phi(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_harmony(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
 };
 
 }  // namespace imp

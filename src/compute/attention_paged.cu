@@ -930,8 +930,12 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                     cp_async_ca_16(&k_buf0[lane_offset + chunk], &K_tok[lane_offset + chunk]);
                 }
             }
-            if constexpr (ELEMS < 8) {
+            if constexpr (ELEMS == 4) {
                 cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
+            } else if constexpr (ELEMS < 8) {
+                // ELEMS==2 (head_dim=64): per-lane offset is only 4-byte
+                // aligned — 8-byte cp.async faults (cudaErrorMisalignedAddress).
+                cp_async_ca_4(&k_buf0[lane_offset], &K_tok[lane_offset]);
             }
             cp_async_commit();
         }
@@ -955,9 +959,12 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                     cp_async_ca_16(&k_bufs[1 - cur][lane_offset + chunk], &K_next[lane_offset + chunk]);
                 }
             }
-            if constexpr (ELEMS < 8) {
+            if constexpr (ELEMS == 4) {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
                 cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
+            } else if constexpr (ELEMS < 8) {
+                cp_async_ca_4(&v_buf[lane_offset], &V_tok[lane_offset]);
+                cp_async_ca_4(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
             cp_async_commit();
 

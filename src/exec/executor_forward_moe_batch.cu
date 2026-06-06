@@ -109,10 +109,8 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
 
     // gpt-oss (#547): per-expert biases on gate/up outputs BEFORE activation.
     // Rows are expert-sorted (expanded layout) — expert via expert_offsets.
-    static const bool s_no_ebias = getenv("GPTOSS_NO_EBIAS") != nullptr;   // TEMP #547 A/B
-    static const bool s_swiglu = getenv("GPTOSS_SWIGLU") != nullptr;       // TEMP #547 A/B
     const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
-    if (cfg.arch == ModelArch::GPT_OSS && !s_no_ebias) {
+    if (cfg.arch == ModelArch::GPT_OSS) {
         moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offsets, ctx.ne,
                                    ctx.expanded, ctx.eff, stream);
         moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, d_offsets, ctx.ne,
@@ -122,13 +120,13 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     // Activation
     apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
                             ctx.non_gated_experts, ctx.expanded, ctx.eff, compute_dtype_,
-                            s_swiglu ? FFNActivation::SWIGLU : cfg.ffn_activation, stream);
+                            cfg.ffn_activation, stream);
 
     // Down projection
     char* slow_down_act = ctx.non_gated_experts ? expert_up_base : expert_swiglu_base;
     nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_down_ptr, slow_down_act, expert_down_base, ctx.eff, ctx.d);
 
-    if (cfg.arch == ModelArch::GPT_OSS && !s_no_ebias)
+    if (cfg.arch == ModelArch::GPT_OSS)
         moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offsets, ctx.ne,
                                    ctx.expanded, ctx.d, stream);
 
@@ -648,8 +646,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         // added before softmax/top-k it shifts selection AND the renormalized
         // top-k weights (= HF's topk(logits+b) → softmax-over-selected).
         // Distinct from DeepSeek's selection-only score_bias (router_bias_ptr).
-        static const bool s_no_rbias = getenv("GPTOSS_NO_RBIAS") != nullptr;  // TEMP #547 A/B
-        if (cfg.arch == ModelArch::GPT_OSS && ly.router_bias.data != nullptr && !s_no_rbias)
+        if (cfg.arch == ModelArch::GPT_OSS && ly.router_bias.data != nullptr)
             moe_add_logit_bias(static_cast<float*>(logits_f32.data), ly.router_bias.data, n, ne, stream);
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,

@@ -772,10 +772,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // FP16 paged decode kernels understand them — prefill routing below
     // forces the cuBLAS path whenever sinks are present.
     const void* attn_sinks = (cfg.arch == ModelArch::GPT_OSS) ? ly.attn_sinks.data : nullptr;
-    // TEMP diagnostic toggle (#547 bring-up): A/B sinks off.
-    static const bool s_no_sinks = getenv("GPTOSS_NO_SINKS") != nullptr;
-    if (s_no_sinks)
-        attn_sinks = nullptr;
 
     if (state.is_prefill) {
         // Chunked prefill: when prefill_offset > 0, queries from this chunk must
