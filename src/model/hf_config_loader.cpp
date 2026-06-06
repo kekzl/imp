@@ -314,6 +314,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
         jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
     }
+    // gpt-oss: no separate MoE intermediate key — intermediate_size IS the
+    // per-expert FFN width (2880); there is no dense FFN at all.
+    if (cfg.expert_d_ff == 0 && cfg.n_experts > 0 && cfg.arch == ModelArch::GPT_OSS) {
+        cfg.expert_d_ff = cfg.d_ff;
+    }
 
     // Qwen3.5/3.6 GDN: linear-attention layer config. The HF config exposes
     // these as `linear_*` fields; we map them onto the existing ssm_*
