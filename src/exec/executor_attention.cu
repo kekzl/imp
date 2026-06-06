@@ -73,8 +73,15 @@ static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, c
     // a conservative blanket decline until the kernel's q_offset handling is
     // root-caused (issue #548) — first chunks (q_offset == 0, the original #525 use case)
     // keep the fast path.
-    if (q_offset > 0)
-        return false;
+    // Chunk continuations (q_offset > 0) were declined here as a #553
+    // mitigation for catastrophic NLL on the Llama family. Root cause
+    // (#548) was NOT this kernel: the pinned prefill staging
+    // (h_pf_token_ids_/h_pf_positions_) was rewritten by the host while
+    // earlier chunks' H2D copies were still queued — the fully-async FA2
+    // path let the host run far enough ahead to hit it, the cuBLAS path's
+    // implicit syncs hid it. Fixed via pf_staging_evt_ in
+    // engine_scheduler.cpp; kernel-level q_offset parity is locked by
+    // FmhaFA2Test.FP16QK_Chunked_*.
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
     Tensor q4 = q.reshape(4, q4s);
@@ -858,7 +865,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             const bool chunked_use_fmha = !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
                                           (fmha_threshold > 0 && ctx_len >= fmha_threshold);
 
-            if (chunked_use_fmha) {
+            // Chunked attention routing (#548): prefer the FP16-QK FA2 kernel
+            // at EVERY ctx_len, not only below the threshold. It is O(n)
+            // memory (no S-matrix) like the fp8 family but carries no e4m3
+            // score noise — the long-context chunked path through the
+            // e4m3 FMHA family drifted teacher-forced NLL by up to ~25%
+            // (ChunkedPrefillTest.LongContext_Chunk_Invariance is the gate).
+            // The fp8 family stays as fallback for configs f16-QK declines
+            // (hd != 128, fa2_fp16qk=never), and cuBLAS below the threshold.
+            if (!per_layer_shapes &&
+                try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
+                                       nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
+                                       q_offset, stream)) {
+                // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
+            } else if (chunked_use_fmha) {
                 // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
@@ -869,11 +889,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 Tensor o4 = ao.reshape(4, o4s);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
-            } else if (!per_layer_shapes &&
-                       try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
-                                              nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                              q_offset, stream)) {
-                // short chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
             } else {
                 // cuBLAS: needs S-matrix for [n × ctx_len]
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,

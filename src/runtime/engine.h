@@ -332,6 +332,13 @@ private:
     int* d_pf_context_lens_ = nullptr;
     int* h_pf_positions_ = nullptr;      // pinned host staging
     int32_t* h_pf_token_ids_ = nullptr;  // pinned host staging
+    // Guards reuse of the pinned staging above: records after the H2D copies
+    // are enqueued; the next chunk host-waits on it before REWRITING the
+    // pinned source. Without this the host runs many fully-async chunks
+    // ahead (no implicit syncs on the FA2 path) and overwrites the staging
+    // while earlier copies are still queued -> chunk c uploads chunk c+N's
+    // tokens/positions (#548: catastrophic chunked-prefill NLL on Llama).
+    cudaEvent_t pf_staging_evt_ = nullptr;
 
     // ── Penalty token buffer ─────────────────────────────────────────
     int32_t* d_penalty_tokens_ = nullptr;

@@ -300,23 +300,20 @@ TEST_F(ChunkedPrefillTest, Llama_3_2_3B_Chunk_64_LogitsEqual) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3b (DISABLED — issue #548): LONG-context chunk invariance.
+// Test 3b (#548 gate — ENABLED): LONG-context chunk invariance.
 //
-// Once a chunk's ctx_len crosses fmha_prefill_threshold (~2.5-2.9k), the
-// chunked path routes through the fp8/e4m3 FMHA family
-// (attention_prefill_dispatch) whose accumulated e4m3 score noise drifts the
-// teacher-forced NLL by up to ~25% vs the reference (measured 2026-06-06,
-// 120-item long_prompt ~3.1k tokens, Llama-3.2-3B, post fa2_fp16qk
-// continuation-decline):
-//   chunk=0(→s_cap-clamped ~1984+rest) nll 0.80
-//   chunk=64  nll 0.61   chunk=512 nll 0.97
-// (Before the fa2_fp16qk continuation-decline this read nll 8.08 —
-// catastrophic — at chunk=64; that part is fixed.) Same quality class as
-// issue #511 (fp8-FMHA above threshold unvalidated); tracked in #548.
-// Enable when the long-context chunk path is numerically reconciled.
+// History: chunked continuations above fmha_prefill_threshold used to route
+// through the fp8/e4m3 FMHA family, drifting teacher-forced NLL up to ~25%;
+// below the threshold the f16-QK fast path produced CATASTROPHIC NLL on the
+// Llama family (0.29 -> 7.13). Root cause of the latter was never the
+// kernel: the pinned prefill staging (h_pf_token_ids_/h_pf_positions_) was
+// rewritten by the host while earlier chunks' H2D copies were still queued
+// (#548, fixed via pf_staging_evt_). With the race fixed, chunked
+// continuations now route through the FP16-QK FA2 kernel at every ctx_len
+// (no e4m3 score noise, no S-matrix), and this gate holds.
 // ---------------------------------------------------------------------------
 
-TEST_F(ChunkedPrefillTest, DISABLED_LongContext_Chunk_Invariance) {
+TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance) {
     const char* path = llama_3b_path();
     if (!model_exists(path))
         GTEST_SKIP() << "model not present: " << path;

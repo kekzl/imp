@@ -465,7 +465,18 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
         }
     }
 
-    // Use pinned staging buffers when available (avoids internal pageable->pinned copy)
+    // Use pinned staging buffers when available (avoids internal pageable->pinned copy).
+    // PINNED sources are truly asynchronous: the H2D reads the buffer when the
+    // copy EXECUTES (in stream order, behind all prior chunks' kernels), not
+    // when it is enqueued. Before rewriting the staging for this chunk, wait
+    // until the previous chunk's copies have actually run — otherwise a host
+    // that runs several fully-async chunks ahead (FA2 attention path, no
+    // implicit syncs) uploads chunk c+N's tokens/positions for chunk c
+    // (#548: catastrophic chunked-prefill NLL, timing/arch-dependent).
+    // Pageable sources below (block_table, ctx_len) are safe by CUDA
+    // semantics (captured before cudaMemcpyAsync returns).
+    if (pf_staging_evt_ && (h_pf_token_ids_ || h_pf_positions_) && chunk_len <= config_.max_seq_len)
+        IMP_CUDA_CHECK_LOG(cudaEventSynchronize(pf_staging_evt_));
     if (h_pf_token_ids_ && chunk_len <= config_.max_seq_len) {
         memcpy(h_pf_token_ids_, req->input_tokens.data() + offset, chunk_len * sizeof(int32_t));
         check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_, chunk_len * sizeof(int32_t),
@@ -491,6 +502,9 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                               pf_stream),
               "memcpy positions");
     }
+
+    if (pf_staging_evt_ && (h_pf_token_ids_ || h_pf_positions_) && chunk_len <= config_.max_seq_len)
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(pf_staging_evt_, pf_stream));
 
     check(cudaMemcpyAsync(d_block_tables, block_table.data(), block_table.size() * sizeof(int),
                           cudaMemcpyHostToDevice, pf_stream),
