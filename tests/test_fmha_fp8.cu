@@ -180,6 +180,19 @@ TEST_F(FmhaFP8Test, HD64) { run_test(1, 32, 32, 4, 4, 64, true); }
 
 TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
 
+// --- #566 residue: fp8 kernel at hd=256, production-like long sizes ---
+// gemma-3-12b (hd=256) prefill routes through THIS kernel once n crosses the
+// FMHA threshold (head_dim % 32 gate — not the FP16 WMMA as assumed). The
+// pre-#569 catastrophic window readings and the no-window PPL 10.5 came
+// through here; pin the kernel against the fp64-style oracle at those shapes.
+TEST_F(FmhaFP8Test, HD256_LongSeq) { run_test(1, 1536, 1536, 16, 8, 256, true); }
+TEST_F(FmhaFP8Test, HD256_LongSeq_SlidingWindow1024) {
+    run_test(1, 1536, 1536, 16, 8, 256, true, /*sw=*/1024);
+}
+TEST_F(FmhaFP8Test, HD128_LongSeq_SlidingWindow1024) {
+    run_test(1, 1536, 1536, 16, 8, 128, true, /*sw=*/1024);
+}
+
 // Mimic Qwen3.5-4B attention prefill shape: 16 Q heads, 4 KV heads (GQA 4:1),
 // head_dim=256, 128-token sequence. Multi-tile on both axes with non-zero V
 // throughout — catches the S_tile smem overlap bug that the HD256 test
