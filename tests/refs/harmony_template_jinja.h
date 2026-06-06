@@ -1,6 +1,8 @@
-// AUTO-GENERATED from tests/fixtures/gpt_oss_chat_template.jinja — committed copy of
-// the gpt-oss-20b Harmony chat_template.jinja (model: openai/gpt-oss-20b).
-// Embedded as a raw string so the parity test is hermetic (no runtime file dep).
+// Hand-embedded raw-string copy of tests/fixtures/gpt_oss_chat_template.jinja
+// (source of truth; gpt-oss-20b Harmony chat_template.jinja, model:
+// openai/gpt-oss-20b). MUST equal the fixture byte-for-byte — when the fixture
+// changes, re-paste the template body between the R"IMPJINJA( ... )IMPJINJA"
+// delimiters. Embedded so the parity test is hermetic (no runtime file dep).
 #pragma once
 #include <string>
 namespace imp {

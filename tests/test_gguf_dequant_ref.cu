@@ -545,8 +545,8 @@ TYPED_TEST_SUITE(GgufDequant, GgufDequantFormats);
 TYPED_TEST(GgufDequant, AllScaleModes) {
     constexpr QType qt = TypeParam::value;
     const char* name = qtype_name(qt);
-    // Use K=512 for the non-K-quant 32-block formats (16 blocks/row), 512 for
-    // the 256-block formats too (2 super-blocks/row). N chosen non-round so a
+    // K=512 covers both layouts: 16 blocks/row for the 32-block formats and
+    // 2 super-blocks/row for the 256-block K-quants. N chosen non-round so a
     // row-stride bug surfaces.
     check_dequant(name, qt, 37, 512, NORMAL, 1e-3);
     check_dequant(name, qt, 16, 256, ZERO_D, 1e-3);

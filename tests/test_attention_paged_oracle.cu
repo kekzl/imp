@@ -285,6 +285,9 @@ struct PathCtx {
 // run() quantizes K/V into the kernel's exact layout, launches it, returns the
 // max_rel vs the shared fp64 reference (and asserts launch success + finiteness
 // inside, since those are dtype-agnostic guards). TYPED_TEST iterates them.
+// NOTE: launch failures use EXPECT (not ASSERT) because run() returns ErrStats;
+// a failed launch flags the EXPECT and then also blows the envelope check, so
+// it cannot pass silently — it just doesn't abort the case early.
 // ---------------------------------------------------------------------------
 struct PathF16 {
     static const char* name() { return "F16"; }
