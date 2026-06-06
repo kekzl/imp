@@ -159,6 +159,7 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     family_ = family;
     stop_token_ids_.clear();
     use_jinja_ = false;
+    mentions_thinking_ = false;  // resolved below once the Jinja engine is up
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
@@ -169,6 +170,19 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             use_jinja_ = true;
             build_control_token_map(tokenizer);
             IMP_LOG_INFO("Chat template: using Jinja2 engine");
+            // Think evidence (drives the server-side thinking DEFAULT):
+            //  a) the template exposes the `enable_thinking` switch
+            //     (Qwen3 hybrid, Qwen3.6, Nemotron), or
+            //  b) a fresh-conversation render emits "<think>" (Phi-4
+            //     reasoning system prompt, DeepSeek-R1 generation prefix).
+            // A raw substring match is NOT enough: Qwen3-*-Instruct-2507
+            // mentions <think> only in branches that re-render PAST
+            // assistant turns — for a fresh turn nothing thinks, and
+            // defaulting it to thinking traps the whole answer in
+            // reasoning_content.
+            mentions_thinking_ = jinja_str.find("enable_thinking") != std::string::npos;
+            if (!mentions_thinking_ && jinja_str.find("<think>") != std::string::npos)
+                mentions_thinking_ = probe_render_mentions_think(tokenizer);
         } else {
             IMP_LOG_WARN("Jinja2 parse failed (%s), falling back to hardcoded template",
                          tpl->error().c_str());
@@ -1115,6 +1129,22 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
     auto_detect_stop_tokens(ctx);
 
     return result;
+}
+
+// Render a minimal fresh conversation and report whether the generation
+// prompt itself contains "<think>" — i.e. the template (not the model)
+// enters reasoning mode on a new turn. See init() for why this exists.
+bool ChatTemplate::probe_render_mentions_think(const Tokenizer& tok) const {
+    if (!jinja_tpl_)
+        return false;
+    jinja::Context ctx;
+    std::vector<ChatMessage> probe{{"user", "hi"}};
+    ctx["messages"] = jinja::Value(build_jinja_messages(probe, /*suppress_thinking=*/false));
+    ctx["add_generation_prompt"] = jinja::Value(true);
+    ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
+    ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
+    std::string rendered = jinja_tpl_->render(ctx);
+    return rendered.find("<think>") != std::string::npos;
 }
 
 // ---------------------------------------------------------------------------

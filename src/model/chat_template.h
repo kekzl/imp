@@ -72,6 +72,17 @@ public:
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
+    // True when the raw Jinja template references reasoning ("<think>" or
+    // "enable_thinking"). Used to decide the server-side thinking DEFAULT:
+    // vocab-level <think> tokens alone are NOT evidence of a think-trained
+    // model (Qwen3-*-Instruct-2507 ships the Qwen3 vocab incl. <think>
+    // specials but is not think-trained and its template never opens a
+    // think block — defaulting it to thinking traps the whole answer in
+    // reasoning_content).
+    bool mentions_thinking() const { return mentions_thinking_; }
+    // True when a raw Jinja template is driving rendering (mentions_thinking
+    // is only meaningful evidence in that case).
+    bool has_jinja() const { return use_jinja_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
@@ -128,8 +139,10 @@ private:
     // Jinja2 engine (set during init if template string provided)
     std::shared_ptr<jinja::Template> jinja_tpl_;
     bool use_jinja_ = false;
+    bool mentions_thinking_ = false;
 
     // Jinja2-based apply: render template, split on control tokens, encode
+    bool probe_render_mentions_think(const Tokenizer& tok) const;
     std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                                      bool add_generation_prompt = true, bool suppress_thinking = false) const;
 
