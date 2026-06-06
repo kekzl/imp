@@ -773,8 +773,12 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         if (e != IMP_SUCCESS)
             return e;
         double ppl = ctx->engine->executor()->perplexity_nll(tokens, n_tokens);
-        // Release the prefill request's KV.
-        ctx->active_request = nullptr;
+        // Release the prefill request's KV + recurrent slot. NOTE: do NOT
+        // null active_request first — imp_context_reset only cleans up
+        // (free_sequence / reset_ssm_state / slot release) when it still
+        // sees the request; nulling early leaked the KV sequence AND the
+        // SSM/GDN slot on every imp_perplexity call, so repeated scoring
+        // on hybrid models drifted (stale recurrent state, slot pool decay).
         imp_context_reset(ctx);
         if (ppl < 0.0)
             return IMP_ERROR_INTERNAL;

@@ -1,6 +1,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
@@ -399,6 +400,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // resolver_ helpers mutate this snapshot in place for arch-specific
     // defaults.
     runtime_config_ = take_pending_runtime_config();
+
+    // The deterministic kernel gate lives in process_diag (compute kernels
+    // read process_diag_deterministic_gemm()), but process_diag_install()
+    // only runs in tool mains. Promote the gate here so library/test
+    // embeddings (C API without a tool main) honor [runtime] deterministic /
+    // IMP_DETERMINISTIC too. True-promotion only — arch resolvers and tool
+    // installs may already have set it.
+    if (runtime_config_.runtime.deterministic || runtime_config_.runtime.deterministic_gemm)
+        process_diag_set_deterministic_gemm(true);
 
     init_apply_debug_raw_overrides_();
     init_resolve_kv_dtype_policy_();

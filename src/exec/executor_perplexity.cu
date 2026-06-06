@@ -26,12 +26,14 @@
 
 namespace imp {
 
-// One block per row. Online max + logsumexp over the vocab, then accumulate
-// -logprob(target) into a global double accumulator. Skips the final corpus
-// position (no next token to predict).
+// One block per row. Online max + logsumexp over the vocab, then write
+// -logprob(target) to the per-position slot. Skips the final corpus position
+// (no next token to predict). Per-position writes (host sums in fixed index
+// order) instead of a global atomicAdd keep the NLL bit-reproducible —
+// cross-block atomic accumulation order varies run-to-run.
 __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz, V]
                                        const int32_t* __restrict__ tokens, int chunk_start, int n,
-                                       int V, double* __restrict__ nll_accum) {
+                                       int V, double* __restrict__ nll_per_pos) {
     int row = blockIdx.x;                 // local row in this chunk
     int global_pos = chunk_start + row;   // position in the corpus
     if (global_pos >= n - 1)
@@ -75,7 +77,7 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     if (tid == 0) {
         double lse = log(redd[0]) + static_cast<double>(mx);
         double logprob = static_cast<double>(lg[target]) - lse;
-        atomicAdd(nll_accum, -logprob);
+        nll_per_pos[global_pos] = -logprob;
     }
 }
 
@@ -94,10 +96,10 @@ double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t 
     int32_t* d_tokens = nullptr;
     double* d_nll = nullptr;
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, static_cast<size_t>(n) * sizeof(int32_t)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, sizeof(double)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, static_cast<size_t>(n) * sizeof(double)));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens, static_cast<size_t>(n) * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, sizeof(double), stream));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));
 
     GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config());
 
@@ -148,11 +150,16 @@ double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t 
                                                         n, V, d_nll);
     }
 
-    double h_nll = 0.0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_nll, d_nll, sizeof(double), cudaMemcpyDeviceToHost, stream));
+    // Fixed-order host reduction over per-position NLLs (bit-reproducible).
+    std::vector<double> h_nll_pos(static_cast<size_t>(n), 0.0);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_nll_pos.data(), d_nll, static_cast<size_t>(n) * sizeof(double),
+                                       cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     cudaFree(d_tokens);
     cudaFree(d_nll);
+    double h_nll = 0.0;
+    for (int i = 0; i < n - 1; ++i)
+        h_nll += h_nll_pos[i];
 
     double ppl = std::exp(h_nll / static_cast<double>(n - 1));
     IMP_LOG_INFO("perplexity_nll: n=%d  mean_nll=%.4f  PPL=%.4f", n, h_nll / (n - 1), ppl);
