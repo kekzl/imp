@@ -11,7 +11,7 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 - **CMake 3.25+**
 - **C++20 compiler** (GCC 11+, Clang 14+)
 
-CUTLASS v4.4.2 and Google Test v1.14.0 are fetched automatically via
+CUTLASS v4.5.1 and Google Test v1.14.0 are fetched automatically via
 `FetchContent`. `stb_image` and `stb_image_resize2` are vendored in
 `third_party/stb/`.
 
@@ -116,6 +116,7 @@ dtype after model-specific overrides (e.g. Gemma-4 → FP16 KV via the
 ```
 Model:
   --model <path>            Path to GGUF or SafeTensors model
+  --revision <rev>          HuggingFace revision when --model is a hub repo id
   --mmproj <path>           Vision encoder GGUF for multimodal
   --image <path>            Input image (requires --mmproj)
   --device <n>              CUDA device ID (default: 0)
@@ -165,11 +166,20 @@ Performance:
   --ssm-fp16                FP16 SSM state
   --no-cuda-graphs          Disable CUDA Graphs
   --mxfp4-prefill           CUTLASS MXFP4 GEMM for prefill
+  --prefix-caching          Enable prefix caching in the CLI engine
+  --mtp-spec-decode <k>     MTP speculative decoding with K draft tokens
+                            (models with a native MTP head only)
+  --streaming-kv            Streaming-KV attention (sinks + sliding window)
+  --no-streaming-kv-auto    Disable streaming-KV auto-enable heuristic
+  --stream-sinks <n>        Streaming-KV: number of attention-sink tokens
+  --stream-window <n>       Streaming-KV: sliding-window size in tokens
 
-Benchmark:
+Benchmark / eval:
   --bench                   Synthetic benchmark mode (warmup + timed reps)
   --bench-pp <n>            Prompt tokens (default: 512)
   --bench-reps <n>          Repetitions (default: 3)
+  --perplexity <file>       Teacher-forced perplexity over a text file
+                            (deterministic eval harness, PR #481)
 ```
 
 </details>

@@ -30,6 +30,7 @@ tools/analysis/bench_*
 # Logs (debug runs, repro logs, smoke tests)
 *.log
 bringup_artifacts/
+mtp_retest/
 core
 core.*
 *.dump
