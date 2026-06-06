@@ -512,6 +512,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quant.cu
         tests/test_quant_integration.cu
         tests/test_gguf_dequant_ref.cu
+        tests/test_gpt_oss_mxfp4_convert_ref.cu
         tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
