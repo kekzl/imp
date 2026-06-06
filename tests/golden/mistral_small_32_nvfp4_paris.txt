@@ -1,8 +1,0 @@
-# imp greedy generation golden
-# Model:    Mistral-Small-3.2-24B-Instruct-2506-NVFP4 (SafeTensors, llm-compressor NVFP4)
-# Path:     NVFP4 weights, FP16 KV cache, FP8 prefill auto, NVFP4 decode mode 2
-# Prompt:   "The capital of France is"
-# Flags:    --max-tokens 64 --temperature 0 --seed 0 --chat-template none
-# Captured: 2026-04-29 by bringup/auto-2026-04-29
-# First 8 tokens (deterministic): 6993 ' Paris', 1046 '.', 2157 ' It', 1395 ' is', 1278 ' the', 8961 ' capital', 1307 ' of', 5498 ' France'
- Paris. It is the capital of France and the country's largest city, with a population of 2.3 million in 2099, and the largest city in the European Union. It is one of the most visited cities in the world, with more than 3000000

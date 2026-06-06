@@ -1,8 +1,0 @@
-```json
-{
-  "title": "Beste Gaming-Monitore 2026: Leitfaden für Top-Auswahl",
-  "meta_description": "Entdecke die besten Gaming-Monitore 2026 – mit hohen Refresh-Raten, modernen Technologien und erstklassigem Bild.",
-  "meta_description": "Finde den perfekten Gaming-Monitor für 2026. Unsere umfassende Liste und Bewertungen helfen dir bei der Wahl des richtigen Monitors.",
-  "meta_description": "Entdecke die besten Gaming-Displays 2026 mit hoher Bildwiederholrate, präziser Farbdarstellung und innovativen Designmerkmalen, die von führenden Herstellern entwickelt wurden, um die Anforderungen moderner Gamer zu erfüllen, wobei besonderer Wert auf Aspekte wie Bildqualität, Reaktionszeit, Auflösung und Kompatibilität mit verschiedenen Spielplattformen."
-}
-```
