@@ -11,7 +11,7 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 - **CMake 3.25+**
 - **C++20 compiler** (GCC 11+, Clang 14+)
 
-CUTLASS v4.5.1 and Google Test v1.14.0 are fetched automatically via
+CUTLASS v4.5.1 and Google Test v1.17.0 are fetched automatically via
 `FetchContent`. `stb_image` and `stb_image_resize2` are vendored in
 `third_party/stb/`.
 
