@@ -38,6 +38,7 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
         {"Gemma4ForCausalLM", ModelArch::GEMMA4},
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
+        {"GptOssForCausalLM", ModelArch::GPT_OSS},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
         {"Llama4ForCausalLM", ModelArch::LLAMA4},
@@ -489,6 +490,22 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                      "scale=%.2f norm_topk=%d",
                      cfg.n_experts, cfg.n_experts_active, cfg.n_experts_shared,
                      cfg.expert_shared_d_ff, cfg.expert_weights_scale, (int) cfg.expert_weights_norm);
+    }
+
+    // gpt-oss: alternating attention — layer_types[] marks "sliding_attention"
+    // (window 128) on even layers, "full_attention" on odd. Uniform head_dim
+    // (64); the per-head sink logits + per-expert biases are tensor-level
+    // (weight_map.cpp). Router = topk-then-softmax (resolved in the MoE path).
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        const JValue* lt = jobj_find(eff, "layer_types");
+        if (lt && lt->type == JType::ARRAY) {
+            cfg.swa_layers.clear();
+            cfg.swa_layers.reserve(lt->arr.size());
+            for (const auto& v : lt->arr)
+                cfg.swa_layers.push_back(v.str_val == "sliding_attention" ? 1 : 0);
+        }
+        if (cfg.sliding_window <= 0)
+            cfg.sliding_window = 128;
     }
 
     // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and
