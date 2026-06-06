@@ -441,15 +441,20 @@ if(IMP_BUILD_TESTS)
         tests/test_config.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
+        tests/test_vision_preprocess.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's
         # self-contained anthropic.cpp (json-only dependencies).
+        # test_sse_stream_utils.cpp covers the SSE chunk envelopes +
+        # reasoning/channel splits in tools/imp-server/utils.cpp (issue #557).
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
-            tests/test_anthropic_transform.cpp)
+            tools/imp-server/utils.cpp
+            tests/test_anthropic_transform.cpp
+            tests/test_sse_stream_utils.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
-        target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json)
+        target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
     endif()
     # test_stream_pipeline.cpp includes the self-contained pure header
     # tools/imp-server/stream_pipeline.h (no httplib/json deps).
