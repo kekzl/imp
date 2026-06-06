@@ -250,6 +250,20 @@ TEST_F(FmhaSm120Test, ChunkedCausalHD256) {
     run_test(1, 64, 512, 16, 8, 256, true, 0, 0.0f, 2e-2f, /*q_offset=*/448);
 }
 
+// --- #566 residue: WMMA fallback at hd=256, production-like sizes ---
+// gemma-3-12b (hd=256) read teacher-forced PPL ~10.5 through this chain at
+// n~2.3k even WITHOUT a window (vs 1.7 via cuBLAS) and catastrophic WITH the
+// 1024 window. These cases probe the kernel at those shapes directly.
+TEST_F(FmhaSm120Test, HD256_LongSeq) {
+    run_test(1, 1536, 1536, 16, 8, 256, true, 0, 0.0f, 2e-2f);
+}
+TEST_F(FmhaSm120Test, HD256_LongSeq_SlidingWindow1024) {
+    run_test(1, 1536, 1536, 16, 8, 256, true, /*sw=*/1024, 0.0f, 2e-2f);
+}
+TEST_F(FmhaSm120Test, HD128_LongSeq_SlidingWindow1024) {
+    run_test(1, 1536, 1536, 16, 8, 128, true, /*sw=*/1024, 0.0f, 2e-2f);
+}
+
 TEST_F(FmhaSm120Test, ChunkedSlidingWindow) {
     // Sliding window with q_offset
     run_test(1, 64, 512, 8, 8, 128, true, 128, 0.0f, 1e-2f, /*q_offset=*/448);

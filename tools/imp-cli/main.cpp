@@ -203,7 +203,13 @@ int main(int argc, char** argv) {
             ppl_tokens.insert(ppl_tokens.begin(), bos);
             n_tok++;
         }
-        config.prefill_chunk_size = 0;  // single-chunk: keep all-position hidden
+        // Chunked prefill is the DEFAULT here since the engine-side capture
+        // became chunk-aware (#553): per-chunk NLL accumulation makes the
+        // teacher-forced score independent of chunking, and the chunked
+        // rectangular cuBLAS path is the attention-correctness reference for
+        // long corpora (the single-chunk route falls into the FMHA/WMMA
+        // family beyond the S-matrix cap — the #566 WMMA hd=256 remnant).
+        // An explicit --prefill-chunk-size (incl. 0) still wins.
         config.max_batch_size = 1;
         config.max_seq_len = n_tok + 16;
         fprintf(stderr, "Perplexity: %d tokens from %s\n", n_tok, args.perplexity_file.c_str());
