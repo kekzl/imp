@@ -109,8 +109,10 @@ static double ue4m3_to_double(uint8_t b) {
 }
 
 // CUTLASS SfAtom byte offset for logical scale at (row, k_group).
-// Reimplemented here from the layout spec (atom 128 rows x 4 k-groups = 512 B,
-// K-tiles inner) so the reference does not borrow imp's sfatom_offset().
+// Mirrors imp's sfatom_offset() formula (atom 128 rows x 4 k-groups = 512 B,
+// K-tiles inner). A value-preserving layout permutation, orthogonal to the
+// GEMM/adapter math under test — the reference stays independent of the
+// CUTLASS adapter, but a layout change there must be reflected here.
 static int ref_sfatom_offset(int row, int k_group, int n_k_tiles) {
     const int kAtomRows = 128, kAtomKGroups = 4, kAtomSize = 512;
     int tile_row = row / kAtomRows;

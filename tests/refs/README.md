@@ -52,7 +52,9 @@ gpt-oss YaRN goldens (P2.7): the generator reimplements YaRN-scaled RoPE
 gpt-oss-20b params (factor=32, orig_ctx=4096), pinning cos/sin at positions up
 to 131071. The test re-derives the same math, cross-checks it against the
 golden (**1e-9 rel**), then judges imp's `rope_forward` kernel against the
-verified fp64 ref (**f16 class, 1.5e-2 rel**) and asserts SENSITIVITY to the
+verified fp64 ref (**f16 class, 3e-2 rel** — fast-math `__cosf`/`__sinf`
+argument reduction at pos≈131k costs a few ULPs of phase, measured 1.2e-2)
+and asserts SENSITIVITY to the
 #547 rope_freq_scale inversion (kernel must NOT match the 1024×-wrong ref).
 
 Harmony goldens (P2.7): render strings from the REAL HF reference

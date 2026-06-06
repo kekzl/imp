@@ -27,12 +27,12 @@ Stand nach #574. „CI" = läuft im GitHub-CI (kein GPU-Runner → nur unit);
 | Modul | unit | integration | e2e | numeric-correctness | perf | ungetestet (wertvollste Lücken) |
 |---|---|---|---|---|---|---|
 | core (tensor/config) | ✓ (strukturell) | — | — | — | — | reshape/slice-Numerik (unverändert seit 06-04) |
-| compute/attention | ✓ | ✓ | ✓ greedy-locks | **A**: crosspath fp64-Golden (6 Prefill-Pfade paarweise, `test_attention_crosspath.cu`); **A**: paged-F16-Oracle (`test_attention_paged_oracle.cu`) | bench-only | **`attention_dispatch.cu` Routing-Tabelle** (#493-Klasse), `attention_blackwell.cu`, **paged INT4/INT8 ohne Oracle** (Dateien existieren, characterized-only) [attention sinks (gpt-oss #572): **A geschlossen, #584** `test_gpt_oss_sinks_ref.cu`] |
+| compute/attention | ✓ | ✓ | ✓ greedy-locks | **A**: crosspath fp64-Golden (6 Prefill-Pfade paarweise, `test_attention_crosspath.cu`); **A**: paged-Oracle als TYPED_TEST über 6 KV-Dtypes inkl. INT4/INT8 (`test_attention_paged_oracle.cu`, R8/#582) | bench-only | `attention_blackwell.cu` [Routing-Tabelle: **geschlossen #577** `test_routing_decision.cpp`; attention sinks (gpt-oss #572): **A geschlossen, #584** `test_gpt_oss_sinks_ref.cu`] |
 | compute/sonstige Kernel | ✓ | — | — | A (RoPE/RMSNorm/softmax/reduce vs CPU; **YaRN-Langseq fp64 #584** `test_gpt_oss_yarn_ref.cu`) | — | GPT_OSS_GLU-Aktivierung, Sampling-Numerik (nur „token in vocab") |
-| quant | ✓ | ✓ | ✓ | **A**: `test_gguf_dequant_ref.cu` (Q8_0/Q6_K/Q4_K/IQ4_NL/IQ4_XS vs fp64-Format-Spez, Byte-LCG, no-NaN-Guard); **A**: `test_nvfp4_outlier_ref.cu` (adversariale Fixtures) | bench-only | **`gpt_oss_mxfp4_convert.cu` = 0 Tests** (MXFP4→NVFP4-Konverter, Nibble+Scale-Clamp); CUTLASS grouped nur B (s. §2) |
+| quant | ✓ | ✓ | ✓ | **A**: `test_gguf_dequant_ref.cu` (Q8_0/Q6_K/Q4_K/IQ4_NL/IQ4_XS als TYPED_TEST vs fp64-Format-Spez, Byte-LCG, no-NaN-Guard); **A**: `test_nvfp4_outlier_ref.cu` (adversariale Fixtures); **A**: `test_gpt_oss_mxfp4_convert_ref.cu` (R1.1/#576, bit-exakt); **A**: `test_cutlass_grouped_ref.cu` (R1.2/#576, fp64-CPU-Ref auf identischen Quant-Bits) | bench-only | — |
 | memory/KV | ✓ | ✓ | ✓ prefix-cache E2E (#538-Ship-Gate, 4/4 aktiv) | A (FP8-KV-Kalibrierung) | — | Eviction+Refill-Output-Stabilität, INT8/INT4/NVFP4-KV-Genauigkeitsbänder, vram-Allocator-Budget |
 | model/loader/tokenizer | ✓ inkl. fault-injection (#535-Familie) | ✓ | ✓ | A (Merges, Jinja; **Harmony-Render-Golden vs HF #584** `test_gpt_oss_harmony_golden.cpp`) | — | hf_hub |
-| exec | ✓ teilweise | ✓ | ✓ | B (grouped GEMM, s. §2) | — | `executor_ffn.cu` isoliert, `executor_lora.cu`-Kernel (nur E2E via test_lora), grouped-vs-fallback-Routing in `executor_forward.cu` |
+| exec | ✓ teilweise | ✓ | ✓ | **A** (grouped GEMM via `test_cutlass_grouped_ref.cu`, s. §2) | — | `executor_ffn.cu` isoliert, `executor_lora.cu`-Kernel (nur E2E via test_lora) [grouped-vs-fallback-Routing: **geschlossen #577** `test_routing_decision.cpp`] |
 | lora (neu #571) | — | — | ✓ `test_lora.cpp` (A−: zero-B/nonzero-B-Identität) | — | — | Kernel-Isolation, Multi-Adapter, Rank-Grenzfälle |
 | runtime | ✓ (think/stop, scheduler, json-FSM inkl. $ref/$defs #562) | ✓ | ✓ determinism-E2E (#542) | — | graphs-Gate in verify.sh | ConditionalRunner, Request-Lifecycle/Abort, Warmup-Token-Typ |
 | vision | ✓ CPU-Preprocessing (#564) | — | manuell (gemma-3/4 VL) | — | — | **GPU-Encoder + Projector-Tail komplett** (unverändert) |
@@ -50,18 +50,18 @@ unverändert blind.
 | NVFP4 quantize→dequant→GEMV | `test_nvfp4_outlier_ref.cu` + `tests/refs/gen_nvfp4_outlier_golden.py` | **A** | fp64-Referenz aus Formatdefinition (E2M1+UE4M3+1/512-Floor), 4 adversariale Verteilungen (Gemma-Kollaps-Klasse #514/#516), harter no-NaN/Inf-Guard. Vorbildlich. |
 | NVFP4 block-scaled MMA (mxf4nvf4) | `test_mxf4nvf4_qkt_validate.cu` | A− | E2M1-exakte Inputs → Referenz verlustfrei, aber benignes Datenregime; Präzisionskante nie exerziert. `_probe` = Smoke. |
 | NVFP4-GEMV-Loop | `test_nvfp4_gemv_kpar_loop.cu` | B | Bewusst dokumentiertes Negativ-Resultat (Repro mathematisch äquivalent); Regressions-Riegel, kein Correctness-Beweis. OK so. |
-| **CUTLASS grouped GEMM (pp512-10×-Pfad #574)** | `test_cutlass_grouped_3x_nvfp4.cu` | **B** | grouped vs per-expert — **beide über denselben CUTLASS-Adapter** („only the staging buffer build differs"). Fängt Staging-Bugs, keine Adapter-Bugs. Der neue dominante Prefill-Pfad hat damit keine unabhängige Referenz. |
+| **CUTLASS grouped GEMM (pp512-10×-Pfad #574)** | `test_cutlass_grouped_3x_nvfp4.cu` + `test_cutlass_grouped_ref.cu` (R1.2/#576) | **A** | grouped-vs-per-expert (B, Staging) PLUS unabhängige fp64-CPU-Referenz auf den identischen Quant-Bits, die die GPU konsumiert (Quant-Fehler kancelt → f16-Akkumulationsklasse ≤1e-2, gemessen ~4.9e-4). Boundary-Verteilungen M=0/1/200, single-active-expert. |
 | FP8-E4M3-Encoder | `test_cutlass_nvfp4_alpha.cu` | A− | kanonische Bit-Grenzwerte exakt gepinnt (448/overflow/240-Cliff); Prefill-Teil Smoke. |
 | fp8 FMHA | `test_fmha_fp8.cu` | A− | CPU-Referenz korrekt, aber Toleranz bewusst NICHT assertet („characterized", README §2 — e4m3 auf kurzen Zeilen 0.58–0.71 rel, #512-Mechanismus). Qualitätsgate liegt per Policy bei den E2E-Locks. Füllung teils noch `%13`-Muster. |
 | FA2-Prefill (alle 6 Pfade inkl. cuBLAS-legacy) | `test_attention_crosspath.cu` + fp64-Golden | **A** | Paarweise f16-Klassen-Agreement 1e-2 (gemessen ~4e-4 post-#528), realistisches Heavy-Tail-Datenregime, bit-identische LCG-Fixtures Python↔C++. Der „Killer-Assert" aus Risiko #1 existiert. |
 | FA2 chunked continuation (#553/#568) | `test_attention_chunked.cu` + `test_chunked_prefill.cu` | A−/E2E | Kernel-Test + teacher-forced-NLL-Gates (seit #553 NLL statt Byte-Equality — korrekt wegen Re-Download-Quant-Drift). hd=256-Paritäts-Locks via #570. |
 | Paged decode F16 | `test_attention_paged_oracle.cu` | **A** | fp64-Ref aus Original-f16-K/V; kv_len=333 absichtlich nicht block-aligned. |
-| Paged decode FP8/INT8/INT4 | dito (Envelopes) / **INT4+INT8: keine** | A−/— | Quant-Pfade „characterized" (eingefrorene Envelopes mit Datum), `attention_paged_int4.cu`/`int8.cu` haben **kein** hartes Oracle. Risiko #6 von 06-04 nur teilgeschlossen. |
+| Paged decode FP8/INT8/INT4 | dito (Envelopes; seit R8/#582 als TYPED_TEST über alle 6 KV-Dtypes) | A− | Quant-Pfade „characterized" mit ASSERTETEN eingefrorenen Envelopes (Korrektur 06-07: INT4/INT8-Envelopes existierten schon seit PR #534 — der „keine"-Erstbefund war stale). Risiko #6 von 06-04 geschlossen. |
 | Paged NVFP4-TC | `test_attention_paged_nvfp4_tc*.cu` | C lokal | Launch+SASS-Guard; Numerik via Offline-Microbench + E2E (synthetische Daten NaN-en beide Pfade — dokumentiert). |
 | GGUF-Dequant inkl. IQ4 (#561) | `test_gguf_dequant_ref.cu` | **A** | s. §1. Edge-Cases (d=0, NaN-d, Max-Scale) drin. |
 | MMVQ/dp4a | `test_mmvq.cu`, `test_gemm_dp4a.cu` | B (Diagnose) | dp4a-vs-MMVQ ohne harten Threshold; die echte Referenz läuft über `test_gguf_dequant_ref.cu` (GEMV ≤2.5e-2 mit gemessenem Envelope). |
 | MoE-Routing | `test_moe.cu` | A− | CPU-top-k-Referenz, aber hartkodierte eindeutige Logits — keine Tie-Cases. Executor-Test = not-NaN. |
-| **gpt-oss MXFP4-Experten + sinks (#572)** | — | **C→A für Sinks/Harmony/YaRN (#584)** | Sinks: fp64-Softmax-Ref + Eviction-Geometrie (`test_gpt_oss_sinks_ref.cu`); Harmony: HF-Render-Golden exakt (`test_gpt_oss_harmony_golden.cpp`); YaRN-Langseq fp64 bis 131071 + Inversions-Sensitivität (`test_gpt_oss_yarn_ref.cu`). **Offen: MXFP4-Konverter** (R1.1 separat) + PPL/degen als E2E-Schutz. |
+| **gpt-oss MXFP4-Experten + sinks (#572)** | — | **C→A für Sinks/Harmony/YaRN (#584)** | Sinks: fp64-Softmax-Ref + Eviction-Geometrie (`test_gpt_oss_sinks_ref.cu`); Harmony: HF-Render-Golden exakt (`test_gpt_oss_harmony_golden.cpp`); YaRN-Langseq fp64 bis 131071 + Inversions-Sensitivität (`test_gpt_oss_yarn_ref.cu`). MXFP4-Konverter: **A geschlossen #576** (`test_gpt_oss_mxfp4_convert_ref.cu`, bit-exakt). |
 | GDN/SSM | `test_gdn.cu`, `test_ssm.cu` | A− | CPU-Delta-Rule-Scan-Referenz vorhanden; Toleranz nur implizit (EXPECT_NEAR), Daten synthetisch-benign. |
 
 Hinweis zum Audit-Prompt: „TMA warp-spec grouped GEMM" existiert auf sm_120
@@ -75,10 +75,11 @@ oben entsprechend bewertet.
   in `tests/refs/README.md` (f16-Klasse ≤1e-2 rel gemessen ~4e-4; fp8
   characterized-not-blessed; NVFP4 ≤1e-1 + E2E-Locks; Generator-Crosscheck
   ≤1e-9). Drei Konsumenten: crosspath, nvfp4_outlier, e2e_greedy_locks.
-- **Lücke:** Die Policy wird von den *neuen* Pfaden nicht durchgängig genutzt:
-  grouped GEMM (B-Klasse), mxf4nvf4-Validate (benigne Daten),
-  gpt_oss_mxfp4_convert (nichts). FP8-FMHA-Fixtures nutzen teils noch das
-  `%13`-Füllmuster, das #525 vakuös machte.
+- **Lücke (Stand 06-07 weitgehend geschlossen via #576/#584):** grouped GEMM
+  und gpt_oss_mxfp4_convert haben jetzt class-A-Referenzen nach der Policy;
+  YaRN/Harmony-Goldens committet. Verbleibend: mxf4nvf4-Validate (benigne
+  Daten); FP8-FMHA-Fixtures nutzen teils noch das `%13`-Füllmuster, das #525
+  vakuös machte.
 - GGUF-Dequant-Toleranzen sind dokumentiert UND begründet (Dequant ≤1e-3 =
   reine f32-Rundung; GEMV ≤1e-2; dp4a/MMVQ 2.5e-2 mit Aktivierungs-Quant-
   Rauschen, gemessener Envelope) — Soll-Zustand.
@@ -133,8 +134,8 @@ oben entsprechend bewertet.
 | /v1/messages-Streaming real | **OFFEN auf E2E-Ebene.** Seit #564 sind Envelope/Reasoning-Split/anthropic-Transform unit-getestet (gegen die echten Server-Quelldateien, nicht Mock — gut). Echtes Streaming-Verhalten E2E weiterhin nur OpenAI-seitig; Anthropic-SSE-E2E fehlt. |
 | Tool-Arg-Schema-Validierung | Teilweise: Pass-through in `test_tools.py`; FSM-Ebene inkl. $ref/$defs in `test_json_constrain.cu` (#562). **API-Ebene rekursives Schema ungetestet.** |
 | Constrained output | Gut abgedeckt (whole-token-FSM #517/#519-Kette + #562). |
-| **Neu seit 06-04, ungetestet:** | `gpt_oss_mxfp4_convert.cu` (0 Tests — R1.1 separat), executor_lora-Kernel, grouped-vs-fallback-Routing. [attention sinks, Harmony-Parität vs HF, YaRN-Langsequenz: **geschlossen #584**] |
-| Offene 06-04-Risiken: | #2 teilweise (mode-2-from-scratch weiter ohne externe Oracle), #6 teilweise (INT4/INT8 paged ohne Oracle), #9 zurückgestellt (begründet — MTP dead end), #10 teilweise (fault injection ✓, Unicode-Roundtrip ✓ via fixtures+robustness; NUL-Klasse via SSE-Tests ✓). |
+| **Neu seit 06-04, ungetestet:** | executor_lora-Kernel. [gpt_oss_mxfp4_convert: **geschlossen #576** (bit-exakte fp64-Ref); grouped-vs-fallback-Routing: **geschlossen #577**; attention sinks, Harmony-Parität vs HF, YaRN-Langsequenz: **geschlossen #584**] |
+| Offene 06-04-Risiken: | #2 teilweise (mode-2-from-scratch weiter ohne externe Oracle), #6 **geschlossen** (INT4/INT8-paged-Envelopes existierten seit PR #534 — Erstbefund stale; seit R8/#582 TYPED_TEST über alle KV-Dtypes), #9 zurückgestellt (begründet — MTP dead end), #10 teilweise (fault injection ✓, Unicode-Roundtrip ✓ via fixtures+robustness; NUL-Klasse via SSE-Tests ✓). |
 
 ## 7. Stale / Dead
 
