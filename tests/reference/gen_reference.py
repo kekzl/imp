@@ -14,6 +14,9 @@ The imp test harness loads these .npy files and compares against imp's
 internal tensors (token-by-token and layer-by-layer) to catch kernel
 regressions that manifest only on real model data.
 
+STATUS: dormant infrastructure (TEST_AUDIT.md §7) — no test currently
+consumes these outputs; kept for future HF layer-by-layer comparisons.
+
 Usage:
   python gen_reference.py \\
       --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\

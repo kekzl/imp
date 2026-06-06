@@ -1,4 +1,6 @@
 #!/bin/bash
+# MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT.md §7).
+# Needs a running imp-server on :8080; fires 4 concurrent chat requests.
 set -e
 
 BASE="http://localhost:8080/v1/chat/completions"
