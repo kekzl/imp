@@ -664,9 +664,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool rope_k_deferred = false;  // true when K-RoPE will be fused into KV write
     {
         bool has_qk_norm = (ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr);
-        // Determine if we can fuse K-RoPE into KV cache write
+        // Determine if we can fuse K-RoPE into KV cache write.
+        // YaRN models (#547, gpt-oss): the fused kernels
+        // (rope_q_only_fp16_kernel / write_kv_cache_rope_fused_kernel) only
+        // know theta + 1/scale — no ramp blending, no attn_factor. Prefill
+        // K would be YaRN-correct but every decode-written K plain-RoPE →
+        // degeneration from token 2. Keep YaRN on the separate full path.
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
-                                 state.kv_cache->qtype() == QType::F16 && !cfg.rope_attn_disabled);
+                                 state.kv_cache->qtype() == QType::F16 && !cfg.rope_attn_disabled &&
+                                 cfg.yarn_ext_factor <= 0.0f);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -1059,15 +1065,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int64_t v_shape[2] = {ctx_len, nkv * hd};
             Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
             Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
-            // Use n=1 cuBLAS attention with causal=false (all context visible).
-            // Track E is tried first; it will decline causal=false and fall through to cuBLAS.
+            // n=1 cuBLAS attention. causal=true + q_offset=ctx_len-1 makes the
+            // single query row see the full context AND keeps the sliding-window
+            // mask correct (the old causal=false/q_offset=0 form broke SWA
+            // layers: abs_row=0 never triggered the window). Sinks pass through
+            // so this debug arm stays a faithful reference for gpt-oss (#547).
             {
                 int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
                 half* s_buf = nullptr;
-                cudaMalloc(&s_buf, nh * ctx_len * sizeof(half));
+                cudaMalloc(&s_buf, (size_t)nh * ctx_len * sizeof(half));
                 Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
-                attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/false,
-                                         cfg.attn_logit_softcap, /*q_offset=*/0, stream);
+                attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/true,
+                                         cfg.attn_logit_softcap, /*q_offset=*/ctx_len - 1, stream,
+                                         layer_sliding_window, attn_sinks);
                 cudaFree(s_buf);
             }
             cudaFree(k_flat);
