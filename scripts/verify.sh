@@ -123,7 +123,7 @@ gpu_sample_stop() {
     GPU_DRIFT_DEPRESSED=0
     GPU_DRIFT_DESC=""
     [ -n "$_SAMPLE_PID" ] && kill "$_SAMPLE_PID" >/dev/null 2>&1
-    wait "$_SAMPLE_PID" 2>/dev/null
+    [ -n "$_SAMPLE_PID" ] && wait "$_SAMPLE_PID" 2>/dev/null
     [ -n "$_SAMPLE_FILE" ] && [ -s "$_SAMPLE_FILE" ] || { _cleanup_sample; return 0; }
     # Drop the first 2 samples (clock-ramp cold-start), then aggregate:
     # median mem clock + max power over the steady portion of the run.
