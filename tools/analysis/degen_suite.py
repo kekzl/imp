@@ -137,6 +137,69 @@ class Server:
             "done": got_done,
         }
 
+    def messages(self, messages, max_tokens=256, temperature=0.0, **kw):
+        """Anthropic /v1/messages, DEFAULT path (no reasoning-format flags)."""
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        body.update(kw)
+        with self._post("/v1/messages", body) as r:
+            data = json.loads(r.read())
+        thinking, text = [], []
+        for block in data.get("content", []):
+            if block.get("type") == "thinking":
+                thinking.append(block.get("thinking", ""))
+            elif block.get("type") == "text":
+                text.append(block.get("text", ""))
+        return {
+            "thinking": "".join(thinking),
+            "text": "".join(text),
+            "stop_reason": data.get("stop_reason"),
+            "usage": data.get("usage", {}),
+            "raw": data,
+        }
+
+    def messages_stream(self, messages, max_tokens=256, temperature=0.0, **kw):
+        """Anthropic /v1/messages with stream=true; collects block deltas."""
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        body.update(kw)
+        thinking, text = [], []
+        stop_reason = None
+        events = set()
+        with self._post("/v1/messages", body) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                ev = json.loads(payload)
+                events.add(ev.get("type", ""))
+                if ev.get("type") == "content_block_delta":
+                    d = ev.get("delta", {})
+                    if d.get("type") == "thinking_delta":
+                        thinking.append(d.get("thinking", ""))
+                    elif d.get("type") == "text_delta":
+                        text.append(d.get("text", ""))
+                elif ev.get("type") == "message_delta":
+                    stop_reason = ev.get("delta", {}).get("stop_reason", stop_reason)
+        return {
+            "thinking": "".join(thinking),
+            "text": "".join(text),
+            "stop_reason": stop_reason,
+            "events": events,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Detectors
@@ -404,6 +467,45 @@ class Suite:
                     f"stream={s['content'][:80]!r} nonstream={ns['content'][:80]!r}")
 
 
+    # -- anthropic-thinking ---------------------------------------------------
+    # /v1/messages DEFAULT path (audit 2026-05-31 T8: thinking blocks were only
+    # ever confirmed WITH --reasoning-format; the default path was unconfirmed).
+    def cat_anthropic_thinking(self):
+        q = [{"role": "user", "content": "What is the capital of France? One word."}]
+        n = 400 if self.quick else 800
+
+        if not self.is_reasoning:
+            r = self.srv.messages(q, max_tokens=120)
+            self.record("anthropic-thinking", "non-reasoning: text block, no think tags",
+                        bool(r["text"].strip()) and "<think>" not in r["text"],
+                        f"text={r['text'][:80]!r}")
+            return
+
+        # 1. Non-stream default: reasoning must arrive as a `thinking` content
+        #    block, the answer as a `text` block — with NO request flags.
+        r = self.srv.messages(q, max_tokens=n)
+        self.record("anthropic-thinking", "default non-stream: thinking block present",
+                    bool(r["thinking"].strip()), f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
+        self.record("anthropic-thinking", "default non-stream: text block is the answer",
+                    bool(r["text"].strip()) and reasoning_opener(r["text"]) is None,
+                    f"text={r['text'][:100]!r}")
+        self.record("anthropic-thinking", "default non-stream: no literal think tags",
+                    "<think>" not in r["text"] and "</think>" not in r["text"],
+                    r["text"][:100])
+        self.record("anthropic-thinking", "default non-stream: usage tokens present",
+                    r["usage"].get("input_tokens", 0) > 0 and r["usage"].get("output_tokens", 0) > 0,
+                    str(r["usage"]))
+
+        # 2. Streaming default: thinking_delta blocks, then text_delta.
+        r = self.srv.messages_stream(q, max_tokens=n)
+        self.record("anthropic-thinking", "default stream: thinking_delta events",
+                    bool(r["thinking"].strip()), f"events={sorted(r['events'])}")
+        self.record("anthropic-thinking", "default stream: text deltas are answer",
+                    bool(r["text"].strip()) and reasoning_opener(r["text"]) is None
+                    and "<think>" not in r["text"],
+                    f"text={r['text'][:100]!r}")
+
+
 CATEGORIES = {
     "repetition": Suite.cat_repetition,
     "think-leak": Suite.cat_think_leak,
@@ -412,6 +514,7 @@ CATEGORIES = {
     "long-context": Suite.cat_long_context,
     "multi-turn": Suite.cat_multi_turn,
     "stream": Suite.cat_stream,
+    "anthropic-thinking": Suite.cat_anthropic_thinking,
 }
 
 
