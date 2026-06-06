@@ -19,6 +19,8 @@
 // gemm_via_handle_ (tier-aware: NVFP4 / FP8 / FP16 / GGUF all handled).
 
 #include "exec/executor.h"
+#include "exec/executor_gemv_helpers.h"
+#include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
 #include "core/logging.h"
@@ -108,6 +110,15 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
     const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
     const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
     const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
+    // Raw-GGUF-quant LM head (tied-embedding Gemma Q4_K etc.): mirror the
+    // production use_dp4a_lm arm. Routing these through gemm_via_handle_ at
+    // M=1 hits the GGUF GEMV handlers with an FP16 (un-quantized) input and
+    // produced an illegal memory access on gemma-3-12b — which poisoned the
+    // context and surfaced as the absurd PPL=1.0000 (zeroed NLL buffer).
+    const auto out_qtype = model_->out_proj_.qtype;
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
+                             is_dp4a_qtype(out_qtype) && !runtime_config().gemm.no_dp4a_lm &&
+                             lm_tier != StorageTier::MXFP4 && !lm_has_fp8;
     NvFP4QuantResult nvfp4_lm_r{};
     if (lm_is_nvfp4) {
         if (lm_nvfp4_secondary) {
@@ -136,10 +147,35 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
                 gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_row.data),
                                      static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
             }
+        } else if (use_dp4a_lm) {
+            // Per-row: fused RMSNorm→Q8_1 quantize + dp4a GEMV (the q8_1
+            // scratch holds exactly one row — same as production decode).
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+            for (int r = 0; r < csz; ++r) {
+                Tensor h_row = hc.slice(r, r + 1);
+                Tensor lg_row = lg.slice(r, r + 1);
+                rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
+                                      static_cast<const half*>(model_->output_norm().data), q8,
+                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                      norm_w_off_);
+                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                   static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
+            }
         } else {
             Tensor noc = view_tokens(norm_out_, csz);      // [csz, d]
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
             gemm_via_handle_(model_->out_proj_id, noc, lg, ctx);
+        }
+        // Final logit softcap (Gemma-2/3/4): production forward_logits applies
+        // it before sampling — without it the eval NLL measures a different
+        // model than the one being served.
+        if (cfg.final_logit_softcap > 0.0f && !runtime_config().generation.no_logit_softcap) {
+            int64_t total = static_cast<int64_t>(csz) * V;
+            int threads = 256;
+            int blocks = static_cast<int>((total + threads - 1) / threads);
+            logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<float*>(lg.data), cfg.final_logit_softcap,
+                1.0f / cfg.final_logit_softcap, total);
         }
         perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
                                                         chunk_start + c, n_total, V, d_nll);

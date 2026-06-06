@@ -195,6 +195,14 @@ int main(int argc, char** argv) {
             return 1;
         }
         ppl_tokens.resize(n_tok);
+        // BOS-dependent families (Gemma especially) need the BOS prepended or
+        // the teacher-forced NLL measures an out-of-distribution sequence
+        // (gemma-3-12b read PPL ~100 instead of ~10 without it).
+        int32_t bos = imp_model_bos_token(model);
+        if (bos >= 0 && ppl_tokens[0] != bos) {
+            ppl_tokens.insert(ppl_tokens.begin(), bos);
+            n_tok++;
+        }
         config.prefill_chunk_size = 0;  // single-chunk: keep all-position hidden
         config.max_batch_size = 1;
         config.max_seq_len = n_tok + 16;
