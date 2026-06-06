@@ -2,6 +2,7 @@
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "gguf_stub.h"
+#include "test_models.h"
 
 #include <cuda_runtime.h>
 
@@ -15,7 +16,7 @@ namespace {
 
 // Helper: get model path from environment variable IMP_TEST_MODEL.
 // Tests that require a model are skipped if not set.
-static const char* test_model_path() { return std::getenv("IMP_TEST_MODEL"); }
+static std::string test_model_path() { return imp_test::env_path(imp_test::kEnvModel); }
 
 // --- API sanity tests (no model required) ---
 
@@ -96,12 +97,12 @@ TEST(EndToEndTest, NullArguments) {
 // --- Model-dependent tests (require IMP_TEST_MODEL env var) ---
 
 TEST(EndToEndModelTest, LoadModel) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(path, IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model);
     ASSERT_EQ(err, IMP_SUCCESS);
     ASSERT_NE(model, nullptr);
 
@@ -113,12 +114,12 @@ TEST(EndToEndModelTest, LoadModel) {
 }
 
 TEST(EndToEndModelTest, Tokenize) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
 
     int32_t tokens[256];
     int n_tokens = 0;
@@ -135,12 +136,12 @@ TEST(EndToEndModelTest, Tokenize) {
 }
 
 TEST(EndToEndModelTest, CreateContextAndGenerate) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 512;
@@ -169,12 +170,12 @@ TEST(EndToEndModelTest, CreateContextAndGenerate) {
 }
 
 TEST(EndToEndModelTest, PrefillDecodeStep) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 256;
@@ -216,12 +217,12 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
 // --- Long-context tests (real model required) ---
 
 TEST(EndToEndModelTest, LongContext8k) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 16384;
@@ -253,12 +254,12 @@ TEST(EndToEndModelTest, LongContext8k) {
 }
 
 TEST(EndToEndModelTest, LongContext16k_NVFP4KV) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 16384;
@@ -513,12 +514,12 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
 // ---------------------------------------------------------------------------
 
 TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
-    const char* path = test_model_path();
-    if (!path)
+    const std::string path = test_model_path();
+    if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
     ASSERT_NE(model, nullptr);
 
     ImpConfig config = imp_config_default();

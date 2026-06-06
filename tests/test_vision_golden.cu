@@ -31,6 +31,8 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include "test_models.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -304,9 +306,9 @@ void run_arch(const char* env_var, const char* arch, const VisionGoldenArch* gol
     assert_golden(*golden, emb, num_tokens, d_model);
 }
 
-TEST(VisionGolden, Gemma3SigLIP) { run_arch("IMP_TEST_MMPROJ", "gemma3", gemma3_golden()); }
+TEST(VisionGolden, Gemma3SigLIP) { run_arch(imp_test::kEnvMmproj, "gemma3", gemma3_golden()); }
 
-TEST(VisionGolden, Gemma4v) { run_arch("IMP_TEST_MMPROJ_GEMMA4", "gemma4v", gemma4v_golden()); }
+TEST(VisionGolden, Gemma4v) { run_arch(imp_test::kEnvMmprojGemma4, "gemma4v", gemma4v_golden()); }
 
 }  // namespace
 }  // namespace imp

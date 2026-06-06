@@ -7,11 +7,13 @@
 #include <string>
 #include <unordered_set>
 
+#include "test_models.h"
+
 using namespace imp;
 
 namespace {
 
-const char* kTestModelPath = std::getenv("IMP_TEST_GGUF");
+const char* kTestModelPath = std::getenv(imp_test::kEnvGguf);
 
 }  // namespace
 
