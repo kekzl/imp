@@ -44,6 +44,25 @@ Generators:
 |---|---|---|
 | `gen_attention_crosspath_golden.py` | `attention_crosspath_golden.h` | `tests/test_attention_crosspath.cu` |
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
+| `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
+| `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
+
+gpt-oss YaRN goldens (P2.7): the generator reimplements YaRN-scaled RoPE
+(corr-dim ramp, freq blend, mscale) in fp64 from the YaRN/HF semantics for the
+gpt-oss-20b params (factor=32, orig_ctx=4096), pinning cos/sin at positions up
+to 131071. The test re-derives the same math, cross-checks it against the
+golden (**1e-9 rel**), then judges imp's `rope_forward` kernel against the
+verified fp64 ref (**f16 class, 1.5e-2 rel**) and asserts SENSITIVITY to the
+#547 rope_freq_scale inversion (kernel must NOT match the 1024×-wrong ref).
+
+Harmony goldens (P2.7): render strings from the REAL HF reference
+(`transformers` `apply_chat_template`, model `openai/gpt-oss-20b`). The C++
+test renders the committed `tests/fixtures/gpt_oss_chat_template.jinja` through
+imp's own jinja engine and compares EXACTLY (the one strftime_now `Current
+date:` line is normalized in both — documented in the test). Needs
+`transformers`, only the tokenizer/template (no weights):
+`docker run --rm -v $PWD:/work -v /home/kekz/models:/models -w /work
+python:3.12-slim sh -c "pip install -q transformers jinja2 && MODEL=/models/gpt-oss-20b python3 tests/refs/gen_harmony_golden.py"`.
 
 NVFP4 outlier goldens (risk #2): the generator reimplements NVFP4's two-level
 dequant (E2M1 + UE4M3 micro-scale + f32 tensor-scale, incl. the 1/512 floor)

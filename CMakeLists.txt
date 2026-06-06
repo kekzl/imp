@@ -469,11 +469,13 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer_robustness.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_chat_template.cpp
+        tests/test_gpt_oss_harmony_golden.cpp
         tests/test_jinja.cpp
     )
 
     imp_add_test_module(test-compute SOURCES
         tests/test_rope.cu
+        tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
         tests/test_activation.cu
         tests/test_embedding.cu
@@ -498,6 +500,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_tc.cu
         tests/test_attention_fmha_sm120.cu
         tests/test_attention_crosspath.cu
+        tests/test_gpt_oss_sinks_ref.cu
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu

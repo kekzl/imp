@@ -27,11 +27,11 @@ Stand nach #574. „CI" = läuft im GitHub-CI (kein GPU-Runner → nur unit);
 | Modul | unit | integration | e2e | numeric-correctness | perf | ungetestet (wertvollste Lücken) |
 |---|---|---|---|---|---|---|
 | core (tensor/config) | ✓ (strukturell) | — | — | — | — | reshape/slice-Numerik (unverändert seit 06-04) |
-| compute/attention | ✓ | ✓ | ✓ greedy-locks | **A**: crosspath fp64-Golden (6 Prefill-Pfade paarweise, `test_attention_crosspath.cu`); **A**: paged-F16-Oracle (`test_attention_paged_oracle.cu`) | bench-only | **`attention_dispatch.cu` Routing-Tabelle** (#493-Klasse), `attention_blackwell.cu`, **paged INT4/INT8 ohne Oracle** (Dateien existieren, characterized-only), **attention sinks (gpt-oss #572)** |
-| compute/sonstige Kernel | ✓ | — | — | A (RoPE/RMSNorm/softmax/reduce vs CPU) | — | YaRN-Langsequenz-Parität vs Referenz (#572), GPT_OSS_GLU-Aktivierung, Sampling-Numerik (nur „token in vocab") |
+| compute/attention | ✓ | ✓ | ✓ greedy-locks | **A**: crosspath fp64-Golden (6 Prefill-Pfade paarweise, `test_attention_crosspath.cu`); **A**: paged-F16-Oracle (`test_attention_paged_oracle.cu`) | bench-only | **`attention_dispatch.cu` Routing-Tabelle** (#493-Klasse), `attention_blackwell.cu`, **paged INT4/INT8 ohne Oracle** (Dateien existieren, characterized-only) [attention sinks (gpt-oss #572): **A geschlossen, #584** `test_gpt_oss_sinks_ref.cu`] |
+| compute/sonstige Kernel | ✓ | — | — | A (RoPE/RMSNorm/softmax/reduce vs CPU; **YaRN-Langseq fp64 #584** `test_gpt_oss_yarn_ref.cu`) | — | GPT_OSS_GLU-Aktivierung, Sampling-Numerik (nur „token in vocab") |
 | quant | ✓ | ✓ | ✓ | **A**: `test_gguf_dequant_ref.cu` (Q8_0/Q6_K/Q4_K/IQ4_NL/IQ4_XS vs fp64-Format-Spez, Byte-LCG, no-NaN-Guard); **A**: `test_nvfp4_outlier_ref.cu` (adversariale Fixtures) | bench-only | **`gpt_oss_mxfp4_convert.cu` = 0 Tests** (MXFP4→NVFP4-Konverter, Nibble+Scale-Clamp); CUTLASS grouped nur B (s. §2) |
 | memory/KV | ✓ | ✓ | ✓ prefix-cache E2E (#538-Ship-Gate, 4/4 aktiv) | A (FP8-KV-Kalibrierung) | — | Eviction+Refill-Output-Stabilität, INT8/INT4/NVFP4-KV-Genauigkeitsbänder, vram-Allocator-Budget |
-| model/loader/tokenizer | ✓ inkl. fault-injection (#535-Familie) | ✓ | ✓ | A (Merges, Jinja) | — | hf_hub, Harmony-Template-Parität vs HF (#572 — nur via chat_template-Smoke) |
+| model/loader/tokenizer | ✓ inkl. fault-injection (#535-Familie) | ✓ | ✓ | A (Merges, Jinja; **Harmony-Render-Golden vs HF #584** `test_gpt_oss_harmony_golden.cpp`) | — | hf_hub |
 | exec | ✓ teilweise | ✓ | ✓ | B (grouped GEMM, s. §2) | — | `executor_ffn.cu` isoliert, `executor_lora.cu`-Kernel (nur E2E via test_lora), grouped-vs-fallback-Routing in `executor_forward.cu` |
 | lora (neu #571) | — | — | ✓ `test_lora.cpp` (A−: zero-B/nonzero-B-Identität) | — | — | Kernel-Isolation, Multi-Adapter, Rank-Grenzfälle |
 | runtime | ✓ (think/stop, scheduler, json-FSM inkl. $ref/$defs #562) | ✓ | ✓ determinism-E2E (#542) | — | graphs-Gate in verify.sh | ConditionalRunner, Request-Lifecycle/Abort, Warmup-Token-Typ |
@@ -61,7 +61,7 @@ unverändert blind.
 | GGUF-Dequant inkl. IQ4 (#561) | `test_gguf_dequant_ref.cu` | **A** | s. §1. Edge-Cases (d=0, NaN-d, Max-Scale) drin. |
 | MMVQ/dp4a | `test_mmvq.cu`, `test_gemm_dp4a.cu` | B (Diagnose) | dp4a-vs-MMVQ ohne harten Threshold; die echte Referenz läuft über `test_gguf_dequant_ref.cu` (GEMV ≤2.5e-2 mit gemessenem Envelope). |
 | MoE-Routing | `test_moe.cu` | A− | CPU-top-k-Referenz, aber hartkodierte eindeutige Logits — keine Tie-Cases. Executor-Test = not-NaN. |
-| **gpt-oss MXFP4-Experten + sinks (#572)** | — | **C/—** | Konverter 0 Tests; Sinks nur via paged-Smoke; Harmony nur Template-Smoke. Einziger Schutz: PPL-Werte 7.67/7.99 (manuell) + degen_suite. |
+| **gpt-oss MXFP4-Experten + sinks (#572)** | — | **C→A für Sinks/Harmony/YaRN (#584)** | Sinks: fp64-Softmax-Ref + Eviction-Geometrie (`test_gpt_oss_sinks_ref.cu`); Harmony: HF-Render-Golden exakt (`test_gpt_oss_harmony_golden.cpp`); YaRN-Langseq fp64 bis 131071 + Inversions-Sensitivität (`test_gpt_oss_yarn_ref.cu`). **Offen: MXFP4-Konverter** (R1.1 separat) + PPL/degen als E2E-Schutz. |
 | GDN/SSM | `test_gdn.cu`, `test_ssm.cu` | A− | CPU-Delta-Rule-Scan-Referenz vorhanden; Toleranz nur implizit (EXPECT_NEAR), Daten synthetisch-benign. |
 
 Hinweis zum Audit-Prompt: „TMA warp-spec grouped GEMM" existiert auf sm_120
@@ -133,7 +133,7 @@ oben entsprechend bewertet.
 | /v1/messages-Streaming real | **OFFEN auf E2E-Ebene.** Seit #564 sind Envelope/Reasoning-Split/anthropic-Transform unit-getestet (gegen die echten Server-Quelldateien, nicht Mock — gut). Echtes Streaming-Verhalten E2E weiterhin nur OpenAI-seitig; Anthropic-SSE-E2E fehlt. |
 | Tool-Arg-Schema-Validierung | Teilweise: Pass-through in `test_tools.py`; FSM-Ebene inkl. $ref/$defs in `test_json_constrain.cu` (#562). **API-Ebene rekursives Schema ungetestet.** |
 | Constrained output | Gut abgedeckt (whole-token-FSM #517/#519-Kette + #562). |
-| **Neu seit 06-04, ungetestet:** | `gpt_oss_mxfp4_convert.cu` (0 Tests), attention sinks, Harmony-Parität vs HF, YaRN-Langsequenz, executor_lora-Kernel, grouped-vs-fallback-Routing. |
+| **Neu seit 06-04, ungetestet:** | `gpt_oss_mxfp4_convert.cu` (0 Tests — R1.1 separat), executor_lora-Kernel, grouped-vs-fallback-Routing. [attention sinks, Harmony-Parität vs HF, YaRN-Langsequenz: **geschlossen #584**] |
 | Offene 06-04-Risiken: | #2 teilweise (mode-2-from-scratch weiter ohne externe Oracle), #6 teilweise (INT4/INT8 paged ohne Oracle), #9 zurückgestellt (begründet — MTP dead end), #10 teilweise (fault injection ✓, Unicode-Roundtrip ✓ via fixtures+robustness; NUL-Klasse via SSE-Tests ✓). |
 
 ## 7. Stale / Dead
@@ -202,8 +202,14 @@ oben entsprechend bewertet.
 **P2 — Velocity/Robustheit**
 6. Python-Mock-Suite in CI verdrahten (`pytest -m "not perf and not tools"`,
    CPU-only — der einzige CI-fähige Contract-Check). Aufwand: S.
-7. Attention-sinks-Unit (Sink-Logit-Shift vs CPU-Softmax-Referenz) +
-   Harmony-Template-Golden vs HF-Tokenizer-Output. Aufwand: M.
+7. ~~Attention-sinks-Unit (Sink-Logit-Shift vs CPU-Softmax-Referenz) +
+   Harmony-Template-Golden vs HF-Tokenizer-Output.~~ **DONE (P2.7, #584):**
+   `test_gpt_oss_sinks_ref.cu` (gpt-oss Sink-Logit vs fp64-Softmax-Referenz,
+   inkl. StreamingLLM-Slot-Eviction-Geometrie), `test_gpt_oss_harmony_golden.cpp`
+   (imp-Jinja-Render vs HF `apply_chat_template`-Golden, exakt), plus
+   `test_gpt_oss_yarn_ref.cu` (YaRN-Langsequenz-Parität bis pos 131071 vs fp64,
+   sensitiv auf die #547 rope_freq_scale-Inversion). Generatoren+Goldens in
+   `tests/refs/` (gen_harmony_golden.py, gen_yarn_rope_golden.py).
 8. Decode-Gate um Clock-/Power-Plausibilisierung ergänzen (#526-Klasse:
    bei mem-clock < 13801 MHz WARN statt FAIL). Aufwand: S.
 9. unit_e2e_filter aus Test-Namen-Kopplung lösen (eigene Binary
