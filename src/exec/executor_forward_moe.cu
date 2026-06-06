@@ -346,7 +346,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 // lazily, so output stays correct (at most one wasted decision).
 // The path-selection ORDER + arch/config gates are mirrored as a pure function
 // `select_moe_prefill_path` in moe_prefill_decision.h, pinned by
-// test_moe_prefill_decision.cpp (R2 / P1.4).
+// test_routing_decision.cpp (R2 / P1.4).
 bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
     if (runtime_config().moe.no_cutlass3x)

@@ -21,7 +21,7 @@
 // reproduces the exact short-circuit order of attention_dispatch.cu.
 //
 // Keeping this in lock-step with attention_dispatch.cu is the point: any reorder
-// or gate change shows up as a diff in test_attention_dispatch_table.cpp.
+// or gate change shows up as a diff in test_routing_decision.cpp.
 
 namespace imp {
 
