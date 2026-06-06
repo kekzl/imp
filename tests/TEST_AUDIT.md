@@ -35,13 +35,13 @@ Stand nach #574. „CI" = läuft im GitHub-CI (kein GPU-Runner → nur unit);
 | exec | ✓ teilweise | ✓ | ✓ | **A** (grouped GEMM via `test_cutlass_grouped_ref.cu`, s. §2) | — | `executor_ffn.cu` isoliert, `executor_lora.cu`-Kernel (nur E2E via test_lora) [grouped-vs-fallback-Routing: **geschlossen #577** `test_routing_decision.cpp`] |
 | lora (neu #571) | — | — | ✓ `test_lora.cpp` (A−: zero-B/nonzero-B-Identität) | — | — | Kernel-Isolation, Multi-Adapter, Rank-Grenzfälle |
 | runtime | ✓ (think/stop, scheduler, json-FSM inkl. $ref/$defs #562) | ✓ | ✓ determinism-E2E (#542) | — | graphs-Gate in verify.sh | ConditionalRunner, Request-Lifecycle/Abort, Warmup-Token-Typ |
-| vision | ✓ CPU-Preprocessing (#564) | — | manuell (gemma-3/4 VL) | — | — | **GPU-Encoder + Projector-Tail komplett** (unverändert) |
+| vision | ✓ CPU-Preprocessing (#564) | ✓ GPU-Encoder+Projector Frozen-Golden (R9/#583: SigLIP+gemma4v, committetes 64² PNG → Projector-Spots, f16-Klasse ≤1e-2 rel + NaN/Inf-Guard, mmproj standalone ohne LM) | manuell (gemma-3/4 VL) | — | — | Vision-RoPE/Norm-Einzelkernel isoliert (Golden lockt nur den Encoder-Output) |
 | api/server | ✓ SSE-Utils, anthropic-Transform, stream_pipeline (echte Quelldateien einkompiliert, nicht Mock!) | ✓ relaunch | ✓ | — | — | `handlers.cpp` selbst (nur dessen Utils getestet), Abort-Pfad |
 | api/HTTP (Python) | ✓ Mock (Contract/Errors/Lifecycle) | ✓ real (modellgebunden) | ✓ | — | TTFT/Decode-Gates (real-only) | rekursives json_schema auf API-Ebene; /v1/messages-Streaming-E2E |
 
 Gegenüber 06-04: ~45 % direkt → spürbar besser in attention/quant/runtime/api
-(6 der 10 Risiken geschlossen, s. §6); vision-GPU und exec-Isolation
-unverändert blind.
+(6 der 10 Risiken geschlossen, s. §6); vision-GPU jetzt per Frozen-Golden
+abgedeckt (R9/#583), exec-Isolation unverändert blind.
 
 ## 2. Hot-Path-Kernels — Tiefe der Correctness-Tests
 
@@ -242,7 +242,7 @@ Gates verwandeln (Varianz); keine Seed-Sweeps für Greedy-Pfade.
 | R6 | **Modell-Env-Registry:** ein `tests/test_models.h` (Header-only) mit den 8 Env-Vars + Skip-Helpern statt 25× kopiertem Muster; mechanische Migration | niedrig (mechanisch, semantikerhaltend) | M (Fleißarbeit) |
 | R7 | **Hygiene-Batch** (P3.10) | minimal | S |
 | R8 | **Parametrisierung Quant×Arch** (Prompt-Wunsch): NICHT als große Matrix empfohlen — die Greedy-Lock-/NLL-E2E-Suite parametrisiert bereits über die real vorhandenen Modelle, und eine synthetische Arch-Matrix (LLaMA/Mistral/DeepSeek/…) ohne Gewichte testet nur Loader-Pfade, die `test_e2e_models`/Loader-Tests schon abdecken. Stattdessen: TYPED_TEST über KV-Dtypes im paged-Oracle (R1) und über Quant-Formate im Dequant-Ref — dort ist Parametrisierung billig und echt. | niedrig | S–M |
-| R9 | **Vision-GPU-Golden** (einziger komplett blinder GPU-Bereich): ein eingefrorenes SigLIP-Encoder-Golden (kleines committetes Bild → Projector-Output-Spots, Toleranz f16-Klasse) | niedrig | M |
+| R9 | **Vision-GPU-Golden** (einziger komplett blinder GPU-Bereich): ein eingefrorenes SigLIP-Encoder-Golden (kleines committetes Bild → Projector-Output-Spots, Toleranz f16-Klasse) — **ERLEDIGT (#583)**: `tests/test_vision_golden.cu` + `tests/refs/vision_encoder_golden.h`, deckt SigLIP **und** gemma4v ab (committetes 64² PNG, mmproj standalone ohne LM), ≤1e-2 rel + 5e-3 abs + NaN/Inf-Guard, sauberer SKIP ohne Modell, `make test-vision` (Dump-Mode regeneriert) | niedrig | M |
 
 Empfohlene Reihenfolge: R7 (sofort) → R2+R3 (billig, CI-Wirkung) → R1 (Kern) →
 R4 → R6 → R5 → R9. R8 in R1 integrieren.

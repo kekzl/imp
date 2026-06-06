@@ -577,6 +577,7 @@ if(IMP_BUILD_TESTS)
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp
+        tests/test_vision_golden.cu
     )
 
     set(IMP_TEST_BINARIES
