@@ -81,6 +81,7 @@ Other rules:
 
 - `#pragma once` in headers (no include guards).
 - `.cu` for CUDA, `.cpp` for plain C++, `.h` for headers (CUDA or not).
+- File names are `snake_case`. Known intentional exception: the `smallM` fragment (`gemm_grouped_nvfp4_smallM.{h,cu}`) — it mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.
 - Errors return codes (`ImpError` / `bool`); CUDA errors are checked and logged, not thrown.
 - Don't add third-party dependencies without a very strong reason — the only runtime deps are the CUDA toolkit, CUTLASS (vendored via FetchContent), and `stb_image` for vision.
 - Keep `cudaMalloc` / `cudaFree` out of hot loops — pre-allocate and reuse.
