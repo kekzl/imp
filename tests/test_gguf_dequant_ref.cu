@@ -508,40 +508,50 @@ GemvStats gemv_eval(const std::vector<half>& gpu, const std::vector<double>& ref
 
 // =============================================================================
 // DEQUANT-KERNEL TESTS (path: src/quant/dequant_gpu.cu)
+//
+// TYPED_TEST over the GGUF block formats (R8 / audit §Phase-2 R8: "parametrize
+// where it's cheap and real"). The dequant test body is one shared skeleton —
+// build synthetic blocks, run dequant_gpu, compare to the fp64 reference over
+// the 4 scale modes — that already dispatches on QType (build_* + ref_dequant_all
+// switch). The heterogeneous part is the per-format fp64 reference, which stays
+// in its own function; only the launch+compare driver is parametrized. Each
+// format is a compile-time tag carrying its QType + name; the body is identical.
 // =============================================================================
-TEST(GgufRef, Q8_0_Dequant) {
-    check_dequant("Q8_0", QType::Q8_0, 37, 512, NORMAL, 1e-3);
-    check_dequant("Q8_0", QType::Q8_0, 16, 256, ZERO_D, 1e-3);
-    check_dequant("Q8_0", QType::Q8_0, 16, 256, MAXMAG, 1e-3);
-    check_dequant("Q8_0", QType::Q8_0, 8, 256, NAN_D, 1e-3);  // no-crash / UB guard
+template <QType QT>
+struct QTypeTag {
+    static constexpr QType value = QT;
+};
+
+template <typename T>
+class GgufDequant : public ::testing::Test {};
+
+using GgufDequantFormats =
+    ::testing::Types<QTypeTag<QType::Q8_0>, QTypeTag<QType::Q6_K>, QTypeTag<QType::Q4_K>,
+                     QTypeTag<QType::IQ4_NL>, QTypeTag<QType::IQ4_XS>>;
+
+inline const char* qtype_name(QType qt) {
+    switch (qt) {
+        case QType::Q8_0: return "Q8_0";
+        case QType::Q6_K: return "Q6_K";
+        case QType::Q4_K: return "Q4_K";
+        case QType::IQ4_NL: return "IQ4_NL";
+        case QType::IQ4_XS: return "IQ4_XS";
+        default: return "?";
+    }
 }
 
-TEST(GgufRef, Q6_K_Dequant) {
-    check_dequant("Q6_K", QType::Q6_K, 33, 512, NORMAL, 1e-3);
-    check_dequant("Q6_K", QType::Q6_K, 16, 256, ZERO_D, 1e-3);
-    check_dequant("Q6_K", QType::Q6_K, 16, 256, MAXMAG, 1e-3);
-    check_dequant("Q6_K", QType::Q6_K, 8, 256, NAN_D, 1e-3);
-}
+TYPED_TEST_SUITE(GgufDequant, GgufDequantFormats);
 
-TEST(GgufRef, Q4_K_Dequant) {
-    check_dequant("Q4_K", QType::Q4_K, 33, 512, NORMAL, 1e-3);
-    check_dequant("Q4_K", QType::Q4_K, 16, 256, ZERO_D, 1e-3);
-    check_dequant("Q4_K", QType::Q4_K, 16, 256, MAXMAG, 1e-3);
-    check_dequant("Q4_K", QType::Q4_K, 8, 256, NAN_D, 1e-3);
-}
-
-TEST(GgufRef, IQ4_NL_Dequant) {
-    check_dequant("IQ4_NL", QType::IQ4_NL, 37, 512, NORMAL, 1e-3);
-    check_dequant("IQ4_NL", QType::IQ4_NL, 16, 256, ZERO_D, 1e-3);
-    check_dequant("IQ4_NL", QType::IQ4_NL, 16, 256, MAXMAG, 1e-3);
-    check_dequant("IQ4_NL", QType::IQ4_NL, 8, 256, NAN_D, 1e-3);
-}
-
-TEST(GgufRef, IQ4_XS_Dequant) {
-    check_dequant("IQ4_XS", QType::IQ4_XS, 33, 512, NORMAL, 1e-3);
-    check_dequant("IQ4_XS", QType::IQ4_XS, 16, 256, ZERO_D, 1e-3);
-    check_dequant("IQ4_XS", QType::IQ4_XS, 16, 256, MAXMAG, 1e-3);
-    check_dequant("IQ4_XS", QType::IQ4_XS, 8, 256, NAN_D, 1e-3);
+TYPED_TEST(GgufDequant, AllScaleModes) {
+    constexpr QType qt = TypeParam::value;
+    const char* name = qtype_name(qt);
+    // K=512 covers both layouts: 16 blocks/row for the 32-block formats and
+    // 2 super-blocks/row for the 256-block K-quants. N chosen non-round so a
+    // row-stride bug surfaces.
+    check_dequant(name, qt, 37, 512, NORMAL, 1e-3);
+    check_dequant(name, qt, 16, 256, ZERO_D, 1e-3);
+    check_dequant(name, qt, 16, 256, MAXMAG, 1e-3);
+    check_dequant(name, qt, 8, 256, NAN_D, 1e-3);  // no-crash / UB guard
 }
 
 // =============================================================================

@@ -469,11 +469,13 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer_robustness.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_chat_template.cpp
+        tests/test_gpt_oss_harmony_golden.cpp
         tests/test_jinja.cpp
     )
 
     imp_add_test_module(test-compute SOURCES
         tests/test_rope.cu
+        tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
         tests/test_activation.cu
         tests/test_embedding.cu
@@ -498,6 +500,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_tc.cu
         tests/test_attention_fmha_sm120.cu
         tests/test_attention_crosspath.cu
+        tests/test_gpt_oss_sinks_ref.cu
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
@@ -512,6 +515,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quant.cu
         tests/test_quant_integration.cu
         tests/test_gguf_dequant_ref.cu
+        tests/test_gpt_oss_mxfp4_convert_ref.cu
         tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
         tests/test_nvfp4_quant_hw.cu
@@ -521,6 +525,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
