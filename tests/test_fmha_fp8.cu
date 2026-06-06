@@ -21,7 +21,8 @@ protected:
     // CPU reference attention (same as FP16 test)
     static void ref_attention(const std::vector<float>& Q_f, const std::vector<float>& K_f,
                               const std::vector<float>& V_f, std::vector<float>& O_f, int B, int Sq, int Skv,
-                              int NH, int NKV, int HD, float scale, bool causal, int sw, float softcap) {
+                              int NH, int NKV, int HD, float scale, bool causal, int sw, float softcap,
+                              int q_offset = 0) {
         int gqa = NH / NKV;
         for (int b = 0; b < B; b++) {
             for (int h = 0; h < NH; h++) {
@@ -39,9 +40,9 @@ protected:
                         dot *= scale;
                         if (softcap > 0)
                             dot = softcap * std::tanh(dot / softcap);
-                        if (causal && sk > sq)
+                        if (causal && sk > (q_offset + sq))
                             dot = -1e30f;
-                        if (sw > 0 && (sq - sk) >= sw)
+                        if (sw > 0 && ((q_offset + sq) - sk) >= sw)
                             dot = -1e30f;
                         scores[sk] = dot;
                         max_s = std::max(max_s, dot);
@@ -194,7 +195,7 @@ TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 
 class FmhaFA2Test : public FmhaFP8Test {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false) {
+                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false, int q_offset = 0) {
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
         size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
@@ -209,7 +210,7 @@ protected:
         }
 
         std::vector<float> O_ref(q_elems, 0.0f);
-        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sw, softcap);
+        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sw, softcap, q_offset);
 
         std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
         for (size_t i = 0; i < q_elems; i++)
@@ -239,7 +240,7 @@ protected:
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
         bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_,
-                                         /*q_offset=*/0, fp16_qk);
+                                         q_offset, fp16_qk);
         ASSERT_TRUE(ok) << "fmha_sm120_fa2_prefill returned false (config must be supported)";
         cudaStreamSynchronize(stream_);
         cudaError_t err = cudaGetLastError();
@@ -339,6 +340,37 @@ TEST_F(FmhaFA2Test, FP16QK_MultiTile) { run_fa2(1, 128, 128, 4, 4, 128, true, 0,
 TEST_F(FmhaFA2Test, FP16QK_LongCtx) { run_fa2(1, 256, 256, 8, 2, 128, true, 0, 0.0f, 1.0f, true); }
 TEST_F(FmhaFA2Test, FP16QK_SlidingWindow) { run_fa2(1, 128, 128, 4, 4, 128, true, 64, 0.0f, 1.0f, true); }
 TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f, 1.0f, true); }
+
+// --- Chunk continuation (q_offset > 0) — issue #548 ---
+// PR #553 measured wrong attention on Llama-3.2-3B chunk continuations
+// (teacher-forced NLL 0.29 → 7.13 at chunk=64) while Qwen3-4B was bit-exact
+// through the same kernel, and declined the fast path as a mitigation. These
+// cases reproduce the failing production shapes at the kernel level:
+// Llama-3.2-3B is GQA 24Q/8KV (ratio 3) vs Qwen3's 32/8 (ratio 4), prompts
+// end on arbitrary (non-tile-multiple) KV lengths, and offsets are not
+// Bq/Bkv multiples. seq_kv = q_offset + Sq exactly as the chunked gather
+// produces it.
+TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA4) {
+    run_fa2(1, 64, 512, 32, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/448);
+}
+TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA3_LlamaShape) {
+    run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/448);
+}
+TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA3_OddKv) {
+    // partial last KV tile (seq_kv % 64 != 0) + odd chunk length
+    run_fa2(1, 51, 371, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/320);
+}
+TEST_F(FmhaFA2Test, FP16QK_Chunked_OffsetNotTileMultiple) {
+    run_fa2(1, 64, 292, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/228);
+}
+TEST_F(FmhaFA2Test, FP16QK_Chunked_LongCtx) {
+    // continuation chunk far past the threshold-class context (3k)
+    run_fa2(1, 128, 3200, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/3072);
+}
+TEST_F(FmhaFA2Test, FP8_Chunked_GQA3) {
+    // e4m3 path with the same continuation geometry (looser 5% tol)
+    run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, false, /*q_offset=*/448);
+}
 
 }  // namespace
 }  // namespace imp

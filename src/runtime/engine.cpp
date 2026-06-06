@@ -86,6 +86,10 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_token_ids_));
         h_pf_token_ids_ = nullptr;
     }
+    if (pf_staging_evt_) {
+        IMP_CUDA_CHECK_LOG(cudaEventDestroy(pf_staging_evt_));
+        pf_staging_evt_ = nullptr;
+    }
     // MTP spec-decode workspace cleanup
     if (mtp_ws_storage_) {
         auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);

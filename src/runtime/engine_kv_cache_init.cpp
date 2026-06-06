@@ -272,6 +272,8 @@ bool Engine::init_kv_cache() {
         if (cudaHostAlloc(&h_pf_token_ids_, config_.max_seq_len * sizeof(int32_t), cudaHostAllocDefault) !=
             cudaSuccess)
             h_pf_token_ids_ = nullptr;
+        if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
+            pf_staging_evt_ = nullptr;
     }
 
     // Report memory
