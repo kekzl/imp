@@ -348,6 +348,10 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
     if (runtime_config().moe.no_cutlass3x)
         return false;
+    // gpt-oss: device-args path is arch-gated off (no GLU/bias hooks in the
+    // fused act+quantize kernel) — keep the mirror in sync.
+    if (model_->config().arch == ModelArch::GPT_OSS)
+        return false;
     if (!cutlass_grouped_3x_nvfp4_available())
         return false;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
