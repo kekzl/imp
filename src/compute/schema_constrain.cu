@@ -10,6 +10,12 @@
 
 namespace imp {
 
+// Max simulated frame-stack depth. Each '{'/'[' nesting level holds ~2 frames
+// (container frame + value frame), so 192 frames ~= 96 nesting levels. Only
+// reachable via recursive $ref schemas; hitting the cap forces closure (still
+// schema-valid — any finite nesting satisfies a recursive schema).
+static constexpr size_t kMaxSchemaStackDepth = 192;
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -72,7 +78,9 @@ void SchemaConstrainer::reset() {
 
 void SchemaConstrainer::push_value_frame(const SchemaNode* node) {
     SchemaFrame frame;
-    frame.node = node;
+    // Frames always hold RESOLVED nodes: $ref indirection ends here, so the
+    // phase machine below never sees SchemaType::REF.
+    frame.node = resolve_schema_ref(schema_.get(), node);
     frame.phase = SchemaPhase::VALUE_START;
     stack_.push_back(std::move(frame));
 }
@@ -84,7 +92,7 @@ void SchemaConstrainer::push_value_frame(const SchemaNode* node) {
 const SchemaNode* SchemaConstrainer::find_property(const SchemaNode* obj, const std::string& key) const {
     for (auto& [name, schema] : obj->properties) {
         if (name == key)
-            return schema.get();
+            return resolve_schema_ref(schema_.get(), schema.get());
     }
     return nullptr;
 }
@@ -241,9 +249,11 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 
         case SchemaPhase::ARRAY_OPEN: {
             uint16_t mask = CAT_CLOSE_BRACKET;
-            // Allow value start for first item
-            if (f.node && f.node->items) {
-                switch (f.node->items->type) {
+            // Allow value start for first item ($ref items resolve first)
+            const SchemaNode* items =
+                f.node ? resolve_schema_ref(schema_.get(), f.node->items.get()) : nullptr;
+            if (items) {
+                switch (items->type) {
                     case SchemaType::STRING:
                         mask |= CAT_QUOTE;
                         break;
@@ -452,7 +462,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
     SchemaFrame& f = stk.back();
     auto push_value = [&](const SchemaNode* node) {
         SchemaFrame nf;
-        nf.node = node;
+        nf.node = resolve_schema_ref(schema_.get(), node);
         nf.phase = SchemaPhase::VALUE_START;
         stk.push_back(std::move(nf));
     };
@@ -484,10 +494,23 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             }
             switch (f.node->type) {
                 case SchemaType::OBJECT:
-                    if (c == '{') { f.phase = SchemaPhase::OBJECT_OPEN; return true; }
+                    // Depth cap: recursive $ref schemas allow unbounded nesting;
+                    // refuse to open deeper than ~96 levels (any finite nesting
+                    // still satisfies the schema, so this only forces closure).
+                    if (c == '{') {
+                        if (stk.size() >= kMaxSchemaStackDepth)
+                            return false;
+                        f.phase = SchemaPhase::OBJECT_OPEN;
+                        return true;
+                    }
                     return false;
                 case SchemaType::ARRAY:
-                    if (c == '[') { f.phase = SchemaPhase::ARRAY_OPEN; return true; }
+                    if (c == '[') {
+                        if (stk.size() >= kMaxSchemaStackDepth)
+                            return false;
+                        f.phase = SchemaPhase::ARRAY_OPEN;
+                        return true;
+                    }
                     return false;
                 case SchemaType::STRING:
                     if (c == '"') {

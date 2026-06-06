@@ -26,6 +26,14 @@ public:
         return node;
     }
 
+    // Definitions encountered anywhere in the document ($defs/definitions).
+    // parse_json_schema() attaches them to the root node after parsing.
+    std::vector<std::pair<std::string, std::unique_ptr<SchemaNode>>> collected_defs_;
+    // Set when an unsupported $ref form is seen — the whole parse must fail
+    // (constraining with a silently-dropped $ref would enforce a WRONG grammar).
+    bool ref_error_ = false;
+    bool ref_error() const { return ref_error_; }
+
 private:
     const char* data_;
     size_t len_;
@@ -320,6 +328,48 @@ private:
                     expect(']');
                 }
                 node->type = SchemaType::ENUM;
+            } else if (key == "$ref") {
+                std::string ref = parse_string();
+                std::string name;
+                if (ref == "#") {
+                    name = "#";
+                } else if (ref.rfind("#/$defs/", 0) == 0) {
+                    name = ref.substr(8);
+                } else if (ref.rfind("#/definitions/", 0) == 0) {
+                    name = ref.substr(14);
+                }
+                if (name.empty() || name.find('/') != std::string::npos) {
+                    // External refs / deep JSON pointers — unsupported; fail the
+                    // parse so the caller declines constrained decoding.
+                    IMP_LOG_WARN("JSON schema: unsupported $ref '%s'", ref.c_str());
+                    ref_error_ = true;
+                } else {
+                    node->type = SchemaType::REF;
+                    node->ref_name = name;
+                    has_type = true;
+                }
+            } else if (key == "$defs" || key == "definitions") {
+                skip_ws();
+                if (expect('{')) {
+                    skip_ws();
+                    while (!eof() && peek() != '}') {
+                        std::string def_name = parse_string();
+                        skip_ws();
+                        if (!expect(':'))
+                            break;
+                        auto def_schema = parse_schema_object();
+                        if (def_schema)
+                            collected_defs_.emplace_back(std::move(def_name), std::move(def_schema));
+                        skip_ws();
+                        if (peek() == ',') {
+                            pos_++;
+                            skip_ws();
+                            continue;
+                        }
+                        break;
+                    }
+                    expect('}');
+                }
             } else if (key == "anyOf" || key == "oneOf") {
                 skip_ws();
                 if (expect('[')) {
@@ -359,7 +409,7 @@ private:
         // {"type":"string","enum":[...]} — a later "type":"string" must NOT
         // demote the node back to a free string (the constrainer would then
         // accept any value). Resolve this order-independently.
-        if (!node->enum_values.empty())
+        if (!node->enum_values.empty() && node->type != SchemaType::REF)
             node->type = SchemaType::ENUM;
 
         return node;
@@ -386,6 +436,55 @@ static void compile_patterns(SchemaNode* node) {
         compile_patterns(node->items.get());
     for (auto& sub : node->any_of)
         compile_patterns(sub.get());
+    for (auto& [name, def] : node->defs)
+        compile_patterns(def.get());
+}
+
+// Resolve a REF chain against the root defs table. Defensive guard against
+// pure ref->ref cycles; validate_refs() rejects those at parse time.
+const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* node) {
+    int guard = 0;
+    while (node && node->type == SchemaType::REF) {
+        if (++guard > 64 || !root)
+            return nullptr;
+        if (node->ref_name == "#") {
+            node = root;
+            continue;
+        }
+        const SchemaNode* found = nullptr;
+        for (auto& [name, def] : root->defs) {
+            if (name == node->ref_name) {
+                found = def.get();
+                break;
+            }
+        }
+        node = found;
+    }
+    return node;
+}
+
+// Validate every $ref in the tree: the target must exist and a chain of pure
+// refs must terminate in a non-REF node. Returns false (with a log) on the
+// first unresolvable ref so the caller declines constrained decoding.
+static bool validate_refs(const SchemaNode* root, const SchemaNode* node) {
+    if (!node)
+        return true;
+    if (node->type == SchemaType::REF && resolve_schema_ref(root, node) == nullptr) {
+        IMP_LOG_WARN("JSON schema: unresolvable $ref '%s'", node->ref_name.c_str());
+        return false;
+    }
+    for (auto& [name, prop] : node->properties)
+        if (!validate_refs(root, prop.get()))
+            return false;
+    if (node->items && !validate_refs(root, node->items.get()))
+        return false;
+    for (auto& sub : node->any_of)
+        if (!validate_refs(root, sub.get()))
+            return false;
+    for (auto& [name, def] : node->defs)
+        if (!validate_refs(root, def.get()))
+            return false;
+    return true;
 }
 
 std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
@@ -393,6 +492,18 @@ std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
     auto root = parser.parse();
     if (!root) {
         IMP_LOG_ERROR("Failed to parse JSON schema");
+        return nullptr;
+    }
+    if (parser.ref_error()) {
+        IMP_LOG_ERROR("Failed to parse JSON schema: unsupported $ref form");
+        return nullptr;
+    }
+    // Attach definitions collected anywhere in the document to the root —
+    // resolve_schema_ref() searches only the root table.
+    for (auto& [name, def] : parser.collected_defs_)
+        root->defs.emplace_back(std::move(name), std::move(def));
+    if (!validate_refs(root.get(), root.get())) {
+        IMP_LOG_ERROR("Failed to parse JSON schema: unresolvable $ref");
         return nullptr;
     }
     compile_patterns(root.get());
@@ -409,6 +520,9 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->min_length = min_length;
     c->max_length = max_length;
     c->pattern_nfa = pattern_nfa;  // shared; compiled NFA is immutable
+    c->ref_name = ref_name;
+    for (auto& [name, def] : defs)
+        c->defs.emplace_back(name, def->clone());
     for (auto& [name, prop] : properties)
         c->properties.emplace_back(name, prop->clone());
     if (items)
