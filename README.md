@@ -134,6 +134,7 @@ This is a running experiment in how far AI-generated systems code scales. The [a
 | [Quantization](docs/quantization.md) | GGUF, NVFP4, MXFP4, FP8 KV — formats and trade-offs |
 | [Attention dispatch](docs/attention-dispatch.md) | Per-(phase x dtype x layer) kernel selection |
 | [sm_120a kernels](docs/sm120.md) | Kernel optimization notes |
+| [Determinism](docs/determinism.md) | Reproducibility guarantees + known limits |
 | [imp.conf reference](imp.conf.example) | All runtime configuration keys |
 | [Roadmap](docs/roadmap.md) | Open issues and in-flight work |
 | [Changelog](CHANGELOG.md) | Per-release notes |
