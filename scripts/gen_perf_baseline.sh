@@ -107,6 +107,7 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 cat > "$OUTPUT" << EOF
 {
+  "schema_version": "legacy-v1",
   "model": "$(basename "$MODEL")",
   "gpu": "$GPU",
   "cuda": "$CUDA",

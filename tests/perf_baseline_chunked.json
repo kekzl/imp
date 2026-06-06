@@ -1,5 +1,6 @@
 {
   "comment": "Chunked-prefill perf baseline (chunk=512). Looser gates than perf_baseline.json (5% decode / 8% prefill) to account for gather + rect-attn overhead per chunk. Measured 2026-05-08 on RTX 5090, CUDA 13.2, 5 reps each with --prefill-chunk-size 512.",
+  "schema_version": "multi-model-v1",
   "version": 1,
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.2.78",

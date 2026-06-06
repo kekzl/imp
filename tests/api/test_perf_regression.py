@@ -1,13 +1,25 @@
 """
 Performance regression gate.
 
-Measures TTFT and decode throughput against stored baselines. Fails if
-performance regresses beyond thresholds.
+Measures TTFT and decode throughput against the stored verify.sh baseline.
+Fails if performance regresses beyond thresholds.
 
-What it tests:   TTFT p95 regression, decode tok/s regression.
+What it tests:   TTFT p95 regression (optional, additive key), decode tok/s
+                 regression vs the canonical baseline.
 What it does NOT test: Absolute performance, model quality.
 External state:  Running imp-server with real model + GPU.
                  Baseline file: tests/perf_baseline.json
+
+The baseline file is the canonical verify.sh schema (legacy single-model):
+    {"metrics": {"decode_tps": {"tg128": ...}, "prefill_tps": {"pp512": ...}},
+     "thresholds": {"decode_regression_pct": 3, ...}, "schema_version": ...}
+This suite gates decode throughput against metrics.decode_tps.tg128 and reads
+its threshold from thresholds.decode_regression_pct so it shares ONE source of
+truth with scripts/verify.sh (the audit found the old ["throughput"]/["ttft"]
+keys never existed in the baseline, so the gate silently no-op'd — #579).
+
+TTFT has no key in the verify.sh schema; it is an optional additive
+"ttft" block this suite owns. When absent the TTFT test skips gracefully.
 
 Run with:  pytest test_perf_regression.py -m perf
 Update baselines:  pytest test_perf_regression.py --update-baseline
@@ -15,7 +27,6 @@ Update baselines:  pytest test_perf_regression.py --update-baseline
 
 import json
 import os
-import statistics
 import time
 
 import httpx
@@ -25,9 +36,10 @@ import conftest
 
 BASELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "perf_baseline.json")
 
-# Thresholds
-TTFT_REGRESSION_PCT = 5    # p95 TTFT must not exceed baseline by more than 5%
-THROUGHPUT_REGRESSION_PCT = 3  # p50 tok/s must not regress by more than 3%
+# Fallback thresholds when the baseline omits a thresholds block. The baseline's
+# thresholds.{decode,prefill}_regression_pct take precedence (shared with verify.sh).
+TTFT_REGRESSION_PCT = 5         # p95 TTFT must not exceed baseline by more than 5%
+THROUGHPUT_REGRESSION_PCT = 3   # decode tok/s must not regress by more than this
 
 
 def load_baseline() -> dict:
@@ -35,6 +47,18 @@ def load_baseline() -> dict:
         with open(BASELINE_PATH) as f:
             return json.load(f)
     return {}
+
+
+def baseline_decode_tps(baseline: dict):
+    """Canonical decode-throughput baseline (verify.sh schema). None if absent."""
+    return baseline.get("metrics", {}).get("decode_tps", {}).get("tg128")
+
+
+def baseline_decode_threshold_pct(baseline: dict) -> float:
+    """Decode regression threshold from the baseline, else the module default."""
+    return baseline.get("thresholds", {}).get(
+        "decode_regression_pct", THROUGHPUT_REGRESSION_PCT
+    )
 
 
 def save_baseline(data: dict):
@@ -136,7 +160,13 @@ class TestThroughputRegression:
     RUNS = 10
 
     def test_decode_throughput(self, client, model, request):
-        """Decode tok/s p50 must not regress vs baseline by more than 3%."""
+        """Decode tok/s p50 must not regress vs the canonical verify.sh baseline.
+
+        Gates against metrics.decode_tps.tg128 with thresholds.decode_regression_pct
+        (the same keys scripts/verify.sh reads) so the gate has a single source of
+        truth. --update-baseline rewrites that key in place, preserving the rest of
+        the verify.sh schema.
+        """
         update = request.config.getoption("--update-baseline", default=False)
         baseline = load_baseline()
 
@@ -159,18 +189,22 @@ class TestThroughputRegression:
         print(f"\n  Decode throughput p50: {p50:.1f} tok/s")
 
         if update:
-            baseline["throughput"] = {"decode_tps_p50": p50}
+            baseline.setdefault("metrics", {}).setdefault("decode_tps", {})["tg128"] = p50
             save_baseline(baseline)
             return
 
-        if "throughput" not in baseline:
-            pytest.skip("No throughput baseline. Run with --update-baseline first.")
+        base = baseline_decode_tps(baseline)
+        if base is None:
+            pytest.skip(
+                "No decode baseline (metrics.decode_tps.tg128) found. "
+                "Run scripts/gen_perf_baseline.sh or --update-baseline first."
+            )
 
-        base_p50 = baseline["throughput"]["decode_tps_p50"]
-        threshold = base_p50 * (1 - THROUGHPUT_REGRESSION_PCT / 100.0)
+        thr_pct = baseline_decode_threshold_pct(baseline)
+        threshold = base * (1 - thr_pct / 100.0)
         assert p50 >= threshold, (
             f"Decode throughput p50={p50:.1f} tok/s below baseline "
-            f"{base_p50:.1f} tok/s by >{THROUGHPUT_REGRESSION_PCT}% "
+            f"{base:.1f} tok/s by >{thr_pct}% "
             f"(threshold={threshold:.1f} tok/s)"
         )
 
