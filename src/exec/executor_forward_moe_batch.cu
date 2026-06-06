@@ -107,6 +107,16 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     // Up projection
     nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_up_ptr, gathered_base, expert_up_base, ctx.d, ctx.eff);
 
+    // gpt-oss (#547): per-expert biases on gate/up outputs BEFORE activation.
+    // Rows are expert-sorted (expanded layout) — expert via expert_offsets.
+    const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offsets, ctx.ne,
+                                   ctx.expanded, ctx.eff, stream);
+        moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, d_offsets, ctx.ne,
+                                   ctx.expanded, ctx.eff, stream);
+    }
+
     // Activation
     apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
                             ctx.non_gated_experts, ctx.expanded, ctx.eff, compute_dtype_,
@@ -115,6 +125,10 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     // Down projection
     char* slow_down_act = ctx.non_gated_experts ? expert_up_base : expert_swiglu_base;
     nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_down_ptr, slow_down_act, expert_down_base, ctx.eff, ctx.d);
+
+    if (cfg.arch == ModelArch::GPT_OSS)
+        moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offsets, ctx.ne,
+                                   ctx.expanded, ctx.d, stream);
 
     return true;
 }
@@ -628,6 +642,12 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     const auto& ly = model_->layer(layer);
 
     auto run_topk = [&](const Tensor& logits_f32) {
+        // gpt-oss (#547): router bias is a true LINEAR bias on the logits —
+        // added before softmax/top-k it shifts selection AND the renormalized
+        // top-k weights (= HF's topk(logits+b) → softmax-over-selected).
+        // Distinct from DeepSeek's selection-only score_bias (router_bias_ptr).
+        if (cfg.arch == ModelArch::GPT_OSS && ly.router_bias.data != nullptr)
+            moe_add_logit_bias(static_cast<float*>(logits_f32.data), ly.router_bias.data, n, ne, stream);
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
                             norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
@@ -766,7 +786,23 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         use_nvfp4_moe = (ly.nvfp4_moe_gate_ptr != nullptr);
 
     if (use_nvfp4_moe) {
-        if (!non_gated_experts) {
+        if (cfg.arch == ModelArch::GPT_OSS) {
+            // gpt-oss (#547): per-expert biases on gate/up/down outputs + the
+            // clamped GLU. The fused swiglu-down GEMV computes plain SwiGLU
+            // inline — bypassed here in favor of explicit bias→GLU→down→bias.
+            gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
+                                         norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
+            moe_add_expert_bias_indexed(gate_buf, ly.expert_gate_bias.data, expert_indices, top_k, eff,
+                                        stream);
+            moe_add_expert_bias_indexed(up_buf, ly.expert_up_bias.data, expert_indices, top_k, eff,
+                                        stream);
+            apply_expert_activation(gate_buf, up_buf, act_buf, /*non_gated=*/false, top_k, eff,
+                                    compute_dtype_, FFNActivation::GPT_OSS_GLU, stream);
+            gemv_nvfp4_moe_decode(*ly.nvfp4_moe_down_ptr, expert_indices, act_buf, down_buf, d, eff,
+                                  /*x_stride=*/eff, top_k, stream);
+            moe_add_expert_bias_indexed(down_buf, ly.expert_down_bias.data, expert_indices, top_k, d,
+                                        stream);
+        } else if (!non_gated_experts) {
             gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
                                          norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
             gemv_nvfp4_moe_swiglu_decode(*ly.nvfp4_moe_down_ptr, expert_indices, gate_buf, up_buf,

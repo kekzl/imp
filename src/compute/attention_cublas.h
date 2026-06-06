@@ -19,10 +19,14 @@ namespace imp {
 //
 // sliding_window > 0 additionally masks K[j] where (abs_pos - j) >= sliding_window,
 // i.e. the visible K window is [abs_pos - sliding_window + 1, abs_pos]. Defaults to 0 (off).
+//
+// sinks (gpt-oss, #547): per-head learned sink logits [n_heads] FP16. Each acts
+// as a virtual extra softmax column: the denominator gains exp(sink - max) and
+// the column is dropped after softmax (probabilities sum to < 1). nullptr = off.
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap = 0.0f, int q_offset = 0, cudaStream_t stream = nullptr,
-                              int sliding_window = 0);
+                              int sliding_window = 0, const void* sinks = nullptr);
 
 // Force-create the static cuBLAS handle. Safe to call multiple times.
 // Engine init calls this so the first attention_cublas_prefill invocation

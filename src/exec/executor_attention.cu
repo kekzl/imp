@@ -573,6 +573,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Global layer: full attention, model rope_theta, with freq scaling
             layer_sliding_window = 0;
         }
+    } else if (cfg.arch == ModelArch::GPT_OSS && !cfg.swa_layers.empty()) {
+        // gpt-oss (#547): even layers sliding_attention (window 128), odd
+        // layers full attention. Same RoPE (YaRN) on both layer types —
+        // only the window toggles.
+        bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+        if (!is_swa)
+            layer_sliding_window = 0;
     } else if (cfg.sliding_window_pattern > 0) {
         bool is_global = (layer % cfg.sliding_window_pattern) == (cfg.sliding_window_pattern - 1);
         if (is_global) {
@@ -754,6 +761,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     //                 Q-norm and K-norm absorb the per-element scaling).
     float scale = (cfg.arch == ModelArch::GEMMA4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
 
+    // gpt-oss learned attention sinks (#547): per-head logits acting as a
+    // virtual extra softmax column. Only the cuBLAS prefill softmax and the
+    // FP16 paged decode kernels understand them — prefill routing below
+    // forces the cuBLAS path whenever sinks are present.
+    const void* attn_sinks = (cfg.arch == ModelArch::GPT_OSS) ? ly.attn_sinks.data : nullptr;
+
     if (state.is_prefill) {
         // Chunked prefill: when prefill_offset > 0, queries from this chunk must
         // attend to past chunks K/V already in the paged cache. Gather past
@@ -889,12 +902,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // (ChunkedPrefillTest.LongContext_Chunk_Invariance is the gate).
             // The fp8 family stays as fallback for configs f16-QK declines
             // (hd != 128, fa2_fp16qk=never), and cuBLAS below the threshold.
-            if (!per_layer_shapes &&
+            if (!per_layer_shapes && !attn_sinks &&
                 try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        q_offset, stream)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
-            } else if (chunked_use_fmha) {
+            } else if (chunked_use_fmha && !attn_sinks) {
                 // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
@@ -909,7 +922,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 // cuBLAS: needs S-matrix for [n × ctx_len]
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
-                                         layer_sliding_window);
+                                         layer_sliding_window, attn_sinks);
             }
 
             cudaFreeAsync(k_full, stream);
@@ -921,7 +934,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         }
 
         // Prefill dispatch (post-Phase-2 + Phase-5 Track D):
-        const bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
+        // attn_sinks: only the cuBLAS softmax understands learned sinks.
+        const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold — see the chunked path above
@@ -949,9 +963,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             } else {
                 attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap,
-                                         /*q_offset=*/0, stream, layer_sliding_window);
+                                         /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
             }
         } else {
+            if (attn_sinks) {
+                static bool warned_sinks_fmha = false;
+                if (!warned_sinks_fmha) {
+                    warned_sinks_fmha = true;
+                    IMP_LOG_WARN("attention sinks: S-matrix too small (n=%d) — FMHA fallback IGNORES "
+                                 "sinks; output will be wrong. Lower the prefill chunk size.",
+                                 n);
+                }
+            }
             // FMHA fallback: tiled O(n) memory chain.
             int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
             int64_t kv4s[4] = {1, (int64_t)n, (int64_t)nkv, (int64_t)hd};
@@ -1189,7 +1212,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode(q4, k_c, v_c, o4, state.block_tables, state.context_lens, kv_bs, scale,
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                   stream, state.max_blocks_per_seq, layer_n_sinks);
+                                   stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
+        }
+        if (attn_sinks && cache_dtype != QType::F16) {
+            static bool warned_sinks_kv = false;
+            if (!warned_sinks_kv) {
+                warned_sinks_kv = true;
+                IMP_LOG_WARN("attention sinks: only the FP16 paged decode kernels apply sinks — "
+                             "kv_cache.dtype=%d ignores them; use fp16 KV for this model.",
+                             (int)cache_dtype);
+            }
         }
 
         // Clear L2 persistence hint (weights loaded next need L2 space)
@@ -1372,6 +1404,13 @@ after_attention:
         if (po_fp32_buf) {
             cudaFreeAsync(po_fp32_buf, stream);
         }
+    }
+
+    // gpt-oss o_proj bias (#547): h holds residual + Wo·ao from whichever arm
+    // ran — broadcast-add the bias per token here, after all fused variants.
+    if (ly.o_bias.data != nullptr) {
+        Tensor hv = view_tokens(h, n);
+        add_bias(hv, ly.o_bias, stream);
     }
 
     // LoRA delta on o_proj: h already holds residual + Wo·ao from whichever

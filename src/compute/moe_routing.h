@@ -51,6 +51,21 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                      bool normalize_weights = true, const void* score_bias = nullptr,
                      bool skip_sorting = false);
 
+// gpt-oss router bias (issue #547): true linear bias on the gate LOGITS, added
+// BEFORE softmax/top-k (affects selection AND weights). Distinct from the
+// DeepSeek-style `score_bias` above, which biases SELECTION only.
+// logits_f32: [n, ne] FP32 (mutated). bias: [ne] FP16 on device.
+void moe_add_logit_bias(float* logits_f32, const void* bias_fp16, int n, int ne,
+                        cudaStream_t stream = nullptr);
+
+// gpt-oss per-expert output biases (issue #547).
+// indexed: row r belongs to expert expert_indices[r] (decode [top_k, dim] layout).
+void moe_add_expert_bias_indexed(void* buf_fp16, const void* bias_fp16, const int32_t* expert_indices,
+                                 int n_rows, int dim, cudaStream_t stream = nullptr);
+// sorted: rows grouped by expert per expert_offsets[ne+1] (prefill expanded layout).
+void moe_add_expert_bias_sorted(void* buf_fp16, const void* bias_fp16, const int32_t* expert_offsets,
+                                int ne, int n_rows, int dim, cudaStream_t stream = nullptr);
+
 void moe_gather(const Tensor& input, const MoeRoutingResult& routing, Tensor& gathered,
                 cudaStream_t stream = nullptr);
 

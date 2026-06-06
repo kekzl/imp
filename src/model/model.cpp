@@ -133,7 +133,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
     {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
-    {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0, 3 /*GPT_OSS_GLU*/, -1, false, false, 1.0f, 1.0f, 0},
+    // ewnorm=true: gpt-oss routes softmax-after-topk — selection on biased
+    // logits + renormalized top-k softmax is exactly imp's norm_weights path
+    // once the router bias is added to the logits (compute_moe_routing).
+    {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0, 3 /*GPT_OSS_GLU*/, -1, false, true, 1.0f, 1.0f, 0},
     {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
     {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},

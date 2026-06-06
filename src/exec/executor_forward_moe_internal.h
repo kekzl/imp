@@ -35,6 +35,8 @@ inline void apply_expert_activation(void* gate_data, void* up_data, void* swiglu
         Tensor a(swiglu_data, compute_dtype, 2, act_shape, true);
         if (act_type == FFNActivation::GEGLU)
             geglu(g, u, a, stream);
+        else if (act_type == FFNActivation::GPT_OSS_GLU)
+            gpt_oss_glu(g, u, a, stream);
         else
             swiglu(g, u, a, stream);
     }
