@@ -101,6 +101,7 @@ CLI reference, server flags, config, and C API: [`docs/usage.md`](docs/usage.md)
 | Gemma-4 | 26B-A4B MoE, 31B dense | Q4_K_M, Q5_K_M, Q8_0, NVFP4 |
 | Gemma-3 | text + vision (SigLIP) | GGUF |
 | Phi-4-reasoning-plus | dense, fused projections | NVFP4 |
+| gpt-oss-20b | MoE (32 experts, top-4), Harmony | SafeTensors MXFP4 (native) |
 | Nemotron-H | Mamba2 + Attention + MoE | NVFP4, GGUF |
 | Llama / Mistral / DeepSeek | dense + MoE | GGUF (Q*_K, Q8_0) |
 
