@@ -522,6 +522,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
