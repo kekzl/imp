@@ -765,14 +765,20 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
     }
     *out_ppl = -1.0;
     try {
-        // Fresh context so hidden_ holds exactly this corpus after prefill.
+        // Fresh context so the prefill covers exactly this corpus.
         imp_context_reset(ctx);
-        // Single-chunk prefill (caller must configure prefill_chunk_size=0 / corpus
-        // <= chunk size) so the persistent hidden_ retains all n positions.
+        // Chunked-prefill-aware: the engine accumulates per-position NLL
+        // after every chunk it forwards. (The executor's hidden_ only
+        // retains the most recent chunk, so the historical post-hoc
+        // executor()->perplexity_nll() silently scored stale positions
+        // whenever the resolved prefill chunk size was smaller than the
+        // corpus — which is the C-API DEFAULT: prefill_chunk_size=-1
+        // resolves to 512 on dense archs.)
+        if (!ctx->engine->begin_perplexity_capture(tokens, n_tokens))
+            return IMP_ERROR_INTERNAL;
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
-        if (e != IMP_SUCCESS)
-            return e;
-        double ppl = ctx->engine->executor()->perplexity_nll(tokens, n_tokens);
+        double ppl = -1.0;
+        const bool reduced = ctx->engine->end_perplexity_capture(&ppl);  // always frees buffers
         // Release the prefill request's KV + recurrent slot. NOTE: do NOT
         // null active_request first — imp_context_reset only cleans up
         // (free_sequence / reset_ssm_state / slot release) when it still
@@ -780,7 +786,9 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // SSM/GDN slot on every imp_perplexity call, so repeated scoring
         // on hybrid models drifted (stale recurrent state, slot pool decay).
         imp_context_reset(ctx);
-        if (ppl < 0.0)
+        if (e != IMP_SUCCESS)
+            return e;
+        if (!reduced || ppl < 0.0)
             return IMP_ERROR_INTERNAL;
         *out_ppl = ppl;
         return IMP_SUCCESS;

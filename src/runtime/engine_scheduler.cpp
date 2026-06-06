@@ -29,6 +29,7 @@
 #include "compute/layernorm.h"
 #include "core/logging.h"
 
+#include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -248,6 +249,59 @@ int Engine::resolve_prefill_chunk_size_() const {
 }
 
 // =====================================================================
+// begin/end_perplexity_capture — chunked-prefill-aware teacher forcing
+// (imp_perplexity). See engine.h for the contract.
+// =====================================================================
+
+bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
+    if (ppl_capture_.active || !tokens || n < 2 || !executor_) {
+        return false;
+    }
+    if (cudaMalloc(&ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)) != cudaSuccess) {
+        ppl_capture_.d_tokens = nullptr;
+        return false;
+    }
+    if (cudaMalloc(&ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double)) != cudaSuccess) {
+        cudaFree(ppl_capture_.d_tokens);
+        ppl_capture_.d_tokens = nullptr;
+        ppl_capture_.d_nll = nullptr;
+        return false;
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens,
+                                  static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice));
+    IMP_CUDA_CHECK_LOG(cudaMemset(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double)));
+    ppl_capture_.n = n;
+    ppl_capture_.active = true;
+    return true;
+}
+
+bool Engine::end_perplexity_capture(double* out_ppl) {
+    if (!ppl_capture_.active) {
+        return false;
+    }
+    const int n = ppl_capture_.n;
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+
+    // Fixed-order host reduction over per-position NLLs (bit-reproducible —
+    // same contract as GraphExecutor::perplexity_nll).
+    std::vector<double> h_nll_pos(static_cast<size_t>(n), 0.0);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_nll_pos.data(), ppl_capture_.d_nll,
+                                  static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToHost));
+    cudaFree(ppl_capture_.d_tokens);
+    cudaFree(ppl_capture_.d_nll);
+    ppl_capture_ = PplCapture{};
+
+    double h_nll = 0.0;
+    for (int i = 0; i < n - 1; ++i)
+        h_nll += h_nll_pos[i];
+    double ppl = std::exp(h_nll / static_cast<double>(n - 1));
+    IMP_LOG_INFO("perplexity_nll: n=%d  mean_nll=%.4f  PPL=%.4f", n, h_nll / (n - 1), ppl);
+    if (out_ppl)
+        *out_ppl = ppl;
+    return true;
+}
+
+// =====================================================================
 // step_prefill — process all prefill requests
 // =====================================================================
 
@@ -295,7 +349,10 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     int prefix_reused = 0;
     int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
 
-    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
+    // Perplexity capture must forward EVERY position — a prefix-cache hit
+    // skips the reused prefix's forward, leaving those NLL slots at 0.
+    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 &&
+        !ppl_capture_.active) {
         int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
         if (prefix_reused < 0) {
@@ -594,6 +651,14 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->forward_logits(state, logits_out, pf_stream);
         }
 
+        // Teacher-forced NLL for this chunk's positions (imp_perplexity).
+        // Runs eagerly after the (possibly graph-replayed) forward; hidden_
+        // holds exactly this chunk and nothing reads logits_ afterwards.
+        if (ppl_capture_.active) {
+            executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset,
+                                              chunk_len, ppl_capture_.d_nll, pf_stream);
+        }
+
         if (!pf_pool_used) {
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
         }
@@ -682,6 +747,16 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             req->output_logprobs.push_back(build_logprob_info(executor_->h_logits_pinned(), vocab_size,
                                                               next_token, req->top_logprobs,
                                                               model_->tokenizer()));
+        }
+
+        // Teacher-forced NLL for the LAST chunk's positions (imp_perplexity).
+        // After sampling + logprob extraction: the partial pass overwrites the
+        // logits_ workspace, so it must run once nothing reads this chunk's
+        // logits anymore. hidden_ still holds the chunk (forward_logits only
+        // slices the last token for the production LM head).
+        if (ppl_capture_.active) {
+            executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset,
+                                              chunk_len, ppl_capture_.d_nll, pf_stream);
         }
 
         req->output_tokens.push_back(next_token);
