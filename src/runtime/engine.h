@@ -134,6 +134,18 @@ public:
     // stale block table pointers when KV blocks are reused)
     void reset_batch_pool_cache();
 
+    // Chunked-prefill-aware teacher-forced perplexity (imp_perplexity).
+    // begin: upload the target tokens + zero a per-position NLL buffer.
+    // While active, step_prefill_one accumulates -log p(next token) for every
+    // chunk it forwards (the executor's hidden_ only retains the most recent
+    // chunk, so a post-hoc executor()->perplexity_nll() reads stale positions
+    // whenever the resolved prefill chunk size is smaller than the corpus).
+    // Prefix-cache block reuse is bypassed while active so every position is
+    // actually forwarded. end: fixed-order host reduction (bit-reproducible),
+    // returns exp(mean NLL) in *out_ppl and always frees the buffers.
+    [[nodiscard]] bool begin_perplexity_capture(const int32_t* tokens, int n);
+    [[nodiscard]] bool end_perplexity_capture(double* out_ppl);
+
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
@@ -277,6 +289,16 @@ private:
     int32_t* async_d_banned_tokens_ = nullptr;
     std::vector<int32_t> async_pending_tokens_;
     int async_pending_cursor_ = 0;
+
+    // Teacher-forced perplexity capture (begin/end_perplexity_capture).
+    // Device buffers of length n; step_prefill_one writes per-position NLL
+    // for every forwarded chunk while active.
+    struct PplCapture {
+        bool active = false;
+        int n = 0;
+        int32_t* d_tokens = nullptr;
+        double* d_nll = nullptr;
+    } ppl_capture_;
 
     // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;

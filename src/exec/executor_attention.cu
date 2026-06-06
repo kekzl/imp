@@ -57,13 +57,23 @@ namespace imp {
 // in f16-QK mode. Same numerical class as the cuBLAS reference (f16 inputs,
 // f32 accumulate) — the short-seq e4m3 quality cliff (#511/#512) does not
 // apply, and no [n × ctx] S-matrix is materialized. Declined configs
-// (hd!=128, non-F16) return false → caller stays on cuBLAS; the fp8 FMHA
-// family is intentionally NOT a fallback here.
+// (hd!=128, non-F16, chunk continuation) return false → caller stays on
+// cuBLAS; the fp8 FMHA family is intentionally NOT a fallback here.
 static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, const Tensor& k,
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
                                    cudaStream_t stream) {
     if (rcfg.attention.fa2_fp16qk == "never" || hd != 128)
+        return false;
+    // Chunk CONTINUATION (q_offset > 0, queries attend gathered past KV) is
+    // declined: the f16-QK kernel produces wrong attention there on the
+    // Llama family (teacher-forced NLL 0.29 → 7.13 on Llama-3.2-3B at
+    // chunk=64; greedy output token-identical to single-shot once routed to
+    // cuBLAS instead). Qwen3 was bit-exact through the same path, so this is
+    // a conservative blanket decline until the kernel's q_offset handling is
+    // root-caused (issue #548) — first chunks (q_offset == 0, the original #525 use case)
+    // keep the fast path.
+    if (q_offset > 0)
         return false;
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};

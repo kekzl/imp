@@ -1,11 +1,17 @@
 // Teacher-forced perplexity over a token sequence.
 //
-// Assumes the caller has just run a prefill of `tokens[0..n-1]` so the
-// persistent-workspace `hidden_` holds the final-layer hidden state for ALL n
-// positions (forward_logits leaves it intact — it only slices the last token
-// for the production LM head). We then apply the (tier-aware) LM head to every
-// position in chunks of <= max_logit_tokens_ (logits_ is batch-sized) and
-// accumulate the negative log-likelihood of each actual next token.
+// Two entry points:
+//  - perplexity_nll(tokens, n): assumes a SINGLE-CHUNK prefill of
+//    `tokens[0..n-1]` just ran, so the persistent-workspace `hidden_` holds
+//    the final-layer hidden state for ALL n positions (forward_logits leaves
+//    it intact — it only slices the last token for the production LM head).
+//  - perplexity_nll_partial(...): per-chunk accumulation for CHUNKED prefill
+//    (hidden_ only retains the most recent chunk). Driven by the engine's
+//    step_prefill_one via begin/end_perplexity_capture — that flow backs
+//    imp_perplexity, whose default config resolves to chunked prefill.
+// Both apply the (tier-aware) LM head to every position in batches of
+// <= max_logit_tokens_ (logits_ is batch-sized) and accumulate the negative
+// log-likelihood of each actual next token.
 //
 // PPL = exp( (1/(n-1)) * sum_{i=0}^{n-2} -log softmax(logits_i)[tokens_{i+1}] ).
 //
@@ -81,25 +87,14 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     }
 }
 
-double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {
-    if (!initialized_ || n < 2) {
-        IMP_LOG_ERROR("perplexity_nll: not initialized or n < 2 (n=%d)", n);
-        return -1.0;
+void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
+                                           int chunk_len, double* d_nll, cudaStream_t stream) {
+    if (!initialized_ || chunk_len <= 0 || n_total < 2 || !d_tokens || !d_nll) {
+        return;
     }
     const auto& cfg = model_->config();
     const int V = cfg.vocab_size;
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
-
-    // Ensure the (single-chunk) prefill that populated hidden_ is complete.
-    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
-
-    int32_t* d_tokens = nullptr;
-    double* d_nll = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, static_cast<size_t>(n) * sizeof(int32_t)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, static_cast<size_t>(n) * sizeof(double)));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens, static_cast<size_t>(n) * sizeof(int32_t),
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));
 
     GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config());
 
@@ -127,9 +122,9 @@ double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t 
         }
     }
 
-    Tensor hidden_all = view_tokens(hidden_, n);
-    for (int c = 0; c < n; c += mb) {
-        int csz = (n - c < mb) ? (n - c) : mb;
+    Tensor hidden_all = view_tokens(hidden_, chunk_len);
+    for (int c = 0; c < chunk_len; c += mb) {
+        int csz = (chunk_len - c < mb) ? (chunk_len - c) : mb;
         Tensor hc = hidden_all.slice(c, c + csz);          // [csz, d]
         Tensor lg = view_tokens(logits_, csz);             // [csz, V]
         if (lm_is_nvfp4) {
@@ -146,9 +141,29 @@ double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t 
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
             gemm_via_handle_(model_->out_proj_id, noc, lg, ctx);
         }
-        perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens, c,
-                                                        n, V, d_nll);
+        perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
+                                                        chunk_start + c, n_total, V, d_nll);
     }
+}
+
+double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {
+    if (!initialized_ || n < 2) {
+        IMP_LOG_ERROR("perplexity_nll: not initialized or n < 2 (n=%d)", n);
+        return -1.0;
+    }
+
+    // Ensure the (single-chunk) prefill that populated hidden_ is complete.
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+
+    int32_t* d_tokens = nullptr;
+    double* d_nll = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, static_cast<size_t>(n) * sizeof(int32_t)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, static_cast<size_t>(n) * sizeof(double)));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens, static_cast<size_t>(n) * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));
+
+    perplexity_nll_partial(d_tokens, n, /*chunk_start=*/0, /*chunk_len=*/n, d_nll, stream);
 
     // Fixed-order host reduction over per-position NLLs (bit-reproducible).
     std::vector<double> h_nll_pos(static_cast<size_t>(n), 0.0);

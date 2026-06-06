@@ -605,11 +605,25 @@ public:
     // logits_out will be a view into the internal logits buffer.
     void forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream = nullptr);
 
-    // Teacher-forced perplexity over tokens[0..n-1]. Call AFTER a prefill of the
-    // same tokens (uses the persistent-workspace hidden_, which holds all-position
-    // final hidden after forward_logits). Applies the tier-aware LM head to every
-    // position in chunks and returns exp(mean NLL of next tokens). Bench/eval only.
+    // Teacher-forced perplexity over tokens[0..n-1]. Call AFTER a SINGLE-CHUNK
+    // prefill of the same tokens (uses the persistent-workspace hidden_, which
+    // holds all-position final hidden after forward_logits). Applies the
+    // tier-aware LM head to every position in chunks and returns exp(mean NLL
+    // of next tokens). Bench/eval only. For chunked prefill use the
+    // Engine::begin/end_perplexity_capture flow, which accumulates via
+    // perplexity_nll_partial after every chunk's forward.
     double perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream = nullptr);
+
+    // Per-chunk NLL accumulation (chunked-prefill-aware imp_perplexity).
+    // Applies the tier-aware LM head to hidden_[0..chunk_len-1] — the chunk
+    // that prefill just forwarded, absolute corpus positions chunk_start..
+    // chunk_start+chunk_len-1 — and writes -log p(next token) into
+    // d_nll[global_pos]. d_tokens / d_nll are device buffers of length
+    // n_total owned by the caller (Engine ppl capture). Enqueues on `stream`
+    // only; the caller reduces after a sync. Overwrites the logits_
+    // workspace — call only after all reads of the chunk's logits are done.
+    void perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
+                                int chunk_len, double* d_nll, cudaStream_t stream);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
