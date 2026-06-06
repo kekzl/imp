@@ -18,6 +18,8 @@ deterministic_gemm   = false
 # Full reproducibility mode for temp=0 evals: deterministic MoE routing /
 # expert-scatter and top-k sampling kernels, implies deterministic_gemm.
 # Greedy output becomes bit-identical across runs/contexts (DetEvalE2ETest).
+# Guarantees + known limits (ties, top_k>128, typical_p, GDN cross-context):
+# docs/determinism.md.
 # Legacy env: IMP_DETERMINISTIC=1. Costs a little throughput; off by default.
 deterministic        = false
 # CUDA Graph capture: "auto" picks per-model based on architecture support;
