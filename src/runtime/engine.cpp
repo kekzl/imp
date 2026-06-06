@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
@@ -334,6 +335,31 @@ void Engine::invalidate_graphs() {
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
+}
+
+int Engine::lora_load(const std::string& path) {
+    auto a = std::make_unique<LoraAdapter>();
+    if (!a->load(path, model_ ? model_->n_layers() : 0))
+        return 0;
+    lora_adapters_.push_back(std::move(a));
+    return static_cast<int>(lora_adapters_.size());  // 1-based id
+}
+
+bool Engine::lora_set(int id) {
+    if (id < 0 || id > static_cast<int>(lora_adapters_.size()))
+        return false;
+    if (id == active_lora_)
+        return true;
+    active_lora_ = id;
+    executor_->set_lora(id == 0 ? nullptr : lora_adapters_[id - 1].get());
+    // Decode graphs captured the previous forward (with/without the LoRA
+    // kernels and with the old adapter's pointers) — drop everything,
+    // including the per-batch pool that invalidate_graphs() preserves.
+    invalidate_graphs();
+    for (auto& g : decode_graph_pool_)
+        g.invalidate();
+    IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");
+    return true;
 }
 
 size_t Engine::effective_free_vram() const {

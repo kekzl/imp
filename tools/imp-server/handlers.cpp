@@ -43,6 +43,7 @@ struct ChatRequestParams {
     // "cache_prompt" body field on the OpenAI route).
     bool cache_prompt = false;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
+    std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
     // Stop sequences
     std::vector<std::string> stop_sequences;
@@ -907,6 +908,9 @@ static bool parse_chat_request_params(
     ctx.params.enable_thinking_requested = body.value("enable_thinking", false);
     ctx.params.enable_thinking_set = body.contains("enable_thinking") && body["enable_thinking"].is_boolean();
 
+    // Per-request LoRA adapter selection ("lora": "<name>"; absent/"" = base).
+    ctx.params.lora_name = body.value("lora", std::string());
+
     return true;
 }
 
@@ -1187,6 +1191,29 @@ static bool snapshot_state_and_tokenize_(
                         {"type", "invalid_request_error"}}}};
         res.set_content(error.dump(), "application/json");
         return false;
+    }
+
+    // Per-request LoRA selection (#522): swap the engine-global adapter
+    // before generation. Single-user semantics — the swap re-captures
+    // decode graphs on the next step, so back-to-back requests with
+    // different adapters work; concurrent mixed-adapter batches are out of
+    // scope (imp is batch=1-first by mission).
+    {
+        int32_t want = 0;
+        if (!ctx.params.lora_name.empty()) {
+            auto it = state.lora_ids.find(ctx.params.lora_name);
+            if (it == state.lora_ids.end()) {
+                res.status = 400;
+                json error = {{"error",
+                               {{"message", "Unknown LoRA adapter '" + ctx.params.lora_name +
+                                                "' (load at startup via --lora NAME=PATH)"},
+                                {"type", "invalid_request_error"}}}};
+                res.set_content(error.dump(), "application/json");
+                return false;
+            }
+            want = it->second;
+        }
+        imp_lora_set(state.ctx, want);
     }
 
     // Clamp max_tokens to remaining context window

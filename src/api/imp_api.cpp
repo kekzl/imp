@@ -295,6 +295,32 @@ int32_t imp_model_bos_token(ImpModel model) {
     return tok->add_bos() ? tok->bos_id() : -1;
 }
 
+ImpError imp_lora_load(ImpContext ctx, const char* path, int32_t* out_id) {
+    if (!ctx || !ctx->engine || !path || !out_id)
+        return IMP_ERROR_INVALID_ARG;
+    try {
+        int id = ctx->engine->lora_load(path);
+        if (id <= 0)
+            return IMP_ERROR_INVALID_MODEL;
+        *out_id = id;
+        return IMP_SUCCESS;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_lora_load: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    }
+}
+
+ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id) {
+    if (!ctx || !ctx->engine)
+        return IMP_ERROR_INVALID_ARG;
+    try {
+        return ctx->engine->lora_set(adapter_id) ? IMP_SUCCESS : IMP_ERROR_INVALID_ARG;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_lora_set: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    }
+}
+
 int imp_model_max_seq_len(ImpModel model) {
     if (!model || !model->model) {
         return 0;

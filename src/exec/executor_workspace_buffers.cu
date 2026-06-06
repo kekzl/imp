@@ -908,6 +908,11 @@ void GraphExecutor::release_moe_batch_buf() {
 }
 
 void GraphExecutor::free_buffers() {
+    if (lora_scratch_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(lora_scratch_));
+        lora_scratch_ = nullptr;
+        lora_scratch_sz_ = 0;
+    }
     // Helper: free through VRAMAllocator if pointer was tracked, else cudaFree.
     auto vfree = [this](void*& p) {
         if (p) {

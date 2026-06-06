@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "lora/lora_adapter.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "memory/kv_cache_manager.h"
@@ -424,9 +425,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
+            // LoRA needs the normed projection input materialized — side-write
+            // norm_out (the kernel supports it; FFN's variant always does).
+            half* lora_no = (lora_ && lora_->has_qkv(layer)) ? static_cast<half*>(no.data) : nullptr;
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
                                   static_cast<const half*>(ly.attn_norm.data), q8, qscratch_.d8_buf,
-                                  nullptr /*skip norm_out*/, K, eps, stream, norm_w_off_);
+                                  lora_no, K, eps, stream, norm_w_off_);
             int q_rows = static_cast<int>(ly.wq.shape[0]);
             int k_rows = static_cast<int>(ly.wk.shape[0]);
             int v_rows = static_cast<int>(ly.wv.shape[0]);
@@ -509,6 +513,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
         // Apply Q/K/V biases if present (Qwen2) — fused 3-way for 1 launch
         add_bias_3way(qv, ly.q_bias, kk, ly.k_bias, vv, ly.v_bias, stream);
+
+        // LoRA deltas on the raw projection outputs (pre QK-norm / pre RoPE —
+        // matches HF PEFT semantics of wrapping the Linear). Every QKV arm
+        // above materializes the normed input in `no` (the fused dp4a arm
+        // side-writes it when an adapter is active).
+        if (lora_) {
+            if (const LoraWeights* w = lora_->get(layer, LoraProj::Q))
+                lora_delta_(*w, no.data, qv.data, n, stream);
+            if (const LoraWeights* w = lora_->get(layer, LoraProj::K))
+                lora_delta_(*w, no.data, kk.data, n, stream);
+            if (const LoraWeights* w = lora_->get(layer, LoraProj::V))
+                lora_delta_(*w, no.data, vv.data, n, stream);
+        }
     }
 
     // Gemma 4: K=V sharing for global attention layers (wv == null).
@@ -1354,6 +1371,26 @@ after_attention:
         }
         if (po_fp32_buf) {
             cudaFreeAsync(po_fp32_buf, stream);
+        }
+    }
+
+    // LoRA delta on o_proj: h already holds residual + Wo·ao from whichever
+    // arm ran (all fused arms require !has_post_attn_norm), so accumulating
+    // s·(ao·A^T)·B^T into h afterwards is exactly PEFT's wrapped-Linear
+    // semantics. Sandwich-norm archs (post_attn_norm) would need the delta
+    // INSIDE the norm — declined in v1 with a log.
+    if (lora_) {
+        if (const LoraWeights* w = lora_->get(layer, LoraProj::O)) {
+            if (!has_post_attn_norm) {
+                lora_delta_(*w, ao.data, h.data, n, stream);
+            } else {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN("LoRA: o_proj adapter on a post-attn-norm arch is unsupported (v1) — "
+                                 "delta skipped");
+                }
+            }
         }
     }
     if (debug_attn_steps) {

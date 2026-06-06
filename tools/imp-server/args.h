@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 struct ServerArgs {
@@ -17,6 +18,9 @@ struct ServerArgs {
     int gpu_layers = -1;  // -1 = all on GPU
     int device = 0;
     std::string chat_template = "auto";
+    // --lora NAME=PATH (repeatable): PEFT adapters loaded at startup,
+    // selectable per request via the "lora" body field.
+    std::vector<std::pair<std::string, std::string>> loras;
     bool no_cuda_graphs = false;
     bool ssm_fp16 = false;
     bool kv_fp8 = false;

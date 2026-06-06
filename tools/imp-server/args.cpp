@@ -17,6 +17,7 @@ void print_server_usage(const char* prog) {
             "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
             "  --device <n>          CUDA device ID (default: 0)\n"
             "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"
+            "  --lora NAME=PATH      Load a PEFT LoRA adapter (repeatable); select per request via \"lora\" field\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --ssm-fp16            Use FP16 for SSM h_state\n"
             "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
@@ -73,6 +74,14 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.device = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--chat-template") == 0 && i + 1 < argc) {
             args.chat_template = argv[++i];
+        } else if (std::strcmp(arg, "--lora") == 0 && i + 1 < argc) {
+            std::string spec = argv[++i];
+            size_t eq = spec.find('=');
+            if (eq == std::string::npos || eq == 0 || eq + 1 >= spec.size()) {
+                fprintf(stderr, "--lora expects NAME=PATH, got '%s'\n", spec.c_str());
+                exit(1);
+            }
+            args.loras.emplace_back(spec.substr(0, eq), spec.substr(eq + 1));
         } else if (std::strcmp(arg, "--no-cuda-graphs") == 0) {
             args.no_cuda_graphs = true;
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {

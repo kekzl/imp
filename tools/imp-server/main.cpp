@@ -72,6 +72,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --lora NAME=PATH: load PEFT adapters once; requests select by name.
+    for (const auto& [name, path] : args.loras) {
+        int32_t id = 0;
+        if (imp_lora_load(state.ctx, path.c_str(), &id) != IMP_SUCCESS) {
+            fprintf(stderr, "Failed to load LoRA adapter '%s' from %s\n", name.c_str(), path.c_str());
+            return 1;
+        }
+        state.lora_ids[name] = id;
+        printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
+    }
+
     // Set up HTTP server
     httplib::Server svr;
 
