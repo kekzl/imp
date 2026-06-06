@@ -166,6 +166,46 @@ void ref_dequant_q4_k(const uint8_t* blk, double* out) {
     }
 }
 
+// IQ4_NL: 18 bytes / 32 elems. [ d:f16 | qs:u8[16] ]. Non-linear 4-bit: the
+// nibble indexes a fixed signed codebook (ggml-common.h kvalues_iq4nl).
+// Element j (0..15) = low nibble of qs[j]; element j+16 = high nibble
+// (ggml dequantize_row_iq4_nl). val = d * codebook[nibble].
+static const int8_t kRefIq4nlValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                           1,    13,   25,  38,  53,  69,  89,  113};
+void ref_dequant_iq4_nl(const uint8_t* blk, double* out) {
+    half d;
+    std::memcpy(&d, blk, 2);
+    const uint8_t* qs = blk + 2;
+    double dd = f16_to_f64(d);
+    for (int j = 0; j < 16; ++j) {
+        out[j] = dd * static_cast<double>(kRefIq4nlValues[qs[j] & 0xF]);
+        out[j + 16] = dd * static_cast<double>(kRefIq4nlValues[(qs[j] >> 4) & 0xF]);
+    }
+}
+
+// IQ4_XS: 136 bytes / 256 elems. [ d:f16 | scales_h:u16 | scales_l:u8[4] |
+// qs:u8[128] ]. 8 sub-blocks of 32, 6-bit scale per sub-block:
+//   ls = (scales_l[ib/2] >> 4*(ib%2)) & 0xF | ((scales_h >> 2*ib) & 3) << 4
+// Same codebook + nibble layout as IQ4_NL within each 16-byte sub-block
+// (ggml dequantize_row_iq4_xs). val = d * (ls - 32) * codebook[nibble].
+void ref_dequant_iq4_xs(const uint8_t* blk, double* out) {
+    half d;
+    std::memcpy(&d, blk, 2);
+    uint16_t scales_h;
+    std::memcpy(&scales_h, blk + 2, 2);
+    const uint8_t* scales_l = blk + 4;
+    const uint8_t* qs = blk + 8;
+    double dd = f16_to_f64(d);
+    for (int ib = 0; ib < 8; ++ib) {
+        int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
+        double dl = dd * static_cast<double>(ls - 32);
+        for (int j = 0; j < 16; ++j) {
+            out[ib * 32 + j] = dl * static_cast<double>(kRefIq4nlValues[qs[ib * 16 + j] & 0xF]);
+            out[ib * 32 + j + 16] = dl * static_cast<double>(kRefIq4nlValues[(qs[ib * 16 + j] >> 4) & 0xF]);
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Synthetic block builders — raw bytes via LCG, scale halfs chosen separately.
 // scale_mode: 0 = "normal" random-ish scales; 1 = d=0 (degenerate);
@@ -239,6 +279,36 @@ void build_q4_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode)
         }
 }
 
+void build_iq4_nl(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
+    int bpr = K / 32;
+    buf.resize((size_t)N * bpr * 18);
+    for (int r = 0; r < N; ++r)
+        for (int b = 0; b < bpr; ++b) {
+            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 18;
+            half d = pick_d(g, mode);
+            std::memcpy(bp, &d, 2);
+            for (int i = 0; i < 16; ++i)
+                bp[2 + i] = g.byte();  // codebook indices, full nibble range
+        }
+}
+
+void build_iq4_xs(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
+    int bpr = K / 256;
+    buf.resize((size_t)N * bpr * 136);
+    for (int r = 0; r < N; ++r)
+        for (int b = 0; b < bpr; ++b) {
+            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 136;
+            half d = pick_d(g, mode);
+            std::memcpy(bp, &d, 2);
+            // scales_h + scales_l: all-1-bits hits every 6-bit scale = 63
+            // (max |ls-32| = 31) under MAXMAG, else LCG.
+            for (int i = 0; i < 6; ++i)
+                bp[2 + i] = (mode == MAXMAG) ? 0xFF : g.byte();
+            for (int i = 0; i < 128; ++i)
+                bp[8 + i] = g.byte();
+        }
+}
+
 // -----------------------------------------------------------------------------
 // GPU helpers
 // -----------------------------------------------------------------------------
@@ -282,6 +352,16 @@ void ref_dequant_all(const std::vector<uint8_t>& buf, int N, int K, QType qt,
         for (int r = 0; r < N; ++r)
             for (int b = 0; b < bpr; ++b)
                 ref_dequant_q6_k(buf.data() + ((size_t)r * bpr + b) * 210, &out[(size_t)r * K + b * 256]);
+    } else if (qt == QType::IQ4_NL) {
+        int bpr = K / 32;
+        for (int r = 0; r < N; ++r)
+            for (int b = 0; b < bpr; ++b)
+                ref_dequant_iq4_nl(buf.data() + ((size_t)r * bpr + b) * 18, &out[(size_t)r * K + b * 32]);
+    } else if (qt == QType::IQ4_XS) {
+        int bpr = K / 256;
+        for (int r = 0; r < N; ++r)
+            for (int b = 0; b < bpr; ++b)
+                ref_dequant_iq4_xs(buf.data() + ((size_t)r * bpr + b) * 136, &out[(size_t)r * K + b * 256]);
     } else {  // Q4_K
         int bpr = K / 256;
         for (int r = 0; r < N; ++r)
@@ -300,6 +380,10 @@ void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, dou
         build_q8_0(buf, N, K, g, mode);
     else if (qt == QType::Q6_K)
         build_q6_k(buf, N, K, g, mode);
+    else if (qt == QType::IQ4_NL)
+        build_iq4_nl(buf, N, K, g, mode);
+    else if (qt == QType::IQ4_XS)
+        build_iq4_xs(buf, N, K, g, mode);
     else
         build_q4_k(buf, N, K, g, mode);
 
@@ -444,6 +528,20 @@ TEST(GgufRef, Q4_K_Dequant) {
     check_dequant("Q4_K", QType::Q4_K, 16, 256, ZERO_D, 1e-3);
     check_dequant("Q4_K", QType::Q4_K, 16, 256, MAXMAG, 1e-3);
     check_dequant("Q4_K", QType::Q4_K, 8, 256, NAN_D, 1e-3);
+}
+
+TEST(GgufRef, IQ4_NL_Dequant) {
+    check_dequant("IQ4_NL", QType::IQ4_NL, 37, 512, NORMAL, 1e-3);
+    check_dequant("IQ4_NL", QType::IQ4_NL, 16, 256, ZERO_D, 1e-3);
+    check_dequant("IQ4_NL", QType::IQ4_NL, 16, 256, MAXMAG, 1e-3);
+    check_dequant("IQ4_NL", QType::IQ4_NL, 8, 256, NAN_D, 1e-3);
+}
+
+TEST(GgufRef, IQ4_XS_Dequant) {
+    check_dequant("IQ4_XS", QType::IQ4_XS, 33, 512, NORMAL, 1e-3);
+    check_dequant("IQ4_XS", QType::IQ4_XS, 16, 256, ZERO_D, 1e-3);
+    check_dequant("IQ4_XS", QType::IQ4_XS, 16, 256, MAXMAG, 1e-3);
+    check_dequant("IQ4_XS", QType::IQ4_XS, 8, 256, NAN_D, 1e-3);
 }
 
 // =============================================================================

@@ -27,6 +27,8 @@ enum class QType : uint16_t {
     Q5_K = 13,
     Q6_K = 14,
     Q8_K = 15,
+    IQ4_NL = 20,
+    IQ4_XS = 23,
     BF16 = 30,
     MXFP4 = 31,
 
@@ -45,11 +47,12 @@ enum class QType : uint16_t {
     // for ABI compatibility but map to MXFP4_KV at the imp_api.cpp boundary.
 };
 
-// True for block-quantised disk formats (Q*_K, Q*_0, Q*_1, MXFP4, NVFP4).
+// True for block-quantised disk formats (Q*_K, Q*_0, Q*_1, IQ4_*, MXFP4, NVFP4).
 // These types require a Sidecar scales tensor for reconstruction.
 constexpr bool is_block_quant(QType q) {
     auto v = static_cast<uint16_t>(q);
-    return (v >= 2 && v <= 15) || q == QType::MXFP4 || q == QType::NVFP4;
+    return (v >= 2 && v <= 15) || q == QType::IQ4_NL || q == QType::IQ4_XS || q == QType::MXFP4 ||
+           q == QType::NVFP4;
 }
 
 // True for compute-side dtypes that map directly to a hardware FP/INT type.
@@ -91,6 +94,8 @@ static_assert(static_cast<uint16_t>(QType::Q4_0) == 2, "QType::Q4_0 wire value")
 static_assert(static_cast<uint16_t>(QType::Q4_K) == 12, "QType::Q4_K wire value");
 static_assert(static_cast<uint16_t>(QType::Q6_K) == 14, "QType::Q6_K wire value");
 static_assert(static_cast<uint16_t>(QType::Q8_0) == 8, "QType::Q8_0 wire value");
+static_assert(static_cast<uint16_t>(QType::IQ4_NL) == 20, "QType::IQ4_NL wire value");
+static_assert(static_cast<uint16_t>(QType::IQ4_XS) == 23, "QType::IQ4_XS wire value");
 static_assert(static_cast<uint16_t>(QType::BF16) == 30, "QType::BF16 wire value");
 static_assert(static_cast<uint16_t>(QType::MXFP4) == 31, "QType::MXFP4 wire value");
 
