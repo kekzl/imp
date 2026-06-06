@@ -18,6 +18,7 @@
 
 #include "quant/nvfp4_quant.h"
 #include <cstdint>
+#include <vector>
 
 namespace imp {
 
@@ -28,8 +29,11 @@ namespace imp {
 // extra_scale folds a constant into the per-expert tensor scale — used for the
 // gpt-oss residual-stream 2^-4 rescale on the down projection (see the arch
 // registry comment in model.cpp). Returns false on allocation failure.
+// h_tscales_out (optional): host copy of the per-expert FP32 tensor scales
+// (incl. extra_scale) — needed for the per-expert CUTLASS weight registration.
 bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                       int64_t n_rows_total, int64_t K, int row_offset, int row_stride,
-                                      NvFP4MoEQuantResult& out, float extra_scale = 1.0f);
+                                      NvFP4MoEQuantResult& out, float extra_scale = 1.0f,
+                                      std::vector<float>* h_tscales_out = nullptr);
 
 }  // namespace imp

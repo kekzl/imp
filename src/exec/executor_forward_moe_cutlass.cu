@@ -95,8 +95,11 @@ bool device_args_done = false;
     // (legacy IMP_NVFP4_DEVICE_ARGS=0) to force the legacy
     // path for A/B or workarounds.
     const bool da_enabled = runtime_config().moe.nvfp4_device_args;
+    // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2
+    // only and has no per-expert bias hooks — the legacy host-args path below
+    // runs apply_expert_activation (GPT_OSS_GLU-aware) with bias seams.
     const bool use_device_args =
-        da_enabled &&
+        da_enabled && cfg.arch != ModelArch::GPT_OSS &&
         moe_.d_M_per && moe_.d_M_per_count >= ne &&
         moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
         moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
@@ -345,7 +348,7 @@ char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 bool smallM_done = false;
 {
     const auto& moe_cfg = runtime_config().moe;
-    const bool smallM_optin = moe_cfg.nvfp4_smallM;
+    const bool smallM_optin = moe_cfg.nvfp4_smallM && cfg.arch != ModelArch::GPT_OSS;
     if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
         const int smallM_threshold = moe_cfg.nvfp4_smallM_threshold;
         int max_M = 0;
@@ -739,6 +742,18 @@ if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
     grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
 }
 
+// gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
+// expert-sorted — same seam as the dequant batch path).
+const int32_t* gpt_oss_offsets =
+    (cfg.arch == ModelArch::GPT_OSS) ? static_cast<const int32_t*>(routing.expert_offsets.data)
+                                     : nullptr;
+if (gpt_oss_offsets) {
+    moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, gpt_oss_offsets, ne,
+                               expanded, eff, stream);
+    moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, gpt_oss_offsets, ne,
+                               expanded, eff, stream);
+}
+
 apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                         moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
                         compute_dtype_, cfg.ffn_activation, stream);
@@ -750,6 +765,9 @@ apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
 char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
 if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
     grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);
+    if (gpt_oss_offsets)
+        moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, gpt_oss_offsets, ne,
+                                   expanded, d, stream);
 }
 }  // !smallM_done
 }  // !device_args_done

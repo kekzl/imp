@@ -48,11 +48,11 @@ prequant (Model Optimizer / llm-compressor exports), command pattern
 | Nemotron-3-Nano-30B | 30B (3B) | 126 |
 | gpt-oss-20b¹ | 21B (3.6B) | 345 |
 
-¹ 2026-06-06, commit `85189b15` (PR #572): SafeTensors MXFP4 source, experts
-converted to the NVFP4 decode cache at load (bit-exact nibbles, power-of-two
-scales). Prefill runs the NVFP4→FP16 batch-dequant path + cuBLAS attention
-(attention sinks) — pp512 ≈ 1.9k tok/s, structurally below the CUTLASS
-grouped-GEMM models.
+¹ 2026-06-06 (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
+NVFP4 at load (bit-exact nibbles, power-of-two scales) and registered for the
+CUTLASS grouped-GEMM prefill — pp512 ≈ 16-19k tok/s. Attention stays on the
+cuBLAS path (attention sinks). Decode measured 310-345 depending on host state
+(documented day-to-day variance).
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no

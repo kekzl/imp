@@ -12,7 +12,8 @@ namespace imp {
 
 bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                       int64_t n_rows_total, int64_t K, int row_offset, int row_stride,
-                                      NvFP4MoEQuantResult& out, float extra_scale) {
+                                      NvFP4MoEQuantResult& out, float extra_scale,
+                                      std::vector<float>* h_tscales_out) {
     const int64_t N = n_rows_total / row_stride;  // rows per expert in the output
     const int64_t kb32 = K / 32;                  // MXFP4 blocks per row
     const int64_t row_bytes = K / 2;              // packed nibbles per row
@@ -103,6 +104,8 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     out.expert_stride_packed = static_cast<size_t>(N) * row_bytes;
     out.expert_stride_ms = static_cast<size_t>(N) * ms_per_row;
     out.borrowed = false;
+    if (h_tscales_out)
+        *h_tscales_out = tscales;
     return true;
 }
 

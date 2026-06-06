@@ -1265,18 +1265,19 @@ void GraphExecutor::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         const int64_t dn_K = dn_b.shape[2] * 32;         // d_ff
 
         NvFP4MoEQuantResult g{}, u{}, d{};
+        std::vector<float> g_ts, u_ts, d_ts;
         bool ok = gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
                                                    static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                   gu_K, /*offset=*/0, /*stride=*/2, g) &&
+                                                   gu_K, /*offset=*/0, /*stride=*/2, g, 1.0f, &g_ts) &&
                   gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
                                                    static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                   gu_K, /*offset=*/1, /*stride=*/2, u) &&
+                                                   gu_K, /*offset=*/1, /*stride=*/2, u, 1.0f, &u_ts) &&
                   // down: extra 2^-4 — residual-stream rescale (see arch
                   // registry comment in model.cpp; bias scaled in the loader).
                   gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
                                                    static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
                                                    dn_K, /*offset=*/0, /*stride=*/1, d,
-                                                   /*extra_scale=*/0.0625f);
+                                                   /*extra_scale=*/0.0625f, &d_ts);
         if (!ok) {
             IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
             return;
@@ -1294,6 +1295,72 @@ void GraphExecutor::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);
         install(d, L.expert_down_packed);
+
+        // Per-expert CUTLASS_NVFP4 registration (#547 prefill): without it,
+        // covers_ids() rejects the CUTLASS 3.x grouped path and prefill runs
+        // the dequant->FP16->cuBLAS batch fallback (~38 GB of FP16 dequant
+        // writes per forward — pp512 ~1.9k vs ~15k+ tok/s). Mirrors
+        // cache_moe_native_nvfp4's re-stamp block: shared SfAtom buffer per
+        // projection + per-expert Tensor slices into the contiguous result so
+        // Phase 4's register_tensor() sees CUTLASS-tier wcache entries.
+        auto register_cutlass = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
+                                    const std::vector<float>& h_ts) -> bool {
+            if (!cutlass_sm120_nvfp4_available())
+                return false;
+            const size_t sf_per_expert =
+                cutlass_nvfp4_sf_size(static_cast<int>(r.N), static_cast<int>(r.K));
+            const size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
+            void* d_sfatom = vram_alloc_force(vram_alloc_, sfatom_total, "gptoss_moe_sfatom");
+            if (!d_sfatom) {
+                IMP_LOG_WARN("gpt-oss L%d: SfAtom alloc failed (%.1f MiB) — prefill stays on the "
+                             "dequant fallback",
+                             i, sfatom_total / (1024.0 * 1024.0));
+                return false;
+            }
+            convert_nvfp4_moe_scales_to_sfatom(r.micro_scales, d_sfatom, ne, static_cast<int>(r.N),
+                                               static_cast<int>(r.K), /*stream=*/nullptr);
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+            const_cast<Model*>(model_)->gpu_allocations_.push_back(d_sfatom);
+            experts.assign(ne, Tensor{});
+            for (int e = 0; e < ne; ++e) {
+                void* data_slice =
+                    static_cast<char*>(r.packed_data) + static_cast<size_t>(e) * r.expert_stride_packed;
+                void* ms_slice =
+                    static_cast<char*>(r.micro_scales) + static_cast<size_t>(e) * r.expert_stride_ms;
+                int64_t eshape[2] = {r.N, r.K / 2};  // packed-byte convention (K/2)
+                Tensor w(data_slice, QType::NVFP4, 2, eshape, /*on_device=*/true);
+                w.scales = ms_slice;
+                w.tensor_scale = h_ts[e];
+                experts[e] = w;
+
+                NvFP4QuantResult nv;
+                nv.packed_data = data_slice;
+                nv.micro_scales = ms_slice;
+                nv.owned = false;  // slices into the contiguous conversion result
+                nv.tensor_scale = h_ts[e];
+                nv.N = r.N;
+                nv.K = r.K;
+                wcache_.nvfp4[data_slice] = nv;
+
+                CutlassNvFP4Weight cw;
+                cw.data = data_slice;
+                cw.scale_factors = static_cast<char*>(d_sfatom) + static_cast<size_t>(e) * sf_per_expert;
+                cw.tensor_scale = h_ts[e];
+                cw.N = r.N;
+                cw.K = r.K;
+                cw.sf_bytes = sf_per_expert;
+                cw.sf_borrowed = true;
+                wcache_.cutlass_nvfp4[data_slice] = cw;
+            }
+            wcache_.cutlass_nvfp4_bytes += sfatom_total;
+            return true;
+        };
+        bool ct_ok = register_cutlass(g, L.expert_w_gate, g_ts) &&
+                     register_cutlass(u, L.expert_w_up, u_ts) &&
+                     register_cutlass(d, L.expert_w_down, d_ts);
+        if (i == 0)
+            IMP_LOG_INFO("gpt-oss: CUTLASS grouped prefill %s", ct_ok ? "registered" : "UNAVAILABLE");
+
         dctx.nvfp4_moe_count += 3;
         converted++;
     }
