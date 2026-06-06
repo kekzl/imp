@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "test_models.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -13,11 +14,11 @@ namespace {
 // Environment helpers
 // ---------------------------------------------------------------------------
 
-static const char* primary_model() { return std::getenv("IMP_TEST_MODEL"); }
+static const char* primary_model() { return std::getenv(imp_test::kEnvModel); }
 
-static const char* gdn_model() { return std::getenv("IMP_TEST_MODEL_GDN"); }
+static const char* gdn_model() { return std::getenv(imp_test::kEnvModelGdn); }
 
-static const char* gemma4_model() { return std::getenv("IMP_TEST_MODEL_GEMMA4"); }
+static const char* gemma4_model() { return std::getenv(imp_test::kEnvModelGemma4); }
 
 #define REQUIRE_MODEL(var)    \
     const char* path = var(); \

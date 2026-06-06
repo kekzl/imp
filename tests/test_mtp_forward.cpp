@@ -29,8 +29,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Container bind-mount path (-v $(PWD)/models:/models), matching the rest of
+// the SafeTensors suites; skips cleanly when absent (R6/#581 — was a host path
+// that never existed in the container, so this test skipped there always).
 constexpr const char kQwen36ModelDir[] =
-    "/home/kekz/models/Qwen3.6-35B-A3B-NVFP4";
+    "/models/Qwen3.6-35B-A3B-NVFP4";
 
 bool model_available() {
     return fs::exists(std::string(kQwen36ModelDir) + "/model_mtp.safetensors");

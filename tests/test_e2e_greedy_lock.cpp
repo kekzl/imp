@@ -29,6 +29,7 @@
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "refs/e2e_greedy_locks.h"
+#include "test_models.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,7 +38,7 @@
 
 namespace {
 
-const char* model_path() { return std::getenv("IMP_TEST_MODEL"); }
+const char* model_path() { return std::getenv(imp_test::kEnvModel); }
 
 std::string basename_of(const std::string& p) {
     size_t s = p.find_last_of('/');

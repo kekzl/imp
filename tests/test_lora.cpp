@@ -27,11 +27,12 @@
 #include <vector>
 
 #include "imp/imp.h"
+#include "test_models.h"
 
 namespace {
 
 const char* model_path() {
-    if (const char* p = getenv("IMP_TEST_MODEL_LLAMA"))
+    if (const char* p = getenv(imp_test::kEnvModelLlama))
         return p;
     return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
 }

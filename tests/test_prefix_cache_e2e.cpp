@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "test_models.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -29,7 +30,7 @@
 
 namespace {
 
-const char* model_path() { return std::getenv("IMP_TEST_MODEL"); }
+const char* model_path() { return std::getenv(imp_test::kEnvModel); }
 
 bool is_safetensors_dir(const std::string& p) {
     return p.size() < 5 || p.substr(p.size() - 5) != ".gguf";

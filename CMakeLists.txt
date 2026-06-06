@@ -426,7 +426,11 @@ if(IMP_BUILD_TESTS)
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
         )
-        gtest_discover_tests(${target})
+        # NOTE: deliberately NOT gtest_discover_tests() — it would register every
+        # test individually IN ADDITION to the unit/gpu/perf label aggregates
+        # below, so a plain `ctest` (no label) ran the whole suite twice (R5/#580).
+        # The label aggregates are the single ctest registration; discovery would
+        # also require a GPU at configure-time (the binaries enumerate CUDA tests).
     endfunction()
 
     imp_add_test_module(test-core SOURCES
@@ -593,12 +597,26 @@ if(IMP_BUILD_TESTS)
     # Source of truth for the unit/gpu split. The gtest filter only applies to
     # test-e2e (which contains both stub-only unit tests and CUDA-backed E2E
     # tests in the same binary). All other binaries are clean unit-or-GPU.
+    #
+    # The CPU and GPU tests are interleaved inside test_e2e.cpp / test_continuous_
+    # batching.cpp (e.g. StubModelTest has both CPU and GPU subtests, sharing one
+    # fixture), so they cannot be split into a separate binary without duplicating
+    # fixtures. Instead the split stays a filter, but `guard_e2e_lane_split` below
+    # asserts the filter still resolves to the exact expected CPU-only set — a
+    # rename can no longer silently shift a test into the wrong lane (R5/#580).
+    # NOTE: scripts/verify.sh carries a literal copy of this filter (container
+    # path has no build/ dir) — keep both in sync when changing it.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     add_test(NAME unit_core       COMMAND test-core)
     add_test(NAME unit_text       COMMAND test-text)
     add_test(NAME unit_e2e_subset COMMAND test-e2e "--gtest_filter=${_unit_e2e_filter}")
-    set_tests_properties(unit_core unit_text unit_e2e_subset PROPERTIES LABELS "unit")
+    add_test(NAME guard_e2e_lane_split
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_e2e_lane_split.sh
+                $<TARGET_FILE:test-e2e> "${_unit_e2e_filter}")
+    set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
+        PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)
     add_test(NAME gpu_attention COMMAND test-attention)

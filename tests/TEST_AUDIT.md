@@ -159,28 +159,43 @@ oben entsprechend bewertet.
   nur für Host-Konvertierung). CI (kein GPU-Runner) baut + skippt Test-Job;
   ctest läuft ohne `-j` — für GPU-Tests korrekt (VRAM/Context-Konkurrenz),
   für die unit-Label-Teilmenge wäre `-j` gefahrlos.
-- **Fragilität:** der unit/gpu-Split von `test-e2e` hängt an einem
-  hartkodierten gtest_filter-String in CMakeLists (`_unit_e2e_filter`) —
-  Test-Umbenennung verschiebt Tests still ins falsche Label. Außerdem:
-  `gtest_discover_tests()` registriert ALLE Tests nochmal einzeln neben den
-  8 Label-Aggregaten → `ctest` ohne Label führt alles doppelt aus.
+- **Fragilität (GESCHLOSSEN #580, R5):** der unit/gpu-Split von `test-e2e`
+  hing an einem hartkodierten gtest_filter-String in CMakeLists
+  (`_unit_e2e_filter`) — Test-Umbenennung verschob Tests still ins falsche
+  Label. CPU- und GPU-Tests sind in `test_e2e.cpp`/`test_continuous_batching.cpp`
+  verschränkt (StubModelTest teilt eine Fixture über CPU- und GPU-Subtests),
+  also kein sauberes eigenes Binary ohne Fixture-Duplizierung → stattdessen
+  Filter behalten + Guard-Test `guard_e2e_lane_split`
+  (`scripts/check_e2e_lane_split.sh`), der per `--gtest_list_tests` prüft, dass
+  der Filter EXAKT die eingefrorene CPU-Menge auflöst (37 Tests) — eine
+  Umbenennung schlägt jetzt laut fehl statt still zu verschieben. Außerdem:
+  `gtest_discover_tests()` registrierte ALLE Tests nochmal einzeln neben den
+  Label-Aggregaten → `ctest` ohne Label führte alles doppelt aus (gemessen:
+  1215 ctest-Einträge); entfernt → jetzt 14 Einträge (3 unit + 1 Guard + 6 gpu
+  + 4 perf), jeder Test läuft genau einmal.
 - **Kein per-Test-Timeout in CMake** (nur CI-global 120 s); lange E2E-Tests
   (Modell-Load + 128 Tokens) blockieren den sequentiellen Lauf.
 - **Gemessen (2026-06-06, RTX 5090, ohne Modelle):** Gesamtsuite 1.154 Tests;
   7 von 8 Binaries zusammen < 11 s, aber **test-attention allein 241 s** —
   die Makefile-Annahme „GPU tests < 30s" ist stale. Treiber sind die
-  paged-/crosspath-Oracle-Sweeps; ein `-L unit`-Lauf bleibt < 1 s.
+  paged-/crosspath-Oracle-Sweeps; ein `-L unit`-Lauf bleibt < 1 s. (Makefile-
+  Kommentar `test-gpu` korrigiert, #580; Stand 06-07 sind es ~1.202 Tests.)
 - **Python-API-Suite hängt an nichts:** `run_mock_tests.sh` (CPU-fähig,
   Mock) wird weder von CI noch von verify.sh aufgerufen — die einzige
   CPU-CI-fähige Contract-Suite läuft nur manuell.
-- Modell-Gating über 8 `IMP_TEST_MODEL*`-Env-Vars, dezentral in 25 Dateien
-  (219 SKIP-Aufrufe). Die hartkodierten `/models/...`-Fallback-Pfade
-  (degeneration/api_generate/relaunch/lora/chunked) sind KEIN Defekt: sie
-  matchen den Container-Mount `-v $(PWD)/models:/models` aus dem Makefile und
-  skippen sauber, wenn die Datei fehlt. Einzige Ausnahme:
-  `test_mtp_forward.cpp:33` kodiert einen Host-Pfad
-  (`/home/kekz/models/...`), der im Container nie existiert — der Test skippt
-  dort also immer. Kosmetisch (Feature ist geparkt).
+- Modell-Gating über `IMP_TEST_MODEL*`-Env-Vars, dezentral in den Testdateien
+  kopiert. **GESCHLOSSEN #581 (R6):** zentrale Registry `tests/test_models.h`
+  (header-only) hält die Env-Var-Namen (`imp_test::kEnv*`) + Accessoren
+  (`env_path`/`env_path_or`) an EINER Stelle; die ~14 Konsumenten ziehen den
+  Namen jetzt aus der Registry statt aus kopierten String-Literalen (die
+  GTEST_SKIP-Aufrufe bleiben am Call-Site, weil GTEST_SKIP aus der
+  *aufrufenden* Funktion zurückkehrt). Die hartkodierten
+  `/models/...`-Fallback-Pfade (degeneration/api_generate/relaunch/lora/chunked)
+  sind KEIN Defekt: sie matchen den Container-Mount `-v $(PWD)/models:/models`
+  aus dem Makefile und skippen sauber, wenn die Datei fehlt — bleiben daher als
+  call-site-sichtbare Literale erhalten. `test_mtp_forward.cpp` kodierte einen
+  Host-Pfad (`/home/kekz/models/...`), der im Container nie existierte → auf
+  `/models/...`-Container-Stil normalisiert (#581), skippt jetzt konsistent.
 
 ---
 
@@ -213,10 +228,11 @@ oben entsprechend bewertet.
    `tests/refs/` (gen_harmony_golden.py, gen_yarn_rope_golden.py).
 8. Decode-Gate um Clock-/Power-Plausibilisierung ergänzen (#526-Klasse:
    bei mem-clock < 13801 MHz WARN statt FAIL). Aufwand: S.
-9. unit_e2e_filter aus Test-Namen-Kopplung lösen (eigene Binary
-   `test-e2e-stub` für Stub-Tests ODER Filter aus gemeinsamer Quelle
-   generieren) + doppelte ctest-Registrierung bereinigen. Aufwand: M, Risiko
-   niedrig.
+9. ~~unit_e2e_filter aus Test-Namen-Kopplung lösen + doppelte
+   ctest-Registrierung bereinigen.~~ **DONE (R5, #580):** Filter behalten +
+   Guard-Test `guard_e2e_lane_split` (rename-fest via `--gtest_list_tests`-
+   Abgleich gegen die eingefrorene CPU-Menge); `gtest_discover_tests` entfernt
+   (1215→14 ctest-Einträge, kein Doppellauf mehr).
 
 **P3 — Hygiene (low-risk, sofort ausführbar)**
 10. `tests/golden/` löschen (tot), `tests/api/test_outputs/` löschen +
@@ -238,8 +254,8 @@ Gates verwandeln (Varianz); keine Seed-Sweeps für Greedy-Pfade.
 | R2 | **Routing-/Host-Logik-Units:** P1.4 attention_dispatch + grouped-vs-fallback-Entscheid in `executor_forward` als CPU-Tests (kein GPU nötig → CI-Lane) | niedrig | S |
 | R3 | **CI-Lane Python-Mock** (P2.6): neuer CI-Step nach Build, `pytest tests/api -m "not perf and not tools"` gegen mock_server; läuft ohne GPU | niedrig (CI-only) | S |
 | R4 | **Perf-Gate härten** (P1.5 + P2.8): test_perf_regression-Keys reparieren oder Suite auf verify.sh-Schema umstellen; verify.sh sampelt clocks.mem/power während des Benches und degradiert FAIL→WARN bei depressed-host-Signatur; Baseline-Dateien bekommen einheitliches `schema_version`-Feld | mittel (Gate-Semantik ändert sich — Abstimmung, weil CI-Verhalten betroffen) | M |
-| R5 | **test-e2e-Split entkoppeln** (P2.9): Stub-Unit-Tests in eigenes Binary; Label-Aggregate behalten; gtest_discover_tests-Doppelregistrierung auf Label-Aggregate reduzieren | mittel (Runner-Umbau, Makefile/CI/verify.sh-Pfade anfassen) | M |
-| R6 | **Modell-Env-Registry:** ein `tests/test_models.h` (Header-only) mit den 8 Env-Vars + Skip-Helpern statt 25× kopiertem Muster; mechanische Migration | niedrig (mechanisch, semantikerhaltend) | M (Fleißarbeit) |
+| R5 | **test-e2e-Split entkoppeln** (P2.9): Stub-Unit-Tests in eigenes Binary; Label-Aggregate behalten; gtest_discover_tests-Doppelregistrierung auf Label-Aggregate reduzieren — **ERLEDIGT (#580):** eigenes Binary verworfen (CPU/GPU-Tests teilen Fixtures, nicht trennbar ohne Duplizierung); stattdessen Filter behalten + Guard `guard_e2e_lane_split` (`scripts/check_e2e_lane_split.sh`, rename-fest), `gtest_discover_tests` entfernt (1215→14 ctest-Einträge, kein Doppellauf), Makefile-`<30s`-Kommentar gefixt | mittel (Runner-Umbau, Makefile/CI/verify.sh-Pfade anfassen) | M |
+| R6 | **Modell-Env-Registry:** ein `tests/test_models.h` (Header-only) mit den Env-Vars + Accessoren statt kopiertem Muster; mechanische Migration — **ERLEDIGT (#581):** `tests/test_models.h` (`imp_test::kEnv*` + `env_path`/`env_path_or`), ~14 Dateien migriert (Env-Namen aus Registry, SKIP bleibt am Call-Site, /models-Fallbacks erhalten), `test_mtp_forward` Host-Pfad → Container-Pfad normalisiert | niedrig (mechanisch, semantikerhaltend) | M (Fleißarbeit) |
 | R7 | **Hygiene-Batch** (P3.10) | minimal | S |
 | R8 | **Parametrisierung Quant×Arch** (Prompt-Wunsch): NICHT als große Matrix empfohlen — die Greedy-Lock-/NLL-E2E-Suite parametrisiert bereits über die real vorhandenen Modelle, und eine synthetische Arch-Matrix (LLaMA/Mistral/DeepSeek/…) ohne Gewichte testet nur Loader-Pfade, die `test_e2e_models`/Loader-Tests schon abdecken. Stattdessen: TYPED_TEST über KV-Dtypes im paged-Oracle (R1) und über Quant-Formate im Dequant-Ref — dort ist Parametrisierung billig und echt. | niedrig | S–M |
 | R9 | **Vision-GPU-Golden** (einziger komplett blinder GPU-Bereich): ein eingefrorenes SigLIP-Encoder-Golden (kleines committetes Bild → Projector-Output-Spots, Toleranz f16-Klasse) — **ERLEDIGT (#583)**: `tests/test_vision_golden.cu` + `tests/refs/vision_encoder_golden.h`, deckt SigLIP **und** gemma4v ab (committetes 64² PNG, mmproj standalone ohne LM), ≤1e-2 rel + 5e-3 abs + NaN/Inf-Guard, sauberer SKIP ohne Modell, `make test-vision` (Dump-Mode regeneriert) | niedrig | M |

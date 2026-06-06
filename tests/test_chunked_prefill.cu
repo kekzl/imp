@@ -20,6 +20,7 @@
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "test_models.h"
 
 #include <cstdio>
 #include <set>
@@ -174,12 +175,12 @@ protected:
     // DIFFERENT kernel paths, where greedy logit ties may legitimately flip.
     // IMP_TEST_MODEL_LLAMA=path overrides Llama-3B path.
     static const char* qwen3_4b_path() {
-        const char* p = std::getenv("IMP_TEST_MODEL_QWEN4B");
+        const char* p = std::getenv(imp_test::kEnvModelQwen4b);
         if (p) return p;
         return "/models/Qwen3-4B-Instruct-2507-Q8_0.gguf";
     }
     static const char* llama_3b_path() {
-        const char* p = std::getenv("IMP_TEST_MODEL_LLAMA");
+        const char* p = std::getenv(imp_test::kEnvModelLlama);
         if (p) return p;
         return "/models/Llama-3.2-3B-Instruct-Q8_0.gguf";
     }
