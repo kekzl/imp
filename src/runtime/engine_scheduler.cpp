@@ -291,6 +291,14 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     cudaFree(ppl_capture_.d_nll);
     ppl_capture_ = PplCapture{};
 
+    if (getenv("IMP_PPL_DUMP") != nullptr) {
+        fprintf(stderr, "[PPL-DUMP] per-pos nll:");
+        for (int i = 0; i < n - 1; ++i) {
+            if (i < 16 || i % 16 == 0 || i > n - 6)
+                fprintf(stderr, " [%d]=%.3f", i, h_nll_pos[i]);
+        }
+        fprintf(stderr, "\n");
+    }
     double h_nll = 0.0;
     for (int i = 0; i < n - 1; ++i)
         h_nll += h_nll_pos[i];
