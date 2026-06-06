@@ -31,7 +31,7 @@ ENV CUDA_HOME=/usr/local/cuda
 # Tags must mirror the FetchContent_Declare entries in CMakeLists.txt.
 RUN git clone --depth=1 --branch v1.17.0 https://github.com/google/googletest.git /deps/googletest \
  && git clone --depth=1 --branch v4.5.1  https://github.com/NVIDIA/cutlass.git    /deps/cutlass    \
- && git clone --depth=1 --branch v0.46.0 https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
+ && git clone --depth=1 --branch v0.46.1 https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
  && git clone --depth=1 --branch v3.12.0 https://github.com/nlohmann/json.git     /deps/json
 
 WORKDIR /src
