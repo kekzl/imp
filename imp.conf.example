@@ -23,6 +23,14 @@ deterministic        = false
 # CUDA Graph capture: "auto" picks per-model based on architecture support;
 # "always" forces capture (fails for MoE with D2H routing); "never" disables.
 cuda_graphs          = "auto"
+# cudaStreamCaptureMode for graph capture: "relaxed" (default since
+# 2026-05-16) | "global" (legacy strict) | "thread_local".
+graph_capture_mode   = "relaxed"
+# Capture prefill into a CUDA graph too (default ON since 2026-05-17).
+# Auto-disabled when the model's prefill path is uncapturable.
+prefill_graph        = true
+# Max concurrent sequences in a decode batch (server continuous batching).
+max_batch_size       = 4
 # Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
 # Off by default — opt in for prod rollouts where first-request TTFT
 # matters. In dev / CI / one-shot runs the warmup is pure overhead and can
@@ -45,6 +53,11 @@ dtype                       = "fp16"
 allow_nondeterministic_fp8  = false
 # Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
 fp8_auto_legacy             = false
+# BitDecoding TC path for NVFP4 paged-attention QK (experimental).
+bitdecoding_qk              = false
+# BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
+# typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
+bitdecoding_residual_tokens = 0
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
@@ -52,16 +65,30 @@ fp8_auto_legacy             = false
 fp8_prefill          = "auto"
 fp8_fmha             = "auto"
 fmha_sm120           = "auto"
+# Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).
+# Default "on" since PR #478 (+13-19% long-ctx NVFP4 prefill); declines to
+# the FP8 FMHA for unsupported configs. "never" forces legacy FP8 FMHA.
+fmha_fa2             = "on"
+# FP16-QK FA2 for SHORT prefill (below fmha_prefill_threshold, hd=128):
+# replaces the materialized cuBLAS+softmax path (PR #525, +25-35% pp512
+# NVFP4). "never" restores the materialized cuBLAS path.
+fa2_fp16qk           = "on"
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
 mxfp4                = "auto"
 mxfp4_fp16_fallback  = false
+# MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
+# tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).
+mxfp4_fp16_cache_policy = "legacy"
 force_cublas_decode  = false
 no_qknorm_fused      = false
 splitk_pipe          = true
 gate_concat          = false
+# Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
+# long prefill stays on the fast cuBLAS path before falling back to FMHA.
+attn_scores_mib      = 384
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload
@@ -81,6 +108,25 @@ no_shared_mlp        = false
 no_shexp_gate        = false
 # Force-disable CUTLASS 3.x grouped MoE GEMM path (legacy fallback).
 no_cutlass3x         = false
+# Assert device-mirror == host LRU after every expert-cache mutation
+# (CI/regression diagnosis; costly D2H readback — never in perf runs).
+expert_cache_debug_parity = false
+# Async H2D prefetch of next layer's top-K (proj, expert) pairs under
+# host-offload (0 = off; sensible 3..16).
+prefetch_top_k       = 0
+# Allow CUDA Graphs while experts are host-offloaded (experimental;
+# correct only with 1:1 prefetch coverage).
+allow_graphs_under_offload = false
+# Per-process MoE workspace reserve override in MiB (0 = computed default).
+reserve_mib          = 0
+# CUTLASS 3.x device-args full path for NVFP4 MoE prefill (default ON
+# since 2026-05-14, +11-39% pp512).
+nvfp4_device_args    = true
+# Opt-in smallM kernel branch for NVFP4 MoE prefill + its M threshold.
+nvfp4_smallM         = false
+nvfp4_smallM_threshold = 64
+# Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32).
+mr_nr                = 8
 
 [gdn]
 # FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but
@@ -91,6 +137,11 @@ fp32_out             = false
 norm_eps_override    = 0.0
 ref_kernel           = false
 vhead_reorder        = false
+# Chunkwise SSD scan (chunk-cached K/Q in smem) instead of the per-token
+# loop. Default ON since 2026-05-29 (+16.7% on the GDN scan kernel).
+chunkwise_scan       = true
+# Override gated-DeltaNet weight layout (diagnostic; "" = auto).
+layout_override      = ""
 
 [gemm]
 # dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
@@ -104,6 +155,24 @@ no_mmvq_q8_0         = false
 # Trades VRAM for decode throughput on sub-8-bit models.
 # Gemma-3-12B Q4_K_M: 77 → 141 tok/s (+82%).
 nvfp4_decode_all     = false
+# Q4_K IMMA / HMMA tensor-core GEMM scaffolds (experimental, default off).
+q4k_imma_enabled     = false
+q4k_hmma_enabled     = false
+# Quantize a native FP16/BF16 LM head to an NVFP4 decode cache (dense
+# models; ~+8-16% decode). Default ON.
+nvfp4_lm_head        = true
+# Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
+# set false for maximum coherence). Default ON since PR #483.
+nvfp4_lm_head_gdn    = true
+# Force GGUF-hybrid GDN/SSM in/out projections into the NVFP4 decode cache
+# (Qwen3.6-35B Q4_K_M: +53% decode, PPL flat). Opt-in.
+nvfp4_ssm_proj       = false
+# Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
+# (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
+nvfp4_attn_proj      = false
+# Route native-NVFP4 MoE expert decode (M=1) through per-expert GEMV
+# kernels instead of grouped CUTLASS (+54-80% MoE decode). Default ON.
+nvfp4_moe_decode     = true
 
 # [gemma4] section moved out of the global RuntimeConfig in Phase 5
 # Track A of the architecture refactor. These are now per-model
@@ -118,6 +187,10 @@ lm_dequant_fp16      = false
 think_budget         = 0
 # Force-prepend BOS token even when the tokenizer says no.
 force_bos            = false
+# Disable the banned-token list (debug).
+no_ban               = false
+# Disable RoPE inside the MTP draft head (diagnostic).
+mtp_no_rope          = false
 
 [server]
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system
@@ -129,6 +202,9 @@ prefix_cache         = true
 # requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
 # requests are ignored.
 prefix_pin_budget_pct = 25
+# Green Contexts / prefill-decode overlap streams in the server engine.
+# false = disable (diagnostic).
+green_contexts       = true
 
 [bench]
 # imp-cli --bench: also run Engine::generate() loop for accurate timing.
@@ -137,6 +213,15 @@ generate             = false
 [paths]
 # Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
 mmproj               = ""
+
+[ffn]
+# SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
+# intermediate rows per threshold; no skipping (~1 µs/layer/token when on).
+sparsity_probe       = false
+# FFN down_proj row-skipping per Q8_0 block: skip blocks whose
+# |silu(gate)*up| amax is below this (0.0 = disabled = bit-identical;
+# recommended 0.005..0.05; Q8_0 decode only).
+sparsity_threshold   = 0.0
 
 [diagnostics]
 # Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
@@ -158,3 +243,12 @@ exit_layer           = -1
 profile              = false
 graph_diag           = false
 graph_dump_dir       = ""
+# Force NVFP4 dispatch through dequant→FP16 GEMV (M=1 bisection tool).
+nvfp4_force_dequant  = false
+# Log shape + per-candidate algo for every cuBLASLt algo selection.
+log_gemm_algo        = false
+# MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.
+mtp_pattern_log      = false
+mtp_prenorm_h        = false
+# Audit NVFP4 weight scales at load time.
+audit_nvfp4_scales   = false

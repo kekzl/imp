@@ -5,12 +5,12 @@ Thanks for taking a look. imp is a single-author / single-target experiment, so 
 ## Prerequisites
 
 - An NVIDIA RTX 5090 (Blackwell, `sm_120a`). Other architectures are not supported and will not be added.
-- CUDA Toolkit 13.2 or newer.
+- CUDA Toolkit 13.2 or newer (minimum enforced by CMake; the canonical, tested toolchain is 13.3 — what Docker and CI build with).
 - CMake 3.25 or newer.
 - A C++20 host compiler (GCC 12+, Clang 15+).
 - Docker with GPU passthrough if you want to use the canonical build/test workflow.
 
-The host doesn't need any of these directly — `make build` runs everything in `imp:test`, a CUDA 13.2 container with the toolchain pre-installed.
+The host doesn't need any of these directly — `make build` runs everything in `imp:test`, a CUDA 13.3 container with the toolchain pre-installed.
 
 ## Build
 

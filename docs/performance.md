@@ -17,6 +17,11 @@ Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentiona
 **Last refreshed**: 2026-05-27 (post PRs #405–#448).
 llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
+> **Superseded for current numbers:** the SHA-anchored tables in
+> [`BENCHMARKS.md`](../BENCHMARKS.md) (full zoo re-bench 2026-05-30, Q8_0
+> baseline refresh 2026-06-05, CUDA 13.3) are the canonical current figures.
+> This page documents methodology and the historical cross-engine comparison.
+
 **Bench-mode caveat**: `--bench --max-tokens 128` allocates less KV VRAM than production, which changes the NVFP4 cache budget. MoE models are most affected — use `imp-cli --prompt` for production numbers.
 
 ## Decode Throughput (tg256)
