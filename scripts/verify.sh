@@ -91,7 +91,8 @@ warn()    { echo "${YLW}WARN${RST} $*"; }
 #     400 W floor so a healthy ~500 W run never trips it.
 #   - The SM clock ramps ~1s at bench start (cold-start artifact, audit §5), so
 #     we drop the first 2 samples before aggregating to avoid a false depressed
-#     classification from the ramp.
+#     classification from the ramp. A run with only 1-2 samples can't drop the
+#     ramp, so it's treated as no-data (gate fails open: plain FAIL).
 # Fail-open: if nvidia-smi is missing or errors, the sampler no-ops and the gate
 # behaves exactly as before (no degradation logic kicks in).
 GPU_DRIFT_MEM_FLOOR=13801   # mem clock (MHz) at/above which the host is healthy
@@ -129,7 +130,11 @@ gpu_sample_stop() {
     read -r MEM_MED PWR_MAX N < <(awk -F, '
         { gsub(/ /,""); n++; sm[n]=$1+0; mem[n]=$2+0; pwr[n]=$3+0 }
         END {
-            start = (n > 2) ? 3 : 1; cnt = 0; pmax = 0;
+            # n<=2 is too short to drop the ~1s cold-ramp samples: classify as
+            # no-data (N=0) so the gate fails open (plain FAIL on regression),
+            # never letting cold-ramp low-mem samples force a depressed WARN.
+            if (n <= 2) { print 0, 0, 0; exit }
+            start = 3; cnt = 0; pmax = 0;
             for (i = start; i <= n; i++) { m[++cnt] = mem[i]; if (pwr[i] > pmax) pmax = pwr[i]; }
             if (cnt == 0) { print 0, 0, 0; exit }
             # median of m[1..cnt]
