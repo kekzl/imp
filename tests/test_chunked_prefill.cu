@@ -89,10 +89,15 @@ static std::string generate_greedy(const char* model_path, const std::string& pr
 class ChunkedPrefillTest : public ::testing::Test {
 protected:
     // Model paths: env var override → /models absolute path (Docker bind-mount).
-    // IMP_TEST_MODEL=path overrides Qwen3-4B path.
+    // IMP_TEST_MODEL_QWEN4B=path overrides the Qwen3-4B path. Deliberately NOT
+    // the generic IMP_TEST_MODEL: suite runs set that to whatever model is
+    // under test (e.g. Qwen3-8B for the prefix-cache/greedy-lock gates), and
+    // these chunk-equality expectations are calibrated for Qwen3-4B — on other
+    // models chunk=0 vs chunk>0 cross the attention-kernel threshold into
+    // DIFFERENT kernel paths, where greedy logit ties may legitimately flip.
     // IMP_TEST_MODEL_LLAMA=path overrides Llama-3B path.
     static const char* qwen3_4b_path() {
-        const char* p = std::getenv("IMP_TEST_MODEL");
+        const char* p = std::getenv("IMP_TEST_MODEL_QWEN4B");
         if (p) return p;
         return "/models/Qwen3-4B-Instruct-2507-Q8_0.gguf";
     }
