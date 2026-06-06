@@ -81,7 +81,7 @@ protected:
     void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sliding_window = 0,
                   float softcap = 0.0f, float tol = 1e-2f, int q_offset = 0) {
         if (sm_ < 90) {
-            GTEST_SKIP() << "FMHA sm120 requires sm_90+ (WMMA fallback)";
+            GTEST_SKIP() << "WMMA prefill kernel needs sm_90+ (engine targets sm_120a)";
         }
 
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
