@@ -131,9 +131,25 @@ bool run_vision_pipeline(const std::string& mmproj_path, const std::string& imag
         alloc.allocate(static_cast<size_t>(num_tokens) * d_model * sizeof(half), "vision_golden_out"));
     if (!d_pixels || !d_out) {
         err = "device buffer alloc failed";
+        if (d_pixels)
+            alloc.free(d_pixels);
+        if (d_out)
+            alloc.free(d_out);
         cudaStreamDestroy(stream);
         return false;
     }
+    // VRAMAllocator is a tracker, not an owner (its dtor is a no-op) — free both
+    // buffers on every exit path below.
+    struct BufGuard {
+        VRAMAllocator& a;
+        half* p;
+        half* o;
+        ~BufGuard() {
+            a.free(p);
+            a.free(o);
+        }
+    } guard{alloc, d_pixels, d_out};
+
     cudaMemcpyAsync(d_pixels, img.pixels.data(), static_cast<size_t>(n_pixels) * sizeof(half),
                     cudaMemcpyHostToDevice, stream);
 
