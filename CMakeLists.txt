@@ -561,6 +561,7 @@ if(IMP_BUILD_TESTS)
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
         tests/test_prefix_cache_e2e.cpp
+        tests/test_determinism_e2e.cpp
     )
 
     set(IMP_TEST_BINARIES

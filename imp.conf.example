@@ -15,6 +15,11 @@
 [runtime]
 # Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible.
 deterministic_gemm   = false
+# Full reproducibility mode for temp=0 evals: deterministic MoE routing /
+# expert-scatter and top-k sampling kernels, implies deterministic_gemm.
+# Greedy output becomes bit-identical across runs/contexts (DetEvalE2ETest).
+# Legacy env: IMP_DETERMINISTIC=1. Costs a little throughput; off by default.
+deterministic        = false
 # CUDA Graph capture: "auto" picks per-model based on architecture support;
 # "always" forces capture (fails for MoE with D2H routing); "never" disables.
 cuda_graphs          = "auto"
