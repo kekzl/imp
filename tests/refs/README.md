@@ -47,6 +47,7 @@ Generators:
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `tests/test_vision_golden.cu` (dump mode = its own generator) | `vision_encoder_golden.h` | `tests/test_vision_golden.cu` |
+| `gen_reference.py` | — (none committed) | **dormant** (TEST_AUDIT.md §7) — HF layer-by-layer dump infra for future use; no test consumes it |
 
 gpt-oss YaRN goldens (P2.7): the generator reimplements YaRN-scaled RoPE
 (corr-dim ramp, freq blend, mscale) in fp64 from the YaRN/HF semantics for the
