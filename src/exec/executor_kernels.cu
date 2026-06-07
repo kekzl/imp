@@ -18,6 +18,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
+#include "compute/mmq_q8_imma.h"
 #include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
@@ -1855,6 +1856,21 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // path below as before.
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
+        // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled, default off): fused
+        // dequant on the int8 tensor cores instead of the materialize-to-FP16
+        // → cuBLAS round-trip (the dominant Q8_0 prefill tax, see
+        // docs/audit/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
+        // beta=1 residual-add form; declines (shape / capture-guard) fall
+        // through to the dequant fallback below.
+        if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && input.qtype == QType::F16 &&
+            output.qtype == QType::F16 && M >= 64 && input.stride[0] == h.shape[1] &&
+            output.stride[0] == h.shape[0]) {
+            if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
+                                 reinterpret_cast<__half*>(output.data), M,
+                                 static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]),
+                                 ctx.stream, ctx.beta))
+                return;
+        }
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
