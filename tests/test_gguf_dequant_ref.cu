@@ -166,6 +166,33 @@ void ref_dequant_q4_k(const uint8_t* blk, double* out) {
     }
 }
 
+// Q5_K: 176 bytes / 256 elems. [ d:f16 | dmin:f16 | scales:u8[12] | qh:u8[32] |
+// qs:u8[128] ]. Same 6-bit (scale,min) packing as Q4_K. The 5th bit of
+// element i lives in qh[i % 32] at bit position sub = i/32 (ggml
+// dequantize_row_q5_K). val = d*scale*(q4 + 16*bit) - dmin*min.
+void ref_dequant_q5_k(const uint8_t* blk, double* out) {
+    half d, dmin;
+    std::memcpy(&d, blk, 2);
+    std::memcpy(&dmin, blk + 2, 2);
+    const uint8_t* sc = blk + 4;
+    const uint8_t* qh = blk + 16;
+    const uint8_t* qs = blk + 48;
+    double dd = f16_to_f64(d);
+    double dm = f16_to_f64(dmin);
+    for (int i = 0; i < 256; ++i) {
+        int sub = i / 32;
+        uint8_t scv, mnv;
+        ref_get_scale_min_k4(sub, sc, scv, mnv);
+        int qs_byte = (i / 64) * 32 + (i % 32);
+        int use_high = (i / 32) & 1;
+        uint8_t packed = qs[qs_byte];
+        int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
+        int q5 = q4 + (((qh[i % 32] >> sub) & 1) << 4);
+        out[i] = dd * static_cast<double>(scv) * static_cast<double>(q5) -
+                 dm * static_cast<double>(mnv);
+    }
+}
+
 // IQ4_NL: 18 bytes / 32 elems. [ d:f16 | qs:u8[16] ]. Non-linear 4-bit: the
 // nibble indexes a fixed signed codebook (ggml-common.h kvalues_iq4nl).
 // Element j (0..15) = low nibble of qs[j]; element j+16 = high nibble
@@ -279,6 +306,30 @@ void build_q4_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode)
         }
 }
 
+void build_q5_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
+    int bpr = K / 256;
+    buf.resize((size_t)N * bpr * 176);
+    for (int r = 0; r < N; ++r)
+        for (int b = 0; b < bpr; ++b) {
+            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 176;
+            half d = pick_d(g, mode);
+            half dmin = (mode == MAXMAG) ? f16_from_bits(0x7BFF)
+                                         : __float2half(0.002f + 0.01f * std::fabs(g.unit()));
+            if (mode == ZERO_D)
+                dmin = __float2half(0.0f);
+            if (mode == NAN_D)
+                dmin = f16_from_bits(0x7E00);
+            std::memcpy(bp, &d, 2);
+            std::memcpy(bp + 2, &dmin, 2);
+            for (int i = 0; i < 12; ++i)
+                bp[4 + i] = (mode == MAXMAG) ? 0xFF : g.byte();  // 6-bit scale fields
+            for (int i = 0; i < 32; ++i)
+                bp[16 + i] = g.byte();  // qh: 5th bits, full range
+            for (int i = 0; i < 128; ++i)
+                bp[48 + i] = g.byte();  // 4-bit quant nibbles
+        }
+}
+
 void build_iq4_nl(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
     int bpr = K / 32;
     buf.resize((size_t)N * bpr * 18);
@@ -362,6 +413,11 @@ void ref_dequant_all(const std::vector<uint8_t>& buf, int N, int K, QType qt,
         for (int r = 0; r < N; ++r)
             for (int b = 0; b < bpr; ++b)
                 ref_dequant_iq4_xs(buf.data() + ((size_t)r * bpr + b) * 136, &out[(size_t)r * K + b * 256]);
+    } else if (qt == QType::Q5_K) {
+        int bpr = K / 256;
+        for (int r = 0; r < N; ++r)
+            for (int b = 0; b < bpr; ++b)
+                ref_dequant_q5_k(buf.data() + ((size_t)r * bpr + b) * 176, &out[(size_t)r * K + b * 256]);
     } else {  // Q4_K
         int bpr = K / 256;
         for (int r = 0; r < N; ++r)
@@ -632,6 +688,8 @@ void run_dp4a_gemv(const char* name, QType qt, int N, int K,
         build_q8_0(buf, N, K, g, NORMAL);
     else if (qt == QType::Q6_K)
         build_q6_k(buf, N, K, g, NORMAL);
+    else if (qt == QType::Q5_K)
+        build_q5_k(buf, N, K, g, NORMAL);
     else
         build_q4_k(buf, N, K, g, NORMAL);
     void* dW = to_device(buf);
@@ -724,6 +782,7 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
 TEST(GgufRef, Q6_K_GemvDp4a) { run_dp4a_gemv("Q6_K", QType::Q6_K, 256, 1024, gemv_q6k_q8_1); }
 TEST(GgufRef, Q4_K_GemvDp4a) { run_dp4a_gemv("Q4_K", QType::Q4_K, 256, 1024, gemv_q4_k_q8_1); }
+TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gemv_q5_k_q8_1); }
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }
 TEST(GgufRef, Q4_K_GemvMmvq) { run_mmvq_gemv("Q4_K", QType::Q4_K, 256, 1024, ggml_mmvq_q4k); }

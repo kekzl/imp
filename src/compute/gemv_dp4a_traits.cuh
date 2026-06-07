@@ -68,14 +68,20 @@ __device__ __forceinline__ int unpack_nibbles_2(uint8_t b0, uint8_t b1) {
     return r;
 }
 
-__device__ __forceinline__ void get_scale_min_k4(const uint8_t* __restrict__ sc, int sub, uint8_t& sc_val,
-                                                 uint8_t& min_val) {
+// 6-bit scale/min unpacker matching ggml get_scale_min_k4, register variant
+// (#598): the 12 scale bytes arrive as three words (s0 = sc[0..3],
+// s1 = sc[4..7], s2 = sc[8..11]) from a single uint4 header load instead of
+// per-byte L1 traffic. Byte-pointer reference copies live in
+// mmq_q4k_imma_layout.cu / gemv_ggml_compat.cu.
+__device__ __forceinline__ void get_scale_min_k4_reg(uint32_t s0, uint32_t s1, uint32_t s2, int sub,
+                                                     uint8_t& sc_val, uint8_t& min_val) {
+    auto byte_of = [](uint32_t w, int i) -> uint32_t { return (w >> (8 * i)) & 0xFFu; };
     if (sub < 4) {
-        sc_val = sc[sub] & 63;
-        min_val = sc[sub + 4] & 63;
+        sc_val = byte_of(s0, sub) & 63;
+        min_val = byte_of(s1, sub) & 63;
     } else {
-        sc_val = (sc[sub + 4] & 0xF) | ((sc[sub - 4] >> 6) << 4);
-        min_val = (sc[sub + 4] >> 4) | ((sc[sub] >> 6) << 4);
+        sc_val = (byte_of(s2, sub - 4) & 0xF) | ((byte_of(s0, sub - 4) >> 6) << 4);
+        min_val = (byte_of(s2, sub - 4) >> 4) | ((byte_of(s1, sub - 4) >> 6) << 4);
     }
 }
 
@@ -91,18 +97,23 @@ __device__ __forceinline__ float q4k_dp4a_sub(const uint8_t* __restrict__ qs,  /
     const bool use_high = (sub & 1);
     const uint8_t* qs_base = qs + qs_byte_offset;
 
+    // Two LDG.128 instead of eight LDG.32 (#598): this kernel class is
+    // L1TEX-instruction-bound (L1 hit 98.7%, DRAM 42%), so load count is
+    // the limiter. Alignment is guaranteed: the 144-byte superblock is
+    // 16B-aligned (144 = 9*16, GGUF tensor alignment 32) and qs sits at
+    // +16 + 32*k within it.
+    const uint4 lo = *reinterpret_cast<const uint4*>(qs_base);
+    const uint4 hi = *reinterpret_cast<const uint4*>(qs_base + 16);
+    const uint32_t qsw[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+
     int32_t sumi = 0;
     int q8_sum_int = 0;
     const int ones = 0x01010101;
 
 #pragma unroll
     for (int j = 0; j < 8; j++) {
-        uint32_t qs4;
-        memcpy(&qs4, qs_base + j * 4, 4);
-        uint32_t nibbles = use_high ? ((qs4 >> 4) & 0x0F0F0F0Fu) : (qs4 & 0x0F0F0F0Fu);
-        int ni;
-        memcpy(&ni, &nibbles, 4);
-        sumi = __dp4a(ni, xi[j], sumi);
+        uint32_t nibbles = use_high ? ((qsw[j] >> 4) & 0x0F0F0F0Fu) : (qsw[j] & 0x0F0F0F0Fu);
+        sumi = __dp4a(static_cast<int>(nibbles), xi[j], sumi);
         q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
     }
 
@@ -128,6 +139,16 @@ __device__ __forceinline__ float q5k_dp4a_sub(
     const bool use_high = (sub & 1);
     const uint8_t* qs_base = qs + qs_byte_offset;
 
+    // Vectorized loads (#598, same rationale as q4k_dp4a_sub): qs sits at
+    // +48 + 32*k (16B-aligned), qh at +16 (16B-aligned, 32 bytes shared by
+    // all subs). 4x LDG.128 replaces 16x LDG.32 per call.
+    const uint4 qlo = *reinterpret_cast<const uint4*>(qs_base);
+    const uint4 qhi = *reinterpret_cast<const uint4*>(qs_base + 16);
+    const uint32_t qsw[8] = {qlo.x, qlo.y, qlo.z, qlo.w, qhi.x, qhi.y, qhi.z, qhi.w};
+    const uint4 h0 = *reinterpret_cast<const uint4*>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4*>(qh + 16);
+    const uint32_t qhw[8] = {h0.x, h0.y, h0.z, h0.w, h1.x, h1.y, h1.z, h1.w};
+
     int32_t sumi = 0;
     int32_t sumi_h = 0;  // 5th-bit correction
     int q8_sum_int = 0;
@@ -135,27 +156,18 @@ __device__ __forceinline__ float q5k_dp4a_sub(
 
 #pragma unroll
     for (int j = 0; j < 8; j++) {
-        uint32_t qs4;
-        memcpy(&qs4, qs_base + j * 4, 4);
-        uint32_t nibbles = use_high ? ((qs4 >> 4) & 0x0F0F0F0Fu) : (qs4 & 0x0F0F0F0Fu);
-        int ni;
-        memcpy(&ni, &nibbles, 4);
-        sumi = __dp4a(ni, xi[j], sumi);
+        uint32_t nibbles = use_high ? ((qsw[j] >> 4) & 0x0F0F0F0Fu) : (qsw[j] & 0x0F0F0F0Fu);
+        sumi = __dp4a(static_cast<int>(nibbles), xi[j], sumi);
         q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
 
-        // Four consecutive elements l = j*4, j*4+1, j*4+2, j*4+3.
-        // Each reads qh[l] and extracts bit `sub`. Place the resulting
-        // 0/1 into bit 4 (→ value 16) of each byte of the 4-byte packed
-        // int, matching how ni was built from nibbles 0..15.
-        uint8_t b0 = qh[j * 4 + 0];
-        uint8_t b1 = qh[j * 4 + 1];
-        uint8_t b2 = qh[j * 4 + 2];
-        uint8_t b3 = qh[j * 4 + 3];
-        uint32_t hbits = (((b0 >> sub) & 1u) << 4) | (((b1 >> sub) & 1u) << 12) | (((b2 >> sub) & 1u) << 20) |
-                         (((b3 >> sub) & 1u) << 28);
-        int hi;
-        memcpy(&hi, &hbits, 4);
-        sumi_h = __dp4a(hi, xi[j], sumi_h);
+        // Four consecutive elements l = j*4 .. j*4+3 live in word qhw[j]
+        // (byte l%4). Each extracts bit `sub` and places the 0/1 into bit 4
+        // (→ value 16) of the corresponding byte, matching how `nibbles`
+        // was built from nibbles 0..15.
+        const uint32_t w = qhw[j];
+        uint32_t hbits = ((((w >> 0) >> sub) & 1u) << 4) | ((((w >> 8) >> sub) & 1u) << 12) |
+                         ((((w >> 16) >> sub) & 1u) << 20) | ((((w >> 24) >> sub) & 1u) << 28);
+        sumi_h = __dp4a(static_cast<int>(hbits), xi[j], sumi_h);
     }
 
     return dq * (d_super * (float)sc_val * (float)(sumi + sumi_h) -
@@ -278,13 +290,17 @@ struct DequantTraits<DPQTag::Q4_K> {
 
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
                                                        float /*q8_sum*/) {
-        float d_super = __half2float(*reinterpret_cast<const half*>(bp));
-        float dmin_super = __half2float(*reinterpret_cast<const half*>(bp + 2));
-        const uint8_t* sc = bp + 4;
+        // One LDG.128 for the whole 16-byte header (d, dmin, 12 scale
+        // bytes) instead of 2x LD.16 + per-byte scale loads (#598). The
+        // superblock is 16B-aligned (144 = 9*16).
+        const uint4 hdr = *reinterpret_cast<const uint4*>(bp);
+        const half2 dd = *reinterpret_cast<const half2*>(&hdr.x);
+        float d_super = __half2float(__low2half(dd));
+        float dmin_super = __half2float(__high2half(dd));
         const uint8_t* qs = bp + 16;
 
         uint8_t sc_val, min_val;
-        get_scale_min_k4(sc, sub, sc_val, min_val);
+        get_scale_min_k4_reg(hdr.y, hdr.z, hdr.w, sub, sc_val, min_val);
 
         return q4k_dp4a_sub(qs, sub, d_super, dmin_super, sc_val, min_val, xi, dq);
     }
@@ -302,14 +318,16 @@ struct DequantTraits<DPQTag::Q5_K> {
 
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
                                                        float /*q8_sum*/) {
-        float d_super = __half2float(*reinterpret_cast<const half*>(bp));
-        float dmin_super = __half2float(*reinterpret_cast<const half*>(bp + 2));
-        const uint8_t* sc = bp + 4;
+        // Header via one LDG.128 (#598); 176-byte superblock is 16B-aligned.
+        const uint4 hdr = *reinterpret_cast<const uint4*>(bp);
+        const half2 dd = *reinterpret_cast<const half2*>(&hdr.x);
+        float d_super = __half2float(__low2half(dd));
+        float dmin_super = __half2float(__high2half(dd));
         const uint8_t* qh = bp + 16;
         const uint8_t* qs = bp + 48;
 
         uint8_t sc_val, min_val;
-        get_scale_min_k4(sc, sub, sc_val, min_val);
+        get_scale_min_k4_reg(hdr.y, hdr.z, hdr.w, sub, sc_val, min_val);
 
         return q5k_dp4a_sub(qs, qh, sub, d_super, dmin_super, sc_val, min_val, xi, dq);
     }
