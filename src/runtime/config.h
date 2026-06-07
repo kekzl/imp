@@ -253,6 +253,18 @@ struct RuntimeConfig {
         // Q4_K-IMMA phase-2B ceiling diagnosis (SMEM-staged scales, 128x128x64
         // tiles, symmetric epilogue). Experimental: default off.
         bool q8_imma_enabled = false;
+        // Q4_K dense prefill via the same (new-stack) IMMA kernel — distinct
+        // from the legacy gemm.q4k_imma_enabled (2026-05 64x32 kernel, 40
+        // TOPS plateau). Uses mmq_q4k_imma_reorder's symmetric-s8 + α/β form
+        // with the unified β·rowsum epilogue. Experimental: default off.
+        bool q4k_imma_prefill = false;
+        // MoE batch prefill via the grouped IMMA kernel (one launch over all
+        // experts, gridDim.z = expert, BM=32 small-M tile for the typical
+        // ~32-rows-per-expert routing at pp512). Covers Q8_0/Q4_K expert
+        // tensors; others (Q6_K down_proj) stay on dequant→cuBLAS. This is
+        // lever #1 for the 2.4-2.6x GGUF-MoE prefill gap
+        // (docs/audit/prefill_gap_2026_06_07.md §4.2). Default off.
+        bool moe_imma_prefill = false;
         // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
         // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode
         // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV

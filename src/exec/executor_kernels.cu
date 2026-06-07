@@ -1862,13 +1862,21 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // docs/audit/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
         // beta=1 residual-add form; declines (shape / capture-guard) fall
         // through to the dequant fallback below.
-        if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && input.qtype == QType::F16 &&
-            output.qtype == QType::F16 && M >= 64 && input.stride[0] == h.shape[1] &&
-            output.stride[0] == h.shape[0]) {
+        const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 &&
+                                   M >= 64 && input.stride[0] == h.shape[1] &&
+                                   output.stride[0] == h.shape[0];
+        if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
             if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                                  reinterpret_cast<__half*>(output.data), M,
                                  static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]),
                                  ctx.stream, ctx.beta))
+                return;
+        }
+        if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
+            if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
+                                  reinterpret_cast<__half*>(output.data), M,
+                                  static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]),
+                                  ctx.stream, ctx.beta))
                 return;
         }
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
