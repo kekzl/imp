@@ -12,8 +12,8 @@ AUDIT_KEY_RX = re.compile(r"<!-- audit-key: (\S+) -->")
 
 # Classes whose low %-roofline at the measured shapes is a workload artifact or
 # noise floor, not an actionable lever — kept out of issues (documented in the
-# audit report's "Bekannte Artefakte"): tiny-ctx decode attention, launch-bound
-# micro-kernels at tg256, routing overhead, unclassified leftovers.
+# audit report's "Known artifacts" section): tiny-ctx decode attention,
+# launch-bound micro-kernels at tg256, routing overhead, unclassified leftovers.
 SKIP_CLASSES = {"unclassified", "moe_routing", "kv_write", "kv_gather",
                 "elementwise", "sampling", "rope"}
 SKIP_CELL_CLASS = {("tg256", "attn_decode_paged"), ("tg256", "rmsnorm")}

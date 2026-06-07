@@ -32,7 +32,7 @@ enum class QType : uint16_t {
     BF16 = 30,
     MXFP4 = 31,
 
-    // Engine-internal (>= 64, kollidiert nie mit künftigen Wire-Werten)
+    // Engine-internal (>= 64, never collides with future wire values)
     NONE = 64,
     FP8_E4M3 = 65,
     FP8_E5M2 = 66,

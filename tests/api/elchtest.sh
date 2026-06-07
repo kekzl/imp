@@ -26,8 +26,8 @@ req_status() { curl -s -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$UR
 health() { curl -s --max-time 5 http://localhost:8080"$1" 2>/dev/null; }
 
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║  ELCHTEST — imp-server Stabilitäts- & Korrektheitsprüfung      ║"
-echo "║  Modell: Qwen3-8B-Q8_0    GPU: RTX 5090                       ║"
+echo "║  ELCHTEST (moose test) — imp-server stability & correctness    ║"
+echo "║  Model: Qwen3-8B-Q8_0    GPU: RTX 5090                        ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -39,7 +39,7 @@ r=$(health "/health")
 t "GET /health → 200 + status ok" "endpoint" "$(echo "$r" | grep -q '"status":"ok"' && echo 1 || echo 0)"
 
 r=$(health "/v1/models")
-t "GET /v1/models → list mit data[]" "endpoint" "$(echo "$r" | grep -q '"object":"list"' && echo 1 || echo 0)"
+t "GET /v1/models → list with data[]" "endpoint" "$(echo "$r" | grep -q '"object":"list"' && echo 1 || echo 0)"
 
 r=$(health "/metrics")
 t "GET /metrics → Prometheus format" "endpoint" "$(echo "$r" | grep -q 'imp_requests_total' && echo 1 || echo 0)"
@@ -53,13 +53,13 @@ sc=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" -H "Content-Type
 t "Malformed JSON → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
 
 sc=$(req_status '{"model":"nonexistent.gguf","messages":[{"role":"user","content":"hi"}]}')
-t "Unbekanntes Modell → 404" "error" "$([ "$sc" = "404" ] && echo 1 || echo 0)"
+t "Unknown model → 404" "error" "$([ "$sc" = "404" ] && echo 1 || echo 0)"
 
 sc=$(req_status '{"model":"'$MODEL'","messages":"not array"}')
-t "messages kein Array → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
+t "messages not an array → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
 
 sc=$(req_status '{"model":"'$MODEL'","messages":[]}')
-t "Leeres messages[] → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
+t "Empty messages[] → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
 
 sc=$(req_status '{"model":"'$MODEL'","messages":[{"role":"user","content":"hi"}],"temperature":5}')
 t "temperature=5 → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
@@ -68,46 +68,46 @@ sc=$(req_status '{"model":"'$MODEL'","messages":[{"role":"user","content":"hi"}]
 t "max_tokens=0 → 400" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
 
 sc=$(req_status '{"model":"'$MODEL'","messages":[{"role":"user","content":"hi"}],"n":3}')
-t "n=3 → 400 (nicht unterstützt)" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
+t "n=3 → 400 (not supported)" "error" "$([ "$sc" = "400" ] && echo 1 || echo 0)"
 
 r=$(health "/health")
-t "Server lebt nach 7 Fehler-Requests" "error" "$(echo "$r" | grep -q '"status":"ok"' && echo 1 || echo 0)"
+t "Server alive after 7 error requests" "error" "$(echo "$r" | grep -q '"status":"ok"' && echo 1 || echo 0)"
 
 # ═══════════════════════════════════════════════════════════
 echo ""
-echo "── 3. KORREKTHEIT ──"
+echo "── 3. CORRECTNESS ──"
 # ═══════════════════════════════════════════════════════════
 
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"What is 2+2? Answer with just the number."}],"temperature":0,"max_tokens":30}' 30)
 c=$(echo "$r" | jq -r '.choices[0].message.content // ""')
-t "Greedy 2+2 → enthält '4'" "correct" "$(echo "$c" | grep -q '4' && echo 1 || echo 0)"
+t "Greedy 2+2 → contains '4'" "correct" "$(echo "$c" | grep -q '4' && echo 1 || echo 0)"
 
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"Capital of France? One word."}],"temperature":0,"max_tokens":30}' 30)
 c=$(echo "$r" | jq -r '.choices[0].message.content // ""')
-t "Greedy Hauptstadt Frankreich → Paris" "correct" "$(echo "$c" | grep -qi 'paris' && echo 1 || echo 0)"
+t "Greedy capital of France → Paris" "correct" "$(echo "$c" | grep -qi 'paris' && echo 1 || echo 0)"
 
-# Determinismus
+# Determinism
 p='{"model":"'$MODEL'","messages":[{"role":"user","content":"Say hello"}],"temperature":0,"max_tokens":20,"seed":42}'
 c1=$(req "$p" 30 | jq -r '.choices[0].message.content // ""')
 c2=$(req "$p" 30 | jq -r '.choices[0].message.content // ""')
-t "Seed=42 temp=0 → deterministisch" "correct" "$([ "$c1" = "$c2" ] && echo 1 || echo 0)"
+t "Seed=42 temp=0 → deterministic" "correct" "$([ "$c1" = "$c2" ] && echo 1 || echo 0)"
 
 # JSON output
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"system","content":"Reply JSON: {\"answer\":\"...\"}"},{"role":"user","content":"Capital of Germany?"}],"temperature":0.7,"max_tokens":100}' 30)
 c=$(echo "$r" | jq -r '.choices[0].message.content // ""')
-t "JSON mode → valides JSON" "correct" "$(echo "$c" | jq . >/dev/null 2>&1 && echo 1 || echo 0)"
+t "JSON mode → valid JSON" "correct" "$(echo "$c" | jq . >/dev/null 2>&1 && echo 1 || echo 0)"
 
-# Usage korrekt
+# Usage correct
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"temperature":0}' 15)
 pt=$(echo "$r" | jq -r '.usage.prompt_tokens // 0')
 ct=$(echo "$r" | jq -r '.usage.completion_tokens // 0')
 tt=$(echo "$r" | jq -r '.usage.total_tokens // 0')
 t "Usage: total = prompt + completion" "correct" "$([ "$tt" -eq "$((pt + ct))" ] && echo 1 || echo 0)"
 
-# max_tokens respektiert
+# max_tokens respected
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"Count 1 to 1000"}],"max_tokens":3,"temperature":0}' 15)
 ct=$(echo "$r" | jq -r '.usage.completion_tokens // 0')
-t "max_tokens=3 respektiert (≤5 tok)" "correct" "$([ "$ct" -le 5 ] && echo 1 || echo 0)"
+t "max_tokens=3 respected (≤5 tok)" "correct" "$([ "$ct" -le 5 ] && echo 1 || echo 0)"
 
 # ═══════════════════════════════════════════════════════════
 echo ""
@@ -115,9 +115,9 @@ echo "── 4. STREAMING ──"
 # ═══════════════════════════════════════════════════════════
 
 raw=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"Say hello"}],"max_tokens":10,"temperature":0,"stream":true}' 15)
-t "Stream: enthält chat.completion.chunk" "stream" "$(echo "$raw" | grep -q 'chat.completion.chunk' && echo 1 || echo 0)"
+t "Stream: contains chat.completion.chunk" "stream" "$(echo "$raw" | grep -q 'chat.completion.chunk' && echo 1 || echo 0)"
 t "Stream: [DONE] sentinel" "stream" "$(echo "$raw" | grep -q 'data: \[DONE\]' && echo 1 || echo 0)"
-t "Stream: finish_reason vorhanden" "stream" "$(echo "$raw" | grep -q 'finish_reason' && echo 1 || echo 0)"
+t "Stream: finish_reason present" "stream" "$(echo "$raw" | grep -q 'finish_reason' && echo 1 || echo 0)"
 
 # Stream vs non-stream: assemble stream chunks via jq, compare trimmed
 p_base='{"model":"'$MODEL'","messages":[{"role":"user","content":"What is 1+1? Number only."}],"max_tokens":5,"temperature":0,"think_budget":0'
@@ -143,10 +143,10 @@ all_ok=1
 for i in $(seq 1 8); do
   if ! jq -e '.choices[0].message.content' /tmp/conc_$i.json >/dev/null 2>&1; then all_ok=0; fi
 done
-t "8 concurrent Requests → alle mit content" "concur" "$all_ok"
+t "8 concurrent requests → all with content" "concur" "$all_ok"
 
 r=$(health "/health")
-t "Server stabil nach 8-concurrent" "concur" "$(echo "$r" | grep -q '"status":"ok"' && echo 1 || echo 0)"
+t "Server stable after 8-concurrent" "concur" "$(echo "$r" | grep -q '"status":"ok"' && echo 1 || echo 0)"
 
 # ═══════════════════════════════════════════════════════════
 echo ""
@@ -170,14 +170,15 @@ echo "── 7. EDGE CASES ──"
 # ═══════════════════════════════════════════════════════════
 
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":""}],"max_tokens":5,"temperature":0}' 15)
-t "Leerer User-Content → kein Crash" "edge" "$(echo "$r" | jq -e '.choices[0]' >/dev/null 2>&1 && echo 1 || echo 0)"
+t "Empty user content → no crash" "edge" "$(echo "$r" | jq -e '.choices[0]' >/dev/null 2>&1 && echo 1 || echo 0)"
 
 longtext=$(printf 'word %.0s' $(seq 1 600))
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"Summarize: '"$longtext"'"}],"max_tokens":20,"temperature":0}' 30)
-t "Langer Prompt (600 Wörter) → Antwort" "edge" "$(echo "$r" | jq -e '.choices[0].message.content' >/dev/null 2>&1 && echo 1 || echo 0)"
+t "Long prompt (600 words) → response" "edge" "$(echo "$r" | jq -e '.choices[0].message.content' >/dev/null 2>&1 && echo 1 || echo 0)"
 
+# Prompt intentionally German ("What does 🎉🚀💻 mean?") to exercise unicode/emoji + multilingual input
 r=$(req '{"model":"'$MODEL'","messages":[{"role":"user","content":"Was bedeutet 🎉🚀💻?"}],"max_tokens":30,"temperature":0}' 30)
-t "Unicode/Emoji im Prompt → kein Crash" "edge" "$(echo "$r" | jq -e '.choices[0]' >/dev/null 2>&1 && echo 1 || echo 0)"
+t "Unicode/emoji in prompt → no crash" "edge" "$(echo "$r" | jq -e '.choices[0]' >/dev/null 2>&1 && echo 1 || echo 0)"
 
 rapid_ok=1
 for i in $(seq 1 20); do
@@ -185,7 +186,7 @@ for i in $(seq 1 20); do
     -d '{"model":"'$MODEL'","messages":[{"role":"user","content":"'$i'"}],"max_tokens":1,"temperature":0}' 2>/dev/null)
   echo "$r" | jq -e '.choices[0]' >/dev/null 2>&1 || rapid_ok=0
 done
-t "20 rapid-fire Requests → alle OK" "edge" "$rapid_ok"
+t "20 rapid-fire requests → all OK" "edge" "$rapid_ok"
 
 timeout 1 curl -s "$URL" -H "Content-Type: application/json" \
   -d '{"model":"'$MODEL'","messages":[{"role":"user","content":"Count 1 to 1000"}],"max_tokens":500,"stream":true}' >/dev/null 2>&1 || true
@@ -217,12 +218,12 @@ t "Decode ≥200 tok/s (got ${tps})" "perf" "$([ $tps -ge 200 ] && echo 1 || ech
 # ═══════════════════════════════════════════════════════════
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-printf "║  ERGEBNIS: %d/%d PASS  (%d FAIL)                               ║\n" "$PASS" "$TOTAL" "$FAIL"
+printf "║  RESULT: %d/%d PASS  (%d FAIL)                                 ║\n" "$PASS" "$TOTAL" "$FAIL"
 echo "╠══════════════════════════════════════════════════════════════════╣"
 if [ $FAIL -eq 0 ]; then
-echo "║  ✓ ELCHTEST BESTANDEN                                          ║"
+echo "║  ✓ ELCHTEST PASSED                                             ║"
 else
-echo "║  ✗ ELCHTEST NICHT BESTANDEN                                    ║"
+echo "║  ✗ ELCHTEST FAILED                                             ║"
 printf "║  Failures:%-54s║\n" ""
 printf "$FAILS\n" | while read line; do [ -n "$line" ] && printf "║    %-60s║\n" "$line"; done
 fi

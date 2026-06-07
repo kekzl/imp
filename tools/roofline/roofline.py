@@ -5,7 +5,7 @@ Subcommands:
   measure   ncu+nsys sweep over the shape set (>=3 restarts), new history entry
   ab        unprofiled A/B bench for a fallback knob (e.g. fa2)
   plot      render roofline.png / trend / compare from history (no re-measure)
-  report    markdown report (Modul 1 + Modul 2 + levers) from history
+  report    markdown report (Module 1 + Module 2 + levers) from history
   regress   exit!=0 if a kernel class fell > threshold below a baseline run
   issues    generate GitHub issues from findings (dry-run unless --create)
   list      list history runs

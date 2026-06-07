@@ -1,68 +1,68 @@
-# tools/roofline — reproduzierbare Roofline- & Coverage-Pipeline
+# tools/roofline — reproducible roofline & coverage pipeline
 
-Misst Roofline-Nähe (%-Roofline, AI, achieved FLOPS/BW) und Kernel-Coverage
-(Legacy-Fallback-Anteile) der imp-Hot-Path-Kernels auf der RTX 5090 (sm_120a),
-mit append-only Historie pro Commit.
+Measures roofline proximity (%-roofline, AI, achieved FLOPS/BW) and kernel
+coverage (legacy-fallback shares) of the imp hot-path kernels on the RTX 5090
+(sm_120a), with append-only history per commit.
 
 ## Quickstart
 
 ```bash
-tools/roofline/roofline measure                 # voller Sweep, 3 Restarts (~Stunden, GPU exklusiv)
-tools/roofline/roofline measure --models q8-dense --shapes tg256 --restarts 1   # Smoke
+tools/roofline/roofline measure                 # full sweep, 3 restarts (~hours, GPU exclusive)
+tools/roofline/roofline measure --models q8-dense --shapes tg256 --restarts 1   # smoke
 tools/roofline/roofline plot --latest           # roofline.png + roofline_trend.png
 tools/roofline/roofline plot --compare RUN_A RUN_B
 tools/roofline/roofline report --run latest -o audit/roofline_$(date +%Y_%m_%d).md
 tools/roofline/roofline regress --baseline <run_id|sha> --threshold 5
-tools/roofline/roofline issues --run latest     # dry-run; --create legt GitHub-Issues an
+tools/roofline/roofline issues --run latest     # dry-run; --create files GitHub issues
 tools/roofline/roofline ab --knob fa2           # unprofiled A/B (FA2 on vs never)
 ```
 
-## Architektur
+## Architecture
 
-- **Messung** (`measure`): pro Zelle (Modell × Shape × Restart) zwei Pässe in
-  frischen Docker-Containern (= Restart-Varianz by construction):
-  1. **nsys** (volle Timeline): Kernel-Zeitanteile, cuBLAS-API-Attribution
-     (batched GEMM ⇒ Legacy-Attention QK^T/PV), Phasen-Split (init/prefill/
-     decode) und Kalibrierung des ncu `--launch-skip` (Steady-State-Fenster).
-  2. **ncu** (gepinntes Counter-Set, `--clock-control base`): pro Launch
-     Zeit, `dram__bytes`, Tensor-Pipe-FLOP-Counter, SM/DRAM-%, Occupancy.
-- **Historie** (`history/`): append-only.
-  - `runs/<run_id>.json` — geparster Run (committed). `run_id = <shortSHA>[-dirty]_<timestamp>`.
-  - `index.jsonl` — eine Zeile pro Run für Trend-Queries (committed).
-  - `raw/<run_id>/*.ncu_raw.csv.gz` + `*.nsys_extract.json` — Roh-Exporte,
-    Re-Parse ohne Re-Measure (committed).
-  - `raw/<run_id>/*.ncu-rep|*.nsys-rep|*.sqlite` — binäre Originale,
-    **nur lokal** (gitignored; Release-Check verbietet sie im Repo).
-- **Plots** (`plot`): matplotlib im Container `imp-roofline-plot`
-  (Dockerfile.plot, Host bleibt clean) — rendert ausschließlich aus History.
-- **Report** (`report`): Markdown mit Modul-1-Tabelle, Modul-2-Coverage-Matrix
-  und priorisierter Lever-Liste; jede Zahl referenziert den Run (commit+ts).
-- **Gate** (`regress`): exit≠0, wenn eine Kernel-Klasse (Zeitanteil ≥0.5%)
-  im Median > Schwelle unter die Baseline fällt UND die Restart-Spannen
-  disjunkt sind (sonst Varianz, kein Fail).
+- **Measurement** (`measure`): per cell (model × shape × restart), two passes in
+  fresh Docker containers (= restart variance by construction):
+  1. **nsys** (full timeline): kernel time shares, cuBLAS API attribution
+     (batched GEMM ⇒ legacy attention QK^T/PV), phase split (init/prefill/
+     decode), and calibration of the ncu `--launch-skip` (steady-state window).
+  2. **ncu** (pinned counter set, `--clock-control base`): per launch
+     time, `dram__bytes`, tensor-pipe FLOP counters, SM/DRAM %, occupancy.
+- **History** (`history/`): append-only.
+  - `runs/<run_id>.json` — parsed run (committed). `run_id = <shortSHA>[-dirty]_<timestamp>`.
+  - `index.jsonl` — one line per run for trend queries (committed).
+  - `raw/<run_id>/*.ncu_raw.csv.gz` + `*.nsys_extract.json` — raw exports,
+    re-parse without re-measure (committed).
+  - `raw/<run_id>/*.ncu-rep|*.nsys-rep|*.sqlite` — binary originals,
+    **local only** (gitignored; the release check forbids them in the repo).
+- **Plots** (`plot`): matplotlib in the `imp-roofline-plot` container
+  (Dockerfile.plot, host stays clean) — renders exclusively from history.
+- **Report** (`report`): Markdown with the Module-1 table, the Module-2 coverage
+  matrix and a prioritized lever list; every number references the run (commit+ts).
+- **Gate** (`regress`): exit≠0 when a kernel class (time share ≥0.5%) drops in
+  the median by more than the threshold below the baseline AND the restart
+  ranges are disjoint (otherwise variance, no fail).
 
-## Determinismus / Methodik
+## Determinism / methodology
 
-- Counter-Set, Shapes, Peaks und Klassifikations-Regexes liegen versioniert in
-  `config.json` (`config_version` — Läufe nur innerhalb gleicher Version vergleichen).
-- ncu lockt Clocks auf Base (`--clock-control base`); Compute-Peaks werden auf
-  den **gemessenen** SM-Takt normiert (`gpc__cycles_elapsed.avg.per_second`),
-  Ridge-Points auf Boost-Takt (2.407 GHz) — beides in config.json.
-- AI = FLOPs / `dram__bytes.sum` (gemessener DRAM-Traffic, nicht geschätzt).
-- **FLOP counting**: Tensor-Core-FLOPs aus `sm__ops_path_tensor_src_*`-Countern
-  (Kalibrierung gegen bekannte GEMM-Shapes, siehe Report-Methodik). Non-TC:
-  SASS-Thread-Instruktionen (ffma=2 FLOP; hfma als gepackt HFMA2=4 FLOP
-  gezählt — obere Schranke, im Report als solche markiert).
-- Profil-Läufe nutzen `--no-cuda-graphs` (Graph-Replay versteckt Kernel,
-  Kernel-Mix ist identisch — siehe docs/MISSION_JOURNAL/memory).
-- Prefill-Zellen messen `--bench-reps 3 --max-tokens 1`; Decode-Zellen
-  `--bench-pp 64 --max-tokens 256`. pp-Restart-Varianz (bekannt bis 2.6×)
-  wird als min/med/max ausgewiesen, nie weggemittelt.
+- The counter set, shapes, peaks and classification regexes are versioned in
+  `config.json` (`config_version` — only compare runs within the same version).
+- ncu locks clocks to base (`--clock-control base`); compute peaks are
+  normalized to the **measured** SM clock (`gpc__cycles_elapsed.avg.per_second`),
+  ridge points to the boost clock (2.407 GHz) — both in config.json.
+- AI = FLOPs / `dram__bytes.sum` (measured DRAM traffic, not estimated).
+- **FLOP counting**: tensor-core FLOPs from the `sm__ops_path_tensor_src_*`
+  counters (calibrated against known GEMM shapes, see report methodology). Non-TC:
+  SASS thread instructions (ffma=2 FLOP; hfma counted as packed HFMA2=4 FLOP
+  — an upper bound, flagged as such in the report).
+- Profile runs use `--no-cuda-graphs` (graph replay hides kernels, the kernel
+  mix is identical — see docs/MISSION_JOURNAL/memory).
+- Prefill cells measure `--bench-reps 3 --max-tokens 1`; decode cells
+  `--bench-pp 64 --max-tokens 256`. pp restart variance (known up to 2.6×) is
+  reported as min/med/max, never averaged away.
 
 ## CI
 
-GPU-Messung ist LOKAL (CI hat keinen GPU-Runner). Der Workflow
-`.github/workflows/roofline.yml` prüft auf jedem PR nur Parser/Mathe gegen die
-eingecheckte History (re-parse) und rendert Plots als Artefakt. Baseline-Pinning:
-nach Merge auf main lokal `roofline measure` + Commit der History; `regress`
-läuft im pre-push-Hook, wenn eine Baseline gepinnt ist (`history/BASELINE`).
+GPU measurement is LOCAL (CI has no GPU runner). The workflow
+`.github/workflows/roofline.yml` checks only parser/math against the checked-in
+history (re-parse) on each PR and renders plots as an artifact. Baseline pinning:
+after merge to main, run `roofline measure` locally + commit the history;
+`regress` runs in the pre-push hook when a baseline is pinned (`history/BASELINE`).
