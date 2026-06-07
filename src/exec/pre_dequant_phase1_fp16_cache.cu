@@ -22,7 +22,6 @@
 
 using imp::pre_dequant_internal::create_fused_weight_pair;
 using imp::pre_dequant_internal::deduct_budget;
-using imp::pre_dequant_internal::nvfp4_beneficial;
 
 namespace imp {
 
@@ -41,55 +40,28 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
         return;
     }
 
-    // Plan-driven per-weight gate: cache as FP16 iff the (source-qtype-aware)
-    // planner would route this kind+qtype to the FP16 tier. Sub-5-bit sources
-    // (Q4_K, Q4_0, etc.) land here. Q5_K/Q6_K/Q8_0/Q8_K → NVFP4 (Phase 3).
-    // Native FP4 → their own tier. Replaces the unconditional NVFP4-only
-    // early-exit + per-FFN nvfp4_decode_mode heuristic.
-    auto plan_routes_to_fp16 = [&](TensorKind kind, QType qtype) {
-        if (qtype == QType::F16 || qtype == QType::BF16 || qtype == QType::F32)
-            return false;  // already in compute dtype; no overlay needed
-        const auto cap = effective_capabilities(kind, qtype);
-        return cap.required_floor == StorageTier::FP16;
-    };
-
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
-    // When FP8 is disabled (sub-8-bit models), the planner's FP8 tier entries
-    // have no fallback — Q6_K/Q8_0 weights that would normally get FP8 prefill
-    // cache land in the dequant-on-every-forward fallback. Widen the FP16 gate
-    // to cover those weights too: any dequantable attention/FFN weight that
-    // doesn't already have an overlay gets FP16 cached.
-    const bool fp8_unavailable = !wcache_.use_fp8;
-
+    // Plan-driven gate (Stage 1.3): FP16-cache a weight iff the StoragePlan
+    // routes its source to the FP16 tier, OR the plan flagged it as needing an
+    // FP16 companion. The plan (built in pre_dequant_weights + apply_arch_rules_)
+    // already folds in every rule this gate used to compute inline:
+    //   - Phase 3 owns nvfp4_beneficial weights (Q8_0/Q6_K/Q5_K) → tier NVFP4,
+    //     not FP16 (the #428×#434 starvation guard, now structural).
+    //   - FP8 unavailable → FP8-floor kinds fall back to FP16.
+    //   - gemma-3: NVFP4-tier weights get fp16_companion so the Phase-3 decode
+    //     cache is built FROM the FP16 copy, not from scratch (the <pad>/IMA
+    //     corruption guard) — without a scattered arch check here.
     auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
+        (void)kind;
         if (!w.data || !dequant_gpu_supported(qtype))
             return;
         if (wcache_.fp16.count(w.data))
             return;  // already cached
         if (budget_exhausted)
             return;
-        // Phase 3 (the NVFP4 decode cache) owns nvfp4_beneficial weights
-        // (Q8_0/Q6_K/Q5_K) whenever the decode cache is active. Never FP16-cache
-        // those here — not even when FP8 is unavailable. Doing so consumes the
-        // VRAM budget Phase 3 needs and starves the decode cache to ~2 of ~252
-        // tensors → decode falls back to heavy FP16 weights. That FP8-disable
-        // (PR #428) × FP16-widen (PR #434) interaction regressed Qwen3-8B Q8_0
-        // tg128 284→146 and Qwen3-14B Q6_K 157→93. These weights instead get a
-        // compact NVFP4 decode cache (0.5 B/elem, fast + coherent) and prefill
-        // via on-the-fly Q*_K→FP16 dequant (executor_kernels gemm_via_handle_) —
-        // far less VRAM than double-caching FP16+NVFP4, leaving headroom for KV.
-        // GEMMA3 exception: keep its nvfp4_beneficial weights FP16-cached so the
-        // Phase-3 NVFP4 decode cache is built FROM the FP16 copy, not from scratch
-        // (source Q*_K dequant). Skipping FP16 here forces the from-scratch NVFP4
-        // build, which corrupts Gemma-3 decode (first decode step emits token 0 /
-        // <pad> — verified: pre-#461 FP16-backed Gemma-3 is coherent, #461's skip
-        // regressed gemma-3-12b-it-Q4_K_M to "The"→<pad>). Qwen3 Q6_K/Q8_0 build
-        // NVFP4 from scratch fine, so this is GEMMA3-arch-specific.
-        if (wcache_.nvfp4_decode_mode > 0 && cfg.arch != ModelArch::GEMMA3 &&
-            nvfp4_beneficial(qtype, runtime_config().gemm.nvfp4_decode_all))
-            return;
-        if (!fp8_unavailable && !plan_routes_to_fp16(kind, qtype))
-            return;  // Phase 3 (NVFP4) or native FP4 owns this weight
+        const auto* e = storage_plan_.entry_of(w.data);
+        if (!e || (e->tier != StorageTier::FP16 && !e->fp16_companion))
+            return;  // plan routes this to NVFP4 / FP8 / native, or not in plan
 
         int rows = static_cast<int>(w.shape[0]);
         int cols = static_cast<int>(w.shape[1]);
@@ -124,8 +96,8 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     // Priority order: attention weights first (critical for cuBLAS prefill),
     // then SSM, shared experts, and dense FFN.  This ensures hybrid models
     // like Nemotron (23 SSM + 6 attention layers) cache all attention weights
-    // before SSM weights exhaust the VRAM budget. Tier-decision is per-kind
-    // via plan_routes_to_fp16; per-tensor budget pressure still applies.
+    // before SSM weights exhaust the VRAM budget. Tier-decision is plan-driven
+    // (storage_plan_); per-tensor budget pressure still applies.
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
         cache_weight(L.wq, L.wq.qtype, TensorKind::WQ);
