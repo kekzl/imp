@@ -1079,6 +1079,19 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
     }
 }
 
+// TUNING LADDER 2026-06-07 (Qwen3-8B Q8_0 pp512, baseline 12 131 tok/s) —
+// three refuted attempts, kernel is at its local optimum in this structure:
+//   __launch_bounds__(256,2):  9 768 (-19%) — 184-reg kernel spills under
+//                              the 128-reg cap; 64-fp32 accumulator file.
+//   NT=64 tile (acc 32):       9 685 (-20%) — bigger tiles win, matching
+//                              the 2026-05-18 phase-2B finding (+108% from
+//                              tile growth). 1 CTA/SM stands.
+//   ldmatrix.x4 A+B fetch:    11 619 (-4%)  — smem fetch is NOT the binding
+//                              constraint after the +16-B row pad; matches
+//                              the 2B.5 neutral-to-negative result.
+// Remaining structural ideas (BK=128 sync-halving w/ dynamic smem, warp
+// specialization) are larger rewrites; the model-level gap vs llama.cpp is
+// 1.13x — the smallest on the board. Spend elsewhere first.
 struct WeightPlanes {
     int8_t* qs = nullptr;
     __half* sc = nullptr;  // interleaved (α, β) [N][K/32][2]
