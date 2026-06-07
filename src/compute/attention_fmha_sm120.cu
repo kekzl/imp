@@ -1091,11 +1091,38 @@ __device__ __forceinline__ uint32_t pack2_f2h(float a, float b) {
     memcpy(&r, &h, 4);
     return r;
 }
-__device__ __forceinline__ uint32_t pack2_hh(half a, half b) {
-    __half2 h = __halves2half2(a, b);
-    uint32_t r;
-    memcpy(&r, &h, 4);
-    return r;
+// ldmatrix.x4: one warp instruction loads four 8x8 b16 tiles from smem —
+// replaces 4-6 scalar LDS per MMA operand fetch (this kernel was LSU-
+// instruction-bound: ncu 2026-06-07 measured 3.4 shared-LDS per tensor op;
+// SASS showed 256 LDS.U16 per KV tile for the V fragments alone). Each group
+// of 8 lanes supplies the row addresses of one tile (rows stay 16-B aligned
+// thanks to the FA2_KV_PAD stride). The non-trans form delivers fragments in
+// mma A/B register order for row-major sources; .trans transposes each 8x8
+// during delivery — exactly the V[kv][hd] -> B[k][n] fragment turn the PV MMA
+// needs, killing the strided 2-byte V loads AND their pack2 PRMTs.
+__device__ __forceinline__ void ldsm_x4(uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3,
+                                        const half* smem_row) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+    uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(smem_row));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+                 : "r"(a));
+#else
+    r0 = r1 = r2 = r3 = 0;
+    (void)smem_row;
+#endif
+}
+__device__ __forceinline__ void ldsm_x4_trans(uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3,
+                                              const half* smem_row) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+    uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(smem_row));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+                 : "r"(a));
+#else
+    r0 = r1 = r2 = r3 = 0;
+    (void)smem_row;
+#endif
 }
 __device__ __forceinline__ float quad_max(float v) {
     v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFF, v, 1));
@@ -1200,33 +1227,24 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                   (int64_t)head_idx * head_dim;
 
     // Padded smem row strides (see FA2_Q_PAD / FA2_KV_PAD — bank-conflict relief).
-    // FP16QK stores Q as halfs: stride unit is HALFS and the row size doubles
-    // in bytes (2*(HD+pad)); fp8 mode keeps the byte-stride layout.
-    constexpr int QSTRIDE = head_dim + (FP16QK ? FA2_KV_PAD : FA2_Q_PAD);  // halfs (fp16) / bytes (fp8)
-    constexpr int KVSTRIDE = head_dim + FA2_KV_PAD;                        // K/V row stride in HALFS
-    constexpr size_t Q_SMEM_BYTES = (size_t)Bq * QSTRIDE * (FP16QK ? sizeof(half) : sizeof(uint8_t));
+    // fp16 mode keeps Q in registers (no smem tile at all); fp8 mode stages
+    // e4m3 bytes with the byte-stride layout.
+    constexpr int QSTRIDE = head_dim + FA2_Q_PAD;    // bytes (fp8 mode only)
+    constexpr int KVSTRIDE = head_dim + FA2_KV_PAD;  // K/V row stride in HALFS
+    constexpr size_t Q_SMEM_BYTES = FP16QK ? 0 : (size_t)Bq * QSTRIDE * sizeof(uint8_t);
 
     extern __shared__ char smem[];
     uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);           // fp8 mode view
-    half* Q_h16 = reinterpret_cast<half*>(smem);                 // fp16 mode view
     half* K_buf = reinterpret_cast<half*>(smem + Q_SMEM_BYTES);  // [2][Bkv*KVSTRIDE] f16
     half* V_buf = K_buf + 2 * Bkv * KVSTRIDE;                    // [2][Bkv*KVSTRIDE] f16
 
-    // ---- load Q once: fp8 mode converts 4 halves → 4 e4m3; fp16 mode copies ----
-    if constexpr (FP16QK) {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += NTHREADS) {
-            int i = vi * 4;
-            int r = i / head_dim;
-            int d = i % head_dim;  // multiple of 4 → uint2-aligned into the padded row
-            uint2* dst = reinterpret_cast<uint2*>(Q_h16 + r * QSTRIDE + d);
-            if (q_start + r >= seq_q) {
-                *dst = make_uint2(0, 0);
-            } else {
-                *dst = *reinterpret_cast<const uint2*>(&Q_ptr[(int64_t)r * q_row_stride + d]);
-            }
-        }
-    } else {
+    // ---- load Q once: fp8 mode converts 4 halves → 4 e4m3 into smem; fp16
+    // mode skips smem entirely — each lane pulls its loop-invariant
+    // A-fragment words straight from global into registers below (Q is read
+    // exactly once per CTA, and dropping the staging tile frees enough smem
+    // for the 8-warp Bq=128 config: the kernel is latency-bound at 4 warps,
+    // 1 warp/scheduler). ----
+    if constexpr (!FP16QK) {
         const int total_vec4 = (Bq * head_dim) / 4;
         for (int vi = tid; vi < total_vec4; vi += NTHREADS) {
             int i = vi * 4;
@@ -1258,6 +1276,29 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     cp_async_commit();
     __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
 
+    // fp16 mode: the Q A-fragments are loop-invariant — load them once,
+    // straight from global memory into registers (no smem staging; rows past
+    // seq_q are zero-filled like the old staging loop did). Register layout
+    // matches the a0..a3 the QK MMA consumed: a0=(rl,cl) a1=(rl+8,cl)
+    // a2=(rl,cl+8) a3=(rl+8,cl+8).
+    uint32_t a_frag[FP16QK ? (HD / 16) : 1][4];
+    if constexpr (FP16QK) {
+        const int r0 = warp_id * 16 + rl;
+        const int r1 = r0 + 8;
+        const bool v0 = (q_start + r0) < seq_q;
+        const bool v1 = (q_start + r1) < seq_q;
+        const half* q0 = Q_ptr + (int64_t)r0 * q_row_stride;
+        const half* q1 = Q_ptr + (int64_t)r1 * q_row_stride;
+#pragma unroll
+        for (int k = 0; k < HD / 16; k++) {
+            const int d = k * 16 + cl;
+            a_frag[k][0] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + d) : 0u;
+            a_frag[k][1] = v1 ? *reinterpret_cast<const uint32_t*>(q1 + d) : 0u;
+            a_frag[k][2] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + d + 8) : 0u;
+            a_frag[k][3] = v1 ? *reinterpret_cast<const uint32_t*>(q1 + d + 8) : 0u;
+        }
+    }
+
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int slot = (j - first_kv_tile) & 1;
         const int kv_start = j * Bkv;
@@ -1280,35 +1321,60 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
         // ---- QK: S[n] = Q(warp rows) @ K[n-tile]^T ----
         // fp8 mode: m16n8k32.e4m3 (K cvt f16→fp8 inline). fp16 mode: m16n8k16.f16.
         float S[N_S][4];
+        if constexpr (FP16QK) {
+            // n-tiles processed in pairs: one ldmatrix.x4 fetches the K
+            // B-fragments (b0,b1) of BOTH tiles — lanes 0-7 / 8-15 address
+            // {rows n*8+0..7, k-lo} / {same rows, k-hi}, lanes 16-31 the same
+            // for tile n+1. A comes from the hoisted loop-invariant a_frag.
 #pragma unroll
-        for (int n = 0; n < N_S; n++) {
-            float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
-            if constexpr (FP16QK) {
+            for (int n = 0; n < N_S; n += 2) {
+                float dA[4] = {0.f, 0.f, 0.f, 0.f};
+                float dB[4] = {0.f, 0.f, 0.f, 0.f};
+                const int b_row = (n + (lane >> 4)) * 8 + (lane & 7);
+                const int b_khalf = ((lane >> 3) & 1) << 3;
+                const half* krow = K_cur + b_row * KVSTRIDE + b_khalf;
+                // software pipeline: fetch k+1's B fragments while k's MMAs
+                // run — at 1-2 warps per scheduler the LDSM→HMMA dependency
+                // latency is otherwise exposed (short_scoreboard-bound).
+                uint32_t b0, b1, c0, c1;
+                ldsm_x4(b0, b1, c0, c1, krow);
 #pragma unroll
                 for (int k = 0; k < HD / 16; k++) {
-                    // m16n8k16 A (row-major f16): a0=(rl,cl) a1=(rl+8,cl)
-                    // a2=(rl,cl+8) a3=(rl+8,cl+8) — same reg order the
-                    // validated PV mma below uses (ra1 = S[..][2,3] = row+8).
-                    const half* qb = Q_h16 + warp_id * 16 * QSTRIDE + k * 16;
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(qb + rl * QSTRIDE + cl);
-                    uint32_t a1 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE + cl);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(qb + rl * QSTRIDE + cl + 8);
-                    uint32_t a3 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE + cl + 8);
-                    // B (col-major f16): thread holds K-row (= score col) rl,
-                    // k-elems {cl,cl+1} (b0) and {cl+8,cl+9} (b1).
-                    const half* kb = K_cur + (n * 8 + rl) * KVSTRIDE + k * 16;
-                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(kb + cl);
-                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(kb + cl + 8);
+                    uint32_t nb0, nb1, nc0, nc1;
+                    if (k + 1 < HD / 16)
+                        ldsm_x4(nb0, nb1, nc0, nc1, krow + (k + 1) * 16);
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
                         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                         "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
-                        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2),
-                          "f"(d3));
+                        : "=f"(dA[0]), "=f"(dA[1]), "=f"(dA[2]), "=f"(dA[3])
+                        : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]), "r"(a_frag[k][3]),
+                          "r"(b0), "r"(b1), "f"(dA[0]), "f"(dA[1]), "f"(dA[2]), "f"(dA[3]));
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
+                        : "=f"(dB[0]), "=f"(dB[1]), "=f"(dB[2]), "=f"(dB[3])
+                        : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]), "r"(a_frag[k][3]),
+                          "r"(c0), "r"(c1), "f"(dB[0]), "f"(dB[1]), "f"(dB[2]), "f"(dB[3]));
 #endif
+                    if (k + 1 < HD / 16) {
+                        b0 = nb0;
+                        b1 = nb1;
+                        c0 = nc0;
+                        c1 = nc1;
+                    }
                 }
-            } else {
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    S[n][e] = dA[e];
+                    S[n + 1][e] = dB[e];
+                }
+            }
+        } else {
+#pragma unroll
+        for (int n = 0; n < N_S; n++) {
+            float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
+            {
 #pragma unroll
                 for (int k = 0; k < KC; k++) {
                     const uint8_t* qb = Q_fp8 + warp_id * 16 * QSTRIDE + k * 32;
@@ -1333,6 +1399,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
             S[n][1] = d1;
             S[n][2] = d2;
             S[n][3] = d3;
+        }
         }
 
         // ---- scale + softcap + causal/SWA mask (per register) ----
@@ -1406,20 +1473,29 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
         }
 
         // ---- PV: O += P @ V, m16n8k16 f16 ----
+        // V B-fragments via ldmatrix.x4.trans over hn-pairs: lanes 0-7 / 8-15
+        // address V rows m*16+0..7 / +8..15 at HD col hn*8, lanes 16-31 the
+        // same rows at col (hn+1)*8. .trans turns each row-major 8x8 V block
+        // into the col-major B fragment (r0/r1 = rb0/rb1 of hn, r2/r3 of
+        // hn+1) — was 4 strided LDS.U16 + 2 PRMT packs per MMA.
 #pragma unroll
         for (int m = 0; m < N_KG; m++) {
             uint32_t ra0 = pack2_f2h(S[2 * m][0], S[2 * m][1]);
             uint32_t ra1 = pack2_f2h(S[2 * m][2], S[2 * m][3]);
             uint32_t ra2 = pack2_f2h(S[2 * m + 1][0], S[2 * m + 1][1]);
             uint32_t ra3 = pack2_f2h(S[2 * m + 1][2], S[2 * m + 1][3]);
-            int kr0 = m * 16 + cl;  // Bkv row = (lane%4)*2
+            const half* vrow = V_cur + (m * 16 + (lane & 15)) * KVSTRIDE + ((lane >> 4) << 3);
+            // software pipeline: V fragments for hn+2 fetched under hn's MMAs
+            uint32_t rb0, rb1, rc0, rc1;
+            ldsm_x4_trans(rb0, rb1, rc0, rc1, vrow);
 #pragma unroll
-            for (int hn = 0; hn < N_O; hn++) {
-                int ncol = hn * 8 + rl;  // HD col
-                uint32_t rb0 = pack2_hh(V_cur[(kr0)*KVSTRIDE + ncol], V_cur[(kr0 + 1) * KVSTRIDE + ncol]);
-                uint32_t rb1 = pack2_hh(V_cur[(kr0 + 8) * KVSTRIDE + ncol],
-                                        V_cur[(kr0 + 9) * KVSTRIDE + ncol]);
+            for (int hn = 0; hn < N_O; hn += 2) {
+                uint32_t sb0, sb1, sc0, sc1;
+                if (hn + 2 < N_O)
+                    ldsm_x4_trans(sb0, sb1, sc0, sc1, vrow + (hn + 2) * 8);
                 float o0 = O_frag[hn][0], o1 = O_frag[hn][1], o2 = O_frag[hn][2], o3 = O_frag[hn][3];
+                float p0 = O_frag[hn + 1][0], p1 = O_frag[hn + 1][1], p2 = O_frag[hn + 1][2],
+                      p3 = O_frag[hn + 1][3];
 #if __CUDA_ARCH__ >= 1200
                 asm volatile(
                     "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
@@ -1427,11 +1503,27 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                     : "=f"(o0), "=f"(o1), "=f"(o2), "=f"(o3)
                     : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), "r"(rb0), "r"(rb1), "f"(o0), "f"(o1), "f"(o2),
                       "f"(o3));
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
+                    : "=f"(p0), "=f"(p1), "=f"(p2), "=f"(p3)
+                    : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), "r"(rc0), "r"(rc1), "f"(p0), "f"(p1), "f"(p2),
+                      "f"(p3));
 #endif
                 O_frag[hn][0] = o0;
                 O_frag[hn][1] = o1;
                 O_frag[hn][2] = o2;
                 O_frag[hn][3] = o3;
+                O_frag[hn + 1][0] = p0;
+                O_frag[hn + 1][1] = p1;
+                O_frag[hn + 1][2] = p2;
+                O_frag[hn + 1][3] = p3;
+                if (hn + 2 < N_O) {
+                    rb0 = sb0;
+                    rb1 = sb1;
+                    rc0 = sc0;
+                    rc1 = sc1;
+                }
             }
         }
         __syncthreads();
@@ -1459,10 +1551,10 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk) {
     constexpr int Bkv = 64;
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
-    // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD), fp16 mode stages halfs
-    // (FA2_KV_PAD, same stride math as the kernel's QSTRIDE).
-    const size_t q_bytes = fp16_qk ? (size_t)Bq * (head_dim + FA2_KV_PAD) * sizeof(half)
-                                   : (size_t)Bq * (head_dim + FA2_Q_PAD) * sizeof(uint8_t);
+    // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD); fp16 mode keeps Q in
+    // registers (loop-invariant A-fragments loaded once from global) — no
+    // smem tile at all, which is what lets Bq=128 (8 warps) fit.
+    const size_t q_bytes = fp16_qk ? 0 : (size_t)Bq * (head_dim + FA2_Q_PAD) * sizeof(uint8_t);
     return q_bytes + (size_t)2 * Bkv * kvstride * sizeof(half)  // K_buf[2] f16 (double-buffer, padded)
            + (size_t)2 * Bkv * kvstride * sizeof(half);         // V_buf[2] f16 (double-buffer, padded)
 }
@@ -1499,10 +1591,13 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     // the q-tiles (2× CTAs) to fill the GPU. Large context already fills with Bq=128 (more
     // latency-hiding per CTA via 8 warps), so keep 128 there.
     const long blocks_128 = (long)((seq_q + 127) / 128) * batch_size * n_heads;
-    // fp16 QK doubles the Q tile: Bq=128 (~102 KB) blows the sm_120 smem
-    // opt-in, Bq=64 (~85 KB) fits — and fp16 mode only runs below the prefill
-    // threshold anyway, where Bq=64 is the occupancy winner.
-    const bool use_bq64 = fp16_qk || blocks_128 < (long)sm_count;
+    // fp16 mode keeps Q in registers (no smem tile) so Bq=128 fits since the
+    // ldmatrix rework. The KV double-buffer alone (~70 KB) caps both Bq
+    // variants at 1 CTA/SM, so Bq=64 halves the resident warps without
+    // raising CTA residency — and the kernel is latency-bound (LDSM→HMMA
+    // chains; 4 warps = 1 warp/scheduler). Prefer 8 warps unless the grid
+    // would fill less than half the SMs.
+    const bool use_bq64 = fp16_qk ? (blocks_128 < (long)(sm_count / 2)) : (blocks_128 < (long)sm_count);
     const int Bq = use_bq64 ? 64 : 128;
 
     const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk);
@@ -1513,8 +1608,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(SM120_WARP_SIZE, Bq / 16);  // warps = Bq/16
 
-    auto kern = fp16_qk ? fmha_sm120_fa2_kernel<64, 128, true>
-                        : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>);
+    auto kern = fp16_qk
+                    ? (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true> : fmha_sm120_fa2_kernel<128, 128, true>)
+                    : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>);
     cudaError_t aerr = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                             static_cast<int>(smem));
     if (aerr != cudaSuccess)
