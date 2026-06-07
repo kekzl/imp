@@ -48,6 +48,9 @@ bool process_diag_prefill_graph_enabled();
 // the cache in place (replaces the former RuntimeConfig::install dual-write).
 bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
+// FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc) — read by the
+// free-function gemm() in compute/gemm.cu, which carries no RuntimeConfig.
+bool process_diag_cublas_fp16_acc();
 
 // Attention
 bool process_diag_attention_splitk_pipe();

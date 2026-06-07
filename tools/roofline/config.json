@@ -1,5 +1,5 @@
 {
-  "config_version": 2,
+  "config_version": 3,
   "comment": "Pinned roofline measurement config. Changing counters/shapes bumps config_version \u2014 runs are only comparable within the same version.",
   "gpu": {
     "name": "NVIDIA GeForce RTX 5090 (GB202, sm_120a)",
@@ -7,14 +7,17 @@
     "dram_peak_gbs": 1792.0,
     "nominal_boost_ghz": 2.407,
     "flop_per_cycle": {
-      "comment": "GPU-wide dense math ops per SM-clock cycle. peak_flops(dtype) = flop_per_cycle * measured_sm_clock_hz. Calibrated so tc_fp16*2.407GHz = 838 TFLOPS, tc_fp8 = 1677, tc_fp4 = 3354 (datasheet peaks).",
+      "comment": "GPU-wide dense math ops per SM-clock cycle. peak_flops(dtype) = flop_per_cycle * measured_sm_clock_hz. CALIBRATED EMPIRICALLY 2026-06-07 (saturated mma.sync microbench, issues #595/#596): tc_fp16 f16acc hits the 838-TFLOPS datasheet rate (170 SM x 2048 ops/clk), but (a) FP32 accumulate runs at 1/4 rate on GeForce (tc_*_f32acc keys; fp16 f32acc measured 253 TFLOPS @2.85GHz = 512 ops/SM/clk, fp8 f32acc 496 = 1024), and (b) the mxf4nvf4 block-scale FP4 path peaks at HALF the 3354-TOPS datasheet number (measured 2019 TOPS @2.85GHz = 4096 ops/SM/clk) - 3354 is not reachable via mma.sync on sm_120a. dst_fp32 ncu counters map to the *_f32acc keys in rl_classify.TC_OPS_METRICS.",
       "tc_fp16": 348160,
       "tc_bf16": 348160,
       "tc_fp8": 696320,
-      "tc_fp4": 1392640,
+      "tc_fp4": 696320,
       "tc_int8": 696320,
       "cuda_fp32": 43520,
-      "cuda_fp16": 87040
+      "cuda_fp16": 87040,
+      "tc_fp16_f32acc": 87040,
+      "tc_bf16_f32acc": 87040,
+      "tc_fp8_f32acc": 174080
     }
   },
   "ncu": {

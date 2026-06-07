@@ -85,17 +85,52 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-using StrideA = typename Gemm::GemmKernel::StrideA;
-using StrideB = typename Gemm::GemmKernel::StrideB;
-using StrideC = typename Gemm::GemmKernel::StrideC;
-using StrideD = typename Gemm::GemmKernel::StrideD;
-using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-using Sm1xxBlkScaledConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+// Strides / SF layouts are derived per-variant inside the templated impl
+// below (typename GemmT::GemmKernel::StrideA etc.) — both variants share the
+// same SfAtom data layout, only the CTA tiling differs.
 
 // Verify SFVecSize matches our constant (kSFVecSize = 16)
 static_assert(Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
               "CUTLASS SFVecSize mismatch — expected 16 for nv_float4_t");
+
+// ---------------------------------------------------------------------------
+// Small-N variant: pingpong schedule + 128x64x128 tile.
+// The default cooperative 128x128 tile starves the GPU on small-N GEMMs
+// (kv_proj N=1024 at M=512: 32 CTAs on 170 SMs). Pingpong with a 64-wide
+// N-tile doubles the CTA count and overlaps two consumer warpgroups:
+// measured 2026-06-07 (standalone config sweep on Qwen3-14B shapes, #596)
+// 2.1x on 512x1024x5120 (27.0us -> 12.8us). It LOSES ~25% on large-N
+// shapes, hence the dispatch threshold below. The SfAtom scale layout is
+// tile-shape-independent (128-row x 4-group atoms from SFVecSize=16), so
+// both variants consume identical A/B scale buffers.
+// ---------------------------------------------------------------------------
+using ThreadBlockShapeSmallN = Shape<_128, _64, _128>;
+
+using CollectiveEpilogueSmallN = typename cutlass::epilogue::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ThreadBlockShapeSmallN, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator, ElementAccumulator, ElementC,
+    LayoutCTag, AlignmentC, ElementD, LayoutDTag, AlignmentD,
+    cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+
+using CollectiveMainloopSmallN = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB, LayoutBTag, AlignmentB,
+    ElementAccumulator, ThreadBlockShapeSmallN, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogueSmallN::SharedStorage))>,
+    cutlass::gemm::KernelTmaWarpSpecializedPingpong>::CollectiveOp;
+
+using GemmKernelSmallN = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>,
+                                                              CollectiveMainloopSmallN,
+                                                              CollectiveEpilogueSmallN, void>;
+using GemmSmallN = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelSmallN>;
+
+static_assert(GemmSmallN::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
+              "CUTLASS SFVecSize mismatch (small-N variant)");
+
+// N at/below this routes to the small-N pingpong kernel. Measured: N=1024
+// is 2.1x faster, N=5120 is ~25% slower — the crossover lies between;
+// 2048 is the conservative cut.
+static constexpr int kSmallNThreshold = 2048;
 
 namespace imp {
 
@@ -611,27 +646,36 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 static void* s_cutlass_workspace = nullptr;
 static size_t s_cutlass_workspace_size = 0;
 
-size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
-    auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
+template <class GemmT>
+static size_t cutlass_workspace_for(int M, int N, int K) {
+    using GK = typename GemmT::GemmKernel;
+    auto stride_A = cutlass::make_cute_packed_stride(typename GK::StrideA{}, {M, K, 1});
+    auto stride_B = cutlass::make_cute_packed_stride(typename GK::StrideB{}, {N, K, 1});
+    auto stride_C = cutlass::make_cute_packed_stride(typename GK::StrideC{}, {M, N, 1});
+    auto stride_D = cutlass::make_cute_packed_stride(typename GK::StrideD{}, {M, N, 1});
 
-    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
-    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
+    using BlkCfg = typename GK::CollectiveMainloop::Sm1xxBlkScaledConfig;
+    auto layout_SFA = BlkCfg::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
+    auto layout_SFB = BlkCfg::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
 
-    typename Gemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                  {M, N, K, 1},
-                                  {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr,
-                                   layout_SFB},
-                                  {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}};
+    typename GemmT::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                   {M, N, K, 1},
+                                   {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr,
+                                    layout_SFB},
+                                   {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}};
 
-    return Gemm::get_workspace_size(args);
+    return GemmT::get_workspace_size(args);
 }
 
-bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b, void* d_fp16,
-                              int M, int N, int K, void* workspace, size_t workspace_size,
-                              cudaStream_t stream) {
+size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
+    return (N <= kSmallNThreshold) ? cutlass_workspace_for<GemmSmallN>(M, N, K)
+                                   : cutlass_workspace_for<Gemm>(M, N, K);
+}
+
+template <class GemmT>
+static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
+                                          void* d_fp16, int M, int N, int K, void* workspace,
+                                          size_t workspace_size, cudaStream_t stream) {
     // Flush any prior async errors — a sticky CUDA error will make
     // cuTensorMapEncodeTiled return 719 (LAUNCH_FAILED) instead of the real code.
     {
@@ -642,13 +686,15 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
         }
     }
 
-    auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1});
+    using GK = typename GemmT::GemmKernel;
+    auto stride_A = cutlass::make_cute_packed_stride(typename GK::StrideA{}, {M, K, 1});
+    auto stride_B = cutlass::make_cute_packed_stride(typename GK::StrideB{}, {N, K, 1});
+    auto stride_C = cutlass::make_cute_packed_stride(typename GK::StrideC{}, {M, N, 1});
+    auto stride_D = cutlass::make_cute_packed_stride(typename GK::StrideD{}, {M, N, 1});
 
-    auto layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
-    auto layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
+    using BlkCfg = typename GK::CollectiveMainloop::Sm1xxBlkScaledConfig;
+    auto layout_SFA = BlkCfg::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
+    auto layout_SFB = BlkCfg::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
 
     auto* a_ptr = reinterpret_cast<const ElementA::DataType*>(a_data);
     auto* b_ptr = reinterpret_cast<const ElementB::DataType*>(b.data);
@@ -664,17 +710,17 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
     // D = tensor_scale * (A_fp4 * SFA * B_fp4 * micro_scale_only) = correct result.
     float alpha = b.tensor_scale;
 
-    typename Gemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                  {M, N, K, 1},
-                                  {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr,
-                                   layout_SFB},
-                                  {{alpha, 0.0f},
-                                   d_ptr,
-                                   stride_C,  // C = D buffer (beta=0, never read)
-                                   d_ptr,
-                                   stride_D}};
+    typename GemmT::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                   {M, N, K, 1},
+                                   {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr,
+                                    layout_SFB},
+                                   {{alpha, 0.0f},
+                                    d_ptr,
+                                    stride_C,  // C = D buffer (beta=0, never read)
+                                    d_ptr,
+                                    stride_D}};
 
-    Gemm gemm;
+    GemmT gemm;
     cutlass::Status st = gemm.can_implement(args);
     if (st != cutlass::Status::kSuccess) {
         IMP_LOG_WARN("CUTLASS sm120 NVFP4 GEMM: can_implement failed (%d) for M=%d N=%d K=%d", (int)st, M, N,
@@ -683,7 +729,7 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
     }
 
     // Ensure workspace
-    size_t needed = Gemm::get_workspace_size(args);
+    size_t needed = GemmT::get_workspace_size(args);
     void* ws = workspace;
     if (needed > workspace_size) {
         if (needed > s_cutlass_workspace_size) {
@@ -708,6 +754,16 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
     }
 
     return true;
+}
+
+bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b, void* d_fp16,
+                              int M, int N, int K, void* workspace, size_t workspace_size,
+                              cudaStream_t stream) {
+    if (N <= kSmallNThreshold)
+        return gemm_nvfp4_cutlass_sm120_impl<GemmSmallN>(a_data, a_sf, b, d_fp16, M, N, K, workspace,
+                                                         workspace_size, stream);
+    return gemm_nvfp4_cutlass_sm120_impl<Gemm>(a_data, a_sf, b, d_fp16, M, N, K, workspace, workspace_size,
+                                               stream);
 }
 
 bool cutlass_sm120_nvfp4_available() { return true; }

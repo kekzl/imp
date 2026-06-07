@@ -325,7 +325,13 @@ static int gemm_algo_log_enabled() { return imp::process_diag_log_gemm_algo() ? 
 static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
                                       bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0,
-                                      int K = 0) {
+                                      int K = 0, bool fp16_scale = false) {
+    // COMPUTE_16F descriptors take __half alpha/beta (scale type CUDA_R_16F).
+    const __half h_alpha = __float2half(alpha);
+    const __half h_zero = __float2half(0.0f);
+    const float f_zero = 0.0f;
+    const void* p_alpha = fp16_scale ? static_cast<const void*>(&h_alpha) : static_cast<const void*>(&alpha);
+    const void* p_zero = fp16_scale ? static_cast<const void*>(&h_zero) : static_cast<const void*>(&f_zero);
     cublasLtMatmulPreference_t pref = nullptr;
     CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
@@ -400,10 +406,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             algo_ok[i] = false;
             continue;
         }
-        float zero = 0.0f;
         for (int w = 0; w < kWarmupIters; w++) {
-            cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data,
-                                                 entry.Adesc, &zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
+            cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
+                                                 entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
                                                  &results[i].algo, s_workspace, results[i].workspaceSize, stream);
             if (wst != CUBLAS_STATUS_SUCCESS) {
                 algo_ok[i] = false;
@@ -415,10 +420,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     for (int i = 0; i < nresults; i++) {
         if (!algo_ok[i])
             continue;
-        float zero = 0.0f;
         cudaEventRecord(start, stream);
         for (int r = 0; r < kBenchmarkIters; r++)
-            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
+            cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero, temp_c,
                            entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
                            results[i].workspaceSize, stream);
         cudaEventRecord(stop, stream);
@@ -558,6 +562,15 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.qtype);
 
+    // FP16-accumulate prefill fast path (gemm.cublas_fp16_acc): GeForce
+    // sm_120 runs FP16 TC with FP32 accumulate at 1/4 rate; COMPUTE_16F
+    // restores full rate (~2x measured on prefill shapes). F16-only, M>1 —
+    // decode (M==1) routes through gemm_try_gemv before this and stays 32F.
+    const bool use_fp16_acc = process_diag_cublas_fp16_acc() && M > 1 && A.qtype == QType::F16 &&
+                              B.qtype == QType::F16 && C.qtype == QType::F16;
+    if (use_fp16_acc)
+        compute_type = CUBLAS_COMPUTE_16F;
+
     // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR
     // (status 14) under stream capture on sm_120 — heuristic + workspace
     // allocation paths aren't graph-safe. Route FP16×FP16→FP16 GEMMs to the
@@ -606,14 +619,17 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         } else {
             GemmCacheEntry new_entry{};
             new_entry.desc_M = M;
-            cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I) ? CUDA_R_32I : CUDA_R_32F;
+            cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)   ? CUDA_R_32I
+                                        : (compute_type == CUBLAS_COMPUTE_16F) ? CUDA_R_16F
+                                                                                : CUDA_R_32F;
 
             create_gemm_descriptors(new_entry, compute_type, scale_type, cuda_dtype_A, cuda_dtype_B,
                                     cuda_dtype_C, (int)K, (int)M, (int)N);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
-                                      (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K);
+                                      (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K,
+                                      use_fp16_acc);
 
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
@@ -645,8 +661,15 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                          (int)N, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
         }
     } else {
-        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data,
-                                           entry->Adesc, &beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
+        // COMPUTE_16F descriptors take __half alpha/beta (scale type R_16F).
+        const __half h_alpha = __float2half(alpha);
+        const __half h_beta = __float2half(beta);
+        const void* p_alpha = use_fp16_acc ? static_cast<const void*>(&h_alpha)
+                                           : static_cast<const void*>(&alpha);
+        const void* p_beta = use_fp16_acc ? static_cast<const void*>(&h_beta)
+                                          : static_cast<const void*>(&beta);
+        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data,
+                                           entry->Adesc, p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
                                            entry->has_algo ? &entry->algo : nullptr, s_workspace,
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
@@ -656,8 +679,8 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
                 reselect_algo_for_entry(*entry);
             }
-            st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
-                                C.data, entry->Cdesc, C.data, entry->Cdesc,
+            st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+                                p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
                                 entry->has_algo ? &entry->algo : nullptr, s_workspace, entry->workspace_size,
                                 stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
