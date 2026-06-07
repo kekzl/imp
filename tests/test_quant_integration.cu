@@ -1925,7 +1925,7 @@ TEST(QuantIntegrationTest, Q5_KDp4aDenseGemm) {
 
     // Q8_1 scratch
     int q8_blocks = M * (K / 32);
-    void* d_q8 = nullptr; cudaMalloc(&d_q8, q8_blocks * 36);
+    void* d_q8 = nullptr; cudaMalloc(&d_q8, q8_blocks * sizeof(imp::block_q8_1));
     float* d_d8 = nullptr; cudaMalloc(&d_d8, q8_blocks * sizeof(float));
 
     gemm_q5k_dp4a_dense(d_w, d_act, d_out, d_q8, d_d8, M, N, K, nullptr);
