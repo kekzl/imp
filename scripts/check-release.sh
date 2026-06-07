@@ -38,7 +38,7 @@ while IFS= read -r link; do
     # Each .md doc is a different cwd; resolve against repo root for absolute
     # links, otherwise against each containing doc. Cheap heuristic: try repo
     # root + any docs/ subdir.
-    if [ -e "$link" ] || [ -e "docs/$link" ] || [ -e "$(dirname "$link")/$(basename "$link")" ]; then
+    if [ -e "$link" ] || [ -e "docs/$link" ] || [ -e "docs/audit/$link" ] || [ -e "$(dirname "$link")/$(basename "$link")" ]; then
         :
     else
         echo "  broken: $link"

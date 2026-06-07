@@ -1,0 +1,154 @@
+{
+ "knob": "fa2",
+ "git": {
+  "commit": "e66cfa45",
+  "dirty": true
+ },
+ "timestamp": "20260607_093755",
+ "results": [
+  {
+   "model": "q8-dense",
+   "shape": "pp512",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp512": 8490.31
+   },
+   "variant": {
+    "pp512": 8383.61
+   }
+  },
+  {
+   "model": "q8-dense",
+   "shape": "pp2048",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp2048": 8000.39
+   },
+   "variant": {
+    "pp2048": 7991.01
+   }
+  },
+  {
+   "model": "q8-dense",
+   "shape": "pp4096",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp4096": 7528.2
+   },
+   "variant": {
+    "pp4096": 7526.1
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp512",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp512": 20555.35
+   },
+   "variant": {
+    "pp512": 17616.8
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp2048",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp2048": 18193.12
+   },
+   "variant": {
+    "pp2048": 18042.26
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp4096",
+   "restart": 0,
+   "knob": "fa2",
+   "baseline": {
+    "pp4096": 15565.39
+   },
+   "variant": {
+    "pp4096": 15696.82
+   }
+  },
+  {
+   "model": "q8-dense",
+   "shape": "pp512",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp512": 8438.32
+   },
+   "variant": {
+    "pp512": 8423.44
+   }
+  },
+  {
+   "model": "q8-dense",
+   "shape": "pp2048",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp2048": 7841.38
+   },
+   "variant": {
+    "pp2048": 8027.97
+   }
+  },
+  {
+   "model": "q8-dense",
+   "shape": "pp4096",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp4096": 7353.24
+   },
+   "variant": {
+    "pp4096": 7470.65
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp512",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp512": 21082.9
+   },
+   "variant": {
+    "pp512": 20685.71
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp2048",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp2048": 18064.32
+   },
+   "variant": {
+    "pp2048": 17712.11
+   }
+  },
+  {
+   "model": "nvfp4-dense",
+   "shape": "pp4096",
+   "restart": 1,
+   "knob": "fa2",
+   "baseline": {
+    "pp4096": 15612.76
+   },
+   "variant": {
+    "pp4096": 15355.78
+   }
+  }
+ ]
+}

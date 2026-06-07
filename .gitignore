@@ -99,3 +99,8 @@ _audit/
 CLAUDE.md
 .claude/*
 !.claude/skills/
+tools/roofline/history/raw/**/*.ncu-rep
+tools/roofline/history/raw/**/*.nsys-rep
+tools/roofline/history/raw/**/*.sqlite
+tools/roofline/plots/
+tools/roofline/__pycache__/
