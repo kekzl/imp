@@ -4,38 +4,49 @@ Companion doc to [`architecture.md`](architecture.md) — covers exactly which a
 
 If this doc and the code disagree, the code wins. Source of truth is `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
 
-## Prefill — two-branch gate
+> **Measured coverage (2026-06-07, [`docs/audit/roofline_2026_06_07.md`](audit/roofline_2026_06_07.md)):**
+> on hd=128 models (Qwen3 dense/MoE — Q8_0, Q4_K_M, NVFP4) the legacy
+> materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512–pp4096
+> — FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range.
+> Only hd≠128 models (gemma-3-12b, hd=256) still hit it: 3.6–6.9% of prefill
+> time = 92–99% of their attention time.
 
-Post-Phase-2 (PR #344), the prefill dispatch in `src/exec/executor_attention.cu` is a flat two-branch switch:
+## Prefill — gate (post #525: FA2 f16-QK first, cuBLAS as hd≠128 fallback)
+
+The prefill dispatch in `src/exec/executor_attention.cu` (~line 942) tries the
+FP16-QK FA2 drop-in before the materialized cuBLAS path:
 
 ```cpp
-const bool force_cublas_attn = per_layer_shapes;          // Gemma-4 hd=512
+const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
 const bool s_matrix_fits     = attn_scores_buf_ != nullptr &&
                                n <= attn_scores_.shape[1];
-const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
+const bool prefer_fmha       = !force_cublas_attn &&
+                               (n >= attention.fmha_prefill_threshold);
 
-if (s_matrix_fits && !non_gemma4_sliding) {
-    attention_cublas_prefill(...);
+if (s_matrix_fits && !prefer_fmha) {
+    if (!force_cublas_attn && try_fa2_fp16qk_prefill(...)) { /* FA2 f16-QK */ }
+    else attention_cublas_prefill(...);            // legacy materialized
 } else {
-    attention_prefill_dispatch(...);   // FMHA fallback
+    attention_prefill_dispatch(...);               // FMHA chain
 }
 ```
 
 | Condition | Path | Why |
 |---|---|---|
-| S-matrix fits **and** (not non-Gemma-4 sliding) | `attention_cublas_prefill` | Default for typical Qwen3 / Gemma-4 configs. cuBLAS QK^T → materialized [nh, n, n] FP16 S-matrix (capped at ~1 GiB) → causal+sliding softmax → cuBLAS PV. |
-| S-matrix doesn't fit (long context past cap) | FMHA fallback chain | Tiled O(n) memory; no materialized S. |
-| `non_gemma4_sliding` (non-Gemma-4 model with sliding window) | FMHA fallback chain | cuBLAS's sliding-mask path is Gemma-4-optimized; FMHA is faster for other archs. |
-| `force_cublas_attn` (Gemma-4 hd=512 global layers) | `attention_cublas_prefill` always | FMHA OOMs the 100 KiB smem cap at hd=512. cuBLAS handles arbitrary head_dim. |
+| short seq (n < `fmha_prefill_threshold`, auto ≈ S-matrix cap + 1), **hd=128**, `fa2_fp16qk != "never"` | `fmha_sm120_fa2_kernel<…,FP16QK=1>` | FP16-QK FA2 drop-in (#525): cuBLAS-FP16-quality without the materialized S-matrix. |
+| short seq, **hd≠128** (gemma hd=256) or `attn_sinks`/per-layer shapes | `attention_cublas_prefill` | Legacy materialized path: cuBLAS QK^T → [nh, n, n] FP16 S-matrix (`attn_scores_mib`, default 384 MiB) → causal softmax → cuBLAS PV. The only remaining production user. |
+| long seq (n ≥ threshold) | FMHA chain below | Tiled O(n) memory; no materialized S. |
+| chunked continuation (`q_offset > 0`) with cumulative ctx < threshold | `attention_cublas_prefill` | FA2 f16-QK still declines `q_offset > 0` (conservative blanket gate post-#548); the FMHA chain needs ctx ≥ threshold. |
 
-### FMHA fallback chain (`src/compute/attention_dispatch.cu`)
+### FMHA chain (`src/compute/attention_dispatch.cu`, host model: `attention_dispatch_decision.h`)
 
-Tried in order, first hit wins. After Phase 2 archival the chain is:
+Tried in order, first hit wins:
 
-1. **`fmha_sm120_mxfp4_prefill`** — when `attention.mxfp4` enabled and the kernel accepts the head_dim
-2. **`fmha_sm120_fp8_prefill`** — when `attention.fp8_fmha != "never"` (default auto)
-3. **`fmha_sm120_prefill`** — FP16, the surviving non-cluster variant
-4. **`flash_attention_blackwell`** — WMMA 128×64 tiles as the last resort
+1. **`fmha_sm120_mxfp4_prefill`** — opt-in (`attention_mxfp4_available()`), hd%32==0
+2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd==128 only**
+3. **`fmha_sm120_fp8_prefill`** — when `attention.fp8_fmha != "never"` (default auto), hd%32==0
+4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0
+5. **`flash_attention_blackwell`** — WMMA 128×64 tiles as the last resort
 
 The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) live in `docs/archive/` with resurrection memos.
 

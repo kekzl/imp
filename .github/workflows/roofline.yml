@@ -1,0 +1,64 @@
+# Roofline regression gate + plot artifacts.
+#
+# CI has no GPU runner — measurement (`roofline measure`) is LOCAL-only.
+# This workflow re-parses the committed history (raw CSV exports), runs the
+# regression gate against the pinned baseline (tools/roofline/history/BASELINE)
+# and publishes roofline.png / roofline_trend.png as artifacts.
+#
+# Baseline pinning happens locally after a merge to main:
+#   make roofline-pin     # roofline measure (3 restarts) + pin run_id + commit
+name: Roofline
+
+on:
+  pull_request:
+    paths:
+      - "tools/roofline/**"
+  push:
+    branches: [main]
+    paths:
+      - "tools/roofline/**"
+
+jobs:
+  roofline-check:
+    name: Roofline regress + plots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install plot deps
+        run: pip install matplotlib==3.9.2
+
+      - name: Regression gate vs pinned baseline
+        run: |
+          cd tools/roofline
+          if [ ! -f history/BASELINE ]; then
+            echo "no pinned baseline (history/BASELINE missing) — skipping gate"
+            exit 0
+          fi
+          if [ ! -s history/index.jsonl ]; then
+            echo "no runs in history — skipping gate"
+            exit 0
+          fi
+          python3 roofline.py regress --baseline "$(cat history/BASELINE)" --run latest --threshold 5
+
+      - name: Render plots from history
+        run: |
+          cd tools/roofline
+          if [ ! -s history/index.jsonl ]; then
+            echo "no runs in history — skipping plots"
+            exit 0
+          fi
+          mkdir -p plots
+          python3 rl_plot.py --mode roofline --run latest --out plots/roofline.png
+          python3 rl_plot.py --mode trend --run latest --out plots/roofline_trend.png
+
+      - name: Upload plot artifacts
+        if: hashFiles('tools/roofline/plots/*.png') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: roofline-plots
+          path: tools/roofline/plots/*.png

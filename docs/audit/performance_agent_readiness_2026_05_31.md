@@ -56,7 +56,7 @@ Bereinigter Per-Prefill-Mix (NVFP4 MoE):
 |---|---|---|---|
 | CUTLASS NVFP4 grouped GEMM (`GroupProblemShape`) | ~19 % | Expert-FFN, ~Roofline | [P] nsys |
 | `fmha_sm120_fa2_kernel<128>` | ~13 % | FA2-Attention (greift partiell) | [P] nsys |
-| `causal_softmax_fp32_to_fp16` + nvjet-cuBLAS-MMAs | ~18 % | **materialisierte Attention (Nicht-FA2)** | [P] nsys |
+| `causal_softmax_fp32_to_fp16` + nvjet-cuBLAS-MMAs | ~18 % | **materialisierte Attention (Nicht-FA2)** — ⚠️ STALE (Stand vor #525 FP16-QK-FA2). Re-Messung 2026-06-07: **0.0 %** auf allen hd=128-Modellen pp512–4096; nur hd≠128 (gemma-3) bei 3.6–6.9 %. Siehe [`roofline_2026_06_07.md`](roofline_2026_06_07.md) | [P] nsys |
 | MoE quant/scatter/permute/gating/scale | je ~1 % | Routing-Overhead, klein | [P] nsys |
 
 **Befund:** FA2 (`fmha_sm120_fa2_kernel`) *und* der alte materialisierte Pfad (`causal_softmax_fp32_to_fp16` + cuBLAS
@@ -95,7 +95,7 @@ NVFP4-pp2048-Analyse: "CUTLASS NVFP4 GEMM 39 % (competitive w/ vLLM) + Attention
 
 | # | Befund | Beleg | Erwarteter Speedup | Aufwand | Decode-Risiko | Adressiert MoE-Prefill-Lücke? |
 |---|---|---|---|---|---|---|
-| A1 | **FA2-Abdeckung im Prefill erhöhen** — materialisierter `causal_softmax`+cuBLAS-QK^T/PV-Pfad läuft parallel zu FA2; vollständige FA2-Umstellung über mehr Seq-Längen/Head-Dims | [P] nsys (~18 % Nicht-FA2-Attention) + [C] `attention.fmha_*` | pp +10–20 % (long-ctx) | M | mittel (Attention ändert sich; FA2 ist parity-getestet) | Ja (Haupt-Hebel NVFP4) |
+| A1 | **FA2-Abdeckung im Prefill erhöhen** — ✅ ERLEDIGT (#525 FP16-QK-FA2): Re-Messung 2026-06-07 = **0.0 % Legacy-Anteil auf hd=128**; Rest nur hd≠128 (gemma, 3.6–6.9 % Fenster = 92–99 % von dessen Attention). Siehe [`roofline_2026_06_07.md`](roofline_2026_06_07.md) | [P] nsys (~~18 %~~ → 0 %) | erledigt | — | — | Ja |
 | A2 | **GGUF-Q4_K-MoE-Prefill: in-SMEM-MMQ statt dequant→cuBLAS** | [C] 8.3× BW-Overhead, doku-belegt | pp +30–50 % GGUF | XL (2–3 Wo) | niedrig | nur GGUF (Legacy-Prio) |
 | A3 | **Kleine-M grouped-GEMM-Effizienz** — Attention-Shapes ~34 % Roofline bei small-M; Tile/Scheduler-Tuning | [P] doku-Roofline | pp +5–10 % | L | mittel | teilweise |
 | A4 | `convert_scales_sfatom` als Init **nicht** als Prefill-Kosten behandeln (Anti-Befund) | [P] identische Instanzzahl | 0 (Klarstellung) | — | — | nein |
