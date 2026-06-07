@@ -35,7 +35,7 @@ Useful build options:
 ## Test
 
 ```bash
-make test-gpu          # Full CUDA suite (~30s)
+make test-gpu          # Full CUDA suite (~4-5 min; test-attention alone ~241s)
 make test-unit         # CPU-only filter (~5s)
 make verify-fast       # Build + filtered tests + perf gate + smoke prompt (~90s)
 make verify            # Full pre-merge gate (~5min)

@@ -37,7 +37,7 @@ Single RTX 5090, greedy, CUDA 13.3, CUDA Graphs on. Headline numbers
 (decode, the reliable A/B signal — see [BENCHMARKS.md](BENCHMARKS.md) for
 dated, commit-anchored measurements with exact commands):
 
-- **GGUF dense decode:** Qwen3-8B Q8_0 at **~258 tok/s** (CI-gated baseline) —
+- **GGUF dense decode:** Qwen3-8B Q8_0 at **~268 tok/s** (CI-gated baseline) —
   **+37–72% over llama.cpp** with full offload and flash attention.
 - **NVFP4 SafeTensors decode:** 30B-class MoE at **~245–307 tok/s**
   (Qwen3-30B/Coder-30B 307, Qwen3.6-35B 245, Gemma-4-26B 259) — effectively

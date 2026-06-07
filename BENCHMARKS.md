@@ -22,7 +22,7 @@ prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
 
 | Date | Commit | CUDA | Model | Quant | Metric | tok/s | Command |
 |---|---|---|---|---|---|---:|---|
-| 2026-05-29 | `perf_baseline.json` | 13.3 | Qwen3-8B | Q8_0 | tg128 | 258.9 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-tg 128` |
+| 2026-06-05 | `perf_baseline.json` (#540) | 13.3 | Qwen3-8B | Q8_0 | tg128 | 268.4 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-tg 128` |
 | 2026-05-29 | `perf_baseline.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 157.7 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-tg 128 --ctx 2048` |
 | 2026-05-30 | `bebafd5` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 259 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-tg 128` |
 
