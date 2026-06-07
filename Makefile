@@ -10,7 +10,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize roofline-measure roofline-pin roofline-regress
+.PHONY: build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -140,22 +140,6 @@ gen-perf-baseline: build
 		-u $(shell id -u):$(shell id -g) \
 		-e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 		--entrypoint bash $(DOCKER_IMG) scripts/gen_perf_baseline.sh "$(MODEL)"
-
-# Roofline pipeline (tools/roofline/): GPU measurement is local-only (CI has no
-# GPU runner). `roofline-pin` runs the full sweep, pins the run as regression
-# baseline (history/BASELINE) and leaves history ready to commit.
-roofline-measure: check-gpu
-	@tools/roofline/roofline measure
-
-roofline-pin: check-gpu
-	@RUN_ID=$$(tools/roofline/roofline measure | tail -1) && \
-		echo "$$RUN_ID" > tools/roofline/history/BASELINE && \
-		echo "pinned roofline baseline: $$RUN_ID (commit tools/roofline/history/)"
-
-roofline-regress:
-	@if [ -f tools/roofline/history/BASELINE ]; then \
-		tools/roofline/roofline regress --baseline "$$(cat tools/roofline/history/BASELINE)" --run latest --threshold 5; \
-	else echo "no pinned baseline — run 'make roofline-pin' first"; fi
 
 # install the pre-push hook that runs verify-fast when source files change
 install-hooks:
