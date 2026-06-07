@@ -182,7 +182,9 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     // entirely, so the diff between plan and registry is informational, not
     // an error.
     {
-        StoragePlan ideal_plan = plan_storage(*model_, cfg, hints_);
+        // Stage 1: reuse the persistent plan built at the top of
+        // pre_dequant_weights() instead of re-running plan_storage a third time.
+        const StoragePlan& ideal_plan = storage_plan_;
         size_t plan_overlay = 0;
         size_t plan_fp16 = 0, plan_fp8 = 0, plan_nvfp4 = 0;
         size_t plan_cutlass_nvfp4 = 0, plan_mxfp4 = 0, plan_fp32 = 0;
@@ -258,6 +260,62 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
             wcache_.fp16.size(), wcache_.fp8.size(), wcache_.nvfp4.size(), wcache_.cutlass_nvfp4.size(),
             wcache_.cutlass_mxfp4.size(), wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
             wcache_.fused_gate_up.size());
+
+        // Stage 1 plan-vs-actual parity diagnostic: for every plan entry whose
+        // tier is an overlay, compare the planned tier against the tier the
+        // legacy build path actually produced (inferred from which wcache map
+        // the source pointer landed in). A mismatch means switching this
+        // builder to plan-driven would change behaviour — it MUST be understood
+        // (expected budget-eviction, or a real arch-rule the plan doesn't yet
+        // encode) before that builder is migrated. Pure diagnostic; logs only.
+        // The planned tier here is the post-downgrade tier; budget eviction
+        // (planned overlay → actual native/uncached) is the common benign case.
+        {
+            // "Present in the planned tier's map?" — NOT first-hit. A GGUF weight
+            // legitimately appears in BOTH wcache_.nvfp4 (its tier) AND
+            // wcache_.cutlass_nvfp4 (the dead G3 SF buffer); first-hit would
+            // falsely flag it. We ask: did the legacy build put this source into
+            // the map the plan chose? If yes → matched (extra overlays are a
+            // separate G3 concern). If it landed in a DIFFERENT map → real
+            // mismatch (the plan and the legacy path disagree on tier). If it
+            // landed nowhere → evicted (budget / native fallback, benign).
+            auto present_in = [&](StorageTier t, const void* src) -> bool {
+                switch (t) {
+                    case StorageTier::FP16: return wcache_.fp16.count(src) > 0;
+                    case StorageTier::FP8: return wcache_.fp8.count(src) > 0;
+                    case StorageTier::NVFP4: return wcache_.nvfp4.count(src) > 0;
+                    case StorageTier::CUTLASS_NVFP4: return wcache_.cutlass_nvfp4.count(src) > 0;
+                    case StorageTier::MXFP4: return wcache_.cutlass_mxfp4.count(src) > 0;
+                    default: return false;
+                }
+            };
+            auto any_overlay = [&](const void* src) -> bool {
+                return wcache_.fp16.count(src) || wcache_.fp8.count(src) ||
+                       wcache_.nvfp4.count(src) || wcache_.cutlass_nvfp4.count(src) ||
+                       wcache_.cutlass_mxfp4.count(src);
+            };
+            int mismatch = 0, evicted = 0, matched = 0;
+            for (const auto& e : ideal_plan.entries) {
+                const bool plan_overlay_e =
+                    (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
+                     e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
+                     e.tier == StorageTier::MXFP4);
+                if (!plan_overlay_e)
+                    continue;
+                if (present_in(e.tier, e.source_data)) {
+                    ++matched;
+                } else if (any_overlay(e.source_data)) {
+                    ++mismatch;
+                    IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d not in its map "
+                                 "(landed in a different overlay)",
+                                 tensor_kind_name(e.kind), static_cast<int>(e.tier));
+                } else {
+                    ++evicted;  // planned overlay but not cached (budget / native fallback)
+                }
+            }
+            IMP_LOG_INFO("Phase-4 plan/actual parity: matched=%d mismatch=%d evicted=%d",
+                         matched, mismatch, evicted);
+        }
         // Native layer counterpart to the overlay diagnostic: tensors uploaded
         // as their on-disk format and dispatched through qtype-specific kernels
         // (no tier choice, no cascade-bug class). gpu_allocations_ tracks every

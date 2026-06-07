@@ -37,20 +37,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     size_t total_reserve = min_reserve + budget.nvfp4_cache_bytes;
     size_t remaining_budget = (free_vram > total_reserve) ? (free_vram - total_reserve) : 0;
 
-    // Phase 4.2: run StoragePlanner for diagnostic purposes.
-    // The plan output is NOT used to drive allocation yet — the existing legacy code
-    // path still decides what to allocate. Log discrepancies between the plan and
-    // the legacy decisions so we can catch bugs before Phase 4.4+ flips to
-    // plan-driven allocation. Actual storage ownership flip happens in Phase 5.
-    {
-        hints_.vram_budget_bytes = remaining_budget;
-        StoragePlan diag_plan = plan_storage(*model_, cfg, hints_);
-        if (diag_plan.failed) {
-            IMP_LOG_WARN("StoragePlanner (diagnostic): plan failed — %s", diag_plan.failure_reason.c_str());
-        } else {
-            IMP_LOG_INFO("StoragePlanner (diagnostic): %zu entries, projected VRAM %.2f MiB",
-                         diag_plan.entries.size(), diag_plan.projected_vram_bytes / (1024.0 * 1024.0));
-        }
+    // Stage 1 (one-tier-truth): build the StoragePlan once and hold it for the
+    // model's lifetime. The pre-dequant phases are being migrated to read their
+    // overlay-tier decision from `storage_plan_` (plan_tier_of) instead of
+    // scattered nvfp4_beneficial/plan_routes_to_fp16 checks. A plan-vs-actual
+    // parity diagnostic runs in Phase 4 (after the caches are built) to surface
+    // any mismatch before a builder is switched. The plan does not drive
+    // allocation yet — this commit is pure plumbing (zero behaviour change).
+    hints_.vram_budget_bytes = remaining_budget;
+    storage_plan_ = plan_storage(*model_, cfg, hints_);
+    if (storage_plan_.failed) {
+        IMP_LOG_WARN("StoragePlanner: plan failed — %s", storage_plan_.failure_reason.c_str());
+    } else {
+        IMP_LOG_INFO("StoragePlanner: %zu entries, projected VRAM %.2f MiB",
+                     storage_plan_.entries.size(),
+                     storage_plan_.projected_vram_bytes / (1024.0 * 1024.0));
     }
 
     // --- Phase 0: Promote NVFP4 pre-quantized weights to Tensor sidecars ---

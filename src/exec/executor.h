@@ -941,6 +941,16 @@ private:
     // Mode flags mirrored from wcache_ for PlanHints (hints_ is the Phase 5 source of truth).
     PlanHints hints_;
 
+    // Stage 1 (one-tier-truth): the StoragePlanner output, held for the model's
+    // lifetime. Built once at the top of pre_dequant_weights(). The pre-dequant
+    // phases are being migrated to read their overlay-tier decision from here
+    // (plan_tier_of) instead of scattered nvfp4_beneficial/plan_routes_to_fp16
+    // checks. Empty until pre_dequant_weights runs.
+    StoragePlan storage_plan_;
+    // Planned overlay tier for a source pointer, or Undefined if the pointer is
+    // not in the plan (native GGUF blocks bypass the overlay layer).
+    StorageTier plan_tier_of(const void* src) const { return storage_plan_.tier_of(src); }
+
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
     WeightRegistry registry_;
 
