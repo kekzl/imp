@@ -333,17 +333,19 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
             "(GGUF blocks + norms + scratch — bypass the overlay layer)",
             model_->gpu_allocations_.size());
 
-        // Phase 5 PR #1 Commit 5.1.4.a: log how many bytes of original GGUF
-        // are REDUNDANT — fully covered by the overlay tier such that the
-        // dispatch never reads `source_data`. Diagnostic-only here; actual
-        // freeing (5.1.4.b) requires dispatch-site safety guards.
-        //
-        // Qualifying tiers: NVFP4 / CUTLASS_NVFP4 / FP8 / MXFP4 (decode-fast
-        // kernels exist for the overlay). FP16-cached weights still need the
-        // original for dp4a decode (per 5.1.3.c) and are not counted.
+        // Decode-redundancy diagnostic: how many bytes of original GGUF the
+        // overlay tier (NVFP4 / CUTLASS_NVFP4 / FP8 / MXFP4) covers for DECODE.
+        // This is an UPPER BOUND, not freeable VRAM: M>1 prefill still reads the
+        // GGUF source for these weights — Q8_0/Q4_K via IMMA raw-read on the
+        // source, Q6_K/Q5_K via on-the-fly dequant or CUTLASS — so the source
+        // stays resident under the current strict-quality-neutral prefill paths.
+        // (The earlier "could be freed / deferred to 5.1.4.b" wording was wrong
+        // since IMMA raw-read prefill #617; Phase 4b correctly frees nothing for
+        // these, see its source-pointer guard.) FP16-cached weights keep the
+        // original for dp4a decode and are not counted.
         {
-            size_t droppable_count = 0;
-            size_t droppable_bytes = 0;
+            size_t decode_redundant_count = 0;
+            size_t decode_redundant_bytes = 0;
             for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
                 const auto& h = registry_.handle(id);
                 if (!h.can_drop_source())
@@ -351,14 +353,14 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                 int64_t cols = h.shape[1] > 0 ? h.shape[1] : 1;
                 size_t row_bytes = qtype_row_bytes(h.source_qtype, cols);
                 size_t bytes = row_bytes * static_cast<size_t>(h.shape[0]);
-                droppable_bytes += bytes;
-                ++droppable_count;
+                decode_redundant_bytes += bytes;
+                ++decode_redundant_count;
             }
             IMP_LOG_INFO(
-                "Phase-4 drop-source diagnostic: %zu handles, %.2f MiB of original "
-                "GGUF could be freed (overlay tier covers prefill + decode). "
-                "Actual freeing deferred to Commit 5.1.4.b.",
-                droppable_count, droppable_bytes / (1024.0 * 1024.0));
+                "Phase-4 decode-redundancy: %zu handles, %.2f MiB of GGUF source is "
+                "decode-redundant (overlay covers decode) but kept resident for "
+                "M>1 prefill (upper bound, not freeable).",
+                decode_redundant_count, decode_redundant_bytes / (1024.0 * 1024.0));
         }
     }
 
@@ -517,13 +519,16 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     }
 }
 
-// Phase 5 PR #1 Commit 5.1.4.b: mark `Tensor.dropped_source = true` for
-// every weight whose handle says can_drop_source(). BISECT MODE: does NOT
-// actually free the GPU allocation. The mark triggers safety guards in
-// dispatch — any path that derefs weight.data raw with a marked weight
-// logs a "coverage gap" warning. When all paths route via overlay
-// correctly (no warnings), the second phase of 5.1.4.b will flip the
-// `actually_free` flag below and reclaim the VRAM.
+// Free a GGUF source allocation only when NO path still reads it. The guard
+// below (try_mark) frees a source iff it's a base allocation AND not present in
+// wcache_.nvfp4 / wcache_.cutlass_nvfp4. For decode-cached weights the source
+// IS present in those maps (keyed on the source pointer), so they are correctly
+// SKIPPED — M>1 prefill reads the GGUF source (IMMA raw-read / dequant /
+// CUTLASS) under the strict-quality-neutral prefill paths. Net effect today:
+// near-zero sources freed, by design — the decode-redundancy diagnostic in
+// Phase 4 is an upper bound, not freeable VRAM. The mark also sets
+// Tensor.dropped_source so any raw-deref path that DID lose its source would
+// log a coverage-gap warning instead of reading freed memory.
 void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
     constexpr bool actually_free = true;
