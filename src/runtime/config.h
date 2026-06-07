@@ -246,6 +246,13 @@ struct RuntimeConfig {
         // m16n8k16 tile kernel. Phase 0 scaffold (default off). When enabled,
         // prefill (M >= 32) Q4_K weights bypass dequant-to-FP16 + cuBLAS.
         bool q4k_hmma_enabled = false;
+        // Q8_0 INT8 IMMA prefill GEMM (mmq_q8_imma.cu): fused dequant on the
+        // int8 tensor cores (s8.s8.s32 measured 968 TOPS — full rate, unlike
+        // the quartered f32-accumulate paths). Replaces the dequant-to-FP16 →
+        // cuBLAS round-trip for Q8_0 prefill (M ≥ 64). Redesigned against the
+        // Q4_K-IMMA phase-2B ceiling diagnosis (SMEM-staged scales, 128x128x64
+        // tiles, symmetric epilogue). Experimental: default off.
+        bool q8_imma_enabled = false;
         // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
         // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode
         // throughput on sub-8-bit models (e.g. Gemma-3-12B Q4_K_M: dp4a GEMV

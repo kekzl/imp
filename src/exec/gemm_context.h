@@ -36,6 +36,7 @@ struct GemmContext {
     // Wired by the executor's GemmContext::make caller from runtime_config().
     bool q4k_imma_enabled = false;
     bool q4k_hmma_enabled = false;
+    bool q8_imma_enabled = false;
     bool gemm_no_mmvq = false;
     bool gemm_no_mmvq_q8_0 = false;
     bool gemm_no_dp4a_gemv = false;
@@ -58,6 +59,7 @@ struct GemmContext {
         ctx.force_mmvq = force_mmvq;
         ctx.q4k_imma_enabled = rcfg.gemm.q4k_imma_enabled;
         ctx.q4k_hmma_enabled = rcfg.gemm.q4k_hmma_enabled;
+        ctx.q8_imma_enabled = rcfg.gemm.q8_imma_enabled;
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
         ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
         ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
