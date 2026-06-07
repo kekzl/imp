@@ -138,6 +138,77 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
 }
 
 // --------------------------------------------------------------------------
+// Warp-per-row FP16 RMSNorm — the batch-prefill variant (#602).
+//
+// The block-per-row kernel above runs 512 threads on rows of d_vec =
+// d_model/8 float4s (256 for d=2048): half the threads idle and every row
+// pays two __syncthreads + a smem round-trip — measured 8-10% of DRAM BW
+// at 7-8% of the NVFP4 prefill window (latency-bound, not bandwidth).
+// One WARP per row needs only shuffle reductions: no barrier, no smem.
+// Eight rows per 256-thread block.
+// --------------------------------------------------------------------------
+__global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
+                                         const __half* __restrict__ weight,
+                                         __half* __restrict__ out, int rows, int d_model,
+                                         float eps, float weight_offset) {
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (row >= rows) return;
+    const int d_vec = d_model >> 3;
+    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(row) * d_model);
+    const float4* w_vec = reinterpret_cast<const float4*>(weight);
+    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
+
+    float sum_sq = 0.0f;
+    for (int i = lane; i < d_vec; i += 32) {
+        float4 v = x_vec[i];
+        half2 h0 = *reinterpret_cast<half2*>(&v.x);
+        half2 h1 = *reinterpret_cast<half2*>(&v.y);
+        half2 h2 = *reinterpret_cast<half2*>(&v.z);
+        half2 h3 = *reinterpret_cast<half2*>(&v.w);
+        float2 f0 = __half22float2(h0), f1 = __half22float2(h1);
+        float2 f2 = __half22float2(h2), f3 = __half22float2(h3);
+        sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y + f2.x * f2.x +
+                  f2.y * f2.y + f3.x * f3.x + f3.y * f3.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFFu, sum_sq, off);
+    const float inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+
+    for (int i = lane; i < d_vec; i += 32) {
+        float4 xv = x_vec[i];
+        float4 wv = w_vec[i];
+        half2 xh0 = *reinterpret_cast<half2*>(&xv.x);
+        half2 xh1 = *reinterpret_cast<half2*>(&xv.y);
+        half2 xh2 = *reinterpret_cast<half2*>(&xv.z);
+        half2 xh3 = *reinterpret_cast<half2*>(&xv.w);
+        half2 wh0 = *reinterpret_cast<half2*>(&wv.x);
+        half2 wh1 = *reinterpret_cast<half2*>(&wv.y);
+        half2 wh2 = *reinterpret_cast<half2*>(&wv.z);
+        half2 wh3 = *reinterpret_cast<half2*>(&wv.w);
+        float2 xf0 = __half22float2(xh0), wf0 = __half22float2(wh0);
+        float2 xf1 = __half22float2(xh1), wf1 = __half22float2(wh1);
+        float2 xf2 = __half22float2(xh2), wf2 = __half22float2(wh2);
+        float2 xf3 = __half22float2(xh3), wf3 = __half22float2(wh3);
+        float4 result;
+        *reinterpret_cast<half2*>(&result.x) = __float22half2_rn(
+            make_float2(xf0.x * inv_rms * (wf0.x + weight_offset),
+                        xf0.y * inv_rms * (wf0.y + weight_offset)));
+        *reinterpret_cast<half2*>(&result.y) = __float22half2_rn(
+            make_float2(xf1.x * inv_rms * (wf1.x + weight_offset),
+                        xf1.y * inv_rms * (wf1.y + weight_offset)));
+        *reinterpret_cast<half2*>(&result.z) = __float22half2_rn(
+            make_float2(xf2.x * inv_rms * (wf2.x + weight_offset),
+                        xf2.y * inv_rms * (wf2.y + weight_offset)));
+        *reinterpret_cast<half2*>(&result.w) = __float22half2_rn(
+            make_float2(xf3.x * inv_rms * (wf3.x + weight_offset),
+                        xf3.y * inv_rms * (wf3.y + weight_offset)));
+        out_vec[i] = result;
+    }
+}
+
+// --------------------------------------------------------------------------
 // Fused RMSNorm + residual for FP32
 // out = rmsnorm(x + residual) * weight
 // x is updated in-place to (x + residual)
@@ -284,6 +355,17 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
                         static_cast<float*>(out.data), d_model, eps, weight_offset);
             break;
         case QType::F16:
+            // Batch prefill (#602): warp-per-row — no barriers/smem; the
+            // block-per-row kernel was latency-bound at 8-10% BW.
+            if (rows >= 16 && (d_model & 7) == 0) {
+                const int warps_per_block = 8;
+                const int grid = (rows + warps_per_block - 1) / warps_per_block;
+                pdl::launch(rmsnorm_fp16_warp_kernel, dim3(grid), dim3(warps_per_block * 32), 0,
+                            stream, static_cast<const __half*>(x.data),
+                            static_cast<const __half*>(weight.data),
+                            static_cast<__half*>(out.data), rows, d_model, eps, weight_offset);
+                break;
+            }
             pdl::launch(rmsnorm_fp16_kernel, dim3(rows), dim3(block), 0, stream,
                         static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                         static_cast<__half*>(out.data), d_model, eps, weight_offset);
