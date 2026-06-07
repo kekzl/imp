@@ -1,40 +1,40 @@
 ---
 name: benchmark-cuda
-description: Use when benchmarking, profiling, or A/B-testing CUDA kernels in the imp inference engine on RTX 5090 (sm_120). Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "kernel feels slow", "is this regression real".
+description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to BENCHMARKS.md/README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
 ---
 
 # CUDA Kernel Benchmarking — imp / sm_120 / RTX 5090
 
 Pair with `sm120-cuda-expert` for optimization decisions.
 
-## STOP — read first
+## STOP — what is a real signal on this box
 
-**Decode (`tg256`) is the only reliable A/B signal.** `pp512` varies up to **2.6× across container restarts** because cuBLAS picks different algorithms each cold start. Never gate on prefill-only numbers; always show decode delta too. The CI gate (`tests/perf_baseline.json`) reflects this: 3% decode threshold, 5% prefill threshold.
+1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) varies up to **2.6× across container restarts** (cuBLAS algo re-selection each cold start). Never gate on prefill-only numbers. Metric keys: `tests/perf_baseline.json` gates on **`tg128`**; ad-hoc bench runs usually report `tg256` — compare like with like.
+2. **The GPU is water-cooled and never throttles** (idles ~30 °C). Do NOT insert temperature cooldowns. The 15 s cooldown in `gen_perf_baseline.sh` resets **cuBLAS algo-selection state** under sustained load, not temperature.
+3. **Idle downclock is the dominant cold-start artifact.** Clocks take ~1 s to ramp under load — the first second reads artificially LOW (produced a spurious −42% that re-measured +20% clean). Always precede timed reps with a **discarded warmup run >1 s**; imp's built-in `Warmup...` is too short.
+4. **Decode can read 8–15% low for a whole day** (host/driver state, WSL2 — issue #526). Sample clocks DURING the bench: `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw --format=csv -l 1`. Healthy load ≈ **2850 MHz SM / 13801 MHz mem / ~500 W**. Lower mem clock or power = depressed host day → do NOT trust cross-day deltas or refresh baselines that day.
+5. **Back-to-back sweeps read 6–10% low** vs isolated runs. One model per process, isolated, before trusting cross-model deltas.
 
-## Theoretical peaks (RTX 5090)
+## Methodology (every A/B)
 
-| Metric | Peak |
-|--------|------|
-| HBM bandwidth | 1,792 GB/s |
-| FP16 TC | 838 TFLOPS |
-| FP8 TC | 1,677 TFLOPS |
-| FP4 TC | 3,354 TOPS |
-| L2 cache | 96 MB |
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` · 10 reps · 3+ trials · one model per process · `make check-gpu` first (no concurrent GPU consumers) · warm clocks >1 s before timing.
 
-Below 60% bandwidth (memory-bound) or 50% compute (compute-bound) → investigate.
+The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `/home/kekz/models`, NOT the repo's `models/` symlinks).
 
 ## Pick the right tool
 
 | Goal | Tool | Notes |
 |------|------|-------|
-| End-to-end engine perf | `make bench` → `tools/imp-bench/` | runs across baseline models, reports tg/pp |
-| Per-config sweep with MBU/MFU/TTFT/TBT | `bench/bench.py` | CSV output, optional llama.cpp compare |
-| Refresh perf baseline | `scripts/gen_perf_baseline.sh` | run after intentional perf changes; writes `tests/perf_baseline.json` |
-| Regression gate | `make verify-fast` | reads `tests/perf_baseline.json`, 3%/5% thresholds |
+| End-to-end engine perf | `make bench` | `imp-cli --bench --bench-pp 512 --bench-reps 5` sweep across baseline models |
+| Single model quick check | `make test-perf` | Qwen3-8B Q8_0 only |
+| Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` | CSV output, optional llama.cpp compare |
+| Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/…]` | cold-median: 5 trials × 15 s cooldown; writes `tests/perf_baseline.json` |
+| Regression gate | `make verify-fast` | 3% decode / 5% prefill thresholds |
+| North-star gate (Qwen3-14B Q6_K) | `make verify-north-star` | vs `tests/perf_baseline_north_star.json` |
 | Single kernel — wall-clock A/B | `cudaEvent` in launcher | see Step 1 |
-| Single kernel — metrics, occupancy, stalls | `ncu` | see Step 2 |
-| Multi-kernel timeline / launch overhead / graph behavior | `nsys` | see Step 3 |
-| Compare imp vs llama.cpp | `bench/profile.sh` | apples-to-apples on same models |
+| Single kernel — metrics, stalls | `ncu` | see Step 2 |
+| Timeline / launch overhead / graphs | `nsys` | see Step 3 |
+| Compare imp vs llama.cpp | `bench/profile.sh` | same models, apples-to-apples |
 
 ## Step 1: cudaEvent in-code (quick A/B)
 
@@ -42,7 +42,7 @@ Below 60% bandwidth (memory-bound) or 50% compute (compute-bound) → investigat
 cudaEvent_t start, stop;
 cudaEventCreate(&start); cudaEventCreate(&stop);
 
-// Warmup — always >=3 iterations (first launch has JIT/cache penalty)
+// Warmup — >=3 iterations AND >1s total busy time (clock ramp, see STOP #3)
 for (int i = 0; i < 3; i++) kernel<<<...>>>(...);
 cudaDeviceSynchronize();
 
@@ -56,17 +56,20 @@ cudaEventElapsedTime(&ms, start, stop);
 float avg_us = (ms / N_ITER) * 1000.0f;
 ```
 
-Rules: warmup ≥3, N_ITER ≥100 for kernels <100µs, lock clocks (`sudo nvidia-smi -lgc 2400,2400`; reset `-rgc`), kill concurrent GPU consumers.
+Rules: N_ITER ≥100 for kernels <100 µs, check stddev not just mean, kill concurrent GPU consumers, sample clocks during the run (STOP #4).
 
 ## Step 2: Nsight Compute (ncu) — per-kernel metrics
 
-Use the helper to get a consistent metric set:
+ncu is NOT in the runtime image. Use the **host** install mounted into the container, and call the real binary (not the cuda symlink wrapper):
 
 ```bash
-./.claude/skills/benchmark-cuda/ncu-basic.sh "my_kernel.*" ./build/imp-bench
+docker run --rm --gpus all -v /home/kekz/models:/models \
+  -v /opt/nvidia/nsight-compute/2026.2.0:/ncu -v /tmp/out:/out --user root \
+  imp:test /ncu/ncu --kernel-name "regex:my_kernel.*" --launch-skip 3 --launch-count 10 \
+  -o /out/profile ./build/imp-bench …   # chmod 777 /tmp/out first
 ```
 
-Or invoke directly with the canonical metric list — see `ncu-basic.sh` for the full set. Key metrics to read:
+Canonical metric set: `./.claude/skills/benchmark-cuda/ncu-basic.sh "<kernel-regex>" <binary> [args]`. Key metrics:
 
 | Metric | Meaning | Target |
 |--------|---------|--------|
@@ -77,48 +80,59 @@ Or invoke directly with the canonical metric list — see `ncu-basic.sh` for the
 | `l1tex__t_sector_hit_rate` | L1 hit rate | >90% for cached |
 | `stall_*` | Where warps stall | lowest = bottleneck |
 
-Always `--launch-skip 3 --launch-count N` to skip warmup. Compile with `-lineinfo` for source-correlated stalls (`--set detailed --import-source yes`).
+Always `--launch-skip 3 --launch-count N`. Compile with `-lineinfo` for source-correlated stalls (`--set detailed --import-source yes`).
 
 ## Step 3: Nsight Systems (nsys) — timeline
 
 When you suspect: launch overhead, H2D/D2H stalls, stream serialization, CUDA Graph behavior.
 
+**WSL2 needs sampling disabled** or nsys hangs/errors:
+
 ```bash
-nsys profile --stats=true -t cuda,nvtx,osrt \
-    --cuda-memory-usage=true -o timeline \
-    --force-overwrite=true ./build/imp-bench
+nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda,nvtx \
+    --stats=true --cuda-memory-usage=true -o timeline --force-overwrite=true \
+    ./build/imp-bench …
 nsys stats timeline.nsys-rep
 ```
 
-**`nsys` needs `--no-cuda-graphs`** when measuring per-kernel times — graph replay hides individual kernel timings.
+**CUDA Graphs hide captured kernels** — profile with imp's `--no-cuda-graphs` flag to see the true decode kernel mix.
 
-Red flags: gaps between launches >10µs (CPU-bound) · H2D/D2H during compute without overlap · CUDA Graph not collapsing launches (graph disabled or stream-captured wrong).
+Red flags: gaps between launches >10 µs (CPU-bound) · H2D/D2H during compute without overlap · graph not collapsing launches (silent fallback — see `check-degeneration`).
+
+**compute-sanitizer does NOT work on WSL2** (WDDM exposes no debugger interface). `make sanitize` is documented for native-Linux hosts only.
 
 ## Step 4: Roofline (one-liner)
 
-`AI = total_flops / total_bytes_moved` (matmul FLOPs = `2·M·N·K`; bytes from `dram__bytes.sum` in ncu). Ridge points: FP16=468, FP8=936, FP4=1873 FLOP/byte. AI < ridge → memory-bound; AI > ridge → compute-bound.
+`AI = total_flops / total_bytes_moved` (matmul FLOPs = `2·M·N·K`; bytes from `dram__bytes.sum` in ncu). Peaks: HBM 1,792 GB/s · FP16 838 TFLOPS · FP8 1,677 · FP4 3,354 TOPS · L2 96 MB. Ridge points: FP16=468, FP8=936, FP4=1873 FLOP/byte. AI < ridge → memory-bound.
 
 ## Report template
 
 ```
 Kernel: <name>, config: <block=X, grid=Y, smem=Z>
-  Wall:        <us> µs (N=<iters>, warmup=3)
+  Wall:        <us> µs (N=<iters>, warmup >1s)
   DRAM:        <pct>% of 1792 GB/s
   SM:          <pct>% of peak
   Occup:       <pct>%
   TC util:     <pct>%
+  Clocks live: <MHz SM>/<MHz mem>/<W>   (healthy: 2850/13801/~500)
   Bound by:    <memory|compute|latency|stalls>  reason: <top stall>
-  vs baseline: <±X%>
+  vs baseline: <±X%> on tg (decode)
 ```
+
+## Publishing numbers (keep docs from going stale)
+
+- **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR.
+- **`BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
+- `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
 ## Red flags — STOP and re-run
 
-- Reporting `pp512` delta without `tg256` delta → variance is up to 2.6×, you're seeing noise
-- Skipping warmup → first launch 2–10× worse (JIT + cold caches)
-- Profiling with clocks unlocked → thermal throttling skews A/B
+- Reporting `pp512` delta without a decode delta → 2.6× restart variance, you're seeing noise
+- Trusting a cold single-shot number → first ~1 s runs at idle clocks (NOT heat — this box never throttles)
+- Cross-day decode delta without sampling clocks during the bench → host drift is 8–15%
+- Refreshing the baseline on a depressed-host day → bakes a low bar in
 - Including `cudaMalloc/Free` in timing → allocate once outside the loop
-- Trusting `ncu` wall-clock → ncu serializes/replays kernels; use `nsys` or `cudaEvent` for real time
-- `ncu` without `-lineinfo` → no source correlation
-- Comparing against wrong peak → FP16 ≠ FP8 ≠ FP4 TOPS; pick the kernel's dtype
-- Small `N_ITER` on noisy kernels → run ≥100, check stddev not just mean
-- A/B without graphs both ON and OFF → graph replay can hide silent fallback (see `check-degeneration` skill)
+- Trusting `ncu` wall-clock → ncu serializes/replays; use `nsys` or `cudaEvent` for real time
+- Comparing against wrong peak → FP16 ≠ FP8 ≠ FP4; pick the kernel's dtype
+- A/B without graphs both ON and OFF → graph replay can hide silent fallback (see `check-degeneration`)
+- Back-to-back multi-model sweep deltas → isolate per process, one model each

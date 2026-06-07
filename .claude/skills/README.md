@@ -1,0 +1,21 @@
+# imp Agent Skills — Index
+
+Project-scoped skills for agentic work on imp (`.claude/skills/*/SKILL.md`). Each
+description states when to fire AND when not to — keep that property when editing.
+
+| Skill | Covers | Pairs with |
+|---|---|---|
+| [building-and-testing](building-and-testing/SKILL.md) | Docker build, test suite, verify gates, CI reality (no GPU runner), determinism/PPL caveats, PR conventions | benchmark-cuda (perf), check-degeneration (quality) |
+| [benchmark-cuda](benchmark-cuda/SKILL.md) | Benchmarking & profiling (cudaEvent/ncu/nsys/roofline), measurement artifacts on this box (clock ramp, host drift), baseline refresh + publishing numbers | sm120-cuda-expert |
+| [sm120-cuda-expert](sm120-cuda-expert/SKILL.md) | Writing/optimizing CUDA kernels for sm_120a; PTX templates + dead-ends ledgers in `references/` | benchmark-cuda, check-degeneration |
+| [check-degeneration](check-degeneration/SKILL.md) | Output-coherence battery after hot-path changes (degen_suite, GTest battery, graphs parity) | — |
+| [server-api](server-api/SKILL.md) | imp-server endpoints (OpenAI + Anthropic), streaming, json_schema, tool calling, cache_control, validation tools | check-degeneration |
+| [add-model-arch](add-model-arch/SKILL.md) | New-architecture integration checklist + wrong-output diagnostic fingerprints | quant-formats, check-degeneration |
+| [quant-formats](quant-formats/SKILL.md) | GGUF/NVFP4/FP8 formats, StorageTier dispatch contract, decode cache, KV dtypes | sm120-cuda-expert |
+
+Boundaries (to avoid trigger collisions):
+
+- *Measure* perf → benchmark-cuda · *write* the kernel → sm120-cuda-expert · *is the output still sane* → check-degeneration.
+- *Build/test mechanics & CI* → building-and-testing · *model output via HTTP* → server-api · *model loads but is wrong* → add-model-arch · *bytes/scales/tiers* → quant-formats.
+
+Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md).
