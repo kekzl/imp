@@ -176,6 +176,7 @@ TEST(MmqQ8Imma, Square128) { run_case(128, 128, 64, 42, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, PrefillChunkShape) { run_case(512, 128, 256, 43, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, QkvLikeShape) { run_case(512, 1024, 4096, 44, 15e-3f, 1e-2f); }
 TEST(MmqQ8Imma, MTail) { run_case(313, 256, 128, 45, 15e-3f, 2e-2f); }
+TEST(MmqQ8Imma, NTail192) { run_case(128, 192, 128, 51, 15e-3f, 2e-2f); }  // gemma-4 d_ff=704 class
 TEST(MmqQ8Imma, MTailNoTail320) { run_case(320, 256, 128, 45, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, MTailSeed47) { run_case(313, 256, 128, 47, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, MTailBigK) { run_case(313, 256, 1024, 45, 15e-3f, 2e-2f); }
@@ -423,9 +424,9 @@ TEST(MmqQ8Imma, DeclineShapes) {
     cudaMalloc(&d_w, W.size());
     cudaMalloc(&d_x, 64 * 64 * sizeof(__half));
     cudaMalloc(&d_out, 64 * 64 * sizeof(__half));
-    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 63, 128, 64, nullptr));   // M
-    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 64, 64, nullptr));    // N
-    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 128, 32, nullptr));   // K
+    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 63, 128, 64, nullptr));  // M < 64
+    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 63, 64, nullptr));   // N odd
+    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 128, 32, nullptr));  // K % 64
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_out);

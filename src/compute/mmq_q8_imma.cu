@@ -72,7 +72,8 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
                                            const __half* __restrict__ Bsc, int8_t (*sA)[kRow],
                                            int8_t (*sB)[kRow], __half (*sAsc)[2],
                                            float (*sArs)[2], __half (*sBsc)[2][2], int base_m,
-                                           int M, int K, int subs, int k_base) {
+                                           int M, int K, int subs, int k_base,
+                                           int base_n_rows) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -85,7 +86,8 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     for (int i = tid; i < kBN * 4; i += kThreads) {
         const int row = i >> 2;
         const int col = (i & 3) * 16;
-        cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col, true);
+        cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col,
+                       (base_n_rows < 0) || (row < base_n_rows));
     }
     const int kb0 = k_base / 32;
 #pragma unroll
@@ -96,7 +98,8 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     }
 #pragma unroll
     for (int i = tid; i < kBN; i += kThreads) {
-        cp_async_ca_8(&sBsc[i][0][0], Bsc + (static_cast<size_t>(i) * subs + kb0) * 2, true);
+        cp_async_ca_8(&sBsc[i][0][0], Bsc + (static_cast<size_t>(i) * subs + kb0) * 2,
+                      (base_n_rows < 0) || (i < base_n_rows));
     }
 }
 
@@ -130,6 +133,7 @@ __global__ void __launch_bounds__(kThreads)
     const int base_m = blockIdx.y * BM;
     const int base_n = blockIdx.x * kBN;
     if (base_m >= rows || rows == 0) return;
+    const int n_rem = (N - base_n >= kBN) ? -1 : (N - base_n);  // -1 = full tile
 
     const int subs = K / 32;
     const int8_t* A = X_s8 + row_off * K;
@@ -163,7 +167,7 @@ __global__ void __launch_bounds__(kThreads)
 
     const int ksteps = K / kBK;
     load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0], base_m,
-                   rows, K, subs, 0);
+                   rows, K, subs, 0, n_rem);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
@@ -171,7 +175,8 @@ __global__ void __launch_bounds__(kThreads)
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
             load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
-                           sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK);
+                           sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK,
+                           n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -241,6 +246,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
             const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
                 __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
@@ -288,7 +294,8 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
                                                int N, int sblk_count, int8_t (*sA)[kRow],
                                                uint8_t (*sBq)[kQRow], uint8_t (*sBh)[16],
                                                __half (*sAsc)[2], float (*sArs)[2], int base_m,
-                                               int M, int K, int subs, int k_base) {
+                                               int M, int K, int subs, int k_base,
+                                               int base_n_rows) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -304,12 +311,13 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
         const int part = i % 3;
+        const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
         const uint8_t* blk = Wq4k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * 144;
         if (part == 0) {
-            cp_async_cg_16(&sBh[row][0], blk, true);  // d, dmin, 12-B scales
+            cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else {
             const int off = (part - 1) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + 16 + grp * 32 + off, true);
+            cp_async_cg_16(&sBq[row][off], blk + 16 + grp * 32 + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
@@ -346,6 +354,7 @@ __global__ void __launch_bounds__(kThreads)
     const int base_m = blockIdx.y * BM;
     const int base_n = blockIdx.x * kBN;
     if (base_m >= rows || rows == 0) return;
+    const int n_rem = (N - base_n >= kBN) ? -1 : (N - base_n);
 
     const int subs = K / 32;
     const int sblk_count = K / 256;
@@ -379,7 +388,7 @@ __global__ void __launch_bounds__(kThreads)
 
     const int ksteps = K / kBK;
     load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, N, sblk_count, sA[0], sBq[0], sBh[0],
-                       sAsc[0], sArs[0], base_m, rows, K, subs, 0);
+                       sAsc[0], sArs[0], base_m, rows, K, subs, 0, n_rem);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
@@ -388,7 +397,7 @@ __global__ void __launch_bounds__(kThreads)
             const int nstage = (ks + 1) & 1;
             load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, N, sblk_count, sA[nstage],
                                sBq[nstage], sBh[nstage], sAsc[nstage], sArs[nstage], base_m, rows,
-                               K, subs, (ks + 1) * kBK);
+                               K, subs, (ks + 1) * kBK, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -478,6 +487,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
             const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
                 __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
@@ -535,7 +545,8 @@ __device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict
                                                int sblk_count, int8_t (*sA)[kRow],
                                                uint8_t (*sQl)[kQlRow], uint8_t (*sQh)[kQhRow],
                                                uint8_t (*sScd)[8], __half (*sAsc)[2], int base_m,
-                                               int M, int K, int subs, int k_base) {
+                                               int M, int K, int subs, int k_base,
+                                               int base_n_rows) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -552,16 +563,18 @@ __device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict
     for (int i = tid; i < kBN * 8; i += kThreads) {
         const int row = i >> 3;
         const int part = i & 7;
+        const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
         const uint8_t* blk =
             Wq6k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ6Stride;
         if (part < 4) {
-            cp_async_cg_16(&sQl[row][part * 16], blk + g * 64 + part * 16, true);
+            cp_async_cg_16(&sQl[row][part * 16], blk + g * 64 + part * 16, bvalid);
         } else if (part < 6) {
-            cp_async_cg_16(&sQh[row][(part - 4) * 16], blk + 128 + g * 32 + (part - 4) * 16, true);
+            cp_async_cg_16(&sQh[row][(part - 4) * 16], blk + 128 + g * 32 + (part - 4) * 16,
+                           bvalid);
         } else if (part == 6) {
-            cp_async_ca_4(&sScd[row][0], blk + 192 + 2 * j, true);  // 4 per-16 scales
+            cp_async_ca_4(&sScd[row][0], blk + 192 + 2 * j, bvalid);  // 4 per-16 scales
         } else {
-            cp_async_ca_4(&sScd[row][4], blk + 208, true);  // d (+2 pad bytes)
+            cp_async_ca_4(&sScd[row][4], blk + 208, bvalid);  // d (+2 pad bytes)
         }
     }
     const int kb0 = k_base / 32;
@@ -597,6 +610,7 @@ __global__ void __launch_bounds__(kThreads)
     const int base_m = blockIdx.y * BM;
     const int base_n = blockIdx.x * kBN;
     if (base_m >= rows || rows == 0) return;
+    const int n_rem = (N - base_n >= kBN) ? -1 : (N - base_n);
 
     const int subs = K / 32;
     const int sblk_count = K / 256;
@@ -642,7 +656,7 @@ __global__ void __launch_bounds__(kThreads)
 
     const int ksteps = K / kBK;
     load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(0), sQl(0), sQh(0), sScd(0),
-                       sAsc(0), base_m, rows, K, subs, 0);
+                       sAsc(0), base_m, rows, K, subs, 0, n_rem);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
@@ -651,7 +665,7 @@ __global__ void __launch_bounds__(kThreads)
             const int nstage = (ks + 1) & 1;
             load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(nstage), sQl(nstage),
                                sQh(nstage), sScd(nstage), sAsc(nstage), base_m, rows, K, subs,
-                               (ks + 1) * kBK);
+                               (ks + 1) * kBK, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -752,6 +766,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
             const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
                 __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
@@ -940,7 +955,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
     const int grid_m_rows = d_offsets ? h_max_rows : M;
     const bool small_m = d_offsets && h_max_rows < 96;
     const int bm = small_m ? 32 : 128;
-    dim3 grid(N / kBN, (grid_m_rows + bm - 1) / bm, ne);
+    dim3 grid((N + kBN - 1) / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
     if (qkind == 1) {
         // raw-read kernel: zero extra weight VRAM
@@ -1019,21 +1034,21 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
 
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
                       int K, cudaStream_t stream, float beta) {
-    if (M < 64 || N % kBN != 0 || K % kBK != 0) return false;
+    if (M < 64 || N % 2 != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta) {
-    if (M < 64 || N % kBN != 0 || K % 256 != 0) return false;
+    if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta) {
-    if (M < 64 || N % kBN != 0 || K % 256 != 0) return false;
+    if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q6k_blocks, 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
@@ -1041,7 +1056,7 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                        int K, cudaStream_t stream) {
-    if (N % kBN != 0 || K % (qkind != 0 ? 256 : kBK) != 0) return false;
+    if (N % 2 != 0 || K % (qkind != 0 ? 256 : kBK) != 0) return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
                                 d_offsets, h_max_rows, expanded, ne);
