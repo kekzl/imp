@@ -20,8 +20,8 @@ consumes these outputs; kept for future HF layer-by-layer comparisons.
 Usage:
   python gen_reference.py \\
       --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
-      --out  tests/reference/data/tinyllama \\
-      --prompts tests/reference/prompts.json \\
+      --out  tests/refs/data/tinyllama \\
+      --prompts tests/refs/prompts.json \\
       --decode-tokens 16
 
 The script is self-contained and CPU-only by default (use --device cuda

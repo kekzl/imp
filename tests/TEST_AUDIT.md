@@ -143,7 +143,7 @@ oben entsprechend bewertet.
 |---|---|---|
 | `tests/golden/*.txt` (5 Dateien) | **null Konsumenten** (grep über tests/scripts/tools/CI); 2× Mistral-Small = gelöschtes Modell; Makefile `test-golden` verweist selbst auf pytest | **tot → löschen** (low-risk) |
 | `tests/api/test_outputs/` (21 committete .txt) | Lauf-Artefakte von `test_repetition_compare.sh` (schreibt dorthin), einmalig vor Monaten committet | **Artefakte → löschen + .gitignore** (low-risk) |
-| `tests/reference/gen_reference.py` | null Nutzung; Infrastruktur für künftige HF-Layer-Vergleiche | schlafend — behalten, im README als dormant markieren |
+| `tests/refs/gen_reference.py` | null Nutzung; Infrastruktur für künftige HF-Layer-Vergleiche | schlafend — behalten, im README als dormant markieren |
 | `tests/fixtures/` | **NICHT tot** (Agent-Erstbefund falsch): `scripts/validate_safetensors.py:628,892` konsumiert beide Dateien | behalten |
 | Stale-Kommentar „FMHA sm120 requires sm_90+ (WMMA fallback)" | `test_attention_fmha_sm120.cu:84` | irreführend auf sm_120a-only-Engine → fixen (low-risk) |
 | Kommentar „same fate as the SM100-only tcgen05 family" (`tests/bench/mmq_q4k_imma_bench.cu:30`) | Agent-Erstbefund „dead commentary" — geprüft: im Kontext korrekt (tcgen05 IST sm_100-only, genau deshalb fehlt es auf sm_120) | behalten |
@@ -238,7 +238,7 @@ oben entsprechend bewertet.
 10. `tests/golden/` löschen (tot), `tests/api/test_outputs/` löschen +
     .gitignore, irreführende Skip-Message in `test_attention_fmha_sm120.cu`
     fixen, Manual-Skripte als manuell markieren,
-    `tests/reference/gen_reference.py` als dormant markieren.
+    `tests/refs/gen_reference.py` als dormant markieren.
 
 **Nicht tun:** Spec-decode-Exactness (#9 von 06-04) bleibt zurückgestellt
 (MTP = bewiesener Dead End bei aktueller Präzision); Bench-Tests nicht in
