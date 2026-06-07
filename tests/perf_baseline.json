@@ -2,20 +2,20 @@
   "schema_version": "legacy-v1",
   "model": "Qwen3-8B-Q8_0.gguf",
   "gpu": "NVIDIA GeForce RTX 5090",
-  "cuda": "unknown",
+  "cuda": "13.3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-06-04T22:52:45Z",
+  "timestamp": "2026-06-07T15:33:17Z",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
   "reps": 5,
   "n_trials": 5,
   "metrics": {
     "prefill_tps": {
-      "pp128": 3602.66,
-      "pp512": 8221.54,
-      "pp4096": 9781.29
+      "pp128": 3858.32,
+      "pp512": 10649.22,
+      "pp4096": 13691.02
     },
     "decode_tps": {
-      "tg128": 268.42
+      "tg128": 284.82
     },
     "memory_mb": {
       "model_weights": 8320

@@ -70,7 +70,10 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.graph_capture_mode = cfg.runtime.graph_capture_mode;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;
     d.deterministic_gemm = cfg.runtime.deterministic_gemm;
-    d.cublas_fp16_acc = cfg.gemm.cublas_fp16_acc;
+    // "auto" resolves per-arch at engine init (init_resolve_quant_flags_ →
+    // process_diag_set_cublas_fp16_acc); standalone tools without an engine
+    // treat auto as off.
+    d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
     d.attention_splitk_pipe = cfg.attention.splitk_pipe;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
@@ -99,6 +102,7 @@ const std::string& process_diag_graph_capture_mode() { return slot().graph_captu
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }
 bool process_diag_deterministic_gemm() { return slot().deterministic_gemm; }
 bool process_diag_cublas_fp16_acc() { return slot().cublas_fp16_acc; }
+void process_diag_set_cublas_fp16_acc(bool v) { slot().cublas_fp16_acc = v; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
 bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }

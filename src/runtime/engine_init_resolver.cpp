@@ -176,6 +176,22 @@ void Engine::init_resolve_fp8_prefill_() {
 void Engine::init_resolve_quant_flags_() {
     const auto& mcfg = model_->config();
     // --- Resolve auto-detection flags ---
+
+    // gemm.cublas_fp16_acc=auto → per-arch default. GeForce sm_120 quarters
+    // FP32-accumulate FP16 tensor-core rate (PR #606 calibration); 16F
+    // accumulate restores full rate (+24.9% q8 pp512 measured 2026-06-07,
+    // decode neutral, PPL flat on Qwen3-8B). Denied per measurement/risk:
+    // Gemma-3/4 (+0.7% PPL on gemma-3-12b) and gpt-oss (documented FP16
+    // residual-overflow sensitivity — f16 accumulators are the same hazard
+    // class). "on"/"off" bypass this and were applied at install time.
+    if (runtime_config_.gemm.cublas_fp16_acc == "auto") {
+        const bool deny = (mcfg.arch == ModelArch::GEMMA3 || mcfg.arch == ModelArch::GEMMA4 ||
+                           mcfg.arch == ModelArch::GPT_OSS);
+        process_diag_set_cublas_fp16_acc(!deny);
+        IMP_LOG_INFO("cuBLAS FP16-accumulate prefill: auto → %s (arch=%s)", deny ? "OFF" : "ON",
+                     model_arch_name(mcfg.arch));
+    }
+
     // NVFP4 decode mode
     int n_gdn_auto = 0;
     for (int i = 0; i < mcfg.n_layers; i++)

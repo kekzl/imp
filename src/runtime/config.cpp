@@ -224,8 +224,13 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.nvfp4_decode_all = parse_bool(val, cfg.gemm.nvfp4_decode_all);
     else if (eq("gemm.nvfp4_lm_head"))
         cfg.gemm.nvfp4_lm_head = parse_bool(val, cfg.gemm.nvfp4_lm_head);
-    else if (eq("gemm.cublas_fp16_acc"))
-        cfg.gemm.cublas_fp16_acc = parse_bool(val, cfg.gemm.cublas_fp16_acc);
+    else if (eq("gemm.cublas_fp16_acc")) {
+        // tri-state auto|on|off; legacy bool spellings stay valid
+        if (val == "auto" || val == "on" || val == "off")
+            cfg.gemm.cublas_fp16_acc = val;
+        else
+            cfg.gemm.cublas_fp16_acc = parse_bool(val, false) ? "on" : "off";
+    }
     else if (eq("gemm.nvfp4_lm_head_gdn"))
         cfg.gemm.nvfp4_lm_head_gdn = parse_bool(val, cfg.gemm.nvfp4_lm_head_gdn);
     else if (eq("gemm.nvfp4_ssm_proj"))

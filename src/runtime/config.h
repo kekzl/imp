@@ -266,13 +266,17 @@ struct RuntimeConfig {
         // 1/4 rate (measured 2026-06-07: 253 vs 1956 TFLOPS saturated
         // mma.sync); the cuBLAS 32F prefill GEMMs sit at ~225 TFLOPS — ~89% of
         // that quarter-rate ceiling, so the kernel is fine, the compute type
-        // is the cap. 16F measured ~2x kernel throughput on all prefill
-        // shapes (e.g. 512x17408x5120: 226→422 TFLOPS, B streamed from DRAM).
-        // Risk: f16 accumulator overflow/precision over long-K dots — keep
-        // default off until a perplexity A/B blesses it. Applies only to
+        // is the cap. 16F measured +24.9% q8 pp512 model-level (2026-06-07,
+        // paired same-day restarts), decode neutral. "auto" (default) enables
+        // it per-arch at engine init: ON except GEMMA3/GEMMA4 (measured +0.7%
+        // PPL on gemma-3-12b) and GPT_OSS (known FP16-residual-overflow
+        // sensitivity — f16 accumulators are the same hazard class). "on"
+        // forces it everywhere, "off" restores 32F accumulate. Legacy bool
+        // values (true/false/1/0) parse as on/off. Applies only to
         // F16xF16→F16 with M>1 (prefill); decode GEMV and mixed-precision
-        // paths are untouched.
-        bool cublas_fp16_acc = false;
+        // paths are untouched. Standalone tools that skip engine init treat
+        // "auto" as off.
+        std::string cublas_fp16_acc = "auto";
         // Allow NVFP4 LM head even on GDN/SSM-hybrid models (normally excluded —
         // an older NVFP4 method degraded recurrent-state coherence, memory
         // lm_head_only_nvfp4_qwen3_6_refuted). Quantified 2026-05-29 with the

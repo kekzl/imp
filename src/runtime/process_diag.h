@@ -50,7 +50,11 @@ bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
 // FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc) — read by the
 // free-function gemm() in compute/gemm.cu, which carries no RuntimeConfig.
+// "auto" (default) is resolved per-arch by init_resolve_quant_flags_ via the
+// setter (ON except Gemma-3/4 and gpt-oss); install() maps auto → off so
+// engine-less tools keep 32F accumulate.
 bool process_diag_cublas_fp16_acc();
+void process_diag_set_cublas_fp16_acc(bool v);
 
 // Attention
 bool process_diag_attention_splitk_pipe();

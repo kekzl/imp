@@ -177,10 +177,12 @@ nvfp4_attn_proj      = false
 nvfp4_moe_decode     = true
 # FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F). GeForce sm_120
 # runs FP32-accumulate tensor cores at 1/4 rate, so 32F caps prefill at
-# ~225 TFLOPS; 16F doubles kernel throughput (Qwen3-8B Q8_0 pp512 +17%,
-# PPL flat). Gemma-3-12B measured +0.7% PPL — hence opt-in. Decode (M=1)
-# is unaffected.
-cublas_fp16_acc      = false
+# ~225 TFLOPS; 16F roughly doubles GEMM throughput (Qwen3-8B Q8_0 pp512
+# +24.9% measured 2026-06-07, PPL flat, decode neutral). auto (default) =
+# ON per arch except Gemma-3/4 (+0.7% PPL measured) and gpt-oss
+# (f16-overflow sensitivity); on = force everywhere; off = always 32F.
+# Decode (M=1) is unaffected.
+cublas_fp16_acc      = auto
 
 # [gemma4] section moved out of the global RuntimeConfig in Phase 5
 # Track A of the architecture refactor. These are now per-model
