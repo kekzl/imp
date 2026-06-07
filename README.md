@@ -43,9 +43,9 @@ dated, commit-anchored measurements with exact commands):
   (Qwen3-30B/Coder-30B 307, Qwen3.6-35B 245, Gemma-4-26B 259) — effectively
   uncontested on `sm_120`, where vLLM's NVFP4 path needs `tcgen05` and
   llama.cpp has no native NVFP4 support.
-- Honest losses: GGUF prefill (1.3–2.4× behind llama.cpp), NVFP4 prefill
-  (~1.4× behind vLLM, attention-bound), Qwen3.6-35B GGUF decode (−31%,
-  structural FP16 GDN-projection tax).
+- Honest losses: NVFP4 long-context prefill (~1.7× behind vLLM at pp4096,
+  attention-bound; imp WINS below ~2k context), Qwen3.6-35B GGUF decode
+  (−31%, structural FP16 GDN-projection tax).
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
 command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
@@ -63,7 +63,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
 - **Consumer Blackwell only.** `sm_120a` SASS + `compute_120f` PTX fallback. No Hopper, Ada, Ampere, datacenter Blackwell. No AMD, Intel, Apple, or CPU paths.
-- **GGUF prefill is slow.** 1.3–2.4× behind llama.cpp; needs a custom IMMA prefill kernel. NVFP4 prefill trails vLLM ~1.4×.
+- **GGUF prefill: largely fixed 2026-06-07.** The INT8-IMMA prefill family (#612–#617) puts Qwen3-30B-A3B and Qwen3-14B-Q6_K AHEAD of llama.cpp; Q8_0 dense and gemma-4 sit at 1.20×, Qwen3.6-35B at 1.55× (GDN share is quality-locked). NVFP4 prefill trails vLLM ~1.7× at pp4096 only — imp WINS below ~2k context (see docs/audit/prefill_gap_2026_06_07.md).
 - **MoE/hybrid GGUF decode loses on Qwen3.6-35B** (~−31% vs llama.cpp): an FP16-projection tax on the GDN/attention path that NVFP4 can't address.
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
