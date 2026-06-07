@@ -573,8 +573,8 @@ struct PathNVFP4TC {
 };
 
 // ===========================================================================
-// TYPED_TEST over KV dtypes (R8 / audit Phase-2 R8: "TYPED_TEST über KV-Dtypes
-// im paged-Oracle"). One typed fixture, one body; each KV dtype is a policy
+// TYPED_TEST over KV dtypes (R8 / audit Phase-2 R8: "TYPED_TEST over KV dtypes
+// in the paged oracle"). One typed fixture, one body; each KV dtype is a policy
 // type. The two production decode shapes (GQA 32x8 and MHA 8x8 at hd=128) and
 // the kv_len sweep {16, 64, 333, 1024} run inside the body. 333 is deliberately
 // NOT block-aligned (partial-tail block); 16/64 are the short rows where quant

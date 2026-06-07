@@ -79,6 +79,7 @@ Prefill numbers vary up to 2.6× across container restarts because of cuBLAS alg
 
 Other rules:
 
+- **English only.** All PRs (title + body), commit messages, code comments, docs, and `.md` files are written entirely in English. (Deliberate non-English *test data* — tokenizer Unicode fixtures, multilingual probes in `tools/analysis/degen_suite.py` — is exempt and should carry a comment saying so.)
 - `#pragma once` in headers (no include guards).
 - `.cu` for CUDA, `.cpp` for plain C++, `.h` for headers (CUDA or not).
 - File names are `snake_case`. Known intentional exception: the `smallM` fragment (`gemm_grouped_nvfp4_smallM.{h,cu}`) — it mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.

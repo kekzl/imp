@@ -331,7 +331,7 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
     //
     // Build the CUTLASS cache directly from the Tensor sidecars (data
     // pointer, scales, tensor_scale, shape) so the prefill dispatch
-    // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
+    // at executor_kernels.cu:1975 fires on the native FP4×FP4 path.
     //
     // Historical EXCLUSION (added 2026-05-02, REMOVED 2026-05-14):
     // The llm-compressor NVFP4 format previously triggered a Skip-Guard

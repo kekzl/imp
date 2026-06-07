@@ -1,4 +1,4 @@
-"""Build the Modul-1 roofline table rows from a run record. Joins the per-cell
+"""Build the Module-1 roofline table rows from a run record. Joins the per-cell
 ncu metric groups (base/sass_*/tc_* for prefill, full for decode) at kernel-
 class level: each group is an independent single-pass capture of the SAME
 steady-state window (same --launch-skip/--launch-count), so per-group rates

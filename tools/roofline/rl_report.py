@@ -1,4 +1,4 @@
-"""Markdown report: Modul-1 roofline table + Modul-2 coverage matrix + lever
+"""Markdown report: Module-1 roofline table + Module-2 coverage matrix + lever
 list. Renders purely from history (run JSON + nsys extracts). stdlib only."""
 import json
 import os
@@ -116,8 +116,8 @@ def fmt_num(x, digits=1):
 
 
 def module1_table(rows, min_share_pct=1.0):
-    hdr = ("| Kernel-Klasse | Modell/Shape | Zeitanteil % (nsys) | AI (FLOP/B) | erreicht "
-           "(med) | Peak | %-Roofline (min/med/max) | bound-by | dtype | L1-Hit% | Occ % |\n"
+    hdr = ("| Kernel class | Model/Shape | Time share % (nsys) | AI (FLOP/B) | achieved "
+           "(med) | Peak | %-roofline (min/med/max) | bound-by | dtype | L1-hit% | Occ % |\n"
            "|---|---|---|---|---|---|---|---|---|---|---|\n")
     lines = []
     for r in sorted(rows, key=lambda r: (r["model"], r["shape"], -r.get("time_share_pct", 0))):
@@ -137,12 +137,12 @@ def module1_table(rows, min_share_pct=1.0):
             f"| {r['ai']:.2f} | {ach} | {peak} "
             f"| {r['pct_roofline_min']:.1f} / {r['pct_roofline_med']:.1f} / {r['pct_roofline_max']:.1f} "
             f"| {r['bound_by']} | {r['dtype']} | {r.get('l1_hit_pct', 0):.0f} | {r['occupancy_pct']:.0f} |")
-    return hdr + "\n".join(lines) + "\n(*) = Zeitanteil aus ncu-Fenster (nsys-Share fehlt)\n"
+    return hdr + "\n".join(lines) + "\n(*) = time share from the ncu window (nsys share missing)\n"
 
 
 def module2_table(cov):
-    hdr = ("| Zelle | Legacy-Attn %-Anteil Fenster (min/med/max) | Legacy-Anteil an "
-           "Attention % (min/med/max) | Restarts |\n|---|---|---|---|\n")
+    hdr = ("| Cell | Legacy-attn %-share of window (min/med/max) | Legacy share of "
+           "attention % (min/med/max) | Restarts |\n|---|---|---|---|\n")
     lines = []
     for cell, agg in cov.items():
         a = agg["legacy_attn_share_of_total_pct"]
@@ -195,33 +195,33 @@ def render(run, cfg, ab_results=None):
     lv = levers(rows, cov, cfg["roofline"])
     meta = run["meta"]
     md = []
-    md.append(f"# imp Roofline-Audit — Run `{run['run_id']}`\n")
+    md.append(f"# imp Roofline Audit — Run `{run['run_id']}`\n")
     md.append(f"- Commit: `{meta['git']['commit']}`{' (dirty)' if meta['git']['dirty'] else ''}"
               f" · Timestamp: {meta['timestamp']} · config_version: {meta['config_version']}")
     env = meta.get("env", {})
-    md.append(f"- GPU: {env.get('gpu','?')} · Treiber: {env.get('driver','?')} · "
+    md.append(f"- GPU: {env.get('gpu','?')} · Driver: {env.get('driver','?')} · "
               f"CUDA: {env.get('cuda','?')} · ncu: {env.get('ncu','?')}")
-    md.append(f"- Methodik: ncu `--clock-control base` (Clocks gelockt), Counter gepinnt "
-              f"(config_version {meta['config_version']}), {meta['restarts']} Container-Restarts, "
-              f"AI aus gemessenem `dram__bytes.sum`, FLOPs aus `sm__ops_path_tensor_*`/SASS-Counters. "
-              f"Roh-Exporte: `tools/roofline/history/raw/{run['run_id']}/`.\n")
-    md.append("## Modul 1 — Roofline pro Kernel-Klasse\n")
-    md.append("Zeitanteil = Klassen-Anteil an der nsys-Phasen-Timeline der Zelle "
-              "(prefill_window bzw. post_prefill=Decode). %-Roofline/AI aus dem "
-              "ncu-Steady-State-Fenster. Peak compute auf gemessenen (gelockten) "
-              "SM-Takt normiert; ridge auf Boost-Takt.\n")
+    md.append(f"- Methodology: ncu `--clock-control base` (clocks locked), pinned counters "
+              f"(config_version {meta['config_version']}), {meta['restarts']} container restarts, "
+              f"AI from measured `dram__bytes.sum`, FLOPs from `sm__ops_path_tensor_*`/SASS counters. "
+              f"Raw exports: `tools/roofline/history/raw/{run['run_id']}/`.\n")
+    md.append("## Module 1 — Roofline per kernel class\n")
+    md.append("Time share = class share of the cell's nsys phase timeline "
+              "(prefill_window resp. post_prefill=decode). %-roofline/AI from the "
+              "ncu steady-state window. Peak compute normalized to the measured (locked) "
+              "SM clock; ridge to the boost clock.\n")
     md.append(module1_table(rows))
-    md.append("\n## Modul 2 — Coverage / Legacy-Fallback (aus nsys-Timeline)\n")
+    md.append("\n## Module 2 — Coverage / legacy fallback (from the nsys timeline)\n")
     md.append(module2_table(cov))
     if ab_results:
-        md.append("\n### A/B Fallback-Deltas (gemessen, unprofiled)\n")
+        md.append("\n### A/B fallback deltas (measured, unprofiled)\n")
         md.append("```json\n" + json.dumps(ab_results, indent=1) + "\n```\n")
-    md.append("\n## Lever-Liste (priorisiert, **alle Gewinne = Schätzung** via Amdahl "
-              "aus gemessenem Zeitanteil × Roofline-Headroom)\n")
+    md.append("\n## Lever list (prioritized, **all gains = estimate** via Amdahl "
+              "from measured time share × roofline headroom)\n")
     for i, l in enumerate(lv[:15], 1):
-        md.append(f"{i}. **{l['class']}** @ {l['cell']} — est. Fenster-Gewinn "
-                  f"~{l['est_gain_pct']:.1f}% (Zeitanteil {l['time_share_pct']:.1f}%, "
-                  f"{'%-Roofline med ' + format(l.get('pct_roofline_med', 0), '.1f') + ' vs Ziel ' + format(l.get('target_pct', 0), '.0f') if l['kind']=='roofline_headroom' else l.get('note','')})")
-    md.append("\n*(Jede Zahl rückverfolgbar: run_id = commit_timestamp; Roh-ncu-CSV + "
-              "nsys-Extract liegen append-only unter history/raw/<run_id>/.)*\n")
+        md.append(f"{i}. **{l['class']}** @ {l['cell']} — est. window gain "
+                  f"~{l['est_gain_pct']:.1f}% (time share {l['time_share_pct']:.1f}%, "
+                  f"{'%-roofline med ' + format(l.get('pct_roofline_med', 0), '.1f') + ' vs target ' + format(l.get('target_pct', 0), '.0f') if l['kind']=='roofline_headroom' else l.get('note','')})")
+    md.append("\n*(Every number traceable: run_id = commit_timestamp; raw ncu CSV + "
+              "nsys extract are append-only under history/raw/<run_id>/.)*\n")
     return "\n".join(md)
