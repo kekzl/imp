@@ -304,11 +304,17 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                     continue;
                 if (present_in(e.tier, e.source_data)) {
                     ++matched;
+                } else if (e.fp16_companion && present_in(StorageTier::FP16, e.source_data)) {
+                    // gemma-3 companion: planned NVFP4 + FP16 backing; when the
+                    // NVFP4 primary is budget-evicted only the FP16 companion
+                    // remains. Expected degraded state, not a tier disagreement.
+                    ++matched;
                 } else if (any_overlay(e.source_data)) {
                     ++mismatch;
-                    IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d not in its map "
-                                 "(landed in a different overlay)",
-                                 tensor_kind_name(e.kind), static_cast<int>(e.tier));
+                    StorageTier actual = infer_tier_from_wcache(wcache_, e.source_data);
+                    IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d actual-tier=%d",
+                                 tensor_kind_name(e.kind), static_cast<int>(e.tier),
+                                 static_cast<int>(actual));
                 } else {
                     ++evicted;  // planned overlay but not cached (budget / native fallback)
                 }
