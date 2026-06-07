@@ -1,0 +1,147 @@
+{
+  "config_version": 1,
+  "comment": "Pinned roofline measurement config. Changing counters/shapes bumps config_version — runs are only comparable within the same version.",
+
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5090 (GB202, sm_120a)",
+    "sm_count": 170,
+    "dram_peak_gbs": 1792.0,
+    "nominal_boost_ghz": 2.407,
+    "flop_per_cycle": {
+      "comment": "GPU-wide dense math ops per SM-clock cycle. peak_flops(dtype) = flop_per_cycle * measured_sm_clock_hz. Calibrated so tc_fp16*2.407GHz = 838 TFLOPS, tc_fp8 = 1677, tc_fp4 = 3354 (datasheet peaks).",
+      "tc_fp16": 348160,
+      "tc_bf16": 348160,
+      "tc_fp8": 696320,
+      "tc_fp4": 1392640,
+      "tc_int8": 696320,
+      "cuda_fp32": 43520,
+      "cuda_fp16": 87040
+    }
+  },
+
+  "ncu": {
+    "binary": "/opt/nvidia/nsight-compute/2026.2.0/ncu",
+    "clock_control": "base",
+    "launch_count": 120,
+    "skip_fraction": 0.45,
+    "replay_mode": "kernel",
+    "metrics": [
+      "gpu__time_duration.sum",
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
+      "dram__bytes.sum",
+      "gpc__cycles_elapsed.avg.per_second",
+      "sm__warps_active.avg.pct_of_peak_sustained_active",
+      "l1tex__throughput.avg.pct_of_peak_sustained_elapsed",
+      "l1tex__t_sector_hit_rate.pct",
+      "sm__ops_path_tensor_src_fp4_dst_fp32.sum",
+      "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum",
+      "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum",
+      "sm__ops_path_tensor_src_fp8_dst_fp16.sum",
+      "sm__ops_path_tensor_src_fp8_dst_fp32.sum",
+      "sm__ops_path_tensor_src_fp16_dst_fp16.sum",
+      "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
+      "sm__ops_path_tensor_src_bf16_dst_fp32.sum",
+      "sm__ops_path_tensor_src_int8.sum",
+      "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+      "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+      "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+      "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+      "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+      "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
+    ]
+  },
+
+  "nsys": {
+    "binary": "/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/nsys",
+    "trace": "cuda,nvtx,osrt,cublas"
+  },
+
+  "docker": {
+    "image": "imp:test",
+    "models_mount": "/home/kekz/models",
+    "imp_cli": "/usr/local/bin/imp-cli",
+    "env": { "CUBLAS_WORKSPACE_CONFIG": ":4096:8" }
+  },
+
+  "models": {
+    "q8-dense": {
+      "path": "/models/Qwen3-8B-Q8_0.gguf",
+      "family": "gguf-q8", "arch": "dense",
+      "comment": "dense GGUF: cuBLAS FP16 prefill + NVFP4/Q8 decode cache"
+    },
+    "nvfp4-dense": {
+      "path": "/models/Qwen3-14B-NVFP4",
+      "family": "nvfp4", "arch": "dense",
+      "comment": "north-star dense NVFP4 SafeTensors: CUTLASS NVFP4 GEMM + FA2"
+    },
+    "nvfp4-moe": {
+      "path": "/models/Qwen3-30B-A3B-NVFP4-Modelopt",
+      "family": "nvfp4", "arch": "moe",
+      "comment": "MoE NVFP4: CUTLASS grouped GEMM + MoE GEMV decode"
+    },
+    "q4k-moe": {
+      "path": "/models/Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "family": "gguf-q4k", "arch": "moe",
+      "comment": "legacy GGUF Q4_K: source dequant prefill + fused MoE"
+    },
+    "q4k-dense-hd256": {
+      "path": "/models/gemma-3-12b-it-Q4_K_M.gguf",
+      "family": "gguf-q4k", "arch": "dense",
+      "shapes": ["pp512", "pp2048", "tg256"],
+      "comment": "hd=256: FA2/fa2_fp16qk decline (hd!=128) -> exercises the legacy materialized cuBLAS attention path below fmha_prefill_threshold + gemv_gguf decode (no NVFP4 fast-path)"
+    }
+  },
+
+  "shapes": {
+    "pp512":  { "phase": "prefill", "bench_pp": 512,  "bench_reps": 3, "max_tokens": 1 },
+    "pp2048": { "phase": "prefill", "bench_pp": 2048, "bench_reps": 3, "max_tokens": 1 },
+    "pp4096": { "phase": "prefill", "bench_pp": 4096, "bench_reps": 3, "max_tokens": 1 },
+    "tg256":  { "phase": "decode",  "bench_pp": 64,   "bench_reps": 1, "max_tokens": 256 }
+  },
+
+  "capture_regex": {
+    "prefill": "fmha|flash_attention|causal_softmax|softcap|gemm|gemv|cutlass|nvjet|nvf4|xmma|quantize_fp16|dequant|rmsnorm|rope|qknorm",
+    "decode": "gemv|nvjet|paged_attention|rmsnorm|rope|qknorm|write_kv|argmax|topk|softmax|apply_|residual"
+  },
+
+  "kernel_classes": [
+    { "name": "attn_fa2",            "group": "attention", "regex": "fmha_sm120_fa2_kernel" },
+    { "name": "attn_fmha_fp8",       "group": "attention", "regex": "fmha_sm120_fp8_kernel" },
+    { "name": "attn_fmha_mxfp4",     "group": "attention", "regex": "fmha_sm120_mxfp4_kernel" },
+    { "name": "attn_fmha_wmma",      "group": "attention", "regex": "fmha_sm120_kernel" },
+    { "name": "attn_wmma_fallback",  "group": "attention", "regex": "flash_attention_blackwell_kernel|flash_attention_prefill_tc_kernel" },
+    { "name": "attn_legacy_softmax", "group": "attention_legacy", "regex": "causal_softmax|softcap_fp16_kernel|build_attn_ptr_arrays" },
+    { "name": "attn_decode_paged",   "group": "attention", "regex": "paged_attention_" },
+    { "name": "gemm_grouped_nvfp4",  "group": "gemm", "regex": "GemmUniversal.*Grp|grouped_3x_staging|device_kernel.*Group" },
+    { "name": "gemm_cutlass_nvfp4",  "group": "gemm", "regex": "cutlass.*(nv_float4|float_e2m1|f4|ue4m3)|cutlass3x_sm120" },
+    { "name": "gemm_cublas",         "group": "gemm", "regex": "nvjet|ampere_|turing_|volta_|sm80_|sm86_|sm89_|sm90_|sm100_|sm120_|xmma|cublas|cutlass::Kernel|cutlass3x" },
+    { "name": "gemm_moe_fused_gguf", "group": "gemm", "regex": "gemm_q6k_fused_moe|gemm_q6k_moe_fused|gemm_q4k|mmq_q4k" },
+    { "name": "gemv_nvfp4",          "group": "gemv", "regex": "gemv_nvfp4_" },
+    { "name": "gemv_mxfp4",          "group": "gemv", "regex": "gemv_mxfp4_" },
+    { "name": "gemv_gguf",           "group": "gemv", "regex": "gemv_q8_0|gemv_q6k|gemv_q4|gemv_q5|gemv_q2|gemv_q3" },
+    { "name": "gemv_fp",             "group": "gemv", "regex": "gemv_fp16|gemv_fp32|gemv_bf16|gemv_fp8" },
+    { "name": "quant_cvt_nvfp4",     "group": "dequant", "regex": "quantize_fp16_nvfp4|fused_act_quantize|convert_scales_sfatom|quantize_fp16_mxfp4|build_mxfp4_scales" },
+    { "name": "dequant_nvfp4",       "group": "dequant", "regex": "dequantize_nvfp4|nvfp4_dequant" },
+    { "name": "dequant_gguf",        "group": "dequant", "regex": "dequant_q[0-9]|dequant_iq4|dequant_mxfp4|dequantize_fp8" },
+    { "name": "rmsnorm",             "group": "norm", "regex": "rmsnorm|add_rmsnorm|group_rmsnorm" },
+    { "name": "rope",                "group": "rope", "regex": "rope_forward|qknorm_rope|write_kv_cache_rope|rope_q_only|mrope" },
+    { "name": "sampling",            "group": "sampling", "regex": "argmax|topk_topp|topp_sample|softmax_to_pairs|softmax_max|softmax_sum|apply_penalties|apply_min_p|apply_typical|apply_dry|mirostat|force_single_token" },
+    { "name": "kv_write",            "group": "misc", "regex": "write_kv_cache" },
+    { "name": "elementwise",         "group": "misc", "regex": "silu|swiglu|geglu|gelu|residual_add|add_residual|fp32_to_fp16|fp16_to_fp32|embed|copy_|cast_" }
+  ],
+
+  "roofline": {
+    "comment": "ridge_flop_per_byte computed as peak_flops(dtype)@boost / dram_peak; %-roofline uses measured SM clock for the compute peak.",
+    "memory_bound_pct_target": 70.0,
+    "compute_bound_pct_target": 50.0
+  },
+
+  "regress": { "default_threshold_pct": 5.0, "metric": "pct_roofline", "min_time_share_pct": 0.5 },
+
+  "issues": {
+    "min_lever_pct_estimate": 3.0,
+    "labels": ["audit"],
+    "title_prefix": "[roofline-audit]"
+  }
+}
