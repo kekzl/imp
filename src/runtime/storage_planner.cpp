@@ -106,7 +106,7 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
     int64_t cols = (t.ndim > 1 ? t.shape[1] : 1);
     int64_t bytes = bytes_for_tier(rows, cols, tier);
 
-    plan.entries.push_back({next_id++, kind, t.qtype, tier, bytes, rows, cols});
+    plan.entries.push_back({next_id++, kind, t.qtype, tier, bytes, rows, cols, t.data, false});
     total += static_cast<size_t>(bytes);
 }
 
@@ -207,6 +207,30 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
         plan.failure_reason = "vram budget insufficient even at required_floor tiers";
     }
     return plan;
+}
+
+void StoragePlan::build_index_() const {
+    by_src_.clear();
+    by_src_.reserve(entries.size());
+    for (const auto& e : entries) {
+        if (e.source_data)
+            by_src_[e.source_data] = &e;
+    }
+    index_built_ = true;
+}
+
+const StoragePlan::Entry* StoragePlan::entry_of(const void* src) const {
+    if (!src)
+        return nullptr;
+    if (!index_built_)
+        build_index_();
+    auto it = by_src_.find(src);
+    return it == by_src_.end() ? nullptr : it->second;
+}
+
+StorageTier StoragePlan::tier_of(const void* src) const {
+    const Entry* e = entry_of(src);
+    return e ? e->tier : StorageTier::Undefined;
 }
 
 }  // namespace imp

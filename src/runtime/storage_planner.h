@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace imp {
@@ -30,11 +31,28 @@ struct StoragePlan {
         int64_t bytes;
         int64_t rows;
         int64_t cols;
+        const void* source_data = nullptr;  // GGUF/source pointer — the key the
+                                            // pre-dequant phases dispatch on.
+        // Stage 1: arch rule (gemma-3) requires the NVFP4 decode cache to be
+        // built FROM an FP16 companion copy, not from scratch. When true, an
+        // NVFP4-tier entry also keeps an FP16 cache entry alive.
+        bool fp16_companion = false;
     };
     std::vector<Entry> entries;
     size_t projected_vram_bytes = 0;
     bool failed = false;
     std::string failure_reason;
+
+    // O(1) lookup of the planned tier for a source pointer. Returns
+    // StorageTier::Undefined if the pointer is not in the plan (e.g. native
+    // GGUF blocks that bypass the overlay layer). Built lazily on first call.
+    StorageTier tier_of(const void* src) const;
+    const Entry* entry_of(const void* src) const;
+
+  private:
+    mutable std::unordered_map<const void*, const Entry*> by_src_;
+    mutable bool index_built_ = false;
+    void build_index_() const;
 };
 
 // Pure function — no GPU allocations, no side effects. Determines per-tensor

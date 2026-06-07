@@ -825,9 +825,23 @@ void GraphExecutor::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
     int ct_count = 0;
     size_t ct_total = 0;
     bool ct_exhausted = false;
+    int ct_skipped_dead = 0;
     for (auto& [ptr, nvfp4] : wcache_.nvfp4) {
         if (ct_exhausted)
             break;
+        // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1
+        // prefill uses IMMA raw-read on the GGUF source — the CUTLASS GEMM path
+        // (executor_kernels gemm_via_handle_, primary_tier==CUTLASS_NVFP4) is
+        // never reached for them, so the SF buffer is dead VRAM (~0.45 GB on an
+        // 8B Q8_0 model). Today that is Q8_0 with q8_imma_enabled. CUTLASS stays
+        // for native-NVFP4 (prefill IS CUTLASS) and Q6_K/Q5_K (not IMMA-routed →
+        // CUTLASS is their prefill path). Decode is unaffected: decode_tier stays
+        // NVFP4 (the plain wcache_.nvfp4 GEMV), independent of the SF buffer.
+        const auto* pe = storage_plan_.entry_of(ptr);
+        if (pe && pe->source_qtype == QType::Q8_0 && runtime_config().gemm.q8_imma_enabled) {
+            ++ct_skipped_dead;
+            continue;
+        }
         // Estimate CUTLASS allocation (only scale factors — data is borrowed)
         size_t est = cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K));
         if (ct_total + est > ct_budget) {
@@ -850,8 +864,13 @@ void GraphExecutor::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         wcache_.cutlass_nvfp4_bytes = ct_total;
         deduct_budget(remaining_budget, ct_total + wcache_.nvfp4_bytes);
-        IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB", ct_count,
-                     ct_total / (1024.0 * 1024.0));
+        IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB (skipped %d "
+                     "IMMA-prefill weights — dead SF buffer)",
+                     ct_count, ct_total / (1024.0 * 1024.0), ct_skipped_dead);
+    } else if (ct_skipped_dead > 0) {
+        IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: 0 tensors (skipped %d IMMA-prefill "
+                     "weights — dead SF buffer)",
+                     ct_skipped_dead);
     }
 }
 
