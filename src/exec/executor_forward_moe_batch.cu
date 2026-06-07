@@ -457,9 +457,12 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
         if (moe_imma && out_dtype == QType::F16 &&
-            (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K) &&
+            (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K ||
+             qtype == QType::Q5_1) &&
             max_rows_per_expert > 0) {
-            const int qkind = (qtype == QType::Q4_K) ? 1 : (qtype == QType::Q6_K ? 2 : 0);
+            const int qkind = (qtype == QType::Q4_K)
+                                  ? 1
+                                  : (qtype == QType::Q6_K ? 2 : (qtype == QType::Q5_1 ? 3 : 0));
             if (mmq_imma_moe_gemm(packed.data, qkind,
                                   reinterpret_cast<const __half*>(a_base),
                                   reinterpret_cast<__half*>(c_base),
