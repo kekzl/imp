@@ -183,6 +183,17 @@ nvfp4_moe_decode     = true
 # (f16-overflow sensitivity); on = force everywhere; off = always 32F.
 # Decode (M=1) is unaffected.
 cublas_fp16_acc      = auto
+# INT8-IMMA prefill family (fused dequant on int8 tensor cores, 968 TOPS
+# measured). Validated 2026-06-07 with teacher-forced PPL gates on
+# Qwen3-8B/30B-MoE/gemma-4-26B (neutral or better) and Qwen3.6-35B (+0.55%).
+# Q8_0 dense prefill GEMMs (Qwen3-8B Q8_0 pp512 +7% over fp16-acc cuBLAS).
+q8_imma_enabled      = true
+# Grouped MoE expert prefill (one launch over all experts). The big one:
+# Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
+moe_imma_prefill     = true
+# Dense Q4_K via IMMA: stays opt-in (never validated on a clean dense Q4_K
+# model; dense Q6_K measured SLOWER than fp16-acc cuBLAS and is not wired).
+q4k_imma_prefill     = false
 
 # [gemma4] section moved out of the global RuntimeConfig in Phase 5
 # Track A of the architecture refactor. These are now per-model

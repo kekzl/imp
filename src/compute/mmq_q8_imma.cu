@@ -64,7 +64,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
 //   Asc [BM][2]    half   activation scale, d-plane cols (kb0, kb0+1)
 //   Ars [BM][2]    float  activation rowsum, same cols
 //   Bsc [kBN][2][2] half  weight (α, β) interleaved for both kb cols
-template <int BM>
+template <int BM, bool WB>
 __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A,
                                            const __half* __restrict__ Asc,
                                            const float* __restrict__ Ars,
@@ -94,7 +94,8 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
         cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
-        cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        if (WB)
+            cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 #pragma unroll
     for (int i = tid; i < kBN; i += kThreads) {
@@ -106,7 +107,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
 // out = (or +=, BETA1) the α/β-scaled IMMA over [BM,kBN] tiles. Grouped MoE
 // form: gridDim.z = ne with device expert_offsets; dense passes offsets ==
 // nullptr (z extent 1).
-template <int BM, bool BETA1>
+template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
                     const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
@@ -166,17 +167,17 @@ __global__ void __launch_bounds__(kThreads)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
     const int ksteps = K / kBK;
-    load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0], base_m,
-                   rows, K, subs, 0, n_rem);
+    load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0],
+                       base_m, rows, K, subs, 0, n_rem);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
         const int stage = ks & 1;
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
-            load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
-                           sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK,
-                           n_rem);
+            load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
+                               sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK,
+                               n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -200,8 +201,8 @@ __global__ void __launch_bounds__(kThreads)
                 // hoisted over all n-frags
                 const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
                 const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
-                const float rs_lo = sArs[stage][arow_lo][kb];
-                const float rs_hi = sArs[stage][arow_hi][kb];
+                const float rs_lo = WB ? sArs[stage][arow_lo][kb] : 0.0f;
+                const float rs_hi = WB ? sArs[stage][arow_hi][kb] : 0.0f;
 
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
@@ -228,10 +229,19 @@ __global__ void __launch_bounds__(kThreads)
                     const float bl = __half2float(__high2half(ab_lo));
                     const float ah = __half2float(__low2half(ab_hi));
                     const float bh = __half2float(__high2half(ab_hi));
-                    acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
-                    acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
-                    acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
-                    acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
+                    if (WB) {
+                        acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
+                        acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
+                        acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
+                        acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
+                    } else {
+                        // pure-alpha Q8_0 fast path (the unified beta form
+                        // cost Q8 ~6%: 11.4k -> 10.7k pp512, fixed here)
+                        acc[mf][nf][0] += (da_lo * al) * static_cast<float>(c0);
+                        acc[mf][nf][1] += (da_lo * ah) * static_cast<float>(c1);
+                        acc[mf][nf][2] += (da_hi * al) * static_cast<float>(c2);
+                        acc[mf][nf][3] += (da_hi * ah) * static_cast<float>(c3);
+                    }
                 }
             }
         }
@@ -1262,16 +1272,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
     const auto& w = g_weights[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
+    // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (small_m) {
-        mmq_imma_kernel<32, false><<<grid, kThreads, 0, stream>>>(
+        mmq_imma_kernel<32, false, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
     } else if (beta == 1.0f) {
-        mmq_imma_kernel<128, true><<<grid, kThreads, 0, stream>>>(
+        mmq_imma_kernel<128, true, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
     } else {
-        mmq_imma_kernel<128, false><<<grid, kThreads, 0, stream>>>(
+        mmq_imma_kernel<128, false, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
     }

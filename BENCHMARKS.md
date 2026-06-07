@@ -27,9 +27,28 @@ prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
 | 2026-05-30 | `bebafd5` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 259 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-tg 128` |
 
 Against llama.cpp (b8445+, full offload, flash attention on): imp wins dense
-GGUF decode by **+37–72%**, loses GGUF prefill by 1.3–2.4× (no custom IMMA
-prefill kernel), and loses MoE/hybrid GGUF decode on Qwen3.6-35B-A3B (~−31%,
-structural FP16-projection tax on the GDN path).
+GGUF decode by **+37–72%** and loses MoE/hybrid GGUF decode on
+Qwen3.6-35B-A3B (~−31%, structural FP16-projection tax on the GDN path).
+
+## GGUF prefill (pp512, INT8-IMMA family — default on since #617)
+
+All rows 2026-06-07, CUDA 13.3, 10 reps, fresh container per run, healthy-host
+clocks logged. llama.cpp = build 19e92c3, same GGUF files, same day, `-fa 1
+-ngl 999 -r 5`. Command pattern: `imp-cli --model <gguf> --bench --bench-pp
+512 --bench-reps 10`.
+
+| Commit | Model | Quant | imp tok/s | llama.cpp | verdict |
+|---|---|---|---:|---:|---|
+| `62d96a0e` | Qwen3-30B-A3B (MoE) | Q4_K_M | **9 970** | 9 288 | **imp +7%** |
+| `3dd945d5` | Qwen3-14B | Q6_K | **6 617** | 6 522 | **imp +1.5%** |
+| `84790dac` | Gemma-4-26B-A4B (MoE) | Q4_K_M | **8 946** | 10 749 | 1.20× behind |
+| `#617` | Qwen3-8B | Q8_0 | **12 131** | 13 724 | 1.13× behind |
+| `62d96a0e` | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | **5 165** | 8 027 | 1.55× behind (GDN share is quality-locked FP16) |
+
+Morning-of-2026-06-07 baselines for the same five rows were 3 968 / 5 262 /
+4 231 / 8 401 / 3 675 — the day's IMMA + fp16-acc work (#608–#616) moved GGUF
+prefill +36 % to +151 % per model. PPL teacher-forced gates: neutral or
+better on all except Qwen3.6-35B (+0.55 %, documented trade).
 
 ## NVFP4 SafeTensors decode (tg256)
 
