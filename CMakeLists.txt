@@ -199,6 +199,7 @@ if(IMP_USE_CUTLASS)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
+        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mma_peak_saturated.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES tests/bench/fp4_pv_bench.cu)
         list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
@@ -535,6 +536,7 @@ if(IMP_BUILD_TESTS)
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
+        tests/test_mma_peak_saturated.cu
         tests/test_mxf4nvf4_mma_variants_bench.cu
         tests/test_fp4_pv_bench.cu
         tests/test_mxf4nvf4_qkt_validate.cu

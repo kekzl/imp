@@ -261,6 +261,18 @@ struct RuntimeConfig {
         // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted). Legacy
         // env: IMP_NO_NVFP4_LM_HEAD=1 to disable.
         bool nvfp4_lm_head = true;
+        // FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F instead of
+        // 32F). GeForce sm_120 runs FP16 tensor cores with FP32 accumulate at
+        // 1/4 rate (measured 2026-06-07: 253 vs 1956 TFLOPS saturated
+        // mma.sync); the cuBLAS 32F prefill GEMMs sit at ~225 TFLOPS — ~89% of
+        // that quarter-rate ceiling, so the kernel is fine, the compute type
+        // is the cap. 16F measured ~2x kernel throughput on all prefill
+        // shapes (e.g. 512x17408x5120: 226→422 TFLOPS, B streamed from DRAM).
+        // Risk: f16 accumulator overflow/precision over long-K dots — keep
+        // default off until a perplexity A/B blesses it. Applies only to
+        // F16xF16→F16 with M>1 (prefill); decode GEMV and mixed-precision
+        // paths are untouched.
+        bool cublas_fp16_acc = false;
         // Allow NVFP4 LM head even on GDN/SSM-hybrid models (normally excluded —
         // an older NVFP4 method degraded recurrent-state coherence, memory
         // lm_head_only_nvfp4_qwen3_6_refuted). Quantified 2026-05-29 with the
