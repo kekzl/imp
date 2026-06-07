@@ -75,7 +75,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - CUDA teardown errors in Model destructor (#439)
 - Q5_K forward pass test NaN from cross-test cuBLAS state contamination (#445)
 
-## Unreleased
+### Earlier unversioned work (pre-0.9.1; was a stray second "Unreleased" section)
 
 - **Gemma-4 FP8 prefill carve-out removed** — the 2026-05-09 measurement
   showing -5..-19% prefill on Gemma-4 vs FP16 has substantially closed

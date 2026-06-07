@@ -26,10 +26,9 @@ Anything below this bar is a bug.
 
 1. **RTX 5090** (sm_120, GB202, 32 GB GDDR7) — the hero target. Every optimization decision is made for this chip first.
 2. **RTX PRO 6000 Blackwell** (sm_120, 96 GB) — same arch, more VRAM. Free win if 5090 is fast.
-3. **H100 / H200** (sm_90a) — Hopper path stays alive but is not the hero. Maintained, not optimized aggressively.
-4. **Consumer Blackwell siblings** (5080, 5070 Ti, etc.) — same sm_120, should work, lower priority for tuning.
+3. **Consumer Blackwell siblings** (5080, 5070 Ti, etc.) — same sm_120, covered by the `compute_120f` PTX fallback in the fatbin, lower priority for tuning.
 
-Everything else is best-effort via cuBLAS + scalar Flash Attention 2 fallback. Not a goal.
+Everything else is **unsupported by design**. There is no Hopper (sm_90a), Ada, Ampere, or datacenter-Blackwell (sm_100) path in the tree — the engine is built against `sm_120a` exclusively (see README "Consumer Blackwell only"). Not a goal.
 
 ---
 
@@ -39,7 +38,8 @@ These models must be **best-in-class on 5090**. No exceptions, no excuses.
 Hero status requires staged local weights, a green degeneration battery, and
 decode numbers in `BENCHMARKS.md` (realigned 2026-06-06, issues #549/#550 —
 heroes that had never produced a local number moved to the extended set
-below; gpt-oss-20b is the one tracked not-yet-supported hero):
+below; gpt-oss-20b closed the last hero gap on 2026-06-06, #547 / PRs
+#572–#574):
 
 | Model | Quant | Why |
 |---|---|---|
@@ -49,7 +49,7 @@ below; gpt-oss-20b is the one tracked not-yet-supported hero):
 | Qwen3.6-35B-A3B | NVFP4 | Hybrid (GDN + MoE) daily driver, MTP head |
 | Gemma-4 26B-A4B (text + vision) | NVFP4 | Multimodal + MoE hero |
 | Nemotron-H | NVFP4 | Hybrid (Mamba2 + Attn + MoE) flagship |
-| gpt-oss-20b | MXFP4 (SafeTensors) | First-class MXFP4 path — **tracked gap, not yet supported (#547)** |
+| gpt-oss-20b | MXFP4 (SafeTensors) | First-class MXFP4 path — **supported since 2026-06-06** (#547, PRs #572–#574): experts converted to NVFP4 at load, Harmony channels, tg ≈ 315–345, pp512 ≈ 16–19k |
 
 If a hero model regresses against any competitor on the primary metric, that is a release blocker.
 
@@ -73,8 +73,8 @@ Concrete technical commitments — these are means, not ends, but progress on th
 ### Compute path
 - **NVFP4 must remain the default fast path** on sm_120. FP16/BF16 paths exist for correctness, never as the recommended config. The Blackwell consumer FP16/BF16 throughput nerf is a hardware fact; NVFP4 is the way out and we lean into it harder than anyone.
 - **MXFP4 FMHA** (already novel — first such impl) must stay ahead and expand to more shapes. The +6.7–7.9% over FP8 FMHA on Qwen3 is the baseline, not the ceiling.
-- **CUTLASS Hopper FMHA path on sm_120** for prefill — keep up with CUTLASS releases.
-- **WMMA 8-warp decode kernel** is the decode workhorse on sm_120. Tune for every hero model's head dim.
+- **FA2 prefill family** (register-resident FA2 default-on, FP16-QK FA2 for short prefill, FP8 FMHA fallback) is the prefill attention path on sm_120 — FP8×FP8 cuBLAS prefill is `NOT_SUPPORTED` on this chip, so FA2 carries the commitment. Keep it ahead and expand shapes (hd≠128 declines today).
+- **Paged decode attention** (FP16/FP8/INT8/INT4/NVFP4 KV) + the CUDA-graph decode loop is the decode workhorse on sm_120. Tune for every hero model's head dim.
 - **Grouped GEMM dequant for MoE prefill** — gap to vLLM single-seq has substantially closed. Qwen3-Coder-30B-A3B-NVFP4 (cold-median 5×5 trials, 15 s cooldown, 2026-05-23):
   - **pp512 = 17,521 tok/s** (σ wide: 16k-19k spread across trials — cuBLAS-algo-state still drifts at this kernel size despite cold-median methodology)
   - **pp2048 = 18,573 tok/s** (σ tight: 18.3k-18.9k = 3 % spread — exceeds vLLM 0.20.2's pp512 single-seq number)

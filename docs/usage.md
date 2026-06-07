@@ -7,7 +7,7 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 ## Requirements
 
 - **NVIDIA Blackwell GB202** (sm_120a) — RTX 5090, RTX PRO 5000 Blackwell, or RTX PRO 6000 Blackwell. Same binary, same kernels; the workstation cards just have more VRAM (48 / 96 GB) for bigger MoE models without expert offload.
-- **CUDA Toolkit 13.2+** — `cudart`, `cuda_driver`, `cublas`, `cublasLt`
+- **CUDA Toolkit 13.3** (13.2 minimum enforced by CMake; 13.3 is the canonical toolchain Docker and CI build with) — `cudart`, `cuda_driver`, `cublas`, `cublasLt`
 - **CMake 3.25+**
 - **C++20 compiler** (GCC 11+, Clang 14+)
 
