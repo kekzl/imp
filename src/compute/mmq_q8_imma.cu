@@ -493,6 +493,287 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 // -----------------------------------------------------------------------------
+// Q6_K RAW-read kernel (per-16 scales, symmetric — no beta/rowsum term).
+//
+// The 210-B super-blocks are only 2-aligned (blocks cp.async at all sizes),
+// so a one-time 224-B-stride repack (plain byte copy, +6.7% of the Q6_K
+// bytes — ~110 MB for the 30B down_proj experts) restores 16-B alignment;
+// the forge 2026-05-28 "2-aligned quant repack" finding, applied here.
+//
+// Per-16 scale granularity vs the k32 MMA: HALF-MMA SPLIT — issue the
+// m16n8k32 twice per sub-block, once as (b0, 0) and once as (0, b1); the
+// zeroed operand register makes each MMA return the 16-wide partial sum,
+// which gets its own α = d·sc16. Same int-op count as a k16 MMA pair,
+// zero layout restructuring.
+//
+// Quad mapping (see dequant_gpu.cu Q6_K header): K-step ks covers sub-block
+// pair j = (2ks)%8, j+1 → group g = j>>2, quads (j%4, j%4+1). The pair
+// shares ql bytes [g*64 .. +63] (quad&1 selects the 32-byte half, quad>=2
+// the nibble) and qh bytes [g*32 .. +31] (shift quad*2).
+// -----------------------------------------------------------------------------
+
+constexpr int kQ6Stride = 224;  // repacked super-block stride (210 padded, 16-B aligned)
+constexpr int kQlRow = 64 + 16;
+constexpr int kQhRow = 32 + 16;
+
+__global__ void q6k_repack_kernel(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
+                                  size_t n_blocks) {
+    const size_t b = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t total = n_blocks * 105;  // 210 B as 105 u16 copies
+    if (b >= total) return;
+    const size_t blk = b / 105;
+    const size_t off = (b % 105) * 2;
+    uint16_t v;
+    memcpy(&v, src + blk * 210 + off, 2);
+    memcpy(dst + blk * kQ6Stride + off, &v, 2);
+}
+
+template <int BM>
+__device__ __forceinline__ void load_kstep_q6k(int tid, const int8_t* __restrict__ A,
+                                               const __half* __restrict__ Asc,
+                                               const uint8_t* __restrict__ Wq6k, int base_n,
+                                               int sblk_count, int8_t (*sA)[kRow],
+                                               uint8_t (*sQl)[kQlRow], uint8_t (*sQh)[kQhRow],
+                                               uint8_t (*sScd)[8], __half (*sAsc)[2], int base_m,
+                                               int M, int K, int subs, int k_base) {
+#pragma unroll
+    for (int i = tid; i < BM * 4; i += kThreads) {
+        const int row = i >> 2;
+        const int col = (i & 3) * 16;
+        const bool valid = (base_m + row) < M;
+        cp_async_cg_16(&sA[row][col],
+                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+    }
+    const int ks = k_base / kBK;
+    const int sblk = ks >> 2;
+    const int j = (2 * ks) & 7;   // even sub-block of the pair
+    const int g = j >> 2;         // 128-element group
+#pragma unroll
+    for (int i = tid; i < kBN * 8; i += kThreads) {
+        const int row = i >> 3;
+        const int part = i & 7;
+        const uint8_t* blk =
+            Wq6k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ6Stride;
+        if (part < 4) {
+            cp_async_cg_16(&sQl[row][part * 16], blk + g * 64 + part * 16, true);
+        } else if (part < 6) {
+            cp_async_cg_16(&sQh[row][(part - 4) * 16], blk + 128 + g * 32 + (part - 4) * 16, true);
+        } else if (part == 6) {
+            cp_async_ca_4(&sScd[row][0], blk + 192 + 2 * j, true);  // 4 per-16 scales
+        } else {
+            cp_async_ca_4(&sScd[row][4], blk + 208, true);  // d (+2 pad bytes)
+        }
+    }
+    const int kb0 = k_base / 32;
+#pragma unroll
+    for (int i = tid; i < BM; i += kThreads) {
+        const bool valid = (base_m + i) < M;
+        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+    }
+}
+
+template <int BM, bool BETA1>
+__global__ void __launch_bounds__(kThreads)
+    mmq_imma_q6k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                            const uint8_t* __restrict__ Wq6k, __half* __restrict__ out, int M,
+                            int N, int K, const int32_t* __restrict__ expert_offsets,
+                            size_t w_stride_blocks) {
+    constexpr int kWM = (BM == 128) ? 4 : 2;
+    constexpr int kWN = (BM == 128) ? 2 : 4;
+    constexpr int kTileM = BM / kWM;
+    constexpr int kTileN = kBN / kWN;
+    constexpr int kMF = kTileM / 16;
+    constexpr int kNF = kTileN / 8;
+
+    int rows = M;
+    size_t row_off = 0;
+    const int e = blockIdx.z;
+    if (expert_offsets != nullptr) {
+        const int32_t o0 = __ldg(&expert_offsets[e]);
+        const int32_t o1 = __ldg(&expert_offsets[e + 1]);
+        row_off = static_cast<size_t>(o0);
+        rows = o1 - o0;
+    }
+    const int base_m = blockIdx.y * BM;
+    const int base_n = blockIdx.x * kBN;
+    if (base_m >= rows || rows == 0) return;
+
+    const int subs = K / 32;
+    const int sblk_count = K / 256;
+    const int8_t* A = X_s8 + row_off * K;
+    const __half* Asc = x_scale + row_off * subs;
+    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * kQ6Stride;
+    __half* C = out + row_off * N;
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid >> 5;
+    const int lane = tid & 31;
+    const int warp_m = warp_id / kWN;
+    const int warp_n = warp_id % kWN;
+    const int rl = lane >> 2;
+    const int cl = lane & 3;
+
+    // dynamic smem (BM=128 + Q6 staging exceeds the 48-KB static limit);
+    // offsets are COMPILE-TIME constants — no runtime pointer arrays (the
+    // 3-stage experiment's local-memory spill trap).
+    extern __shared__ uint8_t smem6[];
+    constexpr size_t kAOff = 0;
+    constexpr size_t kQlOff = kAOff + static_cast<size_t>(kStages) * BM * kRow;
+    constexpr size_t kQhOff = kQlOff + static_cast<size_t>(kStages) * kBN * kQlRow;
+    constexpr size_t kScdOff = kQhOff + static_cast<size_t>(kStages) * kBN * kQhRow;
+    constexpr size_t kAscOff = kScdOff + static_cast<size_t>(kStages) * kBN * 8;
+    typedef int8_t ARow[kRow];
+    typedef uint8_t QlRow[kQlRow];
+    typedef uint8_t QhRow[kQhRow];
+    typedef uint8_t ScdRow[8];
+    typedef __half AscRow[2];
+    auto sA = [&](int st) { return reinterpret_cast<ARow*>(smem6 + kAOff + static_cast<size_t>(st) * BM * kRow); };
+    auto sQl = [&](int st) { return reinterpret_cast<QlRow*>(smem6 + kQlOff + static_cast<size_t>(st) * kBN * kQlRow); };
+    auto sQh = [&](int st) { return reinterpret_cast<QhRow*>(smem6 + kQhOff + static_cast<size_t>(st) * kBN * kQhRow); };
+    auto sScd = [&](int st) { return reinterpret_cast<ScdRow*>(smem6 + kScdOff + static_cast<size_t>(st) * kBN * 8); };
+    auto sAsc = [&](int st) { return reinterpret_cast<AscRow*>(smem6 + kAscOff + static_cast<size_t>(st) * BM * 4); };
+
+    float acc[kMF][kNF][4];
+#pragma unroll
+    for (int i = 0; i < kMF; ++i)
+#pragma unroll
+        for (int j2 = 0; j2 < kNF; ++j2)
+            acc[i][j2][0] = acc[i][j2][1] = acc[i][j2][2] = acc[i][j2][3] = 0.0f;
+
+    const int ksteps = K / kBK;
+    load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(0), sQl(0), sQh(0), sScd(0),
+                       sAsc(0), base_m, rows, K, subs, 0);
+    cp_async_commit();
+
+    for (int ks = 0; ks < ksteps; ++ks) {
+        const int stage = ks & 1;
+        if (ks + 1 < ksteps) {
+            const int nstage = (ks + 1) & 1;
+            load_kstep_q6k<BM>(tid, A, Asc, W, base_n, sblk_count, sA(nstage), sQl(nstage),
+                               sQh(nstage), sScd(nstage), sAsc(nstage), base_m, rows, K, subs,
+                               (ks + 1) * kBK);
+            cp_async_commit();
+            cp_async_wait_group<1>();
+        } else {
+            cp_async_wait_group<0>();
+        }
+        __syncthreads();
+
+        const int j = (2 * ks) & 7;
+        const int quad_base = j & 3;  // quads (quad_base, quad_base+1)
+
+#pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+            const int kc = kb * 32;
+            const int quad = quad_base + kb;
+            const int ql_half = (quad & 1) * 32;
+            const uint32_t nib_shift = (quad >= 2) ? 4u : 0u;
+            const uint32_t qh_shift = static_cast<uint32_t>(quad * 2);
+#pragma unroll
+            for (int mf = 0; mf < kMF; ++mf) {
+                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int arow_hi = arow_lo + 8;
+                const int acol = kc + cl * 4;
+                uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_lo][acol]);
+                uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_hi][acol]);
+                uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_lo][acol + 16]);
+                uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_hi][acol + 16]);
+                const float da_lo = __half2float(sAsc(stage)[arow_lo][kb]);
+                const float da_hi = __half2float(sAsc(stage)[arow_hi][kb]);
+
+#pragma unroll
+                for (int nf = 0; nf < kNF; ++nf) {
+                    const int bcol = warp_n * kTileN + nf * 8 + rl;
+                    const uint32_t ql0 =
+                        *reinterpret_cast<const uint32_t*>(&sQl(stage)[bcol][ql_half + cl * 4]);
+                    const uint32_t ql1 = *reinterpret_cast<const uint32_t*>(
+                        &sQl(stage)[bcol][ql_half + cl * 4 + 16]);
+                    const uint32_t qh0 =
+                        *reinterpret_cast<const uint32_t*>(&sQh(stage)[bcol][cl * 4]);
+                    const uint32_t qh1 =
+                        *reinterpret_cast<const uint32_t*>(&sQh(stage)[bcol][cl * 4 + 16]);
+                    const uint32_t b0 = __vsub4(((ql0 >> nib_shift) & 0x0F0F0F0Fu) |
+                                                    (((qh0 >> qh_shift) & 0x03030303u) << 4),
+                                                0x20202020u);
+                    const uint32_t b1 = __vsub4(((ql1 >> nib_shift) & 0x0F0F0F0Fu) |
+                                                    (((qh1 >> qh_shift) & 0x03030303u) << 4),
+                                                0x20202020u);
+
+                    // HALF-MMA SPLIT: per-16 scales need the two 16-wide
+                    // partial sums separately — zero the other B register.
+                    int32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0;
+                    int32_t q0 = 0, q1 = 0, q2 = 0, q3 = 0;
+#if __CUDA_ARCH__ >= 800
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                        : "=r"(p0), "=r"(p1), "=r"(p2), "=r"(p3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(0), "r"(0), "r"(0),
+                          "r"(0), "r"(0));
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                        : "=r"(q0), "=r"(q1), "=r"(q2), "=r"(q3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(0), "r"(b1), "r"(0), "r"(0),
+                          "r"(0), "r"(0));
+#endif
+                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                    // per-16 α from the staged scales: bytes [2*kb], [2*kb+1]; d at [4]
+                    const int8_t* sc_lo = reinterpret_cast<const int8_t*>(&sScd(stage)[ncol_lo][0]);
+                    const int8_t* sc_hi =
+                        reinterpret_cast<const int8_t*>(&sScd(stage)[ncol_lo + 1][0]);
+                    __half d_lo_h, d_hi_h;
+                    memcpy(&d_lo_h, &sScd(stage)[ncol_lo][4], 2);
+                    memcpy(&d_hi_h, &sScd(stage)[ncol_lo + 1][4], 2);
+                    const float dlo = __half2float(d_lo_h);
+                    const float dhi = __half2float(d_hi_h);
+                    const float al1 = dlo * static_cast<float>(sc_lo[2 * kb]);
+                    const float al2 = dlo * static_cast<float>(sc_lo[2 * kb + 1]);
+                    const float ah1 = dhi * static_cast<float>(sc_hi[2 * kb]);
+                    const float ah2 = dhi * static_cast<float>(sc_hi[2 * kb + 1]);
+                    acc[mf][nf][0] += da_lo * fmaf(al1, static_cast<float>(p0),
+                                                   al2 * static_cast<float>(q0));
+                    acc[mf][nf][1] += da_lo * fmaf(ah1, static_cast<float>(p1),
+                                                   ah2 * static_cast<float>(q1));
+                    acc[mf][nf][2] += da_hi * fmaf(al1, static_cast<float>(p2),
+                                                   al2 * static_cast<float>(q2));
+                    acc[mf][nf][3] += da_hi * fmaf(ah1, static_cast<float>(p3),
+                                                   ah2 * static_cast<float>(q3));
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int mf = 0; mf < kMF; ++mf) {
+        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+        const int row_hi = row_lo + 8;
+#pragma unroll
+        for (int nf = 0; nf < kNF; ++nf) {
+            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            if (row_lo < rows) {
+                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
+                *p = BETA1 ? __hadd2(*p, v) : v;
+            }
+            if (row_hi < rows) {
+                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
+                *p = BETA1 ? __hadd2(*p, v) : v;
+            }
+        }
+    }
+}
+
+constexpr size_t q6k_smem_bytes(int BM) {
+    return static_cast<size_t>(kStages) *
+           (static_cast<size_t>(BM) * kRow + static_cast<size_t>(kBN) * kQlRow +
+            static_cast<size_t>(kBN) * kQhRow + static_cast<size_t>(kBN) * 8 +
+            static_cast<size_t>(BM) * 4);
+}
+
+// -----------------------------------------------------------------------------
 // Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned! memcpy
 // only) → qs plane [N][K] s8 + interleaved (α=d, β=0) plane [N][K/32][2].
 // -----------------------------------------------------------------------------
@@ -558,8 +839,14 @@ struct ActScratch {
     size_t cap_msubs = 0;
 };
 
+struct Q6kRepack {
+    uint8_t* blocks = nullptr;  // 224-B-stride super-blocks
+    size_t n_blocks = 0;
+};
+
 std::mutex g_mtx;
 std::unordered_map<const void*, WeightPlanes> g_weights;
+std::unordered_map<const void*, Q6kRepack> g_q6k;
 ActScratch g_act;
 
 bool stream_capturing(cudaStream_t stream) {
@@ -593,6 +880,20 @@ bool ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capt
     return true;
 }
 
+bool ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool capturing) {
+    auto it = g_q6k.find(src);
+    if (it != g_q6k.end() && it->second.n_blocks == n_blocks) return true;
+    if (capturing) return false;
+    Q6kRepack r;
+    r.n_blocks = n_blocks;
+    if (cudaMalloc(&r.blocks, n_blocks * kQ6Stride) != cudaSuccess) return false;
+    const size_t total = n_blocks * 105;
+    q6k_repack_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
+        static_cast<const uint8_t*>(src), r.blocks, n_blocks);
+    g_q6k[src] = r;
+    return true;
+}
+
 bool ensure_act(int M, int K, bool capturing) {
     const size_t mk = static_cast<size_t>(M) * K;
     const size_t msubs = static_cast<size_t>(M) * (K / 32);
@@ -623,12 +924,15 @@ void quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
                                                          g_act.xrowsum);
 }
 
-bool gemm_common(const void* w_blocks, bool q4k, const __half* x_f16, __half* out_f16, int M,
-                 int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets,
-                 int h_max_rows, int expanded, int ne) {
+bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __half* x_f16,
+                 __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
+                 const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
     std::lock_guard<std::mutex> lk(g_mtx);
     const bool capturing = stream_capturing(stream);
-    if (!q4k && !ensure_weight(w_blocks, ne * N, K, stream, capturing)) return false;
+    if (qkind == 0 && !ensure_weight(w_blocks, ne * N, K, stream, capturing)) return false;
+    if (qkind == 2 &&
+        !ensure_q6k(w_blocks, static_cast<size_t>(ne) * N * (K / 256), stream, capturing))
+        return false;
     const int act_rows = d_offsets ? expanded : M;
     if (!ensure_act(act_rows, K, capturing)) return false;
     quantize_act(x_f16, act_rows, K, stream);
@@ -638,7 +942,7 @@ bool gemm_common(const void* w_blocks, bool q4k, const __half* x_f16, __half* ou
     const int bm = small_m ? 32 : 128;
     dim3 grid(N / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
-    if (q4k) {
+    if (qkind == 1) {
         // raw-read kernel: zero extra weight VRAM
         const uint8_t* w4 = static_cast<const uint8_t*>(w_blocks);
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
@@ -654,6 +958,40 @@ bool gemm_common(const void* w_blocks, bool q4k, const __half* x_f16, __half* ou
             mmq_imma_q4k_raw_kernel<128, false><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+        }
+        return true;
+    }
+    if (qkind == 2) {
+        const uint8_t* w6 = g_q6k[w_blocks].blocks;
+        const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
+        static bool smem_set6 = false;
+        if (!smem_set6) {
+            smem_set6 = true;
+            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<32, false>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(q6k_smem_bytes(32)));
+            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<128, false>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(q6k_smem_bytes(128)));
+            cudaFuncSetAttribute(mmq_imma_q6k_raw_kernel<128, true>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(q6k_smem_bytes(128)));
+        }
+        if (small_m) {
+            mmq_imma_q6k_raw_kernel<32, false>
+                <<<grid, kThreads, q6k_smem_bytes(32), stream>>>(g_act.xs8, g_act.xscale, w6,
+                                                                 out_f16, M, N, K, d_offsets,
+                                                                 w_stride_blocks);
+        } else if (beta == 1.0f) {
+            mmq_imma_q6k_raw_kernel<128, true>
+                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
+                                                                  out_f16, M, N, K, d_offsets,
+                                                                  w_stride_blocks);
+        } else {
+            mmq_imma_q6k_raw_kernel<128, false>
+                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
+                                                                  out_f16, M, N, K, d_offsets,
+                                                                  w_stride_blocks);
         }
         return true;
     }
@@ -683,30 +1021,35 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
                       int K, cudaStream_t stream, float beta) {
     if (M < 64 || N % kBN != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q8_blocks, false, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0,
-                       1);
+    return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta) {
     if (M < 64 || N % kBN != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
-    return gemm_common(w_q4k_blocks, true, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0,
-                       1);
+    return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
-bool mmq_imma_moe_gemm(const void* w_blocks, bool qtype_is_q4k, const __half* x_f16,
-                       __half* out_f16, const int32_t* d_offsets, int h_max_rows, int expanded,
-                       int ne, int N, int K, cudaStream_t stream) {
-    if (N % kBN != 0 || K % (qtype_is_q4k ? 256 : kBK) != 0) return false;
+bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M,
+                       int N, int K, cudaStream_t stream, float beta) {
+    if (M < 64 || N % kBN != 0 || K % 256 != 0) return false;
+    if (beta != 0.0f && beta != 1.0f) return false;
+    return gemm_common(w_q6k_blocks, 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+}
+
+bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
+                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
+                       int K, cudaStream_t stream) {
+    if (N % kBN != 0 || K % (qkind != 0 ? 256 : kBK) != 0) return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
-    const bool ok = gemm_common(w_blocks, qtype_is_q4k, x_f16, out_f16, /*M=*/0, N, K, stream,
-                                0.0f, d_offsets, h_max_rows, expanded, ne);
+    const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
+                                d_offsets, h_max_rows, expanded, ne);
     static bool logged = false;
     if (ok && !logged) {
         logged = true;
         IMP_LOG_INFO("MoE IMMA prefill ACTIVE (%s, ne=%d N=%d K=%d max_rows=%d)",
-                     qtype_is_q4k ? "Q4_K" : "Q8_0", ne, N, K, h_max_rows);
+                     qkind == 1 ? "Q4_K" : (qkind == 2 ? "Q6_K" : "Q8_0"), ne, N, K, h_max_rows);
     }
     return ok;
 }
@@ -718,6 +1061,8 @@ void mmq_q8_imma_release_all() {
         cudaFree(w.sc);
     }
     g_weights.clear();
+    for (auto& [_, r] : g_q6k) cudaFree(r.blocks);
+    g_q6k.clear();
     if (g_act.xs8) {
         cudaFree(g_act.xs8);
         cudaFree(g_act.xscale);

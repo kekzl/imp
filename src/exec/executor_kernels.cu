@@ -1879,6 +1879,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                   ctx.stream, ctx.beta))
                 return;
         }
+        // NOTE: dense Q6_K is deliberately NOT routed through IMMA — measured
+        // 2026-06-07 on Qwen3-14B-Q6_K: 4.5k vs 6.6k pp512 for the
+        // dequant→cuBLAS-fp16acc path. The half-MMA split halves the int8
+        // rate, and on large dense shapes full-rate f16-acc HMMA wins; the
+        // fusion saving only dominates in the MoE regime (64% dequant tax),
+        // where Q6_K-IMMA ships (down_proj, see the MoE batch path).
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
