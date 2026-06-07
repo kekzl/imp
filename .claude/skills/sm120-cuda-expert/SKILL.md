@@ -23,9 +23,9 @@ Optimal-kernel reference for RTX 5090 (GB202, **sm_120a** — consumer Blackwell
 
 ## The three laws
 
-1. **Decode at batch=1 is launch-overhead-bound first, memory-bound second.** With ~80–120 launches per layer, per-launch µs costs dominate once GEMM is fast. Order of operations: (a) make per-launch GEMM fast (CUTLASS sm_120 NVFP4 fast-path, not slow `gemm_nvfp4` dequant→cuBLAS fallback); (b) capture decode in CUDA Graph (`AsyncGraphLoop`); (c) only then chase memory traffic. A faster kernel alone shows little tok/s gain — but it *enables* graph capture to win because launches no longer hide behind GEMM. Always re-bench graphs ON after a hot-path patch.
+1. **Decode at batch=1 is launch-overhead-bound first, memory-bound second.** With ~80–120 launches per layer, per-launch µs costs dominate once GEMM is fast. Order of operations: (a) make per-launch GEMM fast (CUTLASS sm_120 NVFP4 fast-path, not slow `gemm_nvfp4` dequant→cuBLAS fallback); (b) capture decode in CUDA Graph (the async graph decode loop — `CudaGraphConditionalRunner` in `src/runtime/cuda_graph.h`, launched by `engine_graph_decode.cpp`); (c) only then chase memory traffic. A faster kernel alone shows little tok/s gain — but it *enables* graph capture to win because launches no longer hide behind GEMM. Always re-bench graphs ON after a hot-path patch.
 
-2. **Occupancy is king.** Keep registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`** on regular GEMV/attention paths — overrides cost -4.5% to -20%. Two known correct exceptions: HD=128 GDN kernel needs `(HD,1)` to avoid a miscompile; FMHA `(256,1)` is correct on SMEM-limited kernels (~69 KB → 1 block/SM anyway, allows max register allocation).
+2. **Occupancy is king — for getting kernels to the roofline, not past it.** Keep registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`** on regular GEMV/attention paths — overrides cost -4.5% to -20%. Two known correct exceptions: HD=128 GDN kernel needs `(HD,1)` to avoid a miscompile; FMHA `(256,1)` is correct on SMEM-limited kernels (~69 KB → 1 block/SM anyway, allows max register allocation). Caveat: the mature NVFP4 decode path already sits at its ceiling — full nsys+ncu sweep (2026-05-30, Qwen3-14B NVFP4) showed decode = 87% NVFP4 GEMVs at 66–70% HBM with the plateau co-limited by 4-bit dequant (L1TEX 91%); **raising occupancy further and KPAR→MR rerouting are refuted levers there** — don't re-pursue.
 
 3. **Quantization type determines kernel strategy.** Q8_0 (simple dequant) → bandwidth-bound → row-parallel + smem-cached activations. Q6_K (complex dequant) → compute-influenced → K-parallel + warp-level work division. NVFP4 prequant → must hit `StorageTier::CUTLASS_NVFP4` (SfAtom layout) for the sm_120a fast path; plain `StorageTier::NVFP4` falls through to slow `gemm_nvfp4`. No universal "best" GEMV.
 
@@ -33,14 +33,21 @@ Optimal-kernel reference for RTX 5090 (GB202, **sm_120a** — consumer Blackwell
 
 | Technique | Gain | Detail |
 |-----------|------|--------|
-| **CUDA Graph decode + AsyncGraphLoop** | **+95–376% decode** | Conditional graph w/ PDL, `max_steps=255`. Biggest gain on small-GEMM models. Requires CUTLASS NVFP4 fast-path active first. |
-| CUTLASS sm_120a NVFP4 weight cache | enables graph win | `StorageTier::CUTLASS_NVFP4`. Verify via init log; `StorageTier::NVFP4` = slowpath. |
+| **CUDA Graph decode (conditional graph + PDL)** | **+95–376% decode** | `CudaGraphConditionalRunner`; `max_steps` sized per request. Biggest gain on small-GEMM models. Requires CUTLASS NVFP4 fast-path active first. |
+| CUTLASS sm_120a NVFP4 weight cache | enables graph win | `StorageTier::CUTLASS_NVFP4` (`src/core/storage_tier.h`); plain `StorageTier::NVFP4` = slowpath. |
 | `mma.sync.kind::mxf4nvf4.block_scale` | 2.6× raw MMA over f8f6f4 | k=64 vs k=32; HW applies UE4M3 scale inside MMA. Needs `compute_120a` (see Compile flags). |
-| FP8 prefill cache | +40–60% prefill | FP8×FP8 cuBLAS = 2× TC throughput |
+| FA2 register-resident prefill (`attention.fmha_fa2`, default on) | +13–19% long-ctx NVFP4 prefill | S/P/O in registers, 1 barrier/KV tile; declines safely for hd≠128. |
+| FP16-QK FA2 for short prefill (`attention.fa2_fp16qk`, default on) | +25–35% pp512 NVFP4 | QK^T in f16 mma — avoids the short-seq e4m3 quality cliff (#511/#512); declined configs fall back to cuBLAS. |
+| FA2 smem row-stride padding | 1.54× FA2 kernel, +27% pp16384 | head_dim=128 stride aliased all 32 banks (PR #484). Post-fix FA2 is LSU-bound ≈ ceiling. |
+| FA2 cp.async K/V double-buffer | −11.6% FA2 kernel long-ctx | prefetch tile j+1 while j computes |
+| NVFP4 lm_head (`gemm.nvfp4_lm_head`, `…_gdn` default ON) | +8–16% dense, +11.4% Qwen3.6 decode | BF16 lm_head quantized to NVFP4 at load; costs +2.2% PPL (owner-accepted). |
+| GGUF `gemm.nvfp4_ssm_proj` (opt-in) | +53% GGUF-hybrid decode | reverses the −31% GGUF Qwen3.6 loss vs llama.cpp; `nvfp4_attn_proj` +3.8% Nemotron. **NVFP4 on GDN in/out projections REGRESSES −9 to −20% — dead end.** |
 | NVFP4 prmt register LUT | +4.7–16% | `prmt.b32` replaces SMEM LUT |
 | Inline Q8_1 in O-projection | +5–10% | Eliminates 1 launch + 1 DRAM round-trip |
 | `__ldcs` on KV cache reads | +2–4% decode | Bypass L1, evict-first L2. **KV only, NOT weights.** |
 | 8-warp Blackwell attention | better SM util | 256 threads vs Hopper's 128 |
+
+**FP8 prefill is DISABLED on sm_120** (`attention.fp8_prefill` auto → off; cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell — `src/runtime/engine_init_resolver.cpp:156`). The historical "+40–60% prefill" FP8×FP8 cuBLAS path does not apply here; prefill levers are the FA2 family above.
 
 PTX templates for all of these → `references/ptx-patterns.md`.
 

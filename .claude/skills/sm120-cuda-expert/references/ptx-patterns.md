@@ -1,6 +1,6 @@
 # sm_120a PTX Inline Assembly Patterns
 
-Heavy reference for the `sm120-cuda-expert` skill. Templates verified on RTX 5090 / GB202 under CUDA 13.2.1, `compute_120a / sm_120a`.
+Heavy reference for the `sm120-cuda-expert` skill. Templates verified on RTX 5090 / GB202 under CUDA 13.2.1, `compute_120a / sm_120a` — re-verified unchanged on CUDA 13.3 (PTX ISA 9.3: 0 of 247 instructions flipped, see known-issues.md).
 
 Guard all sm_120 code: `#if __CUDA_ARCH__ >= 1200`.
 
@@ -32,7 +32,7 @@ asm volatile(
 **Requires `compute_120a`** (NOT `compute_120` / `compute_120f` — `block_scale` modifier and TMA-WS-grouped-GEMM are gated on the `a` arch suffix).
 
 References in repo:
-- `src/compute/attention_mxf4nvf4_probe.cu` — canned-input probe
+- `tests/bench/attention_mxf4nvf4_probe.cu` — canned-input probe
 - `src/compute/attention_fmha_mxf4nvf4_sm120.h` — FMHA upgrade target
 
 ---

@@ -39,7 +39,10 @@ where the recurring production failures live (reasoning/think separation,
 channel stripping, stop handling, truncated-think spill, prompt-blindness):
 
 ```bash
-# server must be running (any model); stdlib-only, runs on the host
+# server must be running, e.g.:
+#   docker run --rm --gpus all -p 8080:8080 -v /home/kekz/models:/models imp:test \
+#     imp-server --host 0.0.0.0 --model /models/<MODEL>
+# the suite itself is stdlib-only and runs on the host:
 python3 tools/analysis/degen_suite.py --url http://localhost:8080
 # Qwen3.6 is non-deterministic at temp=0 — skip the equality check:
 python3 tools/analysis/degen_suite.py --skip-deterministic
@@ -117,6 +120,8 @@ Any match = **fail**, even if output passed the heuristic. Cross-check measured 
 | Llama-3.2-3B | "The capital of France is" | `Paris` |
 
 Pick the first model from this table whose family matches your change. Stable prompts give stable regressions — do not invent new probes.
+
+**Quant-file caveat (2026-06-06):** the local Qwen3-4B (unsloth) and Llama-3.2-3B (bartowski) GGUFs are re-downloads — *different quant files* than the originals. Greedy behavior on logit-tie prompts differs (the unsloth 4B degenerates on synthetic list prompts even unchunked — that's model-intrinsic, NOT an engine bug). For byte-level A/B prefer NLL/perplexity comparison over exact-output equality (the ChunkedPrefill tests switched to NLL for this reason, PR #553). Qwen3.6-35B is non-deterministic even at temp=0 — greedy-token A/B is INVALID there; use perplexity or `degen_suite.py --skip-deterministic`.
 
 ## Red flags — STOP and re-run
 
