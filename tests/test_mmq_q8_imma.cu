@@ -348,6 +348,81 @@ TEST(MmqQ8Imma, Q6KDenseNRMSE) {
     mmq_q8_imma_release_all();
 }
 
+// ---- Q5_1 MoE grouped — NRMSE vs dequant reference (asymmetric β-form) ----
+TEST(MmqQ8Imma, MoeGroupedQ51) {
+    const int ne = 2, N = 128, K = 256;
+    const int rows_per[ne] = {70, 41};
+    int32_t h_off[ne + 1] = {0};
+    for (int e = 0; e < ne; ++e) h_off[e + 1] = h_off[e] + rows_per[e];
+    const int expanded = h_off[ne];
+
+    // packed q5_1 experts: [ne][N][K/32] 24-B blocks
+    const int bpr = K / 32;
+    std::vector<uint8_t> W(static_cast<size_t>(ne) * N * bpr * 24);
+    std::mt19937 rng(401);
+    for (size_t b = 0; b < W.size() / 24; ++b) {
+        uint8_t* bp = W.data() + b * 24;
+        __half dh = __float2half(0.001f + 0.0005f * (rng() % 100));
+        __half mh = __float2half(-0.02f + 0.0004f * (rng() % 100));
+        std::memcpy(bp, &dh, 2);
+        std::memcpy(bp + 2, &mh, 2);
+        for (int i = 0; i < 20; ++i) bp[4 + i] = static_cast<uint8_t>(rng() & 0xFF);
+    }
+    std::vector<__half> x(static_cast<size_t>(expanded) * K);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x) v = __float2half(nd(rng));
+
+    uint8_t* d_w; __half *d_x, *d_out; int32_t* d_off;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(expanded) * N * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_off, sizeof(h_off)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_imma_moe_gemm(d_w, /*qkind=*/3, d_x, d_out, d_off, 70, expanded, ne, N, K,
+                                  nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<__half> out(static_cast<size_t>(expanded) * N);
+    cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
+
+    // dequant reference (unquantized activations; NRMSE bound)
+    auto q5 = [&](const uint8_t* bp, int i) -> int {
+        uint32_t qh;
+        std::memcpy(&qh, bp + 4, 4);
+        const uint8_t* qs = bp + 8;
+        if (i < 16) return (qs[i] & 0xF) | (((qh >> i) & 1u) << 4);
+        return (qs[i - 16] >> 4) | (((qh >> (i)) & 1u) << 4);
+    };
+    double err2 = 0, ref2 = 0;
+    for (int e = 0; e < ne; ++e) {
+        for (int r = h_off[e]; r < h_off[e + 1]; ++r) {
+            for (int n = 0; n < N; ++n) {
+                double ref = 0;
+                for (int s2 = 0; s2 < bpr; ++s2) {
+                    const uint8_t* bp =
+                        W.data() + ((static_cast<size_t>(e) * N + n) * bpr + s2) * 24;
+                    __half dh, mh;
+                    std::memcpy(&dh, bp, 2);
+                    std::memcpy(&mh, bp + 2, 2);
+                    const double d = __half2float(dh), mm = __half2float(mh);
+                    for (int i = 0; i < 32; ++i)
+                        ref += static_cast<double>(
+                                   __half2float(x[(size_t)r * K + s2 * 32 + i])) *
+                               (d * q5(bp, i) + mm);
+                }
+                const double got = __half2float(out[(size_t)r * N + n]);
+                err2 += (got - ref) * (got - ref);
+                ref2 += ref * ref;
+            }
+        }
+    }
+    const double nrmse = std::sqrt(err2 / std::max(ref2, 1e-30));
+    EXPECT_LT(nrmse, 2e-2) << "Q5_1 MoE NRMSE";
+    cudaFree(d_w); cudaFree(d_x); cudaFree(d_out); cudaFree(d_off);
+    mmq_q8_imma_release_all();
+}
+
 TEST(MmqQ8Imma, MoeGroupedQ8) {
     const int ne = 4, N = 128, K = 256;
     const int rows_per[ne] = {37, 0, 96, 19};  // ragged; expert 1 empty
