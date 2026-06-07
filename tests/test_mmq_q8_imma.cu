@@ -272,6 +272,81 @@ TEST(MmqQ8Imma, Q4KDenseNRMSE) {
 }
 
 // ---- MoE grouped (Q8_0, ne=4, ragged offsets incl. an empty expert) ----
+// ---- Q6_K dense — NRMSE vs full-dequant reference (per-16 scales) ----
+namespace q6k_helpers {
+constexpr int kSuper = 256;
+constexpr int kBytes = 210;
+inline void gen_q6k(std::vector<uint8_t>& W, int N, int K, unsigned seed) {
+    const int bpr = K / kSuper;
+    W.resize(static_cast<size_t>(N) * bpr * kBytes);
+    std::mt19937 rng(seed);
+    for (size_t b = 0; b < W.size() / kBytes; ++b) {
+        uint8_t* bp = W.data() + b * kBytes;
+        for (int i = 0; i < 192; ++i) bp[i] = static_cast<uint8_t>(rng() & 0xFF);
+        for (int i = 0; i < 16; ++i)
+            bp[192 + i] = static_cast<uint8_t>(static_cast<int8_t>((rng() % 65) - 32));
+        __half dh = __float2half(0.0005f + 0.0003f * (rng() % 100));
+        std::memcpy(bp + 208, &dh, 2);
+    }
+}
+inline int q6_element(const uint8_t* bp, int i) {
+    const int group = i >> 7, within = i & 127, quad = within >> 5, l = within & 31;
+    const int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
+    const int qh_idx = (group << 5) + l;
+    const uint8_t qlb = bp[ql_idx];
+    const uint8_t low4 = (quad >= 2) ? ((qlb >> 4) & 0xF) : (qlb & 0xF);
+    const uint8_t high2 = (bp[128 + qh_idx] >> (quad * 2)) & 0x3;
+    return static_cast<int>((high2 << 4) | low4) - 32;
+}
+}  // namespace q6k_helpers
+
+TEST(MmqQ8Imma, Q6KDenseNRMSE) {
+    using namespace q6k_helpers;
+    const int M = 128, N = 128, K = 512;
+    std::vector<uint8_t> W;
+    gen_q6k(W, N, K, 311);
+    std::vector<__half> x(static_cast<size_t>(M) * K);
+    std::mt19937 rng(312);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x) v = __float2half(nd(rng));
+
+    uint8_t* d_w; __half *d_x, *d_out;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(M) * N * 2), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q6k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<__half> out(static_cast<size_t>(M) * N);
+    cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
+
+    const int bpr = K / kSuper;
+    double err2 = 0, ref2 = 0;
+    for (int n = 0; n < N; ++n) {
+        for (int m = 0; m < M; m += 7) {
+            double ref = 0;
+            for (int sblk = 0; sblk < bpr; ++sblk) {
+                const uint8_t* bp = W.data() + (static_cast<size_t>(n) * bpr + sblk) * kBytes;
+                __half dh;
+                std::memcpy(&dh, bp + 208, 2);
+                const double d = __half2float(dh);
+                const int8_t* sc = reinterpret_cast<const int8_t*>(bp + 192);
+                for (int i = 0; i < kSuper; ++i)
+                    ref += static_cast<double>(__half2float(x[(size_t)m * K + sblk * kSuper + i])) *
+                           (d * sc[i >> 4] * q6_element(bp, i));
+            }
+            const double got = __half2float(out[(size_t)m * N + n]);
+            err2 += (got - ref) * (got - ref);
+            ref2 += ref * ref;
+        }
+    }
+    const double nrmse = std::sqrt(err2 / std::max(ref2, 1e-30));
+    EXPECT_LT(nrmse, 2e-2) << "Q6K dense NRMSE";
+    cudaFree(d_w); cudaFree(d_x); cudaFree(d_out);
+    mmq_q8_imma_release_all();
+}
+
 TEST(MmqQ8Imma, MoeGroupedQ8) {
     const int ne = 4, N = 128, K = 256;
     const int rows_per[ne] = {37, 0, 96, 19};  // ragged; expert 1 empty
@@ -298,7 +373,7 @@ TEST(MmqQ8Imma, MoeGroupedQ8) {
 
     int max_rows = 0;
     for (int e = 0; e < ne; ++e) max_rows = std::max(max_rows, rows_per[e]);
-    ASSERT_TRUE(mmq_imma_moe_gemm(d_w, false, d_x, d_out, d_off, max_rows, expanded, ne, N, K,
+    ASSERT_TRUE(mmq_imma_moe_gemm(d_w, /*qkind=*/0, d_x, d_out, d_off, max_rows, expanded, ne, N, K,
                                   nullptr));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<__half> out(static_cast<size_t>(expanded) * N);

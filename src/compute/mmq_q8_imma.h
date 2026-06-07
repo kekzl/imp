@@ -33,6 +33,12 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta = 0.0f);
 
+// Dense Q6_K: per-16 scales via half-MMA split (symmetric, no beta term);
+// one-time 224-B-aligned repack (+6.7% of the Q6_K bytes — the 210-B blocks
+// are only 2-aligned, forge 2026-05-28 finding). K % 256 == 0.
+bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M,
+                       int N, int K, cudaStream_t stream, float beta = 0.0f);
+
 // MoE grouped prefill GEMM over ne experts in ONE launch (gridDim.z = ne).
 //   w_blocks     : packed expert weights [ne][N][K] (GGUF blocks, contiguous)
 //   x_f16        : gathered activations [expanded][K] (expert-contiguous)
@@ -42,9 +48,10 @@ bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* ou
 //                  the BM=32 small-M tile — pp512 top-8/128 routing averages
 //                  ~32 rows per expert)
 //   expanded     : total gathered rows (activation quantize span)
-bool mmq_imma_moe_gemm(const void* w_blocks, bool qtype_is_q4k, const __half* x_f16,
-                       __half* out_f16, const int32_t* d_offsets, int h_max_rows, int expanded,
-                       int ne, int N, int K, cudaStream_t stream);
+//   qkind: 0 = Q8_0, 1 = Q4_K, 2 = Q6_K
+bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
+                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
+                       int K, cudaStream_t stream);
 
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();

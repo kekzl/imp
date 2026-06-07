@@ -458,18 +458,27 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     //   Scalar: disabled (FP16 batch path always wins for small batches)
     // =========================================================================
     {
-        if (try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
+        // gemm.moe_imma_prefill: the grouped INT8 IMMA batch path (fused
+        // dequant on tensor cores) supersedes the per-expert fused WMMA/dp4a
+        // prefill variants AND the gemma-4 ggml per-token path — skip them so
+        // dispatch falls through to the batch path, which tries IMMA per
+        // expert tensor. Measured 2026-06-07: Qwen3-30B-A3B pp512 3 968 →
+        // 9 970 tok/s (above llama.cpp).
+        const bool moe_imma_pref = runtime_config().gemm.moe_imma_prefill;
+        if (!moe_imma_pref &&
+            try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
         // Q4_K/Q5_K fused dp4a prefill: wins when expert_d_ff is small enough
         // that the 3.5× bandwidth savings from reading Q4_K directly outweighs
         // cuBLAS's tiled GEMM efficiency. Measured: +20% at eff=512 (Qwen3.6),
         // -20% at eff=768 (Qwen3-30B). Threshold: eff ≤ 640.
-        } else if (eff <= 640 &&
+        } else if (eff <= 640 && !moe_imma_pref &&
                    try_run_moe_q4k_prefill(layer, stream, n, d, eff, ne, expanded,
                                             non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
-        } else if (cfg.overrides.gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
+        } else if (!moe_imma_pref && cfg.overrides.gemma4.ggml_prefill &&
+                   cfg.arch == ModelArch::GEMMA4 &&
                    ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                    ly.expert_down_packed.on_device &&
                    try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
