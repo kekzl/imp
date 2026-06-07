@@ -56,12 +56,22 @@ void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, in
 
 // Q8_1 block: 32 int8 quantized values + FP16 scale (d) + FP16 sum (s).
 // The sum field enables the dp4a bias subtraction trick.
-struct block_q8_1 {
+//
+// LAYOUT (since 2026-06-07, #598 follow-up): qs first + alignas(16) + pad to
+// a 48-B stride. The historical ggml-style 36-B layout put qs at offset 4 —
+// never 16-B aligned — which chained every dp4a GEMV activation read to
+// 8× LDG.32 per block (the measured structural ceiling of the kernel
+// family: 31-42% DRAM BW). With qs at offset 0 and 16-B block alignment the
+// existing 32-B memcpy loads compile to 2× LDG.128. Costs 12 pad bytes per
+// block in tiny scratch buffers. mmvq keeps its own ggml_block_q8_1 (the
+// imported ggml vec_dot kernels expect the original layout).
+struct alignas(16) block_q8_1 {
+    int8_t qs[32];  // quantized values (16-B aligned: offset 0, stride 48)
     half d;         // delta (scale): val = d * qs[i]
     half s;         // sum of qs[0..31] (unused for Q6_K path, used for Q4 variants)
-    int8_t qs[32];  // quantized values
+    int8_t pad[12];
 };
-static_assert(sizeof(block_q8_1) == 36, "block_q8_1 must be 36 bytes");
+static_assert(sizeof(block_q8_1) == 48, "block_q8_1: 48-B stride (16-B-aligned qs plane)");
 
 // Quantize FP16 input vector to Q8_1 blocks.
 // x: [K] FP16, q8_1_out: [K/32] block_q8_1, d8_out: [K/32] float (block scales for fast access).
