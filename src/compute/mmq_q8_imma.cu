@@ -1,12 +1,20 @@
 // =============================================================================
-// mmq_q8_imma.cu — Q8_0 INT8 IMMA prefill GEMM (sm_120a)
+// mmq_q8_imma.cu — INT8 IMMA prefill GEMM family (sm_120a)
 // =============================================================================
 //
-// See mmq_q8_imma.h for the design rationale (phase-2B ceiling fixes: SMEM-
-// staged scales, 128×128×64 tiles, symmetric epilogue). Reuses the activation
-// quantizer from the Q4_K IMMA stack (quantize_fp16_to_int8_subblock).
+// Fused-dequant prefill GEMMs on the int8 tensor cores for Q8_0 and Q4_K
+// (dense + MoE-grouped). See mmq_q8_imma.h for the contract and the design
+// notes vs the 2026-05-18 phase-2B ceiling (SMEM-staged scales, 128x128x64
+// tiles, +16-B row pad killing 28.3M bank conflicts, one syncthreads pair
+// per K-step; 3-stage cp.async REGRESSED -21% — do not re-add).
+//
+// Unified math (α/β form; Q8_0 repacks with α=d, β=0):
+//   out[m,n] = Σ_kb d_a[m,kb] · ( α[n,kb]·Σ_{k∈kb} a_s8·w_s8 + β[n,kb]·rs[m,kb] )
+// where rs is the int rowsum of the quantized activation sub-block (couples
+// to Q4_K's collapsed (q-8)+dmin terms, see mmq_q4k_imma_layout.h).
 
 #include "compute/mmq_q8_imma.h"
+#include "compute/mmq_q4k_imma_layout.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -17,24 +25,23 @@ namespace imp {
 
 namespace {
 
-constexpr int kBM = 128;
 constexpr int kBN = 128;
-constexpr int kBK = 64;  // 2 sub-blocks per K-step
+constexpr int kBK = 64;   // 2 sub-blocks per K-step
 constexpr int kPad = 16;  // smem row pad (bytes): 80-B stride = conflict-free rl-lane access
 constexpr int kRow = kBK + kPad;
 constexpr int kStages = 2;
-constexpr int kWarpsM = 4;
-constexpr int kWarpsN = 2;
-constexpr int kThreads = kWarpsM * kWarpsN * 32;  // 256
-constexpr int kWarpTileM = kBM / kWarpsM;          // 32 → 2 m16 frags
-constexpr int kWarpTileN = kBN / kWarpsN;          // 64 → 8 n8 frags
-constexpr int kMF = kWarpTileM / 16;               // 2
-constexpr int kNF = kWarpTileN / 8;                // 8
+constexpr int kThreads = 256;
 
 __device__ __forceinline__ void cp_async_cg_16(void* smem, const void* glob, bool valid) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
     int src_size = valid ? 16 : 0;  // src-size 0 → zero-fill (OOB M-tail rows)
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(glob),
+                 "r"(src_size));
+}
+__device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob, bool valid) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    int src_size = valid ? 8 : 0;
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(s), "l"(glob),
                  "r"(src_size));
 }
 __device__ __forceinline__ void cp_async_ca_4(void* smem, const void* glob, bool valid) {
@@ -51,76 +58,102 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// One K-step tile load, all 256 threads cooperating:
-//   A  [kBM][kBK] s8 = 8192 B → 32 B/thread (2 × cp16), M-tail rows zero-filled
-//   B  [kBN][kBK] s8 = 8192 B → 32 B/thread (2 × cp16)
-//   Ad [kBM][2] half = 512 B → first 128 threads, 4 B each (d-plane cols
-//      (kb0, kb0+1) are contiguous and 4-B aligned: kb0 is even)
-//   Bd [kBN][2] half = 512 B → next 128 threads
+// One K-step tile load, all 256 threads cooperating (loops are fully
+// unrolled compile-time for both BM variants):
+//   A   [BM][kBK]  s8     M-tail rows zero-filled
+//   B   [kBN][kBK] s8     weight rows always full (N % kBN == 0 gate)
+//   Asc [BM][2]    half   activation scale, d-plane cols (kb0, kb0+1)
+//   Ars [BM][2]    float  activation rowsum, same cols
+//   Bsc [kBN][2][2] half  weight (α, β) interleaved for both kb cols
+template <int BM>
 __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A,
-                                           const int8_t* __restrict__ Ad_src,
+                                           const __half* __restrict__ Asc,
+                                           const float* __restrict__ Ars,
                                            const int8_t* __restrict__ B,
-                                           const int8_t* __restrict__ Bd_src,
-                                           int8_t (*sA)[kRow], int8_t (*sB)[kRow],
-                                           __half (*sAd)[2], __half (*sBd)[2], int base_m, int M,
-                                           int K, int subs, int k_base) {
-    {
-        // A: row = tid/2 in 0..127, col = (tid&1)*32 + {0,16}
-        const int row = tid >> 1;
-        const int col = (tid & 1) * 32;
+                                           const __half* __restrict__ Bsc, int8_t (*sA)[kRow],
+                                           int8_t (*sB)[kRow], __half (*sAsc)[2],
+                                           float (*sArs)[2], __half (*sBsc)[2][2], int base_m,
+                                           int M, int K, int subs, int k_base) {
+#pragma unroll
+    for (int i = tid; i < BM * 4; i += kThreads) {
+        const int row = i >> 2;
+        const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
-        const int8_t* src = A + static_cast<size_t>(base_m + row) * K + k_base + col;
-        cp_async_cg_16(&sA[row][col], src, valid);
-        cp_async_cg_16(&sA[row][col + 16], src + 16, valid);
+        cp_async_cg_16(&sA[row][col],
+                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
-    {
-        // B: weight rows are always full (N % kBN == 0 gate)
-        const int row = tid >> 1;
-        const int col = (tid & 1) * 32;
-        const int8_t* src = B + static_cast<size_t>(row) * K + k_base + col;  // B pre-offset to base_n
-        cp_async_cg_16(&sB[row][col], src, true);
-        cp_async_cg_16(&sB[row][col + 16], src + 16, true);
+#pragma unroll
+    for (int i = tid; i < kBN * 4; i += kThreads) {
+        const int row = i >> 2;
+        const int col = (i & 3) * 16;
+        cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col, true);
     }
-    {
-        const int kb0 = k_base / 32;
-        if (tid < kBM) {
-            const bool valid = (base_m + tid) < M;
-            const __half* src = reinterpret_cast<const __half*>(Ad_src) +
-                                static_cast<size_t>(base_m + tid) * subs + kb0;
-            cp_async_ca_4(&sAd[tid][0], src, valid);
-        } else if (tid < kBM + kBN) {
-            const int row = tid - kBM;
-            const __half* src =
-                reinterpret_cast<const __half*>(Bd_src) + static_cast<size_t>(row) * subs + kb0;
-            cp_async_ca_4(&sBd[row][0], src, true);
-        }
+    const int kb0 = k_base / 32;
+#pragma unroll
+    for (int i = tid; i < BM; i += kThreads) {
+        const bool valid = (base_m + i) < M;
+        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+    }
+#pragma unroll
+    for (int i = tid; i < kBN; i += kThreads) {
+        cp_async_ca_8(&sBsc[i][0][0], Bsc + (static_cast<size_t>(i) * subs + kb0) * 2, true);
     }
 }
 
-// out[M,N] = (or +=, BETA1) per-block-scaled IMMA over [kBM,kBN] tiles.
-template <bool BETA1>
+// out = (or +=, BETA1) the α/β-scaled IMMA over [BM,kBN] tiles. Grouped MoE
+// form: gridDim.z = ne with device expert_offsets; dense passes offsets ==
+// nullptr (z extent 1).
+template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads)
-    mmq_q8_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
-                       const int8_t* __restrict__ W_s8, const __half* __restrict__ w_d,
-                       __half* __restrict__ out, int M, int N, int K) {
-    const int n_block = blockIdx.x;
-    const int m_block = blockIdx.y;
-    const int base_m = m_block * kBM;
-    const int base_n = n_block * kBN;
-    if (base_m >= M) return;
+    mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                    const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
+                    const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
+                    int K, const int32_t* __restrict__ expert_offsets, size_t w_stride,
+                    size_t wsc_stride) {
+    constexpr int kWM = (BM == 128) ? 4 : 2;  // warp grid
+    constexpr int kWN = (BM == 128) ? 2 : 4;
+    constexpr int kTileM = BM / kWM;       // 32 / 16
+    constexpr int kTileN = kBN / kWN;      // 64 / 32
+    constexpr int kMF = kTileM / 16;       // 2 / 1
+    constexpr int kNF = kTileN / 8;        // 8 / 4
+    static_assert(kWM * kWN * 32 == kThreads, "warp grid must fill the CTA");
+
+    int rows = M;
+    size_t row_off = 0;
+    const int e = blockIdx.z;
+    if (expert_offsets != nullptr) {
+        const int32_t o0 = __ldg(&expert_offsets[e]);
+        const int32_t o1 = __ldg(&expert_offsets[e + 1]);
+        row_off = static_cast<size_t>(o0);
+        rows = o1 - o0;
+    }
+    const int base_m = blockIdx.y * BM;
+    const int base_n = blockIdx.x * kBN;
+    if (base_m >= rows || rows == 0) return;
+
+    const int subs = K / 32;
+    const int8_t* A = X_s8 + row_off * K;
+    const __half* Asc = x_scale + row_off * subs;
+    const float* Ars = x_rowsum + row_off * subs;
+    const int8_t* B = W_s8 + static_cast<size_t>(e) * w_stride + static_cast<size_t>(base_n) * K;
+    const __half* Bsc = w_sc + static_cast<size_t>(e) * wsc_stride +
+                        static_cast<size_t>(base_n) * subs * 2;
+    __half* C = out + row_off * N;
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
     const int lane = tid & 31;
-    const int warp_m = warp_id >> 1;  // 0..3
-    const int warp_n = warp_id & 1;   // 0..1
-    const int rl = lane >> 2;         // 0..7
-    const int cl = lane & 3;          // 0..3
+    const int warp_m = warp_id / kWN;
+    const int warp_n = warp_id % kWN;
+    const int rl = lane >> 2;  // 0..7
+    const int cl = lane & 3;   // 0..3
 
-    __shared__ int8_t sA[kStages][kBM][kRow];
+    __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ int8_t sB[kStages][kBN][kRow];
-    __shared__ __half sAd[kStages][kBM][2];
-    __shared__ __half sBd[kStages][kBN][2];
+    __shared__ __half sAsc[kStages][BM][2];
+    __shared__ float sArs[kStages][BM][2];
+    __shared__ __half sBsc[kStages][kBN][2][2];
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -129,22 +162,17 @@ __global__ void __launch_bounds__(kThreads)
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
-    const int subs = K / 32;
     const int ksteps = K / kBK;
-    const int8_t* B_base = W_s8 + static_cast<size_t>(base_n) * K;
-    const int8_t* Bd_base = reinterpret_cast<const int8_t*>(w_d + static_cast<size_t>(base_n) * subs);
-    const int8_t* Ad_base = reinterpret_cast<const int8_t*>(x_scale);
-
-    load_kstep(tid, X_s8, Ad_base, B_base, Bd_base, sA[0], sB[0], sAd[0], sBd[0], base_m, M, K,
-               subs, 0);
+    load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0], base_m,
+                   rows, K, subs, 0);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
         const int stage = ks & 1;
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
-            load_kstep(tid, X_s8, Ad_base, B_base, Bd_base, sA[nstage], sB[nstage], sAd[nstage],
-                       sBd[nstage], base_m, M, K, subs, (ks + 1) * kBK);
+            load_kstep<BM>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
+                           sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -153,24 +181,27 @@ __global__ void __launch_bounds__(kThreads)
         __syncthreads();
 
 #pragma unroll
-        for (int kb = 0; kb < 2; ++kb) {  // 2 sub-blocks per K-step
+        for (int kb = 0; kb < 2; ++kb) {
             const int kc = kb * 32;
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kWarpTileM + mf * 16 + rl;
+                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
                 const int arow_hi = arow_lo + 8;
                 const int acol = kc + cl * 4;
                 uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
                 uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
                 uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
                 uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol + 16]);
-                // d_a for this fragment's two rows, hoisted over all 8 n-frags
-                const float da_lo = __half2float(sAd[stage][arow_lo][kb]);
-                const float da_hi = __half2float(sAd[stage][arow_hi][kb]);
+                // activation scale + rowsum for the fragment's two rows,
+                // hoisted over all n-frags
+                const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
+                const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
+                const float rs_lo = sArs[stage][arow_lo][kb];
+                const float rs_hi = sArs[stage][arow_hi][kb];
 
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kWarpTileN + nf * 8 + rl;
+                    const int bcol = warp_n * kTileN + nf * 8 + rl;
                     const int bk = kc + cl * 4;
                     uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk]);
                     uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk + 16]);
@@ -185,13 +216,18 @@ __global__ void __launch_bounds__(kThreads)
                           "r"(0), "r"(0));
 #endif
                     // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
-                    const int ncol_lo = warp_n * kWarpTileN + nf * 8 + cl * 2;
-                    const float dw_lo = __half2float(sBd[stage][ncol_lo][kb]);
-                    const float dw_hi = __half2float(sBd[stage][ncol_lo + 1][kb]);
-                    acc[mf][nf][0] += (da_lo * dw_lo) * static_cast<float>(c0);
-                    acc[mf][nf][1] += (da_lo * dw_hi) * static_cast<float>(c1);
-                    acc[mf][nf][2] += (da_hi * dw_lo) * static_cast<float>(c2);
-                    acc[mf][nf][3] += (da_hi * dw_hi) * static_cast<float>(c3);
+                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                    const __half2 ab_lo = *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo][kb][0]);
+                    const __half2 ab_hi =
+                        *reinterpret_cast<const __half2*>(&sBsc[stage][ncol_lo + 1][kb][0]);
+                    const float al = __half2float(__low2half(ab_lo));
+                    const float bl = __half2float(__high2half(ab_lo));
+                    const float ah = __half2float(__low2half(ab_hi));
+                    const float bh = __half2float(__high2half(ab_hi));
+                    acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
+                    acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
+                    acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
+                    acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
                 }
             }
         }
@@ -201,18 +237,18 @@ __global__ void __launch_bounds__(kThreads)
     // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kWarpTileM + mf * 16 + rl;
+        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
         const int row_hi = row_lo + 8;
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kWarpTileN + nf * 8 + cl * 2;
-            if (row_lo < M) {
-                __half2* p = reinterpret_cast<__half2*>(&out[static_cast<size_t>(row_lo) * N + col]);
+            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            if (row_lo < rows) {
+                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
-            if (row_hi < M) {
-                __half2* p = reinterpret_cast<__half2*>(&out[static_cast<size_t>(row_hi) * N + col]);
+            if (row_hi < rows) {
+                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
@@ -222,29 +258,39 @@ __global__ void __launch_bounds__(kThreads)
 
 // -----------------------------------------------------------------------------
 // Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned! memcpy
-// only) → qs plane [N][K] s8 + d plane [N][K/32] half. One-time per weight.
+// only) → qs plane [N][K] s8 + interleaved (α=d, β=0) plane [N][K/32][2].
 // -----------------------------------------------------------------------------
 __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restrict__ qs_plane,
-                                __half* __restrict__ d_plane, int n_blocks_total, int subs) {
+                                __half* __restrict__ sc_plane, int n_blocks_total) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks_total) return;
     const uint8_t* blk = src + static_cast<size_t>(b) * 34;
     __half d;
     memcpy(&d, blk, 2);
-    d_plane[b] = d;
+    sc_plane[static_cast<size_t>(b) * 2] = d;
+    sc_plane[static_cast<size_t>(b) * 2 + 1] = __float2half(0.0f);
     int8_t* dst = qs_plane + static_cast<size_t>(b) * 32;
 #pragma unroll
     for (int i = 0; i < 32; ++i) dst[i] = static_cast<int8_t>(blk[2 + i]);
-    (void)subs;
 }
 
-// Faster activation quantizer than the shared 32-thread-block version
-// (quantize_fp16_to_int8_subblock): same math, but 8 warps per block with a
-// grid-stride loop over (m, sub) pairs — the shared kernel's 65k 32-thread
-// blocks cap SM occupancy and ran at ~150 GB/s (32.5 µs per 512×4096 GEMM,
-// nsys 2026-06-07); this version is plain-coalesced and occupancy-bound.
+// Interleave separate α / β planes ([N][subs] each, from mmq_q4k_imma_reorder)
+// into the kernel's [N][subs][2] layout.
+__global__ void interleave_ab_kernel(const __half* __restrict__ alpha,
+                                     const __half* __restrict__ beta,
+                                     __half* __restrict__ sc_plane, size_t total) {
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    sc_plane[i * 2] = alpha[i];
+    sc_plane[i * 2 + 1] = beta[i];
+}
+
+// Activation quantizer: 8 warps per block, grid-stride over (m, sub) pairs
+// (the shared 32-thread-block version ran at ~150 GB/s). Emits s8 + half
+// scale + float rowsum (the rowsum couples to the Q4_K β term; ~free here).
 __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, int K,
-                                         int8_t* __restrict__ xs8, __half* __restrict__ xscale) {
+                                         int8_t* __restrict__ xs8, __half* __restrict__ xscale,
+                                         float* __restrict__ xrowsum) {
     const int subs = K / 32;
     const int total = M * subs;
     const int lane = threadIdx.x & 31;
@@ -262,23 +308,33 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
         int q = __float2int_rn(v * inv);
         q = max(-127, min(127, q));
         xs8[off + lane] = static_cast<int8_t>(q);
-        if (lane == 0)
+        int sq = q;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xFFFFFFFFu, sq, o);
+        if (lane == 0) {
             xscale[static_cast<size_t>(m) * subs + s] =
                 __float2half((amax > 0.0f) ? (amax / 127.0f) : 0.0f);
+            xrowsum[static_cast<size_t>(m) * subs + s] = static_cast<float>(sq);
+        }
     }
 }
 
 struct WeightPlanes {
     int8_t* qs = nullptr;
-    __half* d = nullptr;
-    int N = 0;
+    __half* sc = nullptr;  // interleaved (α, β) [N][K/32][2]
+    int N = 0;             // total rows (ne × per-expert rows for MoE)
     int K = 0;
 };
 struct ActScratch {
     int8_t* xs8 = nullptr;
     __half* xscale = nullptr;
+    float* xrowsum = nullptr;
     size_t cap_mk = 0;
     size_t cap_msubs = 0;
+    // quantize memo: gate/up MoE GEMMs share one gathered batch
+    const void* last_ptr = nullptr;
+    int last_m = 0;
+    int last_k = 0;
 };
 
 std::mutex g_mtx;
@@ -291,7 +347,7 @@ bool stream_capturing(cudaStream_t stream) {
            st == cudaStreamCaptureStatusActive;
 }
 
-bool ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing) {
+bool ensure_weight(const void* src, bool q4k, int N, int K, cudaStream_t stream, bool capturing) {
     auto it = g_weights.find(src);
     if (it != g_weights.end() && it->second.N == N && it->second.K == K) return true;
     if (capturing) return false;  // never allocate inside graph capture
@@ -299,14 +355,36 @@ bool ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capt
     WeightPlanes w;
     w.N = N;
     w.K = K;
+    const size_t subs = static_cast<size_t>(K) / 32;
     if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
-    if (cudaMalloc(&w.d, static_cast<size_t>(N) * (K / 32) * sizeof(__half)) != cudaSuccess) {
+    if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
         cudaFree(w.qs);
         return false;
     }
-    const int total = N * (K / 32);
-    q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
-        static_cast<const uint8_t*>(src), w.qs, w.d, total, K / 32);
+    if (!q4k) {
+        const int total = N * static_cast<int>(subs);
+        q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+            static_cast<const uint8_t*>(src), w.qs, w.sc, total);
+    } else {
+        // reorder into temp α/β planes, then interleave (init-time only)
+        __half* tmp_a = nullptr;
+        __half* tmp_b = nullptr;
+        const size_t plane = static_cast<size_t>(N) * subs * sizeof(__half);
+        if (cudaMalloc(&tmp_a, plane) != cudaSuccess ||
+            cudaMalloc(&tmp_b, plane) != cudaSuccess) {
+            cudaFree(tmp_a);
+            cudaFree(w.qs);
+            cudaFree(w.sc);
+            return false;
+        }
+        mmq_q4k_imma_reorder(src, N, K, w.qs, tmp_a, tmp_b, stream);
+        const size_t total = static_cast<size_t>(N) * subs;
+        interleave_ab_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
+            tmp_a, tmp_b, w.sc, total);
+        cudaStreamSynchronize(stream);  // init-time; temps freed right after
+        cudaFree(tmp_a);
+        cudaFree(tmp_b);
+    }
     g_weights[src] = w;
     return true;
 }
@@ -319,12 +397,61 @@ bool ensure_act(int M, int K, bool capturing) {
     if (g_act.xs8) {
         cudaFree(g_act.xs8);
         cudaFree(g_act.xscale);
+        cudaFree(g_act.xrowsum);
         g_act = ActScratch{};
     }
     if (cudaMalloc(&g_act.xs8, mk) != cudaSuccess) return false;
     if (cudaMalloc(&g_act.xscale, msubs * sizeof(__half)) != cudaSuccess) return false;
+    if (cudaMalloc(&g_act.xrowsum, msubs * sizeof(float)) != cudaSuccess) return false;
     g_act.cap_mk = mk;
     g_act.cap_msubs = msubs;
+    g_act.last_ptr = nullptr;
+    return true;
+}
+
+void quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
+    if (g_act.last_ptr == x && g_act.last_m == M && g_act.last_k == K)
+        return;  // gate/up share one gathered batch — quantize once
+    const int total_warps = M * (K / 32);
+    const int blocks = min(2048, (total_warps + 7) / 8);
+    quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_act.xs8, g_act.xscale,
+                                                         g_act.xrowsum);
+    g_act.last_ptr = x;
+    g_act.last_m = M;
+    g_act.last_k = K;
+}
+
+bool gemm_common(const void* w_blocks, bool q4k, const __half* x_f16, __half* out_f16, int M,
+                 int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets,
+                 int h_max_rows, int expanded, int ne) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    const bool capturing = stream_capturing(stream);
+    if (!ensure_weight(w_blocks, q4k, ne * N, K, stream, capturing)) return false;
+    const int act_rows = d_offsets ? expanded : M;
+    if (!ensure_act(act_rows, K, capturing)) return false;
+    quantize_act(x_f16, act_rows, K, stream);
+
+    const auto& w = g_weights[w_blocks];
+    const size_t w_stride = static_cast<size_t>(N) * K;
+    const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
+    const int grid_m_rows = d_offsets ? h_max_rows : M;
+    const bool small_m = d_offsets && h_max_rows < 96;
+    const int bm = small_m ? 32 : 128;
+    dim3 grid(N / kBN, (grid_m_rows + bm - 1) / bm, ne);
+
+    if (small_m) {
+        mmq_imma_kernel<32, false><<<grid, kThreads, 0, stream>>>(
+            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
+            w_stride, wsc_stride);
+    } else if (beta == 1.0f) {
+        mmq_imma_kernel<128, true><<<grid, kThreads, 0, stream>>>(
+            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
+            w_stride, wsc_stride);
+    } else {
+        mmq_imma_kernel<128, false><<<grid, kThreads, 0, stream>>>(
+            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
+            w_stride, wsc_stride);
+    }
     return true;
 }
 
@@ -334,44 +461,45 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
                       int K, cudaStream_t stream, float beta) {
     if (M < 64 || N % kBN != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
+    return gemm_common(w_q8_blocks, false, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0,
+                       1);
+}
 
-    std::lock_guard<std::mutex> lk(g_mtx);
-    const bool capturing = stream_capturing(stream);
-    if (!ensure_weight(w_q8_blocks, N, K, stream, capturing)) return false;
-    if (!ensure_act(M, K, capturing)) return false;
+bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
+                       int N, int K, cudaStream_t stream, float beta) {
+    if (M < 64 || N % kBN != 0 || K % 256 != 0) return false;
+    if (beta != 0.0f && beta != 1.0f) return false;
+    return gemm_common(w_q4k_blocks, true, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0,
+                       1);
+}
 
-    {
-        const int total_warps_needed = M * (K / 32);
-        const int blocks = min(2048, (total_warps_needed + 7) / 8);
-        quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x_f16, M, K, g_act.xs8, g_act.xscale);
-    }
-
-    const auto& w = g_weights[w_q8_blocks];
-    dim3 grid(N / kBN, (M + kBM - 1) / kBM);
-    if (beta == 1.0f)
-        mmq_q8_imma_kernel<true><<<grid, kThreads, 0, stream>>>(g_act.xs8, g_act.xscale, w.qs, w.d,
-                                                                out_f16, M, N, K);
-    else
-        mmq_q8_imma_kernel<false><<<grid, kThreads, 0, stream>>>(g_act.xs8, g_act.xscale, w.qs,
-                                                                 w.d, out_f16, M, N, K);
+bool mmq_imma_moe_gemm(const void* w_blocks, bool qtype_is_q4k, const __half* x_f16,
+                       __half* out_f16, const int32_t* d_offsets, int h_max_rows, int expanded,
+                       int ne, int N, int K, cudaStream_t stream) {
+    if (N % kBN != 0 || K % (qtype_is_q4k ? 256 : kBK) != 0) return false;
+    if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
+    const bool ok = gemm_common(w_blocks, qtype_is_q4k, x_f16, out_f16, /*M=*/0, N, K, stream,
+                                0.0f, d_offsets, h_max_rows, expanded, ne);
     static bool logged = false;
-    if (!logged) {
+    if (ok && !logged) {
         logged = true;
-        IMP_LOG_INFO("Q8_0 IMMA prefill ACTIVE (M=%d N=%d K=%d, tile 128x128x64, 8 warps)", M, N, K);
+        IMP_LOG_INFO("MoE IMMA prefill ACTIVE (%s, ne=%d N=%d K=%d max_rows=%d)",
+                     qtype_is_q4k ? "Q4_K" : "Q8_0", ne, N, K, h_max_rows);
     }
-    return true;
+    return ok;
 }
 
 void mmq_q8_imma_release_all() {
     std::lock_guard<std::mutex> lk(g_mtx);
     for (auto& [_, w] : g_weights) {
         cudaFree(w.qs);
-        cudaFree(w.d);
+        cudaFree(w.sc);
     }
     g_weights.clear();
     if (g_act.xs8) {
         cudaFree(g_act.xs8);
         cudaFree(g_act.xscale);
+        cudaFree(g_act.xrowsum);
         g_act = ActScratch{};
     }
 }

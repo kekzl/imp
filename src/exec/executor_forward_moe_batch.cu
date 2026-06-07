@@ -2,6 +2,7 @@
 // Extracted from executor_forward_moe.cu for maintainability.
 
 #include "exec/executor.h"
+#include "compute/mmq_q8_imma.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
@@ -440,11 +441,30 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         }
     }
 
+    // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K expert tensors run
+    // the grouped INT8 IMMA kernel — fused dequant, one launch over all
+    // experts — instead of materializing every expert to FP16 (the 63-65%-of-
+    // window dequant tax, docs/audit/prefill_gap_2026_06_07.md §4.2). Other
+    // qtypes (Q6_K down_proj) and FP32-out fall through to the legacy path.
+    int max_rows_per_expert = 0;
+    for (int e = 0; e < ne; ++e)
+        max_rows_per_expert = std::max(max_rows_per_expert, h_offsets[e + 1] - h_offsets[e]);
+    const bool moe_imma = runtime_config().gemm.moe_imma_prefill;
+
     auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
                                   char* c_base, int K_dim, int N_dim,
                                   QType out_dtype = QType::F16) {
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
+        if (moe_imma && out_dtype == QType::F16 &&
+            (qtype == QType::Q8_0 || qtype == QType::Q4_K) && max_rows_per_expert > 0) {
+            if (mmq_imma_moe_gemm(packed.data, qtype == QType::Q4_K,
+                                  reinterpret_cast<const __half*>(a_base),
+                                  reinterpret_cast<__half*>(c_base),
+                                  static_cast<const int32_t*>(routing.expert_offsets.data),
+                                  max_rows_per_expert, expanded, ne, N_dim, K_dim, stream))
+                return;
+        }
         size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
         dequant_gpu(static_cast<const uint8_t*>(packed.data), buf, qtype,
                     ne * static_cast<int>(rows), static_cast<int>(cols), stream);
