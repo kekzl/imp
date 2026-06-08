@@ -812,6 +812,17 @@ private:
     void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, size_t& remaining_budget,
                                          cudaStream_t stream, Nvfp4DecodeContext& dctx);
+    // NVFP4-prequant SafeTensors MoE: build the contiguous per-projection decode
+    // cache for one layer's experts (gate/up/down). Borrows resident contiguous
+    // storage zero-copy when possible, else copies per-expert tensors into one
+    // buffer + frees the sources, and re-stamps per-expert CUTLASS_NVFP4 slices.
+    // Stamps `packed` so wcache lookups + the executor dispatch wire up. Returns
+    // true when the projection is handled (cached or left on the CUTLASS path).
+    // Extracted from the nvfp4_decode_cache_moe_experts_ body; the budget flags
+    // are threaded through so the per-layer accounting is shared across calls.
+    bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
+                                 Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
+                                 size_t& moe_logical_avail);
     void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
