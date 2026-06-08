@@ -4,7 +4,8 @@
 //
 // Adding a new phase: write one new src/exec/pre_dequant_phase*.cu file,
 // add it to CMakeLists.txt IMP_EXEC_SOURCES, declare the method on
-// GraphExecutor in executor.h, and call it from pre_dequant_weights() below.
+// QuantPipeline in quant_pipeline.h, and call it from QuantPipeline::build()
+// below.
 
 #include "exec/executor.h"
 #include "exec/quant_pipeline.h"
@@ -31,9 +32,11 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
                           const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
                           QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
                           MoEWorkspace& moe, int max_tokens) {
-    model_ = &model; runtime_config_ = &rcfg; vram_alloc_ = &alloc; budget_ = &budget;
-    stream_ = stream; wcache_ = &wcache; qscratch_ = &qscratch; registry_ = &registry;
+    model_ = &model; runtime_config_ = &rcfg; vram_alloc_ = &alloc;
+    wcache_ = &wcache; qscratch_ = &qscratch; registry_ = &registry;
     hints_ = &hints; moe_ = &moe; max_tokens_ = max_tokens;
+    // `budget` and `stream` are threaded explicitly through every phase call
+    // below (not stored as members).
     // Skip all weight caching for debugging numerical precision issues
 
     const auto& cfg = model_->config();

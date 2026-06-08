@@ -68,8 +68,6 @@ private:
     const Model* model_ = nullptr;
     VRAMAllocator* vram_alloc_ = nullptr;
     const RuntimeConfig* runtime_config_ = nullptr;
-    const VRAMBudget* budget_ = nullptr;
-    cudaStream_t stream_ = nullptr;
     WeightCaches* wcache_ = nullptr;
     QuantScratch* qscratch_ = nullptr;
     WeightRegistry* registry_ = nullptr;
@@ -80,6 +78,10 @@ private:
     // Accessor mirroring GraphExecutor::runtime_config() so the moved phase
     // methods read the config exactly as before. Set in build() from the
     // owning GraphExecutor's already-validated config.
+    // DELIBERATE DUPLICATION (behaviour-neutral verbatim move): keeps the ~12
+    // runtime_config() call sites in the moved phases byte-identical. When the
+    // next GraphExecutor component (MoeRunner/Workspace) needs a 3rd copy, hoist
+    // this to a shared free helper in runtime/config.h instead.
     const RuntimeConfig& runtime_config() const noexcept {
         static const RuntimeConfig kDefault;
         return runtime_config_ ? *runtime_config_ : kDefault;
