@@ -138,11 +138,9 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // (pointers to GraphExecutor members so e.g. has_gdn_ is read live — still
     // false here, set true below — and the activation/phase tensors the moved
     // methods carve stay GraphExecutor-owned).
-    ws_.init(model, vram_alloc_, compute_dtype_, &max_tokens_, use_pdl_, moe_, &has_moe_, &has_ssm_,
-             &has_gdn_, &has_dense_ffn_, &max_expert_eff_, &max_logit_tokens_, &hidden_, &residual_,
-             &norm_out_, &logits_, &fp32_accum_buf_, &fp32_hidden_, &q_, &k_, &v_, &attn_out_, &proj_out_,
-             &gate_out_, &up_out_, &swiglu_out_, &ffn_out_, &ssm_proj_buf_, &ssm_xBC_buf_, &ssm_y_buf_,
-             &ssm_z_buf_, &ssm_out_buf_, &ssm_dt_buf_, &gdn_fused_proj_buf_);
+    ws_.init(model, vram_alloc_, compute_dtype_, &max_tokens_, moe_, &has_moe_, &has_ssm_, &has_gdn_,
+             &has_dense_ffn_, &max_expert_eff_, &max_logit_tokens_, &hidden_, &residual_, &norm_out_,
+             &logits_, &fp32_accum_buf_, &fp32_hidden_);
 
     // Compute shared workspace sizes (no allocation — deferred to allocate_workspaces()).
     // Deferring GPU allocation maximizes VRAM available for expert weight upload.

@@ -308,11 +308,12 @@ private:
     void* fp32_accum_buf_ = nullptr;
     Tensor fp32_hidden_;  // [max_tokens, d_model] FP32 — true hidden state
 
-    // The shared/persistent workspace buffers + per-phase sizes moved into ws_.
-    // The phase TENSORS below are views the moved ws_ methods carve (via the
-    // pointers wired in ws_.init); the hot path reads them as members.
+    // The shared/persistent workspace buffers + per-phase sizes live in ws_.
+    // The phase TENSORS below are views carved by GraphExecutor's
+    // configure_*_workspace methods (which slice ws_.shared()); the hot path
+    // reads them as members.
 
-    // Attention phase tensors (views into the shared workspace, set by ws_.configure_attn_workspace)
+    // Attention phase tensors (views into the shared workspace, set by configure_attn_workspace)
     Tensor q_;         // [max_tokens, n_heads * head_dim]
     Tensor k_;         // [max_tokens, n_kv_heads * head_dim]
     Tensor v_;         // [max_tokens, n_kv_heads * head_dim]
@@ -447,9 +448,17 @@ private:
 
     // --- Allocation and configuration methods ---
     // The shared/persistent/decode scratch arena (allocate_*_workspace,
-    // compute_shared_sizes, configure_*_workspace, workspace_estimate,
-    // resize_workspace, allocate_decode_workspace, use_workspace) moved into
-    // Workspace (exec/workspace.h); GraphExecutor owns ws_ and delegates.
+    // compute_shared_sizes, workspace_estimate, resize_workspace,
+    // allocate_decode_workspace, use_workspace) moved into Workspace
+    // (exec/workspace.h); GraphExecutor owns ws_ and delegates.
+    //
+    // The four per-phase carvers stay here: they write GraphExecutor's
+    // activation-tensor members (q_/k_/v_/.../gdn_fused_proj_buf_) by slicing
+    // the shared buffer (read via ws_.shared()), so they belong on GraphExecutor.
+    void configure_attn_workspace(int max_tokens);
+    void configure_ffn_workspace(int max_tokens);
+    void configure_moe_workspace(int max_tokens);
+    void configure_ssm_workspace(int max_tokens);
 
     void allocate_auxiliary_buffers(
         bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers

@@ -18,11 +18,15 @@ struct MoEWorkspace;
 // GraphExecutor.
 //
 // The arena BUFFERS (shared/persistent/decode pointers + sizes + swap state)
-// are owned here. The activation/phase TENSORS that the arena carves and the
-// hot path reads (hidden_/q_/moe_/ssm_*/fp32_accum_buf_/…) stay GraphExecutor
-// members — the moved methods write them through pointers set in init(),
-// mirroring how QuantPipeline writes the caller-owned caches. The bodies are
-// otherwise byte-identical (sizing logic unchanged), so the move is
+// are owned here. The PER-PHASE activation tensors (q_/k_/v_/gate_out_/ssm_*/…)
+// are carved by the four GraphExecutor::configure_*_workspace methods — pure
+// activation-tensor slicing, so they live on GraphExecutor (they read the buffer
+// via ws_.shared()). Only the six PERSISTENT tensors that the retained methods
+// here genuinely touch (hidden_/residual_/norm_out_/logits_/fp32_accum_buf_/
+// fp32_hidden_, carved by allocate_persistent_workspace and swapped by the
+// decode/prefill workspace swap in allocate_decode_workspace/use_workspace) are
+// still written here through pointers set in init(), mirroring how QuantPipeline
+// writes the caller-owned caches. The sizing logic is unchanged, so the move is
 // behaviour-neutral.
 //
 // See docs/superpowers/specs/2026-06-08-workspace-component-design.md.
@@ -32,26 +36,20 @@ public:
     // pointer-context). The pointer args are to LIVE GraphExecutor members so
     // the moved methods read/write them exactly as before (e.g. has_gdn_ is
     // still false at the first compute_shared_sizes() and true afterward).
-    void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens, bool use_pdl,
+    void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens,
               MoEWorkspace& moe,
               // model-feature flags (read for phase sizing)
               const bool* has_moe, const bool* has_ssm, const bool* has_gdn, const bool* has_dense_ffn,
               const int* max_expert_eff, const int* max_logit_tokens,
-              // persistent activation tensors (written by allocate/use)
+              // persistent activation tensors (carved by allocate_persistent + swapped by
+              // allocate_decode/use_workspace — the four per-phase configure_* carvers are
+              // back on GraphExecutor, so the 16 phase tensors no longer pass through here)
               Tensor* hidden, Tensor* residual, Tensor* norm_out, Tensor* logits, void** fp32_accum_buf,
-              Tensor* fp32_hidden,
-              // attention phase tensors
-              Tensor* q, Tensor* k, Tensor* v, Tensor* attn_out, Tensor* proj_out,
-              // dense FFN phase tensors
-              Tensor* gate_out, Tensor* up_out, Tensor* swiglu_out, Tensor* ffn_out,
-              // SSM phase tensors
-              Tensor* ssm_proj_buf, Tensor* ssm_xBC_buf, Tensor* ssm_y_buf, Tensor* ssm_z_buf,
-              Tensor* ssm_out_buf, Tensor* ssm_dt_buf, Tensor* gdn_fused_proj_buf) {
+              Tensor* fp32_hidden) {
         model_ = &model;
         vram_alloc_ = alloc;
         compute_dtype_ = compute_dtype;
         max_tokens_ = max_tokens;
-        use_pdl_ = use_pdl;
         moe_ = &moe;
         has_moe_ = has_moe;
         has_ssm_ = has_ssm;
@@ -65,22 +63,6 @@ public:
         logits_ = logits;
         fp32_accum_buf_ = fp32_accum_buf;
         fp32_hidden_ = fp32_hidden;
-        q_ = q;
-        k_ = k;
-        v_ = v;
-        attn_out_ = attn_out;
-        proj_out_ = proj_out;
-        gate_out_ = gate_out;
-        up_out_ = up_out;
-        swiglu_out_ = swiglu_out;
-        ffn_out_ = ffn_out;
-        ssm_proj_buf_ = ssm_proj_buf;
-        ssm_xBC_buf_ = ssm_xBC_buf;
-        ssm_y_buf_ = ssm_y_buf;
-        ssm_z_buf_ = ssm_z_buf;
-        ssm_out_buf_ = ssm_out_buf;
-        ssm_dt_buf_ = ssm_dt_buf;
-        gdn_fused_proj_buf_ = gdn_fused_proj_buf;
     }
 
     // --- zero-overhead inline accessors (hot path reads these) ---
@@ -99,10 +81,6 @@ public:
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);
     size_t workspace_estimate() const;
-    void configure_attn_workspace(int max_tokens);
-    void configure_ffn_workspace(int max_tokens);
-    void configure_moe_workspace(int max_tokens);
-    void configure_ssm_workspace(int max_tokens);
 
     // Free the owned shared + persistent workspace buffers (called from
     // GraphExecutor::free_buffers). Mirrors the original free path exactly:
@@ -116,7 +94,6 @@ private:
     VRAMAllocator* vram_alloc_ = nullptr;
     QType compute_dtype_ = QType::F16;
     int* max_tokens_ = nullptr;  // GraphExecutor::max_tokens_ (read + transient save/restore)
-    bool use_pdl_ = false;
     MoEWorkspace* moe_ = nullptr;
 
     const bool* has_moe_ = nullptr;
@@ -126,35 +103,16 @@ private:
     const int* max_expert_eff_ = nullptr;
     const int* max_logit_tokens_ = nullptr;
 
-    // Persistent activation tensors (owned by GraphExecutor; written here).
+    // Persistent activation tensors (owned by GraphExecutor; carved by
+    // allocate_persistent_workspace and swapped by allocate_decode_workspace /
+    // use_workspace, which stay here). The 16 per-phase activation tensors moved
+    // out with the configure_*_workspace carvers (back on GraphExecutor).
     Tensor* hidden_ = nullptr;
     Tensor* residual_ = nullptr;
     Tensor* norm_out_ = nullptr;
     Tensor* logits_ = nullptr;
     void** fp32_accum_buf_ = nullptr;
     Tensor* fp32_hidden_ = nullptr;
-
-    // Attention phase tensors.
-    Tensor* q_ = nullptr;
-    Tensor* k_ = nullptr;
-    Tensor* v_ = nullptr;
-    Tensor* attn_out_ = nullptr;
-    Tensor* proj_out_ = nullptr;
-
-    // Dense FFN phase tensors.
-    Tensor* gate_out_ = nullptr;
-    Tensor* up_out_ = nullptr;
-    Tensor* swiglu_out_ = nullptr;
-    Tensor* ffn_out_ = nullptr;
-
-    // SSM phase tensors.
-    Tensor* ssm_proj_buf_ = nullptr;
-    Tensor* ssm_xBC_buf_ = nullptr;
-    Tensor* ssm_y_buf_ = nullptr;
-    Tensor* ssm_z_buf_ = nullptr;
-    Tensor* ssm_out_buf_ = nullptr;
-    Tensor* ssm_dt_buf_ = nullptr;
-    Tensor* gdn_fused_proj_buf_ = nullptr;
 
     // --- owned: persistent GPU workspace (always valid, not reconfigured) ---
     void* persistent_workspace_ = nullptr;
