@@ -290,6 +290,27 @@ std::string WeightMap::map_name(const std::string& name) const {
     return name;
 }
 
+// Assign one GPTQ sub-tensor (qweight/qzeros/scales/g_idx) by field name.
+// Returns true if `field` named a known slot. Shared by the self_attn and mlp
+// GPTQ branches in apply_weights() (same field set, only the proj→slot mapping
+// differs).
+static bool assign_gptq_field(TransformerLayer::GPTQWeight* gptq, const std::string& field,
+                              const Tensor& t) {
+    if (!gptq)
+        return false;
+    if (field == "qweight")
+        gptq->qweight = t;
+    else if (field == "qzeros")
+        gptq->qzeros = t;
+    else if (field == "scales")
+        gptq->scales = t;
+    else if (field == "g_idx")
+        gptq->g_idx = t;
+    else
+        return false;
+    return true;
+}
+
 bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors) {
     if (tensors.empty()) {
         IMP_LOG_ERROR("WeightMap: no tensors to apply");
@@ -1081,7 +1102,6 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn") {
             const std::string& proj = parts[4];
-            const std::string& field = parts[5];
             TransformerLayer::GPTQWeight* gptq = nullptr;
             if (proj == "q_proj")
                 gptq = &layer.gptq_q;
@@ -1091,27 +1111,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 gptq = &layer.gptq_v;
             else if (proj == "o_proj")
                 gptq = &layer.gptq_o;
-
-            if (gptq) {
-                if (field == "qweight") {
-                    gptq->qweight = t;
-                    matched = true;
-                } else if (field == "qzeros") {
-                    gptq->qzeros = t;
-                    matched = true;
-                } else if (field == "scales") {
-                    gptq->scales = t;
-                    matched = true;
-                } else if (field == "g_idx") {
-                    gptq->g_idx = t;
-                    matched = true;
-                }
-            }
+            matched = assign_gptq_field(gptq, parts[5], t);
         }
 
         if (!matched && parts.size() >= 6 && parts[3] == "mlp") {
             const std::string& proj = parts[4];
-            const std::string& field = parts[5];
             TransformerLayer::GPTQWeight* gptq = nullptr;
             if (proj == "gate_proj")
                 gptq = &layer.gptq_gate;
@@ -1119,22 +1123,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 gptq = &layer.gptq_up;
             else if (proj == "down_proj")
                 gptq = &layer.gptq_down;
-
-            if (gptq) {
-                if (field == "qweight") {
-                    gptq->qweight = t;
-                    matched = true;
-                } else if (field == "qzeros") {
-                    gptq->qzeros = t;
-                    matched = true;
-                } else if (field == "scales") {
-                    gptq->scales = t;
-                    matched = true;
-                } else if (field == "g_idx") {
-                    gptq->g_idx = t;
-                    matched = true;
-                }
-            }
+            matched = assign_gptq_field(gptq, parts[5], t);
         }
 
         // -----------------------------------------------------------------
