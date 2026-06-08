@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "exec/workspace.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "core/logging.h"
@@ -13,7 +14,7 @@ namespace imp {
 // Shared workspace configuration (pure pointer arithmetic, no allocation)
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::configure_attn_workspace(int max_tokens) {
+void Workspace::configure_attn_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int nh = cfg.n_heads;
@@ -23,24 +24,24 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
 
     char* ptr = static_cast<char*>(shared_workspace_);
 
-    q_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+    (*q_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
                                align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     // K and V are contiguous (no alignment gap) to enable strided batched GEMM.
-    // v_.data == k_.data + kv_raw exactly, so output_stride = kv_raw / es.
+    // (*v_).data == (*k_).data + kv_raw exactly, so output_stride = kv_raw / es.
     {
         size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
         int64_t kv_shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(nkv * hd)};
-        k_ = Tensor(ptr, compute_dtype_, 2, kv_shape, true);
-        v_ = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
+        (*k_) = Tensor(ptr, compute_dtype_, 2, kv_shape, true);
+        (*v_) = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
         ptr += align256(2 * kv_raw);
     }
-    attn_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+    (*attn_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
                                       align256(static_cast<size_t>(max_tokens) * nh * hd * es));
-    proj_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+    (*proj_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                       align256(static_cast<size_t>(max_tokens) * d * es));
 }
 
-void GraphExecutor::configure_ffn_workspace(int max_tokens) {
+void Workspace::configure_ffn_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int ff = cfg.d_ff;
@@ -48,46 +49,46 @@ void GraphExecutor::configure_ffn_workspace(int max_tokens) {
 
     char* ptr = static_cast<char*>(shared_workspace_);
 
-    gate_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+    (*gate_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
                                       align256(static_cast<size_t>(max_tokens) * ff * es));
-    up_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+    (*up_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
                                     align256(static_cast<size_t>(max_tokens) * ff * es));
-    swiglu_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+    (*swiglu_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
                                         align256(static_cast<size_t>(max_tokens) * ff * es));
-    ffn_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+    (*ffn_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                      align256(static_cast<size_t>(max_tokens) * d * es));
 }
 
-void GraphExecutor::configure_moe_workspace(int max_tokens) {
+void Workspace::configure_moe_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int ne = cfg.n_experts;
     int top_k = cfg.n_experts_active;
-    int eff = max_expert_eff_;
+    int eff = *max_expert_eff_;
     size_t es = dtype_size(compute_dtype_);
     int expanded = max_tokens * top_k;
 
     char* ptr = static_cast<char*>(shared_workspace_);
 
     // gate_logits: FP32
-    moe_.gate_logits = make_workspace_tensor(ptr, QType::F32, max_tokens, ne,
+    moe_->gate_logits = make_workspace_tensor(ptr, QType::F32, max_tokens, ne,
                                              align256(static_cast<size_t>(max_tokens) * ne * sizeof(float)));
 
-    moe_.gathered = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
+    moe_->gathered = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
                                           align256(static_cast<size_t>(expanded) * d * es));
-    moe_.expert_gate = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+    moe_->expert_gate = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
                                              align256(static_cast<size_t>(expanded) * eff * es));
-    moe_.expert_up = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+    moe_->expert_up = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
                                            align256(static_cast<size_t>(expanded) * eff * es));
-    moe_.expert_swiglu = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+    moe_->expert_swiglu = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
                                                align256(static_cast<size_t>(expanded) * eff * es));
-    moe_.expert_down = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
+    moe_->expert_down = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
                                              align256(static_cast<size_t>(expanded) * d * es));
-    moe_.scatter_out = make_workspace_tensor(ptr, QType::F32, max_tokens, d,
+    moe_->scatter_out = make_workspace_tensor(ptr, QType::F32, max_tokens, d,
                                              align256(static_cast<size_t>(max_tokens) * d * sizeof(float)));
 }
 
-void GraphExecutor::configure_ssm_workspace(int max_tokens) {
+void Workspace::configure_ssm_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int inner = cfg.ssm_inner_size;
@@ -102,44 +103,44 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
 
     // GDN layers need FP32 intermediate (4 bytes/elem) for numerical precision.
     // Non-GDN SSM layers only need FP16 (es bytes/elem).
-    size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
-    ssm_proj_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ssm_in_dim,
+    size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;
+    (*ssm_proj_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ssm_in_dim,
                                           align256(static_cast<size_t>(max_tokens) * ssm_in_dim *
                                                    proj_elem_size));
-    ssm_xBC_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, conv_channels,
+    (*ssm_xBC_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, conv_channels,
                                          align256(static_cast<size_t>(max_tokens) * conv_channels * es));
-    ssm_y_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
+    (*ssm_y_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
                                        align256(static_cast<size_t>(max_tokens) * inner * es));
-    ssm_z_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
+    (*ssm_z_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
                                        align256(static_cast<size_t>(max_tokens) * inner * es));
-    ssm_out_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+    (*ssm_out_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                          align256(static_cast<size_t>(max_tokens) * d * es));
-    // GDN layers store BOTH alpha and beta projections in ssm_dt_buf_ (sequentially).
+    // GDN layers store BOTH alpha and beta projections in (*ssm_dt_buf_) (sequentially).
     // Allocate 2x n_heads to fit both. Non-GDN SSM only uses 1x (dt projection).
-    size_t dt_multiplier = has_gdn_ ? 2 : 1;
-    ssm_dt_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads * dt_multiplier,
+    size_t dt_multiplier = *has_gdn_ ? 2 : 1;
+    (*ssm_dt_buf_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads * dt_multiplier,
                                         align256(static_cast<size_t>(max_tokens) * n_heads * dt_multiplier *
                                                  es));
     // Output buffer for the fused GDN input projection (4-way: ssm_in + gdn_gate +
-    // gdn_alpha + gdn_beta concatenated along N). Only sized on has_gdn_ models.
+    // gdn_alpha + gdn_beta concatenated along N). Only sized on *has_gdn_ models.
     int fused_total_out = conv_channels + inner + 2 * n_heads;
     size_t fused_bytes =
-        has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es) : align256(0);
-    gdn_fused_proj_buf_ =
+        *has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es) : align256(0);
+    (*gdn_fused_proj_buf_) =
         make_workspace_tensor(ptr, compute_dtype_, max_tokens, fused_total_out, fused_bytes);
 }
 
-bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
     if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0)
         return true;
-    if (new_max_tokens > max_tokens_)
-        new_max_tokens = max_tokens_;  // never exceed init-time max
+    if (new_max_tokens > *max_tokens_)
+        new_max_tokens = *max_tokens_;  // never exceed init-time max
 
     // Recompute shared sizes for the new token count
-    int saved_max = max_tokens_;
-    max_tokens_ = new_max_tokens;
+    int saved_max = *max_tokens_;
+    *max_tokens_ = new_max_tokens;
     compute_shared_sizes(new_max_tokens);
-    max_tokens_ = saved_max;
+    *max_tokens_ = saved_max;
 
     size_t new_shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
     if (new_shared == 0)
@@ -169,7 +170,7 @@ bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
 // Dual workspace for concurrent prefill/decode overlap
 // ---------------------------------------------------------------------------
 
-bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch) {
+bool Workspace::allocate_decode_workspace(cudaStream_t stream, int max_batch) {
     if (decode_workspace_)
         return true;  // already allocated
     if (max_batch <= 0)
@@ -183,7 +184,7 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch
     size_t persistent = static_cast<size_t>(dm) * sizeof(half) * 3 *
                             max_batch  // hidden + residual + norm_out
                         + static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch;  // logits
-    if (fp32_accum_buf_)
+    if ((*fp32_accum_buf_))
         persistent += static_cast<size_t>(dm) * sizeof(float) * max_batch;  // fp32_hidden
 
     decode_workspace_ = vram_alloc(vram_alloc_, persistent, "decode_workspace");
@@ -194,10 +195,10 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch
     decode_persistent_size_ = persistent;
 
     // Shared workspace for max_batch tokens
-    int saved = max_tokens_;
-    max_tokens_ = max_batch;
+    int saved = *max_tokens_;
+    *max_tokens_ = max_batch;
     compute_shared_sizes(max_batch);
-    max_tokens_ = saved;
+    *max_tokens_ = saved;
 
     size_t shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
     if (shared > 0) {
@@ -212,14 +213,14 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch
     decode_shared_size_ = shared;
 
     // Recompute sizes for original max_tokens
-    compute_shared_sizes(max_tokens_);
+    compute_shared_sizes(*max_tokens_);
 
     IMP_LOG_INFO("Decode overlap workspace: %.2f MiB for max_batch=%d (persistent=%.1f KB, shared=%.1f KB)",
                  (persistent + shared) / (1024.0 * 1024.0), max_batch, persistent / 1024.0, shared / 1024.0);
     return true;
 }
 
-void GraphExecutor::use_workspace(int slot) {
+void Workspace::use_workspace(int slot) {
     if (slot == active_workspace_)
         return;
 
@@ -233,12 +234,12 @@ void GraphExecutor::use_workspace(int slot) {
         saved_prefill_ws_.shared = shared_workspace_;
         saved_prefill_ws_.shared_size = shared_workspace_size_;
         saved_prefill_ws_.shared_max_tokens = shared_workspace_max_tokens_;
-        saved_prefill_ws_.hidden = hidden_;
-        saved_prefill_ws_.residual = residual_;
-        saved_prefill_ws_.norm_out = norm_out_;
-        saved_prefill_ws_.logits = logits_;
-        saved_prefill_ws_.fp32_accum = fp32_accum_buf_;
-        saved_prefill_ws_.fp32_hidden = fp32_hidden_;
+        saved_prefill_ws_.hidden = (*hidden_);
+        saved_prefill_ws_.residual = (*residual_);
+        saved_prefill_ws_.norm_out = (*norm_out_);
+        saved_prefill_ws_.logits = (*logits_);
+        saved_prefill_ws_.fp32_accum = (*fp32_accum_buf_);
+        saved_prefill_ws_.fp32_hidden = (*fp32_hidden_);
 
         // Switch to decode workspace
         persistent_workspace_ = decode_workspace_;
@@ -251,19 +252,19 @@ void GraphExecutor::use_workspace(int slot) {
         int mb = decode_max_batch_;
         char* p = static_cast<char*>(decode_workspace_);
         int64_t shape_mb[2] = {mb, dm};
-        hidden_ = Tensor(p, QType::F16, 2, shape_mb, true);
+        (*hidden_) = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        residual_ = Tensor(p, QType::F16, 2, shape_mb, true);
+        (*residual_) = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        norm_out_ = Tensor(p, QType::F16, 2, shape_mb, true);
+        (*norm_out_) = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
         int64_t shape_logits[2] = {mb, cfg.vocab_size};
-        logits_ = Tensor(p, QType::F32, 2, shape_logits, true);
+        (*logits_) = Tensor(p, QType::F32, 2, shape_logits, true);
         p += static_cast<size_t>(cfg.vocab_size) * sizeof(float) * mb;
         if (saved_prefill_ws_.fp32_accum) {
-            fp32_accum_buf_ = p;
+            (*fp32_accum_buf_) = p;
             int64_t shape_fp32[2] = {mb, dm};
-            fp32_hidden_ = Tensor(p, QType::F32, 2, shape_fp32, true);
+            (*fp32_hidden_) = Tensor(p, QType::F32, 2, shape_fp32, true);
         }
 
         active_workspace_ = 1;
@@ -274,12 +275,12 @@ void GraphExecutor::use_workspace(int slot) {
         shared_workspace_ = saved_prefill_ws_.shared;
         shared_workspace_size_ = saved_prefill_ws_.shared_size;
         shared_workspace_max_tokens_ = saved_prefill_ws_.shared_max_tokens;
-        hidden_ = saved_prefill_ws_.hidden;
-        residual_ = saved_prefill_ws_.residual;
-        norm_out_ = saved_prefill_ws_.norm_out;
-        logits_ = saved_prefill_ws_.logits;
-        fp32_accum_buf_ = saved_prefill_ws_.fp32_accum;
-        fp32_hidden_ = saved_prefill_ws_.fp32_hidden;
+        (*hidden_) = saved_prefill_ws_.hidden;
+        (*residual_) = saved_prefill_ws_.residual;
+        (*norm_out_) = saved_prefill_ws_.norm_out;
+        (*logits_) = saved_prefill_ws_.logits;
+        (*fp32_accum_buf_) = saved_prefill_ws_.fp32_accum;
+        (*fp32_hidden_) = saved_prefill_ws_.fp32_hidden;
         active_workspace_ = 0;
     }
 }

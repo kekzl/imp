@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "exec/workspace.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "compute/embedding.h"
@@ -274,7 +275,7 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     return true;
 }
 
-size_t GraphExecutor::workspace_estimate() const {
+size_t Workspace::workspace_estimate() const {
     if (!model_)
         return 0;
     const auto& cfg = model_->config();
@@ -282,8 +283,8 @@ size_t GraphExecutor::workspace_estimate() const {
     size_t es = dtype_size(compute_dtype_);
 
     // Persistent: hidden + residual + norm_out + logits
-    size_t persistent = 3 * align256(static_cast<size_t>(max_tokens_) * d * es) +
-                        align256(static_cast<size_t>(max_logit_tokens_) * cfg.vocab_size * sizeof(float));
+    size_t persistent = 3 * align256(static_cast<size_t>(*max_tokens_) * d * es) +
+                        align256(static_cast<size_t>(*max_logit_tokens_) * cfg.vocab_size * sizeof(float));
 
     // Shared: max of phases (already computed in compute_shared_sizes)
     size_t shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
@@ -294,7 +295,7 @@ size_t GraphExecutor::workspace_estimate() const {
 
     // FP32 accumulator for post-norm models (Gemma-3): 1 × max_tokens × d_model × 4
     bool has_post_norms = (cfg.norm_placement == NormPlacement::POST_NORM);
-    size_t fp32_accum = has_post_norms ? align256(static_cast<size_t>(max_tokens_) * d * sizeof(float)) : 0;
+    size_t fp32_accum = has_post_norms ? align256(static_cast<size_t>(*max_tokens_) * d * sizeof(float)) : 0;
 
     // Auxiliary: compute real estimate from individual buffer sizes
     size_t auxiliary = 0;
@@ -318,7 +319,7 @@ size_t GraphExecutor::workspace_estimate() const {
     int hd_est = cfg.head_dim > 0 ? cfg.head_dim : (d / nh_est);
     auxiliary += 16 * 1024;   // sampling
     auxiliary += 256 * 1024;  // MMVQ scratch (conservative)
-    auxiliary += static_cast<size_t>(max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
+    auxiliary += static_cast<size_t>(*max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
                  sizeof(float);  // split-K
 
     // S-matrix for cuBLAS attention fallback — only needed when CUTLASS FMHA
@@ -327,7 +328,7 @@ size_t GraphExecutor::workspace_estimate() const {
     // doesn't need the S-matrix. This saves up to 256 MiB.
     bool is_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
     if (!is_moe) {
-        auxiliary += std::min(static_cast<size_t>(nh_est) * max_tokens_ * max_tokens_ * sizeof(half),
+        auxiliary += std::min(static_cast<size_t>(nh_est) * *max_tokens_ * *max_tokens_ * sizeof(half),
                               static_cast<size_t>(256) << 20);
     }
 
@@ -341,7 +342,7 @@ size_t GraphExecutor::workspace_estimate() const {
 // Unified workspace allocation
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::compute_shared_sizes(int max_tokens) {
+void Workspace::compute_shared_sizes(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int ff = cfg.d_ff;
@@ -373,7 +374,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
                              : 0);
 
     // Dense FFN phase: gate, up, swiglu, ffn_out
-    if (has_dense_ffn_ && ff > 0) {
+    if (*has_dense_ffn_ && ff > 0) {
         ffn_shared_size_ = align256(static_cast<size_t>(max_tokens) * ff * es)    // gate_out
                            + align256(static_cast<size_t>(max_tokens) * ff * es)  // up_out
                            + align256(static_cast<size_t>(max_tokens) * ff * es)  // swiglu_out
@@ -381,10 +382,10 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     }
 
     // MoE phase
-    if (has_moe_) {
+    if (*has_moe_) {
         int ne = cfg.n_experts;
         int top_k = cfg.n_experts_active;
-        int eff = max_expert_eff_;
+        int eff = *max_expert_eff_;
         int expanded = max_tokens * top_k;
 
         moe_shared_size_ = align256(static_cast<size_t>(max_tokens) * ne * sizeof(float))    // gate_logits
@@ -397,7 +398,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     }
 
     // SSM phase
-    if (has_ssm_) {
+    if (*has_ssm_) {
         int inner = cfg.ssm_inner_size;
         int n_groups = cfg.ssm_group_count;
         int state_size = cfg.ssm_state_size;
@@ -405,7 +406,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
         int conv_channels = inner + 2 * n_groups * state_size;
         int ssm_in_dim = inner + conv_channels + n_heads;
 
-        size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
+        size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;
         int fused_total_out = conv_channels + inner + 2 * n_heads;
         ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim *
                                     proj_elem_size)  // proj (FP32 for GDN)
@@ -413,14 +414,14 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
                            + align256(static_cast<size_t>(max_tokens) * inner * es)          // y
                            + align256(static_cast<size_t>(max_tokens) * inner * es)          // z
                            + align256(static_cast<size_t>(max_tokens) * d * es)              // out
-                           + align256(static_cast<size_t>(max_tokens) * n_heads * (has_gdn_ ? 2 : 1) *
+                           + align256(static_cast<size_t>(max_tokens) * n_heads * (*has_gdn_ ? 2 : 1) *
                                       es)  // dt (2x for GDN: alpha + beta)
-                           + (has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es)
+                           + (*has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es)
                                        : 0);  // gdn_fused_proj (only on GDN models)
     }
 }
 
-bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
+bool Workspace::allocate_persistent_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int v = cfg.vocab_size;
@@ -429,7 +430,7 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     size_t hidden_sz = align256(static_cast<size_t>(max_tokens) * d * es);
     size_t residual_sz = align256(static_cast<size_t>(max_tokens) * d * es);
     size_t norm_out_sz = align256(static_cast<size_t>(max_tokens) * d * es);
-    size_t logits_sz = align256(static_cast<size_t>(max_logit_tokens_) * v * sizeof(float));
+    size_t logits_sz = align256(static_cast<size_t>(*max_logit_tokens_) * v * sizeof(float));
 
     size_t total = hidden_sz + residual_sz + norm_out_sz + logits_sz;
 
@@ -442,13 +443,13 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
 
     char* ptr = static_cast<char*>(persistent_workspace_);
 
-    hidden_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, hidden_sz);
-    residual_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, residual_sz);
-    norm_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, norm_out_sz);
+    (*hidden_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, hidden_sz);
+    (*residual_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, residual_sz);
+    (*norm_out_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, norm_out_sz);
 
     {
-        int64_t shape[2] = {static_cast<int64_t>(max_logit_tokens_), static_cast<int64_t>(v)};
-        logits_ = Tensor(ptr, QType::F32, 2, shape, true);
+        int64_t shape[2] = {static_cast<int64_t>(*max_logit_tokens_), static_cast<int64_t>(v)};
+        (*logits_) = Tensor(ptr, QType::F32, 2, shape, true);
         ptr += logits_sz;
     }
 
@@ -457,10 +458,10 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     // FP32 residual accumulator for post-norm architectures (Gemma-3).
     if (cfg.norm_placement == NormPlacement::POST_NORM) {
         size_t fp32_sz = align256(static_cast<size_t>(max_tokens) * d * sizeof(float));
-        cudaError_t e2 = cudaMalloc(&fp32_accum_buf_, fp32_sz);
+        cudaError_t e2 = cudaMalloc(&(*fp32_accum_buf_), fp32_sz);
         if (e2 == cudaSuccess) {
             int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(d)};
-            fp32_hidden_ = Tensor(fp32_accum_buf_, QType::F32, 2, shape, true);
+            (*fp32_hidden_) = Tensor((*fp32_accum_buf_), QType::F32, 2, shape, true);
             IMP_LOG_INFO("FP32 residual accumulator: %.2f MiB (post-norm architecture)",
                          fp32_sz / (1024.0 * 1024.0));
         } else {
@@ -471,7 +472,7 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     return true;
 }
 
-bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
+bool Workspace::allocate_shared_workspace(int max_tokens) {
     size_t max_shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
     if (max_shared == 0)
         return true;  // no workspace needed
@@ -501,9 +502,9 @@ bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
             (1024.0 * 1024.0));
 
     // Pre-allocate MoE routing buffers (separate from shared workspace)
-    if (has_moe_) {
+    if (*has_moe_) {
         const auto& cfg = model_->config();
-        moe_.routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
+        moe_->routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
     }
     return true;
 }
