@@ -10,22 +10,10 @@
 #include "core/tensor.h"
 #include "quant/fp8_quant.h"
 #include "compute/attention_paged.h"
+#include "test_cuda_skip.h"
 
 namespace imp {
 namespace {
-
-static bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!HasCudaDevice()) {                         \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
 
 // ============================================================================
 // Test 1: FP8 KV Cache construction — verify half-sized blocks

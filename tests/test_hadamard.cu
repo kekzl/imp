@@ -7,6 +7,8 @@
 #include <vector>
 #include <numeric>
 
+#include "test_cuda_skip.h"
+
 namespace imp {
 namespace {
 
@@ -14,14 +16,6 @@ namespace {
     do {                                                                          \
         cudaError_t err = (call);                                                 \
         ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err); \
-    } while (0)
-
-#define SKIP_IF_NO_CUDA()                     \
-    do {                                      \
-        int dev_count = 0;                    \
-        cudaGetDeviceCount(&dev_count);       \
-        if (dev_count == 0)                   \
-            GTEST_SKIP() << "No CUDA device"; \
     } while (0)
 
 // CPU reference: Walsh-Hadamard transform (in-place, unnormalized).

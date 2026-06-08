@@ -8,6 +8,7 @@
 #include "quant/quant_gemm.h"
 #include "quant/nvfp4_gemm.h"
 #include "compute/json_constrain.h"
+#include "compute/schema_constrain.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>

@@ -4,14 +4,18 @@
 #include "memory/kv_cache.h"     // KVCache
 #include "memory/ssm_state.h"    // SSMState
 #include "memory/gdn_state.h"    // GDNState
-#include "compute/json_constrain.h"    // JsonConstrainer
-#include "compute/schema_constrain.h"  // SchemaConstrainer
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <utility>
 #include <vector>
 
 namespace imp {
+
+// Constrained-decoding hooks are referenced only by pointer here; their full
+// definitions live in compute/json_constrain.h / compute/schema_constrain.h and
+// are included by the TUs that dereference them (executor.cu).
+class JsonConstrainer;
+class SchemaConstrainer;
 
 // All the state needed for a single forward pass invocation.
 struct InferenceState {

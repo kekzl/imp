@@ -5,6 +5,7 @@
 
 #include "model/model.h"
 #include "core/tensor.h"
+#include "test_cuda_skip.h"  // HasCudaDevice() + SKIP_IF_NO_CUDA()
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -18,19 +19,6 @@ namespace test {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-inline bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!::imp::test::HasCudaDevice()) {            \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
-
 inline Tensor make_random_weight(int64_t rows, int64_t cols, std::mt19937& rng, float scale = 0.02f) {
     std::normal_distribution<float> dist(0.0f, scale);
     int64_t n = rows * cols;

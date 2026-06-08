@@ -41,21 +41,10 @@
 #include <numeric>
 #include <vector>
 
+#include "test_cuda_skip.h"
+
 namespace imp {
 namespace {
-
-static bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!HasCudaDevice()) {                         \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
 
 // Real manager over a real (small) KV pool. F16 so k_ptr/v_ptr are plain
 // contiguous device memory we can byte-copy in and out.
