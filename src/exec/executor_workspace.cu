@@ -50,7 +50,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
 
     // Gemma 4: allocate a ones buffer for V-normalization (no learned weight).
     // Size = max head_dim (512 for 26B model). Used as rmsnorm weight.
-    if (model.config().arch == ModelArch::GEMMA4) {
+    if (model.profile().is_gemma4) {
         int hd_max = 0;
         for (int v : model.config().head_dim_per_layer)
             hd_max = std::max(hd_max, v);

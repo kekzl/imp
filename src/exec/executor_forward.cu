@@ -419,7 +419,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 // attention sees the correctly-scaled residual stream.
                 // Without this the FP32 accum grows unbounded (layer_out_scale
                 // ~0.1-0.2 compensates residual growth per llama's gemma4-iswa).
-                if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4) {
+                if (fp32_accum_buf_ && model_->profile().is_gemma4) {
                     int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
                         static_cast<float*>(view_tokens(fp32_hidden_, n).data),
@@ -485,7 +485,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // would clobber the FP32 precision and cause ~1-2% drift per layer.
         // Only sync when the MoE path did NOT go through the FP32 accum kernel
         // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
-        if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4 &&
+        if (fp32_accum_buf_ && model_->profile().is_gemma4 &&
             runtime_config().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;

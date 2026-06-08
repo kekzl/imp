@@ -33,8 +33,12 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.has_pure_ssm = any_pure_ssm;
     p.is_hybrid = (any_gdn || any_ssm) && any_attn;
 
-    // attn_variant / attn_* flags / eligibility are filled by their respective
-    // migration steps (B + eligibility); defaults until then.
+    // Architecture identity: the single mapping from the arch enum to the
+    // kernel/norm-selection booleans the executors read.
+    p.is_gemma3 = cfg.arch == ModelArch::GEMMA3;
+    p.is_gemma4 = cfg.arch == ModelArch::GEMMA4;
+    p.is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
+    p.is_llama4 = cfg.arch == ModelArch::LLAMA4;
 
     return p;
 }
