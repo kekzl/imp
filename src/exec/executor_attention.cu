@@ -184,6 +184,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
+    using AttnVariant = ModelProfile::AttnVariant;
     const auto& ly = model_->layer(layer);
     int n = state.n_tokens;
     int nh = cfg.n_heads;
@@ -563,7 +564,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // (otherwise full attention covers the full context anyway). Resolved
     // again per-layer below in case Gemma-3 disables SWA on this layer.
     int layer_n_sinks = streaming_n_sinks_;
-    if (prof.is_gemma4 && !cfg.swa_layers.empty()) {
+    if (prof.attn_variant == AttnVariant::GEMMA4_SWA) {
         // Gemma 4: per-layer SWA pattern stored in cfg.swa_layers (1=SWA, 0=global).
         bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
         if (is_swa) {
@@ -574,7 +575,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Global layer: full attention, model rope_theta, with freq scaling
             layer_sliding_window = 0;
         }
-    } else if (prof.is_gpt_oss && !cfg.swa_layers.empty()) {
+    } else if (prof.attn_variant == AttnVariant::GPTOSS_SWA) {
         // gpt-oss (#547): even layers sliding_attention (window 128), odd
         // layers full attention. Same RoPE (YaRN) on both layer types —
         // only the window toggles.
@@ -611,7 +612,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // (n_rot=hd, with most pairs effectively zeroed by 1e30 divisors). This
     // matches the proportional-rope schema (ccss000000000000) the converter
     // emits via partial_rotary_factor=0.25.
-    if (prof.is_gemma4 && !cfg.swa_layers.empty()) {
+    if (prof.attn_variant == AttnVariant::GEMMA4_SWA) {
         bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
         if (!layer_is_swa && ly.rope_freqs.data && ly.rope_freqs.on_device) {
             longrope_freqs = static_cast<const float*>(ly.rope_freqs.data);
@@ -672,7 +673,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // K would be YaRN-correct but every decode-written K plain-RoPE →
         // degeneration from token 2. Keep YaRN on the separate full path.
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
-                                 state.kv_cache->qtype() == QType::F16 && !cfg.rope_attn_disabled &&
+                                 state.kv_cache->qtype() == QType::F16 && prof.attn_variant != AttnVariant::NOPE &&
                                  cfg.yarn_ext_factor <= 0.0f);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
@@ -685,7 +686,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
-        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused && !cfg.rope_attn_disabled) {
+        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -749,7 +750,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // NoPE attention (Nemotron-H): position lives in the Mamba layers,
             // rotating Q/K here scrambles positional binding (bag-of-words
             // prompts). QK-norm above still applies; only the rotation is skipped.
-            if (!cfg.rope_attn_disabled) {
+            if (prof.attn_variant != AttnVariant::NOPE) {
                 rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
                              layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs);

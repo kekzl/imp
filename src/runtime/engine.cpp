@@ -446,8 +446,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_->build_profile();
     {
         const auto& mp = model_->profile();
-        IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d",
-                     mp.is_moe, mp.is_gdn, mp.is_ssm, mp.is_hybrid, mp.is_dense);
+        const char* av = "standard";
+        switch (mp.attn_variant) {
+            case ModelProfile::AttnVariant::GEMMA4_SWA: av = "gemma4_swa"; break;
+            case ModelProfile::AttnVariant::GPTOSS_SWA: av = "gptoss_swa"; break;
+            case ModelProfile::AttnVariant::NOPE: av = "nope"; break;
+            case ModelProfile::AttnVariant::STANDARD: av = "standard"; break;
+        }
+        IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s",
+                     mp.is_moe, mp.is_gdn, mp.is_ssm, mp.is_hybrid, mp.is_dense, av);
     }
 
     init_apply_debug_raw_overrides_();

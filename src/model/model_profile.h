@@ -35,6 +35,20 @@ struct ModelProfile {
     bool is_gemma4 = false;
     bool is_gpt_oss = false;
     bool is_llama4 = false;
+
+    // --- attention variant (drives the SWA / NoPE dispatch in run_attention) ---
+    // The attention path forks on how positions + sliding windows work. Encoding
+    // it as one variant (decided here from arch + swa_layers + rope_attn_disabled)
+    // replaces the per-call `is_gemma4 && !swa_layers.empty()` /
+    // `is_gpt_oss && !swa_layers.empty()` / `!rope_attn_disabled` re-derivation.
+    //   STANDARD    — RoPE, no per-arch SWA pattern (Gemma-3's
+    //                 sliding_window_pattern path is handled separately and is
+    //                 still STANDARD here).
+    //   GEMMA4_SWA  — Gemma-4 per-layer SWA mask in swa_layers (local rope_theta).
+    //   GPTOSS_SWA  — gpt-oss even=sliding/odd=full, same YaRN RoPE on both.
+    //   NOPE        — no positional encoding at all (Nemotron-H attention).
+    enum class AttnVariant { STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE };
+    AttnVariant attn_variant = AttnVariant::STANDARD;
 };
 
 // Pure: no side effects, no allocation. Reads the model's layers + config once.
