@@ -18,10 +18,12 @@ class Model;
 struct ModelProfile {
     // --- classification ---
     bool is_moe = false;     // n_experts > 0
-    bool is_gdn = false;     // any layer carries a gdn_gate (Gated DeltaNet)
-    bool is_ssm = false;     // any layer carries an ssm_in (Mamba2 / GDN)
-    bool is_hybrid = false;  // recurrent (gdn/ssm) AND attention layers coexist
-    bool is_dense = true;    // !is_moe
+    bool is_gdn = false;       // any layer carries a gdn_gate (Gated DeltaNet)
+    bool is_ssm = false;       // any layer carries an ssm_in (Mamba2 / GDN)
+    bool has_pure_ssm = false; // any layer is SSM WITHOUT a gdn_gate (Mamba2,
+                               // e.g. Nemotron-H) — these disable CUDA graphs
+    bool is_hybrid = false;    // recurrent (gdn/ssm) AND attention layers coexist
+    bool is_dense = true;      // !is_moe
 
     // --- attention variant + flags (drives executor_attention dispatch) ---
     // Filled in migration step B; STANDARD until then.

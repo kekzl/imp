@@ -169,18 +169,12 @@ bool Engine::init_kv_cache() {
 
     // GDN detection
     {
-        int n_gdn = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).gdn_gate.data != nullptr)
-                n_gdn++;
-        if (n_gdn > 0) {
+        if (model_->profile().is_gdn) {
             if (config_.use_cuda_graphs) {
-                IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn);
+                IMP_LOG_INFO("GDN model: CUDA graphs enabled (recurrent state in-place)");
             } else {
                 IMP_LOG_INFO(
-                    "GDN model: %d layers, CUDA graphs disabled (disabled earlier by caller or expert "
-                    "offload)",
-                    n_gdn);
+                    "GDN model: CUDA graphs disabled (disabled earlier by caller or expert offload)");
             }
             // GDN recurrent state accumulates small precision errors per token.
             // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
@@ -205,15 +199,11 @@ bool Engine::init_kv_cache() {
     // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
     // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
     {
-        int n_pure_ssm = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).ssm_in.data != nullptr && model_->layer(i).gdn_gate.data == nullptr)
-                n_pure_ssm++;
-        has_pure_ssm_layers_ = (n_pure_ssm > 0);
+        has_pure_ssm_layers_ = model_->profile().has_pure_ssm;
         if (has_pure_ssm_layers_ && config_.use_cuda_graphs) {
             config_.use_cuda_graphs = false;
-            IMP_LOG_INFO("Mamba2 SSM layers detected (%d/%d): disabling CUDA graphs "
-                         "(recurrent state not yet graph-safe)", n_pure_ssm, mcfg.n_layers);
+            IMP_LOG_INFO("Mamba2 SSM layers detected: disabling CUDA graphs "
+                         "(recurrent state not yet graph-safe)");
         }
     }
 
