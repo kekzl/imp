@@ -28,8 +28,8 @@ namespace imp {
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
                       int K, cudaStream_t stream, float beta = 0.0f);
 
-// Dense Q4_K (new stack — distinct from the legacy gemm.q4k_imma_enabled
-// 2026-05 kernel): same contract; K % 256 == 0 (Q4_K super-block).
+// Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
+// kernel): same contract; K % 256 == 0 (Q4_K super-block).
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta = 0.0f);
 

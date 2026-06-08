@@ -3,9 +3,10 @@
 // =============================================================================
 //
 // Routes Q4_K_M dense GEMM (M ≥ 1024, dense, non-MoE) through the Phase 2B
-// production tile kernel via the mmq_q4k_imma_gemm high-level entry. Default
-// off; the dispatch site checks `gemm.q4k_imma_enabled` before emitting the
-// {FP16, Q4_K, m_is_one=false} strategy key this handler is registered for.
+// production tile kernel via the mmq_q4k_imma_gemm high-level entry. Registered
+// for the {FP16, Q4_K, m_is_one=false} strategy key. (The former
+// gemm.q4k_imma_enabled gate was removed as dead 2026-06-08; the live Q4_K IMMA
+// prefill flag is gemm.q4k_imma_prefill, checked at executor_kernels.cu.)
 //
 // Eligibility (re-checked here):
 //   - weight.qtype == Q4_K
