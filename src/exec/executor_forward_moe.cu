@@ -102,7 +102,7 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed, QType up_qtyp
 
 void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
-    configure_moe_workspace(shared_workspace_max_tokens_);
+    configure_moe_workspace(ws_.shared_max_tokens());
 
     // Phase 4 (MoE host-offload async prefetch). The cache is only initialised
     // when some experts are host-resident; n_slots_ > 0 is therefore the

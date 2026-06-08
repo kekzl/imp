@@ -20,6 +20,7 @@
 #include "exec/moe_workspace.h"
 #include "exec/quant_scratch.h"
 #include "exec/quant_pipeline.h"
+#include "exec/workspace.h"
 #include "runtime/storage_planner.h"
 #include "runtime/vram_budget.h"
 #include "runtime/config.h"
@@ -75,7 +76,7 @@ public:
 
     // Estimated GPU memory needed by allocate_workspaces().
     // Used by Engine to compute the expert upload reserve.
-    size_t workspace_estimate() const;
+    size_t workspace_estimate() const { return ws_.workspace_estimate(); }
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
@@ -172,15 +173,19 @@ public:
 
     // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
     // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
-    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
+    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream) {
+        return ws_.resize_workspace(new_max_tokens, stream);
+    }
 
     // Dual workspace for concurrent prefill/decode overlap.
     // allocate_decode_workspace: creates a second workspace for decode (up to max_batch tokens).
     // use_workspace(0) = prefill (default), use_workspace(1) = decode.
-    bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1);
-    void use_workspace(int slot);  // 0=prefill, 1=decode
-    bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
-    int active_workspace() const { return active_workspace_; }
+    bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
+        return ws_.allocate_decode_workspace(stream, max_batch);
+    }
+    void use_workspace(int slot) { ws_.use_workspace(slot); }  // 0=prefill, 1=decode
+    bool has_decode_workspace() const { return ws_.has_decode_workspace(); }
+    int active_workspace() const { return ws_.active(); }
     int max_tokens() const { return max_tokens_; }
 
     // Capacity of the [n_heads, attn_seq, attn_seq] FP16 attn-scores workspace.
@@ -283,11 +288,13 @@ private:
     // attribute set so the GPU can overlap tail of one kernel with head of next.
     bool use_pdl_ = false;
 
-    // --- Persistent GPU workspace (always valid, not reconfigured) ---
-    void* persistent_workspace_ = nullptr;
-    size_t persistent_workspace_size_ = 0;
+    // --- Scratch arena (shared/persistent/decode workspace) ---
+    // Owns the workspace buffers + sizes + the decode/prefill swap state; the
+    // moved methods write the activation/phase tensors below through pointers
+    // set in ws_.init() (called from GraphExecutor::init). See exec/workspace.h.
+    Workspace ws_;
 
-    // Persistent activation tensors (views into persistent_workspace_)
+    // Persistent activation tensors (views into the persistent workspace)
     Tensor hidden_;    // [max_tokens, d_model] FP16
     Tensor residual_;  // [max_tokens, d_model] FP16
     Tensor norm_out_;  // [max_tokens, d_model] FP16
@@ -301,20 +308,12 @@ private:
     void* fp32_accum_buf_ = nullptr;
     Tensor fp32_hidden_;  // [max_tokens, d_model] FP32 — true hidden state
 
-    // --- Shared GPU workspace (reconfigured per layer phase) ---
-    // Sized to max(attn_size, ffn_size, moe_size, ssm_size).
-    // Tensor views are set up at the start of each run_* function.
-    void* shared_workspace_ = nullptr;
-    size_t shared_workspace_size_ = 0;
-    int shared_workspace_max_tokens_ = 0;  // token count used for current allocation
+    // The shared/persistent workspace buffers + per-phase sizes live in ws_.
+    // The phase TENSORS below are views carved by GraphExecutor's
+    // configure_*_workspace methods (which slice ws_.shared()); the hot path
+    // reads them as members.
 
-    // Pre-computed phase sizes (for max_tokens_)
-    size_t attn_shared_size_ = 0;
-    size_t ffn_shared_size_ = 0;
-    size_t moe_shared_size_ = 0;
-    size_t ssm_shared_size_ = 0;
-
-    // Attention phase tensors (views into shared_workspace_, set by configure_attn_workspace)
+    // Attention phase tensors (views into the shared workspace, set by configure_attn_workspace)
     Tensor q_;         // [max_tokens, n_heads * head_dim]
     Tensor k_;         // [max_tokens, n_kv_heads * head_dim]
     Tensor v_;         // [max_tokens, n_kv_heads * head_dim]
@@ -435,28 +434,9 @@ private:
     // Max expert FFN hidden dim from actual packed tensor shapes (may differ from cfg.expert_d_ff)
     int max_expert_eff_ = 0;
 
-    // --- Dual workspace for concurrent prefill/decode overlap ---
-    // Slot 0 (default): main workspace (prefill, sized for max_tokens)
-    // Slot 1: decode workspace (sized for up to decode_max_batch_ tokens)
-    void* decode_workspace_ = nullptr;         // persistent buf for decode
-    void* decode_shared_workspace_ = nullptr;  // shared buf for decode
-    size_t decode_persistent_size_ = 0;
-    size_t decode_shared_size_ = 0;
-    int decode_max_batch_ = 1;  // max decode batch size this workspace supports
-    int active_workspace_ = 0;
-
-    // Saved prefill workspace pointers (restored when switching back)
-    struct SavedWorkspace {
-        void* persistent;
-        size_t persistent_size;
-        void* shared;
-        size_t shared_size;
-        int shared_max_tokens;
-        Tensor hidden, residual, norm_out, logits;
-        void* fp32_accum;
-        Tensor fp32_hidden;
-    };
-    SavedWorkspace saved_prefill_ws_;
+    // The dual prefill/decode workspace swap state (decode_workspace_,
+    // decode_shared_workspace_, the sizes, decode_max_batch_, active_workspace_,
+    // SavedWorkspace saved_prefill_ws_) moved into ws_ (exec/workspace.h).
 
     // --- Layer offload manager (non-owning, set by engine) ---
     LayerOffloadManager* offload_mgr_ = nullptr;
@@ -467,22 +447,22 @@ private:
     const RuntimeConfig* runtime_config_ = nullptr;
 
     // --- Allocation and configuration methods ---
-
-    [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
-    [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
-    void allocate_auxiliary_buffers(
-        bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
-    void free_buffers();
-
-    // Compute shared workspace sizes for each phase (stored in *_shared_size_ members)
-    void compute_shared_sizes(int max_tokens);
-
-    // Configure tensor views into shared_workspace_ for each phase.
-    // Called at the start of each run_* function. Pure pointer arithmetic, no allocation.
+    // The shared/persistent/decode scratch arena (allocate_*_workspace,
+    // compute_shared_sizes, workspace_estimate, resize_workspace,
+    // allocate_decode_workspace, use_workspace) moved into Workspace
+    // (exec/workspace.h); GraphExecutor owns ws_ and delegates.
+    //
+    // The four per-phase carvers stay here: they write GraphExecutor's
+    // activation-tensor members (q_/k_/v_/.../gdn_fused_proj_buf_) by slicing
+    // the shared buffer (read via ws_.shared()), so they belong on GraphExecutor.
     void configure_attn_workspace(int max_tokens);
     void configure_ffn_workspace(int max_tokens);
     void configure_moe_workspace(int max_tokens);
     void configure_ssm_workspace(int max_tokens);
+
+    void allocate_auxiliary_buffers(
+        bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
+    void free_buffers();
 
     // Per-layer helpers
     void run_attention(int layer, const InferenceState& state, cudaStream_t stream);
