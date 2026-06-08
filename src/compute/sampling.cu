@@ -568,18 +568,6 @@ __global__ void topk_topp_sample_kernel(const float* __restrict__ logits, int vo
 // kernels). The single-block kernel above handles the graph-captured path.
 // ============================================================================
 
-// Kernel: compute softmax probabilities with temperature into key/value arrays
-__global__ void softmax_to_pairs_kernel(const float* __restrict__ logits, int vocab_size,
-                                        float inv_temperature, float global_max, float inv_sum,
-                                        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size)
-        return;
-    float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
-    d_keys[idx] = prob;
-    d_values[idx] = idx;
-}
-
 // Kernel: compute softmax probabilities reading max/sum from device memory.
 // d_max_sum[0] = global_max, d_max_sum[1] = sum. Avoids 2 D2H syncs.
 __global__ void softmax_to_pairs_device_kernel(const float* __restrict__ logits, int vocab_size,
@@ -618,29 +606,6 @@ __global__ void softmax_max_kernel(const float* __restrict__ logits, int vocab_s
             if (s_max[w] > mx)
                 mx = s_max[w];
         atomicMax(reinterpret_cast<int*>(d_max), __float_as_int(mx));
-    }
-}
-
-// Kernel: compute sum of exp(logits - max) (Phase 2, launched after max is known)
-__global__ void softmax_sum_kernel(const float* __restrict__ logits, int vocab_size, float inv_temperature,
-                                   float global_max, float* __restrict__ d_sum) {
-    __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
-
-    float local_sum = 0.0f;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
-        local_sum += expf((logits[i] - global_max) * inv_temperature);
-    }
-    local_sum = warp_reduce_sum(local_sum);
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int lane_id = threadIdx.x % WARP_SIZE;
-    if (lane_id == 0)
-        s_sum[warp_id] = local_sum;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float sm = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
-            sm += s_sum[w];
-        atomicAdd(d_sum, sm);
     }
 }
 
