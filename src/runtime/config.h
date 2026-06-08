@@ -359,16 +359,19 @@ struct RuntimeConfig {
     } generation;
 
     struct Server {
-        // Prefix caching: default ON since the #536/#538 stale-block-table fix
-        // (the historical "FP rounding" off-by-default rationale was a
-        // misattribution of that bug; PrefixCacheE2ETest is the ship gate).
-        bool prefix_cache = true;
+        // Prefix caching: reuse KV blocks for shared prompt prefixes. Defaults
+        // OFF here to match the EngineConfig default (off-by-default for
+        // library/C-API embedders); the server/CLI opt in via imp.conf
+        // ([server] prefix_cache = true, the value in imp.conf.example). The
+        // engine ORs this into EngineConfig.use_prefix_caching at init.
+        // PrefixCacheE2ETest is the ship gate; auto-disabled for SSM/GDN.
+        bool prefix_cache = false;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
         // Green Contexts / prefill-decode overlap streams in the server engine.
-        // [server] green_contexts = false to disable (diagnostic: suspected
-        // memSyncDomain race on sm_120 fallback streams — gemma-3-12b IMA).
-        bool green_contexts = true;
+        // OFF by default (suspected memSyncDomain race on sm_120 fallback
+        // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.
+        bool green_contexts = false;
     } server;
 
     struct Bench {
