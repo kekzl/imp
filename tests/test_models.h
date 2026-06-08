@@ -84,6 +84,16 @@ inline std::string env_path_or(const char* name, const char* fallback) {
     return v ? std::string(v) : std::string(fallback);
 }
 
+// const char* variant for the suites that pass the result straight to
+// fopen()/the C API. Both the getenv pointer and the literal `fallback` have
+// static lifetime, so the returned pointer is safe to hold. The `fallback`
+// stays at the call site (model<->test mapping visible); only the
+// getenv-or-default mechanic is shared.
+inline const char* env_cstr_or(const char* name, const char* fallback) {
+    const char* v = std::getenv(name);
+    return v ? v : fallback;
+}
+
 }  // namespace imp_test
 
 #endif  // IMP_TESTS_TEST_MODELS_H
