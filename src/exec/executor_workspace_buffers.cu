@@ -993,14 +993,6 @@ void GraphExecutor::free_buffers() {
             free_cutlass_mxfp4_weight(mw);
         wcache_.cutlass_mxfp4.clear();
         wcache_.cutlass_mxfp4_bytes = 0;
-        // Q4_K_M direct IMMA cache (Phase 2C infrastructure)
-        for (auto& [ptr, entry] : wcache_.q4k_imma) {
-            if (entry.w_sym_s8) cudaFree(entry.w_sym_s8);
-            if (entry.eff_alpha) cudaFree(entry.eff_alpha);
-            if (entry.eff_beta) cudaFree(entry.eff_beta);
-        }
-        wcache_.q4k_imma.clear();
-        wcache_.q4k_imma_bytes = 0;
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data) {

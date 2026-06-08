@@ -81,32 +81,6 @@ struct WeightCaches {
     size_t cutlass_mxfp4_bytes = 0;
     bool use_mxfp4 = false;
 
-    // --- Q4_K_M direct INT8 IMMA cache (Phase 2C infrastructure) ---
-    // NOTE (2026-06-08): currently INACTIVE. The load-time gate (the former
-    // gemm.q4k_imma_enabled flag) was removed as dead — no path populates this
-    // map; it is only declared + freed. Was meant to be filled by
-    // mmq_q4k_imma_reorder() and consumed by mmq_q4k_imma_tile(). Kept pending a
-    // Phase-2C revival or a full removal of the q4k_imma_tile stack.
-    // Three device buffers per entry:
-    //   w_sym_s8 [N, K]      int8  symmetric-shifted (q - 8)
-    //   eff_alpha [N, K/32]  FP16  d_super · sc[j]
-    //   eff_beta  [N, K/32]  FP16  8·d_super·sc[j] − dmin_super·m[j]
-    // Decode identity: α·q_sym + β  ≡  d·sc·q − dmin·m.
-    //
-    // The Phase 2C dispatcher (separate PR) gates entries on
-    //   M ≥ 1024 && dense && Q4_K_M && !fp16_cache_hit
-    // Off by default until E2E A/B against dense Q4_K_M models lands.
-    struct Q4kImmaCacheEntry {
-        int8_t* w_sym_s8 = nullptr;
-        __half* eff_alpha = nullptr;
-        __half* eff_beta = nullptr;
-        int N = 0;
-        int K = 0;
-    };
-    std::unordered_map<const void*, Q4kImmaCacheEntry> q4k_imma;
-    size_t q4k_imma_bytes = 0;
-    bool use_q4k_imma = false;
-
     // Dual-path mode: FP8 attention + NVFP4 FFN
     bool dual_path_quant = false;
 };

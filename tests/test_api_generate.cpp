@@ -19,8 +19,7 @@
 namespace {
 
 static const char* get_model_path() {
-    const char* p = std::getenv(imp_test::kEnvModel);
-    return p ? p : "/models/Qwen3-8B-Q8_0.gguf";
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
 }
 
 static bool model_exists() {

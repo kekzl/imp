@@ -157,8 +157,7 @@ no_mmvq_q8_0         = false
 # Trades VRAM for decode throughput on sub-8-bit models.
 # Gemma-3-12B Q4_K_M: 77 → 141 tok/s (+82%).
 nvfp4_decode_all     = false
-# Q4_K IMMA / HMMA tensor-core GEMM scaffolds (experimental, default off).
-q4k_imma_enabled     = false
+# Q4_K HMMA tensor-core GEMM scaffold (experimental, default off).
 q4k_hmma_enabled     = false
 # Quantize a native FP16/BF16 LM head to an NVFP4 decode cache (dense
 # models; ~+8-16% decode). Default ON.

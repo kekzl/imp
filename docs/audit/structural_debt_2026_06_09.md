@@ -75,11 +75,15 @@ medium pain × high risk.
 
 ## C5 — Deferred 2026-06-08 findings, still open (re-verified)
 
-- **Dead `WeightCaches::q4k_imma` cache** — re-confirmed never populated (no
-  `use_q4k_imma = true`, no insertion into the map anywhere in `src/`); only
-  declared (`exec/weight_caches.h:99`) + freed. ~1,200 LOC of tile/reorder infra.
-  The *live* path is the separate `q4k_imma_prefill` stack. Removal is D3-class
-  kernel work.
+- **Dead `WeightCaches::q4k_imma` cache — REMOVED (follow-up).** Re-confirmed
+  never populated (no `use_q4k_imma = true`, no insertion anywhere). **Correction
+  to the "~1,200 LOC tile/reorder stack" estimate:** the call-graph shows the
+  *live* `mmq_q4k_imma_gemm` (the `q4k_imma_prefill` path) calls
+  `mmq_q4k_imma_reorder` + `mmq_q4k_imma_tile` on-the-fly — those kernels are
+  **live, not dead**. The only dead code was the unused cache struct itself
+  (`Q4kImmaCacheEntry` map + `use_q4k_imma` + `q4k_imma_bytes`, ~30 LOC in
+  `weight_caches.h`) and its always-empty free loop in
+  `executor_workspace_buffers.cu`. Removed those; the kernels stay.
 - **Unbridged config keys** — `server.prefix_cache`, `server.green_contexts`,
   `server.prefix_pin_budget_pct`, `paths.mmproj` are parsed into `RuntimeConfig`
   but **never read** (`grep cfg.server.` finds only the parse lines); the live
