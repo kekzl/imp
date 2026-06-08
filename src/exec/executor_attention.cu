@@ -183,6 +183,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     configure_attn_workspace(shared_workspace_max_tokens_);
 
     const auto& cfg = model_->config();
+    const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
     int n = state.n_tokens;
     int nh = cfg.n_heads;
@@ -199,7 +200,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Layer 0 (SWA) wq=[4096,2816] wk=[2048,2816] → 16 Q × hd=256, 8 KV × hd=256
     // Layer 5 (Global) wq=[8192,2816] wk=[1024,2816] → 16 Q × hd=512, 2 KV × hd=512
     // Authoritative source = the loaded tensor shapes; per-layer config can lag.
-    if (cfg.arch == ModelArch::GEMMA4 && hd > 0 && ly.wq.data != nullptr) {
+    if (prof.is_gemma4 && hd > 0 && ly.wq.data != nullptr) {
         int wq_out = static_cast<int>(ly.wq.shape[0]);
         if (wq_out > 0 && (wq_out % hd) == 0) {
             int nh_layer = wq_out / hd;
@@ -364,7 +365,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                           no.qtype == QType::F16 && ly.wq.qtype == ly.wk.qtype &&
                           ly.wk.qtype == ly.wv.qtype && is_dp4a_qtype(ly.wq.qtype) &&
-                          !(using_fp32_accum && cfg.arch == ModelArch::GEMMA4));
+                          !(using_fp32_accum && prof.is_gemma4));
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -442,7 +443,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Gemma-4 FP32 accum path: read FP32 residual directly to avoid the
             // FP16 round-trip that drops ~1-2% precision per layer and causes
             // the last-token hidden state to drift by sign-flip at L29.
-            if (using_fp32_accum && cfg.arch == ModelArch::GEMMA4) {
+            if (using_fp32_accum && prof.is_gemma4) {
                 Tensor fp32_h = view_tokens(fp32_hidden_, n);
                 rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
             } else {
@@ -532,7 +533,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // These layers have no V projection — V is aliased from K. Copy K→V here
     // so all downstream code (QK-norm, V-norm, KV-write, attention) sees a
     // valid V tensor.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
+    if (prof.is_gemma4 && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
         size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.qtype);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes, cudaMemcpyDeviceToDevice, stream));
     }
@@ -540,7 +541,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // V-normalization (Gemma 4): per-head RMSNorm with NO learned weight.
     // Matches llama.cpp's `Vcur = ggml_rms_norm(Vcur, eps)` (gemma4-iswa.cpp:82).
     // Required for both K=V-shared global layers and standard SWA layers.
-    if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr) {
+    if (prof.is_gemma4 && v_norm_ones_buf_ != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
         Tensor v_flat(vv.data, vv.qtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};
@@ -562,7 +563,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // (otherwise full attention covers the full context anyway). Resolved
     // again per-layer below in case Gemma-3 disables SWA on this layer.
     int layer_n_sinks = streaming_n_sinks_;
-    if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty()) {
+    if (prof.is_gemma4 && !cfg.swa_layers.empty()) {
         // Gemma 4: per-layer SWA pattern stored in cfg.swa_layers (1=SWA, 0=global).
         bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
         if (is_swa) {
@@ -573,7 +574,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Global layer: full attention, model rope_theta, with freq scaling
             layer_sliding_window = 0;
         }
-    } else if (cfg.arch == ModelArch::GPT_OSS && !cfg.swa_layers.empty()) {
+    } else if (prof.is_gpt_oss && !cfg.swa_layers.empty()) {
         // gpt-oss (#547): even layers sliding_attention (window 128), odd
         // layers full attention. Same RoPE (YaRN) on both layer types —
         // only the window toggles.
@@ -610,7 +611,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // (n_rot=hd, with most pairs effectively zeroed by 1e30 divisors). This
     // matches the proportional-rope schema (ccss000000000000) the converter
     // emits via partial_rotary_factor=0.25.
-    if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty()) {
+    if (prof.is_gemma4 && !cfg.swa_layers.empty()) {
         bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
         if (!layer_is_swa && ly.rope_freqs.data && ly.rope_freqs.on_device) {
             longrope_freqs = static_cast<const float*>(ly.rope_freqs.data);
@@ -678,7 +679,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // longrope_freqs above) zero out most pairs to realize the
         // partial-rotary schedule from the GGUF (ccss000000000000).
         int fused_rope_dim = cfg.rope_dim;
-        if (cfg.arch == ModelArch::GEMMA4) {
+        if (prof.is_gemma4) {
             fused_rope_dim = hd;
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
@@ -740,7 +741,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // global layers' freq_factors (longrope_freqs) realize the
             // partial-rotary schedule from the GGUF.
             int layer_rope_dim = cfg.rope_dim;
-            if (cfg.arch == ModelArch::GEMMA4) {
+            if (prof.is_gemma4) {
                 layer_rope_dim = hd;
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
@@ -765,13 +766,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     //   Standard archs: 1/sqrt(head_dim).
     //   Gemma 4: 1.0 (confirmed by llama.cpp print_info: f_attn_scale = 1.0.
     //                 Q-norm and K-norm absorb the per-element scaling).
-    float scale = (cfg.arch == ModelArch::GEMMA4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
+    float scale = (prof.is_gemma4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the
     // FP16 paged decode kernels understand them — prefill routing below
     // forces the cuBLAS path whenever sinks are present.
-    const void* attn_sinks = (cfg.arch == ModelArch::GPT_OSS) ? ly.attn_sinks.data : nullptr;
+    const void* attn_sinks = (prof.is_gpt_oss) ? ly.attn_sinks.data : nullptr;
 
     if (state.is_prefill) {
         // Chunked prefill: when prefill_offset > 0, queries from this chunk must
@@ -1008,7 +1009,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Per-layer rope_dim (same as prefill rope path above): Gemma 4
             // uses full hd; longrope_freqs encodes the partial-rotary schedule.
             int effective_rope_dim;
-            if (cfg.arch == ModelArch::GEMMA4) {
+            if (prof.is_gemma4) {
                 effective_rope_dim = hd;
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
@@ -1321,7 +1322,7 @@ after_attention:
         // post-attention rmsnorm. Uses the cublasGemmEx FP16×FP16→FP32 path
         // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq
         // and dp4a fast paths via output.qtype==FP32 guards in dispatch.
-        const bool fp32_attn_out = (model_->config().arch == ModelArch::GEMMA4 && using_fp32_accum &&
+        const bool fp32_attn_out = (prof.is_gemma4 && using_fp32_accum &&
                                     model_->config().overrides.gemma4.fp32_gemm_out);
         void* po_fp32_buf = nullptr;
         if (fp32_attn_out) {
@@ -1397,7 +1398,7 @@ after_attention:
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
-        } else if (has_post_attn_norm && model_->config().arch == ModelArch::GEMMA4) {
+        } else if (has_post_attn_norm && prof.is_gemma4) {
             // Gemma 4 sandwich norm: h = r + post_attn_norm(po).
             // Normalize attention output first, THEN add residual (HF reference order).
             rmsnorm(po, ly.post_attn_norm, po, model_->config().rms_norm_eps, stream, norm_w_off_);

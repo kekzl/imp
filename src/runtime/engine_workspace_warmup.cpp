@@ -237,7 +237,7 @@ void Engine::warmup() {
     // produces wrong logits under real inputs and drives decode into
     // backtick/markdown degeneration. IMP_NO_WARMUP=1 was the manual
     // mitigation; make it automatic for the arch.
-    if (model_->config().arch == ModelArch::GEMMA4) {
+    if (model_->profile().is_gemma4) {
         IMP_LOG_INFO("Warmup skipped (Gemma-4 algo-jitter protection)");
         return;
     }

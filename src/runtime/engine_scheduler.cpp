@@ -192,7 +192,7 @@ bool Engine::supports_chunked_prefill_() const {
     // GEMMA3 (SWA, uniform head_dim/kv_heads, sliding_window_pattern) reuses the
     // same per-layer cuBLAS sliding_window dispatch as GEMMA4 and passes the
     // uniformity gates below; verified coherent on gemma-3-12b-it-Q4_K_M.
-    if (cfg.arch == ModelArch::LLAMA4) return false;       // MoE + SWA, untested
+    if (model_->profile().is_llama4) return false;       // MoE + SWA, untested
     // Per-layer attention shape uniformity gate. Hybrid archs (QWEN35*, QWEN36_MOE,
     // NEMOTRON_H_MOE) populate n_kv_heads_per_layer with zeros for non-attention
     // layers — uniformity here means all *nonzero* values agree. Truly heterogeneous

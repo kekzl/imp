@@ -135,6 +135,7 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
 
 void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
+    const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
     // Populate per-call context. Subsequent phase helpers read ctx directly.
@@ -160,7 +161,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // dedicated `ffn_norm`); match the fallback chain used in run_ffn. Without
     // this, MoE reuses the pre-attention norm and the residual stream explodes
     // (observed on Qwen3.6-35B-A3B GDN+MoE: logits L2=100k, garbage output).
-    const Tensor& norm_w = (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
+    const Tensor& norm_w = (prof.is_gemma4 && ly.ffn_pre_norm_2.data != nullptr)
                                ? ly.ffn_pre_norm_2
                            : (ly.ffn_norm.data != nullptr)       ? ly.ffn_norm
                            : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
@@ -191,18 +192,18 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
     // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
     // compounds catastrophically through the 128-expert top-8 MoE routing.
-    ctx.gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
+    ctx.gemma4_fp32_norm = (prof.is_gemma4 && fp32_accum_buf_ != nullptr);
     // When FP32 residual accumulator is active AND post_ffn_norm exists, defer the
     // residual add to rmsnorm_fp32_accum_to_fp16_kernel (which keeps fp32_hidden_ in
     // sync + applies overflow scaling). Without this, moe_weighted_sum_residual
     // adds residual in FP16 and the shadow goes stale — measured ~7% drift at L3
     // that compounds to 260% by L29 vs llama.cpp (docs/gemma4_layer_diff.md).
-    ctx.moe_use_fp32_residual = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr &&
+    ctx.moe_use_fp32_residual = (prof.is_gemma4 && fp32_accum_buf_ != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
     // Diagnostic: keep MoE down-projection output in FP32 (no FP16 truncation
     // at GEMM output) to isolate precision drift. Allocated below in the FP16
     // batch path; freed at moe_after_experts. Other prefill paths ignore this.
-    ctx.fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
+    ctx.fp32_down_active = (prof.is_gemma4 &&
                             cfg.overrides.gemma4.fp32_expert_down);
     ctx.fp32_down_buf = nullptr;
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
@@ -233,6 +234,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
 
 void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
+    const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
     // 3. Gate logits + top-k routing
@@ -241,7 +243,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     // This matches llama.cpp's gemma4-iswa.cpp:151-155.
     // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
     // and produces ~2x too small router logits, causing wrong expert selection.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr) {
+    if (prof.is_gemma4 && ly.ffn_gate_inp_scale.data != nullptr) {
         // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * scale * (1/sqrt(d)))
         // Keep router_in in FP32 to prevent precision loss that causes routing instability
         // at later layers (L29). The FP16 intermediate loses enough precision to change
@@ -290,7 +292,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     const void* router_bias_ptr = ly.moe_router_bias.data;
     // Gemma-4: moe_router_bias may hold ffn_down_exps.scale (per-expert output
     // multiplier) due to GGUF name collision — NOT a router bias. Don't use it.
-    if (cfg.arch == ModelArch::GEMMA4 && router_bias_ptr != nullptr) {
+    if (prof.is_gemma4 && router_bias_ptr != nullptr) {
         if (layer == 0)
             IMP_LOG_INFO("Gemma 4: ignoring moe_router_bias (likely ffn_down_exps.scale, not router bias)");
         router_bias_ptr = nullptr;
@@ -304,7 +306,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
-    if (cfg.arch == ModelArch::GEMMA4 && cfg.overrides.gemma4.no_decode_fast) {
+    if (prof.is_gemma4 && cfg.overrides.gemma4.no_decode_fast) {
         ctx.will_decode_fast = false;
     }
 
@@ -353,7 +355,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         return false;
     // gpt-oss: device-args path is arch-gated off (no GLU/bias hooks in the
     // fused act+quantize kernel) — keep the mirror in sync.
-    if (model_->config().arch == ModelArch::GPT_OSS)
+    if (model_->profile().is_gpt_oss)
         return false;
     if (!cutlass_grouped_3x_nvfp4_available())
         return false;
@@ -398,6 +400,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     moe_ffn_phase2_state_and_norm_(layer, stream, ctx);
 
     const auto& cfg = model_->config();
+    const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
     // Local references into ctx so the remaining body reads unchanged.
@@ -431,7 +434,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Gemma-4 ggml_prefill path consumes it from here; the RMSNorm itself
     // already ran inside moe_ffn_phase2_state_and_norm_. Declared BEFORE the
     // will_decode_fast goto so the jump does not bypass its initialization.
-    const Tensor& norm_w = (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
+    const Tensor& norm_w = (prof.is_gemma4 && ly.ffn_pre_norm_2.data != nullptr)
                                ? ly.ffn_pre_norm_2
                            : (ly.ffn_norm.data != nullptr)       ? ly.ffn_norm
                            : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
@@ -478,7 +481,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                             non_gated_experts, up_qtype, routing, no)) {
             // Falls through to scatter (step 7)
         } else if (!moe_imma_pref && cfg.overrides.gemma4.ggml_prefill &&
-                   cfg.arch == ModelArch::GEMMA4 &&
+                   prof.is_gemma4 &&
                    ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                    ly.expert_down_packed.on_device &&
                    try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
@@ -640,6 +643,7 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
 // ---------------------------------------------------------------------------
 void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
+    const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
     // Free diagnostic FP32 expert-down buffer if we malloc'd it ourselves.
@@ -653,7 +657,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     //     Reuses MoE workspace buffers (routed computation is complete).
     //     Supports both gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
     // Gemma 4: sanitize inf/NaN in MoE scatter output before post-norm.
-    if (cfg.arch == ModelArch::GEMMA4) {
+    if (prof.is_gemma4) {
         sanitize_fp16(static_cast<__half*>(ctx.h.data), static_cast<int64_t>(ctx.n) * ctx.d, stream);
     }
 
@@ -661,7 +665,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
         debug_tensor_rows("L0_moe_scatter_out", view_tokens(ctx.h, ctx.n), stream);
     }
     // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr) {
+    if (prof.is_gemma4 && ly.ffn_post_norm_2.data != nullptr) {
         rmsnorm(ctx.h, ly.ffn_post_norm_2, ctx.h, ctx.eps, stream, norm_w_off_);
     }
     if (debug_forward_enabled() && layer == 0) {
@@ -671,7 +675,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     // Gemma 4: re-derive `no` for the shared MLP from the saved residual
     // (which still holds the original hidden state) using ffn_norm — the MoE
     // branch consumed `no` produced from pre_ffw_norm_2 above.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr &&
+    if (prof.is_gemma4 && ly.ffn_pre_norm_2.data != nullptr &&
         ly.w_up_shared.data != nullptr && ly.ffn_norm.data != nullptr) {
         rmsnorm(ctx.r, ly.ffn_norm, ctx.no, ctx.eps, stream, norm_w_off_);
     }
@@ -692,7 +696,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     // Without this, every MoE layer does a FP16 elementwise_add and the downstream
     // forced sync (executor_forward.cu:373-381) clobbers the FP32 accum with
     // FP16-rounded data, accumulating ~1-2% drift per layer over 30 layers.
-    const bool moe_fp32_accum = (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr &&
+    const bool moe_fp32_accum = (prof.is_gemma4 && ly.post_ffn_norm.data != nullptr &&
                                  fp32_accum_buf_ != nullptr && !ctx.residual_fused);
     if (moe_fp32_accum) {
         // fp32_hidden_ holds the pre-MoE residual (written by run_attention's
@@ -708,7 +712,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
             debug_tensor_stats_all(buf, ctx.h, stream);
         }
     } else {
-        if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
+        if (prof.is_gemma4 && ly.post_ffn_norm.data != nullptr) {
             rmsnorm(ctx.h, ly.post_ffn_norm, ctx.h, ctx.eps, stream, norm_w_off_);
         }
         if (layer == 0) {

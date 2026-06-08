@@ -356,7 +356,7 @@ void GraphExecutor::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);
     }
 
-    if (cfg.arch == ModelArch::GPT_OSS)
+    if (model_->profile().is_gpt_oss)
         gpt_oss_convert_moe_experts_(cfg, dctx);
     nvfp4_decode_cache_moe_experts_(cfg, remaining_budget, stream, dctx);
 }

@@ -745,7 +745,7 @@ if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
 // gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
 // expert-sorted — same seam as the dequant batch path).
 const int32_t* gpt_oss_offsets =
-    (cfg.arch == ModelArch::GPT_OSS) ? static_cast<const int32_t*>(routing.expert_offsets.data)
+    (model_->profile().is_gpt_oss) ? static_cast<const int32_t*>(routing.expert_offsets.data)
                                      : nullptr;
 if (gpt_oss_offsets) {
     moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, gpt_oss_offsets, ne,

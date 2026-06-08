@@ -111,7 +111,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     // gpt-oss (#547): per-expert biases on gate/up outputs BEFORE activation.
     // Rows are expert-sorted (expanded layout) — expert via expert_offsets.
     const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
-    if (cfg.arch == ModelArch::GPT_OSS) {
+    if (model_->profile().is_gpt_oss) {
         moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offsets, ctx.ne,
                                    ctx.expanded, ctx.eff, stream);
         moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, d_offsets, ctx.ne,
@@ -127,7 +127,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     char* slow_down_act = ctx.non_gated_experts ? expert_up_base : expert_swiglu_base;
     nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_down_ptr, slow_down_act, expert_down_base, ctx.eff, ctx.d);
 
-    if (cfg.arch == ModelArch::GPT_OSS)
+    if (model_->profile().is_gpt_oss)
         moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offsets, ctx.ne,
                                    ctx.expanded, ctx.d, stream);
 
@@ -671,7 +671,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         // added before softmax/top-k it shifts selection AND the renormalized
         // top-k weights (= HF's topk(logits+b) → softmax-over-selected).
         // Distinct from DeepSeek's selection-only score_bias (router_bias_ptr).
-        if (cfg.arch == ModelArch::GPT_OSS && ly.router_bias.data != nullptr)
+        if (model_->profile().is_gpt_oss && ly.router_bias.data != nullptr)
             moe_add_logit_bias(static_cast<float*>(logits_f32.data), ly.router_bias.data, n, ne, stream);
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
@@ -771,7 +771,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     }
 
     // Gemma-4: per-expert output scale absorbed into routing weights.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
+    if (model_->profile().is_gemma4 && ly.expert_down_scale.data != nullptr &&
         ly.expert_down_scale.on_device) {
         int64_t n_weights = static_cast<int64_t>(n) * top_k;
         int threads_s = 256;
@@ -811,7 +811,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         use_nvfp4_moe = (ly.nvfp4_moe_gate_ptr != nullptr);
 
     if (use_nvfp4_moe) {
-        if (cfg.arch == ModelArch::GPT_OSS) {
+        if (model_->profile().is_gpt_oss) {
             // gpt-oss (#547): per-expert biases on gate/up/down outputs + the
             // clamped GLU. The fused swiglu-down GEMV computes plain SwiGLU
             // inline — bypassed here in favor of explicit bias→GLU→down→bias.
@@ -1022,10 +1022,10 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     }
     // Gemma-4: shared MLP can overflow FP16 at deep layers; sanitize inf/NaN
     // before post_ffw_norm_1 so rmsnorm doesn't produce all-zero output.
-    if (cfg.arch == ModelArch::GEMMA4) {
+    if (model_->profile().is_gemma4) {
         sanitize_fp16(static_cast<__half*>(sh_down.data), static_cast<int64_t>(n) * d, stream);
     }
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
+    if (model_->profile().is_gemma4 && ly.ffn_post_norm_1.data != nullptr &&
         !cfg.overrides.gemma4.no_post_ffw_1) {
         rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
     }

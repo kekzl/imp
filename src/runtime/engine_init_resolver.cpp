@@ -177,8 +177,8 @@ void Engine::init_resolve_quant_flags_() {
     // residual-overflow sensitivity — f16 accumulators are the same hazard
     // class). "on"/"off" bypass this and were applied at install time.
     if (runtime_config_.gemm.cublas_fp16_acc == "auto") {
-        const bool deny = (mcfg.arch == ModelArch::GEMMA3 || mcfg.arch == ModelArch::GEMMA4 ||
-                           mcfg.arch == ModelArch::GPT_OSS);
+        const auto& prof = model_->profile();
+        const bool deny = (prof.is_gemma3 || prof.is_gemma4 || prof.is_gpt_oss);
         process_diag_set_cublas_fp16_acc(!deny);
         IMP_LOG_INFO("cuBLAS FP16-accumulate prefill: auto → %s (arch=%s)", deny ? "OFF" : "ON",
                      model_arch_name(mcfg.arch));
@@ -289,7 +289,7 @@ void Engine::init_resolve_quant_flags_() {
     // (55 tok/s vs 21.7 at mode 1) with multi-turn green. The cap is removed;
     // dense Gemma follows the same sub-8-bit mode-2 auto-pick as every other
     // arch (still gated behind gemm.nvfp4_decode_all for Q4_K-class sources).
-    if (model_->config().arch == ModelArch::GEMMA4) {
+    if (model_->profile().is_gemma4) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
         // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.

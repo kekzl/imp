@@ -125,7 +125,7 @@ void GraphExecutor::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // token 0 / <pad>, then IMA). The legacy Phase 1 keeps these FP16-cached;
     // encode that as an fp16_companion flag on every NVFP4-tier entry so the
     // plan-driven Phase 1 (Stage 1.3) preserves the same backing copy.
-    if (cfg.arch == ModelArch::GEMMA3) {
+    if (model_->profile().is_gemma3) {
         for (auto& e : plan.entries) {
             if (e.tier == StorageTier::NVFP4)
                 e.fp16_companion = true;
