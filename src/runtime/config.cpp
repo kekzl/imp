@@ -206,8 +206,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gdn.chunkwise_scan = parse_bool(val, cfg.gdn.chunkwise_scan);
 
     // [gemm]
-    else if (eq("gemm.no_dp4a"))
-        cfg.gemm.no_dp4a = parse_bool(val, cfg.gemm.no_dp4a);
     else if (eq("gemm.no_dp4a_gemv"))
         cfg.gemm.no_dp4a_gemv = parse_bool(val, cfg.gemm.no_dp4a_gemv);
     else if (eq("gemm.no_dp4a_lm"))
@@ -216,8 +214,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
     else if (eq("gemm.no_mmvq_q8_0"))
         cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
-    else if (eq("gemm.q4k_imma_enabled"))
-        cfg.gemm.q4k_imma_enabled = parse_bool(val, cfg.gemm.q4k_imma_enabled);
     else if (eq("gemm.q4k_hmma_enabled"))
         cfg.gemm.q4k_hmma_enabled = parse_bool(val, cfg.gemm.q4k_hmma_enabled);
     else if (eq("gemm.q8_imma_enabled"))
@@ -284,8 +280,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [diagnostics]
     else if (eq("diagnostics.debug_forward"))
         cfg.diagnostics.debug_forward = parse_bool(val, cfg.diagnostics.debug_forward);
-    else if (eq("diagnostics.debug_gemm_dispatch"))
-        cfg.diagnostics.debug_gemm_dispatch = parse_bool(val, cfg.diagnostics.debug_gemm_dispatch);
     else if (eq("diagnostics.debug_template"))
         cfg.diagnostics.debug_template = parse_bool(val, cfg.diagnostics.debug_template);
     else if (eq("diagnostics.dump_hidden_dir"))

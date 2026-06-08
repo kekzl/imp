@@ -230,18 +230,10 @@ struct RuntimeConfig {
     } gdn;
 
     struct GEMM {
-        bool no_dp4a = false;
         bool no_dp4a_gemv = false;
         bool no_dp4a_lm = false;
         bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
-        // Phase 2C infrastructure (default off until E2E A/B lands on
-        // dense Q4_K_M models). When true, executor_pre_dequant will
-        // populate WeightCaches::q4k_imma for eligible Q4_K weights
-        // (dense, M ≥ 1024 hint) and a future dispatcher PR will route
-        // the GEMM through mmq_q4k_imma_tile. Detailed wrap-up:
-        // docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
-        bool q4k_imma_enabled = false;
         // Q4_K x FP16 HMMA GEMM: in-SMEM nibble decode + FP16 tensor core
         // m16n8k16 tile kernel. Phase 0 scaffold (default off). When enabled,
         // prefill (M >= 32) Q4_K weights bypass dequant-to-FP16 + cuBLAS.
@@ -253,10 +245,10 @@ struct RuntimeConfig {
         // Q4_K-IMMA phase-2B ceiling diagnosis (SMEM-staged scales, 128x128x64
         // tiles, symmetric epilogue). Experimental: default off.
         bool q8_imma_enabled = true;
-        // Q4_K dense prefill via the same (new-stack) IMMA kernel — distinct
-        // from the legacy gemm.q4k_imma_enabled (2026-05 64x32 kernel, 40
-        // TOPS plateau). Uses mmq_q4k_imma_reorder's symmetric-s8 + α/β form
-        // with the unified β·rowsum epilogue. Experimental: default off.
+        // Q4_K dense prefill via the (new-stack) IMMA kernel: uses
+        // mmq_q4k_imma_reorder's symmetric-s8 + α/β form with the unified
+        // β·rowsum epilogue. Experimental: default off. (Distinct from the
+        // retired 2026-05 64x32 q4k_imma kernel that plateaued at 40 TOPS.)
         bool q4k_imma_prefill = false;
         // MoE batch prefill via the grouped IMMA kernel (one launch over all
         // experts, gridDim.z = expert, BM=32 small-M tile for the typical
@@ -414,7 +406,6 @@ struct RuntimeConfig {
 
     struct Diagnostics {
         bool debug_forward = false;
-        bool debug_gemm_dispatch = false;
         bool debug_template = false;
         std::string dump_hidden_dir;
         std::string dump_logits_dir;   // path or empty
