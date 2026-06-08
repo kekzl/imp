@@ -15,6 +15,7 @@
 #include "exec/weight_handle.h"
 #include "exec/moe_workspace.h"
 #include "exec/quant_scratch.h"
+#include "exec/quant_pipeline.h"
 #include "runtime/storage_planner.h"
 #include "runtime/config.h"
 #include <cuda_runtime.h>
@@ -486,33 +487,8 @@ struct WeightCaches {
     bool dual_path_quant = false;
 };
 
-// Per-call state for GraphExecutor::pre_dequant_phase3_nvfp4_decode_().
-// Bundles the locals shared between sub-phase helpers — exclusion set,
-// candidate entries, mode string, MoE-cache accumulators.
-struct Nvfp4DecodeContext {
-    // One entry per weight that may receive NVFP4 quantization. Populated by
-    // the collect phase; consumed by the mode-1 / mode-2 / second-pass phases.
-    struct Entry {
-        const void* orig_ptr;
-        Tensor weight;
-        QType qtype;
-        bool from_scratch;
-    };
-
-    std::unordered_set<const void*> exclude_ptrs;
-    std::vector<Entry> entries;
-    const char* mode_str = "";          // "additive" or "only", set early
-    size_t moe_budget = 0;              // initialised before the MoE-cache phase
-    int    nvfp4_moe_count = 0;         // populated by the MoE-cache phase
-    size_t nvfp4_moe_total = 0;
-    // Shared VRAM safety reserve for mode 2 paths (dense incremental,
-    // CUTLASS NVFP4, MoE expert caching). Computed once at the top of
-    // pre_dequant_phase3_nvfp4_decode_() from the model's actual attention
-    // layout — replaces the previous `total_mem / 10` heuristic which
-    // reserved 3.2 GiB on a 32 GiB 5090 and starved the dense NVFP4 cache
-    // (20 of 281 tensors uncached on Qwen3-14B Q6_K → −20% decode tok/s).
-    size_t safety_reserve = 0;
-};
+// Nvfp4DecodeContext moved to exec/quant_pipeline.h (build-only; consumed by
+// the QuantPipeline phase-3 helpers).
 
 // Per-call state for GraphExecutor::run_moe_ffn(). Bundles the locals that
 // were previously captured by the monolithic body so each MoE phase helper
@@ -775,64 +751,10 @@ public:
     }
 
 private:
-    // Phases of pre_dequant_weights(), extracted for readability.
-    // Cross-phase state: remaining_budget is reduced by each FP16/FP8/NVFP4
-    // pass; cfg is const reference to model config.
-    void pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream);
-    void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
-    void pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
-                                        size_t& remaining_budget, cudaStream_t stream);
-    void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
-                                       size_t& remaining_budget, cudaStream_t stream);
-    void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
-                                          size_t& remaining_budget, cudaStream_t stream);
-    // Sub-phase helpers for pre_dequant_phase3_nvfp4_decode_. Each operates
-    // on a shared Nvfp4DecodeContext; the orchestrator above calls them in
-    // sequence, mirroring the legacy monolithic body.
-    void nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
-    // Quantize a native-precision (FP16/BF16) LM head to an NVFP4 decode cache
-    // entry in wcache_.nvfp4. No-op when the LM head is already a quantized
-    // source (GGUF path handles it via collect_candidates) or when the model is
-    // GDN/SSM-hybrid. See RuntimeConfig::Gemm::nvfp4_lm_head.
-    void nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream);
-    // Quantize the recipe-excluded BF16/FP16 attention q/k/v/o projections of a
-    // native-NVFP4 hybrid into wcache_.nvfp4 so M=1 decode uses the fast NVFP4
-    // GEMV. Opt-in via gemm.nvfp4_attn_proj. No-op unless the flag is set.
-    // (The GDN in/out analog was measured to regress decode and was dropped.)
-    void nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg, cudaStream_t stream);
-    void nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
-                                      Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_budget, cudaStream_t stream,
-                                                 Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
-                                   Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cudaStream_t stream);
-    void nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream);
-    void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
-    void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, size_t& remaining_budget,
-                                         cudaStream_t stream, Nvfp4DecodeContext& dctx);
-    // NVFP4-prequant SafeTensors MoE: build the contiguous per-projection decode
-    // cache for one layer's experts (gate/up/down). Borrows resident contiguous
-    // storage zero-copy when possible, else copies per-expert tensors into one
-    // buffer + frees the sources, and re-stamps per-expert CUTLASS_NVFP4 slices.
-    // Stamps `packed` so wcache lookups + the executor dispatch wire up. Returns
-    // true when the projection is handled (cached or left on the CUTLASS path).
-    // Extracted from the nvfp4_decode_cache_moe_experts_ body; the budget flags
-    // are threaded through so the per-layer accounting is shared across calls.
-    bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
-                                 Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
-                                 size_t& moe_logical_avail);
-    void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
-    void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
-    void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
-    // Phase 5 PR #1 Commit 5.1.4.b: mark Tensor.dropped_source for weights
-    // whose handle says can_drop_source(). DOES NOT cudaFree (yet) — bisect
-    // mode: trigger the safety guards in dispatch to surface unguarded paths
-    // via "dropped-source reached final fallback" warnings without actually
-    // crashing on stale pointers. Actual freeing follows once coverage is
-    // verified clean.
-    void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
+    // The init-time weight-quantization pipeline (the 23 pre_dequant_*/
+    // nvfp4_decode_* methods + the build-only StoragePlan) was extracted to
+    // QuantPipeline (exec/quant_pipeline.h). GraphExecutor owns one
+    // (quant_pipeline_, below) and delegates pre_dequant_weights() to it.
 
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
@@ -949,25 +871,19 @@ public:
     bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
 
 private:
+    // Init-time weight-quantization pipeline (D2 extraction). Owns the build-only
+    // StoragePlan; fills the long-lived caches below by reference in build().
+    QuantPipeline quant_pipeline_;
+
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
     WeightCaches wcache_;
 
     // Mode flags mirrored from wcache_ for PlanHints (hints_ is the Phase 5 source of truth).
     PlanHints hints_;
 
-    // Stage 1 (one-tier-truth): the StoragePlanner output, held for the model's
-    // lifetime. Built once at the top of pre_dequant_weights(). The pre-dequant
-    // phases are being migrated to read their overlay-tier decision from here
-    // (plan_tier_of) instead of scattered nvfp4_beneficial/plan_routes_to_fp16
-    // checks. Empty until pre_dequant_weights runs.
-    StoragePlan storage_plan_;
-    // Planned overlay tier for a source pointer, or Undefined if the pointer is
-    // not in the plan (native GGUF blocks bypass the overlay layer).
-    StorageTier plan_tier_of(const void* src) const { return storage_plan_.tier_of(src); }
-    // Stage 1.2: fold the scattered arch-specific overlay rules (gemma-3 FP16
-    // backing, GDN ssm FP16 floor, native-NVFP4 prefill) into one pass over the
-    // freshly-built plan, so the plan matches what the legacy builders produce.
-    void apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const;
+    // The build-only StoragePlan (storage_plan_), plan_tier_of(), and
+    // apply_arch_rules_() moved into QuantPipeline (exec/quant_pipeline.h) —
+    // they have no hot-path reader.
 
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
     WeightRegistry registry_;

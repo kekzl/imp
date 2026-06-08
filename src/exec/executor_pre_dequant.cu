@@ -16,6 +16,17 @@
 
 namespace imp {
 
+// Delegate: the init-time quantization pipeline lives in QuantPipeline. The
+// engine call site (engine_kv_cache_init.cpp) is unchanged. The four long-lived
+// caches + moe_ stay owned by GraphExecutor and are filled by reference; the
+// forward hot path reads them exactly as before (byte-identical).
+void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
+    if (!initialized_ || !model_)
+        return;
+    quant_pipeline_.build(*model_, runtime_config(), *vram_alloc_, budget, stream,
+                          wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
+}
+
 void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAllocator& alloc,
                           const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
                           QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
