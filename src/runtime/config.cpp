@@ -79,12 +79,27 @@ float parse_float(const std::string& v, float fallback) {
 void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw) {
     std::string val = strip_quotes(trim(raw));
 
-    auto eq = [&](const char* k) { return dotted_key == k; };
+    // Typed key binders. Each binds one dotted key to its destination field;
+    // the field's type selects the parser, and the compiler rejects a key bound
+    // to a wrong-typed field. First match wins (the `matched` guard mirrors the
+    // old else-if short-circuit); unknown keys fall through to the warning.
+    bool matched = false;
+    auto B = [&](const char* k, bool& f) {
+        if (!matched && dotted_key == k) { f = parse_bool(val, f); matched = true; }
+    };
+    auto I = [&](const char* k, int& f) {
+        if (!matched && dotted_key == k) { f = parse_int(val, f); matched = true; }
+    };
+    auto F = [&](const char* k, float& f) {
+        if (!matched && dotted_key == k) { f = parse_float(val, f); matched = true; }
+    };
+    auto S = [&](const char* k, std::string& f) {
+        if (!matched && dotted_key == k) { f = val; matched = true; }
+    };
 
     // [runtime]
-    if (eq("runtime.deterministic_gemm"))
-        cfg.runtime.deterministic_gemm = parse_bool(val, cfg.runtime.deterministic_gemm);
-    else if (eq("runtime.deterministic")) {
+    B("runtime.deterministic_gemm", cfg.runtime.deterministic_gemm);
+    if (!matched && dotted_key == "runtime.deterministic") {
         cfg.runtime.deterministic = parse_bool(val, cfg.runtime.deterministic);
         // Full determinism implies deterministic GEMM algo selection — the
         // compute kernels gate routing/sampling determinism on the same
@@ -92,155 +107,92 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         // covers GEMM + MoE routing + top-k sampling.
         if (cfg.runtime.deterministic)
             cfg.runtime.deterministic_gemm = true;
-    } else if (eq("runtime.cuda_graphs"))
-        cfg.runtime.cuda_graphs = val;
-    else if (eq("runtime.warmup"))
-        cfg.runtime.warmup = parse_bool(val, cfg.runtime.warmup);
-    else if (eq("runtime.max_seq_len"))
-        cfg.runtime.max_seq_len = parse_int(val, cfg.runtime.max_seq_len);
-    else if (eq("runtime.no_pdl"))
-        cfg.runtime.no_pdl = parse_bool(val, cfg.runtime.no_pdl);
-    else if (eq("runtime.debug_raw"))
-        cfg.runtime.debug_raw = parse_bool(val, cfg.runtime.debug_raw);
-    else if (eq("runtime.no_vision_graph"))
-        cfg.runtime.no_vision_graph = parse_bool(val, cfg.runtime.no_vision_graph);
-    else if (eq("runtime.graph_capture_mode"))
-        cfg.runtime.graph_capture_mode = val;
-    else if (eq("runtime.prefill_graph"))
-        cfg.runtime.prefill_graph = parse_bool(val, cfg.runtime.prefill_graph);
-    else if (eq("runtime.max_batch_size"))
-        cfg.runtime.max_batch_size = parse_int(val, cfg.runtime.max_batch_size);
+        matched = true;
+    }
+    S("runtime.cuda_graphs", cfg.runtime.cuda_graphs);
+    B("runtime.warmup", cfg.runtime.warmup);
+    I("runtime.max_seq_len", cfg.runtime.max_seq_len);
+    B("runtime.no_pdl", cfg.runtime.no_pdl);
+    B("runtime.debug_raw", cfg.runtime.debug_raw);
+    B("runtime.no_vision_graph", cfg.runtime.no_vision_graph);
+    S("runtime.graph_capture_mode", cfg.runtime.graph_capture_mode);
+    B("runtime.prefill_graph", cfg.runtime.prefill_graph);
+    I("runtime.max_batch_size", cfg.runtime.max_batch_size);
 
     // [kv_cache]
-    else if (eq("kv_cache.dtype"))
-        cfg.kv_cache.dtype = val;
-    else if (eq("kv_cache.allow_nondeterministic_fp8"))
-        cfg.kv_cache.allow_nondeterministic_fp8 = parse_bool(val, cfg.kv_cache.allow_nondeterministic_fp8);
-    else if (eq("kv_cache.fp8_auto_legacy"))
-        cfg.kv_cache.fp8_auto_legacy = parse_bool(val, cfg.kv_cache.fp8_auto_legacy);
-    else if (eq("kv_cache.bitdecoding_residual_tokens"))
-        cfg.kv_cache.bitdecoding_residual_tokens = parse_int(val, cfg.kv_cache.bitdecoding_residual_tokens);
-    else if (eq("kv_cache.bitdecoding_qk"))
-        cfg.kv_cache.bitdecoding_qk = parse_bool(val, cfg.kv_cache.bitdecoding_qk);
+    S("kv_cache.dtype", cfg.kv_cache.dtype);
+    B("kv_cache.allow_nondeterministic_fp8", cfg.kv_cache.allow_nondeterministic_fp8);
+    B("kv_cache.fp8_auto_legacy", cfg.kv_cache.fp8_auto_legacy);
+    I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
+    B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
 
     // [attention]
-    else if (eq("attention.fp8_prefill"))
-        cfg.attention.fp8_prefill = val;
-    else if (eq("attention.fp8_fmha"))
-        cfg.attention.fp8_fmha = val;
-    else if (eq("attention.fmha_sm120"))
-        cfg.attention.fmha_sm120 = val;
-    else if (eq("attention.fmha_fa2"))
-        cfg.attention.fmha_fa2 = val;
-    else if (eq("attention.fa2_fp16qk"))
-        cfg.attention.fa2_fp16qk = val;
-    else if (eq("attention.fmha_prefill_threshold"))
-        cfg.attention.fmha_prefill_threshold = parse_int(val, cfg.attention.fmha_prefill_threshold);
-    else if (eq("attention.attn_scores_mib"))
-        cfg.attention.attn_scores_mib = parse_int(val, cfg.attention.attn_scores_mib);
-    else if (eq("attention.mxfp4"))
-        cfg.attention.mxfp4 = val;
-    else if (eq("attention.mxfp4_fp16_fallback"))
-        cfg.attention.mxfp4_fp16_fallback = parse_bool(val, cfg.attention.mxfp4_fp16_fallback);
-    else if (eq("attention.mxfp4_fp16_cache_policy"))
-        cfg.attention.mxfp4_fp16_cache_policy = val;
-    else if (eq("attention.force_cublas_decode"))
-        cfg.attention.force_cublas_decode = parse_bool(val, cfg.attention.force_cublas_decode);
-    else if (eq("attention.no_qknorm_fused"))
-        cfg.attention.no_qknorm_fused = parse_bool(val, cfg.attention.no_qknorm_fused);
-    else if (eq("attention.splitk_pipe"))
-        cfg.attention.splitk_pipe = parse_bool(val, cfg.attention.splitk_pipe);
-    else if (eq("attention.gate_concat"))
-        cfg.attention.gate_concat = parse_bool(val, cfg.attention.gate_concat);
+    S("attention.fp8_prefill", cfg.attention.fp8_prefill);
+    S("attention.fp8_fmha", cfg.attention.fp8_fmha);
+    S("attention.fmha_sm120", cfg.attention.fmha_sm120);
+    S("attention.fmha_fa2", cfg.attention.fmha_fa2);
+    S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
+    I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
+    I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
+    S("attention.mxfp4", cfg.attention.mxfp4);
+    B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
+    S("attention.mxfp4_fp16_cache_policy", cfg.attention.mxfp4_fp16_cache_policy);
+    B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);
+    B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
+    B("attention.splitk_pipe", cfg.attention.splitk_pipe);
+    B("attention.gate_concat", cfg.attention.gate_concat);
 
     // [moe]
-    else if (eq("moe.expert_overhead_pct"))
-        cfg.moe.expert_overhead_pct = parse_int(val, cfg.moe.expert_overhead_pct);
-    else if (eq("moe.force_host_experts"))
-        cfg.moe.force_host_experts = parse_int(val, cfg.moe.force_host_experts);
-    else if (eq("moe.skip"))
-        cfg.moe.skip = parse_bool(val, cfg.moe.skip);
-    else if (eq("moe.force_fp16_sync"))
-        cfg.moe.force_fp16_sync = parse_bool(val, cfg.moe.force_fp16_sync);
-    else if (eq("moe.no_expert_cache"))
-        cfg.moe.no_expert_cache = parse_bool(val, cfg.moe.no_expert_cache);
-    else if (eq("moe.expert_cache_debug_parity"))
-        cfg.moe.expert_cache_debug_parity = parse_bool(val, cfg.moe.expert_cache_debug_parity);
-    else if (eq("moe.prefetch_top_k"))
-        cfg.moe.prefetch_top_k = parse_int(val, cfg.moe.prefetch_top_k);
-    else if (eq("moe.allow_graphs_under_offload"))
-        cfg.moe.allow_graphs_under_offload = parse_bool(val, cfg.moe.allow_graphs_under_offload);
-    else if (eq("moe.zero_workspace"))
-        cfg.moe.zero_workspace = parse_bool(val, cfg.moe.zero_workspace);
-    else if (eq("moe.no_shared_mlp"))
-        cfg.moe.no_shared_mlp = parse_bool(val, cfg.moe.no_shared_mlp);
-    else if (eq("moe.no_shexp_gate"))
-        cfg.moe.no_shexp_gate = parse_bool(val, cfg.moe.no_shexp_gate);
-    else if (eq("moe.no_cutlass3x"))
-        cfg.moe.no_cutlass3x = parse_bool(val, cfg.moe.no_cutlass3x);
-    else if (eq("moe.reserve_mib"))
-        cfg.moe.reserve_mib = parse_int(val, cfg.moe.reserve_mib);
-    else if (eq("moe.nvfp4_device_args"))
-        cfg.moe.nvfp4_device_args = parse_bool(val, cfg.moe.nvfp4_device_args);
-    else if (eq("moe.nvfp4_smallM"))
-        cfg.moe.nvfp4_smallM = parse_bool(val, cfg.moe.nvfp4_smallM);
-    else if (eq("moe.nvfp4_smallM_threshold"))
-        cfg.moe.nvfp4_smallM_threshold = parse_int(val, cfg.moe.nvfp4_smallM_threshold);
-    else if (eq("moe.mr_nr"))
-        cfg.moe.mr_nr = parse_int(val, cfg.moe.mr_nr);
+    I("moe.expert_overhead_pct", cfg.moe.expert_overhead_pct);
+    I("moe.force_host_experts", cfg.moe.force_host_experts);
+    B("moe.skip", cfg.moe.skip);
+    B("moe.force_fp16_sync", cfg.moe.force_fp16_sync);
+    B("moe.no_expert_cache", cfg.moe.no_expert_cache);
+    B("moe.expert_cache_debug_parity", cfg.moe.expert_cache_debug_parity);
+    I("moe.prefetch_top_k", cfg.moe.prefetch_top_k);
+    B("moe.allow_graphs_under_offload", cfg.moe.allow_graphs_under_offload);
+    B("moe.zero_workspace", cfg.moe.zero_workspace);
+    B("moe.no_shared_mlp", cfg.moe.no_shared_mlp);
+    B("moe.no_shexp_gate", cfg.moe.no_shexp_gate);
+    B("moe.no_cutlass3x", cfg.moe.no_cutlass3x);
+    I("moe.reserve_mib", cfg.moe.reserve_mib);
+    B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
+    B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
+    I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
+    I("moe.mr_nr", cfg.moe.mr_nr);
 
     // [gdn]
-    else if (eq("gdn.fp32_scan"))
-        cfg.gdn.fp32_scan = parse_bool(val, cfg.gdn.fp32_scan);
-    else if (eq("gdn.fp32_out"))
-        cfg.gdn.fp32_out = parse_bool(val, cfg.gdn.fp32_out);
-    else if (eq("gdn.norm_eps_override"))
-        cfg.gdn.norm_eps_override = parse_float(val, cfg.gdn.norm_eps_override);
-    else if (eq("gdn.layout_override"))
-        cfg.gdn.layout_override = val;
-    else if (eq("gdn.ref_kernel"))
-        cfg.gdn.ref_kernel = parse_bool(val, cfg.gdn.ref_kernel);
-    else if (eq("gdn.vhead_reorder"))
-        cfg.gdn.vhead_reorder = parse_bool(val, cfg.gdn.vhead_reorder);
-    else if (eq("gdn.chunkwise_scan"))
-        cfg.gdn.chunkwise_scan = parse_bool(val, cfg.gdn.chunkwise_scan);
+    B("gdn.fp32_scan", cfg.gdn.fp32_scan);
+    B("gdn.fp32_out", cfg.gdn.fp32_out);
+    F("gdn.norm_eps_override", cfg.gdn.norm_eps_override);
+    S("gdn.layout_override", cfg.gdn.layout_override);
+    B("gdn.ref_kernel", cfg.gdn.ref_kernel);
+    B("gdn.vhead_reorder", cfg.gdn.vhead_reorder);
+    B("gdn.chunkwise_scan", cfg.gdn.chunkwise_scan);
 
     // [gemm]
-    else if (eq("gemm.no_dp4a_gemv"))
-        cfg.gemm.no_dp4a_gemv = parse_bool(val, cfg.gemm.no_dp4a_gemv);
-    else if (eq("gemm.no_dp4a_lm"))
-        cfg.gemm.no_dp4a_lm = parse_bool(val, cfg.gemm.no_dp4a_lm);
-    else if (eq("gemm.no_mmvq"))
-        cfg.gemm.no_mmvq = parse_bool(val, cfg.gemm.no_mmvq);
-    else if (eq("gemm.no_mmvq_q8_0"))
-        cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
-    else if (eq("gemm.q4k_hmma_enabled"))
-        cfg.gemm.q4k_hmma_enabled = parse_bool(val, cfg.gemm.q4k_hmma_enabled);
-    else if (eq("gemm.q8_imma_enabled"))
-        cfg.gemm.q8_imma_enabled = parse_bool(val, cfg.gemm.q8_imma_enabled);
-    else if (eq("gemm.q4k_imma_prefill"))
-        cfg.gemm.q4k_imma_prefill = parse_bool(val, cfg.gemm.q4k_imma_prefill);
-    else if (eq("gemm.moe_imma_prefill"))
-        cfg.gemm.moe_imma_prefill = parse_bool(val, cfg.gemm.moe_imma_prefill);
-    else if (eq("gemm.nvfp4_decode_all"))
-        cfg.gemm.nvfp4_decode_all = parse_bool(val, cfg.gemm.nvfp4_decode_all);
-    else if (eq("gemm.nvfp4_lm_head"))
-        cfg.gemm.nvfp4_lm_head = parse_bool(val, cfg.gemm.nvfp4_lm_head);
-    else if (eq("gemm.cublas_fp16_acc")) {
+    B("gemm.no_dp4a_gemv", cfg.gemm.no_dp4a_gemv);
+    B("gemm.no_dp4a_lm", cfg.gemm.no_dp4a_lm);
+    B("gemm.no_mmvq", cfg.gemm.no_mmvq);
+    B("gemm.no_mmvq_q8_0", cfg.gemm.no_mmvq_q8_0);
+    B("gemm.q4k_hmma_enabled", cfg.gemm.q4k_hmma_enabled);
+    B("gemm.q8_imma_enabled", cfg.gemm.q8_imma_enabled);
+    B("gemm.q4k_imma_prefill", cfg.gemm.q4k_imma_prefill);
+    B("gemm.moe_imma_prefill", cfg.gemm.moe_imma_prefill);
+    B("gemm.nvfp4_decode_all", cfg.gemm.nvfp4_decode_all);
+    B("gemm.nvfp4_lm_head", cfg.gemm.nvfp4_lm_head);
+    if (!matched && dotted_key == "gemm.cublas_fp16_acc") {
         // tri-state auto|on|off; legacy bool spellings stay valid
         if (val == "auto" || val == "on" || val == "off")
             cfg.gemm.cublas_fp16_acc = val;
         else
             cfg.gemm.cublas_fp16_acc = parse_bool(val, false) ? "on" : "off";
+        matched = true;
     }
-    else if (eq("gemm.nvfp4_lm_head_gdn"))
-        cfg.gemm.nvfp4_lm_head_gdn = parse_bool(val, cfg.gemm.nvfp4_lm_head_gdn);
-    else if (eq("gemm.nvfp4_ssm_proj"))
-        cfg.gemm.nvfp4_ssm_proj = parse_bool(val, cfg.gemm.nvfp4_ssm_proj);
-    else if (eq("gemm.nvfp4_attn_proj"))
-        cfg.gemm.nvfp4_attn_proj = parse_bool(val, cfg.gemm.nvfp4_attn_proj);
-    else if (eq("gemm.nvfp4_moe_decode"))
-        cfg.gemm.nvfp4_moe_decode = parse_bool(val, cfg.gemm.nvfp4_moe_decode);
+    B("gemm.nvfp4_lm_head_gdn", cfg.gemm.nvfp4_lm_head_gdn);
+    B("gemm.nvfp4_ssm_proj", cfg.gemm.nvfp4_ssm_proj);
+    B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
+    B("gemm.nvfp4_moe_decode", cfg.gemm.nvfp4_moe_decode);
 
     // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5
     // Track A of the architecture refactor. Per-model knobs no longer live
@@ -248,76 +200,47 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // GGUF / SafeTensors loader or the engine init resolver onto the model.
 
     // [generation]
-    else if (eq("generation.no_logit_softcap"))
-        cfg.generation.no_logit_softcap = parse_bool(val, cfg.generation.no_logit_softcap);
-    else if (eq("generation.lm_dequant_fp16"))
-        cfg.generation.lm_dequant_fp16 = parse_bool(val, cfg.generation.lm_dequant_fp16);
-    else if (eq("generation.think_budget"))
-        cfg.generation.think_budget = parse_int(val, cfg.generation.think_budget);
-    else if (eq("generation.force_bos"))
-        cfg.generation.force_bos = parse_bool(val, cfg.generation.force_bos);
-    else if (eq("generation.no_ban"))
-        cfg.generation.no_ban = parse_bool(val, cfg.generation.no_ban);
-    else if (eq("generation.mtp_no_rope"))
-        cfg.generation.mtp_no_rope = parse_bool(val, cfg.generation.mtp_no_rope);
+    B("generation.no_logit_softcap", cfg.generation.no_logit_softcap);
+    B("generation.lm_dequant_fp16", cfg.generation.lm_dequant_fp16);
+    I("generation.think_budget", cfg.generation.think_budget);
+    B("generation.force_bos", cfg.generation.force_bos);
+    B("generation.no_ban", cfg.generation.no_ban);
+    B("generation.mtp_no_rope", cfg.generation.mtp_no_rope);
 
     // [server]
-    else if (eq("server.prefix_cache"))
-        cfg.server.prefix_cache = parse_bool(val, cfg.server.prefix_cache);
-    else if (eq("server.prefix_pin_budget_pct"))
-        cfg.server.prefix_pin_budget_pct = parse_int(val, cfg.server.prefix_pin_budget_pct);
-    else if (eq("server.green_contexts"))
-        cfg.server.green_contexts = parse_bool(val, cfg.server.green_contexts);
+    B("server.prefix_cache", cfg.server.prefix_cache);
+    I("server.prefix_pin_budget_pct", cfg.server.prefix_pin_budget_pct);
+    B("server.green_contexts", cfg.server.green_contexts);
 
     // [bench]
-    else if (eq("bench.generate"))
-        cfg.bench.generate = parse_bool(val, cfg.bench.generate);
+    B("bench.generate", cfg.bench.generate);
 
     // [paths]
-    else if (eq("paths.mmproj"))
-        cfg.paths.mmproj = val;
+    S("paths.mmproj", cfg.paths.mmproj);
 
     // [diagnostics]
-    else if (eq("diagnostics.debug_forward"))
-        cfg.diagnostics.debug_forward = parse_bool(val, cfg.diagnostics.debug_forward);
-    else if (eq("diagnostics.debug_template"))
-        cfg.diagnostics.debug_template = parse_bool(val, cfg.diagnostics.debug_template);
-    else if (eq("diagnostics.dump_hidden_dir"))
-        cfg.diagnostics.dump_hidden_dir = val;
-    else if (eq("diagnostics.dump_logits_dir"))
-        cfg.diagnostics.dump_logits_dir = val;
-    else if (eq("diagnostics.dump_routing_dir"))
-        cfg.diagnostics.dump_routing_dir = val;
-    else if (eq("diagnostics.dump_tokens"))
-        cfg.diagnostics.dump_tokens = parse_bool(val, cfg.diagnostics.dump_tokens);
-    else if (eq("diagnostics.exit_layer"))
-        cfg.diagnostics.exit_layer = parse_int(val, cfg.diagnostics.exit_layer);
-    else if (eq("diagnostics.profile"))
-        cfg.diagnostics.profile = parse_bool(val, cfg.diagnostics.profile);
-    else if (eq("diagnostics.graph_diag"))
-        cfg.diagnostics.graph_diag = parse_bool(val, cfg.diagnostics.graph_diag);
-    else if (eq("diagnostics.graph_dump_dir"))
-        cfg.diagnostics.graph_dump_dir = val;
-    else if (eq("diagnostics.nvfp4_force_dequant"))
-        cfg.diagnostics.nvfp4_force_dequant = parse_bool(val, cfg.diagnostics.nvfp4_force_dequant);
-    else if (eq("diagnostics.log_gemm_algo"))
-        cfg.diagnostics.log_gemm_algo = parse_bool(val, cfg.diagnostics.log_gemm_algo);
-    else if (eq("diagnostics.mtp_pattern_log"))
-        cfg.diagnostics.mtp_pattern_log = parse_bool(val, cfg.diagnostics.mtp_pattern_log);
-    else if (eq("diagnostics.mtp_prenorm_h"))
-        cfg.diagnostics.mtp_prenorm_h = parse_bool(val, cfg.diagnostics.mtp_prenorm_h);
-    else if (eq("diagnostics.audit_nvfp4_scales"))
-        cfg.diagnostics.audit_nvfp4_scales = parse_bool(val, cfg.diagnostics.audit_nvfp4_scales);
+    B("diagnostics.debug_forward", cfg.diagnostics.debug_forward);
+    B("diagnostics.debug_template", cfg.diagnostics.debug_template);
+    S("diagnostics.dump_hidden_dir", cfg.diagnostics.dump_hidden_dir);
+    S("diagnostics.dump_logits_dir", cfg.diagnostics.dump_logits_dir);
+    S("diagnostics.dump_routing_dir", cfg.diagnostics.dump_routing_dir);
+    B("diagnostics.dump_tokens", cfg.diagnostics.dump_tokens);
+    I("diagnostics.exit_layer", cfg.diagnostics.exit_layer);
+    B("diagnostics.profile", cfg.diagnostics.profile);
+    B("diagnostics.graph_diag", cfg.diagnostics.graph_diag);
+    S("diagnostics.graph_dump_dir", cfg.diagnostics.graph_dump_dir);
+    B("diagnostics.nvfp4_force_dequant", cfg.diagnostics.nvfp4_force_dequant);
+    B("diagnostics.log_gemm_algo", cfg.diagnostics.log_gemm_algo);
+    B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
+    B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
+    B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
 
     // [ffn]
-    else if (eq("ffn.sparsity_probe"))
-        cfg.ffn.sparsity_probe = parse_bool(val, cfg.ffn.sparsity_probe);
-    else if (eq("ffn.sparsity_threshold"))
-        cfg.ffn.sparsity_threshold = parse_float(val, cfg.ffn.sparsity_threshold);
+    B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
+    F("ffn.sparsity_threshold", cfg.ffn.sparsity_threshold);
 
-    else {
+    if (!matched)
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
-    }
 }
 
 bool file_exists(const std::string& path) {
