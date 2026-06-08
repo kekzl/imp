@@ -439,62 +439,6 @@ void moe_add_expert_bias_sorted(void* buf_fp16, const void* bias_fp16, const int
 }
 
 // ============================================================================
-// Kernel 2: Count tokens per expert
-//
-// Each token contributes top_k entries.  We atomically increment per-expert
-// counts.  expert_counts has n_experts elements, initialized to zero.
-// ============================================================================
-
-__global__ void count_tokens_per_expert_kernel(const int32_t* __restrict__ expert_indices, int n_tokens,
-                                               int top_k, int32_t* __restrict__ expert_counts) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_tokens * top_k;
-    if (idx < total) {
-        int expert = expert_indices[idx];
-        atomicAdd(&expert_counts[expert], 1);
-    }
-}
-
-// ============================================================================
-// Kernel 3: Exclusive prefix sum (scan) on expert_counts to produce
-// expert_offsets.  Single block, single thread (n_experts is small).
-// ============================================================================
-
-__global__ void exclusive_scan_kernel(const int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
-                                      int n_experts) {
-    if (threadIdx.x == 0) {
-        int32_t running = 0;
-        for (int i = 0; i < n_experts; ++i) {
-            offsets[i] = running;
-            running += counts[i];
-        }
-        offsets[n_experts] = running;  // total
-    }
-}
-
-// ============================================================================
-// Kernel 4: Scatter token IDs into sorted_token_ids based on expert assignment.
-//
-// For each (token, j) pair where expert_indices[token*top_k + j] == e,
-// place the token into the e-th bucket of sorted_token_ids.
-// We use atomicAdd on a write-position counter per expert.
-// ============================================================================
-
-__global__ void scatter_token_ids_kernel(const int32_t* __restrict__ expert_indices,
-                                         const int32_t* __restrict__ expert_offsets, int n_tokens, int top_k,
-                                         int32_t* __restrict__ sorted_token_ids,
-                                         int32_t* __restrict__ expert_write_pos) {  // [n_experts], init to 0
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_tokens * top_k;
-    if (idx < total) {
-        int token = idx / top_k;
-        int expert = expert_indices[idx];
-        int pos = atomicAdd(&expert_write_pos[expert], 1);
-        sorted_token_ids[expert_offsets[expert] + pos] = token;
-    }
-}
-
-// ============================================================================
 // Kernel 5: Gather -- reorder tokens by expert assignment
 //
 // For each position i in sorted_token_ids:
@@ -547,25 +491,6 @@ __global__ void moe_gather_kernel_impl(const T* __restrict__ input,
 //
 // We'll store this auxiliary array right after sorted_token_ids in memory.
 // ============================================================================
-
-// Extended scatter kernel that also writes flat indices.
-__global__ void scatter_token_ids_with_flat_idx_kernel(
-    const int32_t* __restrict__ expert_indices, const int32_t* __restrict__ expert_offsets, int n_tokens,
-    int top_k, int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
-    int32_t* __restrict__ expert_write_pos, int32_t* __restrict__ token_to_expanded) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_tokens * top_k;
-    if (idx < total) {
-        int token = idx / top_k;
-        int expert = expert_indices[idx];
-        int pos = atomicAdd(&expert_write_pos[expert], 1);
-        int dest = expert_offsets[expert] + pos;
-        sorted_token_ids[dest] = token;
-        sorted_flat_idx[dest] = idx;  // flat index into expert_weights
-        if (token_to_expanded)
-            token_to_expanded[idx] = dest;  // inverse map
-    }
-}
 
 // Scatter-add kernel using the flat index to look up weights.
 // Reads from T* expert output (float or half), always accumulates into float* output.
@@ -761,12 +686,6 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
 // ============================================================================
 // Utility: zero-initialize device memory
 // ============================================================================
-
-__global__ void zero_int32_kernel(int32_t* data, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n)
-        data[idx] = 0;
-}
 
 __global__ void zero_float_kernel(float* data, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
