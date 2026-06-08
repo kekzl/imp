@@ -18,6 +18,7 @@
 // `feedback_gguf_mxfp4_legacy_2026_05_24` for the full rule.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/logging.h"
@@ -30,9 +31,9 @@
 
 namespace imp {
 
-void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
+void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    if (!(wcache_.nvfp4_decode_mode == 0 && wcache_.cutlass_mxfp4.empty() &&
+    if (!(wcache_->nvfp4_decode_mode == 0 && wcache_->cutlass_mxfp4.empty() &&
           cutlass_sm120_mxfp4_available()))
         return;
     // Check if any layer has MXFP4 weights
@@ -62,12 +63,12 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
             check(L.ssm_out);
             check(L.gdn_gate);
         }
-        if (max_k > 0 && !qscratch_.mxfp4_act_sf) {
-            qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-            qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size, "mxfp4_act_sf");
-            if (!qscratch_.cutlass_act_data) {
-                qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-                qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size,
+        if (max_k > 0 && !qscratch_->mxfp4_act_sf) {
+            qscratch_->mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
+            qscratch_->mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_->mxfp4_act_sf_size, "mxfp4_act_sf");
+            if (!qscratch_->cutlass_act_data) {
+                qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+                qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
                                                         "cutlass_act_data");
             }
         }
@@ -98,8 +99,8 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
                     // Track bulk for shutdown cleanup (same pattern as Phase 3).
                     // Phase 3 and Phase 3c are mutually exclusive in practice
                     // (gated on `nvfp4_decode_mode`), so only one writes here.
-                    wcache_.fp16_bulk_data = d_fp16_bulk;
-                    wcache_.fp16_bulk_data_size = fp16_total;
+                    wcache_->fp16_bulk_data = d_fp16_bulk;
+                    wcache_->fp16_bulk_data_size = fp16_total;
                     size_t offset = 0;
                     for (auto& sw : small_weights) {
                         size_t bytes = static_cast<size_t>(sw.N) * sw.K * sizeof(half);
@@ -107,7 +108,7 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
                         offset += bytes;
                         dequant_mxfp4_to_fp16(sw.ptr, sw.N, sw.K, d_fp16, stream);
                         int64_t shape[2] = {sw.N, sw.K};
-                        wcache_.fp16[sw.ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
+                        wcache_->fp16[sw.ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
                     }
                     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                     IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
@@ -115,8 +116,8 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
                     for (int i = 0; i < cfg.n_layers; i++) {
                         TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
                         auto replace = [&](Tensor& w, QType& qt) {
-                            auto it = wcache_.fp16.find(w.data);
-                            if (it != wcache_.fp16.end() && qt == QType::MXFP4) {
+                            auto it = wcache_->fp16.find(w.data);
+                            if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
                                 w = it->second;
                                 qt = QType::F16;
                             }
@@ -135,12 +136,12 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
                 return;
             if (w.ndim < 2 || w.shape[1] % 32 != 0)
                 return;
-            if (wcache_.cutlass_mxfp4.count(w.data))
+            if (wcache_->cutlass_mxfp4.count(w.data))
                 return;
             CutlassMxFP4Weight mw;
             if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
                 mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
-                wcache_.cutlass_mxfp4[w.data] = mw;
+                wcache_->cutlass_mxfp4[w.data] = mw;
                 mx_count++;
             }
         };
@@ -162,7 +163,7 @@ void GraphExecutor::pre_dequant_phase3c_standalone_mxfp4_(
         register_mx(model_->output_proj(), model_->out_proj_.qtype, true);
         if (mx_count > 0) {
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_.use_mxfp4 = true;
+            wcache_->use_mxfp4 = true;
 
             // In-place unpack: raw blocks are compacted to [N, K/2] within the
             // SAME buffer. No separate data allocation, no free needed.

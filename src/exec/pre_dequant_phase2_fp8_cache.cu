@@ -11,6 +11,7 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
@@ -29,12 +30,12 @@ using imp::pre_dequant_internal::for_each_dense_weight;
 
 namespace imp {
 
-void GraphExecutor::pre_dequant_phase2_fp8_cache_(
+void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
     size_t& remaining_budget, cudaStream_t stream) {
     size_t fp8_budget = std::min(remaining_budget, budget.fp8_cache_bytes);
     size_t phase2_fp16_bytes = 0;
-    if (wcache_.use_fp8) {
+    if (wcache_->use_fp8) {
         // --- FP16 weight cache for native NVFP4 ---
         // FP8 quantization error (~0.5%/layer) compounds over 36 layers and
         // shifts argmax in 152K vocab. vLLM avoids this by dequanting NVFP4→FP16
@@ -45,7 +46,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
         size_t fp16_all_bytes = 0;
         {
             auto cache_weight_fp16 = [&](const Tensor& w) {
-                if (!w.data || wcache_.fp16.count(w.data))
+                if (!w.data || wcache_->fp16.count(w.data))
                     return;
                 QType qtype = w.qtype;
                 if (qtype != QType::NVFP4)
@@ -77,7 +78,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
 
                 int64_t fp16_shape[4] = {static_cast<int64_t>(rows), logical_K, 0, 0};
                 Tensor fp16_tensor(fp16_buf, QType::F16, 2, fp16_shape, true);
-                wcache_.fp16[w.data] = fp16_tensor;
+                wcache_->fp16[w.data] = fp16_tensor;
                 fp16_all_count++;
                 fp16_all_bytes += fp16_bytes;
             };
@@ -114,9 +115,9 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                 return;
             if (!dequant_gpu_supported(qtype) && qtype != QType::NVFP4)
                 return;
-            if (wcache_.fp16.count(w.data))
+            if (wcache_->fp16.count(w.data))
                 return;
-            if (wcache_.fp8.count(w.data))
+            if (wcache_->fp8.count(w.data))
                 return;
             if (fp8_exhausted)
                 return;
@@ -143,7 +144,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
         // Same priority order — attention first, then SSM/FFN
         for_each_dense_weight(*model_, cfg, collect_weight_fp8);
 
-        if (!fp8_entries.empty() && qscratch_.dequant) {
+        if (!fp8_entries.empty() && qscratch_->dequant) {
             // Pre-allocate reusable calibration temp buffers
             int max_grid = 0;
             size_t total_fp8_bytes = 0;
@@ -185,16 +186,16 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                     nv.tensor_scale = e.weight.tensor_scale;
                     nv.N = rows;
                     nv.K = cols * 2;
-                    dequantize_nvfp4_to_fp16(nv, qscratch_.dequant, stream);
+                    dequantize_nvfp4_to_fp16(nv, qscratch_->dequant, stream);
                 } else {
-                    dequant_gpu(e.weight.data, qscratch_.dequant, e.qtype, rows, cols, stream);
+                    dequant_gpu(e.weight.data, qscratch_->dequant, e.qtype, rows, cols, stream);
                 }
 
                 void* fp8_buf = d_fp8_bulk + fp8_offset;
                 fp8_offset += e.n_elems;
 
                 // Async calibrate + quantize (no host sync)
-                calibrate_and_quantize_fp8_async(qscratch_.dequant, fp8_buf, static_cast<int>(e.n_elems),
+                calibrate_and_quantize_fp8_async(qscratch_->dequant, fp8_buf, static_cast<int>(e.n_elems),
                                                  d_block_maxes, max_grid, d_absmax,
                                                  d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
@@ -202,7 +203,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                     (e.qtype == QType::NVFP4) ? e.weight.shape[1] * 2 : e.weight.shape[1],
                     e.weight.shape[2], e.weight.shape[3]};
                 Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.weight.ndim, fp8_shape, true);
-                wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                wcache_->fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                 actual_count++;
             }
 
@@ -213,8 +214,8 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
                 IMP_CUDA_CHECK_LOG(cudaMemcpy(h_scales.data(), d_scales_all, actual_count * sizeof(float),
                                               cudaMemcpyDeviceToHost));
                 for (int i = 0; i < actual_count; i++) {
-                    auto it = wcache_.fp8.find(fp8_entries[i].orig_ptr);
-                    if (it != wcache_.fp8.end()) {
+                    auto it = wcache_->fp8.find(fp8_entries[i].orig_ptr);
+                    if (it != wcache_->fp8.end()) {
                         it->second.host_scale = h_scales[i];
                     }
                 }
@@ -223,17 +224,17 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
             IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
             IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
             // Track bulk buffers for cleanup
-            wcache_.fp8_overflow_scales = d_scales_all;
-            wcache_.fp8_overflow_count = actual_count;
-            wcache_.fp8_overflow_data = d_fp8_bulk;
-            wcache_.fp8_overflow_data_size = total_fp8_bytes;
+            wcache_->fp8_overflow_scales = d_scales_all;
+            wcache_->fp8_overflow_count = actual_count;
+            wcache_->fp8_overflow_data = d_fp8_bulk;
+            wcache_->fp8_overflow_data_size = total_fp8_bytes;
             fp8_count = actual_count;
         }
 
         if (fp8_count > 0) {
-            wcache_.fp8_bytes = fp8_total;
+            wcache_->fp8_bytes = fp8_total;
             size_t fp16_equivalent = 0;
-            for (auto& [ptr, entry] : wcache_.fp8) {
+            for (auto& [ptr, entry] : wcache_->fp8) {
                 fp16_equivalent += entry.weight.numel() * sizeof(half);
             }
             IMP_LOG_INFO("FP8 weight cache: %d tensors, %.2f MiB (%.2f MiB saved vs FP16)", fp8_count,
@@ -243,7 +244,7 @@ void GraphExecutor::pre_dequant_phase2_fp8_cache_(
         }
     }
 
-    deduct_budget(remaining_budget, wcache_.fp8_bytes + phase2_fp16_bytes);
+    deduct_budget(remaining_budget, wcache_->fp8_bytes + phase2_fp16_bytes);
 }
 
 }  // namespace imp

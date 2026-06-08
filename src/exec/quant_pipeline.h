@@ -3,6 +3,7 @@
 #include "core/tensor.h"            // Tensor, QType (used by Nvfp4DecodeContext + signatures)
 #include "runtime/storage_planner.h" // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
+#include "runtime/config.h"          // RuntimeConfig (runtime_config() accessor)
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <vector>
@@ -13,7 +14,6 @@ namespace imp {
 class Model;
 class VRAMAllocator;
 struct ModelConfig;
-struct RuntimeConfig;
 struct VRAMBudget;     // defined in exec/executor.h
 struct WeightCaches;   // defined in exec/executor.h
 struct QuantScratch;
@@ -60,7 +60,7 @@ public:
     void build(const Model& model, const RuntimeConfig& rcfg, VRAMAllocator& alloc,
                const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
                QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
-               MoEWorkspace& moe);
+               MoEWorkspace& moe, int max_tokens);
 
 private:
     // Build context (set at the top of build(); the phase methods read these
@@ -75,6 +75,15 @@ private:
     WeightRegistry* registry_ = nullptr;
     PlanHints* hints_ = nullptr;
     MoEWorkspace* moe_ = nullptr;
+    int max_tokens_ = 0;   // workspace max token count (build-time scratch sizing)
+
+    // Accessor mirroring GraphExecutor::runtime_config() so the moved phase
+    // methods read the config exactly as before. Set in build() from the
+    // owning GraphExecutor's already-validated config.
+    const RuntimeConfig& runtime_config() const noexcept {
+        static const RuntimeConfig kDefault;
+        return runtime_config_ ? *runtime_config_ : kDefault;
+    }
 
     // Owned build-only state.
     StoragePlan storage_plan_;

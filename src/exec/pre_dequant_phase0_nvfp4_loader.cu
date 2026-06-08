@@ -10,6 +10,7 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
@@ -24,7 +25,7 @@
 
 namespace imp {
 
-void GraphExecutor::pre_dequant_phase0_promote_nvfp4_sidecars_(
+void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     const ModelConfig& cfg, cudaStream_t stream) {
     if (!cfg.is_nvfp4_prequant)
         return;
@@ -311,7 +312,7 @@ void GraphExecutor::pre_dequant_phase0_promote_nvfp4_sidecars_(
     }
 }
 
-void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
+void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
     const ModelConfig& cfg, cudaStream_t stream) {
     if (!cfg.is_nvfp4_prequant)
         return;
@@ -320,7 +321,7 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
     // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
     //
     // Phase 0 set qtype=NVFP4 directly on the main weight Tensor sidecars
-    // but did NOT populate wcache_.nvfp4 (the legacy decode-cache map that
+    // but did NOT populate wcache_->nvfp4 (the legacy decode-cache map that
     // Phase 3b iterates to build the CUTLASS cache). Without this loop,
     // prefill (M>1) for prequant SafeTensors models falls through to
     // gemm_nvfp4 dequant→cuBLAS in executor_kernels.cu — slower AND
@@ -367,7 +368,7 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
                 return;
-            if (wcache_.cutlass_nvfp4.count(w.data))
+            if (wcache_->cutlass_nvfp4.count(w.data))
                 return;
             NvFP4QuantResult tmp;
             tmp.packed_data = w.data;
@@ -380,12 +381,12 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
             // per-16 FP8 micro_scales, not SfAtom). Without this, decode falls
             // through to the CUTLASS_NVFP4 case which uses source_scales —
             // but that path produced zero output on some models.
-            wcache_.nvfp4[w.data] = tmp;
+            wcache_->nvfp4[w.data] = tmp;
 
             CutlassNvFP4Weight cw;
             convert_nvfp4_to_cutlass(tmp, cw, stream);
             if (cw.data) {
-                wcache_.cutlass_nvfp4[w.data] = cw;
+                wcache_->cutlass_nvfp4[w.data] = cw;
                 ct_total += cw.sf_bytes;
                 ct_count++;
             }
@@ -412,7 +413,7 @@ void GraphExecutor::pre_dequant_phase0b_register_cutlass_nvfp4_(
 
         if (ct_count > 0) {
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_.cutlass_nvfp4_bytes += ct_total;
+            wcache_->cutlass_nvfp4_bytes += ct_total;
             IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
                          ct_total / (1024.0 * 1024.0));
         }
