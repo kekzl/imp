@@ -34,7 +34,7 @@ namespace imp {
 
 void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // Configure shared workspace for dense FFN phase
-    ws_.configure_ffn_workspace(ws_.shared_max_tokens());
+    configure_ffn_workspace(ws_.shared_max_tokens());
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);

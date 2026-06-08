@@ -39,7 +39,7 @@ static inline int get_ssm_layer(const std::vector<int>& ssm_layer_map, int layer
 
 void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t stream) {
     // Configure shared workspace for SSM phase
-    ws_.configure_ssm_workspace(ws_.shared_max_tokens());
+    configure_ssm_workspace(ws_.shared_max_tokens());
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
@@ -256,7 +256,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 // ---------------------------------------------------------------------------
 
 void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
-    ws_.configure_ssm_workspace(ws_.shared_max_tokens());
+    configure_ssm_workspace(ws_.shared_max_tokens());
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);

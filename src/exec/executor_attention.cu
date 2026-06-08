@@ -180,7 +180,7 @@ static void clear_l2_persist(cudaStream_t stream) { clear_l2_policy(stream); }
 
 void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream) {
     // Configure shared workspace for attention phase
-    ws_.configure_attn_workspace(ws_.shared_max_tokens());
+    configure_attn_workspace(ws_.shared_max_tokens());
 
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
