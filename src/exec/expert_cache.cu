@@ -1,4 +1,5 @@
 #include "executor.h"
+#include "exec/expert_cache.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
