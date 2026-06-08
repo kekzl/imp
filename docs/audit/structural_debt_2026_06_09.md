@@ -167,4 +167,52 @@ PRs #629–#631.
   `imp::test::HasCudaDevice()` + `SKIP_IF_NO_CUDA()`; the 11 local macro
   definitions and 6 local `HasCudaDevice()` re-definitions removed and replaced
   with the include. `get_model_path()` dedup (3 files) left for a follow-up.
-</content>
+
+---
+
+## Verification pass — 2026-06-09 (same session, after shipping C5–C8)
+
+Before acting on the bigger findings each was re-verified against the actual
+code + the 2026-06-08 principle **"split on conflation, not size; no speculative
+abstraction."** The cheap/genuine items shipped; the big-ticket findings did
+**not survive verification** — the fresh fan-out audit over-flagged them (the
+same false-positive pattern flagged under "Refuted" above). Evidence-backed
+verdicts:
+
+- **C5 — DONE (PR #636).** Bridged at engine init (imp.conf → `EngineConfig`,
+  OR semantics); RuntimeConfig defaults realigned to the real (off) defaults so
+  no-imp.conf embedders are unaffected. Functionally verified:
+  `prefix_cache=true` → engine logs "Prefix caching enabled". This was a genuine
+  bug (documented keys silently inert), not just structure.
+- **C8 — DONE (PR #635).** 5 dead kernels removed (116 LOC); clean link proves
+  no launch site.
+- **C3 — partial DONE (PR #637), rest DECLINED.** Real GPTQ field-assignment
+  duplication extracted (`assign_gptq_field`, 58→24 LOC). The NVFP4 fused-scale
+  slicing is **parallel structure, not duplication** (3-way-by-head vs
+  2-way-by-half, correctness-critical with inline bug-history comments) — left
+  alone. The full ladder→registry rewrite is high-risk (mis-mapped tensor name
+  = garbage output) for cosmetic gain — declined.
+- **C1 — REFUTED.** The "~2,000 LOC repeated core loop" is **already factored**:
+  `attention_paged_common.cuh` owns `online_softmax_step`,
+  `compute_context_range`, `block_token_range`, `compute_kv_tile_bounds`,
+  `apply_score_masks`, `crosswarp_reduce_*`, cp.async wrappers — and all 6
+  variants `#include` it and call those helpers (4–18 uses each, verified). What
+  remains per-variant is format-specific K/V dequant, inherently divergent and
+  correctly separated. No traits-template dedup warranted.
+- **C2 — REFUTED.** `gdn.cu` / `gemm.cu` / `sampling.cu` / `json_schema.cpp` are
+  each one cohesive domain (GDN layer / GEMM / sampling / schema→grammar), not
+  conflated god-files — the same call the 2026-06-08 audit already made for
+  `gdn.cu` ("domain-cohesive, don't touch"). Size ≠ smell. Splitting would be
+  low-value churn against the project's own guidance.
+- **C4 — REFUTED as a bug-class.** Both loaders handle Gemma SWA/RoPE-local: the
+  SafeTensors path via `hf_config_loader.cpp` (`sliding_window`, `swa_layers`,
+  `rope_local_theta` at lines 293/512-556) and GGUF inline from metadata. They
+  parse the same concepts format-appropriately — not a divergence bug.
+  Consolidating two working format-specific parsers is speculative; declined
+  absent a concrete bug.
+
+**Net:** the genuine, safe, high-value debt (C5 bug + C6/C7 hygiene + C8 dead
+code + the real C3 dedup) is shipped. The remaining big-ticket findings were
+verified non-debt or low-value-high-risk. Lesson reinforced: a fan-out audit
+surfaces candidates; each must be re-checked against the real code (with `tools/`
+in scope) and the conflation-not-size principle before it is acted on.
