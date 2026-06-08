@@ -12,10 +12,13 @@ description states when to fire AND when not to — keep that property when edit
 | [server-api](server-api/SKILL.md) | imp-server endpoints (OpenAI + Anthropic), streaming, json_schema, tool calling, cache_control, validation tools | check-degeneration |
 | [add-model-arch](add-model-arch/SKILL.md) | New-architecture integration checklist + wrong-output diagnostic fingerprints | quant-formats, check-degeneration |
 | [quant-formats](quant-formats/SKILL.md) | GGUF/NVFP4/FP8 formats, StorageTier dispatch contract, decode cache, KV dtypes | sm120-cuda-expert |
+| [codebase-audit](codebase-audit/SKILL.md) | Structural-debt / dead-code / god-file / flag audits + the verification discipline that stops fan-out over-flagging; `docs/audit/` convention | building-and-testing, check-degeneration |
+| [docs-sync](docs-sync/SKILL.md) | Keeping architecture.md / README / GOAL.md / supported-models.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule | benchmark-cuda (perf), codebase-audit |
 
 Boundaries (to avoid trigger collisions):
 
 - *Measure* perf → benchmark-cuda · *write* the kernel → sm120-cuda-expert · *is the output still sane* → check-degeneration.
 - *Build/test mechanics & CI* → building-and-testing · *model output via HTTP* → server-api · *model loads but is wrong* → add-model-arch · *bytes/scales/tiers* → quant-formats.
+- *Is this code dead / should we refactor* → codebase-audit · *keep the docs consistent with the code* → docs-sync. Perf-number measurement + `perf_baseline.json` refresh stay with benchmark-cuda (docs-sync only reconciles the surrounding prose).
 
 Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md).
