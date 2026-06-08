@@ -32,22 +32,41 @@ Two things that live in `executor_workspace*.cu` are NOT workspace and stay on
   classification (`model_->layer(i).moe_gate.data != nullptr`). Model territory
   (ModelProfile-adjacent), not workspace. Left in place.
 
-**In scope (moves into `Workspace`):** the buffer members + the allocation/sizing
-lifecycle —
-- members: `persistent_workspace_`(+size), `shared_workspace_`(+size,+max_tokens),
+**Boundary refinement (found while planning — keeps the move verbatim).**
+`executor_workspace_buffers.cu::allocate_auxiliary_buffers` (~870 lines) is a
+*cross-cutting buffer-allocation hub*: it allocates `qscratch_` (QuantScratch),
+the `moe_` (MoEWorkspace) buffers, `attn_scores_buf_`, `fp32_accum_buf_`, and
+`nvfp4_dequant_ws_buf_` together — those belong to the quant / MoE / attention
+concerns, not to "the workspace." Splitting that hub would be surgery on a
+god-method (exactly the silent-sizing-bug hazard). So it STAYS on GraphExecutor
+(its buffers go to their own components later). This also drops the
+`fp32_accum_buf_` (~23) and `attn_scores_buf_` (~7) hot-path churn.
+
+By contrast `executor_workspace.cu` allocates ONLY `shared_workspace_` and
+`persistent_workspace_` — the shared/persistent scratch arena IS cleanly
+separable. That is the `Workspace` component:
+
+**In scope (moves into `Workspace`):**
+- members: `shared_workspace_`(+size, +max_tokens), `persistent_workspace_`(+size),
   `attn_shared_size_`, `ffn_shared_size_`, `moe_shared_size_`, `ssm_shared_size_`,
-  `fp32_accum_buf_`, `attn_scores_buf_`(+size) + `attn_scores_` Tensor,
-  `nvfp4_dequant_ws_buf_`(+size), `decode_persistent_size_`, `decode_shared_size_`,
-  `active_workspace_`, `saved_prefill_ws_` (the `SavedWorkspace` swap state).
-- methods: `allocate_persistent_workspace`, `allocate_shared_workspace`,
-  `allocate_decode_workspace`, `allocate_auxiliary_buffers`, `allocate_workspaces`,
-  `compute_shared_sizes`, `configure_attn_workspace`, `configure_ffn_workspace`,
-  `configure_moe_workspace`, `configure_ssm_workspace`, `use_workspace`,
-  `resize_workspace`, `free_buffers` (workspace portion), `ensure_logits_pinned`,
-  `release_moe_batch_buf`, `workspace_estimate`.
+  `decode_persistent_size_`, `decode_shared_size_`, `decode_workspace_`,
+  `decode_shared_workspace_`, `active_workspace_`, `saved_prefill_ws_`
+  (the `SavedWorkspace` decode/prefill swap state).
+- methods (from `executor_workspace.cu` + `executor_workspace_config.cu`):
+  `compute_shared_sizes`, `allocate_persistent_workspace`,
+  `allocate_shared_workspace`, `allocate_decode_workspace`, `workspace_estimate`,
+  `configure_attn_workspace`, `configure_ffn_workspace`, `configure_moe_workspace`,
+  `configure_ssm_workspace`, `use_workspace`, `resize_workspace`.
+
+**Stays on GraphExecutor:** `allocate_auxiliary_buffers` + `free_buffers` (the
+cross-cutting alloc/free hub), `release_moe_batch_buf`, `ensure_logits_pinned`,
+and the buffers `qscratch_`, `moe_`, `attn_scores_buf_`, `fp32_accum_buf_`,
+`nvfp4_dequant_ws_buf_` (allocated by the hub; the hot path reads them as
+GraphExecutor members, unchanged). Also `view_tokens` + `layer_has_*` as above.
 
 The exact member/method set is finalized during implementation (build catches any
-straggler); this list is the cohesive cluster.
+straggler); `allocate_workspaces` (the orchestrator) stays on GraphExecutor and
+calls `ws_.allocate_*` for the workspace portion.
 
 ## Goal & constraints
 
@@ -70,20 +89,19 @@ Access pattern (zero overhead):
 ```cpp
 // Workspace exposes inline accessors; the hot path reads through them.
 void* shared() const { return shared_workspace_; }
-void* fp32_accum() const { return fp32_accum_buf_; }
-const Tensor& attn_scores() const { return attn_scores_; }
-// ... etc.
+void* persistent() const { return persistent_workspace_; }
+int shared_max_tokens() const { return shared_workspace_max_tokens_; }
+// ... configure_attn/ffn/moe/ssm(n), use_workspace(...), resize(...) as methods.
 ```
-Hot-path call sites change mechanically:
+Hot-path call sites change mechanically (the refined-scope set, ~40 sites):
 - `shared_workspace_` → `ws_.shared()` (~17 sites)
-- `fp32_accum_buf_` → `ws_.fp32_accum()` (~23 sites, 5 TUs — the gemma-4 fp32 path)
-- `attn_scores_buf_` / `attn_scores_` → `ws_.attn_scores*()` (~7 sites)
 - `configure_attn_workspace(n)` → `ws_.configure_attn(n)` (and ffn/moe/ssm) (~9)
-- `persistent_workspace_` / `use_workspace` / `resize_workspace` → `ws_.x()` (~10)
+- `persistent_workspace_` / `use_workspace` / `resize_workspace` /
+  `shared_workspace_max_tokens_` → `ws_.x()` (~14)
 
-`GraphExecutor` keeps a couple of thin accessors it already exposes publicly
-(`active_workspace()`, the attn-scores width getter at executor.h:190) — they
-delegate to `ws_`.
+`fp32_accum_buf_` and `attn_scores_buf_` are NOT moved (allocated by the hub that
+stays) — so their ~30 hot-path sites are untouched. `GraphExecutor` keeps its
+public `active_workspace()` getter as a thin delegate to `ws_`.
 
 ## Data flow
 
