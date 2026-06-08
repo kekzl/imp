@@ -107,6 +107,7 @@ set(IMP_MEMORY_SOURCES
 
 set(IMP_MODEL_SOURCES
     src/model/model.cpp
+    src/model/model_profile.cpp
     src/model/gguf_loader.cpp
     src/model/safetensors_loader.cpp
     src/model/llm_compressor_loader.cpp
