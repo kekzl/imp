@@ -2,6 +2,7 @@
 
 #include "model/hf_config_loader.h"
 #include "model/model_config.h"
+#include "model/model_profile.h"
 #include "model/mtp_head.h"
 #include "model/tokenizer.h"
 #include <optional>
@@ -19,6 +20,12 @@ public:
     ~Model();
 
     const ModelConfig& config() const { return config_; }
+
+    // Architecture-derived facts (D1). Built once via build_profile() after the
+    // layers are loaded, before the engine-init resolvers read them. Read-only
+    // everywhere else.
+    const ModelProfile& profile() const { return profile_; }
+    void build_profile() { profile_ = derive_model_profile(*this, config_); }
 
     // Sampling/EOS defaults shipped by the model author in
     // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
@@ -56,6 +63,7 @@ public:
     size_t estimate_expert_bytes() const;
 
     ModelConfig config_;
+    ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
     // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)

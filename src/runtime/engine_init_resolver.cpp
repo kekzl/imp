@@ -122,15 +122,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
 // scan-output divergence vs llama.cpp.
 void Engine::init_resolve_ssm_dtype_() {
     const auto& mcfg = model_->config();
-    bool has_gdn_for_dtype = false;
-    if (mcfg.ssm_state_size > 0) {
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            if (model_->layer(i).gdn_gate.data != nullptr) {
-                has_gdn_for_dtype = true;
-                break;
-            }
-        }
-    }
+    const bool has_gdn_for_dtype = (mcfg.ssm_state_size > 0) && model_->profile().is_gdn;
     if (config_.ssm_state_dtype == QType::F32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
         config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
@@ -193,11 +185,6 @@ void Engine::init_resolve_quant_flags_() {
     }
 
     // NVFP4 decode mode
-    int n_gdn_auto = 0;
-    for (int i = 0; i < mcfg.n_layers; i++)
-        if (model_->layer(i).gdn_gate.data != nullptr)
-            n_gdn_auto++;
-
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
 
     if (config_.use_nvfp4_decode < 0) {
@@ -212,8 +199,8 @@ void Engine::init_resolve_quant_flags_() {
                                               (config_.nvfp4_decode_all &&
                                                (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
                                                 wq_qtype == QType::Q2_K)));
-        const bool is_moe = (mcfg.n_experts > 0);
-        const bool is_gdn = (n_gdn_auto > 0);
+        const bool is_moe = model_->profile().is_moe;
+        const bool is_gdn = model_->profile().is_gdn;
 
         const bool sub8bit_qtype = (wq_qtype == QType::Q4_K || wq_qtype == QType::Q3_K ||
                                      wq_qtype == QType::Q2_K || is_iq4);
@@ -240,9 +227,8 @@ void Engine::init_resolve_quant_flags_() {
             // pre_dequant_weights to preserve recurrent state precision.
             config_.use_nvfp4_decode = 2;
             IMP_LOG_INFO(
-                "NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
-                "ssm_in/ssm_out excluded for precision)",
-                n_gdn_auto);
+                "NVFP4 decode: auto → mode 2 (GDN model — "
+                "ssm_in/ssm_out excluded for precision)");
         } else {
             const char* why = is_moe ? "MoE" : "non-Q*_K-6-8bit";
             config_.use_nvfp4_decode = 2;
@@ -289,7 +275,7 @@ void Engine::init_resolve_quant_flags_() {
     // and then never used (was happening when the disable lived inside
     // init_kv_cache, ~3 MiB pure waste). Dual-path quant keeps the FP8 path
     // for FFN even on GDN — only attention drops to FP16.
-    if (config_.use_fp8_prefill && !config_.dual_path_quant && n_gdn_auto > 0) {
+    if (config_.use_fp8_prefill && !config_.dual_path_quant && model_->profile().is_gdn) {
         IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
         config_.use_fp8_prefill = 0;
     }

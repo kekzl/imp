@@ -440,6 +440,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (runtime_config_.runtime.deterministic || runtime_config_.runtime.deterministic_gemm)
         process_diag_set_deterministic_gemm(true);
 
+    // D1: derive the architecture profile ONCE, before the resolvers below that
+    // currently re-derive GDN/SSM/MoE classification inline. The layers are
+    // loaded by now (the resolvers read layer().gdn_gate.data directly).
+    model_->build_profile();
+    {
+        const auto& mp = model_->profile();
+        IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d",
+                     mp.is_moe, mp.is_gdn, mp.is_ssm, mp.is_hybrid, mp.is_dense);
+    }
+
     init_apply_debug_raw_overrides_();
     init_resolve_kv_dtype_policy_();
     init_resolve_ssm_dtype_();
