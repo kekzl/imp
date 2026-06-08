@@ -7,6 +7,7 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
@@ -22,11 +23,11 @@ using imp::pre_dequant_internal::infer_tier_from_wcache;
 
 namespace imp {
 
-void GraphExecutor::pre_dequant_phase4_tensor_registry_(
+void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     const ModelConfig& cfg, cudaStream_t stream) {
     (void)stream;  // unused but kept for signature consistency
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
-    registry_.clear();
+    registry_->clear();
     // Explicit kind overrides t.kind which is UNKNOWN after weight_upload.cu
     // creates fresh Tensor descriptors (TensorKind is not preserved through
     // the upload code paths). Phase 5 plan-driven allocation requires kind to
@@ -34,15 +35,15 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
-        StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
-        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
-        auto& h = registry_.handle(id);
+        StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
+        TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_->handle(id);
         h.primary_tier = tier;
         h.source_data = t.data;
         h.source_qtype = t.qtype;
         h.source_scales = t.scales;
         h.source_tensor_scale = t.tensor_scale;
-        borrow_payload_from_wcache(h, wcache_, t.data);
+        borrow_payload_from_wcache(h, *wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
         // Prefill (M>1): FP16 cuBLAS > FP8 cuBLAS > CUTLASS NVFP4 > source dequant
@@ -53,13 +54,13 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         // Decode uses source NVFP4 data for GEMV (single-token, no compounding).
         h.prefill_tier = tier;
         h.decode_tier = tier;
-        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp16.count(t.data)) {
+        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp16.count(t.data)) {
             h.prefill_tier = StorageTier::FP16;
             // Decode: use source NVFP4 data for GEMV (not the FP16 cache)
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.fp8.count(t.data)) {
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp8.count(t.data)) {
             h.prefill_tier = StorageTier::FP8;
             h.decode_tier = StorageTier::FP8;
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_.nvfp4.count(t.data)) {
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->nvfp4.count(t.data)) {
             h.decode_tier = StorageTier::NVFP4;
         }
         return id;
@@ -106,29 +107,29 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
 
         // Borrow nvfp4_moe pointers for packed 3D expert NVFP4 cache (Task 3.4)
         {
-            auto it = wcache_.nvfp4_moe.find(L.expert_gate_packed.data);
-            L.nvfp4_moe_gate_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+            auto it = wcache_->nvfp4_moe.find(L.expert_gate_packed.data);
+            L.nvfp4_moe_gate_ptr = (it != wcache_->nvfp4_moe.end()) ? &it->second : nullptr;
         }
         {
-            auto it = wcache_.nvfp4_moe.find(L.expert_up_packed.data);
-            L.nvfp4_moe_up_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+            auto it = wcache_->nvfp4_moe.find(L.expert_up_packed.data);
+            L.nvfp4_moe_up_ptr = (it != wcache_->nvfp4_moe.end()) ? &it->second : nullptr;
         }
         {
-            auto it = wcache_.nvfp4_moe.find(L.expert_down_packed.data);
-            L.nvfp4_moe_down_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+            auto it = wcache_->nvfp4_moe.find(L.expert_down_packed.data);
+            L.nvfp4_moe_down_ptr = (it != wcache_->nvfp4_moe.end()) ? &it->second : nullptr;
         }
         // Borrow fp16 pointers for packed expert tensors (Task 3.4)
         {
-            auto it = wcache_.fp16.find(L.expert_gate_packed.data);
-            L.fp16_packed_gate_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+            auto it = wcache_->fp16.find(L.expert_gate_packed.data);
+            L.fp16_packed_gate_cache = (it != wcache_->fp16.end()) ? &it->second : nullptr;
         }
         {
-            auto it = wcache_.fp16.find(L.expert_up_packed.data);
-            L.fp16_packed_up_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+            auto it = wcache_->fp16.find(L.expert_up_packed.data);
+            L.fp16_packed_up_cache = (it != wcache_->fp16.end()) ? &it->second : nullptr;
         }
         {
-            auto it = wcache_.fp16.find(L.expert_down_packed.data);
-            L.fp16_packed_down_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+            auto it = wcache_->fp16.find(L.expert_down_packed.data);
+            L.fp16_packed_down_cache = (it != wcache_->fp16.end()) ? &it->second : nullptr;
         }
     }
     // Register model-level (non-layer) tensors.
@@ -144,12 +145,12 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     // the GPU pointer. `h.owned_bytes` is set to the allocation size so the
     // registry destructor (`free_owned_storage`) will free it. The wcache_
     // map entry is erased after transfer so that the workspace cleanup's
-    // wcache_.fused_kv loop becomes a no-op — no double-free.
+    // wcache_->fused_kv loop becomes a no-op — no double-free.
     auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
-        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
-        auto& h = registry_.handle(id);
+        TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_->handle(id);
         h.primary_tier = StorageTier::FP16;
         h.payload.fp16.data = static_cast<half*>(t.data);
         h.owned_bytes = static_cast<int64_t>(t.nbytes());
@@ -157,21 +158,21 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
     };
     for (int i = 0; i < cfg.n_layers; ++i) {
         auto& L = const_cast<Model*>(model_)->layer(i);
-        if (auto it = wcache_.fused_kv.find(i); it != wcache_.fused_kv.end()) {
+        if (auto it = wcache_->fused_kv.find(i); it != wcache_->fused_kv.end()) {
             L.fused_kv_id = register_fused(TensorKind::FUSED_KV, it->second);
         }
-        if (auto it = wcache_.fused_gate_up.find(i); it != wcache_.fused_gate_up.end()) {
+        if (auto it = wcache_->fused_gate_up.find(i); it != wcache_->fused_gate_up.end()) {
             L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
         }
     }
-    // Transfer storage ownership: clear the wcache_.fused_kv / fused_gate_up
+    // Transfer storage ownership: clear the wcache_->fused_kv / fused_gate_up
     // maps so the legacy cleanup loops in executor_workspace_buffers.cu find
     // them empty. The underlying pointers live on in the registry handles
-    // and are freed by `registry_.free_owned_storage()` in workspace cleanup.
-    wcache_.fused_kv.clear();
-    wcache_.fused_gate_up.clear();
+    // and are freed by `registry_->free_owned_storage()` in workspace cleanup.
+    wcache_->fused_kv.clear();
+    wcache_->fused_gate_up.clear();
 
-    IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)", registry_.size());
+    IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)", registry_->size());
 
     // Phase 4 (Option C) overlay diagnostic: report ideal vs actual overlay
     // population. The plan enumerates every quantize-able tensor at its
@@ -217,7 +218,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                     break;
             }
         }
-        size_t registry_count = registry_.size();
+        size_t registry_count = registry_->size();
         IMP_LOG_INFO(
             "Phase-4 overlay: registry=%zu cached / plan-ideal=%zu "
             "(uncached %zu remain as native GGUF blocks)",
@@ -237,8 +238,8 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                 if (overlay)
                     ++plan_per_kind[static_cast<int>(e.kind)];
             }
-            for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
-                ++registry_per_kind[static_cast<int>(registry_.handle(id).kind)];
+            for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id) {
+                ++registry_per_kind[static_cast<int>(registry_->handle(id).kind)];
             }
             for (int k = 0; k < static_cast<int>(TensorKind::_COUNT); ++k) {
                 int diff = plan_per_kind[k] - registry_per_kind[k];
@@ -257,9 +258,9 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
             "Phase-4 wcache actual: fp16=%zu fp8=%zu nvfp4=%zu "
             "cutlass_nvfp4=%zu cutlass_mxfp4=%zu nvfp4_moe=%zu "
             "fused_kv=%zu fused_gate_up=%zu",
-            wcache_.fp16.size(), wcache_.fp8.size(), wcache_.nvfp4.size(), wcache_.cutlass_nvfp4.size(),
-            wcache_.cutlass_mxfp4.size(), wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
-            wcache_.fused_gate_up.size());
+            wcache_->fp16.size(), wcache_->fp8.size(), wcache_->nvfp4.size(), wcache_->cutlass_nvfp4.size(),
+            wcache_->cutlass_mxfp4.size(), wcache_->nvfp4_moe.size(), wcache_->fused_kv.size(),
+            wcache_->fused_gate_up.size());
 
         // Stage 1 plan-vs-actual parity diagnostic: for every plan entry whose
         // tier is an overlay, compare the planned tier against the tier the
@@ -272,8 +273,8 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         // (planned overlay → actual native/uncached) is the common benign case.
         {
             // "Present in the planned tier's map?" — NOT first-hit. A GGUF weight
-            // legitimately appears in BOTH wcache_.nvfp4 (its tier) AND
-            // wcache_.cutlass_nvfp4 (the dead G3 SF buffer); first-hit would
+            // legitimately appears in BOTH wcache_->nvfp4 (its tier) AND
+            // wcache_->cutlass_nvfp4 (the dead G3 SF buffer); first-hit would
             // falsely flag it. We ask: did the legacy build put this source into
             // the map the plan chose? If yes → matched (extra overlays are a
             // separate G3 concern). If it landed in a DIFFERENT map → real
@@ -281,18 +282,18 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
             // landed nowhere → evicted (budget / native fallback, benign).
             auto present_in = [&](StorageTier t, const void* src) -> bool {
                 switch (t) {
-                    case StorageTier::FP16: return wcache_.fp16.count(src) > 0;
-                    case StorageTier::FP8: return wcache_.fp8.count(src) > 0;
-                    case StorageTier::NVFP4: return wcache_.nvfp4.count(src) > 0;
-                    case StorageTier::CUTLASS_NVFP4: return wcache_.cutlass_nvfp4.count(src) > 0;
-                    case StorageTier::MXFP4: return wcache_.cutlass_mxfp4.count(src) > 0;
+                    case StorageTier::FP16: return wcache_->fp16.count(src) > 0;
+                    case StorageTier::FP8: return wcache_->fp8.count(src) > 0;
+                    case StorageTier::NVFP4: return wcache_->nvfp4.count(src) > 0;
+                    case StorageTier::CUTLASS_NVFP4: return wcache_->cutlass_nvfp4.count(src) > 0;
+                    case StorageTier::MXFP4: return wcache_->cutlass_mxfp4.count(src) > 0;
                     default: return false;
                 }
             };
             auto any_overlay = [&](const void* src) -> bool {
-                return wcache_.fp16.count(src) || wcache_.fp8.count(src) ||
-                       wcache_.nvfp4.count(src) || wcache_.cutlass_nvfp4.count(src) ||
-                       wcache_.cutlass_mxfp4.count(src);
+                return wcache_->fp16.count(src) || wcache_->fp8.count(src) ||
+                       wcache_->nvfp4.count(src) || wcache_->cutlass_nvfp4.count(src) ||
+                       wcache_->cutlass_mxfp4.count(src);
             };
             int mismatch = 0, evicted = 0, matched = 0;
             for (const auto& e : ideal_plan.entries) {
@@ -311,7 +312,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                     ++matched;
                 } else if (any_overlay(e.source_data)) {
                     ++mismatch;
-                    StorageTier actual = infer_tier_from_wcache(wcache_, e.source_data);
+                    StorageTier actual = infer_tier_from_wcache(*wcache_, e.source_data);
                     IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d actual-tier=%d",
                                  tensor_kind_name(e.kind), static_cast<int>(e.tier),
                                  static_cast<int>(actual));
@@ -346,8 +347,8 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         {
             size_t decode_redundant_count = 0;
             size_t decode_redundant_bytes = 0;
-            for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
-                const auto& h = registry_.handle(id);
+            for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id) {
+                const auto& h = registry_->handle(id);
                 if (!h.can_drop_source())
                     continue;
                 int64_t cols = h.shape[1] > 0 ? h.shape[1] : 1;
@@ -381,7 +382,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         const int ne = cfg.n_experts;
         const int n_layers = cfg.n_layers;
         if (ne > 0) {
-        moe_.per_layer_da_cache.assign(n_layers, MoEWorkspace::PerLayerNvfp4DeviceArgsCache{});
+        moe_->per_layer_da_cache.assign(n_layers, MoEWorkspace::PerLayerNvfp4DeviceArgsCache{});
 
         std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
         std::vector<float>       h_alpha(ne);
@@ -395,7 +396,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
                 for (int e = 0; e < ne; ++e) {
                     if (ids[e] == kInvalidTensorID)
                         return false;
-                    const auto& h = registry_.handle(ids[e]);
+                    const auto& h = registry_->handle(ids[e]);
                     if (!h.payload.cutlass_nvfp4.weight ||
                         !h.payload.cutlass_nvfp4.sf)
                         return false;
@@ -424,7 +425,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
         std::vector<int> failed_layers;
         for (int li = 0; li < n_layers; ++li) {
             const auto& L = model_->layer(li);
-            auto& c = moe_.per_layer_da_cache[li];
+            auto& c = moe_->per_layer_da_cache[li];
             const bool moe_layer = !L.expert_up_ids.empty() || !L.expert_down_ids.empty() ||
                                    !L.expert_gate_ids.empty();
             if (!moe_layer) {
@@ -521,7 +522,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
 
 // Free a GGUF source allocation only when NO path still reads it. The guard
 // below (try_mark) frees a source iff it's a base allocation AND not present in
-// wcache_.nvfp4 / wcache_.cutlass_nvfp4. For decode-cached weights the source
+// wcache_->nvfp4 / wcache_->cutlass_nvfp4. For decode-cached weights the source
 // IS present in those maps (keyed on the source pointer), so they are correctly
 // SKIPPED — M>1 prefill reads the GGUF source (IMMA raw-read / dequant /
 // CUTLASS) under the strict-quality-neutral prefill paths. Net effect today:
@@ -529,7 +530,7 @@ void GraphExecutor::pre_dequant_phase4_tensor_registry_(
 // Phase 4 is an upper bound, not freeable VRAM. The mark also sets
 // Tensor.dropped_source so any raw-deref path that DID lose its source would
 // log a coverage-gap warning instead of reading freed memory.
-void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
+void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
     constexpr bool actually_free = true;
 
@@ -542,7 +543,7 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
     auto try_mark = [&](Tensor& t, TensorID id) -> bool {
         if (id == kInvalidTensorID || !t.data || t.dropped_source)
             return false;
-        const auto& h = registry_.handle(id);
+        const auto& h = registry_->handle(id);
         if (!h.can_drop_source())
             return false;
         if (h.source_data != t.data)
@@ -555,8 +556,8 @@ void GraphExecutor::pre_dequant_phase4b_drop_redundant_sources_(
                 skipped_shared_bytes += bytes;
                 return false;
             }
-            if (wcache_.cutlass_nvfp4.count(t.data) > 0 ||
-                wcache_.nvfp4.count(t.data) > 0) {
+            if (wcache_->cutlass_nvfp4.count(t.data) > 0 ||
+                wcache_->nvfp4.count(t.data) > 0) {
                 ++skipped_shared_count;
                 skipped_shared_bytes += bytes;
                 return false;

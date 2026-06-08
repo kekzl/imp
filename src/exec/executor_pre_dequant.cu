@@ -4,9 +4,11 @@
 //
 // Adding a new phase: write one new src/exec/pre_dequant_phase*.cu file,
 // add it to CMakeLists.txt IMP_EXEC_SOURCES, declare the method on
-// GraphExecutor in executor.h, and call it from pre_dequant_weights() below.
+// QuantPipeline in quant_pipeline.h, and call it from QuantPipeline::build()
+// below.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
 
@@ -15,9 +17,26 @@
 
 namespace imp {
 
+// Delegate: the init-time quantization pipeline lives in QuantPipeline. The
+// engine call site (engine_kv_cache_init.cpp) is unchanged. The four long-lived
+// caches + moe_ stay owned by GraphExecutor and are filled by reference; the
+// forward hot path reads them exactly as before (byte-identical).
 void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
     if (!initialized_ || !model_)
         return;
+    quant_pipeline_.build(*model_, runtime_config(), *vram_alloc_, budget, stream,
+                          wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
+}
+
+void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAllocator& alloc,
+                          const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
+                          QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
+                          MoEWorkspace& moe, int max_tokens) {
+    model_ = &model; runtime_config_ = &rcfg; vram_alloc_ = &alloc;
+    wcache_ = &wcache; qscratch_ = &qscratch; registry_ = &registry;
+    hints_ = &hints; moe_ = &moe; max_tokens_ = max_tokens;
+    // `budget` and `stream` are threaded explicitly through every phase call
+    // below (not stored as members).
     // Skip all weight caching for debugging numerical precision issues
 
     const auto& cfg = model_->config();
@@ -53,8 +72,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // building earlier mis-tiered native-NVFP4 weights as FP16/FP8. A plan-vs-
     // actual parity diagnostic runs in Phase 4 to surface any mismatch before a
     // builder is switched. The plan does not drive allocation yet.
-    hints_.vram_budget_bytes = remaining_budget;
-    storage_plan_ = plan_storage(*model_, cfg, hints_);
+    hints_->vram_budget_bytes = remaining_budget;
+    storage_plan_ = plan_storage(*model_, cfg, *hints_);
     apply_arch_rules_(storage_plan_, cfg);
     if (storage_plan_.failed) {
         IMP_LOG_WARN("StoragePlanner: plan failed — %s", storage_plan_.failure_reason.c_str());
@@ -89,11 +108,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // builders plan-driven without changing behaviour). Driven by the Phase-4
 // plan/actual parity diagnostic: a rule is added here only where parity shows
 // the plan and the legacy path disagree for a real (non-budget) reason.
-void GraphExecutor::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const {
+void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const {
     // FP8 prefill unavailable (sm_120 cuBLAS, and disabled for gemma/GDN): the
     // FP8-floor kinds (WK/WV/QKV_FUSED) the plan picked from the kind table fall
     // back to FP16 at build time. Encode that so the plan matches.
-    if (!wcache_.use_fp8) {
+    if (!wcache_->use_fp8) {
         for (auto& e : plan.entries)
             if (e.tier == StorageTier::FP8)
                 e.tier = StorageTier::FP16;

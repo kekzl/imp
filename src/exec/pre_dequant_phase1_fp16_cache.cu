@@ -12,6 +12,7 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
@@ -25,7 +26,7 @@ using imp::pre_dequant_internal::deduct_budget;
 
 namespace imp {
 
-void GraphExecutor::pre_dequant_phase1_fp16_cache_(
+void QuantPipeline::pre_dequant_phase1_fp16_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
     size_t& remaining_budget, cudaStream_t stream) {
     (void)budget;  // strategy gate retired — plan-driven now
@@ -33,7 +34,7 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     int cached_count = 0;
     bool budget_exhausted = false;
 
-    if (wcache_.use_fp8) {
+    if (wcache_->use_fp8) {
         IMP_LOG_INFO(
             "FP8 prefill: skipping FP16 cache (Phase 1), "
             "all dense weights → FP8 cache (Phase 2)");
@@ -55,7 +56,7 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
         (void)kind;
         if (!w.data || !dequant_gpu_supported(qtype))
             return;
-        if (wcache_.fp16.count(w.data))
+        if (wcache_->fp16.count(w.data))
             return;  // already cached
         if (budget_exhausted)
             return;
@@ -88,7 +89,7 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
         dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
 
         Tensor fp16_tensor(fp16_buf, QType::F16, w.ndim, w.shape, true);
-        wcache_.fp16[w.data] = fp16_tensor;
+        wcache_->fp16[w.data] = fp16_tensor;
         total_cache_bytes += fp16_bytes;
         cached_count++;
     };
@@ -123,8 +124,8 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
         bool stop = false;
-        if (create_fused_weight_pair(L.wk, L.wv, wcache_.fp16, vram_alloc_, total_cache_bytes,
-                                     remaining_budget, stream, wcache_.fused_kv, i, stop))
+        if (create_fused_weight_pair(L.wk, L.wv, wcache_->fp16, vram_alloc_, total_cache_bytes,
+                                     remaining_budget, stream, wcache_->fused_kv, i, stop))
             fused_kv_count++;
         else if (stop)
             break;
@@ -140,8 +141,8 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
             (L.w_gate.shape[0] != L.w_up.shape[0] || L.w_gate.shape[1] != L.w_up.shape[1]))
             continue;
         bool stop = false;
-        if (create_fused_weight_pair(L.w_gate, L.w_up, wcache_.fp16, vram_alloc_, total_cache_bytes,
-                                     remaining_budget, stream, wcache_.fused_gate_up, i, stop))
+        if (create_fused_weight_pair(L.w_gate, L.w_up, wcache_->fp16, vram_alloc_, total_cache_bytes,
+                                     remaining_budget, stream, wcache_->fused_gate_up, i, stop))
             fused_gu_count++;
         else if (stop)
             break;
@@ -149,7 +150,7 @@ void GraphExecutor::pre_dequant_phase1_fp16_cache_(
 
     if (cached_count > 0) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        wcache_.fp16_bytes = total_cache_bytes;
+        wcache_->fp16_bytes = total_cache_bytes;
         IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
                      cached_count, total_cache_bytes / (1024.0 * 1024.0), fused_kv_count, fused_gu_count);
     }
