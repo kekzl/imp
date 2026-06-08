@@ -431,6 +431,23 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // defaults.
     runtime_config_ = take_pending_runtime_config();
 
+    // Bridge the documented imp.conf [server]/[paths] keys into the live
+    // EngineConfig. These keys are user-facing (imp.conf.example) but were
+    // parsed into RuntimeConfig and never read — the live path flowed only
+    // through the C-API/CLI, so setting them in imp.conf was silently inert
+    // (the wiring PR #541 intended for [server] prefix_cache regressed in a
+    // later refactor). imp.conf is the user's persistent preference; a CLI
+    // flag / C-API value can additionally ENABLE a knob (OR), so a library
+    // embedder's explicit choice is never clobbered. --mmproj (explicit
+    // one-shot) overrides imp.conf. RuntimeConfig defaults for these match the
+    // EngineConfig defaults (off), so no-imp.conf embedders are unaffected.
+    config_.use_prefix_caching = config_.use_prefix_caching || runtime_config_.server.prefix_cache;
+    config_.use_green_contexts = config_.use_green_contexts || runtime_config_.server.green_contexts;
+    if (config_.prefix_pin_budget_pct == 25)  // EngineConfig default untouched → take imp.conf
+        config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
+    if (config_.mmproj_path.empty())
+        config_.mmproj_path = runtime_config_.paths.mmproj;
+
     // The deterministic kernel gate lives in process_diag (compute kernels
     // read process_diag_deterministic_gemm()), but process_diag_install()
     // only runs in tool mains. Promote the gate here so library/test

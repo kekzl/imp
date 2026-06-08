@@ -215,17 +215,19 @@ mtp_no_rope          = false
 
 [server]
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system
-# prompts, multi-turn history). Default ON since the #536/#538
-# stale-block-table fix; PrefixCacheE2ETest guards hit==fresh equality.
-# Auto-disabled for recurrent (SSM/GDN) models.
+# prompts, multi-turn history). Read by the engine and ORed into the live
+# config at init; PrefixCacheE2ETest guards hit==fresh equality.
+# Auto-disabled for recurrent (SSM/GDN) models. (Library/C-API embedders
+# that do not load imp.conf default to OFF.)
 prefix_cache         = true
 # Cap on KV blocks pinned by Anthropic cache_control / "cache_prompt"
 # requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
 # requests are ignored.
 prefix_pin_budget_pct = 25
 # Green Contexts / prefill-decode overlap streams in the server engine.
-# false = disable (diagnostic).
-green_contexts       = true
+# Opt-in (off by default): suspected memSyncDomain race on sm_120 fallback
+# streams (gemma-3-12b IMA). Set true to enable.
+green_contexts       = false
 
 [bench]
 # imp-cli --bench: also run Engine::generate() loop for accurate timing.
