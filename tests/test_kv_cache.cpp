@@ -14,24 +14,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include "test_cuda_skip.h"
+
 namespace imp {
 namespace {
-
-// ============================================================================
-// Helper: skip the entire test if no CUDA device is available.
-// ============================================================================
-static bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!HasCudaDevice()) {                         \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
 
 // ============================================================================
 // DeviceAllocator tests

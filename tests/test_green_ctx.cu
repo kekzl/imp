@@ -7,24 +7,10 @@
 #include <vector>
 #include <atomic>
 
+#include "test_cuda_skip.h"
+
 namespace imp {
 namespace {
-
-// ============================================================================
-// Helper: skip if no CUDA device
-// ============================================================================
-static bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!HasCudaDevice()) {                         \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
 
 // Simple kernel for testing graph capture
 __global__ void add_one_kernel(float* data, int n) {

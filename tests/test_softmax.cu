@@ -8,12 +8,7 @@
 #include <cmath>
 #include <limits>
 
-#define SKIP_IF_NO_CUDA()                       \
-    do {                                        \
-        int dev;                                \
-        if (cudaGetDevice(&dev) != cudaSuccess) \
-            GTEST_SKIP();                       \
-    } while (0)
+#include "test_cuda_skip.h"
 
 namespace imp {
 namespace {

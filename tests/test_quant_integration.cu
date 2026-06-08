@@ -17,25 +17,14 @@
 #include <random>
 #include <unordered_set>
 
+#include "test_cuda_skip.h"
+
 namespace imp {
 namespace {
 
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-static bool HasCudaDevice() {
-    int count = 0;
-    cudaError_t err = cudaGetDeviceCount(&count);
-    return err == cudaSuccess && count > 0;
-}
-
-#define SKIP_IF_NO_CUDA()                               \
-    do {                                                \
-        if (!HasCudaDevice()) {                         \
-            GTEST_SKIP() << "No CUDA device available"; \
-        }                                               \
-    } while (0)
 
 // Host-side FP16 conversion helpers (bitwise, no CUDA device intrinsics)
 static float fp16_to_float(uint16_t h) {
