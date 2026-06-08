@@ -376,7 +376,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
     }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
-                       shared_workspace_, shared_workspace_size_, ctx.stream);
+                       ws_.shared(), ws_.shared_size(), ctx.stream);
 }
 
 }  // namespace imp

@@ -180,7 +180,7 @@ static void clear_l2_persist(cudaStream_t stream) { clear_l2_policy(stream); }
 
 void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream) {
     // Configure shared workspace for attention phase
-    configure_attn_workspace(shared_workspace_max_tokens_);
+    ws_.configure_attn_workspace(ws_.shared_max_tokens());
 
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
@@ -256,7 +256,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     // For Qwen3.5 attention output gate: allocate larger Q buffer AFTER all
     // standard attention buffers to avoid overlap (q_/k_/v_/attn_out_/proj_out_
-    // all share the same shared_workspace_ memory).
+    // all share the same ws_.shared() memory).
     Tensor qv_full;
     if (has_attn_output_gate) {
         auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
