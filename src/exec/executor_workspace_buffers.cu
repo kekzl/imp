@@ -1082,10 +1082,7 @@ void GraphExecutor::free_buffers() {
     }
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
-    vfree(shared_workspace_);
-    shared_workspace_size_ = 0;
-    vfree(persistent_workspace_);
-    persistent_workspace_size_ = 0;
+    ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();
     initialized_ = false;

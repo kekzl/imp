@@ -134,9 +134,19 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // - Decode:  n_sequences (one per batch slot)
     max_logit_tokens_ = std::max(max_batch_size, 1);
 
+    // Wire the scratch-arena component with the live context it sizes against
+    // (pointers to GraphExecutor members so e.g. has_gdn_ is read live — still
+    // false here, set true below — and the activation/phase tensors the moved
+    // methods carve stay GraphExecutor-owned).
+    ws_.init(model, vram_alloc_, compute_dtype_, &max_tokens_, use_pdl_, moe_, &has_moe_, &has_ssm_,
+             &has_gdn_, &has_dense_ffn_, &max_expert_eff_, &max_logit_tokens_, &hidden_, &residual_,
+             &norm_out_, &logits_, &fp32_accum_buf_, &fp32_hidden_, &q_, &k_, &v_, &attn_out_, &proj_out_,
+             &gate_out_, &up_out_, &swiglu_out_, &ffn_out_, &ssm_proj_buf_, &ssm_xBC_buf_, &ssm_y_buf_,
+             &ssm_z_buf_, &ssm_out_buf_, &ssm_dt_buf_, &gdn_fused_proj_buf_);
+
     // Compute shared workspace sizes (no allocation — deferred to allocate_workspaces()).
     // Deferring GPU allocation maximizes VRAM available for expert weight upload.
-    compute_shared_sizes(max_tokens_);
+    ws_.compute_shared_sizes(max_tokens_);
 
     // Build SSM layer index mapping
     if (has_ssm_) {
@@ -256,11 +266,11 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     if (!initialized_ || !model_)
         return false;
 
-    if (!allocate_persistent_workspace(max_tokens_)) {
+    if (!ws_.allocate_persistent_workspace(max_tokens_)) {
         IMP_LOG_ERROR("Persistent workspace allocation failed — cannot run inference");
         return false;
     }
-    if (!allocate_shared_workspace(max_tokens_)) {
+    if (!ws_.allocate_shared_workspace(max_tokens_)) {
         IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
         return false;
     }
@@ -509,8 +519,21 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
     return true;
 }
 
-// allocate_auxiliary_buffers(), release_moe_batch_buf(), free_buffers()
-// are in executor_workspace_buffers.cu
+void Workspace::free_buffers() {
+    if (shared_workspace_) {
+        vram_free(vram_alloc_, shared_workspace_);
+        shared_workspace_ = nullptr;
+    }
+    shared_workspace_size_ = 0;
+    if (persistent_workspace_) {
+        vram_free(vram_alloc_, persistent_workspace_);
+        persistent_workspace_ = nullptr;
+    }
+    persistent_workspace_size_ = 0;
+}
+
+// GraphExecutor::allocate_auxiliary_buffers(), release_moe_batch_buf(),
+// free_buffers() are in executor_workspace_buffers.cu
 
 // pre_dequant_weights() is in executor_pre_dequant.cu
 // configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),

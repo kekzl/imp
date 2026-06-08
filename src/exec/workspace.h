@@ -32,7 +32,7 @@ public:
     // pointer-context). The pointer args are to LIVE GraphExecutor members so
     // the moved methods read/write them exactly as before (e.g. has_gdn_ is
     // still false at the first compute_shared_sizes() and true afterward).
-    void init(const Model& model, VRAMAllocator& alloc, QType compute_dtype, int* max_tokens, bool use_pdl,
+    void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens, bool use_pdl,
               MoEWorkspace& moe,
               // model-feature flags (read for phase sizing)
               const bool* has_moe, const bool* has_ssm, const bool* has_gdn, const bool* has_dense_ffn,
@@ -48,7 +48,7 @@ public:
               Tensor* ssm_proj_buf, Tensor* ssm_xBC_buf, Tensor* ssm_y_buf, Tensor* ssm_z_buf,
               Tensor* ssm_out_buf, Tensor* ssm_dt_buf, Tensor* gdn_fused_proj_buf) {
         model_ = &model;
-        vram_alloc_ = &alloc;
+        vram_alloc_ = alloc;
         compute_dtype_ = compute_dtype;
         max_tokens_ = max_tokens;
         use_pdl_ = use_pdl;
@@ -103,6 +103,12 @@ public:
     void configure_ffn_workspace(int max_tokens);
     void configure_moe_workspace(int max_tokens);
     void configure_ssm_workspace(int max_tokens);
+
+    // Free the owned shared + persistent workspace buffers (called from
+    // GraphExecutor::free_buffers). Mirrors the original free path exactly:
+    // the decode-swap buffers are intentionally NOT freed here (matching the
+    // pre-extraction behaviour).
+    void free_buffers();
 
 private:
     // --- build context (pointers to LIVE GraphExecutor state) ---
