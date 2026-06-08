@@ -1518,7 +1518,64 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     // the duplicate (per-expert + contiguous) would peak at ~30 GiB which
     // doesn't fit in 32 GiB, and the legacy fallback can't fire for layers
     // where nvfp4_moe_*_ptr is non-null anyway.
-    auto cache_moe_native_nvfp4 = [&](Tensor& packed, std::vector<Tensor>& experts) -> bool {
+
+    for (int i = 0; i < cfg.n_layers; i++) {
+        // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
+        // to stamp the contiguous buffer pointer. const_cast follows the
+        // existing pattern at e.g. lines 1517 / 1598 of weight_upload.cu.
+        auto& L = const_cast<Model*>(model_)->layer(i);
+
+        bool g = false, u = false, d = false;
+        if (cfg.is_nvfp4_prequant) {
+            g = cache_moe_native_nvfp4_(L.expert_gate_packed, L.expert_w_gate, stream, dctx, moe_budget_exhausted, moe_logical_avail);
+            u = cache_moe_native_nvfp4_(L.expert_up_packed, L.expert_w_up, stream, dctx, moe_budget_exhausted, moe_logical_avail);
+            d = cache_moe_native_nvfp4_(L.expert_down_packed, L.expert_w_down, stream, dctx, moe_budget_exhausted, moe_logical_avail);
+            // Non-gated MoE (e.g. Nemotron-H NemotronHForCausalLM): no gate
+            // projection exists, so g=0 is expected when up and down cached.
+            // Suppress the misleading warning in that case; expert_gemm's
+            // wcache_.nvfp4_moe lookup handles the missing-gate path.
+            bool non_gated = (L.expert_gate_packed.data == nullptr &&
+                              (L.expert_w_gate.empty() ||
+                               L.expert_w_gate[0].data == nullptr));
+            if ((g || u || d) && !(g && u && d) && !(non_gated && u && d)) {
+                IMP_LOG_WARN(
+                    "Layer %d: partial NVFP4 MoE native cache "
+                    "(g=%d u=%d d=%d) — fast path may not engage",
+                    i, (int)g, (int)u, (int)d);
+            }
+        }
+
+        // GGUF / re-quant path: only run when native didn't populate.
+        // For GGUF NVFP4-target models the source qtype is Q*_K/Q8_0 and
+        // packed.data is non-null; for prequant SafeTensors all three
+        // native calls succeeded above and these are no-ops because
+        // packed.data now points into wcache_.nvfp4_moe.
+        if (!g)
+            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
+        if (!u)
+            cache_moe_expert_nvfp4(L.expert_up_packed, L.expert_up_packed.qtype);
+        if (!d)
+            cache_moe_expert_nvfp4(L.expert_down_packed, L.expert_down_packed.qtype);
+    }
+
+    if (dctx.nvfp4_moe_count > 0) {
+        wcache_.nvfp4_moe_bytes = dctx.nvfp4_moe_total;
+        IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB", dctx.nvfp4_moe_count,
+                     dctx.nvfp4_moe_total / (1024.0 * 1024.0));
+    } else if (wcache_.nvfp4.empty()) {
+        IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
+    }
+}
+
+
+// Extracted from nvfp4_decode_cache_moe_experts_ (was a 325-line [&] lambda).
+// Builds the contiguous NVFP4 decode cache for one MoE projection's experts;
+// see the declaration in executor.h for the full contract. The budget flags
+// (moe_budget_exhausted / moe_logical_avail) are threaded in so the per-layer
+// accounting is shared across the gate/up/down calls.
+bool GraphExecutor::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts,
+                                            cudaStream_t stream, Nvfp4DecodeContext& dctx,
+                                            bool& moe_budget_exhausted, size_t& moe_logical_avail) {
         if (experts.empty() || !experts[0].data)
             return false;
         if (experts[0].qtype != QType::NVFP4 || experts[0].scales == nullptr)
@@ -1842,54 +1899,5 @@ void GraphExecutor::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         }
 
         return true;
-    };
-
-    for (int i = 0; i < cfg.n_layers; i++) {
-        // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
-        // to stamp the contiguous buffer pointer. const_cast follows the
-        // existing pattern at e.g. lines 1517 / 1598 of weight_upload.cu.
-        auto& L = const_cast<Model*>(model_)->layer(i);
-
-        bool g = false, u = false, d = false;
-        if (cfg.is_nvfp4_prequant) {
-            g = cache_moe_native_nvfp4(L.expert_gate_packed, L.expert_w_gate);
-            u = cache_moe_native_nvfp4(L.expert_up_packed, L.expert_w_up);
-            d = cache_moe_native_nvfp4(L.expert_down_packed, L.expert_w_down);
-            // Non-gated MoE (e.g. Nemotron-H NemotronHForCausalLM): no gate
-            // projection exists, so g=0 is expected when up and down cached.
-            // Suppress the misleading warning in that case; expert_gemm's
-            // wcache_.nvfp4_moe lookup handles the missing-gate path.
-            bool non_gated = (L.expert_gate_packed.data == nullptr &&
-                              (L.expert_w_gate.empty() ||
-                               L.expert_w_gate[0].data == nullptr));
-            if ((g || u || d) && !(g && u && d) && !(non_gated && u && d)) {
-                IMP_LOG_WARN(
-                    "Layer %d: partial NVFP4 MoE native cache "
-                    "(g=%d u=%d d=%d) — fast path may not engage",
-                    i, (int)g, (int)u, (int)d);
-            }
-        }
-
-        // GGUF / re-quant path: only run when native didn't populate.
-        // For GGUF NVFP4-target models the source qtype is Q*_K/Q8_0 and
-        // packed.data is non-null; for prequant SafeTensors all three
-        // native calls succeeded above and these are no-ops because
-        // packed.data now points into wcache_.nvfp4_moe.
-        if (!g)
-            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
-        if (!u)
-            cache_moe_expert_nvfp4(L.expert_up_packed, L.expert_up_packed.qtype);
-        if (!d)
-            cache_moe_expert_nvfp4(L.expert_down_packed, L.expert_down_packed.qtype);
-    }
-
-    if (dctx.nvfp4_moe_count > 0) {
-        wcache_.nvfp4_moe_bytes = dctx.nvfp4_moe_total;
-        IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB", dctx.nvfp4_moe_count,
-                     dctx.nvfp4_moe_total / (1024.0 * 1024.0));
-    } else if (wcache_.nvfp4.empty()) {
-        IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
-    }
 }
-
 }  // namespace imp
