@@ -246,6 +246,7 @@ set(IMP_RUNTIME_SOURCES
 set(IMP_EXEC_SOURCES
     src/exec/executor.cu
     src/exec/executor_kernels.cu
+    src/exec/executor_gemm_dispatch.cu
     src/exec/gemm_kernel_registry.cu
     src/exec/gemm_kernel_fp8.cu
     src/exec/gemm_kernel_nvfp4_gemv.cu
