@@ -215,4 +215,9 @@ private:
     bool launched_ = false;
 };
 
+// Advance the device-side decode cursor for the pipelined constrained loop:
+// (*d_pos)++ and (*d_ctx)++ after a token was sampled, so the next (already
+// enqueued) forward replay reads the new position without host involvement.
+void launch_pipeline_advance(int* d_pos, int* d_ctx, cudaStream_t stream);
+
 }  // namespace imp

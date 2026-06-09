@@ -303,6 +303,34 @@ private:
     std::vector<int32_t> async_pending_tokens_;
     int async_pending_cursor_ = 0;
 
+    // Pipelined constrained decode (json_mode / json_schema, single sequence).
+    // Constrained requests can't run the conditional graph loop (the grammar
+    // FSM lives on the host), but the eager path leaves the GPU idle during
+    // every host turnaround (FSM update + mask compute + relaunch). This mode
+    // keeps the host FSM authoritative and hides its latency instead: each
+    // tick enqueues [mask + sample + advance] for the in-flight forward AND
+    // the NEXT forward (which reads the freshly sampled token from device
+    // memory), so the GPU is already deep in forward N+1 while the host
+    // processes token N.
+    struct ConstrainedPipeline {
+        bool active = false;
+        std::shared_ptr<Request> req;
+        CudaGraphRunner runner;  // captures forward_logits only
+        InferenceState state{};  // stable device pointers for the whole run
+        Tensor logits;           // fixed-address logits view (workspace buffer)
+        int32_t* d_token = nullptr;  // ARGMAX_SCRATCH_BYTES (token + argmax scratch)
+        int* d_pos = nullptr;        // [1] current position
+        int* d_ctx = nullptr;        // [1] current context length
+        int* d_bt = nullptr;         // uploaded block table
+        int32_t* d_banned = nullptr; // banned token ids (device)
+        int32_t* h_token = nullptr;  // pinned landing for the sampled token
+        cudaEvent_t ev = nullptr;    // sampled-token-ready event
+        int budget = 0;              // tokens coverable by pre-allocated KV
+        int produced = 0;            // tokens harvested by this pipeline
+        bool forward_in_flight = false;
+    };
+    ConstrainedPipeline cpipe_;
+
     // Teacher-forced perplexity capture (begin/end_perplexity_capture).
     // Device buffers of length n; step_prefill_one writes per-position NLL
     // for every forwarded chunk while active.
@@ -500,6 +528,14 @@ private:
     // Returns: 0 = no async graph active, 1 = still running (step returns true),
     //         -1 = graph exhausted/generation done (check scheduler for more work)
     int step_async_graph_resume();
+
+    // Pipelined constrained decode (see ConstrainedPipeline). Launch after the
+    // first decode step of an eligible json/schema request; one tick harvests
+    // one token. Returns: 0 = inactive/exhausted (fall through to eager),
+    // 1 = produced a token and continues, -1 = generation finished.
+    bool try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream);
+    int step_constrained_pipeline();
+    void teardown_constrained_pipeline(bool synchronize);
 
     // Schedule prefill/decode batches and reconfigure green contexts.
     // Returns true if there is work to do (batches non-empty).

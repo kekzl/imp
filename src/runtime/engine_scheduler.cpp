@@ -59,6 +59,14 @@ bool Engine::step() {
         return scheduler_->has_pending() || scheduler_->active_count() > 0;
     }
 
+    // Fast path: pipelined constrained decode (json/schema) — one token/tick.
+    int cp_result = step_constrained_pipeline();
+    if (cp_result == 1)
+        return true;
+    if (cp_result == -1) {
+        return scheduler_->has_pending() || scheduler_->active_count() > 0;
+    }
+
     // Schedule prefill/decode batches and reconfigure green contexts.
     if (!step_schedule())
         return false;
@@ -1431,6 +1439,29 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             !dreq->output_tokens.empty()) {
             int32_t last_token = dreq->output_tokens.back();
             try_launch_async_graph_loop(dreq, last_token, dec_stream);
+        }
+    }
+
+    // Constrained requests (json_mode / json_schema) can't run the conditional
+    // loop (the grammar FSM is host-side) — launch the pipelined constrained
+    // decode instead: per tick the host enqueues mask+sample AND the next
+    // forward, hiding FSM/mask latency under GPU compute. masked_sample_async
+    // covers banned tokens + greedy/top-k/top-p only — penalties or any
+    // host-side sampling feature stays on the eager path.
+    if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 && !offload_mgr_ &&
+        config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active && !needs_logprobs &&
+        (needs_json_mode || needs_schema_mode)) {
+        auto& dreq = valid_decode[0];
+        // rep/freq/presence penalties and think_budget ARE supported (uploaded /
+        // forced per tick like the eager path) — the server defaults
+        // (repetition_penalty 1.05, think_budget 0.5) must not block the
+        // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
+        const bool pipeline_compatible =
+            dreq->logit_bias.empty() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
+            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f &&
+            !mtp_spec_decode_enabled() && constraints_.is_active();
+        if (pipeline_compatible && dreq->status == RequestStatus::DECODING && !dreq->output_tokens.empty()) {
+            try_launch_constrained_pipeline(dreq, dec_stream);
         }
     }
 }
