@@ -485,9 +485,10 @@ __global__ void post_decode_step_kernel(
     int* __restrict__ d_step_counter,        // [1] device-side step counter
     int max_steps, int eos_id, const int32_t* __restrict__ d_stop_ids, int n_stop_ids,
     // Think budget (all 0/-1 when disabled)
-    int think_budget_limit, int32_t think_start_id, int32_t think_end_id,
-    int* __restrict__ d_think_count,  // [1] reasoning token counter
-    int* __restrict__ d_in_think,     // [1] think block flag
+    int think_budget_limit, int32_t think_start_id, int32_t think_end_id, int think_grace_tokens,
+    int* __restrict__ d_think_count,      // [1] reasoning token counter
+    int* __restrict__ d_in_think,         // [1] think block flag
+    int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
     int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
     // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
     int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
@@ -497,14 +498,20 @@ __global__ void post_decode_step_kernel(
     int step = *d_step_counter;
     int32_t token = *d_token_id;
 
-    // Track think state on device
-    if (think_budget_limit > 0) {
-        if (token == think_start_id)
+    // Track think state on device. Active whenever a </think> id is known
+    // (think_end_id >= 0), independent of the budget — it drives EOS/stop
+    // suppression inside the block and the post-</think> grace window. The
+    // reasoning-token counter only matters for the budget (budget_limit > 0).
+    const bool track_think = (think_end_id >= 0);
+    if (track_think) {
+        if (token == think_start_id) {
             *d_in_think = 1;
-        else if (token == think_end_id)
+        } else if (token == think_end_id) {
             *d_in_think = 0;
-        else if (*d_in_think)
+            *d_think_exit_step = step;  // open the post-think grace window
+        } else if (*d_in_think && think_budget_limit > 0) {
             (*d_think_count)++;
+        }
     }
 
     // Write token to ring buffer (visible to host via mapped memory)
@@ -534,11 +541,15 @@ __global__ void post_decode_step_kernel(
     *d_ring_step_counter = step + 1;
 
     // Check stop conditions.
-    // Suppress stop tokens (EOS, <|im_end|>) while inside <think> block —
-    // the model may emit them during reasoning, stopping prematurely.
-    bool in_think = (think_budget_limit > 0 && d_in_think && *d_in_think);
+    // Suppress stop tokens (EOS, <|im_end|>) while inside <think> block — the
+    // model may emit them during reasoning, stopping prematurely — and for a
+    // grace window after </think> closes (numerically-noisy NVFP4 quants can
+    // close an empty block in ~3 tokens then EOS to a 0-content completion).
+    bool in_think = (track_think && d_in_think && *d_in_think);
+    bool grace = (think_grace_tokens > 0 && d_think_exit_step && *d_think_exit_step >= 0 &&
+                  (step - *d_think_exit_step) < think_grace_tokens);
     bool should_stop = (step + 1 >= max_steps);
-    if (!in_think && !ignore_eos) {
+    if (!in_think && !grace && !ignore_eos) {
         if (token == eos_id)
             should_stop = true;
         for (int i = 0; i < n_stop_ids; i++) {
@@ -547,8 +558,10 @@ __global__ void post_decode_step_kernel(
         }
     }
 
-    // Think budget: break loop to return to CPU for force_token injection
-    if (in_think && *d_think_count >= think_budget_limit) {
+    // Think budget: break loop to return to CPU for force_token injection.
+    // Gated on budget_limit > 0 — without it, limit 0 would make every in-think
+    // step satisfy (count >= 0) and break the loop on the first reasoning token.
+    if (think_budget_limit > 0 && in_think && *d_think_count >= think_budget_limit) {
         should_stop = true;
     }
 
@@ -557,7 +570,7 @@ __global__ void post_decode_step_kernel(
             int stop_reason = 0;
             if (step + 1 >= max_steps)
                 stop_reason = 1;  // max_steps
-            else if (!in_think && !ignore_eos) {
+            else if (!in_think && !grace && !ignore_eos) {
                 if (token == eos_id)
                     stop_reason = 2;  // eos
                 for (int i = 0; i < n_stop_ids; i++) {
@@ -623,15 +636,21 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         }
     }
 
-    // Think budget counters (device-side)
-    if (config_.think_budget_limit > 0) {
+    // Think-state counters (device-side). Allocated whenever think tracking is
+    // active (a </think> id is known), not only for budgets — the in_think flag
+    // and exit-step drive EOS/stop suppression + the post-</think> grace window.
+    if (config_.think_end_id >= 0) {
         err = cudaMalloc(&d_think_count_, sizeof(int));
         if (err != cudaSuccess)
             goto fail;
         err = cudaMalloc(&d_in_think_, sizeof(int));
         if (err != cudaSuccess)
             goto fail;
+        err = cudaMalloc(&d_think_exit_step_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
         int zero = 0;
+        int neg_one = -1;
         int init_think = config_.initial_in_think ? 1 : 0;
         err = cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
@@ -641,6 +660,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         err = cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("ConditionalRunner: in_think init failed: %s", cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_think_exit_step_, &neg_one, sizeof(int), cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: think_exit_step init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
     }
@@ -832,7 +856,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      config_.max_steps, config_.eos_id, d_stop_ids_,
                                                      static_cast<int>(config_.stop_ids.size()),
                                                      config_.think_budget_limit, config_.think_start_id,
-                                                     config_.think_end_id, d_think_count_, d_in_think_,
+                                                     config_.think_end_id, config_.think_grace_tokens,
+                                                     d_think_count_, d_in_think_, d_think_exit_step_,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_, handle_);
 
@@ -977,6 +1002,10 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_in_think_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_));
         d_in_think_ = nullptr;
+    }
+    if (d_think_exit_step_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_think_exit_step_));
+        d_think_exit_step_ = nullptr;
     }
     if (d_penalty_ring_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_));

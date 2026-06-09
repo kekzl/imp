@@ -841,6 +841,7 @@ bool Tokenizer::load(const std::string& path) {
     const JValue* added = jobj_find(root, "added_tokens");
     if (added && added->type == JType::ARRAY) {
         token_types_.resize(vocab_.size(), 1);  // default NORMAL=1
+        added_token_ids_.resize(vocab_.size(), false);
 
         for (const auto& tok : added->arr) {
             if (tok.type != JType::OBJECT)
@@ -863,9 +864,12 @@ bool Tokenizer::load(const std::string& path) {
                 scores_.resize(id + 1, 0.0f);
                 token_types_.resize(id + 1, 1);
             }
+            if (id >= static_cast<int>(added_token_ids_.size()))
+                added_token_ids_.resize(id + 1, false);
 
             vocab_[id] = content;
             token_to_id_[content] = id;
+            added_token_ids_[id] = true;
             if (is_special)
                 token_types_[id] = 3;  // CONTROL
 
