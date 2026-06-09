@@ -2,8 +2,8 @@
 
 Reproducibly anchored measurements. Every row states **when**, **on what
 commit**, **with which CUDA version and quant**, and **the exact command** —
-re-run the command on the stated commit to reproduce. There are no versioned
-releases of this PoC; the commit SHA is the version.
+re-run the command on the stated commit to reproduce. The commit SHA is the
+authoritative version; tagged releases (current: **v0.10.0**) snapshot a SHA.
 
 **Hardware (constant across all runs):** single RTX 5090 (GB202, 32 GB GDDR7,
 water-cooled — never thermally throttled), Ryzen host, WSL2, Docker.
@@ -22,9 +22,15 @@ prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
 
 | Date | Commit | CUDA | Model | Quant | Metric | tok/s | Command |
 |---|---|---|---|---|---|---:|---|
-| 2026-06-05 | `perf_baseline.json` (#540) | 13.3 | Qwen3-8B | Q8_0 | tg128 | 268.4 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-tg 128` |
-| 2026-05-29 | `perf_baseline.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 157.7 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-tg 128 --ctx 2048` |
-| 2026-05-30 | `bebafd5` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 259 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-tg 128` |
+| 2026-06-07 | `perf_baseline.json` (CI gate) | 13.3 | Qwen3-8B | Q8_0 | tg128 | 286.4 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
+| 2026-05-29 | `perf_baseline_north_star.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 157.7 | `… --max-seq-len 2048` |
+| 2026-06-09 | `ec9145b3` | 13.3 | Qwen3-14B | Q6_K | tg128 | 164 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
+| 2026-06-09 | `ec9145b3` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 273 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
+
+> Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
+> 286.4 (cold-median, 5 trials × 5 reps). Single-session warm reads carry the
+> documented ±5–10 % host/driver day-to-day variance (issue #526) — sample
+> `clocks.mem` during the bench (healthy = 13801 MHz / ~500 W under prefill).
 
 Against llama.cpp (b8445+, full offload, flash attention on): imp wins dense
 GGUF decode by **+37–72%** and loses MoE/hybrid GGUF decode on
@@ -52,26 +58,28 @@ better on all except Qwen3.6-35B (+0.55 %, documented trade).
 
 ## NVFP4 SafeTensors decode (tg256)
 
-All rows: 2026-05-30, commit `bebafd5` (clean main), CUDA 13.3, NVFP4
-prequant (Model Optimizer / llm-compressor exports), command pattern
-`imp-cli --model <model-dir>/ --bench --bench-tg 256`.
+All rows: 2026-06-09, commit `ec9145b3` (v0.10.0 base), CUDA 13.3, NVFP4
+prequant (Model Optimizer / llm-compressor exports), warm isolated runs (one
+model per process, per-model warmup, 10 reps), command pattern `imp-cli
+--model <model-dir>/ --bench --bench-pp 16 --bench-reps 10 --max-tokens 256`.
+Decode carries ±5–10 % day-to-day variance (issue #526); clocks logged healthy
+(mem 13801 MHz).
 
 | Model | Params (active) | tok/s |
 |---|---|---:|
-| Qwen3-8B-cortecs | 8.2B | 277 |
-| Qwen3-14B | 14B | 168 |
-| Qwen3-30B-A3B-Modelopt | 30B (3B) | 307 |
-| Qwen3-Coder-30B-A3B | 30B (3B) | 307 |
-| Qwen3.6-35B-A3B | 35B (3B) | 245 |
-| Gemma-4-26B-A4B | 26B (4B) | 259 |
-| Nemotron-3-Nano-30B | 30B (3B) | 126 |
-| gpt-oss-20b¹ | 21B (3.6B) | 345 |
+| Qwen3-8B-cortecs | 8.2B | 270 |
+| Qwen3-14B | 14B | 159 |
+| Qwen3-30B-A3B-Modelopt | 30B (3B) | 305 |
+| Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
+| Qwen3.6-35B-A3B | 35B (3B) | 257 |
+| Gemma-4-26B-A4B | 26B (4B) | 266 |
+| Nemotron-3-Nano-30B | 30B (3B) | 128 |
+| gpt-oss-20b¹ | 21B (3.6B) | 325 |
 
-¹ 2026-06-06 (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
+¹ gpt-oss (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
 NVFP4 at load (bit-exact nibbles, power-of-two scales) and registered for the
 CUTLASS grouped-GEMM prefill — pp512 ≈ 16-19k tok/s. Attention stays on the
-cuBLAS path (attention sinks). Decode measured 310-345 depending on host state
-(documented day-to-day variance).
+cuBLAS path (attention sinks). Decode 310-345 depending on host state.
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no

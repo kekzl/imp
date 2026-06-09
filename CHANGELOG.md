@@ -4,30 +4,93 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
-### Critical fixes
+## [0.10.0] - 2026-06-09
 
-- **Gemma-3 garbage output** — `apply_arch_defaults` set `norm_weight_offset = 1.0`
-  for `GEMMA3`, but the llama.cpp GGUF converter already bakes the `+1` into every
-  `*norm.weight` (verified: `blk.0.attn_norm.weight` min ≈ 0.99 == learned ≈ 0 + 1;
-  same convention noted for Qwen3.5/Gemma-4 in `gguf_loader.cpp`). The extra offset
-  double-counted across all four sandwich norms × 48 layers, producing incoherent
-  token salad on every prompt. Fix: GEMMA3 now uses offset 0 (matching GEMMA4 and
-  Qwen3.5). Verified coherent on `gemma-3-12b-it-Q4_K_M` ("The capital of France is
-  Paris."), decode speed unchanged.
+151 commits since v0.9.1. Headlines: gpt-oss-20b support, LoRA hot-swap, the
+INT8-IMMA prefill family (GGUF prefill from "always behind" to ahead of
+llama.cpp on the MoE/Q6_K heroes), a GeForce-Blackwell tensor-core-rate
+recalibration that unlocked several opt-in compute-type levers, and a roofline
+audit that mapped the remaining decode/prefill ceilings. Benchmarks refreshed
+(`BENCHMARKS.md`, commit-anchored); correctness gate (full GTest suite) green.
+
+### Added
+
+- **gpt-oss-20b** (#547, #572, #574) — MXFP4 experts converted to NVFP4 at load,
+  attention sinks, Harmony channel split, YaRN/split-K/FP16-range fixes. CUTLASS
+  grouped-GEMM prefill registration took pp512 from ~1.9k to 16–19k tok/s (~10×);
+  decode 310–345 tok/s.
+- **LoRA / PEFT adapter hot-swap** (#522/#571) — runtime low-rank deltas, no
+  weight patching.
+- **IQ4_NL / IQ4_XS** i-quant GGUF support (#556/#561).
+- **Gemma-4 vision** (gemma4v, #490) + Gemma-3 mmproj projector load (#489).
+- **Teacher-forced perplexity tool** `imp-cli --perplexity` (#481), chunk-aware
+  since #553 (determinism-proof eval).
+- **Anthropic `cache_control` prompt caching** — prefix-cache pinning + usage
+  accounting; `prefix_cache` default on (#522/#541).
+- **`attention.fa2_f16acc`** opt-in (#597) — f16-accumulate QK^T in the FP16-QK
+  FA2 kernel: +3–4 % pp2048/pp4096 NVFP4 prefill for +0.37 % PPL.
 
 ### Performance
 
-- **Gemma-3 chunked prefill** — enabled for `GEMMA3` (was gated off as "no test
-  model"). Gemma-3 has uniform head_dim/kv_heads and reuses the same per-layer
-  cuBLAS sliding-window dispatch as Gemma-4. Verified: byte-identical greedy output
-  vs single-shot prefill on a 577-token prompt split into 3 chunks across SWA
-  boundaries.
+- **INT8-IMMA prefill GEMM family** (#612–#619, default on since #617) — fused
+  dequant on INT8 tensor cores for Q8_0/Q4_K/Q6_K/Q5_1, incl. MoE grouped
+  variants and N-tail support. Qwen3-30B-A3B (MoE) and Qwen3-14B-Q6_K prefill now
+  **ahead of llama.cpp**; gemma-4-26B MoE +111 % cumulative; Q8 dense 1.13×.
+- **GeForce tensor-core-rate calibration** (#606) — sm_120 silicon runs FP4
+  block-scale at ½ datasheet and FP16/FP8 f32-accumulate at ¼ rate; roofline
+  peaks corrected. Unlocked `gemm.cublas_fp16_acc` (default on per-arch, denies
+  Gemma-3/4 + gpt-oss; #611) and CUTLASS small-N pingpong (kv_proj 2.1×).
+- **FA2 prefill** — ldmatrix operand fetch + register-resident Q + 8-warp fp16qk
+  (#609, −28 % late-chunk kernel); FP16-QK short-prefill path (#525, +25–35 %
+  pp512); seq-adaptive Bq (#493).
+- **dp4a GEMV** — 16-B-aligned `block_q8_1` (48-B stride) removes the
+  activation-load ceiling (#619); LDG.128 Q4_K/Q5_K weight loads (#607).
+- **NVFP4 decode** — NVFP4 lm_head default-on for GDN/hybrid models (+11.4 %
+  Qwen3.6-35B decode, #483); opt-in NVFP4 for recipe-excluded hybrid projections
+  (+53 % GGUF `nvfp4_ssm_proj`, +3.8 % Nemotron `nvfp4_attn_proj`; #486).
+- **RMSNorm** — warp-per-row FP16 RMSNorm for batch prefill (#620).
 
 ### Fixed
 
-- **`imp-bench` build break** — `bench_attention.cu` called `attention_prefill_dispatch`
-  without the `RuntimeConfig` argument added to its signature. Restored the build and
-  extended the prefill-attention sweep to 32k tokens.
+- **SafeTensors Llama-family RoPE** — NeoX layout for LLAMA/MISTRAL/MIXTRAL/LLAMA4
+  (GGUF pre-permutes Q/K, HF does not); fixed Phi-4 prompt-blind output (#503).
+- **Nemotron-H NoPE attention** (#518); **MXFP4 GGML type-39 nibble order is
+  split, not linear** (#567); **sliding-window prefill** routed through the
+  cuBLAS masked softmax — the correctness reference for hd=256 + window (#566/#569).
+- **Pinned-staging reuse race** corrupted chunked continuations (root cause of the
+  "fa2_fp16qk Llama bug" + long-ctx e4m3 reroute, #548/#568); **in-place
+  float→half S/P-tile compaction race** in the WMMA prefill kernels (#528/#539).
+- **Recurrent-state slot** leak/concurrency for SSM/GDN (#500/#501);
+  **model-reload SIGSEGV + VRAM retention**, strict OpenAI model semantics, no
+  auto-swap (#507).
+- **Determinism** — `[runtime] deterministic` now works via the C API + bit-stable
+  perplexity, proven on GDN-hybrid (#542). Prefix-cache stale-table hit fixed
+  via content-compare (#538).
+- **Constrained decoding** — per-token FSM simulation for schema JSON, `$ref`/
+  `$defs` incl. recursive schemas, regex enforcement, whole-token validation
+  (#497/#498/#499/#517/#562); **thinking** default requires template evidence,
+  not just a vocab `<think>` token (#513/#563).
+- **Gemma-3 garbage output** — `apply_arch_defaults` double-counted the
+  `norm_weight_offset` (llama.cpp already bakes the `+1` into `*norm.weight`);
+  GEMMA3 now uses offset 0.
+- **Gemma-3 chunked prefill** enabled (uniform head_dim/kv_heads, byte-identical
+  greedy vs single-shot across SWA boundaries); **`imp-bench` build break**.
+
+### Changed / internal
+
+- **`ModelProfile`** — one source of truth for architecture classification; all
+  hot-path `cfg.arch == X` checks route through it; `attn_variant` enum for the
+  SWA/NoPE dispatch (#622/#623/#625).
+- **VRAM cache rebuild** — RAII ownership of all 8 caches (double-free is now a
+  compile error), one authoritative storage tier, honest diagnostics (#621).
+- **Roofline audit** (`docs/audit/roofline_2026_06_07.md` + the
+  `tools/roofline/` ncu+nsys pipeline): shipped the `attn_fa2` f16-acc lever
+  (#597) and documented the structural ceilings of MoE-decode `gemv_nvfp4`
+  (#600), MoE-prefill `gemm_grouped_nvfp4` (#601), and hd=256 prefill coverage
+  (#603, blocked on #566).
+- **CUDA 13.3 native images** (#520); dependency pins CUTLASS v4.5.1, GTest
+  v1.17.0, nlohmann/json v3.12.0, httplib v0.46.1.
+- **Server-level degeneration suite** `tools/analysis/degen_suite.py` (#508).
 
 ## [0.9.1] - 2026-05-27
 

@@ -37,12 +37,12 @@ Single RTX 5090, greedy, CUDA 13.3, CUDA Graphs on. Headline numbers
 (decode, the reliable A/B signal — see [BENCHMARKS.md](BENCHMARKS.md) for
 dated, commit-anchored measurements with exact commands):
 
-- **GGUF dense decode:** Qwen3-8B Q8_0 at **~268 tok/s** (CI-gated baseline) —
+- **GGUF dense decode:** Qwen3-8B Q8_0 at **~286 tok/s** (CI-gated baseline) —
   **+37–72% over llama.cpp** with full offload and flash attention.
-- **NVFP4 SafeTensors decode:** 30B-class MoE at **~245–307 tok/s**
-  (Qwen3-30B/Coder-30B 307, Qwen3.6-35B 245, Gemma-4-26B 259) — effectively
-  uncontested on `sm_120`, where vLLM's NVFP4 path needs `tcgen05` and
-  llama.cpp has no native NVFP4 support.
+- **NVFP4 SafeTensors decode:** 30B-class MoE at **~257–338 tok/s**
+  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 257, Gemma-4-26B 266;
+  2026-06-09) — effectively uncontested on `sm_120`, where vLLM's NVFP4 path
+  needs `tcgen05` and llama.cpp has no native NVFP4 support.
 - Honest losses: NVFP4 long-context prefill (~1.7× behind vLLM at pp4096,
   attention-bound; imp WINS below ~2k context), Qwen3.6-35B GGUF decode
   (−31%, structural FP16 GDN-projection tax).
