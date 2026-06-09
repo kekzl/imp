@@ -324,12 +324,21 @@ bool JsonConstrainer::advance_char(char c) {
                 } else {
                     current_state_ = JsonState::DONE;
                 }
+            } else if (static_cast<unsigned char>(c) < 0x20) {
+                // JSON forbids raw control chars (U+0000–U+001F) inside
+                // strings — they must arrive escaped. Multi-char tokens whose
+                // first char passes the category mask (e.g. `"<newline>`)
+                // used to smuggle them through.
+                return false;
             }
             // Otherwise stay in IN_STRING
             break;
 
         case JsonState::IN_STRING_ESCAPE:
-            // Any char after \ — back to IN_STRING
+            // Back to IN_STRING — but `\` + raw control char is not a legal
+            // escape sequence (the escape char itself must be printable).
+            if (static_cast<unsigned char>(c) < 0x20)
+                return false;
             current_state_ = JsonState::IN_STRING;
             break;
 
@@ -425,7 +434,14 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     const bool in_string =
         current_state_ == JsonState::IN_STRING || current_state_ == JsonState::IN_STRING_ESCAPE;
     size_t n_allowed = 0;
-    for (int i = 0; i < vocab_size; i++) {
+    // vocab_size is the LOGITS width (model vocab); token_categories_ /
+    // token_texts_ only cover the TOKENIZER vocab (vocab_size_). SafeTensors
+    // models pad the lm_head past the tokenizer vocab (Qwen3-8B-NVFP4: 151936
+    // vs 151669) — iterating to vocab_size read token_texts_ out of bounds
+    // (host SIGBUS, killed imp-server on the first json_mode request).
+    // Padding ids stay allow=0 and the kernel masks them via n_classified.
+    const int n_classified = std::min(vocab_size, vocab_size_);
+    for (int i = 0; i < n_classified; i++) {
         uint8_t allow = 0;
         if ((token_categories_[i] & mask) != 0) {
             const std::string& text = token_texts_[i];
@@ -471,7 +487,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     int blocks = (vocab_size + threads - 1) / threads;
     constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_,
                                                                 d_token_allow_, d_allowed_mask_, vocab_size,
-                                                                /*use_token_allow=*/true);
+                                                                n_classified, /*use_token_allow=*/true);
 }
 
 // ============================================================================
@@ -550,8 +566,10 @@ void GrammarConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
     // No category gating for grammar; the per-token allow mask (built from the
-    // NFA) carries the full constraint.
-    grammar_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_allow_, vocab_size);
+    // NFA) carries the full constraint. d_token_allow_ only covers the
+    // tokenizer vocab — padding logits past it are masked via n_classified.
+    grammar_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_allow_, vocab_size,
+                                                        /*n_classified=*/vocab_size_);
 }
 
 void GrammarConstrainer::update(int32_t token) {
