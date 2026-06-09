@@ -148,7 +148,6 @@ layout_override      = ""
 [gemm]
 # dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
 # quantized GEMM. Disabling forces dequant->cuBLAS path (diagnostic).
-no_dp4a              = false
 no_dp4a_gemv         = false
 no_dp4a_lm           = false
 no_mmvq              = false
@@ -248,7 +247,6 @@ sparsity_threshold   = 0.0
 [diagnostics]
 # Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
 debug_forward        = false
-debug_gemm_dispatch  = false
 # Print intermediate Jinja2 chat-template rendering steps.
 debug_template       = false
 # If non-empty, dump per-layer hidden states as .npy files to this directory.
