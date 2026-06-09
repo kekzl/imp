@@ -71,7 +71,8 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 | `__launch_bounds__` cost on regular paths: -4.5% to -20% | Repeated benchmarks 2026-04 to 2026-05 |
 | `mxf4nvf4.block_scale` raw MMA: 2.60× over f8f6f4 | `mxf4nvf4_mma_bench` 2026-04-25 |
 | CUDA Graph decode on prequant NVFP4 MoE: +193% to +234% | Qwen3-Coder, Qwen3.6, Gemma-4 NVFP4 — verified 2026-05-07 |
-| pp512 cuBLAS-autotune variance: up to 2.6× across container restarts | Use `tg256` for A/B; see `benchmark-cuda` skill |
+| pp512 cuBLAS-autotune variance: up to 2.6× across container restarts | Use `tg256` for A/B; ≤5% prefill-kernel deltas need nsys per-kernel sums, not end-to-end pp (PR #648) — see `benchmark-cuda` skill |
+| FP4 `mma.sync` measured peak ≈ 2,019 TOPS (~½ datasheet); f32-accumulate = ¼ rate | TC-rate calibration 2026-06-07 (#595/#596) |
 
 ---
 
@@ -81,6 +82,11 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 - **FP8×FP8 cuBLAS prefill on sm_120.** Disabled by default since 2026-05-28: cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell (`engine_init_resolver.cpp:156`, config `attention.fp8_prefill`). Prefill levers are the FA2 family instead.
 - **NVFP4 on GDN in/out projections.** REGRESSES −9 to −20% on wide GDN shapes — FP16 wins there. (`gemm.nvfp4_ssm_proj` for GGUF hybrids and `gemm.nvfp4_attn_proj` are the shipped, measured exceptions.)
 - **Occupancy raise / KPAR→MR reroute on the NVFP4 decode GEMV path.** Refuted by the 2026-05-30 nsys+ncu roofline sweep — decode plateau is a 4-bit-dequant co-limit (L1TEX 91%), not occupancy.
+- **Batch-1 MoE decode GEMV beyond 30% roofline.** Structural (#600/PR #642): shallow grids (1.5–2 waves) + tiny K (1.5–4 loads/lane); occupancy is already HIGHER than dense. `moe.mr_nr` is saturated — NR=4 +0.9%, NR≥16 regresses. Don't re-pursue.
+- **MoE grouped-GEMM (NVFP4 prefill) beyond 41% roofline.** Structural (#601/PR #644): grid=170 (1 wave), 23% occupancy, per-expert M≈32. `moe.nvfp4_smallM` REGRESSES vs the device-args default (which is +25–32%) — keep it OFF. The NVFP4 prefill lever is attention, not grouped GEMM.
+- **Q8-IMMA occupancy/fetch tuning beyond #617.** Three refuted attempts documented in PR #618's tuning ladder. Also: per-launch **workspace memos poison IMMA perf**, and f32-accumulate quarters the TC rate.
+- **Re-enabling tiled SWA at hd=256 (gemma-3).** Tiled kernels DO support hd=256, but gemma-3-on-cuBLAS is a deliberate #566 SWA-correctness anchor (tiled hd256+window = PPL 42 vs 1.0). Blocked on #566, not wiring (#603/PR #645).
+- **FA2 occupancy work without smem surgery (Bq=64 etc.).** Post-#609 FA2 is tensor-pipe-busiest and smem-capped at 16.7% occupancy (#597/PR #643); the shipped levers are `fa2_f16acc` and the Bkv=32 underfill variant (PR #648).
 - **Async `wgmma` / `tcgen05` / TMEM on consumer Blackwell.** Not available — SM100 (B200) exclusives. sm_120 peak path is register `mma.sync`. (Note: the *synchronous* `nvcuda::wmma` API *does* compile on sm_120 but lowers to **HMMA** — it is not async wgmma and not the peak path; it costs extra smem traffic and a smem round-trip vs hand-written `mma.sync` with register-resident fragments.)
 - **Materializing the attention score tile (S/P) in shared memory.** A FA-style kernel that writes S to smem, runs softmax over smem, then reads P back for the PV MMA becomes **barrier- / L1-TEX-bound** (tensor cores idle, compute util in the teens) — the smem round-trip + `__syncthreads` dominate, not the MMAs. True FA2 keeps row max/sum and the S/P fragments **register-resident** and fuses softmax into the QK→PV handoff. Don't trust a kernel header that *claims* register-based softmax — verify against the code (some in-tree kernels are mislabeled).
 - **`__noinline__` on device inner-loop helpers.** Spills to Local Memory (DRAM). Use `__forceinline__`.

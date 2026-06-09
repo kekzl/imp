@@ -7,7 +7,7 @@ description: Use when adding support for a new model architecture to imp, portin
 
 ## Integration checklist (gpt-oss PR #572 is the reference example)
 
-1. **Enum + registry**: add to `ModelArch` in `src/model/model_arch.h`; wire `parse_model_arch` (GGUF `general.architecture`, `gguf_loader.cpp:1114`) and/or HF detection (`hf_config_loader.cpp:76` — `architectures` array, `model_type` fallback), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model_arch.cpp`.
+1. **Enum + registry**: add to `ModelArch` in `src/model/model_arch.h`; wire `parse_model_arch` (GGUF `general.architecture`, `gguf_loader.cpp:1114`) and/or HF detection (`hf_config_loader.cpp:76` — `architectures` array, `model_type` fallback), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model_arch.cpp`. **Then register the arch's traits in `ModelProfile`** (`src/model/model_profile.h` — single source of truth since PRs #622/#623, incl. the `AttnVariant` SWA/NoPE dispatch enum). Never add new `cfg.arch == X` checks in hot-path code — the profile is what dispatch reads.
 2. **Loader**: tensor-name mapping in `src/model/tensor_kind_matcher.cpp` / `weight_map.cpp`; SafeTensors path in `safetensors_loader.cpp` (NVFP4 prequant via `llm_compressor_loader.cpp` if applicable).
 3. **Arch config**: RoPE variant (NeoX vs GPT-J pair layout! see traps), YaRN/`rope_freq_scale`, SWA layer pattern, attention quirks (NoPE, sinks, softcap), norm placement, MoE router type — in `model_config.h` + `apply_arch_defaults`.
 4. **Chat template**: `src/model/chat_template.cpp` (+ `jinja.cpp` if templated); think/reasoning channel handling if applicable.
@@ -35,6 +35,7 @@ description: Use when adding support for a new model architecture to imp, portin
 - **Banned-token list vs channel tokens**: arch-specific control tokens (Harmony channels) must not land on the banned list.
 - **Per-layer rope_freqs** (Gemma-4): non-SWA layers need their own freqs, `n_rot=hd`.
 - **h_state precision** (GDN/hybrid): FP32 gate required — FP16 NaNs at depth.
+- **HF tensor-name prefixes**: multimodal checkpoints wrap the LM under e.g. `model.language_model.*` (Qwen3.5-VL, PR #647) — strip the prefix in the loader or every tensor "is missing".
 - **`attention_k_eq_v`** (gemma-4-31B-style) is NOT implemented — such archs need real work, not config.
 - Model too big? 32 GB VRAM: ~29 GiB weights is the practical ceiling (gemma-4-31B NVFP4 never fits).
 
