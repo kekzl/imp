@@ -324,11 +324,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
     const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
     const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
-    // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.6-VL)
-    // share the same `model.language_model.*` / `model.vision_tower.*` layout.
-    // Text-only Qwen3.6 ships bare `model.*` keys, so the strip is a no-op
-    // there.
-    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe;
+    // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.5-VL,
+    // Qwen3.6-VL) share the same `model.language_model.*` / `model.vision_tower.*`
+    // (resp. `model.visual.*`) layout plus an `mtp.*` head. Text-only variants
+    // ship bare `model.*` keys, so the strip is prefix-guarded and a no-op there.
+    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35);
 
     for (auto& [orig_name, tensor] : tensors) {
         std::string name = orig_name;
