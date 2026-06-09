@@ -313,7 +313,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 // Compute per-token allow mask (for key names and enum values)
 // ---------------------------------------------------------------------------
 
-void SchemaConstrainer::compute_token_allow_mask() {
+void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     need_token_allow_ = false;
 
     if (stack_.empty())
@@ -328,9 +328,41 @@ void SchemaConstrainer::compute_token_allow_mask() {
     // alongside (it governs EOS / whitespace / structural first-char), so a
     // token must pass BOTH. token_legal() handles empty (EOS/special) tokens by
     // deferring to the category mask.
+    //
+    // Cost control (this loop runs per decode step over the whole vocab, and
+    // token_legal deep-copies the frame stack per candidate — it dominated
+    // json_schema decode at 151k tokens):
+    //  - category prefilter: the kernel ANDs category and allow, so a token
+    //    that fails the category mask is masked regardless of allow — skip
+    //    its simulation entirely. In structural phases the category mask is
+    //    narrow and this eliminates almost all simulations.
+    //  - in-string O(1) shortcut (mirrors JsonConstrainer): in a free string
+    //    value, any token without '"', '\\' or a raw control char stays
+    //    inside the string by construction — sim_advance would accept every
+    //    char without touching the stack, so skip the simulation. Pattern /
+    //    enum / key strings still simulate (prefix & regex constraints).
     need_token_allow_ = true;
+    const bool free_string = (top().phase == SchemaPhase::STRING_VALUE);
     for (int i = 0; i < vocab_size_; i++) {
-        token_allow_[i] = token_legal(token_texts_[i]) ? 1 : 0;
+        if ((token_categories_[i] & cat_mask) == 0) {
+            token_allow_[i] = 0;  // masked by category — simulation irrelevant
+            continue;
+        }
+        const std::string& text = token_texts_[i];
+        if (free_string && !text.empty()) {
+            bool plain = true;
+            for (char c : text) {
+                if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20) {
+                    plain = false;
+                    break;
+                }
+            }
+            if (plain) {
+                token_allow_[i] = 1;
+                continue;
+            }
+        }
+        token_allow_[i] = token_legal(text) ? 1 : 0;
     }
 }
 
@@ -369,7 +401,7 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 
     // Compute masks
     uint16_t cat_mask = compute_category_mask();
-    compute_token_allow_mask();
+    compute_token_allow_mask(cat_mask);
 
     // Empty-allow guard: an over-tight schema/state combination (e.g.
     // {"type":"object"} without properties — the key phase knows no legal
