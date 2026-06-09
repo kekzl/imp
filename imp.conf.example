@@ -75,6 +75,11 @@ fmha_fa2             = "on"
 # replaces the materialized cuBLAS+softmax path (PR #525, +25-35% pp512
 # NVFP4). "never" restores the materialized cuBLAS path.
 fa2_fp16qk           = "on"
+# f16-accumulate QK^T in the fp16-qk FA2 kernel (#597). GeForce sm_120 runs
+# f16-src/f32-acc HMMA at 1/4 rate (#606); f16-acc lifts the score MMA to the
+# full-rate class: +3-4% pp2048/pp4096 NVFP4 prefill (Qwen3-14B) for +0.37% PPL.
+# Opt-in quality tradeoff (default false); only the fa2_fp16qk path is affected.
+fa2_f16acc           = false
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
