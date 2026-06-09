@@ -32,7 +32,7 @@ using namespace imp::think_logic;
 TEST(ThinkTokenAccept, ControlTypeAccepted) {
     // GGUF metadata path: <think> tagged CONTROL -> is_special=true -> accept.
     EXPECT_TRUE(accept_think_token(/*start_id=*/151648, /*has_token_types=*/true,
-                                   /*is_special=*/true, /*vocab=*/152064));
+                                   /*is_special=*/true, /*is_added=*/false, /*vocab=*/152064));
 }
 
 TEST(ThinkTokenAccept, UserDefinedTypeAccepted) {
@@ -40,21 +40,32 @@ TEST(ThinkTokenAccept, UserDefinedTypeAccepted) {
     // still true (4 != NORMAL). The old code required CONTROL and rejected this,
     // leaving think_end_id_ == -1 so the budget never fired. Must accept now.
     EXPECT_TRUE(accept_think_token(/*start_id=*/151648, /*has_token_types=*/true,
-                                   /*is_special=*/true, /*vocab=*/152064));
+                                   /*is_special=*/true, /*is_added=*/false, /*vocab=*/152064));
+}
+
+TEST(ThinkTokenAccept, AddedButNotSpecialAccepted) {
+    // THE Qwen3/Qwen3.x NVFP4 SafeTensors case: </think> is added_tokens id
+    // 151668 with special=false -> is_special=false but is_added=true. The old
+    // is_special-only gate rejected it (think_end_id_ == -1), forcing every
+    // think chat onto the eager decode path. An explicit added marker must be
+    // accepted so the conditional-graph loop runs.
+    EXPECT_TRUE(accept_think_token(/*start_id=*/151667, /*has_token_types=*/true,
+                                   /*is_special=*/false, /*is_added=*/true, /*vocab=*/151936));
 }
 
 TEST(ThinkTokenAccept, NormalTypeRejected) {
-    // Nemotron: "<think>" is plain text at ID 12, type NORMAL -> is_special=false.
-    // Must NOT be treated as a think marker (else every literal "<think>" in
-    // ordinary text would toggle reasoning mode).
+    // Nemotron: "<think>" is plain text at ID 12, type NORMAL, NOT in
+    // added_tokens -> is_special=false, is_added=false. Must NOT be treated as a
+    // think marker (else every literal "<think>" in ordinary text would toggle
+    // reasoning mode).
     EXPECT_FALSE(accept_think_token(/*start_id=*/12, /*has_token_types=*/true,
-                                    /*is_special=*/false, /*vocab=*/256000));
+                                    /*is_special=*/false, /*is_added=*/false, /*vocab=*/256000));
 }
 
 TEST(ThinkTokenAccept, AbsentTokenRejected) {
     // find_token("<think>") == -1: the model has no <think> token at all.
     EXPECT_FALSE(accept_think_token(/*start_id=*/-1, /*has_token_types=*/true,
-                                    /*is_special=*/false, /*vocab=*/152064));
+                                    /*is_special=*/false, /*is_added=*/false, /*vocab=*/152064));
 }
 
 TEST(ThinkTokenAccept, NoTypeTableHeuristicTopOfVocab) {
@@ -62,11 +73,11 @@ TEST(ThinkTokenAccept, NoTypeTableHeuristicTopOfVocab) {
     // 1% of the vocab range (added/special tokens cluster there).
     // vocab=1000 -> threshold = 1000*99/100 = 990; accept strictly above 990.
     EXPECT_TRUE(accept_think_token(/*start_id=*/995, /*has_token_types=*/false,
-                                   /*is_special=*/false, /*vocab=*/1000));
+                                   /*is_special=*/false, /*is_added=*/false, /*vocab=*/1000));
     EXPECT_FALSE(accept_think_token(/*start_id=*/990, /*has_token_types=*/false,
-                                    /*is_special=*/false, /*vocab=*/1000));
+                                    /*is_special=*/false, /*is_added=*/false, /*vocab=*/1000));
     EXPECT_FALSE(accept_think_token(/*start_id=*/5, /*has_token_types=*/false,
-                                    /*is_special=*/false, /*vocab=*/1000));
+                                    /*is_special=*/false, /*is_added=*/false, /*vocab=*/1000));
 }
 
 // ---------------------------------------------------------------------------

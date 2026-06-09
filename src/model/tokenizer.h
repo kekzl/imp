@@ -100,6 +100,15 @@ public:
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] != 1;
     }
 
+    // True if `id` was declared in tokenizer.json's `added_tokens` array (an
+    // explicit added marker), regardless of its `special` flag. Distinguishes a
+    // deliberately-added marker like Qwen3's `</think>` (added, special=false)
+    // from a NORMAL BPE piece that happens to spell "<think>" (Nemotron ID 12,
+    // not added). Empty vector ⇒ no added-token metadata ⇒ always false.
+    bool is_added_token(int id) const {
+        return id >= 0 && id < static_cast<int>(added_token_ids_.size()) && added_token_ids_[id];
+    }
+
     // Defensive overlay: mark a token as CONTROL even when it wasn't tagged
     // by the source tokenizer. Used to cross-check special_tokens_map.json
     // against tokenizer.json's special-flag column for HF model directories.
@@ -153,6 +162,10 @@ private:
 
     // Per-token type from GGUF (NORMAL=1, CONTROL=3, etc.). Empty if not available.
     std::vector<int32_t> token_types_;
+
+    // Membership flag per id for tokenizer.json `added_tokens` (HF SafeTensors).
+    // Empty when the source carries no added_tokens array.
+    std::vector<bool> added_token_ids_;
 
     // Cached list of special-token strings (CONTROL type) sorted by length
     // descending. Used by encode_*() to pre-split input on these literals so

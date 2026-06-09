@@ -87,10 +87,10 @@ bool Engine::init_features() {
             // so models thought until max_tokens (empty content under
             // json_mode/short budgets). Nemotron's "<think>" at ID 12 is type
             // NORMAL text and stays excluded.
-            bool is_special = think_logic::accept_think_token(
+            bool accept = think_logic::accept_think_token(
                 ts, ptok->has_token_types(), ptok->has_token_types() && ptok->is_special_token(ts),
-                vocab);
-            if (is_special) {
+                ptok->is_added_token(ts), vocab);
+            if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
             }

@@ -1,5 +1,6 @@
 #include "runtime/engine.h"
 #include "runtime/cuda_graph.h"
+#include "runtime/think_stop_logic.h"
 #include "memory/kv_cache.h"
 #include "model/chat_template.h"
 #include "compute/sampling.h"
@@ -83,12 +84,19 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
             gcfg.penalty_history = req.output_tokens;
         }
     }
-    // Think budget: device-side enforcement in post_decode_step_kernel
-    if (req.think_budget > 0.0f && think_end_id_ >= 0) {
-        gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);
+    // Think tracking: device-side in post_decode_step_kernel. Enabled whenever a
+    // single-token </think> id is known (think_end_id_ >= 0), so the conditional
+    // loop runs for reasoning models instead of falling back to eager decode.
+    // Provides EOS/stop suppression while inside the block + a post-</think>
+    // grace window (matches the eager should_stop path). think_budget_limit stays
+    // opt-in (only when the request set a budget).
+    if (think_end_id_ >= 0) {
         gcfg.think_start_id = think_start_id_;
         gcfg.think_end_id = think_end_id_;
         gcfg.initial_in_think = req.in_think_block;
+        gcfg.think_grace_tokens = think_logic::kMinAnswerAfterThink;
+        if (req.think_budget > 0.0f)
+            gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);
     }
     return gcfg;
 }

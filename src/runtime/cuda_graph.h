@@ -138,6 +138,12 @@ public:
         int32_t think_start_id = -1;    // <think> token ID
         int32_t think_end_id = -1;      // </think> token ID
         bool initial_in_think = false;  // true if already inside <think> block
+        // Post-</think> grace: suppress EOS/stop for this many tokens after the
+        // think block closes, matching think_logic::kMinAnswerAfterThink on the
+        // eager path. Guards against numerically-noisy NVFP4 quants that close an
+        // empty think block in ~3 tokens then EOS to a 0-content completion.
+        // 0 = no think tracking in the loop (set >0 whenever think_end_id >= 0).
+        int think_grace_tokens = 0;
         bool ignore_eos = false;        // don't stop on EOS/stop tokens (benchmark mode)
         // Penalty parameters (applied to logits before sampling each iteration)
         float repetition_penalty = 1.0f;
@@ -187,8 +193,9 @@ private:
     int32_t* d_stop_ids_ = nullptr;  // [n_stop_ids] stop token IDs on device
 
     // Think budget tracking (device-side)
-    int* d_think_count_ = nullptr;  // [1] reasoning token counter
-    int* d_in_think_ = nullptr;     // [1] currently inside <think> block
+    int* d_think_count_ = nullptr;      // [1] reasoning token counter
+    int* d_in_think_ = nullptr;         // [1] currently inside <think> block
+    int* d_think_exit_step_ = nullptr;  // [1] step at which </think> last closed (-1 = never)
 
     // Penalty token history: [prefix_len + max_steps] ring buffer for penalty computation.
     // prefix_len tokens are pre-populated from prior output; subsequent slots filled by

@@ -29,11 +29,20 @@ namespace imp::think_logic {
 // "lives in the top 1% of the vocab id range" (added/special tokens cluster there).
 //
 // `start_id` < 0 means the literal "<think>" is absent -> never a think model.
-inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_special, int vocab_size) {
+//
+// `is_added` == the token was declared in tokenizer.json's added_tokens array.
+// Qwen3/Qwen3.x NVFP4 SafeTensors ship <think>/</think> as added tokens with
+// special=false (is_special=false), so the is_special gate alone left
+// think_end_id_ == -1 and forced those reasoning models onto the eager decode
+// path (no conditional-graph loop, −27..36% decode). An *added* marker is a
+// deliberate control marker even when special=false; only a NORMAL BPE piece
+// that merely spells "<think>" (Nemotron ID 12, not added) must stay rejected.
+inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_special, bool is_added,
+                               int vocab_size) {
     if (start_id < 0)
         return false;
     if (has_token_types)
-        return is_special;  // is_special == (token_type != NORMAL)
+        return is_special || is_added;  // special OR an explicit added marker
     return start_id > vocab_size * 99 / 100;
 }
 
