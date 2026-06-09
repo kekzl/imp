@@ -1179,6 +1179,42 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
     }
 }
 
+// Split K/V loaders for the TWOSLOT pipeline: K and V of a tile load in
+// different phases (V under QK compute, next K under PV compute), so each
+// needs its own issue point. Same OOR policy as the combined loader.
+template <int HD, int BKV = 64>
+__device__ __forceinline__ void prefetch_k_tile(half* K_dst, const half* K_ptr, int kv_start, int seq_kv,
+                                                int64_t kv_row_stride, int tid, int nthreads) {
+    constexpr int VEC = 8;
+    constexpr int vecs_per_row = HD / VEC;
+    constexpr int total_vecs = BKV * vecs_per_row;
+    constexpr int KVS = HD + FA2_KV_PAD;
+    for (int vi = tid; vi < total_vecs; vi += nthreads) {
+        int r = vi / vecs_per_row;
+        int c = (vi % vecs_per_row) * VEC;
+        if (kv_start + r < seq_kv)
+            cp_async_cg_16(&K_dst[r * KVS + c], K_ptr + (int64_t)(kv_start + r) * kv_row_stride + c);
+    }
+}
+
+template <int HD, int BKV = 64>
+__device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, int kv_start, int seq_kv,
+                                                int64_t kv_row_stride, int tid, int nthreads) {
+    constexpr int VEC = 8;
+    constexpr int vecs_per_row = HD / VEC;
+    constexpr int total_vecs = BKV * vecs_per_row;
+    constexpr int KVS = HD + FA2_KV_PAD;
+    for (int vi = tid; vi < total_vecs; vi += nthreads) {
+        int r = vi / vecs_per_row;
+        int c = (vi % vecs_per_row) * VEC;
+        if (kv_start + r < seq_kv) {
+            cp_async_cg_16(&V_dst[r * KVS + c], V_ptr + (int64_t)(kv_start + r) * kv_row_stride + c);
+        } else {
+            *reinterpret_cast<uint4*>(&V_dst[r * KVS + c]) = make_uint4(0, 0, 0, 0);
+        }
+    }
+}
+
 // FP16QK=false: Q staged in smem as e4m3, K converted f16->fp8 inline, QK via
 // mma.m16n8k32.e4m3 (2x score throughput; quality validated ONLY at long
 // context — e4m3 score noise compounds across layers at short seq, #511/#512).
@@ -1189,7 +1225,12 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
 // Softmax, masking and PV are shared — one grammar of truth for the math.
 // BKV=32 halves the KV double-buffer (~70 KB → ~35 KB smem) so 2 CTAs/SM fit —
 // the occupancy "smem surgery" lever from #597 for the grid-underfill band.
-template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64>
+// TWOSLOT (#597 second cut): keeps the FULL Bkv=64 tile at the same ~35 KB by
+// replacing the K/V double-buffer with a two-slot rotation — one K slot, one
+// V slot. K and V of a tile load in different phases (V_j under QK_j's MMAs,
+// K_{j+1} under PV_j's), so the cp.async overlap survives with half the smem:
+// 2 CTAs/SM AND half the per-tile online-softmax/barrier overhead of BKV=32.
+template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
@@ -1239,8 +1280,11 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 
     extern __shared__ char smem[];
     uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);           // fp8 mode view
-    half* K_buf = reinterpret_cast<half*>(smem + Q_SMEM_BYTES);  // [2][Bkv*KVSTRIDE] f16
-    half* V_buf = K_buf + 2 * Bkv * KVSTRIDE;                    // [2][Bkv*KVSTRIDE] f16
+    // Double-buffer mode: K_buf/V_buf are [2][Bkv*KVSTRIDE]. TWOSLOT mode:
+    // one slot each — half the footprint, rotation handled by load phases.
+    constexpr int KV_SLOTS = TWOSLOT ? 1 : 2;
+    half* K_buf = reinterpret_cast<half*>(smem + Q_SMEM_BYTES);  // [KV_SLOTS][Bkv*KVSTRIDE] f16
+    half* V_buf = K_buf + KV_SLOTS * Bkv * KVSTRIDE;             // [KV_SLOTS][Bkv*KVSTRIDE] f16
 
     // ---- load Q once: fp8 mode converts 4 halves → 4 e4m3 into smem; fp16
     // mode skips smem entirely — each lane pulls its loop-invariant
@@ -1273,10 +1317,17 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     int num_kv_tiles, first_kv_tile;
     compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
                            num_kv_tiles, q_offset);
-    // prologue: kick off the first KV tile's load into buffer slot 0
-    if (first_kv_tile < num_kv_tiles)
-        prefetch_kv_tile<head_dim, Bkv>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv,
-                                        kv_row_stride, tid, NTHREADS);
+    // prologue: kick off the first KV tile's load into buffer slot 0.
+    // TWOSLOT: K only — V_0 issues at the top of the first loop iteration so
+    // its load overlaps QK_0's MMAs.
+    if (first_kv_tile < num_kv_tiles) {
+        if constexpr (TWOSLOT)
+            prefetch_k_tile<head_dim, Bkv>(K_buf, K_ptr, first_kv_tile * Bkv, seq_kv, kv_row_stride, tid,
+                                           NTHREADS);
+        else
+            prefetch_kv_tile<head_dim, Bkv>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv,
+                                            kv_row_stride, tid, NTHREADS);
+    }
     cp_async_commit();
     __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
 
@@ -1304,21 +1355,30 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
-        const int slot = (j - first_kv_tile) & 1;
+        const int slot = TWOSLOT ? 0 : ((j - first_kv_tile) & 1);
         const int kv_start = j * Bkv;
 
-        // prefetch tile j+1 into the alternate slot, overlapping this tile's compute
-        if (j + 1 < num_kv_tiles) {
-            const int nslot = slot ^ 1;
-            prefetch_kv_tile<head_dim, Bkv>(K_buf + nslot * Bkv * KVSTRIDE, V_buf + nslot * Bkv * KVSTRIDE,
-                                            K_ptr, V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid,
-                                            NTHREADS);
+        if constexpr (TWOSLOT) {
+            // Issue V_j now — it loads while QK_j's MMAs run below. Then wait
+            // for K_j (the older commit group; FIFO completion) before QK.
+            prefetch_v_tile<head_dim, Bkv>(V_buf, V_ptr, kv_start, seq_kv, kv_row_stride, tid, NTHREADS);
             cp_async_commit();
-            cp_async_wait_group<1>();  // this tile (slot) landed; tile j+1 still in flight
+            cp_async_wait_group<1>();  // K_j landed; V_j still in flight
+            __syncthreads();           // K_j visible to all threads
         } else {
-            cp_async_wait_group<0>();
+            // prefetch tile j+1 into the alternate slot, overlapping this tile's compute
+            if (j + 1 < num_kv_tiles) {
+                const int nslot = slot ^ 1;
+                prefetch_kv_tile<head_dim, Bkv>(K_buf + nslot * Bkv * KVSTRIDE,
+                                                V_buf + nslot * Bkv * KVSTRIDE, K_ptr, V_ptr, (j + 1) * Bkv,
+                                                seq_kv, kv_row_stride, tid, NTHREADS);
+                cp_async_commit();
+                cp_async_wait_group<1>();  // this tile (slot) landed; tile j+1 still in flight
+            } else {
+                cp_async_wait_group<0>();
+            }
+            __syncthreads();  // this tile's K/V fully landed for all threads
         }
-        __syncthreads();  // this tile's K/V fully landed for all threads
 
         const half* K_cur = K_buf + slot * Bkv * KVSTRIDE;
         const half* V_cur = V_buf + slot * Bkv * KVSTRIDE;
@@ -1458,6 +1518,19 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
             S[n][2] = d2;
             S[n][3] = d3;
         }
+        }
+
+        if constexpr (TWOSLOT) {
+            // QK_j is done with K_buf. Wait for V_j (needed by PV below), and
+            // barrier so every warp's QK reads retired — then K_buf is free
+            // and K_{j+1} can stream in under the softmax + PV phase.
+            cp_async_wait_group<0>();
+            __syncthreads();
+            if (j + 1 < num_kv_tiles) {
+                prefetch_k_tile<head_dim, Bkv>(K_buf, K_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid,
+                                               NTHREADS);
+                cp_async_commit();
+            }
         }
 
         // ---- scale + softcap + causal/SWA mask (per register) ----
@@ -1606,14 +1679,15 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 }
 
-static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv) {
+static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool twoslot = false) {
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
     // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD); fp16 mode keeps Q in
     // registers (loop-invariant A-fragments loaded once from global) — no
     // smem tile at all, which is what lets Bq=128 (8 warps) fit.
     const size_t q_bytes = fp16_qk ? 0 : (size_t)Bq * (head_dim + FA2_Q_PAD) * sizeof(uint8_t);
-    return q_bytes + (size_t)2 * Bkv * kvstride * sizeof(half)  // K_buf[2] f16 (double-buffer, padded)
-           + (size_t)2 * Bkv * kvstride * sizeof(half);         // V_buf[2] f16 (double-buffer, padded)
+    const size_t slots = twoslot ? 1 : 2;  // TWOSLOT: one K + one V slot
+    return q_bytes + slots * Bkv * kvstride * sizeof(half)  // K_buf f16 (padded)
+           + slots * Bkv * kvstride * sizeof(half);         // V_buf f16 (padded)
 }
 
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
@@ -1662,6 +1736,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
     const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
     int Bq, Bkv;
+    bool twoslot = false;
     decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
     if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
@@ -1669,9 +1744,14 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             kern = f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
                           : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
         } else if (blocks_128 >= (long)(sm_count / 2)) {
-            Bq = 64, Bkv = 32;
-            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 32>
-                          : fmha_sm120_fa2_kernel<64, 128, true, false, 32>;
+            // Underfill band (#597): Bq=64 doubles the grid and TWOSLOT halves
+            // the KV smem (~70 KB → ~35 KB) at the FULL Bkv=64 tile, so 2
+            // CTAs/SM become resident. Supersedes the Bkv=32 double-buffer
+            // (same residency, but half the online-softmax rescales and fewer
+            // barriers per KV row).
+            Bq = 64, Bkv = 64, twoslot = true;
+            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true>
+                          : fmha_sm120_fa2_kernel<64, 128, true, false, 64, true>;
         } else {
             Bq = 64, Bkv = 64;
             kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64>
@@ -1684,7 +1764,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
     }
 
-    const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk, Bkv);
+    const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk, Bkv, twoslot);
     if (smem > (size_t)max_smem)
         return false;
 
@@ -1700,9 +1780,10 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (!logged_once) {
         logged_once = true;
         IMP_LOG_INFO(
-            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, smem=%zu B, "
-            "seq_q=%d seq_kv=%d)",
-            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", smem, seq_q, seq_kv);
+            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, "
+            "kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
+            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", twoslot ? "twoslot" : "dbuf", smem,
+            seq_q, seq_kv);
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
