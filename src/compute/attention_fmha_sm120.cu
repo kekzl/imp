@@ -33,6 +33,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -1186,7 +1187,7 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
 // the short-sequence variant that replaces the materialized cuBLAS+softmax
 // path below fmha_prefill_threshold without the e4m3 quality risk.
 // Softmax, masking and PV are shared — one grammar of truth for the math.
-template <int Bq, int HD, bool FP16QK = false>
+template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
@@ -1328,8 +1329,6 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
             // for tile n+1. A comes from the hoisted loop-invariant a_frag.
 #pragma unroll
             for (int n = 0; n < N_S; n += 2) {
-                float dA[4] = {0.f, 0.f, 0.f, 0.f};
-                float dB[4] = {0.f, 0.f, 0.f, 0.f};
                 const int b_row = (n + (lane >> 4)) * 8 + (lane & 7);
                 const int b_khalf = ((lane >> 3) & 1) << 3;
                 const half* krow = K_cur + b_row * KVSTRIDE + b_khalf;
@@ -1338,36 +1337,91 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                 // latency is otherwise exposed (short_scoreboard-bound).
                 uint32_t b0, b1, c0, c1;
                 ldsm_x4(b0, b1, c0, c1, krow);
+                if constexpr (F16ACC) {
+                    // f16-accumulate QK^T (#597, opt-in attention.fa2_f16acc).
+                    // GeForce sm_120 runs f16-src/f32-acc HMMA at 1/4 rate (253
+                    // of 838 TFLOPS, #606); f16-acc lifts the score MMA to the
+                    // full-rate class (+3-4% pp2048/pp4096 NVFP4, +0.37% PPL on
+                    // Qwen3-14B). Scores are softmaxed immediately so the
+                    // reduced accumulate precision is low-risk. Accumulators are
+                    // 2 packed-half2 registers (also halves the score reg foot-
+                    // print). PV stays f32-acc (online O sum needs the range).
+                    uint32_t dA[2] = {0u, 0u};
+                    uint32_t dB[2] = {0u, 0u};
 #pragma unroll
-                for (int k = 0; k < HD / 16; k++) {
-                    uint32_t nb0, nb1, nc0, nc1;
-                    if (k + 1 < HD / 16)
-                        ldsm_x4(nb0, nb1, nc0, nc1, krow + (k + 1) * 16);
+                    for (int k = 0; k < HD / 16; k++) {
+                        uint32_t nb0, nb1, nc0, nc1;
+                        if (k + 1 < HD / 16)
+                            ldsm_x4(nb0, nb1, nc0, nc1, krow + (k + 1) * 16);
 #if __CUDA_ARCH__ >= 1200
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
-                        : "=f"(dA[0]), "=f"(dA[1]), "=f"(dA[2]), "=f"(dA[3])
-                        : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]), "r"(a_frag[k][3]),
-                          "r"(b0), "r"(b1), "f"(dA[0]), "f"(dA[1]), "f"(dA[2]), "f"(dA[3]));
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
-                        : "=f"(dB[0]), "=f"(dB[1]), "=f"(dB[2]), "=f"(dB[3])
-                        : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]), "r"(a_frag[k][3]),
-                          "r"(c0), "r"(c1), "f"(dB[0]), "f"(dB[1]), "f"(dB[2]), "f"(dB[3]));
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                            "{%0,%1},{%2,%3,%4,%5},{%6,%7},{%0,%1};\n"
+                            : "+r"(dA[0]), "+r"(dA[1])
+                            : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]),
+                              "r"(a_frag[k][3]), "r"(b0), "r"(b1));
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                            "{%0,%1},{%2,%3,%4,%5},{%6,%7},{%0,%1};\n"
+                            : "+r"(dB[0]), "+r"(dB[1])
+                            : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]),
+                              "r"(a_frag[k][3]), "r"(c0), "r"(c1));
 #endif
-                    if (k + 1 < HD / 16) {
-                        b0 = nb0;
-                        b1 = nb1;
-                        c0 = nc0;
-                        c1 = nc1;
+                        if (k + 1 < HD / 16) {
+                            b0 = nb0;
+                            b1 = nb1;
+                            c0 = nc0;
+                            c1 = nc1;
+                        }
                     }
-                }
+                    const half2 a01 = *reinterpret_cast<const half2*>(&dA[0]);
+                    const half2 a23 = *reinterpret_cast<const half2*>(&dA[1]);
+                    const half2 b01 = *reinterpret_cast<const half2*>(&dB[0]);
+                    const half2 b23 = *reinterpret_cast<const half2*>(&dB[1]);
+                    S[n][0] = __low2float(a01);
+                    S[n][1] = __high2float(a01);
+                    S[n][2] = __low2float(a23);
+                    S[n][3] = __high2float(a23);
+                    S[n + 1][0] = __low2float(b01);
+                    S[n + 1][1] = __high2float(b01);
+                    S[n + 1][2] = __low2float(b23);
+                    S[n + 1][3] = __high2float(b23);
+                } else {
+                    float dA[4] = {0.f, 0.f, 0.f, 0.f};
+                    float dB[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
-                for (int e = 0; e < 4; e++) {
-                    S[n][e] = dA[e];
-                    S[n + 1][e] = dB[e];
+                    for (int k = 0; k < HD / 16; k++) {
+                        uint32_t nb0, nb1, nc0, nc1;
+                        if (k + 1 < HD / 16)
+                            ldsm_x4(nb0, nb1, nc0, nc1, krow + (k + 1) * 16);
+#if __CUDA_ARCH__ >= 1200
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                            "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
+                            : "=f"(dA[0]), "=f"(dA[1]), "=f"(dA[2]), "=f"(dA[3])
+                            : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]),
+                              "r"(a_frag[k][3]), "r"(b0), "r"(b1), "f"(dA[0]), "f"(dA[1]), "f"(dA[2]),
+                              "f"(dA[3]));
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                            "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
+                            : "=f"(dB[0]), "=f"(dB[1]), "=f"(dB[2]), "=f"(dB[3])
+                            : "r"(a_frag[k][0]), "r"(a_frag[k][1]), "r"(a_frag[k][2]),
+                              "r"(a_frag[k][3]), "r"(c0), "r"(c1), "f"(dB[0]), "f"(dB[1]), "f"(dB[2]),
+                              "f"(dB[3]));
+#endif
+                        if (k + 1 < HD / 16) {
+                            b0 = nb0;
+                            b1 = nb1;
+                            c0 = nc0;
+                            c1 = nc1;
+                        }
+                    }
+#pragma unroll
+                    for (int e = 0; e < 4; e++) {
+                        S[n][e] = dA[e];
+                        S[n + 1][e] = dB[e];
+                    }
                 }
             }
         } else {
@@ -1608,9 +1662,14 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(SM120_WARP_SIZE, Bq / 16);  // warps = Bq/16
 
-    auto kern = fp16_qk
-                    ? (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true> : fmha_sm120_fa2_kernel<128, 128, true>)
-                    : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>);
+    // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
+    // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
+    const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
+    auto kern = fp16_qk ? (f16acc ? (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true, true>
+                                              : fmha_sm120_fa2_kernel<128, 128, true, true>)
+                                   : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true>
+                                               : fmha_sm120_fa2_kernel<128, 128, true>))
+                        : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>);
     cudaError_t aerr = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                             static_cast<int>(smem));
     if (aerr != cudaSuccess)
@@ -1620,8 +1679,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (!logged_once) {
         logged_once = true;
         IMP_LOG_INFO(
-            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, qk=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
-            Bq, fp16_qk ? "f16" : "e4m3", smem, seq_q, seq_kv);
+            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, qk=%s, qk_acc=%s, smem=%zu B, "
+            "seq_q=%d seq_kv=%d)",
+            Bq, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", smem, seq_q, seq_kv);
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
