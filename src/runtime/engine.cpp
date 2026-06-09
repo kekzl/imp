@@ -335,6 +335,12 @@ void Engine::invalidate_graphs() {
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
+
+    // The pipelined constrained decode holds a captured forward graph plus
+    // request-specific device state — same invalidation requirement as the
+    // conditional runner.
+    if (cpipe_.active)
+        teardown_constrained_pipeline(/*synchronize=*/true);
 }
 
 int Engine::lora_load(const std::string& path) {

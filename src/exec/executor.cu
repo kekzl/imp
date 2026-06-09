@@ -400,6 +400,64 @@ std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state, c
 // Async decode: embedding from device token → forward → sample to device
 // ---------------------------------------------------------------------------
 
+void GraphExecutor::masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
+                                        int32_t* h_pinned, cudaStream_t stream) {
+    int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
+    float* lp = static_cast<float*>(logits.data);
+
+    // Forced token (think-budget </think> injection): mirrors the eager
+    // sampler — the force overrides bans and constraint masks.
+    if (state.force_token >= 0 && state.force_token < vocab) {
+        force_single_token(lp, vocab, state.force_token, stream);
+        Tensor last_f = logits.slice(0, 1);
+        int64_t vshape_f[1] = {last_f.shape[1]};
+        last_f = last_f.reshape(1, vshape_f);
+        sample_greedy_device(last_f, d_result, h_pinned, stream);
+        return;
+    }
+
+    // Repetition / frequency / presence penalties — same order as the eager
+    // sampler (penalties before bans and constraint mask). The engine uploads
+    // the token history per tick (upload_penalties), exactly like eager.
+    if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
+        const int32_t* pen_ptr = state.penalty_tokens;
+        int pen_n = state.n_penalty_tokens;
+        if (state.repeat_last_n > 0 && pen_n > state.repeat_last_n) {
+            pen_ptr += (pen_n - state.repeat_last_n);
+            pen_n = state.repeat_last_n;
+        }
+        apply_penalties(lp, vocab, pen_ptr, pen_n, state.repetition_penalty, state.frequency_penalty,
+                        state.presence_penalty, stream);
+    }
+
+    // Banned special tokens — device list, graph-/replay-safe.
+    if (state.d_banned_tokens && state.n_d_banned_tokens > 0) {
+        constexpr int kBanThreads = 256;
+        int blocks = (state.n_d_banned_tokens + kBanThreads - 1) / kBanThreads;
+        ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, state.d_banned_tokens,
+                                                              state.n_d_banned_tokens, vocab);
+    }
+
+    // Grammar constraint mask (host-computed this step, uploaded stream-ordered).
+    if (state.schema_constrainer)
+        state.schema_constrainer->apply_mask(lp, vocab, stream);
+    else if (state.json_constrainer)
+        state.json_constrainer->apply_mask(lp, vocab, stream);
+
+    // Device-side sampling → d_result, async copy to h_pinned.
+    Tensor last = logits.slice(0, 1);
+    int64_t vocab_shape[1] = {last.shape[1]};
+    last = last.reshape(1, vocab_shape);
+    if (state.temperature <= 0.0f || state.top_k == 1) {
+        sample_greedy_device(last, d_result, h_pinned, stream);
+    } else {
+        int top_k = state.top_k > 0 ? state.top_k : 50;
+        float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+        unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
+        sample_topk_topp_device(last, top_k, top_p, state.temperature, seed, d_result, h_pinned, stream);
+    }
+}
+
 void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
                                          cudaStream_t stream) {
     if (!initialized_) {

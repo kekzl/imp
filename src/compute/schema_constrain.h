@@ -150,7 +150,9 @@ private:
     void push_value_frame(const SchemaNode* node);
 
     uint16_t compute_category_mask() const;
-    void compute_token_allow_mask();
+    // cat_mask: the current category mask — tokens failing it are masked by
+    // the kernel anyway, so their (expensive) per-token simulation is skipped.
+    void compute_token_allow_mask(uint16_t cat_mask);
 
     // Single-char transition over a frame stack. Returns false when c is not a
     // legal transition for the current phase. Drives both the real update path

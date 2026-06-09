@@ -124,6 +124,14 @@ public:
     void forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
                               cudaStream_t stream = nullptr);
 
+    // Constrained async sampling (pipelined constrained decode): applies
+    // device-side banned-token masking + the active json/schema constraint
+    // mask, then samples on device. Writes the token to d_result (which must
+    // be ARGMAX_SCRATCH_BYTES, argmax scratch follows the token) and async-
+    // copies it to h_pinned. No host-device sync — order via an event.
+    void masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
+                             int32_t* h_pinned, cudaStream_t stream);
+
     // Set centralized VRAM allocator for budget-tracked allocations.
     // Must be called before allocate_workspaces() / pre_dequant_weights().
     void set_vram_allocator(class VRAMAllocator* alloc) { vram_alloc_ = alloc; }

@@ -1040,4 +1040,17 @@ void CudaGraphConditionalRunner::cleanup() {
     last_read_step_ = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Pipelined constrained decode: device-side cursor advance
+// ---------------------------------------------------------------------------
+
+__global__ void pipeline_advance_kernel(int* __restrict__ d_pos, int* __restrict__ d_ctx) {
+    (*d_pos)++;
+    (*d_ctx)++;
+}
+
+void launch_pipeline_advance(int* d_pos, int* d_ctx, cudaStream_t stream) {
+    pipeline_advance_kernel<<<1, 1, 0, stream>>>(d_pos, d_ctx);
+}
+
 }  // namespace imp
