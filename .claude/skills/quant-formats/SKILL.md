@@ -23,6 +23,8 @@ description: Use when working on imp's quantization formats, loaders, or dequant
 
 `Undefined` (FATAL if dispatched) · `FP32` · `FP16` · `FP8` (E4M3 + per-tensor scale) · `NVFP4` (two-level micro-scale, decode-GEMV path) · `CUTLASS_NVFP4` (block-scaled, CUTLASS sm_120 grouped-GEMM **fast path**) · `MXFP4` (CUTLASS FMHA path).
 
+**Tier decisions have ONE source of truth since PR #621**: `plan_storage()` in `src/runtime/storage_planner.h` (StoragePlan + arch rules) decides every weight's tier at load; the caches it fills are RAII-owned by the executor. Don't add ad-hoc tier overrides downstream — extend the planner's rules.
+
 **`NVFP4` ≠ `CUTLASS_NVFP4`**: a weight stuck on plain `NVFP4` falls through to the slow `gemm_nvfp4` dequant→cuBLAS fallback. For the fast path the scale factors need the CUTLASS SfAtom layout (set up in `src/exec/pre_dequant_*.cu`, Phase 3b). `convert_scales_sfatom` is a load-time artifact — not a runtime perf lever.
 
 ## MoE specifics

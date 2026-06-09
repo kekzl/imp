@@ -21,4 +21,7 @@ Boundaries (to avoid trigger collisions):
 - *Build/test mechanics & CI* → building-and-testing · *model output via HTTP* → server-api · *model loads but is wrong* → add-model-arch · *bytes/scales/tiers* → quant-formats.
 - *Is this code dead / should we refactor* → codebase-audit · *keep the docs consistent with the code* → docs-sync. Perf-number measurement + `perf_baseline.json` refresh stay with benchmark-cuda (docs-sync only reconciles the surrounding prose).
 
-Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md).
+Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md). Content refresh
+2026-06-10: folded in the post-audit sprint (PRs #608–#651 — IMMA prefill family, TC-rate
+calibration, FA2 bottleneck correction, MoE roofline ceilings, StoragePlanner/ModelProfile,
+ConstrainedPipeline, roofline make targets, bench gotchas). Descriptions/triggers unchanged.

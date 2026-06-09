@@ -31,6 +31,7 @@ Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template aut
 
 - **Thinking**: default-ON for think-capable models in plain chat (json/tools requests excluded). Reasoning is split into `reasoning_content` vs `content` (`--reasoning-format deepseek`); gpt-oss uses Harmony channels (analysis/final) mapped the same way. Think-budget guarantees answer headroom — `started_in_think` edge cases were a 3-bug chain (PR #518), be careful there.
 - **Constrained decoding** (`response_format: json_schema`): the per-token FSM simulator `sim_advance` is the SINGLE grammar source (`src/compute/schema_constrain.{h,cu}`; schema parsing in `src/compute/json_schema.h`; chain PRs #497–#499). Supports `$ref`/`$defs`. Termination is exact-JSON (CAT_EOS only at DONE, whitespace cap) — the server returns exactly the JSON object.
+- **Constrained-decode perf** (PR #651; the #650 SIGBUS/ctrl-char fixes are prerequisites): category prefilter + in-string shortcut on the schema mask, then `ConstrainedPipeline` (`src/runtime/engine.h`) enqueues forward N+1 *before* the host FSM advances — json_schema 102→235 tok/s (plain ≈270). In-pipeline: greedy/top-k/top-p, rep/freq/presence penalties, banned tokens, think-budget (deliberately, so the server defaults `repetition_penalty=1.05`/`think_budget=0.5` don't silently disqualify it). **Falls back to eager** (slow) for: logprobs, min_p, typical_p, mirostat, DRY, logit_bias, MTP, batch>1 — when measuring constrained perf, check none of these are set or you're benchmarking the eager path.
 - **`cache_control` / prefix cache**: Anthropic `cache_control` pins prompt-KV blocks (budget `server.prefix_pin_budget_pct` = 25% FIFO) and reports `cache_read_input_tokens`/`cache_creation_input_tokens`. `server.prefix_cache` is default ON since the #536/#538 stale-block-table fix; `PrefixCacheE2ETest` is the ship gate.
 - **Config keys** (`src/runtime/config.h` → `struct Server`): `prefix_cache`, `prefix_pin_budget_pct`, `green_contexts`.
 - **Stop handling**: server stops on turn markers at high temperature (PR #442) — don't remove that guard.
@@ -47,6 +48,8 @@ pytest tests/api/        # or tests/api/run_mock_tests.sh
 # 3. SafeTensors model-level validation battery
 python3 scripts/validate_safetensors.py --help
 ```
+
+**degen_suite has NO json_mode/json_schema category** (categories: repetition, think-leak, special-tokens, adherence, long-context, multi-turn, stream, anthropic-thinking). Constrained-decoding changes need explicit validation: `tests/api/` schema cases + live `response_format: json_schema` requests against a real model.
 
 ## Diagnostic fingerprints
 

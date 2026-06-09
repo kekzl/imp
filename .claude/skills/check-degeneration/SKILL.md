@@ -54,6 +54,9 @@ Source: `tools/analysis/degen_suite.py`. Exit 0 = clean, 1 = failures
 (printed with evidence), 2 = server unreachable. Run this whenever output
 quality is in question — it catches what the C-API GTest battery cannot see.
 
+**Coverage gap:** the suite has NO json_mode/json_schema category — constrained-decoding
+changes pass it untested. Validate those separately (see `server-api` skill → Validation).
+
 ### 1. GTest battery (covers Short / Second-request / Long / NoLeakedSpecialTokens)
 
 ```bash

@@ -9,7 +9,7 @@ Pair with `sm120-cuda-expert` for optimization decisions.
 
 ## STOP — what is a real signal on this box
 
-1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) varies up to **2.6× across container restarts** (cuBLAS algo re-selection each cold start). Never gate on prefill-only numbers. Metric keys: `tests/perf_baseline.json` gates on **`tg128`**; ad-hoc bench runs usually report `tg256` — compare like with like.
+1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) varies up to **2.6× across container restarts** (cuBLAS algo re-selection each cold start). Never gate on prefill-only numbers. For prefill-**kernel** A/Bs ≤5%, end-to-end pp cannot resolve the delta even with full methodology — compare **nsys per-kernel time sums** instead (PR #648 lesson). Metric keys: `tests/perf_baseline.json` gates on **`tg128`**; ad-hoc bench runs usually report `tg256` — compare like with like.
 2. **The GPU is water-cooled and never throttles** (idles ~30 °C). Do NOT insert temperature cooldowns. The 15 s cooldown in `gen_perf_baseline.sh` resets **cuBLAS algo-selection state** under sustained load, not temperature.
 3. **Idle downclock is the dominant cold-start artifact.** Clocks take ~1 s to ramp under load — the first second reads artificially LOW (produced a spurious −42% that re-measured +20% clean). Always precede timed reps with a **discarded warmup run >1 s**; imp's built-in `Warmup...` is too short.
 4. **Decode can read 8–15% low for a whole day** (host/driver state, WSL2 — issue #526). Sample clocks DURING the bench: `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw --format=csv -l 1`. Healthy load ≈ **2850 MHz SM / 13801 MHz mem / ~500 W**. Lower mem clock or power = depressed host day → do NOT trust cross-day deltas or refresh baselines that day.
@@ -19,7 +19,9 @@ Pair with `sm120-cuda-expert` for optimization decisions.
 
 `CUBLAS_WORKSPACE_CONFIG=:4096:8` · 10 reps · 3+ trials · one model per process · `make check-gpu` first (no concurrent GPU consumers) · warm clocks >1 s before timing.
 
-The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `/home/kekz/models`, NOT the repo's `models/` symlinks).
+**Before any GPU job: `docker ps -q | wc -l` must be 0.** Detached/`nohup` containers survive session ends and silently depress every number (cost a v0.10.0 re-bench). `make check-gpu` helps but doesn't see a container that isn't currently on the GPU.
+
+The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `/home/kekz/models`, NOT the repo's `models/` symlinks). `imp-cli` has no `--ctx` flag — the context ceiling is `--max-seq-len`.
 
 ## Pick the right tool
 
@@ -34,7 +36,11 @@ The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`,
 | Single kernel — wall-clock A/B | `cudaEvent` in launcher | see Step 1 |
 | Single kernel — metrics, stalls | `ncu` | see Step 2 |
 | Timeline / launch overhead / graphs | `nsys` | see Step 3 |
+| Full roofline sweep (ncu+nsys pipeline) | `make roofline-measure` | `tools/roofline/` (see its README); classifies kernels, attributes nsys time shares |
+| Pin roofline run as regression baseline | `make roofline-pin` / `roofline-regress` | baseline ref in `tools/roofline/history/BASELINE` |
 | Compare imp vs llama.cpp | `bench/profile.sh` | same models, apples-to-apples |
+
+Known phantom: **gemma-3-12b `--bench` prints bogus tok/s** (issue #514 reopened) — for that model trust perplexity only, never its bench numbers.
 
 ## Step 1: cudaEvent in-code (quick A/B)
 
@@ -103,7 +109,7 @@ Red flags: gaps between launches >10 µs (CPU-bound) · H2D/D2H during compute w
 
 ## Step 4: Roofline (one-liner)
 
-`AI = total_flops / total_bytes_moved` (matmul FLOPs = `2·M·N·K`; bytes from `dram__bytes.sum` in ncu). Peaks: HBM 1,792 GB/s · FP16 838 TFLOPS · FP8 1,677 · FP4 3,354 TOPS · L2 96 MB. Ridge points: FP16=468, FP8=936, FP4=1873 FLOP/byte. AI < ridge → memory-bound.
+`AI = total_flops / total_bytes_moved` (matmul FLOPs = `2·M·N·K`; bytes from `dram__bytes.sum` in ncu). Peaks: HBM 1,792 GB/s · FP16 838 TFLOPS · FP8 1,677 · FP4 3,354 TOPS (datasheet) · L2 96 MB. **Calibrated reality (2026-06-07): FP4 `mma.sync` reaches ≈2,019 TOPS (~½ datasheet), f32-accumulate ¼ rate** — use the measured peak for "% of roofline" claims or every FP4 kernel looks falsely bad. Ridge points (datasheet): FP16=468, FP8=936, FP4=1873 FLOP/byte. AI < ridge → memory-bound. For full sweeps use `make roofline-measure` instead of hand math.
 
 ## Report template
 
@@ -121,7 +127,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 
 ## Publishing numbers (keep docs from going stale)
 
-- **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR.
+- **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. Current Q8 `tg128≈286` was sampled on a **peak day** (normal healthy range 266–278) — a small gate failure on an ordinary day can be host drift against a hot baseline, not a regression; sample clocks before concluding.
 - **`BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
 - `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
