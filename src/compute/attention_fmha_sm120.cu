@@ -1156,11 +1156,11 @@ constexpr int FA2_KV_PAD = 8;  // extra halfs per K/V row (16 B, cp.async-aligne
 
 // Out-of-range rows: K left stale (masked out in the score step), V zero-filled
 // (P=0 for those cols, but 0*NaN=NaN would poison O, so V must be finite).
-template <int HD>
+template <int HD, int BKV = 64>
 __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const half* K_ptr,
                                                  const half* V_ptr, int kv_start, int seq_kv,
                                                  int64_t kv_row_stride, int tid, int nthreads) {
-    constexpr int Bkv = 64;
+    constexpr int Bkv = BKV;
     constexpr int VEC = 8;                  // 8 halfs = 16 B per cp.async
     constexpr int vecs_per_row = HD / VEC;  // 16
     constexpr int total_vecs = Bkv * vecs_per_row;
@@ -1187,12 +1187,15 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
 // the short-sequence variant that replaces the materialized cuBLAS+softmax
 // path below fmha_prefill_threshold without the e4m3 quality risk.
 // Softmax, masking and PV are shared — one grammar of truth for the math.
-template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false>
+// BKV=32 halves the KV double-buffer (~70 KB → ~35 KB smem) so 2 CTAs/SM fit —
+// the occupancy "smem surgery" lever from #597 for the grid-underfill band.
+template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset) {
-    constexpr int Bkv = 64;
+    constexpr int Bkv = BKV;
+    static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
     // Each warp owns one 16-row tile (mma m16) → warps = Bq/16, threads = warps*32.
     // Bq=128 → 8 warps/256 thr (large seq, max latency-hiding); Bq=64 → 4 warps/128 thr
@@ -1272,8 +1275,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                            num_kv_tiles, q_offset);
     // prologue: kick off the first KV tile's load into buffer slot 0
     if (first_kv_tile < num_kv_tiles)
-        prefetch_kv_tile<head_dim>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv, kv_row_stride,
-                                   tid, NTHREADS);
+        prefetch_kv_tile<head_dim, Bkv>(K_buf, V_buf, K_ptr, V_ptr, first_kv_tile * Bkv, seq_kv,
+                                        kv_row_stride, tid, NTHREADS);
     cp_async_commit();
     __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
 
@@ -1307,8 +1310,9 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
         // prefetch tile j+1 into the alternate slot, overlapping this tile's compute
         if (j + 1 < num_kv_tiles) {
             const int nslot = slot ^ 1;
-            prefetch_kv_tile<head_dim>(K_buf + nslot * Bkv * KVSTRIDE, V_buf + nslot * Bkv * KVSTRIDE, K_ptr,
-                                       V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid, NTHREADS);
+            prefetch_kv_tile<head_dim, Bkv>(K_buf + nslot * Bkv * KVSTRIDE, V_buf + nslot * Bkv * KVSTRIDE,
+                                            K_ptr, V_ptr, (j + 1) * Bkv, seq_kv, kv_row_stride, tid,
+                                            NTHREADS);
             cp_async_commit();
             cp_async_wait_group<1>();  // this tile (slot) landed; tile j+1 still in flight
         } else {
@@ -1602,8 +1606,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 }
 
-static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk) {
-    constexpr int Bkv = 64;
+static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv) {
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
     // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD); fp16 mode keeps Q in
     // registers (loop-invariant A-fragments loaded once from global) — no
@@ -1639,37 +1642,55 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     int sm_count = 0;
     cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
 
-    // Bq selection: the kernel is SMEM-bound to ~1 CTA/SM, so grid = (q_tiles × batch×heads)
-    // must alone fill the SMs. Bq=128 gives ceil(seq_q/128) q-tiles; at short context that is
-    // fewer CTAs than SMs → one partial wave, idle SMs, exposed tail. Dropping to Bq=64 doubles
-    // the q-tiles (2× CTAs) to fill the GPU. Large context already fills with Bq=128 (more
-    // latency-hiding per CTA via 8 warps), so keep 128 there.
+    // Bq/Bkv selection: grid = (q_tiles × batch×heads) and per-SM residency must
+    // together fill the SMs. Three bands (fp16qk path; #597 occupancy surgery):
+    //  - blocks_128 ≥ sm_count: Bq=128/Bkv=64 — long-ctx config, grid fills at
+    //    1 CTA/SM with 8 warps of latency-hiding and the deepest cp.async overlap.
+    //  - sm_count/2 ≤ blocks_128 < sm_count: the profiled 0.75-wave underfill band
+    //    (chunked prefill: ~4 q-tiles × ~40 heads < 170 SMs). Bq=64 doubles the
+    //    grid and Bkv=32 halves the KV double-buffer (~70 KB → ~35 KB) so 2 CTAs/SM
+    //    become resident: same 8 warps/SM, but every SM gets work (~2 waves instead
+    //    of 0.75) and barriers split into two independent 4-warp scopes. Bq=128
+    //    can't use the freed smem — 2 CTAs × 8 warps × ~175 regs exceeds the
+    //    64K-register file, so the 2-CTA config requires the 4-warp CTA.
+    //  - blocks_128 < sm_count/2: even the Bq=64 grid stays below the SM count, so
+    //    2-CTA residency never materializes — keep Bkv=64 (deeper cp.async overlap,
+    //    half the per-tile softmax/barrier overhead).
     const long blocks_128 = (long)((seq_q + 127) / 128) * batch_size * n_heads;
-    // fp16 mode keeps Q in registers (no smem tile) so Bq=128 fits since the
-    // ldmatrix rework. The KV double-buffer alone (~70 KB) caps both Bq
-    // variants at 1 CTA/SM, so Bq=64 halves the resident warps without
-    // raising CTA residency — and the kernel is latency-bound (LDSM→HMMA
-    // chains; 4 warps = 1 warp/scheduler). Prefer 8 warps unless the grid
-    // would fill less than half the SMs.
-    const bool use_bq64 = fp16_qk ? (blocks_128 < (long)(sm_count / 2)) : (blocks_128 < (long)sm_count);
-    const int Bq = use_bq64 ? 64 : 128;
 
-    const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk);
+    // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
+    // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
+    const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
+    int Bq, Bkv;
+    decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
+    if (fp16_qk) {
+        if (blocks_128 >= (long)sm_count) {
+            Bq = 128, Bkv = 64;
+            kern = f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
+                          : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
+        } else if (blocks_128 >= (long)(sm_count / 2)) {
+            Bq = 64, Bkv = 32;
+            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 32>
+                          : fmha_sm120_fa2_kernel<64, 128, true, false, 32>;
+        } else {
+            Bq = 64, Bkv = 64;
+            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64>
+                          : fmha_sm120_fa2_kernel<64, 128, true, false, 64>;
+        }
+    } else {
+        const bool use_bq64 = blocks_128 < (long)sm_count;
+        Bq = use_bq64 ? 64 : 128;
+        Bkv = 64;
+        kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
+    }
+
+    const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk, Bkv);
     if (smem > (size_t)max_smem)
         return false;
 
     const int num_q_tiles = (seq_q + Bq - 1) / Bq;
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(SM120_WARP_SIZE, Bq / 16);  // warps = Bq/16
-
-    // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
-    // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
-    const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
-    auto kern = fp16_qk ? (f16acc ? (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true, true>
-                                              : fmha_sm120_fa2_kernel<128, 128, true, true>)
-                                   : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128, true>
-                                               : fmha_sm120_fa2_kernel<128, 128, true>))
-                        : (use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>);
     cudaError_t aerr = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                             static_cast<int>(smem));
     if (aerr != cudaSuccess)
@@ -1679,9 +1700,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (!logged_once) {
         logged_once = true;
         IMP_LOG_INFO(
-            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, qk=%s, qk_acc=%s, smem=%zu B, "
+            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, smem=%zu B, "
             "seq_q=%d seq_kv=%d)",
-            Bq, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", smem, seq_q, seq_kv);
+            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", smem, seq_q, seq_kv);
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),

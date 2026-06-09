@@ -385,5 +385,24 @@ TEST_F(FmhaFA2Test, FP8_Chunked_GQA3) {
     run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, false, /*q_offset=*/448);
 }
 
+// --- Bq=64/Bkv=32 occupancy band (#597) ---
+// blocks_128 = ceil(Sq/128) × NH must land in [sm_count/2, sm_count) to select
+// the 2-CTA/SM Bkv=32 kernel — these shapes give 96 on the 170-SM RTX 5090
+// (GPU tests are local-only on that chip). Covers the halved KV tile against
+// the same CPU oracle: multi-tile causal, partial last KV tile at Bkv=32
+// granularity, chunk continuation, and sliding-window tile bounds.
+TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_CausalMultiTile) {
+    run_fa2(1, 384, 384, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
+}
+TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_OddSeq) {
+    run_fa2(1, 333, 333, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
+}
+TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_Chunked) {
+    run_fa2(1, 384, 1408, 32, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/1024);
+}
+TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_SlidingWindow) {
+    run_fa2(1, 384, 384, 32, 8, 128, true, /*sw=*/64, 0.0f, 1.0f, true);
+}
+
 }  // namespace
 }  // namespace imp
