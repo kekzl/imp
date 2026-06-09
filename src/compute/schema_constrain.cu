@@ -362,7 +362,8 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
                                            vocab_size_ * sizeof(uint8_t), cudaMemcpyHostToDevice, stream));
         int t = 256, b = (vocab_size + t - 1) / t;
         constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
-                                                         d_allowed_mask_, vocab_size, /*use_allow=*/true);
+                                                         d_allowed_mask_, vocab_size,
+                                                         /*n_classified=*/vocab_size_, /*use_allow=*/true);
         return;
     }
 
@@ -407,8 +408,12 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
+    // vocab_size is the LOGITS width (model vocab); the category/allow buffers
+    // only cover the tokenizer vocab — padding logits are masked via
+    // n_classified (SafeTensors lm_head padding, see json_constrain.cu).
     constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
                                                                 d_allowed_mask_, vocab_size,
+                                                                /*n_classified=*/vocab_size_,
                                                                 need_token_allow_);
 }
 
@@ -693,6 +698,12 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 sim_fixup_parent(stk);
                 return true;
             }
+            // JSON forbids raw control chars (U+0000–U+001F) inside strings —
+            // they must arrive escaped (\n, \uXXXX). Multi-char tokens whose
+            // first char passes the category mask (e.g. `"<newline>`) used to
+            // smuggle them through, producing unparseable output.
+            if (static_cast<unsigned char>(c) < 0x20)
+                return false;
             return true;  // any content char
         }
 
@@ -704,6 +715,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 sim_fixup_parent(stk);
                 return true;
             }
+            if (static_cast<unsigned char>(c) < 0x20)
+                return false;  // raw control char — see STRING_VALUE
             if (f.node && f.node->max_length >= 0 && f.string_len + 1 > f.node->max_length)
                 return false;
             if (f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled()) {
@@ -718,6 +731,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
         }
 
         case SchemaPhase::STRING_ESCAPE: {
+            if (static_cast<unsigned char>(c) < 0x20)
+                return false;  // `\` + raw control char is not a legal escape
             f.phase = SchemaPhase::STRING_VALUE;
             return true;
         }

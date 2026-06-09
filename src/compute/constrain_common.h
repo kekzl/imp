@@ -155,14 +155,24 @@ __global__ inline void constrain_mask_kernel(float* __restrict__ logits,
 // is true.
 // ---------------------------------------------------------------------------
 
+// `vocab_size` is the LOGITS width (model vocab); `n_classified` is the number
+// of tokens the constrainer classified (tokenizer vocab). SafeTensors models
+// pad the lm_head past the tokenizer vocab (Qwen3-8B-NVFP4: 151936 vs 151669);
+// those padding ids have no grammar classification and untrained weight rows,
+// so they are masked unconditionally — and the category/allow buffers are only
+// n_classified wide, so reading them at idx >= n_classified would be OOB.
 __global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
                                                    const uint16_t* __restrict__ token_cats,
                                                    const uint8_t* __restrict__ token_allow,
                                                    const uint16_t* __restrict__ allowed_mask, int vocab_size,
-                                                   bool use_token_allow) {
+                                                   int n_classified, bool use_token_allow) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= vocab_size)
         return;
+    if (idx >= n_classified) {
+        logits[idx] = -FLT_MAX;
+        return;
+    }
 
     uint16_t mask = *allowed_mask;
     bool cat_ok = (token_cats[idx] & mask) != 0;
@@ -186,11 +196,12 @@ __global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
 // ---------------------------------------------------------------------------
 
 __global__ inline void grammar_mask_kernel(float* __restrict__ logits,
-                                           const uint8_t* __restrict__ token_allow, int vocab_size) {
+                                           const uint8_t* __restrict__ token_allow, int vocab_size,
+                                           int n_classified) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= vocab_size)
         return;
-    if (token_allow[idx] == 0)
+    if (idx >= n_classified || token_allow[idx] == 0)
         logits[idx] = -FLT_MAX;
 }
 
