@@ -183,4 +183,8 @@ std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
 // runs, digit triples, slash-aware symbol runs. Exposed for unit tests.
 std::vector<std::string> o200k_pre_tokenize(const std::string& text);
 
+// cl100k pre-tokenizer scan (GPT-4/tiktoken lineage, Phi-4; #657): qwen2
+// rules with digit groups of up to three. Exposed for unit tests.
+std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
+
 }  // namespace imp

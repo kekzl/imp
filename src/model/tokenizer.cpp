@@ -806,7 +806,10 @@ static bool utf8_punct_symbol(const std::string& text, size_t i) {
 // NLL on matched text (#657) — and every production prompt containing code
 // was segmented non-canonically. \p{L} is approximated as ASCII isalpha() or
 // any non-ASCII byte (same approximation as the other pre-tokenizers here).
-std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
+// Shared scanner for the qwen2/cl100k regex family — identical except for the
+// digit rule: qwen2 matches single digits (\p{N}), cl100k groups up to three
+// (\p{N}{1,3}; Phi-4 and the GPT-4/tiktoken cl100k lineage).
+static std::vector<std::string> qwen2_like_pre_tokenize(const std::string& text, int max_digit_run) {
     std::vector<std::string> result;
     const size_t n = text.size();
     auto utf8_step = [&](size_t k) -> size_t {
@@ -871,10 +874,14 @@ std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
             }
         }
 
-        // 3. \p{N} — a single digit.
+        // 3. Digit rule: \p{N} (qwen2) or \p{N}{1,3} (cl100k).
         if (is_dig(c)) {
-            result.push_back(text.substr(i, 1));
-            i += 1;
+            size_t k = i;
+            while (k < n && k - i < static_cast<size_t>(max_digit_run) &&
+                   is_dig(static_cast<unsigned char>(text[k])))
+                k++;
+            result.push_back(text.substr(i, k - i));
+            i = k;
             continue;
         }
 
@@ -939,6 +946,14 @@ std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
         i += 1;
     }
     return result;
+}
+
+std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
+    return qwen2_like_pre_tokenize(text, /*max_digit_run=*/1);
+}
+
+std::vector<std::string> cl100k_pre_tokenize(const std::string& text) {
+    return qwen2_like_pre_tokenize(text, /*max_digit_run=*/3);
 }
 
 // ---- o200k pre-tokenization (gpt-oss / GPT-4o family) ----
@@ -1278,8 +1293,14 @@ bool Tokenizer::load(const std::string& path) {
                         std::string rx;
                         if (pattern && pattern->type == JType::OBJECT)
                             jobj_get_string(*pattern, "Regex", rx);
-                        if (rx.find("{1,3}") != std::string::npos)
+                        // Fingerprints, most specific first: only o200k uses
+                        // case classes (\p{Lu}); cl100k shares qwen2's rules
+                        // except digit triples ({1,3}); plain contraction
+                        // alternation → qwen2.
+                        if (rx.find("\\p{Lu}") != std::string::npos)
                             pre_tokenizer_ = "o200k";
+                        else if (rx.find("{1,3}") != std::string::npos)
+                            pre_tokenizer_ = "cl100k";
                         else if (rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos)
                             pre_tokenizer_ = "qwen2";
                         continue;
@@ -1974,6 +1995,10 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             // gpt-oss / GPT-4o family (o200k_harmony): case-aware letter runs,
             // digit triples, slash-aware symbol runs (#657).
             chunks = o200k_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "cl100k") {
+            // GPT-4/tiktoken cl100k lineage (Phi-4): qwen2 rules with digit
+            // triples (#657).
+            chunks = cl100k_pre_tokenize(bpe_text);
         } else {
             chunks = gpt2_pre_tokenize(bpe_text);
         }
