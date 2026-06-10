@@ -840,6 +840,36 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     auto& decode_batch = sched_decode_batch_;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
+    // n-gram (prompt-lookup) speculation: when a draft is available, the
+    // verify step replaces this decode step entirely (it allocates its own
+    // KV blocks and emits accepted tokens). Falls through to the normal
+    // path on a draft miss or when any gate fails.
+    if (runtime_config_.speculative.ngram && decode_batch.size() == 1) {
+        spec_maybe_rearm_(*decode_batch[0]);
+        if (spec_ngram_gates_ok_(*decode_batch[0])) {
+            if (step_spec_verify_(decode_batch[0], dec_stream))
+                return;
+        } else {
+            // One-time diagnosis: say WHY speculation is inactive (gates are
+            // silent otherwise and a misconfigured request looks identical
+            // to a draft-poor one).
+            static bool s_gate_logged = false;
+            if (!s_gate_logged && !decode_batch[0]->spec_ngram_given_up) {
+                s_gate_logged = true;
+                const auto& r = *decode_batch[0];
+                IMP_LOG_INFO(
+                    "spec-ngram: gates failed (temp=%.2f top_k=%d rep_pen=%.2f freq=%.2f "
+                    "pres=%.2f dry=%.2f mirostat=%d bias=%zu logprobs=%d json=%d schema=%d "
+                    "think_budget=%.2f ssm=%d gdn=%d mtp=%d chunked_prefill=%d)",
+                    r.temperature, r.top_k, r.repetition_penalty, r.frequency_penalty,
+                    r.presence_penalty, r.dry_multiplier, r.mirostat, r.logit_bias.size(),
+                    (int)r.logprobs, (int)r.json_mode, (int)!r.json_schema.empty(), r.think_budget,
+                    (int)(ssm_state_ != nullptr), (int)(gdn_state_ != nullptr),
+                    (int)mtp_spec_decode_enabled(), (int)supports_chunked_prefill_());
+            }
+        }
+    }
+
     // SSM/GDN: limit decode batch to 1 sequence
     if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
         decode_batch.resize(1);
@@ -1427,7 +1457,13 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                       // Phase 3.5 MTP telemetry hooks the per-step path; the async
                                       // conditional-graph loop bypasses it. Stay eager when MTP is on
                                       // so accuracy measurement covers the whole generation.
-                                      !mtp_spec_decode_enabled();
+                                      !mtp_spec_decode_enabled() &&
+                                      // n-gram speculation needs the host in the loop every step
+                                      // (draft match + verify dispatch) — the device-side loop
+                                      // would lock speculation out for the rest of the request.
+                                      // Exception: a request that gave up on speculation
+                                      // (draft-poor context) returns to the loop.
+                                      (!runtime_config_.speculative.ngram || dreq->spec_ngram_given_up);
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
         // ship them as added_tokens with special=False, leaving think_end_id_

@@ -75,6 +75,8 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
     }
+    log_spec_stats_();
+    free_spec_buffers_();
     if (prefill_pool_) {
         memory_manager_.vram_allocator().free(prefill_pool_);
         prefill_pool_ = nullptr;

@@ -244,6 +244,28 @@ generate             = false
 # Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
 mmproj               = ""
 
+[speculative]
+# n-gram (prompt-lookup) speculative decoding: drafts come from suffix
+# matches against the request's own prompt+output — no draft model. Greedy
+# verify accepts the longest matching prefix, so output stays a faithful
+# greedy decode. Batch-1, greedy sampling, dense-attention models only;
+# disables the async decode graph loop while on. Wins on repetition-heavy
+# (agent/code/RAG) workloads; can cost a few % on free-form prose.
+ngram                = false
+# Draft tokens proposed per verify step.
+k                    = 8
+# Shortest / longest suffix n-gram match searched.
+min_match            = 3
+max_match            = 8
+# Give up on speculation (and return to the fast async decode loop) after
+# this many consecutive draft misses, or when acceptance stays under 15%.
+# 0 = never give up.
+give_up_after        = 64
+# Burst-hybrid: a given-up request runs the async loop in bursts of this
+# many tokens and re-probes for drafts in between (think models reach their
+# draft-rich region only after the reasoning prose). 0 = give-up is final.
+burst                = 128
+
 [ffn]
 # SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
 # intermediate rows per threshold; no skipping (~1 µs/layer/token when on).

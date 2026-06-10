@@ -29,6 +29,7 @@
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
+#include <cfloat>
 #include <cmath>
 #include <vector>
 
@@ -89,14 +90,19 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     }
 }
 
-void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
-                                           int chunk_len, double* d_nll, cudaStream_t stream) {
-    if (!initialized_ || chunk_len <= 0 || n_total < 2 || !d_tokens || !d_nll) {
+// Shared eval-side LM-head driver (perplexity + spec-decode greedy verify):
+// applies the tier-aware LM head to hidden_[0..n_rows) in batches of
+// max_logit_tokens_, then hands each batch's logits_ view (softcap already
+// applied — production parity) to `consume`.
+void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
+                                            const std::function<void(const Tensor&, int, int)>& consume) {
+    if (!initialized_ || n_rows <= 0) {
         return;
     }
     const auto& cfg = model_->config();
     const int V = cfg.vocab_size;
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    const int chunk_len = n_rows;
 
     GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config());
 
@@ -177,9 +183,67 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
                 static_cast<float*>(lg.data), cfg.final_logit_softcap,
                 1.0f / cfg.final_logit_softcap, total);
         }
-        perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
-                                                        chunk_start + c, n_total, V, d_nll);
+        consume(lg, c, csz);
     }
+}
+
+void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
+                                           int chunk_len, double* d_nll, cudaStream_t stream) {
+    if (!initialized_ || chunk_len <= 0 || n_total < 2 || !d_tokens || !d_nll) {
+        return;
+    }
+    const int V = model_->config().vocab_size;
+    for_each_lm_head_batch_(chunk_len, stream, [&](const Tensor& lg, int row0, int csz) {
+        perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
+                                                       chunk_start + row0, n_total, V, d_nll);
+    });
+}
+
+// One block per row: fp32 argmax → token id. Tie-break = smallest index,
+// matching the production greedy argmax kernels in sampling.cu — spec-decode
+// verify must agree with what plain greedy decode would have sampled.
+__global__ void rowwise_argmax_kernel(const float* __restrict__ logits, int V,
+                                      int32_t* __restrict__ out) {
+    const float* lg = logits + static_cast<int64_t>(blockIdx.x) * V;
+    const int tid = threadIdx.x;
+    float best = -FLT_MAX;
+    int best_idx = 0;
+    for (int i = tid; i < V; i += blockDim.x) {
+        float v = lg[i];
+        if (v > best || (v == best && i < best_idx)) {
+            best = v;
+            best_idx = i;
+        }
+    }
+    __shared__ float s_val[256];
+    __shared__ int s_idx[256];
+    s_val[tid] = best;
+    s_idx[tid] = best_idx;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (s_val[tid + s] > s_val[tid] ||
+                (s_val[tid + s] == s_val[tid] && s_idx[tid + s] < s_idx[tid])) {
+                s_val[tid] = s_val[tid + s];
+                s_idx[tid] = s_idx[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        out[blockIdx.x] = s_idx[0];
+    }
+}
+
+void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream) {
+    if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
+        return;
+    }
+    const int V = model_->config().vocab_size;
+    for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
+        rowwise_argmax_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), V,
+                                                       d_out + row0);
+    });
 }
 
 double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {

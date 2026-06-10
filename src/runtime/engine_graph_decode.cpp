@@ -25,6 +25,13 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     if (remaining <= 0)
         return 0;
 
+    // Burst-hybrid n-gram speculation: a given-up request runs the loop in
+    // bounded bursts so the host can re-probe for drafts in between (see
+    // Engine::spec_maybe_rearm_).
+    if (runtime_config_.speculative.ngram && req->spec_ngram_given_up &&
+        runtime_config_.speculative.burst > 0)
+        remaining = std::min(remaining, runtime_config_.speculative.burst);
+
     constexpr int kMaxLayersForConditionalGraph = 128;
     if (model_->config().n_layers > kMaxLayersForConditionalGraph)
         return 0;

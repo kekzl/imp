@@ -430,6 +430,38 @@ private:
     std::vector<MtpChainEntry> mtp_pending_chain_;
     std::vector<MtpAccuracy> mtp_chain_accept_;
 
+    // ── n-gram (prompt-lookup) speculative decoding ─────────────────
+    // Drafts come from suffix matches against the request's own context
+    // (runtime_config_.speculative); the verify step replays them as a
+    // teacher-forced continuation chunk and accepts the longest greedy-
+    // matching prefix. Implemented in engine_spec_ngram.cpp.
+    // Returns true when it handled this decode step (tokens emitted);
+    // false → caller falls through to the normal decode path.
+    bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
+    bool spec_ngram_gates_ok_(const Request& req) const;
+    void spec_maybe_rearm_(Request& req) const;
+    bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
+    void free_spec_buffers_();
+    void log_spec_stats_() const;
+    // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
+    int32_t* d_spec_tokens_ = nullptr;
+    int* d_spec_positions_ = nullptr;
+    int* d_spec_block_table_ = nullptr;
+    int* d_spec_context_len_ = nullptr;
+    int32_t* d_spec_argmax_ = nullptr;
+    int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
+    int spec_chunk_cap_ = 0;
+    int spec_block_table_cap_ = 0;
+    // Session telemetry (logged when a request finishes).
+    struct SpecStats {
+        long long verify_steps = 0;  // verify forwards run
+        long long miss_steps = 0;    // decode steps with no usable draft
+        long long drafted = 0;       // draft tokens proposed
+        long long accepted = 0;      // draft tokens accepted
+        long long emitted = 0;       // tokens emitted by verify steps
+    };
+    SpecStats spec_stats_{};
+
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;
 
