@@ -729,5 +729,22 @@ TEST(Qwen2PreTokenizeTest, NonAsciiSymbolsAreSymbolsNotLetters) {
     EXPECT_EQ(qwen2_pre_tokenize("K\xc3\xa4se"), (Chunks{"K\xc3\xa4se"}));
 }
 
+// ---- cl100k pre-tokenizer (GPT-4/tiktoken lineage, Phi-4; #657) ----
+//
+// qwen2 rules with digit triples. Chunk truths verified against HF
+// tokenizers pre_tokenize_str on Phi-4-reasoning-plus.
+
+TEST(Cl100kPreTokenizeTest, DigitTriplesCaseBlindStandaloneContractions) {
+    EXPECT_EQ(cl100k_pre_tokenize("17 + 12345"),
+              (Chunks{"17", " +", " ", "123", "45"}));
+    // Case-blind letter runs: camelCase stays ONE chunk (unlike o200k).
+    EXPECT_EQ(cl100k_pre_tokenize("camelCase HTTPSession"),
+              (Chunks{"camelCase", " HTTPSession"}));
+    // Contractions split standalone (like qwen2, unlike o200k's suffix).
+    EXPECT_EQ(cl100k_pre_tokenize("don't stop"), (Chunks{"don", "'t", " stop"}));
+    EXPECT_EQ(cl100k_pre_tokenize("a->b https://x.com/y"),
+              (Chunks{"a", "->", "b", " https", "://", "x", ".com", "/y"}));
+}
+
 }  // namespace
 }  // namespace imp
