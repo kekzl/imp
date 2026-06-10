@@ -1179,8 +1179,17 @@ void Tokenizer::build_special_pieces() {
     if (token_types_.empty())
         return;
     for (size_t id = 0; id < token_types_.size() && id < vocab_.size(); ++id) {
-        if (token_types_[id] != 3)
-            continue;  // CONTROL only
+        // CONTROL (3) markers AND USER_DEFINED (4) symbols. SentencePiece
+        // semantics: user-defined symbols match the RAW input literally and
+        // atomically, before normalization/BPE. gemma-3 stores its multi-space
+        // run tokens ('  ', '   ', …, 27×' ') and HTML tags (<code>, <i>, …)
+        // as USER_DEFINED with literal-space pieces — the ▁-substituting BPE
+        // body can never reproduce them ("▁▁" is not in the vocab), so imp
+        // emitted N single-space tokens per indentation run: +1.3% tokens and
+        // a large share of the +37.5% NLL gap vs llama.cpp on code/markdown
+        // (#657). llama.cpp matches these via its user-defined trie.
+        if (token_types_[id] != 3 && token_types_[id] != 4)
+            continue;
         const std::string& s = vocab_[id];
         if (s.empty())
             continue;

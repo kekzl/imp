@@ -203,6 +203,14 @@ int main(int argc, char** argv) {
             ppl_tokens.insert(ppl_tokens.begin(), bos);
             n_tok++;
         }
+        // diagnostics.dump_tokens: print the FULL corpus token stream (one id
+        // per line on stderr) — cross-engine tokenizer forensics (#657) diffs
+        // this against `llama-tokenize --ids` output.
+        if (runtime_cfg.diagnostics.dump_tokens) {
+            fprintf(stderr, "[DUMP_PPL_TOKENS] n=%d\n", n_tok);
+            for (int ti = 0; ti < n_tok; ti++)
+                fprintf(stderr, "TOK %d %d\n", ti, ppl_tokens[ti]);
+        }
         // Chunked prefill is the DEFAULT here since the engine-side capture
         // became chunk-aware (#553): per-chunk NLL accumulation makes the
         // teacher-forced score independent of chunking, and the chunked
