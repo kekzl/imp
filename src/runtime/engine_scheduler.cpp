@@ -299,10 +299,15 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     cudaFree(ppl_capture_.d_nll);
     ppl_capture_ = PplCapture{};
 
-    if (getenv("IMP_PPL_DUMP") != nullptr) {
+    // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).
+    // IMP_PPL_DUMP=full: every position — needed for cross-mode forensics;
+    // the sparse form hid that per-position values diverge between chunked
+    // and single-shot runs (#655).
+    if (const char* dump = getenv("IMP_PPL_DUMP")) {
+        const bool full = (strcmp(dump, "full") == 0);
         fprintf(stderr, "[PPL-DUMP] per-pos nll:");
         for (int i = 0; i < n - 1; ++i) {
-            if (i < 16 || i % 16 == 0 || i > n - 6)
+            if (full || i < 16 || i % 16 == 0 || i > n - 6)
                 fprintf(stderr, " [%d]=%.3f", i, h_nll_pos[i]);
         }
         fprintf(stderr, "\n");
