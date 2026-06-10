@@ -619,5 +619,55 @@ TEST(TokenizerControlTest, PreservesExistingTypes) {
     EXPECT_FALSE(tok.is_control_token(4));  // 'H' still normal
 }
 
+// ---- Qwen2 pre-tokenizer (#657) ----
+//
+// Expected segmentations derived from the canonical Qwen2 regex and verified
+// against llama.cpp `llama-tokenize` on Qwen3-8B (the listed chunks correspond
+// 1:1 to the canonical token ids on these probes). The old gpt2 fallback
+// split every punctuation char individually, making canonical merges
+// ("->", "://", "(x", ".com") impossible.
+
+using Chunks = std::vector<std::string>;
+
+TEST(Qwen2PreTokenizeTest, SymbolRunsMerge) {
+    EXPECT_EQ(qwen2_pre_tokenize("x->bar"), (Chunks{"x", "->", "bar"}));
+    EXPECT_EQ(qwen2_pre_tokenize("https://example.com"),
+              (Chunks{"https", "://", "example", ".com"}));
+}
+
+TEST(Qwen2PreTokenizeTest, PrefixCharGluesToLetterRun) {
+    // [^\r\n\p{L}\p{N}]?\p{L}+ — '(' and '.' attach to the following word.
+    EXPECT_EQ(qwen2_pre_tokenize("def foo(x):\n"),
+              (Chunks{"def", " foo", "(x", "):\n"}));
+}
+
+TEST(Qwen2PreTokenizeTest, SingleDigits) {
+    // Qwen2 splits digits individually (\p{N}), unlike the 3-digit gpt2 rule.
+    EXPECT_EQ(qwen2_pre_tokenize("q=1&r=42"),
+              (Chunks{"q", "=", "1", "&r", "=", "4", "2"}));
+}
+
+TEST(Qwen2PreTokenizeTest, Contractions) {
+    EXPECT_EQ(qwen2_pre_tokenize("don't stop"), (Chunks{"don", "'t", " stop"}));
+}
+
+TEST(Qwen2PreTokenizeTest, IndentationKeepsOneSpaceForWord) {
+    // \s+(?!\S) backtracks one position: 4-space indent → "   " + " return".
+    EXPECT_EQ(qwen2_pre_tokenize("    return x"),
+              (Chunks{"   ", " return", " x"}));
+}
+
+TEST(Qwen2PreTokenizeTest, NewlineRuns) {
+    // \s*[\r\n]+ groups whitespace up to the LAST newline; the remaining
+    // indent feeds the next chunk.
+    EXPECT_EQ(qwen2_pre_tokenize("a\n\n  b"), (Chunks{"a", "\n\n", " ", " b"}));
+    // Symbol run absorbs trailing newlines ([\r\n]*).
+    EXPECT_EQ(qwen2_pre_tokenize("};\n\nint"), (Chunks{"};\n\n", "int"}));
+}
+
+TEST(Qwen2PreTokenizeTest, TrailingWhitespace) {
+    EXPECT_EQ(qwen2_pre_tokenize("abc   "), (Chunks{"abc", "   "}));
+}
+
 }  // namespace
 }  // namespace imp

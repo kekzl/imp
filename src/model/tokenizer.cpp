@@ -753,6 +753,156 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     return result;
 }
 
+// ---- Qwen2 pre-tokenization ----
+//
+// Faithful hand-rolled scan of the Qwen2 pre-tokenizer regex (the canonical
+// segmentation Qwen2/Qwen3 were trained with; llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2):
+//
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d)            contractions
+//   | [^\r\n\p{L}\p{N}]?\p{L}+              one optional prefix char + letter run
+//   | \p{N}                                 SINGLE digit
+//   |  ?[^\s\p{L}\p{N}]+[\r\n]*             optional space + SYMBOL RUN + newlines
+//   | \s*[\r\n]+                            whitespace ending in newlines
+//   | \s+(?!\S)                             trailing whitespace
+//   | \s+                                   other whitespace
+//
+// The previous routing sent qwen2 through gpt2_pre_tokenize, whose
+// "punctuation = single character" rule makes cross-symbol BPE merges
+// impossible ("->" became "-", ">"; "(x):" four chunks) and whose
+// digit-groups-of-3 rule is non-canonical for Qwen (single digits). On
+// code/markdown text that produced ~20% more tokens than canonical
+// (llama.cpp control: 3084 vs 3690 on a 10 KB corpus) and +70% teacher-forced
+// NLL on matched text (#657) — and every production prompt containing code
+// was segmented non-canonically. \p{L} is approximated as ASCII isalpha() or
+// any non-ASCII byte (same approximation as the other pre-tokenizers here).
+std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
+    std::vector<std::string> result;
+    const size_t n = text.size();
+    auto is_letter = [](unsigned char c) { return std::isalpha(c) != 0 || c >= 128; };
+    auto is_dig = [](unsigned char c) { return std::isdigit(c) != 0; };
+    auto is_ws = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+    };
+    auto is_nl = [](unsigned char c) { return c == '\n' || c == '\r'; };
+
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+
+        // 1. Contractions 's 't 're 've 'm 'll 'd (case-insensitive).
+        if (c == '\'' && i + 1 < n) {
+            const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(text[i + 1])));
+            const char c2 =
+                (i + 2 < n) ? static_cast<char>(std::tolower(static_cast<unsigned char>(text[i + 2]))) : 0;
+            size_t clen = 0;
+            if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd')
+                clen = 2;
+            else if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l'))
+                clen = 3;
+            if (clen > 0) {
+                result.push_back(text.substr(i, clen));
+                i += clen;
+                continue;
+            }
+        }
+
+        // 2. [^\r\n\p{L}\p{N}]?\p{L}+ — one optional non-letter/digit/newline
+        //    prefix char (space, tab, or punctuation) glued to a letter run.
+        {
+            size_t j = i;
+            if (!is_letter(c) && !is_dig(c) && !is_nl(c))
+                j = i + 1;  // candidate prefix char
+            if (j < n && is_letter(static_cast<unsigned char>(text[j]))) {
+                size_t k = j;
+                while (k < n) {
+                    const unsigned char ck = static_cast<unsigned char>(text[k]);
+                    if (!is_letter(ck))
+                        break;
+                    size_t len = 1;
+                    if ((ck & 0xE0) == 0xC0)
+                        len = 2;
+                    else if ((ck & 0xF0) == 0xE0)
+                        len = 3;
+                    else if ((ck & 0xF8) == 0xF0)
+                        len = 4;
+                    k += (len <= n - k) ? len : (n - k);
+                }
+                result.push_back(text.substr(i, k - i));
+                i = k;
+                continue;
+            }
+        }
+
+        // 3. \p{N} — a single digit.
+        if (is_dig(c)) {
+            result.push_back(text.substr(i, 1));
+            i += 1;
+            continue;
+        }
+
+        // 4. ' '?[^\s\p{L}\p{N}]+[\r\n]* — optional space + symbol run + newlines.
+        {
+            size_t j = i + (text[i] == ' ' ? 1 : 0);
+            size_t k = j;
+            while (k < n) {
+                const unsigned char ck = static_cast<unsigned char>(text[k]);
+                if (is_ws(ck) || is_letter(ck) || is_dig(ck))
+                    break;
+                k++;
+            }
+            if (k > j) {
+                while (k < n && is_nl(static_cast<unsigned char>(text[k])))
+                    k++;
+                result.push_back(text.substr(i, k - i));
+                i = k;
+                continue;
+            }
+        }
+
+        // 5.-7. Whitespace rules.
+        if (is_ws(c)) {
+            size_t k = i;
+            size_t last_nl = std::string::npos;
+            while (k < n && is_ws(static_cast<unsigned char>(text[k]))) {
+                if (is_nl(static_cast<unsigned char>(text[k])))
+                    last_nl = k;
+                k++;
+            }
+            if (last_nl != std::string::npos) {
+                // \s*[\r\n]+ — greedy up to the LAST newline in the run; any
+                // trailing spaces/tabs stay for the next match (they become
+                // the ' ?' / prefix of the following chunk).
+                result.push_back(text.substr(i, last_nl + 1 - i));
+                i = last_nl + 1;
+                continue;
+            }
+            if (k >= n) {
+                // \s+(?!\S) — trailing whitespace at end of text.
+                result.push_back(text.substr(i, k - i));
+                i = k;
+                continue;
+            }
+            if (k - i > 1) {
+                // \s+(?!\S) with backtracking: leave ONE space for the next
+                // chunk ("    return" → ["   ", " return"]).
+                result.push_back(text.substr(i, k - i - 1));
+                i = k - 1;
+                continue;
+            }
+            // \s+ — single whitespace char the letter/symbol rules didn't take
+            // (e.g. the space in " 5": digits don't absorb a leading space).
+            result.push_back(text.substr(i, 1));
+            i += 1;
+            continue;
+        }
+
+        // Unreachable in practice (every byte class is handled above).
+        result.push_back(text.substr(i, 1));
+        i += 1;
+    }
+    return result;
+}
+
 // ---- Load vocabulary ----
 
 bool Tokenizer::load(const std::string& path) {
@@ -918,6 +1068,21 @@ bool Tokenizer::load(const std::string& path) {
                         continue;
                     std::string inner_type;
                     jobj_get_string(pt, "type", inner_type);
+                    if (inner_type == "Split") {
+                        // HF Qwen2/Qwen3 tokenizer.json carries the literal
+                        // pre-tokenizer regex in a Split step. Detect the
+                        // contraction signature and route to the faithful
+                        // qwen2 scanner — without this, SafeTensors Qwen
+                        // fell to the gpt2 fallback (per-char punctuation,
+                        // non-canonical segmentation, #657).
+                        const JValue* pattern = jobj_find(pt, "pattern");
+                        std::string rx;
+                        if (pattern && pattern->type == JType::OBJECT)
+                            jobj_get_string(*pattern, "Regex", rx);
+                        if (rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos)
+                            pre_tokenizer_ = "qwen2";
+                        continue;
+                    }
                     if (inner_type == "ByteLevel") {
                         type_ = "gpt2";
                         const JValue* prefix = jobj_find(pt, "add_prefix_space");
@@ -1590,6 +1755,11 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         std::vector<std::string> chunks;
         if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
             chunks = llama3_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "qwen2") {
+            // Qwen2/Qwen3 family: canonical regex incl. symbol RUNS and single
+            // digits — the gpt2 fallback's per-char punctuation made canonical
+            // merges ("->", "():") impossible (#657).
+            chunks = qwen2_pre_tokenize(bpe_text);
         } else {
             chunks = gpt2_pre_tokenize(bpe_text);
         }

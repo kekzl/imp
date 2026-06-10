@@ -6,6 +6,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 
+- **Qwen2/Qwen3 tokenization was non-canonical on symbol/digit sequences**
+  (#657). The gpt2 pre-tokenizer fallback split every punctuation character
+  individually and grouped digits in threes, so canonical BPE merges were
+  impossible (`->` became `-`+`>`, `(x):` four chunks) — on a 10 KB
+  code/markdown corpus imp produced 3690 tokens vs llama.cpp's canonical
+  3084 (+20%), inflating teacher-forced NLL on matched text by +70% and
+  segmenting every production prompt containing code non-canonically.
+  New faithful `qwen2_pre_tokenize` (contractions, prefix-char+letter runs,
+  single digits, symbol runs, GPT-2 whitespace backtracking), routed via
+  GGUF `tokenizer.ggml.pre=qwen2` and detected from the HF tokenizer.json
+  Split regex for SafeTensors. Token streams are now id-identical to
+  llama.cpp on probe texts; corpus count 3084 == llama.cpp; matched-band
+  NLL gap vs llama.cpp: +70% → **+1.3%** (Qwen3-8B-Q8_0 PPL on the corpus:
+  40.5 → 10.98). Greedy locks unchanged; code generation verified coherent.
+
 - **Prefill dispatch chain exhaustion now throws instead of silently emitting
   garbage** (#654). `flash_attention_blackwell` declined hd=256 (smem over the
   99 KB sm_120 opt-in) by silently falling back to `flash_attention_prefill_tc`,

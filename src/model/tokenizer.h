@@ -175,4 +175,8 @@ private:
     void build_special_pieces();
 };
 
+// Qwen2/Qwen3 pre-tokenizer scan (canonical regex segmentation; #657).
+// Exposed for unit tests — production use is inside Tokenizer::encode_*.
+std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
+
 }  // namespace imp
