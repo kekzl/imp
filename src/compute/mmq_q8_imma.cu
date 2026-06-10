@@ -107,13 +107,21 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
 // out = (or +=, BETA1) the α/β-scaled IMMA over [BM,kBN] tiles. Grouped MoE
 // form: gridDim.z = ne with device expert_offsets; dense passes offsets ==
 // nullptr (z extent 1).
-template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */>
+// SPLITK (dense-only): gridDim.z = K-split index instead of expert. With a
+// single M-tile the grid is only N/kBN blocks — far too few to hide the
+// K-loop latency (the spec-decode verify bottleneck, issue #667). Each split
+// computes ks_per_split K-steps and stores its fp32 partial tile to
+// split_out[z][M][N]; mmq_splitk_finalize_kernel reduces the slices (fixed
+// order — bit-reproducible) and applies the beta/residual form.
+template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */,
+          bool SPLITK = false>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
                     const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
                     const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
                     int K, const int32_t* __restrict__ expert_offsets, size_t w_stride,
-                    size_t wsc_stride) {
+                    size_t wsc_stride, float* __restrict__ split_out = nullptr,
+                    int ks_per_split = 0) {
     constexpr int kWM = (BM == 128) ? 4 : 2;  // warp grid
     constexpr int kWN = (BM == 128) ? 2 : 4;
     constexpr int kTileM = BM / kWM;       // 32 / 16
@@ -124,7 +132,7 @@ __global__ void __launch_bounds__(kThreads)
 
     int rows = M;
     size_t row_off = 0;
-    const int e = blockIdx.z;
+    const int e = SPLITK ? 0 : blockIdx.z;  // SPLITK reuses gridDim.z for the K-split
     if (expert_offsets != nullptr) {
         const int32_t o0 = __ldg(&expert_offsets[e]);
         const int32_t o1 = __ldg(&expert_offsets[e + 1]);
@@ -167,14 +175,22 @@ __global__ void __launch_bounds__(kThreads)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
     const int ksteps = K / kBK;
+    int ks_begin = 0;
+    int ks_end = ksteps;
+    if (SPLITK) {
+        ks_begin = blockIdx.z * ks_per_split;
+        ks_end = min(ksteps, ks_begin + ks_per_split);
+        if (ks_begin >= ks_end)
+            return;
+    }
     load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0],
-                       base_m, rows, K, subs, 0, n_rem);
+                       base_m, rows, K, subs, ks_begin * kBK, n_rem);
     cp_async_commit();
 
-    for (int ks = 0; ks < ksteps; ++ks) {
-        const int stage = ks & 1;
-        if (ks + 1 < ksteps) {
-            const int nstage = (ks + 1) & 1;
+    for (int ks = ks_begin; ks < ks_end; ++ks) {
+        const int stage = (ks - ks_begin) & 1;
+        if (ks + 1 < ks_end) {
+            const int nstage = (ks + 1 - ks_begin) & 1;
             load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
                                sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK,
                                n_rem);
@@ -248,6 +264,31 @@ __global__ void __launch_bounds__(kThreads)
         __syncthreads();
     }
 
+    // SPLITK epilogue: store the fp32 partial tile to this split's slice;
+    // the finalize kernel reduces slices and applies beta/residual.
+    if (SPLITK) {
+        float* Cs = split_out + static_cast<size_t>(blockIdx.z) * (static_cast<size_t>(M) * N);
+#pragma unroll
+        for (int mf = 0; mf < kMF; ++mf) {
+            const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+            const int row_hi = row_lo + 8;
+#pragma unroll
+            for (int nf = 0; nf < kNF; ++nf) {
+                const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+                if (col + 1 >= N) continue;
+                if (row_lo < rows) {
+                    Cs[static_cast<size_t>(row_lo) * N + col] = acc[mf][nf][0];
+                    Cs[static_cast<size_t>(row_lo) * N + col + 1] = acc[mf][nf][1];
+                }
+                if (row_hi < rows) {
+                    Cs[static_cast<size_t>(row_hi) * N + col] = acc[mf][nf][2];
+                    Cs[static_cast<size_t>(row_hi) * N + col + 1] = acc[mf][nf][3];
+                }
+            }
+        }
+        return;
+    }
+
     // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
@@ -269,6 +310,18 @@ __global__ void __launch_bounds__(kThreads)
             }
         }
     }
+}
+
+// Reduce the SPLITK partial slices (fixed order — bit-reproducible) and
+// apply the beta form: out = sum (beta 0) or out += sum (beta 1).
+__global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, int n_splits,
+                                           int total, __half* __restrict__ out, int beta1) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    float v = 0.0f;
+    for (int s = 0; s < n_splits; ++s)
+        v += split_out[static_cast<size_t>(s) * total + idx];
+    out[idx] = beta1 ? __hadd(out[idx], __float2half(v)) : __float2half(v);
 }
 
 // -----------------------------------------------------------------------------
@@ -1180,6 +1233,26 @@ bool ensure_act(int M, int K, bool capturing) {
     return true;
 }
 
+// SPLITK partial-slice scratch (grow-only, freed in mmq_q8_imma_release_all).
+struct SplitKScratch {
+    float* buf = nullptr;
+    size_t cap = 0;
+};
+SplitKScratch g_splitk;
+
+bool ensure_splitk(size_t floats, bool capturing) {
+    if (g_splitk.buf && g_splitk.cap >= floats) return true;
+    if (capturing) return false;
+    if (g_splitk.buf) cudaFree(g_splitk.buf);
+    if (cudaMalloc(&g_splitk.buf, floats * sizeof(float)) != cudaSuccess) {
+        g_splitk.buf = nullptr;
+        g_splitk.cap = 0;
+        return false;
+    }
+    g_splitk.cap = floats;
+    return true;
+}
+
 void quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
     // NO memoization: workspace buffers (moe gathered, layer activations) are
     // REUSED across layers with the same pointer — a (ptr, M, K) memo served
@@ -1285,6 +1358,34 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
     const auto& w = g_weights[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
+
+    // Dense small-M split-K: with one M-tile the grid is N/kBN blocks (~20 on
+    // a 2.5k-wide weight) — far too few to hide the K-loop latency. The call
+    // costs ~35 µs regardless of N, which is the spec-decode verify
+    // bottleneck (issue #667). Split the K-steps across gridDim.z into fp32
+    // partial slices and reduce; the finalize kernel applies beta/residual.
+    if (d_offsets == nullptr && M <= 32) {
+        const int ksteps_total = K / kBK;
+        const int n_tiles = (N + kBN - 1) / kBN;
+        int S = 1;
+        while (S < 8 && n_tiles * S < 256 && ksteps_total / (S * 2) >= 2) S *= 2;
+        if (S > 1) {
+            const int ks_per_split = (ksteps_total + S - 1) / S;
+            const int used = (ksteps_total + ks_per_split - 1) / ks_per_split;
+            const size_t slice = static_cast<size_t>(M) * N;
+            if (used > 1 && ensure_splitk(slice * used, capturing)) {
+                dim3 sgrid(n_tiles, 1, used);
+                mmq_imma_kernel<32, false, false, true><<<sgrid, kThreads, 0, stream>>>(
+                    g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K,
+                    nullptr, w_stride, wsc_stride, g_splitk.buf, ks_per_split);
+                const int total = static_cast<int>(slice);
+                mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+                    g_splitk.buf, used, total, out_f16, beta == 1.0f ? 1 : 0);
+                return true;
+            }
+        }
+    }
+
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (small_m) {
         mmq_imma_kernel<32, false, false><<<grid, kThreads, 0, stream>>>(
@@ -1349,6 +1450,11 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 
 void mmq_q8_imma_release_all() {
     std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_splitk.buf) {
+        cudaFree(g_splitk.buf);
+        g_splitk.buf = nullptr;
+        g_splitk.cap = 0;
+    }
     for (auto& [_, w] : g_weights) {
         cudaFree(w.qs);
         cudaFree(w.sc);
