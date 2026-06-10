@@ -3,7 +3,9 @@
 #include "core/logging.h"
 #include "runtime/config.h"
 #include <cuda_runtime.h>
+#include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_fmha_mxfp4_sm120.h"
@@ -86,8 +88,24 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         }
     }
 
-    // Final fallback: WMMA 128x64 tiles for Blackwell.
-    flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset);
+    // Final tier: WMMA 128x64 tiles for Blackwell. Declines (returns false)
+    // for unsupported configs — hd ∉ {64,96,128,256} or smem over the device
+    // opt-in (hd=256 at Br=64 needs ~176 KB vs 99 KB on sm_120).
+    if (flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+        return;
+    }
+
+    // Chain exhausted. Fail loudly instead of leaving O unwritten — the old
+    // silent blackwell→tc fallback at hd=256 swallowed the launch failure and
+    // produced garbage logits (teacher-forced PPL ~1e10, #654). Reaching this
+    // requires disabling the FP16 WMMA tier by config or an unsupported
+    // head_dim; both deserve an error, not silent corruption.
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "attention_prefill_dispatch: no prefill kernel accepts head_dim=%d "
+             "(check attention.fmha_sm120/fmha_fa2 config) (#654)",
+             static_cast<int>(Q.shape[3]));
+    throw std::runtime_error(msg);
 }
 
 }  // namespace imp

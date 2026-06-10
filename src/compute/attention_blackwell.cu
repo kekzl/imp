@@ -23,6 +23,7 @@
 
 #include "compute/attention_tc.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -379,7 +380,7 @@ static size_t compute_smem(int Br, int head_dim) {
 
 // ===== Host-side launcher ====================================================
 
-void flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                bool causal, int sliding_window, float softcap, cudaStream_t stream,
                                int q_offset) {
     const int batch_size = static_cast<int>(Q.shape[0]);
@@ -465,10 +466,21 @@ void flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
     } else if (smem_64 <= (size_t)max_smem) {
         launched = launch(64, smem_64);
     }
-    if (!launched) {
-        // Unsupported head_dim or smem too small; fall back to tc path
-        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+    // Unsupported head_dim or smem too small (e.g. hd=256: Br=64 needs ~176 KB
+    // vs the 99 KB sm_120 opt-in) → DECLINE so the dispatcher can fail loudly.
+    // The old silent fallback to flash_attention_prefill_tc was the #654 bug:
+    // the tc launcher also exceeds smem at hd=256, nobody checked the launch
+    // error, and O kept garbage (teacher-forced PPL ~1e10) — and tc has no
+    // q_offset, so chunked continuations would mask wrongly even when it runs.
+    if (launched) {
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("flash_attention_blackwell launch failed (hd=%d): %s", head_dim,
+                          cudaGetErrorString(err));
+            return false;
+        }
     }
+    return launched;
 #undef LAUNCH_BW
 }
 

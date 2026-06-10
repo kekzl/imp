@@ -30,7 +30,8 @@ enum class AttnPrefillPath {
     FA2,          // fmha_sm120_fa2_prefill (register-resident)
     FP8,          // fmha_sm120_fp8_prefill
     FMHA_SM120,   // fmha_sm120_prefill (WMMA)
-    BLACKWELL,    // flash_attention_blackwell (final fallback)
+    BLACKWELL,    // flash_attention_blackwell (final tier; declines unsupported configs)
+    NONE,         // chain exhausted → attention_prefill_dispatch throws (#654)
 };
 
 // Per-kernel "would this kernel accept the config" flags, mirroring the bool
@@ -43,6 +44,9 @@ struct AttnKernelSupport {
     bool fa2_accepts = false;       // fmha_sm120_fa2_prefill(...) succeeded
     bool fp8_accepts = false;       // fmha_sm120_fp8_prefill(...) succeeded
     bool fmha_sm120_accepts = false;// fmha_sm120_prefill(...) succeeded
+    bool blackwell_accepts = false; // flash_attention_blackwell(...) succeeded
+                                    // (declines hd ∉ {64,96,128,256} and
+                                    // smem-over-limit configs, e.g. hd=256)
 };
 
 // Reproduces attention_prefill_dispatch()'s path selection (config gates +
@@ -69,8 +73,14 @@ inline AttnPrefillPath select_attn_prefill_path(const RuntimeConfig& rcfg,
     if (rcfg.attention.fmha_sm120 != "never" && sup.fmha_sm120_accepts)
         return AttnPrefillPath::FMHA_SM120;
 
-    // 5. Final fallback: WMMA 128x64 Blackwell flash attention (always runs).
-    return AttnPrefillPath::BLACKWELL;
+    // 5. Final tier: WMMA 128x64 Blackwell flash attention (no config gate,
+    //    but declines unsupported configs — see AttnKernelSupport).
+    if (sup.blackwell_accepts)
+        return AttnPrefillPath::BLACKWELL;
+
+    // 6. Chain exhausted: the dispatcher throws instead of producing garbage
+    //    via an unchecked launch (#654).
+    return AttnPrefillPath::NONE;
 }
 
 }  // namespace imp

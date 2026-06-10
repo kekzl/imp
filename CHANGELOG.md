@@ -6,6 +6,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 
+- **Prefill dispatch chain exhaustion now throws instead of silently emitting
+  garbage** (#654). `flash_attention_blackwell` declined hd=256 (smem over the
+  99 KB sm_120 opt-in) by silently falling back to `flash_attention_prefill_tc`,
+  whose launch also fails at hd=256 — unchecked — leaving the output buffer
+  as garbage (teacher-forced PPL ~1e10 when forced via `fmha_sm120=never`).
+  `flash_attention_blackwell` now returns a decline (`bool`, launch-checked;
+  correct at hd∈{64,96,128}: forced-blackwell Qwen3-8B PPL 40.50 vs cuBLAS
+  40.51), the tc fallback (which also lacked `q_offset` for chunked
+  continuations) is removed from the chain, and `attention_prefill_dispatch`
+  throws a descriptive error when no kernel accepts. Default routing is
+  unaffected (FA2/WMMA serve all supported head dims first).
+
 - **fp8-QK FMHA demoted to opt-in — gemma-3 long-context prefill was
   catastrophically degraded** (#511 reopened/resolved). The raw (unscaled)
   Q/K→e4m3 conversion compounds per-layer score error on real activations:

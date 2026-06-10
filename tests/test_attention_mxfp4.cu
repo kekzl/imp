@@ -178,7 +178,7 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         if (sm_ >= 120) {
-            flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream_);
+            ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream_));
         } else {
             flash_attention_prefill_tc(Q, K, V, O, scale, true, 0, 0.0f, stream_);
         }
