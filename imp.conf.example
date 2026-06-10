@@ -65,11 +65,15 @@ bitdecoding_residual_tokens = 0
 # Each "auto" key picks the kernel automatically based on weight type +
 # context length. Override only for benchmarking or compatibility tests.
 fp8_prefill          = "auto"
-fp8_fmha             = "auto"
+# fp8-QK FMHA family: strictly opt-in ("on"). The raw e4m3 Q/K conversion
+# compounds per-layer score error on real activations (#511) — teacher-forced
+# PPL gemma-3-12b 16.6 -> 549 when it served prefill. Default "never" routes
+# hd!=128 prefill to the FP16 WMMA kernel instead.
+fp8_fmha             = "never"
 fmha_sm120           = "auto"
 # Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).
-# Default "on" since PR #478 (+13-19% long-ctx NVFP4 prefill); declines to
-# the FP8 FMHA for unsupported configs. "never" forces legacy FP8 FMHA.
+# Default "on" since PR #478; QK^T runs in f16 unless fa2_fp16qk=never AND
+# fp8_fmha=on (#511). Declines to the FP16 WMMA kernel for unsupported configs.
 fmha_fa2             = "on"
 # FP16-QK FA2 for SHORT prefill (below fmha_prefill_threshold, hd=128):
 # replaces the materialized cuBLAS+softmax path (PR #525, +25-35% pp512

@@ -4,6 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+
+- **fp8-QK FMHA demoted to opt-in — gemma-3 long-context prefill was
+  catastrophically degraded** (#511 reopened/resolved). The raw (unscaled)
+  Q/K→e4m3 conversion compounds per-layer score error on real activations:
+  teacher-forced PPL gemma-3-12b 16.6→549 once chunked prefill crossed the
+  S-matrix cap (~3.5k ctx) and the fp8 kernel started serving (Qwen3-8B
+  forced through it: 40.5→4506). The #511 long-ctx "validation" (needle at
+  5.2k) never exercised the kernel — `fa2_fp16qk` served those chunks.
+  `attention.fp8_fmha` now defaults to `"never"` (strictly opt-in `"on"`);
+  the dispatch-chain FA2 call runs f16-QK; hd≠128 long prefill is served by
+  the FP16 WMMA kernel (PPL-identical to cuBLAS, 15.53 both at n=3441 incl.
+  sliding window). gemma-3-12b @8.3k-token corpus: PPL 549→11.1. Bonus:
+  Qwen3-8B pp4096 +6.9% (the tuned f16-QK FA2 replaces fp8-QK in the
+  unchunked chain). Follow-ups: #654 (broken `flash_attention_blackwell`
+  last-resort), #655 (IMP_PPL_DUMP position mapping).
+
 ## [0.10.0] - 2026-06-09
 
 151 commits since v0.9.1. Headlines: gpt-oss-20b support, LoRA hot-swap, the

@@ -908,8 +908,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // score noise — the long-context chunked path through the
             // e4m3 FMHA family drifted teacher-forced NLL by up to ~25%
             // (ChunkedPrefillTest.LongContext_Chunk_Invariance is the gate).
-            // The fp8 family stays as fallback for configs f16-QK declines
-            // (hd != 128, fa2_fp16qk=never), and cuBLAS below the threshold.
+            // Configs f16-QK declines (hd != 128, e.g. gemma-3 hd=256) fall
+            // through to the tiled dispatch chain, which serves them with the
+            // FP16 WMMA kernel — the fp8-QK family is opt-in only (#511:
+            // raw e4m3 Q/K conversion read teacher-forced PPL 549 vs 16.6 on
+            // gemma-3-12b when it served these chunks). cuBLAS below the
+            // threshold.
             if (!per_layer_shapes && !attn_sinks &&
                 try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
@@ -951,15 +955,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         const bool prefer_fmha = !force_cublas_attn &&
                                  (n >= runtime_config().attention.fmha_prefill_threshold);
 
-        // NOTE (#566): sliding-window prefill used to be routed AWAY from the
-        // cuBLAS path here (`non_gemma4_sliding`) into the WMMA fallback
-        // chain — a relic from before attention_cublas_prefill grew its
-        // sliding_window softmax mask. The WMMA chain's hd=256 + window
-        // combination computes catastrophically wrong attention (gemma-3-12b
-        // at n>1024: teacher-forced PPL 42 vs llama.cpp 1.0; long-prompt
-        // recall answered '77' instead of '477'). The cuBLAS masked softmax
-        // is the correctness reference and handles the window — keep SWA
-        // prefill here whenever the S-matrix fits.
+        // NOTE (#566→#511): sliding-window prefill used to be routed AWAY
+        // from the cuBLAS path here (`non_gemma4_sliding`) into the tiled
+        // fallback chain — a relic from before attention_cublas_prefill grew
+        // its sliding_window softmax mask. The historic "catastrophically
+        // wrong hd=256+window attention" (gemma-3-12b PPL 42 vs llama.cpp
+        // 1.0) was root-caused to the fp8-QK kernel that used to lead that
+        // chain: raw e4m3 Q/K conversion compounds per-layer score error on
+        // real activations (#511) — measured PPL 549 vs 16.6 when it served
+        // gemma-3 chunks. fp8-QK is opt-in now; the FP16 WMMA kernel that
+        // serves hd=256 instead is PPL-identical to cuBLAS (15.53 both,
+        // n=3441 incl. window). cuBLAS stays preferred below the threshold
+        // for throughput and as the materialized reference.
         if (s_matrix_fits && !prefer_fmha) {
             // Below the FMHA threshold: prefer the FP16-QK FA2 kernel over the
             // materialized cuBLAS path (same f16/f32 numerics, O(n) memory).

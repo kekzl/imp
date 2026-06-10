@@ -57,8 +57,12 @@ inline AttnPrefillPath select_attn_prefill_path(const RuntimeConfig& rcfg,
     if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)
         return AttnPrefillPath::FA2;
 
-    // 3. Native FP8 FMHA — ON unless fp8_fmha == "never".
-    if (rcfg.attention.fp8_fmha != "never" && sup.fp8_accepts)
+    // 3. fp8-QK FMHA — strictly opt-in (== "on"). Raw e4m3 Q/K conversion
+    //    compounds ~10% relative score error per layer on real activations
+    //    (#511): teacher-forced PPL gemma-3-12b 16.6→549, Qwen3-8B 40.5→4506
+    //    when this kernel actually serves prefill. Default routes hd!=128
+    //    to the FP16 WMMA kernel below instead.
+    if (rcfg.attention.fp8_fmha == "on" && sup.fp8_accepts)
         return AttnPrefillPath::FP8;
 
     // 4. Native FP16 WMMA FMHA — ON unless fmha_sm120 == "never".
