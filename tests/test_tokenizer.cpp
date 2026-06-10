@@ -669,5 +669,65 @@ TEST(Qwen2PreTokenizeTest, TrailingWhitespace) {
     EXPECT_EQ(qwen2_pre_tokenize("abc   "), (Chunks{"abc", "   "}));
 }
 
+// ---- o200k pre-tokenizer (gpt-oss / GPT-4o, #657) ----
+//
+// Expected chunks verified against HF tokenizers `pre_tokenize_str` on the
+// gpt-oss-20b tokenizer.json (Ġ/Ċ rendered as plain space/newline here).
+
+TEST(O200kPreTokenizeTest, CodeLine) {
+    EXPECT_EQ(o200k_pre_tokenize("def foo(x): return x"),
+              (Chunks{"def", " foo", "(x", "):", " return", " x"}));
+}
+
+TEST(O200kPreTokenizeTest, DigitTriples) {
+    // \p{N}{1,3}: greedy groups of three, and a bare space stays standalone
+    // before digits (no ' ?' option on the digit rule).
+    EXPECT_EQ(o200k_pre_tokenize("17 + 25 = 12345"),
+              (Chunks{"17", " +", " ", "25", " =", " ", "123", "45"}));
+}
+
+TEST(O200kPreTokenizeTest, UrlPrefixAndSlashes) {
+    EXPECT_EQ(o200k_pre_tokenize("https://a.com/x?q=1"),
+              (Chunks{"https", "://", "a", ".com", "/x", "?q", "=", "1"}));
+}
+
+TEST(O200kPreTokenizeTest, ContractionIsSuffix) {
+    // Unlike qwen2 (standalone leading alternative), o200k attaches the
+    // contraction to the letter run: "don't" is ONE chunk.
+    EXPECT_EQ(o200k_pre_tokenize("don't stop"), (Chunks{"don't", " stop"}));
+}
+
+TEST(O200kPreTokenizeTest, CaseAwareLetterRuns) {
+    EXPECT_EQ(o200k_pre_tokenize("camelCase HTTPSession ALLCAPS"),
+              (Chunks{"camel", "Case", " HTTPSession", " ALLCAPS"}));
+}
+
+TEST(O200kPreTokenizeTest, WhitespaceBacktracking) {
+    EXPECT_EQ(o200k_pre_tokenize("    return x"), (Chunks{"   ", " return", " x"}));
+    EXPECT_EQ(o200k_pre_tokenize("a  b"), (Chunks{"a", " ", " b"}));
+}
+
+TEST(O200kPreTokenizeTest, SymbolRunTrailingNewlinesAndSlashes) {
+    EXPECT_EQ(o200k_pre_tokenize("};\n\nint x"), (Chunks{"};\n\n", "int", " x"}));
+    // The trailing class is [\r\n/]*: a slash absorbs a following newline.
+    EXPECT_EQ(o200k_pre_tokenize("x\n/\ny"), (Chunks{"x", "\n", "/\n", "y"}));
+}
+
+TEST(O200kPreTokenizeTest, NonAsciiSymbolsAreSymbolsNotLetters) {
+    // → (U+2192) and — (U+2014) are \p{S}/\p{P}, NOT letters: they take the
+    // symbol-run rule (which absorbs trailing newlines). With the old
+    // ≥0x80=letter approximation, " →\n" became [" →", "\n"] and diverged
+    // from canonical (the 4 residual corpus diffs in #657).
+    EXPECT_EQ(o200k_pre_tokenize("a \xe2\x86\x92\nb"), (Chunks{"a", " \xe2\x86\x92\n", "b"}));
+    EXPECT_EQ(o200k_pre_tokenize("x \xe2\x80\x94 y"), (Chunks{"x", " \xe2\x80\x94", " y"}));
+    // Non-ASCII LETTERS keep working: "Käse" stays one chunk.
+    EXPECT_EQ(o200k_pre_tokenize("K\xc3\xa4se"), (Chunks{"K\xc3\xa4se"}));
+}
+
+TEST(Qwen2PreTokenizeTest, NonAsciiSymbolsAreSymbolsNotLetters) {
+    EXPECT_EQ(qwen2_pre_tokenize("a \xe2\x86\x92\nb"), (Chunks{"a", " \xe2\x86\x92\n", "b"}));
+    EXPECT_EQ(qwen2_pre_tokenize("K\xc3\xa4se"), (Chunks{"K\xc3\xa4se"}));
+}
+
 }  // namespace
 }  // namespace imp

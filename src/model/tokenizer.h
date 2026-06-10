@@ -179,4 +179,8 @@ private:
 // Exposed for unit tests — production use is inside Tokenizer::encode_*.
 std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
 
+// o200k pre-tokenizer scan (gpt-oss / GPT-4o family; #657). Case-aware letter
+// runs, digit triples, slash-aware symbol runs. Exposed for unit tests.
+std::vector<std::string> o200k_pre_tokenize(const std::string& text);
+
 }  // namespace imp
