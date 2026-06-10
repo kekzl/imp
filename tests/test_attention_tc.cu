@@ -260,7 +260,7 @@ protected:
         Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-        flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_);
+        ASSERT_TRUE(flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_));
         cudaStreamSynchronize(stream_);
 
         cudaError_t err = cudaGetLastError();
@@ -429,7 +429,7 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
     Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-    flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true, sliding_window, 0.0f, stream_);
+    ASSERT_TRUE(flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true, sliding_window, 0.0f, stream_));
     cudaStreamSynchronize(stream_);
 
     cudaError_t err = cudaGetLastError();
@@ -452,6 +452,41 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     }
     EXPECT_EQ(non_finite, 0) << "non-finite output/reference elements";
     EXPECT_LT(max_err, 1e-2f) << "Sliding window max relative error " << max_err;
+
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
+}
+
+TEST_F(AttentionBlackwellTest, HeadDim256DeclinesOnSm120) {
+    // hd=256 at Br=64 needs ~176 KB smem vs the 99 KB sm_120 opt-in. The
+    // kernel must DECLINE (return false) so the dispatcher fails loudly —
+    // the old silent fallback to flash_attention_prefill_tc swallowed the
+    // launch failure and produced garbage logits (#654).
+    if (sm_ < 120) {
+        GTEST_SKIP() << "decline contract pinned for sm_120 smem limits";
+    }
+    const int B = 1, Sq = 64, Skv = 64, NH = 2, NKV = 2, HD = 256;
+    size_t elems = (size_t)B * Sq * NH * HD;
+    void *d_q, *d_k, *d_v, *d_o;
+    cudaMalloc(&d_q, elems * sizeof(half));
+    cudaMalloc(&d_k, elems * sizeof(half));
+    cudaMalloc(&d_v, elems * sizeof(half));
+    cudaMalloc(&d_o, elems * sizeof(half));
+    cudaMemset(d_q, 0, elems * sizeof(half));
+    cudaMemset(d_k, 0, elems * sizeof(half));
+    cudaMemset(d_v, 0, elems * sizeof(half));
+    cudaMemset(d_o, 0, elems * sizeof(half));
+    int64_t shape[] = {B, Sq, NH, HD};
+    Tensor Qt(d_q, QType::F16, 4, shape, true);
+    Tensor Kt(d_k, QType::F16, 4, shape, true);
+    Tensor Vt(d_v, QType::F16, 4, shape, true);
+    Tensor Ot(d_o, QType::F16, 4, shape, true);
+
+    EXPECT_FALSE(flash_attention_blackwell(Qt, Kt, Vt, Ot, 0.0625f, true, 0, 0.0f, stream_));
+    cudaStreamSynchronize(stream_);
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 
     cudaFree(d_q);
     cudaFree(d_k);

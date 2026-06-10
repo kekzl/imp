@@ -78,7 +78,10 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
             attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream, rcfg);
             return;
         }
-        flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream);
+        if (!flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream)) {
+            fprintf(stderr, "flash_attention_blackwell declined this config (#654) — nothing to bench\n");
+            exit(1);
+        }
     };
 
     // Warmup

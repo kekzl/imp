@@ -255,12 +255,12 @@ protected:
                 collect(r);
             results.push_back(std::move(r));
         }
-        {  // 6. flash_attention_blackwell (the dispatcher's final fallback)
+        {  // 6. flash_attention_blackwell (the dispatcher's final tier)
             PathResult r{"blackwell"};
             clear_o();
-            flash_attention_blackwell(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0);
-            r.ran = true;
-            collect(r);
+            r.ran = flash_attention_blackwell(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0);
+            if (r.ran)
+                collect(r);
             results.push_back(std::move(r));
         }
 

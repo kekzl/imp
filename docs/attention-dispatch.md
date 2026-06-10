@@ -46,7 +46,8 @@ Tried in order, first hit wins:
 2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd==128 only**. f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
 3. **`fmha_sm120_fp8_prefill`** — strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0. Raw e4m3 Q/K conversion compounds per-layer score error on real activations (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill. Off by default.
 4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0. Default server for hd≠128 long prefill (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).
-5. **`flash_attention_blackwell`** — WMMA 128×64 tiles as the last resort
+5. **`flash_attention_blackwell`** — WMMA 128×64 tiles, last tier. Declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in).
+6. **Chain exhausted → `std::runtime_error`** (#654). The old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10); tc also lacks `q_offset`, so chunked continuations would mask wrongly even when it launches. Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim — both error loudly now.
 
 The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) live in `docs/archive/` with resurrection memos.
 

@@ -28,6 +28,7 @@ AttnKernelSupport all_accept() {
     s.fa2_accepts = true;
     s.fp8_accepts = true;
     s.fmha_sm120_accepts = true;
+    s.blackwell_accepts = true;
     return s;
 }
 
@@ -108,11 +109,24 @@ TEST(AttnDispatchTable, AllSpecializedDisabledFallsToBlackwell) {
     EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::BLACKWELL);
 }
 
-TEST(AttnDispatchTable, AllSpecializedDeclineFallsToBlackwell) {
-    // Unsupported config for every specialized kernel → final WMMA fallback.
+TEST(AttnDispatchTable, AllDeclineIsNoneAndThrows) {
+    // Unsupported config for every kernel incl. the final blackwell tier
+    // (e.g. hd=256 with fmha_sm120=never: blackwell needs ~176 KB smem) →
+    // NONE; the dispatcher throws instead of silently corrupting O (#654).
     auto cfg = default_cfg();
     AttnKernelSupport sup;  // all false
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::BLACKWELL);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::NONE);
+}
+
+TEST(AttnDispatchTable, BlackwellDeclineWithFMHADisabledIsNone) {
+    // The exact #654 production-forced config: hd=256, fmha_sm120=never.
+    // FA2 declines (hd!=128), fp8 opt-in/off, blackwell declines (smem).
+    auto cfg = default_cfg();
+    cfg.attention.fmha_sm120 = "never";
+    auto sup = all_accept();
+    sup.fa2_accepts = false;
+    sup.blackwell_accepts = false;
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::NONE);
 }
 
 TEST(AttnDispatchTable, FMHASm120AutoIsNotNever) {
