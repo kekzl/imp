@@ -6,6 +6,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 
+- **SPM tokenization: USER_DEFINED pieces now literal-matched — gemma
+  multi-space runs were never canonical** (#657). gemma-3 stores indentation
+  tokens (`'  '`…27×`' '`) and HTML tags as SentencePiece user-defined
+  symbols with literal-space pieces; imp's ▁-substituting BPE could never
+  reproduce them and emitted N single-space tokens per indent run. The
+  special-pieces literal pre-split now includes type-4 (USER_DEFINED)
+  alongside CONTROL. gemma-3-12b: token ids identical to llama.cpp, corpus
+  count 3395 == llama.cpp, matched-band NLL +37.5% → **−0.4%**, corpus PPL
+  15.53 → 10.57. Together with the Qwen2 pre-tokenizer fix, the entire
+  measured cross-engine quality gap was tokenization, not numerics. Also:
+  `--set diagnostics.dump_tokens=true` with `--perplexity` now dumps the
+  full corpus token stream for cross-engine diffs.
+
 - **Qwen2/Qwen3 tokenization was non-canonical on symbol/digit sequences**
   (#657). The gpt2 pre-tokenizer fallback split every punctuation character
   individually and grouped digits in threes, so canonical BPE merges were
