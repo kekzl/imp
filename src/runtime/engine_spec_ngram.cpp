@@ -92,7 +92,8 @@ void Engine::free_spec_buffers_() {
 // lock them out exactly there.
 void Engine::spec_maybe_rearm_(Request& req) const {
     const auto& scfg = runtime_config_.speculative;
-    if (!req.spec_ngram_given_up || scfg.burst <= 0 || scfg.give_up_after <= 0)
+    if (!req.spec_ngram_given_up || req.spec_acceptance_doomed || scfg.burst <= 0 ||
+        scfg.give_up_after <= 0)
         return;
     if (static_cast<int>(req.output_tokens.size()) - req.spec_last_giveup_pos < scfg.burst)
         return;
@@ -101,6 +102,38 @@ void Engine::spec_maybe_rearm_(Request& req) const {
     req.spec_verifies = 0;
     req.spec_drafted = 0;
     req.spec_accepted = 0;
+}
+
+// Adaptive miss burst: consecutive draft misses double the burst length
+// (boundary overhead amortizes on draft-poor stretches), a hit resets it.
+// Capped at speculative.burst so re-probing never stops entirely.
+int Engine::spec_effective_miss_burst_(const Request& req) const {
+    const auto& scfg = runtime_config_.speculative;
+    int burst = scfg.miss_burst;
+    if (burst <= 0)
+        return 0;
+    // Cap growth at 4x: longer bursts overshoot draft-rich regions right
+    // after a transition (think prose -> code), losing more speculation
+    // upside than the saved boundary overhead is worth.
+    const int doublings = std::min(2, req.spec_consecutive_misses / 8);
+    burst <<= doublings;
+    const int cap = scfg.burst > 0 ? scfg.burst : 128;
+    return std::min(burst, cap);
+}
+
+// Whether a bounded async-loop burst may be launched directly from the spec
+// hook (mirrors the launch conditions in step_decode_process_outputs).
+bool Engine::spec_burst_launch_ok_(const Request& req) const {
+    if (!decode_graph_pool_[0].is_ready() || offload_mgr_ || !config_.use_cuda_graphs)
+        return false;
+    if (async_graph_runner_.is_setup() && async_parked_req_id_ != req.id)
+        return false;  // runner busy/parked for another request
+    // Text-fallback think tracking needs host-side per-token matching.
+    if (req.in_think_block && think_end_id_ < 0)
+        return false;
+    if (req.output_tokens.empty() || req.status != RequestStatus::DECODING)
+        return false;
+    return true;
 }
 
 bool Engine::spec_ngram_gates_ok_(const Request& req) const {
@@ -150,6 +183,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                          "re-enabling async graph loop",
                          req->id, req->spec_consecutive_misses);
         }
+        // Skip the eager probe step entirely when a bounded loop burst can
+        // take over right away — the eager path costs ~2x per token and the
+        // burst forwards output.back() itself.
+        if (scfg.miss_burst > 0 && !req->spec_ngram_given_up && spec_burst_launch_ok_(*req) &&
+            try_launch_async_graph_loop(req, req->output_tokens.back(), stream,
+                                        spec_effective_miss_burst_(*req))) {
+            return true;  // step handled by the burst launch
+        }
         return false;  // no usable draft — normal decode step
     }
 
@@ -176,12 +217,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int chunk_len = K + 1;
     const int ctx_len = p0 + chunk_len;  // context including the full chunk
 
-    // Staging buffers first (no KV side effects yet on failure).
     const int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
-    if (!ensure_spec_buffers_(std::max(chunk_len, scfg.k + 1), blocks_needed + 16)) {
-        spec_stats_.miss_steps++;
-        return false;
-    }
 
     // KV blocks for all chunk positions (mirror step_decode's append loop).
     // On allocation failure, trim back to the pre-step valid length (p0 KV
@@ -201,6 +237,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
     const auto& block_table = kv_manager_->block_table(req->id);
     const int n_blocks = static_cast<int>(block_table.size());
+
+    // Staging capacity follows the REAL table size — the async graph loop
+    // pre-allocates blocks for the whole remaining generation, so the table
+    // is usually much larger than this chunk needs.
+    if (!ensure_spec_buffers_(std::max(chunk_len, scfg.k + 1), n_blocks + 16)) {
+        spec_stats_.miss_steps++;
+        return false;
+    }
 
     // Upload chunk metadata.
     std::vector<int32_t> h_tokens;
@@ -303,12 +347,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     req->spec_drafted += K;
     req->spec_accepted += matched;
     const bool acceptance_poor =
-        req->spec_verifies >= 16 &&
+        req->spec_verifies >= 8 &&
         req->spec_accepted * 100 < req->spec_drafted * 15;
     if (!req->spec_ngram_given_up && scfg.give_up_after > 0 &&
         (acceptance_poor || req->spec_consecutive_misses >= scfg.give_up_after)) {
         req->spec_ngram_given_up = true;
         req->spec_last_giveup_pos = static_cast<int>(req->output_tokens.size());
+        if (acceptance_poor)
+            req->spec_acceptance_doomed = true;  // economics verdict is final
         IMP_LOG_INFO("spec-ngram: req %d gave up (%s: verifies=%d accepted=%lld/%lld misses=%d) — "
                      "re-enabling async graph loop",
                      req->id, acceptance_poor ? "acceptance-poor" : "draft-poor",

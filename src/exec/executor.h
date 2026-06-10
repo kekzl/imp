@@ -297,6 +297,11 @@ private:
     void for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
                                  const std::function<void(const Tensor&, int, int)>& consume);
 
+    // Spec-decode verify argmax partials (lazy, grows only; freed in
+    // free_buffers).
+    void* verify_argmax_scratch_ = nullptr;
+    size_t verify_argmax_scratch_sz_ = 0;
+
     // LoRA (issue #522)
     const LoraAdapter* lora_ = nullptr;
     void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]

@@ -252,8 +252,8 @@ mmproj               = ""
 # disables the async decode graph loop while on. Wins on repetition-heavy
 # (agent/code/RAG) workloads; can cost a few % on free-form prose.
 ngram                = false
-# Draft tokens proposed per verify step.
-k                    = 8
+# Draft tokens proposed per verify step (verify cost is ~flat in k).
+k                    = 16
 # Shortest / longest suffix n-gram match searched.
 min_match            = 3
 max_match            = 8
@@ -265,6 +265,10 @@ give_up_after        = 64
 # many tokens and re-probes for drafts in between (think models reach their
 # draft-rich region only after the reasoning prose). 0 = give-up is final.
 burst                = 128
+# On a draft miss, run the async loop for this many tokens (cheap rearm,
+# no graph recapture) instead of stepping eagerly until the next draft.
+# 0 = stay eager between drafts.
+miss_burst           = 8
 
 [ffn]
 # SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable

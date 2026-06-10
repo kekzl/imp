@@ -199,16 +199,26 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
     });
 }
 
-// One block per row: fp32 argmax → token id. Tie-break = smallest index,
-// matching the production greedy argmax kernels in sampling.cu — spec-decode
-// verify must agree with what plain greedy decode would have sampled.
-__global__ void rowwise_argmax_kernel(const float* __restrict__ logits, int V,
-                                      int32_t* __restrict__ out) {
-    const float* lg = logits + static_cast<int64_t>(blockIdx.x) * V;
+// Two-phase row-wise argmax. A single block per row reads ~600 KB of fp32
+// logits sequentially (~145 µs/row at vocab 151k); phase 1 splits each row
+// across kArgmaxSplits blocks, phase 2 reduces the partials. Tie-break =
+// smallest index, matching the production greedy argmax in sampling.cu —
+// spec-decode verify must agree with what plain greedy decode would sample.
+constexpr int kArgmaxSplits = 16;
+
+__global__ void rowwise_argmax_partial_kernel(const float* __restrict__ logits, int V,
+                                              float* __restrict__ pvals,
+                                              int* __restrict__ pidxs) {
+    const int row = blockIdx.x;
+    const int split = blockIdx.y;
+    const int chunk = (V + kArgmaxSplits - 1) / kArgmaxSplits;
+    const int begin = split * chunk;
+    const int end = min(V, begin + chunk);
+    const float* lg = logits + static_cast<int64_t>(row) * V;
     const int tid = threadIdx.x;
     float best = -FLT_MAX;
     int best_idx = 0;
-    for (int i = tid; i < V; i += blockDim.x) {
+    for (int i = begin + tid; i < end; i += blockDim.x) {
         float v = lg[i];
         if (v > best || (v == best && i < best_idx)) {
             best = v;
@@ -231,8 +241,29 @@ __global__ void rowwise_argmax_kernel(const float* __restrict__ logits, int V,
         __syncthreads();
     }
     if (tid == 0) {
-        out[blockIdx.x] = s_idx[0];
+        pvals[row * kArgmaxSplits + split] = s_val[0];
+        pidxs[row * kArgmaxSplits + split] = s_idx[0];
     }
+}
+
+// One thread per row: 16 partials is a trivial sequential reduce.
+__global__ void rowwise_argmax_reduce_kernel(const float* __restrict__ pvals,
+                                             const int* __restrict__ pidxs, int n_rows,
+                                             int32_t* __restrict__ out) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows)
+        return;
+    float best = -FLT_MAX;
+    int best_idx = 0;
+    for (int s = 0; s < kArgmaxSplits; ++s) {
+        const float v = pvals[row * kArgmaxSplits + s];
+        const int i = pidxs[row * kArgmaxSplits + s];
+        if (v > best || (v == best && i < best_idx)) {
+            best = v;
+            best_idx = i;
+        }
+    }
+    out[row] = best_idx;
 }
 
 void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream) {
@@ -240,9 +271,26 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         return;
     }
     const int V = model_->config().vocab_size;
+    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    const size_t scratch_needed =
+        static_cast<size_t>(mb) * kArgmaxSplits * (sizeof(float) + sizeof(int));
+    if (verify_argmax_scratch_sz_ < scratch_needed) {
+        if (verify_argmax_scratch_)
+            IMP_CUDA_CHECK_LOG(cudaFree(verify_argmax_scratch_));
+        if (cudaMalloc(&verify_argmax_scratch_, scratch_needed) != cudaSuccess) {
+            verify_argmax_scratch_ = nullptr;
+            verify_argmax_scratch_sz_ = 0;
+            return;
+        }
+        verify_argmax_scratch_sz_ = scratch_needed;
+    }
+    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
     for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
-        rowwise_argmax_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), V,
-                                                       d_out + row0);
+        dim3 grid(csz, kArgmaxSplits);
+        rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(
+            static_cast<const float*>(lg.data), V, pvals, pidxs);
+        rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
     });
 }
 

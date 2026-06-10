@@ -875,9 +875,18 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
             // Still have unconsumed tokens from a previous multi-token step
             *out_token = req->output_tokens[ctx->consumed_output++];
         } else {
-            // Need a new engine step
+            // Need a new engine step. A step may legitimately yield ZERO new
+            // tokens when it only launches an async graph-loop burst (n-gram
+            // speculation miss path) — the burst's tokens arrive on the next
+            // step's drain. Retry a bounded number of times; a persistent
+            // zero-token stream is still an internal error.
             size_t prev_output_size = req->output_tokens.size();
-            (void)ctx->engine->step();
+            for (int attempts = 0;
+                 attempts < 8 && req->output_tokens.size() == prev_output_size &&
+                 req->status == imp::RequestStatus::DECODING;
+                 ++attempts) {
+                (void)ctx->engine->step();
+            }
 
             if (req->output_tokens.size() > prev_output_size) {
                 ctx->consumed_output = prev_output_size;

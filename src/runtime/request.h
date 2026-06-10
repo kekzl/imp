@@ -62,6 +62,10 @@ struct Request {
     long long spec_accepted = 0;
     bool spec_ngram_given_up = false;
     int spec_last_giveup_pos = 0;  // output size at last give-up (burst re-arm)
+    // Sticky acceptance verdict: structured-but-mutating content (number
+    // tables) re-trips the acceptance economics after every re-arm window —
+    // once doomed, give-up is final for this request.
+    bool spec_acceptance_doomed = false;
     bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
     // Generation began inside an injected <think> prefix (the opener lives in
     // the PROMPT, not the output) — seeds the think-budget recount loop and

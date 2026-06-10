@@ -1306,14 +1306,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
 
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
                       int K, cudaStream_t stream, float beta) {
-    if (M < 64 || N % 2 != 0 || K % kBK != 0) return false;
+    // M >= 2 (was >= 64): small-M callers (spec-decode verify chunks, short
+    // prompts) are exactly where the dequant->cuBLAS fallback hurts most; the
+    // tiles zero-fill the M-tail (same machinery as the MoE per-expert path).
+    if (M < 2 || N % 2 != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }
 
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M,
                        int N, int K, cudaStream_t stream, float beta) {
-    if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
+    if (M < 2 || N % 2 != 0 || K % 256 != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q4k_blocks, 1, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }

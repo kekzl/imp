@@ -312,8 +312,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // docs/audit/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
         // beta=1 residual-add form; declines (shape / capture-guard) fall
         // through to the dequant fallback below.
+        // M >= 2 (was >= 64): below 64 the dequant tax dominates even harder —
+        // an M=9 spec-decode verify chunk re-dequantized the ENTIRE model every
+        // step (56% of GPU time, issue #667). The IMMA kernel zero-fills M-tail
+        // rows, and the MoE path already runs it at per-expert M≈32.
         const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 &&
-                                   M >= 64 && input.stride[0] == h.shape[1] &&
+                                   M >= 2 && input.stride[0] == h.shape[1] &&
                                    output.stride[0] == h.shape[0];
         if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
             if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),

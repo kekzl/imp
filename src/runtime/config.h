@@ -406,7 +406,7 @@ struct RuntimeConfig {
     // graph loop), which costs on draft-miss-heavy workloads.
     struct Speculative {
         bool ngram = false;  // enable prompt-lookup speculation (batch-1, greedy)
-        int k = 8;           // draft tokens per verify step
+        int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
         int min_match = 3;   // shortest accepted suffix n-gram match
         int max_match = 8;   // longest suffix extension searched
         // After this many consecutive draft misses the request gives up on
@@ -419,6 +419,11 @@ struct RuntimeConfig {
         // for a couple of steps (think models produce their draft-rich
         // region only after the reasoning prose). 0 = give-up is final.
         int burst = 128;
+        // On a draft miss the request falls back to the async loop for this
+        // many tokens (cheap rearm, no graph recapture) instead of paying
+        // the ~2x eager per-token tax until the next draft shows up.
+        // 0 = stay eager between drafts (legacy behavior).
+        int miss_burst = 8;
     } speculative;
 
     struct FFN {

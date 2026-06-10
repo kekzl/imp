@@ -302,6 +302,11 @@ private:
     int32_t* async_d_banned_tokens_ = nullptr;
     std::vector<int32_t> async_pending_tokens_;
     int async_pending_cursor_ = 0;
+    // Burst-hybrid speculation: after a bounded (step_limit) burst drains,
+    // the runner stays "parked" with its captured graph + block-table buffer
+    // so the next burst of the SAME request can rearm instead of recapture.
+    int async_parked_req_id_ = -1;
+    int async_bt_capacity_ = 0;  // block-table slots baked into the graph
 
     // Pipelined constrained decode (json_mode / json_schema, single sequence).
     // Constrained requests can't run the conditional graph loop (the grammar
@@ -439,6 +444,8 @@ private:
     // false → caller falls through to the normal decode path.
     bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
     bool spec_ngram_gates_ok_(const Request& req) const;
+    bool spec_burst_launch_ok_(const Request& req) const;
+    int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;
     bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
     void free_spec_buffers_();
@@ -601,7 +608,8 @@ private:
 
     std::vector<int32_t> try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
                                                cudaStream_t stream);
-    bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream);
+    bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
+                                     cudaStream_t stream, int step_limit = 0);
 };
 
 }  // namespace imp
