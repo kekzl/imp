@@ -104,3 +104,6 @@ tools/roofline/history/raw/**/*.nsys-rep
 tools/roofline/history/raw/**/*.sqlite
 tools/roofline/plots/
 tools/roofline/__pycache__/
+
+# graphify generated knowledge-graph output (regenerate with `graphify update .`)
+graphify-out/
