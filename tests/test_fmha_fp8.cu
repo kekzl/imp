@@ -1,5 +1,13 @@
 // Tests for the FP8 E4M3 FMHA kernel (QK^T in FP8, PV in FP16).
 // Verifies correctness against a CPU reference for various configs.
+//
+// NOTE (#511): these parity cases use small synthetic values (±0.12) where
+// e4m3 quantization error is invisible. On real model activations the raw
+// (unscaled) Q/K→e4m3 conversion compounds per-layer score error into
+// garbage (teacher-forced PPL gemma-3-12b 16.6→549, Qwen3-8B 40.5→4506) —
+// which is why the kernel is opt-in (attention.fp8_fmha = "on") and NOT in
+// the default dispatch chain. These tests pin indexing/masking only, not
+// production quality.
 
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"

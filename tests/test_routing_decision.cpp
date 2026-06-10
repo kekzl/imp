@@ -17,7 +17,7 @@ using namespace imp;
 
 namespace {
 
-// Default config: fmha_fa2="on", fp8_fmha="auto", fmha_sm120="auto".
+// Default config: fmha_fa2="on", fp8_fmha="never" (opt-in, #511), fmha_sm120="auto".
 RuntimeConfig default_cfg() { return RuntimeConfig{}; }
 
 // Typical hd=128 F16 prefill: every specialized kernel would accept.
@@ -53,18 +53,36 @@ TEST(AttnDispatchTable, Mxfp4AvailableButDeclinesFallsToFA2) {
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FA2);
 }
 
-TEST(AttnDispatchTable, FA2NeverFallsToFP8) {
+TEST(AttnDispatchTable, FA2NeverFallsToFMHANotFP8) {
+    // fp8-QK is opt-in (#511): disabling FA2 must NOT resurrect the e4m3 path.
     auto cfg = default_cfg();
     cfg.attention.fmha_fa2 = "never";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FP8);
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FMHA_SM120);
 }
 
-TEST(AttnDispatchTable, FA2OnButDeclinesFallsToFP8) {
-    // hd != 128 (e.g. Gemma): FA2 declines even with fmha_fa2="on".
+TEST(AttnDispatchTable, FA2OnButDeclinesFallsToFMHA) {
+    // hd != 128 (gemma-3 hd=256, the #511 production victim): FA2 declines
+    // even with fmha_fa2="on" → FP16 WMMA serves, never the fp8-QK kernel.
     auto cfg = default_cfg();
     auto sup = all_accept();
     sup.fa2_accepts = false;
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FP8);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
+}
+
+TEST(AttnDispatchTable, FP8AutoIsOff) {
+    // Legacy "auto" (pre-#511-fix default) must behave as OFF, not ON.
+    auto cfg = default_cfg();
+    cfg.attention.fmha_fa2 = "never";
+    cfg.attention.fp8_fmha = "auto";
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FMHA_SM120);
+}
+
+TEST(AttnDispatchTable, FP8OptInServes) {
+    // Explicit fp8_fmha="on" (experiments) restores the fp8 tier behind FA2.
+    auto cfg = default_cfg();
+    cfg.attention.fmha_fa2 = "never";
+    cfg.attention.fp8_fmha = "on";
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FP8);
 }
 
 TEST(AttnDispatchTable, FP8NeverWithFA2NeverFallsToFMHA) {

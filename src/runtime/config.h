@@ -92,17 +92,24 @@ struct RuntimeConfig {
 
     struct Attention {
         std::string fp8_prefill = "auto";
-        std::string fp8_fmha = "auto";
+        // fp8-QK FMHA family (smem-materializing fp8 kernel + FA2 in fp8-QK
+        // mode): converts Q/K to e4m3 RAW (no per-tile scaling) — ~10% relative
+        // score error on real activations that compounds across layers (#511).
+        // Teacher-forced PPL when this kernel actually serves prefill:
+        // gemma-3-12b 16.6 -> 549 (production chunked long-ctx), Qwen3-8B
+        // 40.5 -> 4506 (forced). The #511 "no measurable loss above threshold"
+        // needle check never exercised this kernel (fa2_fp16qk served those
+        // chunks). Opt-in ("on") for experiments; anything else = off.
+        std::string fp8_fmha = "never";
         int fmha_prefill_threshold = -1;  // -1 = auto (derived from S-matrix capacity)
         std::string fmha_sm120 = "auto";
         // Register-resident FA2 prefill kernel (fmha_sm120_fa2_kernel). When "on"
-        // (default) it replaces the smem-materializing FP8 FMHA for supported
-        // configs (F16, head_dim=128) — keeps S/P/O in registers, 1
-        // __syncthreads/KV tile. Measured +13-19% long-ctx NVFP4 prefill
-        // (Qwen3-14B, seq>=4096) at chunk=512; greedy output token-identical to
-        // the FP8 path (validated 2026-05-29). Declines (-> FP8 FMHA) for
-        // hd!=128 (Gemma), non-F16, or insufficient smem, so it's safe by
-        // default. "never" forces the legacy FP8 FMHA. Legacy env: IMP_FMHA_FA2.
+        // (default) it serves supported configs (F16, head_dim=128) in the tiled
+        // prefill chain — keeps S/P/O in registers, 1 __syncthreads/KV tile.
+        // QK^T mode follows fa2_fp16qk: f16-QK by default (no e4m3 score noise,
+        // #511); fp8-QK only when fa2_fp16qk=never AND fp8_fmha=on. Declines
+        // (-> FP16 WMMA FMHA) for hd!=128 (Gemma), non-F16, or insufficient
+        // smem, so it's safe by default. Legacy env: IMP_FMHA_FA2.
         std::string fmha_fa2 = "on";
         // FP16-QK FA2 for SHORT prefill (seq < fmha_prefill_threshold, hd=128):
         // replaces the materialized cuBLAS+softmax path with the register-

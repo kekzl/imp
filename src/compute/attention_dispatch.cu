@@ -46,21 +46,29 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     }
 
     // Register-resident FA2 ("echtes FA"): keeps S/P/O in registers, 1 barrier per
-    // KV tile (vs the FP8 FMHA's smem-materialized S/P/O + 4 barriers). Opt-in via
-    // [attention] fmha_fa2: "on" | "never" (default), env IMP_FMHA_FA2. head_dim=128.
+    // KV tile (vs the FP8 FMHA's smem-materialized S/P/O + 4 barriers). Default on
+    // via [attention] fmha_fa2, env IMP_FMHA_FA2. head_dim=128. QK^T runs in f16
+    // (same numerical class as cuBLAS) unless the user explicitly opts into the
+    // e4m3 fp8-QK mode (fa2_fp16qk=never AND fp8_fmha=on) — raw-converted fp8
+    // scores compound per layer into garbage on real activations (#511).
     if (rcfg.attention.fmha_fa2 == "on") {
-        if (fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+        const bool fa2_fp8_optin =
+            rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
+        if (fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
+                                   /*fp16_qk=*/!fa2_fp8_optin)) {
             IMP_LOG_DEBUG("FMHA dispatch: using FA2 register-resident kernel (hd=%d)",
                           static_cast<int>(Q.shape[3]));
             return;
         }
-        // unsupported config (hd!=128) → fall through to FP8/FP16 path
+        // unsupported config (hd!=128) → fall through to FP16 WMMA path
     }
 
-    // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.
-    // PV stays FP16. [attention] fp8_fmha: "auto" (default ON) | "never"
-    const bool use_fp8_fmha = rcfg.attention.fp8_fmha != "never";
-    if (use_fp8_fmha) {
+    // fp8-QK FMHA (smem-materializing): QK^T in raw-converted FP8 E4M3 for 2x
+    // score throughput — but the unscaled e4m3 conversion carries ~10% relative
+    // score error that compounds across layers (#511): teacher-forced PPL
+    // gemma-3-12b 16.6 -> 549 / Qwen3-8B 40.5 -> 4506 when this kernel actually
+    // serves prefill. Strictly opt-in: [attention] fp8_fmha = "on".
+    if (rcfg.attention.fp8_fmha == "on") {
         bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                               q_offset);
         if (fp8_ok) {

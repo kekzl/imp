@@ -43,9 +43,9 @@ if (s_matrix_fits && !prefer_fmha) {
 Tried in order, first hit wins:
 
 1. **`fmha_sm120_mxfp4_prefill`** — opt-in (`attention_mxfp4_available()`), hd%32==0
-2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd==128 only**
-3. **`fmha_sm120_fp8_prefill`** — when `attention.fp8_fmha != "never"` (default auto), hd%32==0
-4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0
+2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd==128 only**. f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
+3. **`fmha_sm120_fp8_prefill`** — strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0. Raw e4m3 Q/K conversion compounds per-layer score error on real activations (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill. Off by default.
+4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0. Default server for hd≠128 long prefill (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).
 5. **`flash_attention_blackwell`** — WMMA 128×64 tiles as the last resort
 
 The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) live in `docs/archive/` with resurrection memos.
