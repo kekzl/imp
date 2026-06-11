@@ -83,8 +83,13 @@ cuBLAS path (attention sinks). Decode 310-345 depending on host state.
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no
-native NVFP4 path). NVFP4 **prefill** trails vLLM by ~1.4× — the gap is in
-attention, not the grouped GEMM (near roofline). Nemotron-3-Nano is
+native NVFP4 path). NVFP4 **prefill** (re-measured 2026-06-11 vs vLLM 0.22.1
+FlashInfer-NVFP4, same day/host, after the chunk-2048 default + act-quant
+dedupe): imp wins TTFT/pp512 outright (2.3–3.3×, vLLM has a flat-cost
+small-M regime), wins MoE pp2048 (39.8k vs 34.5k tok/s), ties dense pp2048
+(25.6k vs 26.6k); vLLM keeps pp4096 (1.32–1.33×, attention-bound — imp FA2
+runs the quartered f32-acc class vs FlashInfer with fp8 KV). Decode: imp
++35–40% (14B 168 vs 121–126; 30B-A3B 323 vs 223–233). Nemotron-3-Nano is
 arch-limited (hybrid Mamba2 + attention FP16-projection mix).
 
 ## Output-quality gate
