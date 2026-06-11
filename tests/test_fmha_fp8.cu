@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -216,7 +217,8 @@ TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 
 class FmhaFA2Test : public FmhaFP8Test {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false, int q_offset = 0) {
+                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false, int q_offset = 0,
+                 float tol_override = 0.0f) {
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
         size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
@@ -297,7 +299,7 @@ protected:
         // (inputs are half-rounded vs the float reference; ~2^-11 per element
         // over a 128-dot + f16 P/V rounding in PV). fp8 QK keeps the
         // historical 5%.
-        const float tol = fp16_qk ? 0.01f : 0.05f;
+        const float tol = (tol_override > 0.0f) ? tol_override : (fp16_qk ? 0.01f : 0.05f);
         EXPECT_LT(max_err, tol) << "Max relative error too high: " << max_err;
     }
 };
@@ -411,6 +413,44 @@ TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_Chunked) {
 TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_SlidingWindow) {
     run_fa2(1, 384, 384, 32, 8, 128, true, /*sw=*/64, 0.0f, 1.0f, true);
 }
+
+// --- PV f16-accumulate (attention.fa2_pv_f16acc, #667 follow-up) ---
+// Same oracle; the dispatch reads the process-diag knobs, so the fixture
+// toggles them around each case (and restores the pristine defaults).
+// Tolerance is widened to 2%: O accumulates in f16 across KV tiles (the
+// rescale-and-add rounding is exactly what this knob trades for full-rate
+// HMMA); the production gate is teacher-forced PPL, this pins math/layout.
+class FmhaFA2PvF16Test : public FmhaFA2Test {
+protected:
+    void run_pv(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
+                float softcap = 0.0f, float amplitude = 1.0f, int q_offset = 0) {
+        process_diag_set_fa2_f16acc(true);
+        process_diag_set_fa2_pv_f16acc(true);
+        run_fa2(B, Sq, Skv, NH, NKV, HD, causal, sw, softcap, amplitude, /*fp16_qk=*/true, q_offset,
+                /*tol_override=*/0.02f);
+        process_diag_set_fa2_f16acc(false);
+        process_diag_set_fa2_pv_f16acc(false);
+    }
+};
+
+TEST_F(FmhaFA2PvF16Test, CausalSeq64) { run_pv(1, 64, 64, 4, 4, 128, true); }
+TEST_F(FmhaFA2PvF16Test, CausalShortSeq24_GQA32_8) { run_pv(1, 24, 24, 32, 8, 128, true); }
+TEST_F(FmhaFA2PvF16Test, CausalOddSeq51) { run_pv(1, 51, 51, 4, 4, 128, true); }
+TEST_F(FmhaFA2PvF16Test, RealisticMagnitude_Seq64) {
+    run_pv(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
+}
+TEST_F(FmhaFA2PvF16Test, NonCausal) { run_pv(1, 32, 64, 4, 4, 128, false); }
+TEST_F(FmhaFA2PvF16Test, GQA) { run_pv(1, 64, 64, 8, 2, 128, true); }
+TEST_F(FmhaFA2PvF16Test, MultiTile) { run_pv(1, 128, 128, 4, 4, 128, true); }
+TEST_F(FmhaFA2PvF16Test, LongCtx) { run_pv(1, 256, 256, 8, 2, 128, true); }
+TEST_F(FmhaFA2PvF16Test, SlidingWindow) { run_pv(1, 128, 128, 4, 4, 128, true, 64); }
+TEST_F(FmhaFA2PvF16Test, Softcap) { run_pv(1, 64, 64, 4, 4, 128, true, 0, 50.0f); }
+// chunk continuation + the two occupancy bands (Bq=64 twoslot / Bq=128)
+TEST_F(FmhaFA2PvF16Test, Chunked_GQA3_OddKv) {
+    run_pv(1, 51, 371, 24, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
+}
+TEST_F(FmhaFA2PvF16Test, Bkv32Band_CausalMultiTile) { run_pv(1, 384, 384, 32, 8, 128, true); }
+TEST_F(FmhaFA2PvF16Test, Bq128Band_LongCtx) { run_pv(1, 768, 768, 32, 8, 128, true); }
 
 }  // namespace
 }  // namespace imp

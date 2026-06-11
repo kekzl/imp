@@ -1,0 +1,769 @@
+{
+ "first_attn_ts": 2103696825,
+ "last_attn_end_ts": 4634877696,
+ "n_attn_gemm_attributed": 673,
+ "n_causal_softmax": 336,
+ "n_kernels_total": 11641,
+ "per_kernel": {
+  "ban_logits_kernel(float *, const int *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "unclassified",
+   "count": 4,
+   "group": "unclassified",
+   "phase_time_ns": {
+    "post_prefill": 928,
+    "prefill_window": 2624
+   },
+   "time_ns": 3552
+  },
+  "imp::absmax_kernel(const __half *, long, float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "unclassified",
+   "count": 49,
+   "group": "unclassified",
+   "phase_time_ns": {
+    "init": 3999309
+   },
+   "time_ns": 3999309
+  },
+  "imp::argmax_partial_kernel(const float *, int, float *, int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "sampling",
+   "count": 11,
+   "group": "sampling",
+   "phase_time_ns": {
+    "post_prefill": 12864,
+    "prefill_window": 56255
+   },
+   "time_ns": 69119
+  },
+  "imp::argmax_reduce_kernel(const float *, const int *, int, int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "sampling",
+   "count": 11,
+   "group": "sampling",
+   "phase_time_ns": {
+    "post_prefill": 2688,
+    "prefill_window": 11968
+   },
+   "time_ns": 14656
+  },
+  "imp::build_attn_ptr_arrays_kernel(const void **, const void **, void **, const char *, long, const char *, long, char *, long, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_legacy_softmax",
+   "count": 672,
+   "group": "attention_legacy",
+   "phase_time_ns": {
+    "prefill_window": 387039
+   },
+   "time_ns": 387039
+  },
+  "imp::causal_softmax_inplace_kernel(__half *, int, int, int, bool, int, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_legacy_softmax",
+   "count": 336,
+   "group": "attention_legacy",
+   "phase_time_ns": {
+    "prefill_window": 61996995
+   },
+   "time_ns": 61996995
+  },
+  "imp::convert_scales_sfatom_kernel(const unsigned char *, unsigned char *, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 49,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 579356
+   },
+   "time_ns": 579356
+  },
+  "imp::dequant_q4k_kernel(const unsigned char *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "dequant_gguf",
+   "count": 552,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 20342317,
+    "post_prefill": 348894,
+    "prefill_window": 63110488
+   },
+   "time_ns": 83801699
+  },
+  "imp::dequant_q6k_v2_kernel(const unsigned char *, __half *, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "dequant_gguf",
+   "count": 385,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 5321315,
+    "post_prefill": 111648,
+    "prefill_window": 24443371
+   },
+   "time_ns": 29876334
+  },
+  "imp::embedding_lookup_q6k_kernel(const unsigned char *, const int *, __half *, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 11,
+   "group": "misc",
+   "phase_time_ns": {
+    "init": 20224,
+    "post_prefill": 6080,
+    "prefill_window": 137760
+   },
+   "time_ns": 164064
+  },
+  "imp::fp16_to_fp32_kernel(const __half *, float *, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 11,
+   "group": "misc",
+   "phase_time_ns": {
+    "init": 24160,
+    "post_prefill": 704,
+    "prefill_window": 92896
+   },
+   "time_ns": 117760
+  },
+  "imp::fp32_to_fp16_rowscale_kernel(const float *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 11,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 17600,
+    "prefill_window": 97120
+   },
+   "time_ns": 114720
+  },
+  "imp::geglu_fp16_kernel(const __half *, const __half *, __half *, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 336,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 111135,
+    "prefill_window": 40985488
+   },
+   "time_ns": 41096623
+  },
+  "imp::gemv_nvfp4_kpar_kernel(const unsigned char *, const unsigned char *, float, const __half *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_nvfp4",
+   "count": 96,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 115424,
+    "prefill_window": 346207
+   },
+   "time_ns": 461631
+  },
+  "imp::paged_attention_reduce_kernel(const float *, __half *, int, int, int, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_decode_paged",
+   "count": 192,
+   "group": "attention",
+   "phase_time_ns": {
+    "post_prefill": 152767,
+    "prefill_window": 457849
+   },
+   "time_ns": 610616
+  },
+  "imp::qknorm_rope_fused_fp16_kernel(__half *, __half *, const __half *, const __half *, const int *, int, int, int, float, float, float, int, bool, float, float, float, float, float, const float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rope",
+   "count": 192,
+   "group": "rope",
+   "phase_time_ns": {
+    "post_prefill": 157213,
+    "prefill_window": 473567
+   },
+   "time_ns": 630780
+  },
+  "imp::quantize_nvfp4_from_absmax_kernel(const __half *, unsigned char *, unsigned char *, const float *, float *, long, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "unclassified",
+   "count": 49,
+   "group": "unclassified",
+   "phase_time_ns": {
+    "init": 3501584
+   },
+   "time_ns": 3501584
+  },
+  "imp::rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 107,
+   "group": "norm",
+   "phase_time_ns": {
+    "post_prefill": 43200,
+    "prefill_window": 144576
+   },
+   "time_ns": 187776
+  },
+  "imp::rmsnorm_fp16_warp_kernel(const __half *, const __half *, __half *, int, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 1344,
+   "group": "norm",
+   "phase_time_ns": {
+    "init": 28416,
+    "post_prefill": 9920,
+    "prefill_window": 13030393
+   },
+   "time_ns": 13068729
+  },
+  "imp::rmsnorm_fp32_accum_to_fp16_kernel(const __half *, const __half *, float *, __half *, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 1056,
+   "group": "norm",
+   "phase_time_ns": {
+    "post_prefill": 327518,
+    "prefill_window": 33600322
+   },
+   "time_ns": 33927840
+  },
+  "imp::rmsnorm_quantize_q8_1_kernel(const __half *, const __half *, imp::block_q8_1 *, float *, __half *, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 288,
+   "group": "norm",
+   "phase_time_ns": {
+    "post_prefill": 245534,
+    "prefill_window": 763960
+   },
+   "time_ns": 1009494
+  },
+  "imp::scale_fp16_kernel(__half *, __half, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "unclassified",
+   "count": 11,
+   "group": "unclassified",
+   "phase_time_ns": {
+    "init": 7936,
+    "post_prefill": 704,
+    "prefill_window": 50048
+   },
+   "time_ns": 58688
+  },
+  "imp::write_kv_cache_fused_kernel(const __half *, const __half *, const int *, const int *, __half *, __half *, int, int, int, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "kv_write",
+   "count": 528,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 64736,
+    "prefill_window": 4032909
+   },
+   "time_ns": 4097645
+  },
+  "nvjet_sm120_hsh_mma_112x128x64_3_112x32x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1221242
+   },
+   "time_ns": 1221242
+  },
+  "nvjet_sm120_hsh_mma_112x192x64_2_112x24x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1089723
+   },
+   "time_ns": 1089723
+  },
+  "nvjet_sm120_hsh_mma_128x112x64_3_32x56x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 483453
+   },
+   "attn_gemm_time_ns": 483453,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1217241
+   },
+   "time_ns": 1217241
+  },
+  "nvjet_sm120_hsh_mma_128x128x64_3_64x32x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 3273295,
+    "prefill_window": 11952544
+   },
+   "time_ns": 15225839
+  },
+  "nvjet_sm120_hsh_mma_128x160x64_2_64x40x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 2658865,
+    "prefill_window": 15496941
+   },
+   "time_ns": 18155806
+  },
+  "nvjet_sm120_hsh_mma_128x160x64_2_64x40x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1027354
+   },
+   "time_ns": 1027354
+  },
+  "nvjet_sm120_hsh_mma_128x176x64_2_32x88x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 2923665,
+    "prefill_window": 15599311
+   },
+   "time_ns": 18522976
+  },
+  "nvjet_sm120_hsh_mma_128x208x64_2_32x104x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 680,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1437144,
+    "prefill_window": 111830174
+   },
+   "time_ns": 113267318
+  },
+  "nvjet_sm120_hsh_mma_128x224x64_2_64x56x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1238169
+   },
+   "time_ns": 1238169
+  },
+  "nvjet_sm120_hsh_mma_128x256x64_2_64x64x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 672,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 2470324,
+    "prefill_window": 817018019
+   },
+   "time_ns": 819488343
+  },
+  "nvjet_sm120_hsh_mma_128x256x64_2_64x64x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 998811
+   },
+   "time_ns": 998811
+  },
+  "nvjet_sm120_hsh_mma_128x56x64_4_32x56x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 990618
+   },
+   "time_ns": 990618
+  },
+  "nvjet_sm120_hsh_mma_128x80x64_3_32x40x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "post_prefill": 164255,
+    "prefill_window": 63203916
+   },
+   "attn_gemm_time_ns": 63368171,
+   "class": "gemm_cublas",
+   "count": 341,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 164255,
+    "prefill_window": 64253607
+   },
+   "time_ns": 64417862
+  },
+  "nvjet_sm120_hsh_mma_128x96x64_3_64x24x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1978902
+   },
+   "time_ns": 1978902
+  },
+  "nvjet_sm120_hsh_mma_128x96x64_3_64x24x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 997787
+   },
+   "time_ns": 997787
+  },
+  "nvjet_sm120_hsh_mma_144x192x64_2_144x24x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 32,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 3967819,
+    "prefill_window": 13113307
+   },
+   "time_ns": 17081126
+  },
+  "nvjet_sm120_hsh_mma_160x128x64_2_80x32x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 3058386,
+    "prefill_window": 14970770
+   },
+   "time_ns": 18029156
+  },
+  "nvjet_sm120_hsh_mma_176x192x64_2_176x24x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1053595
+   },
+   "time_ns": 1053595
+  },
+  "nvjet_sm120_hsh_mma_192x144x64_2_48x72x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1190075
+   },
+   "time_ns": 1190075
+  },
+  "nvjet_sm120_hsh_mma_192x160x64_2_48x80x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1360283
+   },
+   "time_ns": 1360283
+  },
+  "nvjet_sm120_hsh_mma_256x112x64_2_64x56x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 360,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 2773874,
+    "prefill_window": 133660364
+   },
+   "time_ns": 136434238
+  },
+  "nvjet_sm120_hsh_mma_256x160x32_3_64x80x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 75655737
+   },
+   "attn_gemm_time_ns": 75655737,
+   "class": "gemm_cublas",
+   "count": 341,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 76638452
+   },
+   "time_ns": 76638452
+  },
+  "nvjet_sm120_hsh_mma_256x96x64_2_64x48x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 360,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 4283114,
+    "post_prefill": 1065787,
+    "prefill_window": 428121833
+   },
+   "time_ns": 433470734
+  },
+  "nvjet_sm120_hsh_mma_64x104x64_4_16x104x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1482458
+   },
+   "time_ns": 1482458
+  },
+  "nvjet_sm120_hsh_mma_64x64x128_3_16x64x128_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1086907
+   },
+   "time_ns": 1086907
+  },
+  "nvjet_sm120_hsh_mma_80x256x64_2_80x32x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1516153
+   },
+   "time_ns": 1516153
+  },
+  "nvjet_sm120_hsh_mma_80x64x64_5_80x16x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1409625
+   },
+   "time_ns": 1409625
+  },
+  "nvjet_sm120_hsh_mma_96x256x64_2_48x64x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 360,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 3739500,
+    "post_prefill": 286622,
+    "prefill_window": 122132056
+   },
+   "time_ns": 126158178
+  },
+  "void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_f16_256x128_32x3_tn_align2>(T1::Params)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1412280
+   },
+   "time_ns": 1412280
+  },
+  "void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x256_32x3_tn_align8>(T1::Params)": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 199135
+   },
+   "attn_gemm_time_ns": 199135,
+   "class": "gemm_cublas",
+   "count": 13,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1398522,
+    "prefill_window": 988571
+   },
+   "time_ns": 2387093
+  },
+  "void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_256x128_32x3_tn_align8>(T1::Params)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 1247130
+   },
+   "time_ns": 1247130
+  },
+  "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)8, (int)9, (bool)0, cublasGemvTensorBatched<const __half>, cublasGemvTensorBatched<const __half>, cublasGemvTensorBatched<__half>>(cublasGemmSmallNParams<T9, T10, T11, T1>)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 1,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 1728
+   },
+   "time_ns": 1728
+  },
+  "void imp::fused_act_quantize_q8_1_kernel<imp::GeGLUAct>(const __half *, const __half *, imp::block_q8_1 *, float *, int, T1)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 192,
+   "group": "dequant",
+   "phase_time_ns": {
+    "post_prefill": 44351,
+    "prefill_window": 131808
+   },
+   "time_ns": 176159
+  },
+  "void imp::fused_act_quantize_q8_1_kernel<imp::IdentityAct>(const __half *, const __half *, imp::block_q8_1 *, float *, int, T1)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 384,
+   "group": "dequant",
+   "phase_time_ns": {
+    "post_prefill": 68320,
+    "prefill_window": 206142
+   },
+   "time_ns": 274462
+  },
+  "void imp::gemv_dp4a_kpar_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)3>>(const unsigned char *, const unsigned char *, const imp::block_q8_1 *, const float *, __half *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_dp4a_gguf",
+   "count": 192,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 2557175,
+    "prefill_window": 7148440
+   },
+   "time_ns": 9705615
+  },
+  "void imp::gemv_dp4a_kpar_kernel<imp::DequantTraits<(imp::DPQTag)2>, (bool)0>(const unsigned char *, const imp::block_q8_1 *, const float *, __half *, const __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_dp4a_gguf",
+   "count": 96,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 1069912,
+    "prefill_window": 3142703
+   },
+   "time_ns": 4212615
+  },
+  "void imp::gemv_dp4a_kpar_kernel<imp::DequantTraits<(imp::DPQTag)3>, (bool)0>(const unsigned char *, const imp::block_q8_1 *, const float *, __half *, const __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_dp4a_gguf",
+   "count": 480,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 1644956,
+    "prefill_window": 4285296
+   },
+   "time_ns": 5930252
+  },
+  "void imp::gemv_dp4a_kpar_qkv_kernel<imp::DequantTraits<(imp::DPQTag)3>>(const unsigned char *, const unsigned char *, const unsigned char *, const imp::block_q8_1 *, const float *, __half *, __half *, __half *, int, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_dp4a_gguf",
+   "count": 96,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 348221,
+    "prefill_window": 1050652
+   },
+   "time_ns": 1398873
+  },
+  "void imp::gemv_nvfp4_multirow_fp32_kernel<(int)8>(const unsigned char *, const unsigned char *, float, const __half *, float *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_nvfp4",
+   "count": 11,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 686686,
+    "prefill_window": 3410606
+   },
+   "time_ns": 4097292
+  },
+  "void imp::paged_attention_splitk_pipeline_kernel<(int)256>(const __half *, const __half *, const __half *, float *, const int *, const int *, int, int, int, int, float, int, int, int, int, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_decode_paged",
+   "count": 192,
+   "group": "attention",
+   "phase_time_ns": {
+    "post_prefill": 537502,
+    "prefill_window": 1618938
+   },
+   "time_ns": 2156440
+  },
+  "void imp::rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rope",
+   "count": 336,
+   "group": "rope",
+   "phase_time_ns": {
+    "init": 16768,
+    "prefill_window": 6251709
+   },
+   "time_ns": 6268477
+  }
+ }
+}

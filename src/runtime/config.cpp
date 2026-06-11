@@ -133,6 +133,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("attention.fmha_fa2", cfg.attention.fmha_fa2);
     S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
     B("attention.fa2_f16acc", cfg.attention.fa2_f16acc);
+    B("attention.fa2_pv_f16acc", cfg.attention.fa2_pv_f16acc);
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
     I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
     S("attention.mxfp4", cfg.attention.mxfp4);
@@ -318,6 +319,11 @@ void seed_from_env(RuntimeConfig& cfg) {
     // in the fp16-qk FA2 kernel (#597, +3-4% long-ctx prefill / +0.37% PPL).
     if (const char* e = std::getenv("IMP_FA2_F16ACC"))
         cfg.attention.fa2_f16acc = (std::atoi(e) != 0);
+
+    // attention.fa2_pv_f16acc — IMP_FA2_PV_F16ACC: '1' also accumulates the
+    // PV MMA in f16 (full-rate HMMA + halved O-fragment registers).
+    if (const char* e = std::getenv("IMP_FA2_PV_F16ACC"))
+        cfg.attention.fa2_pv_f16acc = (std::atoi(e) != 0);
 
     // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))
