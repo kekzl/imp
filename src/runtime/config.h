@@ -122,12 +122,15 @@ struct RuntimeConfig {
         std::string fa2_fp16qk = "on";
         // f16-accumulate QK^T in the FP16-QK FA2 kernel (#597). GeForce sm_120
         // runs f16-src/f32-acc HMMA at 1/4 rate (#606); accumulating the score
-        // MMA in f16 lifts it to the full-rate class. Measured +3-4% pp2048/
-        // pp4096 NVFP4 prefill (Qwen3-14B) for +0.37% PPL — a quality tradeoff
-        // (scores are softmaxed immediately, so the reduced accumulate precision
-        // is low-risk). Opt-in (default off); only affects the fa2_fp16qk path,
+        // MMA in f16 lifts it to the full-rate class. Measured +4.7-5.0%
+        // pp4096 NVFP4 prefill (Qwen3-14B / 30B-A3B, 2026-06-11, chunk-2048
+        // era), decode neutral. Quality gate on a 5.8k teacher-forced corpus:
+        // 14B-NVFP4 PPL identical, 30B-A3B +0.10%, Q8_0 GGUF +0.013% —
+        // scores are softmaxed immediately, so the reduced accumulate
+        // precision stays in the noise. Default ON since 2026-06-11; set
+        // false to restore f32 accumulate. Only affects the fa2_fp16qk path,
         // the fp8-QK path keeps f32 accumulate. Env: IMP_FA2_F16ACC.
-        bool fa2_f16acc = false;
+        bool fa2_f16acc = true;
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16

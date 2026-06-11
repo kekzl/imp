@@ -81,9 +81,10 @@ fmha_fa2             = "on"
 fa2_fp16qk           = "on"
 # f16-accumulate QK^T in the fp16-qk FA2 kernel (#597). GeForce sm_120 runs
 # f16-src/f32-acc HMMA at 1/4 rate (#606); f16-acc lifts the score MMA to the
-# full-rate class: +3-4% pp2048/pp4096 NVFP4 prefill (Qwen3-14B) for +0.37% PPL.
-# Opt-in quality tradeoff (default false); only the fa2_fp16qk path is affected.
-fa2_f16acc           = false
+# full-rate class: +4.7-5.0% pp4096 NVFP4 prefill (Qwen3-14B / 30B-A3B). PPL
+# on a 5.8k teacher-forced corpus: 14B identical, 30B +0.10%, Q8 +0.013%.
+# Default true since 2026-06-11; set false to restore f32 accumulate.
+fa2_f16acc           = true
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
