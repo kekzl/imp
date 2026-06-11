@@ -53,7 +53,7 @@ The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_
 
 ### Chunked prefill carve-out (default for most archs)
 
-Per-arch default `prefill_chunk_size = 512` for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result then hits the dispatch gate above with `q_offset`-aware causal masking. See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and the "Chunked prefill scope" entry in `docs/roadmap.md`.
+Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads — NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4. Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result then hits the dispatch gate above with `q_offset`-aware causal masking. See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and the "Chunked prefill scope" entry in `docs/roadmap.md`.
 
 ## Decode — switch on cache_dtype
 

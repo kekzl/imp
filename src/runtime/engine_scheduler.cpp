@@ -252,7 +252,16 @@ bool Engine::supports_chunked_prefill_() const {
 int Engine::resolve_prefill_chunk_size_() const {
     int explicit_val = config_.prefill_chunk_size;
     if (explicit_val < 0) {
-        return supports_chunked_prefill_() ? 512 : 0;
+        // Default 2048 (was 512 until 2026-06-11). Chunked prefill re-reads
+        // every weight once per chunk, so the memory-bound GEMMs pay the
+        // weight traffic per chunk: at pp4096, 512-token chunks cost
+        // NVFP4-MoE −43% prefill vs 2048 (14.8k -> 26.2k tok/s) and dense
+        // −19% at pp2048 (17.6k -> 21.7k). chunk=0 measured equal to 2048,
+        // so 2048 is the sweet spot that still bounds workspace VRAM and
+        // multi-request interleaving latency. Hybrids stay safe: step_prefill
+        // clamps to executor max_tokens (256/512), and step_prefill_one
+        // clamps n × ctx_len into the attn-scores capacity.
+        return supports_chunked_prefill_() ? 2048 : 0;
     }
     if (explicit_val == 0)
         return 0;
@@ -343,7 +352,7 @@ void Engine::step_prefill(cudaStream_t stream) {
     // Hard cap: chunk size must never exceed the executor's max_tokens
     // (which is itself capped to 256 for SSM/GDN+MoE hybrids and 512 for
     // dense GDN to bound workspace VRAM). Without this clamp, a server-side
-    // prefill_chunk_size default of 512 (handlers.cpp) overflows the
+    // prefill_chunk_size default (handlers.cpp) would overflow the
     // workspace and crashes with `n_tokens (X) exceeds max_tokens (Y)` →
     // `terminate: reshape: numel mismatch` on long prompts to e.g. Qwen3.6.
     if (effective_chunk > executor_->max_tokens()) {

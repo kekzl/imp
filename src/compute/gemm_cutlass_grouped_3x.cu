@@ -606,7 +606,8 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     if (s_gemm == nullptr)
         s_gemm = new GrpGemm();
 
-    // can_implement memoized per (N, K).
+    // can_implement memoized per (N, K). Uses the M=128 dummy host shapes —
+    // can_implement only checks alignment, which depends on N/K, not M.
     if (N != s_can_impl_N || K != s_can_impl_K) {
         cutlass::Status st = s_gemm->can_implement(arguments);
         if (st != cutlass::Status::kSuccess) {
@@ -618,6 +619,17 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
         s_can_impl_N = N;
         s_can_impl_K = K;
     }
+
+    // Withhold the host shapes from initialize/run: real per-expert M lives
+    // ONLY in d_shapes (device). When host shapes are present the group tile
+    // scheduler sizes its grid from them — the M=128 dummy UNDERSIZED the
+    // tile count, so experts with M_e above the tile height silently lost
+    // their upper row tiles (MoE long-prefill corruption at n ≳ 900, where
+    // hot experts cross the tile boundary; found 2026-06-11). With
+    // host_problem_shapes == nullptr CUTLASS launches the fully persistent
+    // grid (sm_count) and walks the device-side group shapes dynamically —
+    // correct for any routing distribution.
+    arguments.problem_shape.host_problem_shapes = nullptr;
 
     size_t needed = GrpGemm::get_workspace_size(arguments);
     ensure_workspace(needed);
