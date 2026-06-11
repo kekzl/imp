@@ -1230,7 +1230,16 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
 // V slot. K and V of a tile load in different phases (V_j under QK_j's MMAs,
 // K_{j+1} under PV_j's), so the cp.async overlap survives with half the smem:
 // 2 CTAs/SM AND half the per-tile online-softmax/barrier overhead of BKV=32.
-template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false>
+// PVF16: f16-accumulate the PV MMA and keep the O accumulator as packed half2
+// (#667 follow-up to the QK f16acc). The online-softmax O rows are convex
+// combinations of V rows (P weights in [0,1], normalized by lA/lB at the end),
+// so the accumulator magnitude is bounded by max|V| — range is safe; the
+// rescale-and-add rounding is what the PPL gate has to clear. Cuts the PV MMAs
+// from the 1/4-rate f32-acc class to full rate AND halves the O-fragment
+// register footprint (N_O*4 floats -> N_O*2 b32), the dominant per-thread
+// register cost of the Bq=128 band. Requires FP16QK.
+template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
+          bool PVF16 = false>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
@@ -1308,10 +1317,20 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 
     // ---- per-warp register state ----
-    float O_frag[N_O][4];
+    // PVF16: O held as packed half2 — reg [0] = (row rl, cols cl,cl+1),
+    // reg [1] = (row rl+8, same cols), matching the m16n8k16 f16-D layout.
+    static_assert(!PVF16 || FP16QK, "PVF16 requires the fp16-qk path");
+    float O_frag[PVF16 ? 1 : N_O][4];
+    uint32_t O_h2[PVF16 ? N_O : 1][2];
+    if constexpr (PVF16) {
 #pragma unroll
-    for (int hn = 0; hn < N_O; hn++)
-        O_frag[hn][0] = O_frag[hn][1] = O_frag[hn][2] = O_frag[hn][3] = 0.0f;
+        for (int hn = 0; hn < N_O; hn++)
+            O_h2[hn][0] = O_h2[hn][1] = 0u;
+    } else {
+#pragma unroll
+        for (int hn = 0; hn < N_O; hn++)
+            O_frag[hn][0] = O_frag[hn][1] = O_frag[hn][2] = O_frag[hn][3] = 0.0f;
+    }
     float mA = -FLT_MAX, mB = -FLT_MAX, lA = 0.0f, lB = 0.0f;
 
     int num_kv_tiles, first_kv_tile;
@@ -1595,12 +1614,24 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
         mA = mnA;
         mB = mnB;
         // rescale O accumulator (rows A=o0,o1 ; B=o2,o3)
+        if constexpr (PVF16) {
+            const __half2 hA = __float2half2_rn(alphaA);
+            const __half2 hB = __float2half2_rn(alphaB);
 #pragma unroll
-        for (int hn = 0; hn < N_O; hn++) {
-            O_frag[hn][0] *= alphaA;
-            O_frag[hn][1] *= alphaA;
-            O_frag[hn][2] *= alphaB;
-            O_frag[hn][3] *= alphaB;
+            for (int hn = 0; hn < N_O; hn++) {
+                __half2& r0 = *reinterpret_cast<__half2*>(&O_h2[hn][0]);
+                __half2& r1 = *reinterpret_cast<__half2*>(&O_h2[hn][1]);
+                r0 = __hmul2(r0, hA);
+                r1 = __hmul2(r1, hB);
+            }
+        } else {
+#pragma unroll
+            for (int hn = 0; hn < N_O; hn++) {
+                O_frag[hn][0] *= alphaA;
+                O_frag[hn][1] *= alphaA;
+                O_frag[hn][2] *= alphaB;
+                O_frag[hn][3] *= alphaB;
+            }
         }
 
         // ---- PV: O += P @ V, m16n8k16 f16 ----
@@ -1624,6 +1655,20 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                 uint32_t sb0, sb1, sc0, sc1;
                 if (hn + 2 < N_O)
                     ldsm_x4_trans(sb0, sb1, sc0, sc1, vrow + (hn + 2) * 8);
+                if constexpr (PVF16) {
+#if __CUDA_ARCH__ >= 1200
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                        "{%0,%1},{%2,%3,%4,%5},{%6,%7},{%0,%1};\n"
+                        : "+r"(O_h2[hn][0]), "+r"(O_h2[hn][1])
+                        : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), "r"(rb0), "r"(rb1));
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                        "{%0,%1},{%2,%3,%4,%5},{%6,%7},{%0,%1};\n"
+                        : "+r"(O_h2[hn + 1][0]), "+r"(O_h2[hn + 1][1])
+                        : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), "r"(rc0), "r"(rc1));
+#endif
+                } else {
                 float o0 = O_frag[hn][0], o1 = O_frag[hn][1], o2 = O_frag[hn][2], o3 = O_frag[hn][3];
                 float p0 = O_frag[hn + 1][0], p1 = O_frag[hn + 1][1], p2 = O_frag[hn + 1][2],
                       p3 = O_frag[hn + 1][3];
@@ -1649,6 +1694,7 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                 O_frag[hn + 1][1] = p1;
                 O_frag[hn + 1][2] = p2;
                 O_frag[hn + 1][3] = p3;
+                }
                 if (hn + 2 < N_O) {
                     rb0 = sb0;
                     rb1 = sb1;
@@ -1668,13 +1714,21 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
 #pragma unroll
     for (int hn = 0; hn < N_O; hn++) {
         int col = hn * 8 + cl;
+        float oA0, oA1, oB0, oB1;
+        if constexpr (PVF16) {
+            const float2 fA = __half22float2(*reinterpret_cast<const __half2*>(&O_h2[hn][0]));
+            const float2 fB = __half22float2(*reinterpret_cast<const __half2*>(&O_h2[hn][1]));
+            oA0 = fA.x, oA1 = fA.y, oB0 = fB.x, oB1 = fB.y;
+        } else {
+            oA0 = O_frag[hn][0], oA1 = O_frag[hn][1], oB0 = O_frag[hn][2], oB1 = O_frag[hn][3];
+        }
         if (q_start + rowA < seq_q) {
-            O_ptr[(int64_t)rowA * q_row_stride + col] = __float2half(O_frag[hn][0] * invA);
-            O_ptr[(int64_t)rowA * q_row_stride + col + 1] = __float2half(O_frag[hn][1] * invA);
+            O_ptr[(int64_t)rowA * q_row_stride + col] = __float2half(oA0 * invA);
+            O_ptr[(int64_t)rowA * q_row_stride + col + 1] = __float2half(oA1 * invA);
         }
         if (q_start + rowB < seq_q) {
-            O_ptr[(int64_t)rowB * q_row_stride + col] = __float2half(O_frag[hn][2] * invB);
-            O_ptr[(int64_t)rowB * q_row_stride + col + 1] = __float2half(O_frag[hn][3] * invB);
+            O_ptr[(int64_t)rowB * q_row_stride + col] = __float2half(oB0 * invB);
+            O_ptr[(int64_t)rowB * q_row_stride + col + 1] = __float2half(oB1 * invB);
         }
     }
 }
@@ -1735,14 +1789,18 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
     // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
     const bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
+    // PV f16-accumulate rides on the f16acc path (full-rate PV MMA + halved
+    // O-fragment registers); attention.fa2_pv_f16acc, default on.
+    const bool pv_f16 = f16acc && imp::process_diag_fa2_pv_f16acc();
     int Bq, Bkv;
     bool twoslot = false;
     decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
     if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;
-            kern = f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
-                          : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
+            kern = pv_f16   ? fmha_sm120_fa2_kernel<128, 128, true, true, 64, false, true>
+                   : f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
+                            : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
         } else if (blocks_128 >= (long)(sm_count / 2)) {
             // Underfill band (#597): Bq=64 doubles the grid and TWOSLOT halves
             // the KV smem (~70 KB → ~35 KB) at the FULL Bkv=64 tile, so 2
@@ -1750,12 +1808,14 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             // (same residency, but half the online-softmax rescales and fewer
             // barriers per KV row).
             Bq = 64, Bkv = 64, twoslot = true;
-            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true>
-                          : fmha_sm120_fa2_kernel<64, 128, true, false, 64, true>;
+            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true, true>
+                   : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true>
+                            : fmha_sm120_fa2_kernel<64, 128, true, false, 64, true>;
         } else {
             Bq = 64, Bkv = 64;
-            kern = f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64>
-                          : fmha_sm120_fa2_kernel<64, 128, true, false, 64>;
+            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, false, true>
+                   : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64>
+                            : fmha_sm120_fa2_kernel<64, 128, true, false, 64>;
         }
     } else {
         const bool use_bq64 = blocks_128 < (long)sm_count;
@@ -1781,9 +1841,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         logged_once = true;
         IMP_LOG_INFO(
             "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, "
-            "kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
-            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", twoslot ? "twoslot" : "dbuf", smem,
-            seq_q, seq_kv);
+            "pv_acc=%s, kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
+            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
+            twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),

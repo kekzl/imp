@@ -30,6 +30,7 @@ struct ProcessDiag {
     // Attention
     bool attention_splitk_pipe = true;
     bool attention_fa2_f16acc = false;
+    bool attention_fa2_pv_f16acc = false;
     std::string attention_mxfp4_mode = "auto";
 
     // FFN
@@ -77,6 +78,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
     d.attention_splitk_pipe = cfg.attention.splitk_pipe;
     d.attention_fa2_f16acc = cfg.attention.fa2_f16acc;
+    d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
@@ -108,6 +110,9 @@ void process_diag_set_cublas_fp16_acc(bool v) { slot().cublas_fp16_acc = v; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
 bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
 bool process_diag_fa2_f16acc() { return slot().attention_fa2_f16acc; }
+bool process_diag_fa2_pv_f16acc() { return slot().attention_fa2_pv_f16acc; }
+void process_diag_set_fa2_f16acc(bool v) { slot().attention_fa2_f16acc = v; }
+void process_diag_set_fa2_pv_f16acc(bool v) { slot().attention_fa2_pv_f16acc = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }

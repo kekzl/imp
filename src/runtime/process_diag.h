@@ -59,6 +59,10 @@ void process_diag_set_cublas_fp16_acc(bool v);
 // Attention
 bool process_diag_attention_splitk_pipe();
 bool process_diag_fa2_f16acc();  // f16-accumulate QK^T in the fp16-qk FA2 kernel (#597)
+bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follow-up)
+// test hooks (mirror process_diag_set_cublas_fp16_acc)
+void process_diag_set_fa2_f16acc(bool v);
+void process_diag_set_fa2_pv_f16acc(bool v);
 // "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
 // only enables MXFP4 attention when mode == "always".
 const std::string& process_diag_attention_mxfp4_mode();

@@ -131,6 +131,18 @@ struct RuntimeConfig {
         // false to restore f32 accumulate. Only affects the fa2_fp16qk path,
         // the fp8-QK path keeps f32 accumulate. Env: IMP_FA2_F16ACC.
         bool fa2_f16acc = true;
+        // f16-accumulate the PV MMA as well. Post-#673 the PV accumulate was
+        // the last 1/4-rate HMMA in the FA2 kernel, dominating its tensor-
+        // pipe time ~4:1; packing O as half2 also halves the O-fragment
+        // register footprint of the Bq=128 band. Measured (2026-06-11, nsys
+        // kernel sums): FA2 kernel −18% pp4096, e2e +9.7% 30B-A3B-NVFP4 /
+        // +3.7% 14B-NVFP4. Quality gate on a 14.8k teacher-forced corpus:
+        // 14B −0.06%, 30B-A3B −0.30%, Q8_0 +0.002% — all noise (O rows are
+        // convex combinations of V, so range is safe; the per-tile rescale
+        // rounding stays below the f16 output precision). Default ON since
+        // 2026-06-11; set false to restore f32 PV accumulate. Requires
+        // fa2_f16acc. Env: IMP_FA2_PV_F16ACC.
+        bool fa2_pv_f16acc = true;
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
