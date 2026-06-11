@@ -96,8 +96,18 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
         gcfg.think_end_id = think_end_id_;
         gcfg.initial_in_think = req.in_think_block;
         gcfg.think_grace_tokens = think_logic::kMinAnswerAfterThink;
-        if (req.think_budget > 0.0f)
-            gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);
+        if (req.think_budget > 0.0f) {
+            // The loop's device-side counter starts at 0 every launch; with
+            // bounded bursts (n-gram speculation think-phase) the request
+            // relaunches mid-think, so the per-launch limit must be the
+            // REMAINING budget or every burst would re-grant the full one.
+            const int full = static_cast<int>(req.max_tokens * req.think_budget);
+            bool thinking_now = false;
+            const int used = think_logic::count_reasoning_tokens(
+                req.output_tokens, think_start_id_, think_end_id_, req.started_in_think,
+                thinking_now);
+            gcfg.think_budget_limit = std::max(1, full - used);
+        }
     }
     return gcfg;
 }
@@ -187,8 +197,19 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(async_d_block_tables_, bt.data(),
                                                bt.size() * sizeof(int), cudaMemcpyHostToDevice,
                                                stream));
+            // Remaining think budget for this launch (the device counter
+            // restarts at 0 per launch; see build_graph_config).
+            int think_limit = 0;
+            if (req->think_budget > 0.0f && think_end_id_ >= 0) {
+                bool thinking_now = false;
+                const int used = think_logic::count_reasoning_tokens(
+                    req->output_tokens, think_start_id_, think_end_id_, req->started_in_think,
+                    thinking_now);
+                think_limit = std::max(
+                    1, static_cast<int>(req->max_tokens * req->think_budget) - used);
+            }
             if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx,
-                                          step_limit, req->in_think_block, stream) &&
+                                          step_limit, req->in_think_block, think_limit, stream) &&
                 async_graph_runner_.launch(stream)) {
                 async_graph_req_ = req;
                 async_pending_tokens_.clear();

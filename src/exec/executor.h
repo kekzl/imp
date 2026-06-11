@@ -114,7 +114,17 @@ public:
     // just ran) and writes argmax token ids to d_out[0..n_rows-1]. Same
     // logits as production greedy sampling (incl. final softcap). Overwrites
     // the logits_ workspace. Enqueues on `stream` only.
-    void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream);
+    //
+    // Optional penalties (exact production parity with apply_penalties):
+    // d_hist[0..n_hist) is the request's output-token history (ends with the
+    // chunk's first token t0); d_draft points at the chunk tokens AFTER t0,
+    // so row j additionally penalizes d_draft[0..j-1] — the same set the
+    // eager path would have accumulated by that step. repeat_last_n != 0 is
+    // the caller's responsibility to gate (window semantics not replicated).
+    void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
+                           const int32_t* d_hist = nullptr, int n_hist = 0,
+                           const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
+                           float freq_pen = 0.0f, float pres_pen = 0.0f);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
@@ -301,6 +311,10 @@ private:
     // free_buffers).
     void* verify_argmax_scratch_ = nullptr;
     size_t verify_argmax_scratch_sz_ = 0;
+    // Spec-decode verify penalty counts: [vocab] int32 occurrence counts of
+    // the shared history (lazy; freed in free_buffers).
+    int32_t* verify_pen_counts_ = nullptr;
+    int verify_pen_counts_cap_ = 0;
 
     // LoRA (issue #522)
     const LoraAdapter* lora_ = nullptr;

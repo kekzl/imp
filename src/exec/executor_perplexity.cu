@@ -266,7 +266,51 @@ __global__ void rowwise_argmax_reduce_kernel(const float* __restrict__ pvals,
     out[row] = best_idx;
 }
 
-void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream) {
+// Occurrence counts of the shared history per vocab id (production
+// apply_penalties scans the history per vocab thread the same way; doing it
+// once here amortizes the scan across all chunk rows).
+__global__ void verify_hist_count_kernel(const int32_t* __restrict__ hist, int n_hist, int V,
+                                         int32_t* __restrict__ counts) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= V) return;
+    int c = 0;
+    for (int i = 0; i < n_hist; ++i)
+        if (hist[i] == idx) c++;
+    counts[idx] = c;
+}
+
+// Apply repetition/frequency/presence penalties to a batch of chunk rows.
+// Row `row0 + blockIdx.y` predicts the token after chunk position row0+y;
+// its penalty set = shared history + d_draft[0..row-1] (the draft tokens the
+// eager path would have emitted before this prediction). Formulas identical
+// to apply_penalties_kernel in sampling.cu.
+__global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, int V,
+                                        const int32_t* __restrict__ counts,
+                                        const int32_t* __restrict__ draft, float rep_pen,
+                                        float freq_pen, float pres_pen) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= V) return;
+    const int row = row0 + blockIdx.y;
+    int count = counts[idx];
+    for (int i = 0; i < row; ++i)
+        if (draft[i] == idx) count++;
+    if (count == 0) return;
+    float* lg = logits + static_cast<size_t>(blockIdx.y) * V + idx;
+    float logit = *lg;
+    if (rep_pen != 1.0f) {
+        if (logit > 0.0f)
+            logit /= rep_pen;
+        else
+            logit *= rep_pen;
+    }
+    logit -= freq_pen * static_cast<float>(count);
+    logit -= pres_pen;
+    *lg = logit;
+}
+
+void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
+                                      const int32_t* d_hist, int n_hist, const int32_t* d_draft,
+                                      float rep_pen, float freq_pen, float pres_pen) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -286,7 +330,32 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     }
     float* pvals = static_cast<float*>(verify_argmax_scratch_);
     int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+
+    const bool penalties = (rep_pen != 1.0f || freq_pen != 0.0f || pres_pen != 0.0f) &&
+                           d_hist != nullptr && d_draft != nullptr;
+    if (penalties) {
+        if (verify_pen_counts_cap_ < V) {
+            if (verify_pen_counts_)
+                IMP_CUDA_CHECK_LOG(cudaFree(verify_pen_counts_));
+            if (cudaMalloc(&verify_pen_counts_, static_cast<size_t>(V) * sizeof(int32_t)) !=
+                cudaSuccess) {
+                verify_pen_counts_ = nullptr;
+                verify_pen_counts_cap_ = 0;
+                return;
+            }
+            verify_pen_counts_cap_ = V;
+        }
+        verify_hist_count_kernel<<<(V + 255) / 256, 256, 0, stream>>>(d_hist, n_hist, V,
+                                                                      verify_pen_counts_);
+    }
+
     for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
+        if (penalties) {
+            dim3 pgrid((V + 255) / 256, csz);
+            verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(
+                static_cast<float*>(lg.data), row0, V, verify_pen_counts_, d_draft, rep_pen,
+                freq_pen, pres_pen);
+        }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(
             static_cast<const float*>(lg.data), V, pvals, pidxs);

@@ -126,8 +126,12 @@ int Engine::spec_effective_miss_burst_(const Request& req) const {
 bool Engine::spec_burst_launch_ok_(const Request& req) const {
     if (!decode_graph_pool_[0].is_ready() || offload_mgr_ || !config_.use_cuda_graphs)
         return false;
-    if (async_graph_runner_.is_setup() && async_parked_req_id_ != req.id)
-        return false;  // runner busy/parked for another request
+    // A runner that is setup but NOT parked is in flight — blocked. Parked
+    // for a DIFFERENT request is fine: try_launch_async_graph_loop tears the
+    // stale park down and rebuilds (a parked warmup request would otherwise
+    // lock every later server request out of the loop entirely).
+    if (async_graph_runner_.is_setup() && async_parked_req_id_ < 0)
+        return false;
     // Text-fallback think tracking needs host-side per-token matching.
     if (req.in_think_block && think_end_id_ < 0)
         return false;
@@ -136,20 +140,25 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
     return true;
 }
 
-bool Engine::spec_ngram_gates_ok_(const Request& req) const {
+bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     if (req.spec_ngram_given_up) return false;
     // Greedy sampling only: verify compares argmax tokens.
     const bool greedy = (req.temperature <= 0.0f || req.top_k == 1);
     if (!greedy) return false;
-    // Any logit-shaping the verify chunk does not replicate disqualifies.
-    if (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
-        req.presence_penalty != 0.0f || req.dry_multiplier != 0.0f || req.mirostat != 0 ||
-        !req.logit_bias.empty())
+    // rep/freq/presence penalties are replicated in the verify
+    // (greedy_argmax_all) for the unbounded window; a bounded repeat_last_n
+    // window slides per chunk row and is not replicated — stay eager there.
+    const bool penalties = req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
+                           req.presence_penalty != 0.0f;
+    if (penalties && req.repeat_last_n != 0) return false;
+    // Logit-shaping the verify chunk does not replicate disqualifies.
+    if (req.dry_multiplier != 0.0f || req.mirostat != 0 || !req.logit_bias.empty())
         return false;
     if (req.logprobs || req.json_mode || !req.json_schema.empty()) return false;
-    // Think budget forces tokens mid-stream (device/host-side) — the verify
-    // path doesn't replicate the forcing, so stay eager-per-token there.
-    if (req.think_budget > 0.0f) return false;
+    // Think budget forces tokens INSIDE the think block (loop/host-side) —
+    // verify only outside it; the think interior runs loop bursts, which
+    // handle the budget device-side.
+    if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) return false;
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return false;
     // Recurrent state (SSM/GDN) advances on every forwarded token and cannot
     // be rewound on draft rejection.
@@ -296,8 +305,29 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     Tensor logits_out;
     executor_->forward_logits(state, logits_out, stream);
 
+    // Penalty history (production parity: output_tokens, unbounded window).
+    const bool penalties = req->repetition_penalty != 1.0f ||
+                           req->frequency_penalty != 0.0f || req->presence_penalty != 0.0f;
+    const int32_t* d_hist = nullptr;
+    int n_hist = 0;
+    if (penalties) {
+        InferenceState pstate;
+        upload_penalties(*req, pstate, stream);
+        if (pstate.penalty_tokens == nullptr) {
+            // Upload failed — an unpenalized verify would diverge from the
+            // eager path; fall back to the normal step.
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
+        }
+        d_hist = pstate.penalty_tokens;
+        n_hist = pstate.n_penalty_tokens;
+    }
+
     // Greedy token for every chunk position, D2H, host compare.
-    executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream);
+    executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist,
+                                 d_spec_tokens_ + 1, req->repetition_penalty,
+                                 req->frequency_penalty, req->presence_penalty);
     if (!check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, chunk_len * sizeof(int32_t),
                                cudaMemcpyDeviceToHost, stream), "argmax D2H"))
         return false;
@@ -321,6 +351,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         if (j >= K || tokj != draft[j]) break;  // bonus token reached or draft diverged
         matched++;
+        // Entering a budgeted think block mid-chunk: the budget forcing lives
+        // in the loop/eager path — stop extending; the accepted prefix stays.
+        if (req->think_budget > 0.0f && req->in_think_block) break;
     }
     kv_manager_->touch(req->id);
 
@@ -331,6 +364,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     spec_stats_.drafted += K;
     spec_stats_.accepted += matched;
     spec_stats_.emitted += emitted;
+    // (request-end stats logging lives in finish_request)
 
     // Acceptance economics: structured-but-mutating content (number tables,
     // counters) produces plenty of suffix matches whose continuations are
@@ -362,8 +396,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                      req->spec_consecutive_misses);
     }
 
-    if (req->status == RequestStatus::FINISHED)
-        log_spec_stats_();
     return true;
 }
 
