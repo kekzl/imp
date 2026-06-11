@@ -74,6 +74,20 @@ static bool use_multirow(int n_mb, int mr_blocks) {
 //         high nibble (bits 4-7) decodes to f16x2.y (upper half).
 __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb, const half* __restrict__ x,
                                                  int elem_base) {
+    // x slice for one micro-block: 16 halfs = 32 B, loaded as two 16-B
+    // vectors. The previous per-pair half2 loads issued 8 narrow 4-B
+    // requests at a 32-B lane stride — each request touched 32 distinct
+    // sectors and the 8 unrolled iterations re-touched the same sectors,
+    // an 8x L1TEX sector-access amplification on x that saturated the
+    // L1TEX data path (~90%) while DRAM idled at ~70% (#667 lever-3
+    // profile: x re-reads were ~77% of all GEMV L1TEX sector accesses).
+    // elem_base is a multiple of 16 halfs, so both loads are 16-B aligned.
+    const uint4 xv0 = *reinterpret_cast<const uint4*>(x + elem_base);
+    const uint4 xv1 = *reinterpret_cast<const uint4*>(x + elem_base + 8);
+    half2 xh[8];
+    *reinterpret_cast<uint4*>(&xh[0]) = xv0;
+    *reinterpret_cast<uint4*>(&xh[4]) = xv1;
+
     float acc = 0.0f;
 #pragma unroll
     for (int b = 0; b < 8; b++) {
@@ -81,9 +95,8 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
         uint32_t w_fp16x2;
         asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }" : "=r"(w_fp16x2) : "r"(byte_val));
 
-        const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + b * 2);
         const half2 wh = *reinterpret_cast<const half2*>(&w_fp16x2);
-        const float2 xf = __half22float2(xh);
+        const float2 xf = __half22float2(xh[b]);
         const float2 wf = __half22float2(wh);
         acc = __fmaf_rn(wf.x, xf.x, acc);
         acc = __fmaf_rn(wf.y, xf.y, acc);
@@ -150,6 +163,11 @@ template <typename DotFn>
 __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_packed,
                                              const uint8_t* __restrict__ row_ms, float tensor_scale, int n_mb,
                                              int lane, DotFn dot_fn) {
+    // (A two-micro-blocks-per-lane variant — 16-B weight vector + 2-B scale
+    // pair for deeper memory-level parallelism — measured exactly neutral
+    // here: the kernels already sit at the practical GDDR7 ceiling once the
+    // x sector amplification is gone. Keep the simple form; it also keeps
+    // the accumulation order bit-identical to the pre-vectorization kernel.)
     float acc = 0.0f;
     for (int mi = lane; mi < n_mb; mi += 32) {
         int byte_off = mi * 8;
@@ -310,13 +328,19 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
                                                         const half* __restrict__ gate,
                                                         const half* __restrict__ up, int elem_base,
                                                         const float* s_lut) {
+    // 16-B vector loads for the gate/up slices (see dot_micro_block — the
+    // narrow per-pair half2 loads were the GEMV L1TEX sector-amplification).
+    half2 ghv[8], uhv[8];
+    *reinterpret_cast<uint4*>(&ghv[0]) = *reinterpret_cast<const uint4*>(gate + elem_base);
+    *reinterpret_cast<uint4*>(&ghv[4]) = *reinterpret_cast<const uint4*>(gate + elem_base + 8);
+    *reinterpret_cast<uint4*>(&uhv[0]) = *reinterpret_cast<const uint4*>(up + elem_base);
+    *reinterpret_cast<uint4*>(&uhv[4]) = *reinterpret_cast<const uint4*>(up + elem_base + 8);
+
     float acc = 0.0f;
 #pragma unroll
     for (int b = 0; b < 8; b++) {
-        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + b * 2);
-        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + b * 2);
-        const float2 gf = __half22float2(gh);
-        const float2 uf = __half22float2(uh);
+        const float2 gf = __half22float2(ghv[b]);
+        const float2 uf = __half22float2(uhv[b]);
         // silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
         float s0 = gf.x / (1.0f + expf(-gf.x)) * uf.x;
         float s1 = gf.y / (1.0f + expf(-gf.y)) * uf.y;
@@ -333,13 +357,17 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
                                                        const float* s_lut) {
     constexpr float SQRT_2_PI = 0.7978845608028654f;
     constexpr float COEFF = 0.044715f;
+    half2 ghv[8], uhv[8];
+    *reinterpret_cast<uint4*>(&ghv[0]) = *reinterpret_cast<const uint4*>(gate + elem_base);
+    *reinterpret_cast<uint4*>(&ghv[4]) = *reinterpret_cast<const uint4*>(gate + elem_base + 8);
+    *reinterpret_cast<uint4*>(&uhv[0]) = *reinterpret_cast<const uint4*>(up + elem_base);
+    *reinterpret_cast<uint4*>(&uhv[4]) = *reinterpret_cast<const uint4*>(up + elem_base + 8);
+
     float acc = 0.0f;
 #pragma unroll
     for (int b = 0; b < 8; b++) {
-        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + b * 2);
-        const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + b * 2);
-        const float2 gf = __half22float2(gh);
-        const float2 uf = __half22float2(uh);
+        const float2 gf = __half22float2(ghv[b]);
+        const float2 uf = __half22float2(uhv[b]);
         float g0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + COEFF * gf.x * gf.x * gf.x)));
         float g1 = gf.y * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.y + COEFF * gf.y * gf.y * gf.y)));
         acc = __fmaf_rn(s_lut[pb[b] & 0x0F], g0 * uf.x, acc);
