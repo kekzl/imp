@@ -484,8 +484,10 @@ __global__ void post_decode_step_kernel(
     int* __restrict__ d_context_len,         // [1] current context length
     int* __restrict__ d_step_counter,        // [1] device-side step counter
     int max_steps, int eos_id, const int32_t* __restrict__ d_stop_ids, int n_stop_ids,
-    // Think budget (all 0/-1 when disabled)
-    int think_budget_limit, int32_t think_start_id, int32_t think_end_id, int think_grace_tokens,
+    // Think budget: remaining-budget limit read from device memory so
+    // rearm() can shrink it across bounded burst launches (0 = disabled).
+    const int* __restrict__ d_think_limit, int32_t think_start_id, int32_t think_end_id,
+    int think_grace_tokens,
     int* __restrict__ d_think_count,      // [1] reasoning token counter
     int* __restrict__ d_in_think,         // [1] think block flag
     int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
@@ -498,6 +500,7 @@ __global__ void post_decode_step_kernel(
     cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
+    const int think_budget_limit = d_think_limit ? *d_think_limit : 0;
 
     // Per-launch step cap: read from device memory so rearm() can bound a
     // burst without recapturing the graph. max_steps stays the hard capacity
@@ -636,6 +639,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     err = cudaMalloc(&d_step_limit_, sizeof(int));
     if (err != cudaSuccess)
         goto fail;
+    err = cudaMalloc(&d_think_limit_, sizeof(int));
+    if (err != cudaSuccess)
+        goto fail;
 
     // Stop token IDs
     if (!config_.stop_ids.empty()) {
@@ -769,6 +775,13 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             IMP_LOG_ERROR("ConditionalRunner: step_limit init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
+        err = cudaMemcpyAsync(d_think_limit_, &config_.think_budget_limit, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: think_limit init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
     }
 
     // ---- Build InferenceState for graph body (uses our device pointers) ----
@@ -875,7 +888,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      d_position_, d_context_len_, d_step_counter_,
                                                      config_.max_steps, config_.eos_id, d_stop_ids_,
                                                      static_cast<int>(config_.stop_ids.size()),
-                                                     config_.think_budget_limit, config_.think_start_id,
+                                                     d_think_limit_, config_.think_start_id,
                                                      config_.think_end_id, config_.think_grace_tokens,
                                                      d_think_count_, d_in_think_, d_think_exit_step_,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
@@ -947,7 +960,8 @@ bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
 }
 
 bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int context_len,
-                                       int step_limit, bool in_think, cudaStream_t stream) {
+                                       int step_limit, bool in_think, int think_limit,
+                                       cudaStream_t stream) {
     if (!exec_ || launched_)
         return false;
     // The captured graph sized its attention workspace for
@@ -972,7 +986,8 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
         !up(d_position_, &position, sizeof(int), "position") ||
         !up(d_context_len_, &context_len, sizeof(int), "context_len") ||
         !up(d_step_counter_, &zero, sizeof(int), "step_counter") ||
-        !up(d_step_limit_, &step_limit, sizeof(int), "step_limit"))
+        !up(d_step_limit_, &step_limit, sizeof(int), "step_limit") ||
+        !up(d_think_limit_, &think_limit, sizeof(int), "think_limit"))
         return false;
     if (d_in_think_) {
         if (!up(d_in_think_, &think, sizeof(int), "in_think") ||
@@ -1046,6 +1061,10 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_step_limit_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_step_limit_));
         d_step_limit_ = nullptr;
+    }
+    if (d_think_limit_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_think_limit_));
+        d_think_limit_ = nullptr;
     }
     if (d_context_len_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_));

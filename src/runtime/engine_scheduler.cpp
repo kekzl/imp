@@ -23,6 +23,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/batch.h"
+#include "runtime/think_stop_logic.h"
 #include "compute/mtp_forward.h"
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
@@ -869,6 +870,31 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                 sreq->spec_acceptance_doomed ? 0 : runtime_config_.speculative.burst;
             if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream, lim))
                 return;
+        } else if (decode_batch[0]->think_budget > 0.0f && decode_batch[0]->in_think_block &&
+                   spec_ngram_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
+                   spec_burst_launch_ok_(*decode_batch[0]) &&
+                   // Budget exhausted → the EAGER step must run: it forces
+                   // the </think> token. Launching the loop here instead
+                   // produced 1-token budget-stopped loops with a full
+                   // recapture each, and </think> was never forced.
+                   !think_logic::should_force_think_end(
+                       decode_batch[0]->think_budget, think_end_id_, decode_batch[0]->max_tokens,
+                       decode_batch[0]->output_tokens, think_start_id_,
+                       decode_batch[0]->started_in_think)) {
+            // Budgeted think interior: the loop handles the budget device-
+            // side in bounded bursts so the host catches the think→answer
+            // transition and resumes verification in the draft-rich answer
+            // region. Fixed burst (the miss counter stays untouched — these
+            // are not draft misses, and inflating it would instantly trip
+            // give-up on the first real probe after </think>).
+            auto& sreq = decode_batch[0];
+            const int think_burst =
+                std::min(32, runtime_config_.speculative.burst > 0
+                                 ? runtime_config_.speculative.burst
+                                 : 32);
+            if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream,
+                                            think_burst))
+                return;
         } else {
             // One-time diagnosis: say WHY speculation is inactive (gates are
             // silent otherwise and a misconfigured request looks identical
@@ -1466,8 +1492,9 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 && !offload_mgr_ &&
         config_.use_cuda_graphs &&
         // A PARKED runner (burst-hybrid speculation) is setup but idle — it
-        // must be allowed back in here, or bursts only ever fire once.
-        (!async_graph_runner_.is_setup() || async_parked_req_id_ == valid_decode[0]->id) &&
+        // must be allowed back in here, or bursts only ever fire once. A park
+        // for a DIFFERENT request is torn down inside the launch.
+        (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
         // forward_decode_async only implements banned_tokens + rep/freq/presence

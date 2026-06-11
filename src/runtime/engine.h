@@ -443,7 +443,7 @@ private:
     // Returns true when it handled this decode step (tokens emitted);
     // false → caller falls through to the normal decode path.
     bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
-    bool spec_ngram_gates_ok_(const Request& req) const;
+    bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;

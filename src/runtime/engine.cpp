@@ -400,6 +400,10 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
     constraints_.reset();
+    // Server visibility: the engine outlives requests, so cumulative
+    // speculation telemetry is logged per request end (no-op when idle).
+    if (runtime_config_.speculative.ngram)
+        log_spec_stats_();
 }
 
 // =====================================================================

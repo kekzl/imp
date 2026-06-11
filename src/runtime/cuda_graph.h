@@ -175,12 +175,14 @@ public:
     // Re-seed device state for another bounded launch WITHOUT recapturing the
     // graph (the expensive part of setup). first_token is forwarded at
     // `position` with context length `context_len` (physical values, no +1
-    // applied inside). step_limit bounds this launch (0 = max_steps). Returns
-    // false when no graph is built, a launch is still in flight, or
-    // context_len would exceed the captured ceiling — caller falls back to a
-    // full setup().
+    // applied inside). step_limit bounds this launch (0 = max_steps);
+    // think_limit is the REMAINING think budget for this launch (0 = no
+    // budget; the device counter restarts at 0 every launch, so the caller
+    // passes full_budget - tokens_already_thought). Returns false when no
+    // graph is built, a launch is still in flight, or context_len would
+    // exceed the captured ceiling — caller falls back to a full setup().
     bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
-               cudaStream_t stream);
+               int think_limit, cudaStream_t stream);
 
     // Context ceiling baked into the captured graph (attention workspace
     // sizing): initial_context_len + max_steps at setup time.
@@ -213,6 +215,7 @@ private:
     int* d_context_len_ = nullptr;   // [1] current context length on device
     int* d_step_counter_ = nullptr;  // [1] step counter on device
     int* d_step_limit_ = nullptr;    // [1] per-launch step cap (0 = max_steps)
+    int* d_think_limit_ = nullptr;   // [1] per-launch remaining think budget (0 = off)
     int32_t* d_stop_ids_ = nullptr;  // [n_stop_ids] stop token IDs on device
 
     // Think budget tracking (device-side)
