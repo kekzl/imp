@@ -26,6 +26,7 @@
 #include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <functional>
 #include <vector>
 #include <unordered_map>
 #include <utility>
@@ -107,6 +108,13 @@ public:
     // workspace — call only after all reads of the chunk's logits are done.
     void perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
                                 int chunk_len, double* d_nll, cudaStream_t stream);
+
+    // Greedy verify for n-gram speculative decoding: applies the tier-aware
+    // LM head to hidden_[0..n_rows-1] (the verify chunk that forward_logits
+    // just ran) and writes argmax token ids to d_out[0..n_rows-1]. Same
+    // logits as production greedy sampling (incl. final softcap). Overwrites
+    // the logits_ workspace. Enqueues on `stream` only.
+    void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
@@ -280,6 +288,19 @@ private:
     void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;
     int max_tokens_ = 0;
+
+    // Shared eval-side LM-head driver: applies the tier-aware LM head to
+    // hidden_[0..n_rows) in batches of max_logit_tokens_ and calls
+    // consume(logits_view, row0, csz) after each batch's logits (softcap
+    // already applied) land in logits_. Used by perplexity_nll_partial and
+    // greedy_argmax_all.
+    void for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
+                                 const std::function<void(const Tensor&, int, int)>& consume);
+
+    // Spec-decode verify argmax partials (lazy, grows only; freed in
+    // free_buffers).
+    void* verify_argmax_scratch_ = nullptr;
+    size_t verify_argmax_scratch_sz_ = 0;
 
     // LoRA (issue #522)
     const LoraAdapter* lora_ = nullptr;

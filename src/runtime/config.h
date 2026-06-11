@@ -397,6 +397,35 @@ struct RuntimeConfig {
         std::string mmproj;
     } paths;
 
+    // n-gram (prompt-lookup) speculative decoding. Drafts come from suffix
+    // matches against the request's own prompt+output tokens — no draft
+    // model, no MTP head. Greedy-only Phase 1: the verify step replays the
+    // draft as a teacher-forced continuation chunk and accepts the longest
+    // argmax-matching prefix, so output is token-identical to plain greedy
+    // decode. Opt-in: the verify loop runs eager (no async conditional
+    // graph loop), which costs on draft-miss-heavy workloads.
+    struct Speculative {
+        bool ngram = false;  // enable prompt-lookup speculation (batch-1, greedy)
+        int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
+        int min_match = 3;   // shortest accepted suffix n-gram match
+        int max_match = 8;   // longest suffix extension searched
+        // After this many consecutive draft misses the request gives up on
+        // speculation and re-enters the async conditional graph loop (the
+        // eager per-token path costs ~2x vs the loop — a draft-poor context
+        // must not pay that for the whole generation). 0 = never give up.
+        int give_up_after = 64;
+        // Burst-hybrid: while given up, the async loop runs in bursts of
+        // this many tokens; after each burst the request re-probes drafts
+        // for a couple of steps (think models produce their draft-rich
+        // region only after the reasoning prose). 0 = give-up is final.
+        int burst = 128;
+        // On a draft miss the request falls back to the async loop for this
+        // many tokens (cheap rearm, no graph recapture) instead of paying
+        // the ~2x eager per-token tax until the next draft shows up.
+        // 0 = stay eager between drafts (legacy behavior).
+        int miss_burst = 8;
+    } speculative;
+
     struct FFN {
         // SwiGLU/GeGLU sparsity probe (instrumentation-only — no skipping).
         // When enabled, every dense-FFN decode step runs a reduce kernel

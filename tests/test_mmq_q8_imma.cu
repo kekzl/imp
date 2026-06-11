@@ -181,6 +181,12 @@ TEST(MmqQ8Imma, MTailNoTail320) { run_case(320, 256, 128, 45, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, MTailSeed47) { run_case(313, 256, 128, 47, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, MTailBigK) { run_case(313, 256, 1024, 45, 15e-3f, 2e-2f); }
 TEST(MmqQ8Imma, M64Min) { run_case(64, 128, 64, 46, 15e-3f, 2e-2f); }
+// Dense small-M (spec-decode verify chunks) routes through the split-K path
+// (M <= 32, gridDim.z = K-splits, fp32 partial slices + finalize reduce).
+TEST(MmqQ8Imma, SmallMSplitKVerifyShape) { run_case(9, 2560, 2560, 48, 15e-3f, 2e-2f); }
+TEST(MmqQ8Imma, SmallMSplitKWideK) { run_case(17, 1024, 9728, 49, 15e-3f, 1e-2f); }
+TEST(MmqQ8Imma, SmallMMin2) { run_case(2, 256, 512, 50, 15e-3f, 2e-2f); }
+TEST(MmqQ8Imma, SmallMNoSplitShortK) { run_case(8, 128, 128, 52, 15e-3f, 2e-2f); }
 // ---- Q4_K dense (new stack) — NRMSE vs full-dequant reference ----
 namespace q4k_helpers {
 constexpr int kSuper = 256;
@@ -491,7 +497,8 @@ TEST(MmqQ8Imma, MoeGroupedQ8) {
 }
 
 TEST(MmqQ8Imma, DeclineShapes) {
-    // N not multiple of 128 / K not multiple of 64 / M < 64 → false
+    // N odd / K not multiple of 64 / M < 2 → false. (M down to 2 is accepted
+    // since the small-M split-K path — spec-decode verify chunks.)
     std::vector<uint8_t> W;
     gen_q8_weight(W, 64, 64, 1);
     uint8_t* d_w = nullptr;
@@ -499,7 +506,7 @@ TEST(MmqQ8Imma, DeclineShapes) {
     cudaMalloc(&d_w, W.size());
     cudaMalloc(&d_x, 64 * 64 * sizeof(__half));
     cudaMalloc(&d_out, 64 * 64 * sizeof(__half));
-    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 63, 128, 64, nullptr));  // M < 64
+    EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 1, 128, 64, nullptr));   // M < 2
     EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 63, 64, nullptr));   // N odd
     EXPECT_FALSE(mmq_q8_imma_gemm(d_w, d_x, d_out, 64, 128, 32, nullptr));  // K % 64
     cudaFree(d_w);

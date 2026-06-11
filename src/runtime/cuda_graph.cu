@@ -494,9 +494,20 @@ __global__ void post_decode_step_kernel(
     int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
     int penalty_prefix_len,
     int* __restrict__ d_penalty_count,  // [1] total penalty token count
+    const int* __restrict__ d_step_limit,  // [1] per-launch cap (0 = max_steps)
     cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
+
+    // Per-launch step cap: read from device memory so rearm() can bound a
+    // burst without recapturing the graph. max_steps stays the hard capacity
+    // ceiling (ring buffer size).
+    int eff_max = max_steps;
+    if (d_step_limit) {
+        const int lim = *d_step_limit;
+        if (lim > 0 && lim < eff_max)
+            eff_max = lim;
+    }
 
     // Track think state on device. Active whenever a </think> id is known
     // (think_end_id >= 0), independent of the budget — it drives EOS/stop
@@ -548,7 +559,7 @@ __global__ void post_decode_step_kernel(
     bool in_think = (track_think && d_in_think && *d_in_think);
     bool grace = (think_grace_tokens > 0 && d_think_exit_step && *d_think_exit_step >= 0 &&
                   (step - *d_think_exit_step) < think_grace_tokens);
-    bool should_stop = (step + 1 >= max_steps);
+    bool should_stop = (step + 1 >= eff_max);
     if (!in_think && !grace && !ignore_eos) {
         if (token == eos_id)
             should_stop = true;
@@ -568,8 +579,8 @@ __global__ void post_decode_step_kernel(
     if (should_stop) {
         if (d_graph_diag_enabled) {
             int stop_reason = 0;
-            if (step + 1 >= max_steps)
-                stop_reason = 1;  // max_steps
+            if (step + 1 >= eff_max)
+                stop_reason = 1;  // max_steps / step_limit
             else if (!in_think && !grace && !ignore_eos) {
                 if (token == eos_id)
                     stop_reason = 2;  // eos
@@ -620,6 +631,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     if (err != cudaSuccess)
         goto fail;
     err = cudaMalloc(&d_step_counter_, sizeof(int));
+    if (err != cudaSuccess)
+        goto fail;
+    err = cudaMalloc(&d_step_limit_, sizeof(int));
     if (err != cudaSuccess)
         goto fail;
 
@@ -749,6 +763,12 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             IMP_LOG_ERROR("ConditionalRunner: step_counter init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
+        err = cudaMemcpyAsync(d_step_limit_, &config_.step_limit, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: step_limit init failed: %s", cudaGetErrorString(err));
+            goto fail;
+        }
     }
 
     // ---- Build InferenceState for graph body (uses our device pointers) ----
@@ -859,7 +879,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      config_.think_end_id, config_.think_grace_tokens,
                                                      d_think_count_, d_in_think_, d_think_exit_step_,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
-                                                     penalty_prefix_len_, d_penalty_count_, handle_);
+                                                     penalty_prefix_len_, d_penalty_count_,
+                                                     d_step_limit_, handle_);
 
         // 5c. End capture
         cudaGraph_t captured_body = nullptr;
@@ -925,6 +946,45 @@ bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
     return true;
 }
 
+bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int context_len,
+                                       int step_limit, bool in_think, cudaStream_t stream) {
+    if (!exec_ || launched_)
+        return false;
+    // The captured graph sized its attention workspace for
+    // initial_context_len + max_steps tokens; never replay past that.
+    const int steps_this_launch = (step_limit > 0) ? step_limit : config_.max_steps;
+    if (context_len + steps_this_launch > captured_context_ceiling())
+        return false;
+
+    auto up = [&](void* dst, const void* src, size_t n, const char* what) {
+        cudaError_t err = cudaMemcpyAsync(dst, src, n, cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: rearm %s upload failed: %s", what,
+                          cudaGetErrorString(err));
+            return false;
+        }
+        return true;
+    };
+    const int zero = 0;
+    const int neg_one = -1;
+    const int think = in_think ? 1 : 0;
+    if (!up(d_token_id_, &first_token, sizeof(int32_t), "token") ||
+        !up(d_position_, &position, sizeof(int), "position") ||
+        !up(d_context_len_, &context_len, sizeof(int), "context_len") ||
+        !up(d_step_counter_, &zero, sizeof(int), "step_counter") ||
+        !up(d_step_limit_, &step_limit, sizeof(int), "step_limit"))
+        return false;
+    if (d_in_think_) {
+        if (!up(d_in_think_, &think, sizeof(int), "in_think") ||
+            !up(d_think_count_, &zero, sizeof(int), "think_count") ||
+            !up(d_think_exit_step_, &neg_one, sizeof(int), "think_exit"))
+            return false;
+    }
+    *h_step_counter_ = 0;
+    last_read_step_ = 0;
+    return true;
+}
+
 std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(cudaStream_t stream) {
     if (!launched_)
         return {};
@@ -982,6 +1042,10 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_position_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_position_));
         d_position_ = nullptr;
+    }
+    if (d_step_limit_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_step_limit_));
+        d_step_limit_ = nullptr;
     }
     if (d_context_len_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_));

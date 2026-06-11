@@ -240,6 +240,15 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
     F("ffn.sparsity_threshold", cfg.ffn.sparsity_threshold);
 
+    // [speculative]
+    B("speculative.ngram", cfg.speculative.ngram);
+    I("speculative.k", cfg.speculative.k);
+    I("speculative.min_match", cfg.speculative.min_match);
+    I("speculative.max_match", cfg.speculative.max_match);
+    I("speculative.give_up_after", cfg.speculative.give_up_after);
+    I("speculative.burst", cfg.speculative.burst);
+    I("speculative.miss_burst", cfg.speculative.miss_burst);
+
     if (!matched)
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
 }
@@ -376,6 +385,14 @@ void seed_from_env(RuntimeConfig& cfg) {
     // ffn.sparsity_threshold — IMP_FFN_SPARSITY_THRESHOLD: float.
     if (const char* e = std::getenv("IMP_FFN_SPARSITY_THRESHOLD"))
         cfg.ffn.sparsity_threshold = parse_float(e, cfg.ffn.sparsity_threshold);
+
+    // speculative.ngram — IMP_SPEC_NGRAM: '1' enables.
+    if (const char* e = std::getenv("IMP_SPEC_NGRAM"))
+        cfg.speculative.ngram = (e[0] == '1');
+
+    // speculative.k — IMP_SPEC_K: int.
+    if (const char* e = std::getenv("IMP_SPEC_K"))
+        cfg.speculative.k = parse_int(e, cfg.speculative.k);
 
     // attention.fp8_prefill — IMP_NO_FP8_PREFILL: '1' sets fp8_prefill="never".
     if (const char* e = std::getenv("IMP_NO_FP8_PREFILL"))

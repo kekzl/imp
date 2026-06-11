@@ -117,14 +117,24 @@ int Engine::step_async_graph_resume() {
 
         auto saved_req = async_graph_req_;
 
-        async_graph_runner_.cleanup();
-        if (async_d_block_tables_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
-            async_d_block_tables_ = nullptr;
-        }
-        if (async_d_banned_tokens_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
-            async_d_banned_tokens_ = nullptr;
+        // Burst-hybrid speculation: keep the captured graph + block-table
+        // buffer parked so the next burst of this request rearms instead of
+        // recapturing (~10-20 ms per capture). Fully torn down on request
+        // finish or when a different request launches.
+        const bool park = runtime_config_.speculative.ngram && !generation_done;
+        if (park) {
+            async_parked_req_id_ = saved_req->id;
+        } else {
+            async_graph_runner_.cleanup();
+            if (async_d_block_tables_) {
+                IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
+                async_d_block_tables_ = nullptr;
+            }
+            if (async_d_banned_tokens_) {
+                IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
+                async_d_banned_tokens_ = nullptr;
+            }
+            async_parked_req_id_ = -1;
         }
         async_graph_req_ = nullptr;
         async_pending_tokens_.clear();
@@ -840,6 +850,46 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     auto& decode_batch = sched_decode_batch_;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
+    // n-gram (prompt-lookup) speculation: when a draft is available, the
+    // verify step replaces this decode step entirely (it allocates its own
+    // KV blocks and emits accepted tokens). Falls through to the normal
+    // path on a draft miss or when any gate fails.
+    if (runtime_config_.speculative.ngram && decode_batch.size() == 1) {
+        spec_maybe_rearm_(*decode_batch[0]);
+        if (spec_ngram_gates_ok_(*decode_batch[0])) {
+            if (step_spec_verify_(decode_batch[0], dec_stream))
+                return;
+        } else if (decode_batch[0]->spec_ngram_given_up &&
+                   spec_burst_launch_ok_(*decode_batch[0])) {
+            // Given-up request: hand it straight to the loop (no eager probe
+            // step). Doomed = acceptance verdict final → run unbounded;
+            // otherwise bounded so spec_maybe_rearm_ can re-probe later.
+            auto& sreq = decode_batch[0];
+            const int lim =
+                sreq->spec_acceptance_doomed ? 0 : runtime_config_.speculative.burst;
+            if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream, lim))
+                return;
+        } else {
+            // One-time diagnosis: say WHY speculation is inactive (gates are
+            // silent otherwise and a misconfigured request looks identical
+            // to a draft-poor one).
+            static bool s_gate_logged = false;
+            if (!s_gate_logged && !decode_batch[0]->spec_ngram_given_up) {
+                s_gate_logged = true;
+                const auto& r = *decode_batch[0];
+                IMP_LOG_INFO(
+                    "spec-ngram: gates failed (temp=%.2f top_k=%d rep_pen=%.2f freq=%.2f "
+                    "pres=%.2f dry=%.2f mirostat=%d bias=%zu logprobs=%d json=%d schema=%d "
+                    "think_budget=%.2f ssm=%d gdn=%d mtp=%d chunked_prefill=%d)",
+                    r.temperature, r.top_k, r.repetition_penalty, r.frequency_penalty,
+                    r.presence_penalty, r.dry_multiplier, r.mirostat, r.logit_bias.size(),
+                    (int)r.logprobs, (int)r.json_mode, (int)!r.json_schema.empty(), r.think_budget,
+                    (int)(ssm_state_ != nullptr), (int)(gdn_state_ != nullptr),
+                    (int)mtp_spec_decode_enabled(), (int)supports_chunked_prefill_());
+            }
+        }
+    }
+
     // SSM/GDN: limit decode batch to 1 sequence
     if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
         decode_batch.resize(1);
@@ -1414,8 +1464,11 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 && !offload_mgr_ &&
-        config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !needs_logprobs && !needs_json_mode &&
-        !needs_schema_mode) {
+        config_.use_cuda_graphs &&
+        // A PARKED runner (burst-hybrid speculation) is setup but idle — it
+        // must be allowed back in here, or bursts only ever fire once.
+        (!async_graph_runner_.is_setup() || async_parked_req_id_ == valid_decode[0]->id) &&
+        !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
         // forward_decode_async only implements banned_tokens + rep/freq/presence
         // penalties device-side. Any sampling feature that requires host-side
@@ -1427,7 +1480,13 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                       // Phase 3.5 MTP telemetry hooks the per-step path; the async
                                       // conditional-graph loop bypasses it. Stay eager when MTP is on
                                       // so accuracy measurement covers the whole generation.
-                                      !mtp_spec_decode_enabled();
+                                      !mtp_spec_decode_enabled() &&
+                                      // n-gram speculation: the loop runs in bounded bursts
+                                      // (miss_burst) so the host can probe for drafts between
+                                      // bursts; with miss_burst=0 the loop stays blocked while
+                                      // speculation is engaged (legacy eager-miss behavior).
+                                      (!runtime_config_.speculative.ngram || dreq->spec_ngram_given_up ||
+                                       runtime_config_.speculative.miss_burst > 0);
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
         // ship them as added_tokens with special=False, leaving think_end_id_
@@ -1443,7 +1502,17 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         if (async_compatible && !needs_eager_for_text_think && dreq->status == RequestStatus::DECODING &&
             !dreq->output_tokens.empty()) {
             int32_t last_token = dreq->output_tokens.back();
-            try_launch_async_graph_loop(dreq, last_token, dec_stream);
+            // Burst-hybrid speculation: bound the loop so the host can probe
+            // for drafts when it returns. Engaged requests use the short
+            // miss_burst; given-up requests the long re-probe burst (0 =
+            // run to completion).
+            int spec_limit = 0;
+            if (runtime_config_.speculative.ngram) {
+                spec_limit = dreq->spec_ngram_given_up ? runtime_config_.speculative.burst
+                                                       : spec_effective_miss_burst_(*dreq);
+                if (spec_limit < 0) spec_limit = 0;
+            }
+            try_launch_async_graph_loop(dreq, last_token, dec_stream, spec_limit);
         }
     }
 

@@ -51,6 +51,21 @@ struct Request {
     float mirostat_eta = 0.1f;        // Learning rate
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;          // Don't stop on EOS (benchmark mode)
+    // n-gram speculation bookkeeping: consecutive draft misses and per-
+    // request acceptance economics, plus the sticky give-up flag that hands
+    // the request back to the async graph loop once the context proved
+    // draft-poor (speculative.give_up_after) or acceptance-poor (structured
+    // content whose continuations never match, e.g. number tables).
+    int spec_consecutive_misses = 0;
+    int spec_verifies = 0;
+    long long spec_drafted = 0;
+    long long spec_accepted = 0;
+    bool spec_ngram_given_up = false;
+    int spec_last_giveup_pos = 0;  // output size at last give-up (burst re-arm)
+    // Sticky acceptance verdict: structured-but-mutating content (number
+    // tables) re-trips the acceptance economics after every re-arm window —
+    // once doomed, give-up is final for this request.
+    bool spec_acceptance_doomed = false;
     bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
     // Generation began inside an injected <think> prefix (the opener lives in
     // the PROMPT, not the output) — seeds the think-budget recount loop and

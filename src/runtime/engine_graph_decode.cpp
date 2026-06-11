@@ -168,10 +168,49 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 }
 
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
-                                         cudaStream_t stream) {
+                                         cudaStream_t stream, int step_limit) {
     int remaining = prepare_graph_loop(req);
     if (remaining <= 0)
         return false;
+
+    // Fast relaunch: a parked runner from a previous burst of the SAME
+    // request keeps its captured graph — reseed device state instead of
+    // recapturing (the burst-hybrid n-gram speculation path relaunches every
+    // few tokens; a full setup costs ~10-20 ms per launch).
+    if (async_graph_runner_.is_setup() && async_parked_req_id_ >= 0) {
+        const auto& bt = kv_manager_->block_table(req->id);
+        const int ctx = req->context_len();
+        if (async_parked_req_id_ == req->id && async_d_block_tables_ != nullptr &&
+            static_cast<int>(bt.size()) <= async_bt_capacity_) {
+            // Verify steps may have appended KV blocks since the park —
+            // refresh the table contents (pointer/capacity baked in graph).
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(async_d_block_tables_, bt.data(),
+                                               bt.size() * sizeof(int), cudaMemcpyHostToDevice,
+                                               stream));
+            if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx,
+                                          step_limit, req->in_think_block, stream) &&
+                async_graph_runner_.launch(stream)) {
+                async_graph_req_ = req;
+                async_pending_tokens_.clear();
+                async_pending_cursor_ = 0;
+                IMP_LOG_DEBUG("AsyncGraphLoop: rearmed for %d-step burst (ctx=%d)", step_limit,
+                              ctx);
+                return true;
+            }
+        }
+        // Rearm impossible (table outgrew capacity / context past ceiling /
+        // upload failure) — tear down and rebuild below.
+        async_graph_runner_.cleanup();
+        if (async_d_block_tables_) {
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
+            async_d_block_tables_ = nullptr;
+        }
+        if (async_d_banned_tokens_) {
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
+            async_d_banned_tokens_ = nullptr;
+        }
+        async_parked_req_id_ = -1;
+    }
 
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
@@ -208,6 +247,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     }
 
     auto gcfg = build_graph_config(*req, remaining);
+    gcfg.step_limit = step_limit;
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         if (d_banned)
@@ -226,6 +266,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_banned_tokens_ = d_banned;
+    async_bt_capacity_ = max_blocks_per_seq;
+    async_parked_req_id_ = -1;
     IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;

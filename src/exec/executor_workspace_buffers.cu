@@ -913,6 +913,11 @@ void GraphExecutor::free_buffers() {
         lora_scratch_ = nullptr;
         lora_scratch_sz_ = 0;
     }
+    if (verify_argmax_scratch_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(verify_argmax_scratch_));
+        verify_argmax_scratch_ = nullptr;
+        verify_argmax_scratch_sz_ = 0;
+    }
     // Helper: free through VRAMAllocator if pointer was tracked, else cudaFree.
     auto vfree = [this](void*& p) {
         if (p) {

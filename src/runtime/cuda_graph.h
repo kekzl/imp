@@ -145,6 +145,12 @@ public:
         // 0 = no think tracking in the loop (set >0 whenever think_end_id >= 0).
         int think_grace_tokens = 0;
         bool ignore_eos = false;        // don't stop on EOS/stop tokens (benchmark mode)
+        // Per-launch step cap read from device memory (0 = unbounded, i.e.
+        // max_steps). Unlike max_steps it is NOT baked into the captured
+        // graph: rearm() can change it between launches, which makes bounded
+        // "burst" launches cheap (no recapture). max_steps stays the capacity
+        // ceiling (ring buffer size, max_context_len).
+        int step_limit = 0;
         // Penalty parameters (applied to logits before sampling each iteration)
         float repetition_penalty = 1.0f;
         float frequency_penalty = 0.0f;
@@ -165,6 +171,22 @@ public:
 
     // Launch the graph. Returns immediately.
     bool launch(cudaStream_t stream);
+
+    // Re-seed device state for another bounded launch WITHOUT recapturing the
+    // graph (the expensive part of setup). first_token is forwarded at
+    // `position` with context length `context_len` (physical values, no +1
+    // applied inside). step_limit bounds this launch (0 = max_steps). Returns
+    // false when no graph is built, a launch is still in flight, or
+    // context_len would exceed the captured ceiling — caller falls back to a
+    // full setup().
+    bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
+               cudaStream_t stream);
+
+    // Context ceiling baked into the captured graph (attention workspace
+    // sizing): initial_context_len + max_steps at setup time.
+    int captured_context_ceiling() const {
+        return config_.initial_context_len + config_.max_steps;
+    }
 
     // Synchronize and return all generated tokens.
     std::vector<int32_t> wait_and_get_tokens(cudaStream_t stream);
@@ -190,6 +212,7 @@ private:
     int* d_position_ = nullptr;      // [1] current position on device
     int* d_context_len_ = nullptr;   // [1] current context length on device
     int* d_step_counter_ = nullptr;  // [1] step counter on device
+    int* d_step_limit_ = nullptr;    // [1] per-launch step cap (0 = max_steps)
     int32_t* d_stop_ids_ = nullptr;  // [n_stop_ids] stop token IDs on device
 
     // Think budget tracking (device-side)
