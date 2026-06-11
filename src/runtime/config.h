@@ -407,8 +407,13 @@ struct RuntimeConfig {
     struct Speculative {
         bool ngram = false;  // enable prompt-lookup speculation (batch-1, greedy)
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
-        int min_match = 3;   // shortest accepted suffix n-gram match
-        int max_match = 8;   // longest suffix extension searched
+        // Longer suffix matches trade draft frequency for precision — and
+        // precision wins decisively: min_match 6 vs 3 measured +16% on
+        // code-edit (50% acceptance) while cutting the structured-content
+        // worst case from -13% to -2% (false 3-gram matches in number
+        // tables produce drafts that never verify).
+        int min_match = 6;   // shortest accepted suffix n-gram match
+        int max_match = 12;  // longest suffix extension searched
         // After this many consecutive draft misses the request gives up on
         // speculation and re-enters the async conditional graph loop (the
         // eager per-token path costs ~2x vs the loop — a draft-poor context
