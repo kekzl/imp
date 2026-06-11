@@ -65,7 +65,7 @@ struct EngineConfig {
     int kv_block_size = 0;
 
     // Chunked prefill
-    int prefill_chunk_size = -1;  // -1 = per-arch default (512 if supported, 0 otherwise)
+    int prefill_chunk_size = -1;  // -1 = per-arch default (2048 if supported, 0 otherwise)
 
     // FP8 prefill weight cache: uses FP8 E4M3 instead of FP16 for ~2x prefill throughput
     bool use_fp8_prefill = false;
