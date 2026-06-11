@@ -2,21 +2,21 @@
   "schema_version": "legacy-v1",
   "model": "Qwen3-14B-Q6_K.gguf",
   "gpu": "NVIDIA GeForce RTX 5090",
-  "cuda": "13.2",
+  "cuda": "13.3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-05-23T09:21:00Z",
+  "timestamp": "2026-06-12T00:10:00Z",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
   "reps": 5,
   "n_trials": 5,
-  "_note": "This is the GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric (157.71 tok/s) is the actual headline north-star number from GOAL.md; it's not auto-gated by verify.sh today (the script reads tg128 from a pp=512 bench) but is recorded here as the canonical cold-median measurement against which manual checks can be made.",
+  "_note": "This is the GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric is the actual headline north-star number from GOAL.md (historic cold-median 157.71, 2026-05-23; re-measured 156.02 on 2026-06-12 — unchanged within host-day noise). Refreshed 2026-06-12 after the IMMA prefill family (#612-#617) and the FA2 full-rate accumulate (#673/#674) moved prefill +12% (pp512) / +77% (pp2048); the previous decode value (165.72) was a peak-day sample whose 3% gate threshold sat above ordinary healthy days (issue #526) — 157.58 is an ordinary-healthy-day cold median, clocks verified during the bench (2880 MHz SM / 13801 MHz mem / ~487 W).",
   "metrics": {
     "prefill_tps": {
-      "pp512": 5955.99,
-      "pp2048": 5266.41
+      "pp512": 6652.95,
+      "pp2048": 9336.35
     },
     "decode_tps": {
-      "tg128": 165.72,
-      "tg128_at_ctx_2048": 157.71
+      "tg128": 157.58,
+      "tg128_at_ctx_2048": 156.02
     },
     "memory_mb": {
       "model_weights": 11860

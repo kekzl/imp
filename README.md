@@ -37,16 +37,16 @@ Single RTX 5090, greedy, CUDA 13.3, CUDA Graphs on. Headline numbers
 (decode, the reliable A/B signal — see [BENCHMARKS.md](BENCHMARKS.md) for
 dated, commit-anchored measurements with exact commands):
 
-- **GGUF dense decode:** Qwen3-8B Q8_0 at **~286 tok/s** (CI-gated baseline) —
+- **GGUF dense decode:** Qwen3-8B Q8_0 at **~270 tok/s** (CI-gated baseline) —
   **+37–72% over llama.cpp** with full offload and flash attention.
 - **NVFP4 SafeTensors decode:** 30B-class MoE at **~257–338 tok/s**
   (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 257, Gemma-4-26B 266;
   2026-06-09) — effectively uncontested on `sm_120`, where vLLM's NVFP4 path
   needs `tcgen05` and llama.cpp has no native NVFP4 support.
-- Honest losses: NVFP4 long-context prefill (~1.3× behind vLLM at pp4096,
-  attention-bound; imp WINS TTFT everywhere, MoE pp2048, and ties dense
-  pp2048 since the chunk-2048 default, 2026-06-11), Qwen3.6-35B GGUF decode
-  (−31%, structural FP16 GDN-projection tax).
+- Honest losses: NVFP4 long-context prefill (~1.2× behind vLLM at pp4096;
+  imp WINS TTFT everywhere, MoE pp2048 by +21%, and ties dense pp2048 —
+  post chunk-2048 default and FA2 full-rate accumulate, 2026-06-12),
+  Qwen3.6-35B GGUF decode (−31%, structural FP16 GDN-projection tax).
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
 command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
@@ -64,7 +64,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
 - **Consumer Blackwell only.** `sm_120a` SASS + `compute_120f` PTX fallback. No Hopper, Ada, Ampere, datacenter Blackwell. No AMD, Intel, Apple, or CPU paths.
-- **GGUF prefill: largely fixed 2026-06-07.** The INT8-IMMA prefill family (#612–#617) puts Qwen3-30B-A3B and Qwen3-14B-Q6_K AHEAD of llama.cpp; Q8_0 dense and gemma-4 sit at 1.20×, Qwen3.6-35B at 1.55× (GDN share is quality-locked). NVFP4 prefill trails vLLM ~1.3× at pp4096 only — imp WINS TTFT everywhere and MoE pp2048 since the chunk-2048 default (2026-06-11; see docs/audit/prefill_gap_2026_06_07.md for the kernel-level decomposition).
+- **GGUF prefill: largely fixed 2026-06-07.** The INT8-IMMA prefill family (#612–#617) puts Qwen3-30B-A3B and Qwen3-14B-Q6_K AHEAD of llama.cpp; Q8_0 dense and gemma-4 sit at 1.20×, Qwen3.6-35B at 1.55× (GDN share is quality-locked). NVFP4 prefill trails vLLM ~1.2× at pp4096 only — imp WINS TTFT everywhere and MoE pp2048 by +21% (2026-06-12, post #673/#674 FA2 full-rate accumulate; see docs/audit/prefill_gap_2026_06_07.md for the kernel-level decomposition).
 - **MoE/hybrid GGUF decode loses on Qwen3.6-35B** (~−31% vs llama.cpp): an FP16-projection tax on the GDN/attention path that NVFP4 can't address.
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
