@@ -95,8 +95,14 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
 
     // Mirror executor_kernels.cu:2147 + 2179-2181 verbatim — same activation
     // quantization step, same CUTLASS GEMM call, same arg order.
-    quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
-                                   args.stream);
+    // act_prequantized: the scratch already holds quantize(input) from a
+    // prior dispatch on the same input (QKV / gate-up dedupe) — skip the
+    // re-quantize; the buffer contents are bit-identical by construction.
+    // (mxfp4_payload != nullptr means the dual-cache branch above may have
+    // clobbered the scratch with MXFP4 scale layout — never skip then.)
+    if (!args.act_prequantized || args.mxfp4_payload != nullptr)
+        quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
+                                       args.stream);
     bool ok = gemm_nvfp4_cutlass_sm120(args.cutlass_act_data, args.cutlass_act_sf, payload,
                                        args.output->data, M, N, K, args.cutlass_workspace,
                                        args.cutlass_workspace_size, args.stream);

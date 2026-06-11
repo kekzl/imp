@@ -517,6 +517,13 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
+    // NVFP4 prefill block in gemm_via_handle_ (which quantizes the input
+    // into the shared activation scratch). Gate for the act-quant-hint
+    // dedupe at the QKV / gate-up call sites — must be CONSERVATIVE: a
+    // false negative just re-quantizes; a false positive would skip with a
+    // stale scratch.
+    bool prefill_routes_cutlass_nvfp4_(TensorID id) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);

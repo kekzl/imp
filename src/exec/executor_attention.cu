@@ -503,10 +503,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                 } else {
+                    // NVFP4-CUTLASS prefill QKV reads the SAME normed input
+                    // three times — quantize it into the activation scratch
+                    // once (Q's dispatch) and let K/V skip the re-quantize
+                    // via the act-quant hint. Bit-identical reuse.
+                    GemmContext kv_ctx = ctx;
+                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id) &&
+                        prefill_routes_cutlass_nvfp4_(ly.wk_id) &&
+                        (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id))) {
+                        kv_ctx = ctx.with_act_quant_hint(no.data, n,
+                                                         static_cast<int>(no.shape[1]));
+                    }
                     gemm_via_handle_(ly.wq_id, no, q_target, ctx);
-                    gemm_via_handle_(ly.wk_id, no, kk, ctx);
+                    gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
                     if (ly.wv.data != nullptr) {
-                        gemm_via_handle_(ly.wv_id, no, vv, ctx);
+                        gemm_via_handle_(ly.wv_id, no, vv, kv_ctx);
                     }
                     // else: K=V sharing path — vv populated below from kk.
                 }

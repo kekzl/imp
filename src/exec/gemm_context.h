@@ -72,6 +72,25 @@ struct GemmContext {
         c.beta = b;
         return c;
     }
+
+    // Act-quant hint (NVFP4 prefill QKV / gate-up dedupe): the CUTLASS NVFP4
+    // activation scratch already holds quantize(input) for exactly this
+    // (data, M, K) triple — a prior dispatch on the SAME input quantized it.
+    // gemm_via_handle_ forwards the match as args.act_prequantized so the
+    // handler skips its quantize step. Scoped per call site (QKV, gate/up);
+    // never cached across ops — the scratch is clobbered by the next
+    // dispatch on a different input.
+    const void* act_quant_hint_data = nullptr;
+    int act_quant_hint_m = 0;
+    int act_quant_hint_k = 0;
+
+    GemmContext with_act_quant_hint(const void* data, int m, int k) const {
+        GemmContext c = *this;
+        c.act_quant_hint_data = data;
+        c.act_quant_hint_m = m;
+        c.act_quant_hint_k = k;
+        return c;
+    }
 };
 
 }  // namespace imp

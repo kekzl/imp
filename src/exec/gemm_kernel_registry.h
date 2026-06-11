@@ -111,6 +111,13 @@ struct GemmKernelArgs {
     void* q8_1_buf = nullptr;
     float* d8_buf = nullptr;
 
+    // Act-quant dedupe (CUTLASS_NVFP4 prefill): cutlass_act_data/_sf already
+    // hold the quantized form of `input` (a prior dispatch on the same input
+    // quantized it). The handler skips quantize_fp16_to_nvfp4_cutlass. Set
+    // by gemm_via_handle_ when the GemmContext act-quant hint matches the
+    // (input.data, M, K) of this call.
+    bool act_prequantized = false;
+
     // Per-model gemma4.force_mmvq override (Phase 5 Track A). Used by the
     // GGUF small-M kernels to decide between the mmvq and dp4a backends.
     // Sourced from ModelConfig::Overrides::Gemma4::force_mmvq via GemmContext.

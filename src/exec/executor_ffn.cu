@@ -235,8 +235,17 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, *fused_gu, go, uo, stream);
                 } else {
+                    // NVFP4-CUTLASS prefill gate/up share the normed input —
+                    // gate's dispatch quantizes it into the activation
+                    // scratch, up skips the re-quantize (act-quant hint).
+                    GemmContext up_ctx = ctx;
+                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.w_gate_id) &&
+                        prefill_routes_cutlass_nvfp4_(ly.w_up_id)) {
+                        up_ctx = ctx.with_act_quant_hint(no.data, n,
+                                                         static_cast<int>(no.shape[1]));
+                    }
                     gemm_via_handle_(ly.w_gate_id, no, go, ctx);
-                    gemm_via_handle_(ly.w_up_id, no, uo, ctx);
+                    gemm_via_handle_(ly.w_up_id, no, uo, up_ctx);
                 }
             }
         }
