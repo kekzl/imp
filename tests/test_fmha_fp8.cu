@@ -452,5 +452,26 @@ TEST_F(FmhaFA2PvF16Test, Chunked_GQA3_OddKv) {
 TEST_F(FmhaFA2PvF16Test, Bkv32Band_CausalMultiTile) { run_pv(1, 384, 384, 32, 8, 128, true); }
 TEST_F(FmhaFA2PvF16Test, Bq128Band_LongCtx) { run_pv(1, 768, 768, 32, 8, 128, true); }
 
+// --- amax-scaled fp8-QK (attention.fp8_qk_scaled, #680) ---
+// The raw e4m3 conversion loses mantissa bits at realistic Q/K magnitudes
+// (#511); the scaled variant must hold a much tighter bound exactly there.
+class FmhaFA2Fp8ScaledTest : public FmhaFA2Test {
+protected:
+    void run_scaled(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, float amp,
+                    int q_offset = 0) {
+        process_diag_set_fp8_qk_scaled(true);
+        run_fa2(B, Sq, Skv, NH, NKV, HD, causal, 0, 0.0f, amp, /*fp16_qk=*/false, q_offset,
+                /*tol_override=*/0.02f);
+        process_diag_set_fp8_qk_scaled(false);
+    }
+};
+
+TEST_F(FmhaFA2Fp8ScaledTest, Causal) { run_scaled(1, 64, 64, 4, 4, 128, true, 1.0f); }
+TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude) { run_scaled(1, 64, 64, 4, 4, 128, true, 80.0f); }
+TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude_GQA) {
+    run_scaled(1, 136, 136, 32, 8, 128, true, 80.0f);
+}
+TEST_F(FmhaFA2Fp8ScaledTest, Chunked) { run_scaled(1, 64, 512, 24, 8, 128, true, 80.0f, 448); }
+
 }  // namespace
 }  // namespace imp
