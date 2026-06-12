@@ -246,3 +246,35 @@ gated metric (pp512) and the short-prefill regime must be measured explicitly.
 - The dominant footprint (weights 14.6 GiB + NVFP4 SF/overlay + scales) and the
   ~1.7 GiB CUDA-context/cuBLAS reservation are structural / irreducible without
   an accuracy or prefill-throughput trade.
+
+---
+
+## 2026-06-12 — Lever C (KV-FP8 storage): viable, accuracy-gated
+
+`--kv-fp8` switches the KV cache to FP8 E4M3 storage (f16 compute, dequant on
+read — the vLLM-style path, NOT the refuted fp8-QK). The model declares
+`kv_cache_quant_algo=FP8`; imp keeps F16 by default. Measured (deterministic PPL
+A/B for accuracy; `imp-cli --bench` 12 reps × 2 trials for throughput):
+
+| metric | F16 | FP8 E4M3 | Δ |
+|---|---:|---:|---:|
+| KV per-token | 1536 MiB / 16384 tok | 768 MiB / 16384 tok (or 1140 MiB / 24320 tok) | **−768 MiB** (or +48% context) |
+| PPL — 199-tok corpus | 5.7878 | 5.7598 | −0.48% (noise, FP8 better) |
+| **PPL — 3766-tok natural prose** | **16.7244** | **16.8627** | **+0.83%** (real, small) |
+| pp2048 | ~43155 tok/s | ~42982 tok/s | −0.4% (parity) |
+| **tg256 (decode)** | 319.3 | **321.9** | **+0.8% (faster)** |
+
+Unlike the three refuted levers, KV-FP8 **delivers**: −768 MiB at fixed context
+(or it unlocks the full 8×4096 KV that F16 cannot fit — F16 caps at 16384 total
+tokens = 2048/seq at batch 8), decode is marginally *faster* (halved KV-read
+bandwidth outweighs the forced `deterministic_gemm` on the FP8 path), prefill at
+parity. The cost is **+0.83% PPL** on real multi-thousand-token context (the
+short corpus is too short to show KV-quant compounding — filler/repetitive text
+gives PPL→1.0 and must not be used to gate this).
+
+Verdict: **viable opt-in** (`--kv-fp8`). Flipping it to default needs the same
++0.83%-class long-context gate per model family (correctness varies by family —
+the engine's F16 default is deliberate); this run validates only Qwen3-Coder-30B.
+It is best understood as a **context-capacity** lever here, since the F16 KV is
+already small (1536 MiB) and min-sized — FP8 lets the requested 8×4096 actually
+fit rather than reclaiming idle VRAM.
