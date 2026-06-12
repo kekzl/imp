@@ -1563,6 +1563,10 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         wcache_->nvfp4_moe_bytes = dctx.nvfp4_moe_total;
         IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB", dctx.nvfp4_moe_count,
                      dctx.nvfp4_moe_total / (1024.0 * 1024.0));
+        if (dctx.nvfp4_moe_ms_freed > 0)
+            IMP_LOG_INFO("NVFP4 MoE cache: freed %.2f MiB duplicated per-expert micro-scales "
+                         "(contiguous ms_ref copies are now the single source)",
+                         dctx.nvfp4_moe_ms_freed / (1024.0 * 1024.0));
     } else if (wcache_->nvfp4.empty()) {
         IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
     }
@@ -1657,6 +1661,41 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         packed = Tensor(experts[0].data, QType::NVFP4, 3, shp, /*on_device=*/true);
                         wcache_->nvfp4_moe[experts[0].data] = r;
                         dctx.nvfp4_moe_count++;
+                        // The contiguous micro-scale copy is now the single
+                        // source for every consumer (decode cache via
+                        // r.micro_scales; CUTLASS prefill reads its own
+                        // Phase-0 SfAtom buffers, never the raw scales; the
+                        // Phase-4 registry snapshot runs after this and
+                        // picks up re-stamped pointers). Free the scattered
+                        // per-expert source scales — they were resident
+                        // TWICE, ~1.7 GiB across 144 groups on
+                        // Qwen3-30B-A3B-NVFP4 — and re-stamp the layer
+                        // tensors + per-expert nvfp4 wcache entries onto
+                        // the copy slices. Mirrors the non-borrow branch's
+                        // free-after-copy below.
+                        if (d_ms_copy) {
+                            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                            auto* mut_model = const_cast<Model*>(model_);
+                            size_t freed = 0;
+                            for (int e = 0; e < ne_z; ++e) {
+                                auto& w = experts[e];
+                                void* old_sc = w.scales;
+                                void* new_sc = static_cast<char*>(d_ms_copy) +
+                                               static_cast<size_t>(e) * e_ms;
+                                if (old_sc && mut_model->is_base_gpu_allocation(old_sc)) {
+                                    mut_model->release_gpu_allocation(old_sc);
+                                    IMP_CUDA_CHECK_LOG(cudaFree(old_sc));
+                                    freed += e_ms;
+                                }
+                                w.scales = new_sc;
+                                auto nit = wcache_->nvfp4.find(w.data);
+                                if (nit != wcache_->nvfp4.end() &&
+                                    nit->second.micro_scales == old_sc)
+                                    nit->second.micro_scales = new_sc;
+                            }
+                            if (freed)
+                                dctx.nvfp4_moe_ms_freed += freed;
+                        }
                         IMP_LOG_INFO("NVFP4 MoE native: data-borrow decode cache (ne=%d N=%lld K=%lld, "
                                      "scales_contig=%d; gemv_nvfp4_moe fast decode)",
                                      ne_z, (long long)N_z, (long long)K_z, (int)scales_contig);

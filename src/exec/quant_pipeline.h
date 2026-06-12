@@ -38,6 +38,7 @@ struct Nvfp4DecodeContext {
     size_t moe_budget = 0;              // initialised before the MoE-cache phase
     int    nvfp4_moe_count = 0;         // populated by the MoE-cache phase
     size_t nvfp4_moe_total = 0;
+    size_t nvfp4_moe_ms_freed = 0;      // duplicated per-expert micro-scales freed (borrow path)
     // Shared VRAM safety reserve for mode 2 paths (dense incremental,
     // CUTLASS NVFP4, MoE expert caching). Computed once at the top of
     // pre_dequant_phase3_nvfp4_decode_() from the model's actual attention
