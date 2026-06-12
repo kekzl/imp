@@ -475,8 +475,24 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     if (S.ndim >= 3)
         s_buf_fp16_elems *= S.shape[2];
     int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * q_len * kv_len;
-    bool use_fp32_s = (s_fp32_elems * 2 <= s_buf_fp16_elems);
+    // FP32-S needs 3× the score element count, not 2× (#677): the FP32 QK^T
+    // scores occupy the front 2·s_fp32_elems half-slots, and the FP16
+    // probabilities are written to a SEPARATE, non-overlapping region right
+    // after them (S_prob below). Aliasing the two (the old fused in-place
+    // FP32→FP16 downcast wrote FP16 over the front half of the FP32 scores)
+    // is a cross-block WAR hazard: the FP16 output of a higher (head,row)
+    // block overwrites the FP32 scores of a lower block before that block has
+    // read them, so the softmax result depends on block-scheduling order and
+    // the buffer's prior contents — nondeterministic across forward calls. The
+    // band where 2×≤buf<3× falls back to the FP16-S softmax (read/write FP16 at
+    // the SAME address per element — no aliasing); in practice cuBLAS prefill
+    // only serves small/moderate n (large n routes to FA2/FMHA), so FP32-S is
+    // retained wherever it matters (deep-layer NaN avoidance).
+    bool use_fp32_s = (s_fp32_elems * 3 <= s_buf_fp16_elems);
     float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
+    // FP16 probabilities: non-overlapping with the FP32 scores on the FP32-S
+    // path; identical to S_base on the FP16-S path (in-place, safe).
+    half* S_prob = use_fp32_s ? (S_base + 2 * s_fp32_elems) : S_base;
 
     if (gqa_ratio == 1) {
         // ---------------------------------------------------------------
@@ -515,16 +531,17 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 // probabilities to S_base directly. Replaces softmax_fp32_inplace
                 // + fp32_to_fp16_kernel pair (saves one full pass over the tensor).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                    S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
             } else {
                 causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
                     S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
             }
         }
 
-        // O = P × V (always FP16)
+        // O = P × V (always FP16). P is read from S_prob (== S_base on the
+        // FP16-S path; the non-overlapping FP16 region on the FP32-S path).
         cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
-                                   V_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), S_base,
+                                   V_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), S_prob,
                                    CUDA_R_16F, ld_s, strideS, &zero_f, O_base, CUDA_R_16F, ld_o,
                                    static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
 
@@ -571,7 +588,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             if (use_fp32_s) {
                 // Fused FP32 softmax + downcast (see MHA path above).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                    S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
             } else {
                 causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
                     S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
@@ -580,9 +597,10 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 
         // Step 3: O = P × V — re-fill pointer arrays device-side for the
         // second cuBLAS call. cuBLAS: C = alpha * A * B with A=V (OP_N),
-        // B=P (OP_N). A is GQA-shared, B and C are per-head.
+        // B=P (OP_N). A is GQA-shared, B and C are per-head. P is read from
+        // S_prob (non-overlapping FP16 region on the FP32-S path, #677).
         launch_build_attn_ptrs(s_attn_d_ptrs, n_heads, V_base,
-                               static_cast<int64_t>(head_dim) * sizeof(half), S_base,
+                               static_cast<int64_t>(head_dim) * sizeof(half), S_prob,
                                static_cast<int64_t>(strideS) * sizeof(half), O_base,
                                static_cast<int64_t>(head_dim) * sizeof(half), gqa_ratio, stream);
 
