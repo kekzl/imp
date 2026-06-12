@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "model/gguf_loader.h"
+#include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
@@ -39,8 +40,10 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
             return cudaErrorMemoryAllocation;
         }
         cudaError_t err = cudaMallocAsync(ptr, size, stream);
-        if (err == cudaSuccess)
+        if (err == cudaSuccess) {
             g_total_allocated += size;
+            MemAccount::instance().note("WEIGHTS", static_cast<std::ptrdiff_t>(size));
+        }
         return err;
     }
     // Fallback: per-tensor check (used outside upload passes)

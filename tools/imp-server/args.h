@@ -15,6 +15,7 @@ struct ServerArgs {
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_tokens = 8192;
+    int max_batch_size = 0;  // --max-batch: decode batch / KV+workspace sizing (0 = engine auto)
     int gpu_layers = -1;  // -1 = all on GPU
     int device = 0;
     std::string chat_template = "auto";

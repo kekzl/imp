@@ -237,6 +237,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
+    B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
+    S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 
     // [ffn]
     B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);

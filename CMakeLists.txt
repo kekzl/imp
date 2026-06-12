@@ -96,6 +96,7 @@ set(IMP_CORE_SOURCES
 set(IMP_MEMORY_SOURCES
     src/memory/device_allocator.cu
     src/memory/vram_allocator.cu
+    src/memory/mem_account.cu
     src/memory/pinned_allocator.cpp
     src/memory/memory_manager.cpp
     src/memory/kv_cache.cu

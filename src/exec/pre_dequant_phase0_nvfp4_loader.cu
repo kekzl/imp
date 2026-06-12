@@ -354,7 +354,6 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
     // CUTLASS fast path for all NVFP4-prequant models uniformly.
     if (cutlass_sm120_nvfp4_available()) {
         int ct_count = 0;
-        size_t ct_total = 0;
         // NOTE on the GDN/SSM quality lock and gemm.nvfp4_ssm_proj:
         // For NATIVE-NVFP4 checkpoints the in_proj/out_proj (ssm_in/ssm_out)
         // weights only EXIST as NVFP4 bytes — there is no FP16 copy and
@@ -368,7 +367,7 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
                 return;
-            if (wcache_->cutlass_nvfp4.count(w.data))
+            if (wcache_->nvfp4.count(w.data))
                 return;
             NvFP4QuantResult tmp;
             tmp.packed_data = w.data;
@@ -381,15 +380,19 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
             // per-16 FP8 micro_scales, not SfAtom). Without this, decode falls
             // through to the CUTLASS_NVFP4 case which uses source_scales —
             // but that path produced zero output on some models.
+            //
+            // VRAM-AUDIT (2026-06-12): do NOT build the CUTLASS SfAtom buffer
+            // here. Phase 3b (nvfp4_decode_convert_cutlass_) iterates exactly
+            // this wcache_->nvfp4 map and rebuilds cutlass_nvfp4[ptr] for every
+            // entry, unconditionally overwriting whatever this loop inserted —
+            // so a SfAtom built here is immediately orphaned (the map drops the
+            // pointer without freeing it) and stays resident, dead, until exit.
+            // On Qwen3-Coder-30B-A3B NVFP4 that orphan was ~1782 MiB. Phase 3b
+            // is the authoritative, budget-aware builder whose entries Phase 4
+            // snapshots into the weight handles the GEMM kernels actually read;
+            // seeding nvfp4 here is all Phase 0b needs to do.
             wcache_->nvfp4[w.data] = tmp;
-
-            CutlassNvFP4Weight cw;
-            convert_nvfp4_to_cutlass(tmp, cw, stream);
-            if (cw.data) {
-                wcache_->cutlass_nvfp4[w.data] = cw;
-                ct_total += cw.sf_bytes;
-                ct_count++;
-            }
+            ct_count++;
         };
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = mut_model->layer(i);
@@ -412,10 +415,11 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         register_prequant(mut_model->out_proj_);
 
         if (ct_count > 0) {
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_->cutlass_nvfp4_bytes += ct_total;
-            IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB", ct_count,
-                         ct_total / (1024.0 * 1024.0));
+            // Decode-cache registration only; Phase 3b builds the CUTLASS SfAtom
+            // for these entries (see register_prequant note above).
+            IMP_LOG_INFO("NVFP4 prequant: registered %d weights in decode cache "
+                         "(CUTLASS SfAtom built once in Phase 3b)",
+                         ct_count);
         }
         {
             int n_ssm = 0;

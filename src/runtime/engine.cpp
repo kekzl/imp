@@ -7,6 +7,7 @@
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
 #include "memory/kv_cache.h"
+#include "memory/mem_account.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/ffn_sparsity_probe.h"
@@ -40,6 +41,11 @@ using engine_internal::ensure_prefill_workspace;
 using engine_internal::free_prefill_buffers;
 
 Engine::~Engine() {
+    // Phase-0 VRAM audit: stop the peak sampler and emit the final table
+    // (captures the device-used peak reached during the workload).
+    MemAccount::instance().sampler_stop();
+    MemAccount::instance().report("shutdown");
+
     // Save prefix cache to disk before shutdown
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled()) {
         kv_manager_->save_prefix_cache(config_.prefix_cache_path, stream_);
@@ -495,6 +501,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_compute_max_seq_len_();
 
     // --- Core initialization ---
+    // Phase-0 VRAM audit harness: lifecycle checkpoints bracket each init
+    // sub-phase so the device free-VRAM delta measures that phase's cost with
+    // full coverage (raw cudaMalloc included). Gated, default off.
+    if (runtime_config_.diagnostics.vram_audit) {
+        MemAccount::instance().set_enabled(true);
+        if (!runtime_config_.diagnostics.vram_audit_dump.empty())
+            MemAccount::instance().set_dump_path(runtime_config_.diagnostics.vram_audit_dump);
+    }
+    MemAccount::instance().checkpoint("00_pre_init");
+
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
     if (!memory_manager_.vram_allocator().init(0.05f)) {
@@ -506,19 +522,28 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     gemm_grouped_3x_nvfp4_prewarm();
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
+    MemAccount::instance().checkpoint("01_prewarm_gemm");
 
     // --- Sub-phases ---
     if (!init_weights())
         return false;
+    MemAccount::instance().checkpoint("02_weights+decode_cache");
     if (!init_kv_cache())
         return false;
+    MemAccount::instance().checkpoint("03_kv_cache");
     if (!init_features())
         return false;
+    MemAccount::instance().checkpoint("04_features");
     if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
     } else {
         warmup();
     }
+    MemAccount::instance().checkpoint("05_post_warmup");
+    // Start the device-used peak sampler so the prefill activation / score
+    // matrix spike during the workload is captured, then dump the init table.
+    MemAccount::instance().sampler_start(2000);
+    MemAccount::instance().report("init_complete");
 
     return true;
 }
