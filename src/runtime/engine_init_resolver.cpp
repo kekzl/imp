@@ -77,7 +77,26 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
+    // Scope (2026-06-12, #680 diagnosis): the deterministic forcing below is
+    // a PR-#52-era (April) workaround for NaNs in the cuBLAS-attention + FP8
+    // round-trip — it predates the FA2 default-on stack (#478/#548). When the
+    // f16-QK FA2 chain serves every attention call (hd=128, fa2 enabled),
+    // cuBLAS attention never touches the FP8 KV and the forcing only drags in
+    // the single-block deterministic MoE permute (measured: the entire −35%
+    // pp4096 regression of --kv-fp8 on Qwen3-30B-A3B was that one kernel;
+    // without it kv-fp8 is perf-neutral-to-positive at clean PPL on
+    // Qwen3-30B/14B/8B). Non-FA2 configs (gemma-class hd!=128, attn sinks
+    // via head_dim, fa2 disabled) keep the workaround.
+    const bool fa2_serves_attention = mcfg.head_dim == 128 &&
+                                      runtime_config_.attention.fmha_fa2 != "never" &&
+                                      runtime_config_.attention.fa2_fp16qk != "never";
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
+        !runtime_config_.runtime.deterministic_gemm) {
+        IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128) — skipping the legacy "
+                     "deterministic-cuBLAS forcing (set kv_cache.allow_nondeterministic_fp8=false "
+                     "semantics unchanged for non-FA2 configs)");
+    }
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
         !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
         !runtime_config_.runtime.deterministic_gemm) {
         // Phase 5 Track D: mutate the per-Engine RuntimeConfig in place
