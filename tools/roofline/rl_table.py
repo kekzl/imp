@@ -87,7 +87,21 @@ def class_aggregate(ncu_groups, class_name, gpu_cfg, ncu_cfg=None, fallback_flop
     ach_bw = by / t
     ai = ach_flops / ach_bw if ach_bw > 0 else 0.0
     peak_bw = gpu_cfg["dram_peak_gbs"] * 1e9
-    fpc = gpu_cfg["flop_per_cycle"][dtype]
+    # Effective peak for mixed-dtype kernels: FLOP-weighted harmonic mean of
+    # the per-dtype peaks (time to issue the mix at peak = sum over dtypes of
+    # flops_d / peak_d). Picking only the dominant dtype made the peak flip
+    # 4x between cells/runs for kernels that mix accumulate precisions (the
+    # FA2 kernel mixes f16-dst and f32-dst HMMA since #673) — %-roofline
+    # jumped with the classification, not with the kernel. Reduces to the
+    # single-dtype peak for pure kernels; dtypes without a configured rate
+    # fall back to the dominant dtype's (keeps old behavior for SASS keys).
+    fpc_table = gpu_cfg["flop_per_cycle"]
+    fpc_dom = fpc_table[dtype]
+    if ach_flops > 0 and len(rates) > 1:
+        denom = sum(fl / fpc_table.get(d, fpc_dom) for d, fl in rates.items())
+        fpc = ach_flops / denom if denom > 0 else fpc_dom
+    else:
+        fpc = fpc_dom
     peak_flops_boost = fpc * gpu_cfg["nominal_boost_ghz"] * 1e9
     peak_flops_clk = fpc * clk_hz
     ridge = peak_flops_boost / peak_bw

@@ -22,13 +22,17 @@ prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
 
 | Date | Commit | CUDA | Model | Quant | Metric | tok/s | Command |
 |---|---|---|---|---|---|---:|---|
-| 2026-06-07 | `perf_baseline.json` (CI gate) | 13.3 | Qwen3-8B | Q8_0 | tg128 | 286.4 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
-| 2026-05-29 | `perf_baseline_north_star.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 157.7 | `… --max-seq-len 2048` |
+| 2026-06-12 | `perf_baseline.json` (CI gate) | 13.3 | Qwen3-8B | Q8_0 | tg128 | 269.5 | `imp-cli --model Qwen3-8B-Q8_0.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
+| 2026-06-12 | `perf_baseline_north_star.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 156.0 | `… --max-seq-len 2048` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Qwen3-14B | Q6_K | tg128 | 164 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 273 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
 
 > Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
-> 286.4 (cold-median, 5 trials × 5 reps). Single-session warm reads carry the
+> 269.5 (cold-median, 5 trials × 5 reps, 2026-06-12, clocks verified healthy
+> during the bench: 2880 MHz SM / 13801 MHz mem / ~487 W). The previous
+> baseline (286.4, 2026-06-07) was sampled on a documented peak day — its 3 %
+> gate threshold (277.8) sat INSIDE the normal healthy range (266–278), so
+> ordinary days could fail spuriously. Single-session warm reads carry the
 > documented ±5–10 % host/driver day-to-day variance (issue #526) — sample
 > `clocks.mem` during the bench (healthy = 13801 MHz / ~500 W under prefill).
 
@@ -83,13 +87,31 @@ cuBLAS path (attention sinks). Decode 310-345 depending on host state.
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no
-native NVFP4 path). NVFP4 **prefill** (re-measured 2026-06-11 vs vLLM 0.22.1
-FlashInfer-NVFP4, same day/host, after the chunk-2048 default + act-quant
-dedupe): imp wins TTFT/pp512 outright (2.3–3.3×, vLLM has a flat-cost
-small-M regime), wins MoE pp2048 (39.8k vs 34.5k tok/s), ties dense pp2048
-(25.6k vs 26.6k); vLLM keeps pp4096 (1.32–1.33×, attention-bound — imp FA2
-runs the quartered f32-acc class vs FlashInfer with fp8 KV). Decode: imp
-+35–40% (14B 168 vs 121–126; 30B-A3B 323 vs 223–233). Nemotron-3-Nano is
+native NVFP4 path).
+
+## NVFP4 prefill (post FA2 full-rate accumulate, #673/#674)
+
+imp rows: 2026-06-12, commit `bcb7354d`, CUDA 13.3, median of 3 isolated
+trials × 10 reps, fresh container per run, clocks verified healthy. Command:
+`imp-cli --model <dir> --bench --bench-pp <n> --bench-reps 10 --max-tokens 1`.
+vLLM reference: 0.22.1 FlashInfer-NVFP4 (fp8 KV), same host, measured
+2026-06-11 — one day older than the imp rows, so the ratios carry that
+cross-day caveat.
+
+| Model | pp | imp tok/s | vLLM tok/s (06-11) | verdict |
+|---|---|---:|---:|---|
+| Qwen3-30B-A3B (MoE) | 2048 | **41 668** | 34 500 | **imp +21%** |
+| Qwen3-30B-A3B (MoE) | 4096 | **30 300** | 36 200 | 1.19× behind (was 1.38×) |
+| Qwen3-14B (dense) | 2048 | **25 932** | 26 600 | ~tie (1.03×) |
+| Qwen3-14B (dense) | 4096 | **19 938** | 25 300 | 1.27× behind (was ~1.5×) |
+
+imp wins TTFT/pp512 outright (2.1–3.4×, vLLM has a flat-cost small-M
+regime) and now MoE pp2048 by a clear margin; the remaining pp4096 gap is
+grouped-GEMM/attention mix at long context (FA2 QK^T and PV both run
+full-rate f16-accumulate since #673/#674 — the prior "quartered f32-acc
+class" explanation no longer applies; the FA2 kernel is dependency-chain
+bound, see the 2026-06-12 dead-ends entry). Decode: imp +27–40% (14B
+153–168 vs 121–126; 30B-A3B 291–323 vs 223–233). Nemotron-3-Nano is
 arch-limited (hybrid Mamba2 + attention FP16-projection mix).
 
 ## Output-quality gate
