@@ -342,14 +342,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // LRU expert cache: keeps recently-used host experts on GPU.
         // Only allocated when some experts reside on host (not all fit in VRAM).
         if (max_expert_raw > 0) {
+            // gpt-oss exemption: its MXFP4 experts are host-resident here only
+            // transiently — pre_dequant converts them to on-device NVFP4 +
+            // CUTLASS-grouped before the first forward. They are never
+            // host-offloaded at runtime, so the LRU cache must not be allocated
+            // (it would shadow the converted device experts → garbage output).
             bool has_host_experts = false;
-            for (int li = 0; li < model_->n_layers(); li++) {
-                const auto& L = model_->layer(li);
-                if ((L.expert_up_packed.data && !L.expert_up_packed.on_device) ||
-                    (L.expert_down_packed.data && !L.expert_down_packed.on_device) ||
-                    (L.expert_gate_packed.data && !L.expert_gate_packed.on_device)) {
-                    has_host_experts = true;
-                    break;
+            if (!model_->profile().is_gpt_oss) {
+                for (int li = 0; li < model_->n_layers(); li++) {
+                    const auto& L = model_->layer(li);
+                    if ((L.expert_up_packed.data && !L.expert_up_packed.on_device) ||
+                        (L.expert_down_packed.data && !L.expert_down_packed.on_device) ||
+                        (L.expert_gate_packed.data && !L.expert_gate_packed.on_device)) {
+                        has_host_experts = true;
+                        break;
+                    }
                 }
             }
             if (has_host_experts && !runtime_config().moe.no_expert_cache) {

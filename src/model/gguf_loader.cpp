@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -612,8 +613,16 @@ static bool assign_tensor(Model& model, const std::string& name, const Tensor& t
                 layer.v_bias = tensor;
             else
                 assign_quant(layer.wv, tensor);
-        } else if (field == "attn_output")
-            assign_quant(layer.wo, tensor);
+        } else if (field == "attn_output") {
+            // gpt-oss adds an output-projection bias.
+            if (suffix == "bias")
+                layer.o_bias = tensor;
+            else
+                assign_quant(layer.wo, tensor);
+        }
+        // gpt-oss learned attention sinks: per-head sink logits [n_heads].
+        else if (field == "attn_sinks")
+            layer.attn_sinks = tensor;
         else if (field == "attn_norm")
             layer.attn_norm = tensor;
         else if (field == "attn_q_norm")
@@ -691,21 +700,33 @@ static bool assign_tensor(Model& model, const std::string& name, const Tensor& t
             // this branch the scale would be silently misassigned to layer.moe_gate.
             if (suffix == "scale")
                 layer.ffn_gate_inp_scale = tensor;
+            else if (suffix == "bias")
+                layer.router_bias = tensor;  // gpt-oss router logits bias [n_experts]
             else
                 layer.moe_gate = tensor;
         }
-        // Packed expert tensors: 3D [n_experts, rows, cols]
-        else if (field == "ffn_gate_exps")
-            assign_quant(layer.expert_gate_packed, tensor);
-        else if (field == "ffn_up_exps")
-            assign_quant(layer.expert_up_packed, tensor);
-        else if (field == "ffn_down_exps") {
+        // Packed expert tensors: 3D [n_experts, rows, cols]. gpt-oss adds a
+        // per-expert .bias on each projection — without the suffix split the
+        // bias tensor clobbers the packed weight (load order dependent).
+        else if (field == "ffn_gate_exps") {
+            if (suffix == "bias")
+                layer.expert_gate_bias = tensor;
+            else
+                assign_quant(layer.expert_gate_packed, tensor);
+        } else if (field == "ffn_up_exps") {
+            if (suffix == "bias")
+                layer.expert_up_bias = tensor;
+            else
+                assign_quant(layer.expert_up_packed, tensor);
+        } else if (field == "ffn_down_exps") {
             // Distinguish .weight (the per-expert FFN down weights) from .scale
-            // (per-expert output multiplier, shape [n_expert]). Same 4-part-name
-            // bug as ffn_gate_inp.scale: the scale tensor would otherwise overwrite
-            // expert_down_packed.
+            // (per-expert output multiplier, shape [n_expert]) and gpt-oss's
+            // per-expert .bias. Same 4-part-name bug as ffn_gate_inp.scale: a
+            // non-weight tensor would otherwise overwrite expert_down_packed.
             if (suffix == "scale")
                 layer.expert_down_scale = tensor;
+            else if (suffix == "bias")
+                layer.expert_down_bias = tensor;
             else
                 assign_quant(layer.expert_down_packed, tensor);
         }
@@ -1292,6 +1313,27 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // the loaded tensor shapes, not GGUF metadata.
     }
 
+    // gpt-oss: alternating attention — even layers use sliding-window (128),
+    // odd layers use full attention. HF encodes this via layer_types[]; the
+    // GGUF omits the per-layer array (only a scalar attention.sliding_window),
+    // so derive the documented gpt-oss pattern here. Without swa_layers the
+    // ModelProfile resolves attn=standard and every layer runs full attention
+    // → wrong output (PPL ~3000 instead of ~4.7).
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        if (cfg.sliding_window <= 0)
+            cfg.sliding_window = static_cast<int>(get_uint("attention.sliding_window", 128));
+        if (cfg.sliding_window <= 0)
+            cfg.sliding_window = 128;
+        if (cfg.swa_layers.empty()) {
+            cfg.swa_layers.resize(cfg.n_layers, 0);
+            for (int i = 0; i < cfg.n_layers; i++)
+                cfg.swa_layers[i] = ((i % 2) == 0) ? 1 : 0;  // even = sliding_attention
+        }
+        IMP_LOG_INFO("gpt-oss: SWA pattern derived — %zu/%d sliding (even layers, window=%d), rest full",
+                     std::count(cfg.swa_layers.begin(), cfg.swa_layers.end(), uint8_t(1)), cfg.n_layers,
+                     cfg.sliding_window);
+    }
+
     // Attention logit softcapping (Gemma-2/3: tanh(score/cap)*cap)
     cfg.attn_logit_softcap = static_cast<float>(get_float("attn_logit_softcapping", 0.0));
     if (cfg.attn_logit_softcap == 0.0f)
@@ -1659,6 +1701,127 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         if (n_moe > 0 && n_moe < cfg.n_layers && n_dense_ffn == 0 && n_ssm == 0) {
             IMP_LOG_WARN("Only %d/%d layers have MoE, remaining layers have no FFN", n_moe, cfg.n_layers);
         }
+    }
+
+    // gpt-oss residual-stream 2^-4 rescale (#547, GGUF parity with the
+    // SafeTensors loader). gpt-oss's huge activations overflow imp's FP16
+    // hidden state (hidden L2 reaches ±inf by ~L23 → NaN logits / garbage
+    // decode). Scaling every contributor to the residual stream by 2^-4 is
+    // exact for the model output: the FP16/RMSNorm path is scale-invariant and
+    // the lm_head reads only normed values. Contributors handled elsewhere:
+    //   - embeddings: cfg.embed_scale = 2^-4 (arch registry)
+    //   - expert down weights: tensor_scales in the MXFP4→NVFP4 converter
+    //     (pre_dequant_phase3_nvfp4_decode.cu)
+    // Handled here, host-side (GGUF is mmap'd read-only, so scale into fresh
+    // host_owned_buffers_): attention output Wo + o_bias, and expert down bias.
+    if (cfg.arch == ModelArch::GPT_OSS) {
+        // The GGUF tensor `blk.N.post_attention_norm.weight` is gpt-oss's
+        // PRE-FFN norm (llama convention: post_attention_layernorm gates the
+        // FFN/MoE input — see weight_map.cpp's SafeTensors mapping → ffn_norm).
+        // The generic 4-part handler routed it to post_attn_norm (the Gemma-3
+        // sandwich-norm slot), so the MoE ran on the UN-normalized residual →
+        // router logits ~10x too large → wrong expert selection → garbage.
+        // Move it to ffn_norm (gpt-oss has no sandwich norm).
+        for (auto& ly : model->layers_) {
+            if (!ly.ffn_norm.data && ly.post_attn_norm.data) {
+                ly.ffn_norm = ly.post_attn_norm;
+                ly.post_attn_norm = Tensor();
+            }
+        }
+
+        // ×2^-4 helpers for each dtype a gpt-oss residual contributor (Wo,
+        // o_bias, expert down bias) can appear in across GGUF quants. Q8_0
+        // (Wo on the official mxfp4 GGUF) shifts each block's fp16 d; F16/BF16
+        // (Wo/biases on f16/bf16 GGUFs) shift the per-value exponent (lossless);
+        // F32 (biases) multiplies. All write into fresh host_owned_buffers_
+        // (the GGUF mmap is read-only).
+        auto scale_f32 = [&](Tensor& t) -> bool {
+            int64_t n = t.numel();
+            float* dst = static_cast<float*>(std::malloc(sizeof(float) * n));
+            if (!dst)
+                return false;
+            const float* src = static_cast<const float*>(t.data);
+            for (int64_t i = 0; i < n; i++)
+                dst[i] = src[i] * 0.0625f;
+            model->host_owned_buffers_.push_back(dst);
+            t.data = dst;
+            return true;
+        };
+        // exp_bits/exp_pos: F16 = 5 bits at 10; BF16 = 8 bits at 7. Subtract 4
+        // from the biased exponent; underflow (exp<=4) → signed zero.
+        auto scale_half_like = [&](Tensor& t, int exp_pos, int exp_mask) -> bool {
+            int64_t n = t.numel();
+            uint16_t* dst = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * n));
+            if (!dst)
+                return false;
+            const uint16_t* src = static_cast<const uint16_t*>(t.data);
+            const uint16_t sub = static_cast<uint16_t>(4u << exp_pos);
+            for (int64_t i = 0; i < n; i++) {
+                uint16_t v = src[i];
+                int exp = (v >> exp_pos) & exp_mask;
+                if (exp == exp_mask || exp == 0)
+                    dst[i] = v;  // inf/nan/zero/subnormal
+                else if (exp <= 4)
+                    dst[i] = static_cast<uint16_t>(v & 0x8000u);
+                else
+                    dst[i] = static_cast<uint16_t>(v - sub);
+            }
+            model->host_owned_buffers_.push_back(dst);
+            t.data = dst;
+            return true;
+        };
+        auto scale_q8_0 = [&](Tensor& t) -> bool {
+            int64_t n = t.numel();
+            if (n % 32 != 0) {
+                IMP_LOG_ERROR("gpt-oss GGUF rescale: Q8_0 numel %lld not 32-block-aligned", (long long)n);
+                return false;
+            }
+            int64_t nblocks = n / 32;
+            size_t bytes = static_cast<size_t>(nblocks) * 34;  // [fp16 d | 32 int8]
+            uint8_t* dst = static_cast<uint8_t*>(std::malloc(bytes));
+            if (!dst)
+                return false;
+            std::memcpy(dst, t.data, bytes);
+            for (int64_t b = 0; b < nblocks; b++) {
+                uint16_t* d = reinterpret_cast<uint16_t*>(dst + static_cast<size_t>(b) * 34);
+                uint16_t v = *d;
+                int exp = (v >> 10) & 0x1F;
+                if (exp == 0x1F || exp == 0)
+                    continue;
+                if (exp <= 4)
+                    *d = static_cast<uint16_t>(v & 0x8000u);
+                else
+                    *d = static_cast<uint16_t>(v - (4u << 10));
+            }
+            model->host_owned_buffers_.push_back(dst);
+            t.data = dst;
+            return true;
+        };
+        auto scale_any = [&](Tensor& t) -> bool {
+            if (!t.data || t.on_device)
+                return true;
+            switch (t.qtype) {
+                case QType::F32:
+                    return scale_f32(t);
+                case QType::F16:
+                    return scale_half_like(t, 10, 0x1F);
+                case QType::BF16:
+                    return scale_half_like(t, 7, 0xFF);
+                case QType::Q8_0:
+                    return scale_q8_0(t);
+                default:
+                    IMP_LOG_ERROR("gpt-oss GGUF rescale: unsupported qtype %d", (int)t.qtype);
+                    return false;
+            }
+        };
+        bool ok = true;
+        for (auto& ly : model->layers_)
+            ok = ok && scale_any(ly.wo) && scale_any(ly.o_bias) && scale_any(ly.expert_down_bias);
+        if (!ok) {
+            IMP_LOG_ERROR("gpt-oss GGUF: residual-stream rescale failed");
+            return nullptr;
+        }
+        IMP_LOG_INFO("gpt-oss GGUF: residual stream rescaled by 2^-4 (Wo + o_bias + expert down bias)");
     }
 
     // 8. Extract tokenizer from GGUF metadata

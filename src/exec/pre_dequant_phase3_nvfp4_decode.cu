@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <unordered_set>
+#include <cstring>
 #include <vector>
 
 namespace imp {
@@ -1266,41 +1267,101 @@ if (mx_native > 0) {
 // ---------------------------------------------------------------------------
 void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx) {
     int converted = 0;
+
+    // GGUF path helper: convert one host-resident ggml-MXFP4 expert tensor
+    // ([ne, N, K], separate per projection) into a device NvFP4MoEQuantResult.
+    // ggml type-39 packs each 32-element block as [scale(1) | qs(16)] with
+    // SPLIT nibble order (element j = low nibble of qs[j], j+16 = high nibble);
+    // type-31 packs [qs(16) | scale(1)] in LINEAR pair order. The converter
+    // expects linear pairs + a separate ue8m0 scale plane, so normalize here
+    // (mirrors weight_upload.cu's upload_qtype_mxfp4_). stride=1 because GGUF
+    // stores gate and up as distinct tensors (HF interleaves them, stride=2).
+    auto gguf_convert = [&](const Tensor& t, float extra_scale, NvFP4MoEQuantResult& r,
+                            std::vector<float>& ts) -> bool {
+        if (!t.data || t.ndim < 3)
+            return false;
+        const int ne = static_cast<int>(t.shape[0]);
+        const int64_t N = t.shape[1];
+        const int64_t K = t.shape[2];
+        const int64_t kb = K / 32;  // MXFP4 blocks per row
+        const int64_t nblk = static_cast<int64_t>(ne) * N * kb;
+        std::vector<uint8_t> blocks(static_cast<size_t>(nblk) * 16);
+        std::vector<uint8_t> scales(static_cast<size_t>(nblk));
+        const uint8_t* src = static_cast<const uint8_t*>(t.data);
+        const bool v2 = t.mxfp4_layout_v2;
+        for (int64_t blk = 0; blk < nblk; ++blk) {
+            const uint8_t* sb = src + static_cast<size_t>(blk) * 17;  // 17B ggml block
+            uint8_t* db = blocks.data() + static_cast<size_t>(blk) * 16;
+            if (v2) {
+                scales[blk] = sb[0];
+                const uint8_t* qs = sb + 1;
+                for (int b = 0; b < 16; ++b) {
+                    const int e0 = 2 * b, e1 = 2 * b + 1;
+                    const uint8_t n0 = (e0 < 16) ? (qs[e0] & 0xF) : (qs[e0 - 16] >> 4);
+                    const uint8_t n1 = (e1 < 16) ? (qs[e1] & 0xF) : (qs[e1 - 16] >> 4);
+                    db[b] = static_cast<uint8_t>(n0 | (n1 << 4));
+                }
+            } else {
+                std::memcpy(db, sb, 16);
+                scales[blk] = sb[16];
+            }
+        }
+        return gpt_oss_convert_experts_to_nvfp4(blocks.data(), scales.data(), ne, N, K,
+                                                /*offset=*/0, /*stride=*/1, r, extra_scale, &ts);
+    };
+
     for (int i = 0; i < cfg.n_layers; ++i) {
         TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
+
+        int ne = 0;
+        NvFP4MoEQuantResult g{}, u{}, d{};
+        std::vector<float> g_ts, u_ts, d_ts;
+
         const Tensor& gu_b = L.expert_gate_up_packed_blocks;
         const Tensor& gu_s = L.expert_gate_up_packed_scales;
         const Tensor& dn_b = L.expert_down_packed_blocks;
         const Tensor& dn_s = L.expert_down_packed_scales;
-        if (!gu_b.data || !gu_s.data || !dn_b.data || !dn_s.data)
-            continue;
-        if (gu_b.on_device || dn_b.on_device) {
-            IMP_LOG_ERROR("gpt-oss L%d: packed expert tensors unexpectedly on device — skipping", i);
-            continue;
-        }
-        const int ne = static_cast<int>(gu_b.shape[0]);
-        const int64_t gu_rows = gu_b.shape[1];           // 2*d_ff, interleaved
-        const int64_t gu_K = gu_b.shape[2] * 32;         // K from block count
-        const int64_t dn_rows = dn_b.shape[1];           // d_model
-        const int64_t dn_K = dn_b.shape[2] * 32;         // d_ff
 
-        NvFP4MoEQuantResult g{}, u{}, d{};
-        std::vector<float> g_ts, u_ts, d_ts;
-        bool ok = gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
-                                                   static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                   gu_K, /*offset=*/0, /*stride=*/2, g, 1.0f, &g_ts) &&
-                  gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
-                                                   static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
-                                                   gu_K, /*offset=*/1, /*stride=*/2, u, 1.0f, &u_ts) &&
-                  // down: extra 2^-4 — residual-stream rescale (see arch
-                  // registry comment in model.cpp; bias scaled in the loader).
-                  gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
-                                                   static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
-                                                   dn_K, /*offset=*/0, /*stride=*/1, d,
-                                                   /*extra_scale=*/0.0625f, &d_ts);
-        if (!ok) {
-            IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
-            return;
+        if (gu_b.data && gu_s.data && dn_b.data && dn_s.data) {
+            // SafeTensors: HF packed blocks (gate_up interleaved, down separate).
+            if (gu_b.on_device || dn_b.on_device) {
+                IMP_LOG_ERROR("gpt-oss L%d: packed expert tensors unexpectedly on device — skipping", i);
+                continue;
+            }
+            ne = static_cast<int>(gu_b.shape[0]);
+            const int64_t gu_rows = gu_b.shape[1];   // 2*d_ff, interleaved
+            const int64_t gu_K = gu_b.shape[2] * 32;  // K from block count
+            const int64_t dn_rows = dn_b.shape[1];   // d_model
+            const int64_t dn_K = dn_b.shape[2] * 32;  // d_ff
+            bool ok = gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
+                                                       static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
+                                                       gu_K, /*offset=*/0, /*stride=*/2, g, 1.0f, &g_ts) &&
+                      gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(gu_b.data),
+                                                       static_cast<const uint8_t*>(gu_s.data), ne, gu_rows,
+                                                       gu_K, /*offset=*/1, /*stride=*/2, u, 1.0f, &u_ts) &&
+                      // down: extra 2^-4 — residual-stream rescale (see arch
+                      // registry comment in model.cpp; bias scaled in the loader).
+                      gpt_oss_convert_experts_to_nvfp4(static_cast<const uint8_t*>(dn_b.data),
+                                                       static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
+                                                       dn_K, /*offset=*/0, /*stride=*/1, d,
+                                                       /*extra_scale=*/0.0625f, &d_ts);
+            if (!ok) {
+                IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
+                return;
+            }
+        } else if (L.expert_gate_packed.data && !L.expert_gate_packed.on_device &&
+                   L.expert_gate_packed.qtype == QType::MXFP4) {
+            // GGUF: separate ggml-MXFP4 gate/up/down expert tensors (host-mmap),
+            // kept host-resident by weight_upload's gpt-oss carve-out.
+            ne = static_cast<int>(L.expert_gate_packed.shape[0]);
+            if (!gguf_convert(L.expert_gate_packed, 1.0f, g, g_ts) ||
+                !gguf_convert(L.expert_up_packed, 1.0f, u, u_ts) ||
+                !gguf_convert(L.expert_down_packed, 0.0625f, d, d_ts)) {
+                IMP_LOG_ERROR("gpt-oss L%d: GGUF MXFP4→NVFP4 expert conversion failed", i);
+                return;
+            }
+        } else {
+            continue;  // no convertible expert source on this layer
         }
 
         auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
