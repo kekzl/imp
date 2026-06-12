@@ -28,14 +28,18 @@ namespace imp {
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();
 
-    // Dequant scratch buffer for on-the-fly weight dequantization.
+    // Dequant scratch buffer for on-the-fly weight dequantization. Every
+    // consumer guards with dequant_gpu_supported(qtype) (GGUF block quants
+    // only), so weights outside that set can never need the scratch — on
+    // SafeTensors F16/NVFP4 models this skips the whole buffer (~85 MiB on
+    // Qwen3-14B-NVFP4).
     {
         size_t max_weight_elems = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
                                   &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
-                if (w->data)
+                if (w->data && dequant_gpu_supported(w->qtype))
                     max_weight_elems = std::max(max_weight_elems, static_cast<size_t>(w->numel()));
             }
         }
@@ -355,6 +359,30 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
+        // ST-NVFP4 experts run the CUTLASS 3.x grouped path for ALL prefill
+        // sizes (StorageTier::CUTLASS_NVFP4 covers every expert on healthy
+        // loads); the buffers below only back the GGUF-family batch paths
+        // (FP16-cache batch, Q6_K FP8 batch, IMMA Q8 staging) and the
+        // post-CUTLASS NVFP4→FP16 dequant fallback. Skipping them frees
+        // ~640 MiB on Qwen3-30B-A3B-NVFP4 (3.5 GiB free at load) — the
+        // pathological CUTLASS-decline case falls through to the legacy
+        // per-expert path (slow but correct).
+        bool experts_st_nvfp4 = true;
+        for (int i = 0; i < cfg.n_layers && experts_st_nvfp4; i++) {
+            const auto& L = model_->layer(i);
+            if (L.expert_up_packed.data && L.expert_up_packed.qtype != QType::NVFP4)
+                experts_st_nvfp4 = false;
+            if (L.expert_down_packed.data && L.expert_down_packed.qtype != QType::NVFP4)
+                experts_st_nvfp4 = false;
+        }
+        if (experts_st_nvfp4) {
+            IMP_LOG_INFO("MoE batch dequant + fp32_down buffers: skipped "
+                         "(ST-NVFP4 experts — CUTLASS grouped prefill needs neither)");
+            moe_.batch_dequant_buf = nullptr;
+            moe_.batch_dequant_buf_size = 0;
+            moe_.fp32_down_buf = nullptr;
+            moe_.fp32_down_buf_size = 0;
+        } else
         // Batch dequant buffer: sized for a chunk of experts (L2-resident strategy).
         // We dequant a chunk of experts to FP16, then immediately GEMM while the
         // FP16 data is still warm in L2 cache (~96 MB on RTX 5090). This avoids
