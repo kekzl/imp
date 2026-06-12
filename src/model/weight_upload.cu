@@ -2039,6 +2039,66 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             t.on_device = true;
             scale_count++;
         };
+        // NVFP4 MoE expert micro-scales: upload one CONTIGUOUS slab per
+        // (layer, projection) so experts[e].scales = base + e*e_ms. Otherwise
+        // each expert's weight_scale is a separate cudaMallocAsync issued in
+        // unordered_map hash order, landing at non-adjacent addresses
+        // (scales_contig=0) — which forces the decode-cache borrow to allocate
+        // a contiguous copy and free the scattered originals at load time
+        // (pre_dequant_phase3_nvfp4_decode.cu, the #679 copy/free dance). A
+        // single slab makes that borrow truly zero-copy. The per-expert sub-
+        // blocks are byte-identical to the individual uploads, so CUTLASS
+        // SfAtom (Phase-3b) and the fused-projection split are unaffected.
+        {
+            int moe_scale_slabs = 0;
+            auto slab_proj_scales = [&](std::vector<Tensor>& experts, int layer, const char* kind) {
+                const int N = static_cast<int>(experts.size());
+                if (N == 0)
+                    return;
+                std::vector<NvFP4PreQuantWeight*> grp(N, nullptr);
+                size_t e_ms = 0;
+                for (int e = 0; e < N; ++e) {
+                    std::string k =
+                        "L" + std::to_string(layer) + "." + kind + "." + std::to_string(e);
+                    auto it = nvfp4_scratch_.find(k);
+                    if (it == nvfp4_scratch_.end())
+                        return;  // not NVFP4-prequant experts — leave to per-tensor upload
+                    Tensor& ws = it->second.weight_scale;
+                    if (!ws.data || ws.on_device || ws.numel() == 0)
+                        return;
+                    size_t b = ws.nbytes();
+                    if (e == 0)
+                        e_ms = b;
+                    else if (b != e_ms)
+                        return;  // ragged — bail, per-tensor upload still correct
+                    grp[e] = &it->second;
+                }
+                if (e_ms == 0)
+                    return;
+                void* slab = nullptr;
+                if (cudaMallocAsync(&slab, static_cast<size_t>(N) * e_ms, stream) != cudaSuccess)
+                    return;
+                gpu_allocations_.push_back(slab);  // single base alloc; ~Model frees it once
+                for (int e = 0; e < N; ++e) {
+                    Tensor& ws = grp[e]->weight_scale;
+                    void* dst = static_cast<char*>(slab) + static_cast<size_t>(e) * e_ms;
+                    cudaMemcpyAsync(dst, ws.data, e_ms, cudaMemcpyHostToDevice, stream);
+                    ws.data = dst;        // interior pointer — NOT tracked as a base alloc
+                    ws.on_device = true;  // existing upload_scale loop now skips it
+                    scale_count++;
+                }
+                ++moe_scale_slabs;
+            };
+            for (size_t i = 0; i < layers_.size(); ++i) {
+                slab_proj_scales(layers_[i].expert_w_gate, static_cast<int>(i), "expert_w_gate");
+                slab_proj_scales(layers_[i].expert_w_up, static_cast<int>(i), "expert_w_up");
+                slab_proj_scales(layers_[i].expert_w_down, static_cast<int>(i), "expert_w_down");
+            }
+            if (moe_scale_slabs > 0)
+                IMP_LOG_INFO("NVFP4 MoE expert micro-scales: %d contiguous (layer,proj) slabs "
+                             "(zero-copy decode borrow, no load-time scale copy)",
+                             moe_scale_slabs);
+        }
         for (auto& [name, sc] : nvfp4_scratch_) {
             // Audit weight_scale_2 BEFORE upload (it's still a host pointer).
             if (audit && sc.weight_scale_2.data && !sc.weight_scale_2.on_device) {
