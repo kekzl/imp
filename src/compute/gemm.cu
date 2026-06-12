@@ -1711,7 +1711,27 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
     //   input  [M,K] row-major = [K,M] col-major; CUBLAS_OP_N
     //   result [N,M] col-major = [M,N] row-major
     long long weight_stride = static_cast<long long>(N) * K;  // stride between wk and wv in weight_kv
-    long long output_stride = static_cast<long long>(M) * N;  // stride between k_out and v_out
+    // strideC: derive from the ACTUAL pointer distance between the two output
+    // views, like gemm_pair_batched. The old `M*N` only matched the workspace
+    // layout when M == the buffer's max_tokens (the engine maintains that via
+    // resize_workspace, the raw-executor path does not) — for M < max_tokens
+    // the V batch landed inside the K buffer and v_out stayed stale (#677:
+    // first-forward V was silently zero/garbage).
+    long long output_stride = (static_cast<const char*>(v_out.data) -
+                               static_cast<const char*>(k_out.data)) /
+                              static_cast<long long>(dtype_size(input.qtype));
+    if (output_stride < static_cast<long long>(M) * N) {
+        // Outputs not laid out batched-compatibly (or overlapping): fall back
+        // to two separate GEMMs rather than corrupting V.
+        int64_t w_shape[2] = {N, K};
+        Tensor wk(weight_kv.data, weight_kv.qtype, 2, w_shape, true);
+        Tensor wv(static_cast<char*>(weight_kv.data) +
+                      weight_stride * static_cast<long long>(dtype_size(weight_kv.qtype)),
+                  weight_kv.qtype, 2, w_shape, true);
+        gemm(input, wk, k_out, alpha, beta, stream);
+        gemm(input, wv, v_out, alpha, beta, stream);
+        return;
+    }
 
     cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M,
                                                    K,                              // cuBLAS m, n, k
