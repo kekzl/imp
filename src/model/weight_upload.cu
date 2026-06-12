@@ -797,6 +797,11 @@ struct UploadCtx {
     // at conversion time. Applied only on BF16-source paths in upload_weight().
     // Set to 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
     float arch_norm_offset = 0.0f;
+    // gpt-oss MXFP4 MoE experts must stay host-resident through weight upload:
+    // the MXFP4→NVFP4 conversion runs at pre_dequant (needs the executor's
+    // wcache). Set true for ModelArch::GPT_OSS so upload_packed_experts skips
+    // them instead of uploading raw MXFP4 the executor cannot consume.
+    bool is_gpt_oss = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1616,6 +1621,16 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             if (packed.on_device)
                 return true;  // already on GPU (e.g. from Gemma 4 fused split)
 
+            // gpt-oss MXFP4 experts: keep host-resident raw. The executor's
+            // pre_dequant phase converts them to NVFP4 + registers the CUTLASS
+            // grouped path (gpt_oss_convert_moe_experts_). Uploading raw MXFP4
+            // here would leave them in a format no MoE kernel consumes (NaN);
+            // the F16-slice fallback below also mis-strides MXFP4 bytes.
+            if (ctx.is_gpt_oss && qtype == QType::MXFP4) {
+                IMP_LOG_DEBUG("  %s: gpt-oss MXFP4 experts kept host-resident for NVFP4 convert", name);
+                return true;
+            }
+
             int n_experts = static_cast<int>(packed.shape[0]);
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
@@ -1939,8 +1954,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                                     config_.arch == ModelArch::QWEN36_MOE)
                                        ? 1.0f
                                        : 0.0f;
+    const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);
     UploadCtx ctx{compute_dtype,       stream,          gpu_allocations_, host_pinned_,
-                  host_pinned_allocs_, arch_norm_offset};
+                  host_pinned_allocs_, arch_norm_offset, is_gpt_oss};
 
     // --- Embeddings, output norm, output projection ---
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {
