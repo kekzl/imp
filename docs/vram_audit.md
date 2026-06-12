@@ -75,8 +75,19 @@ report; `[loader]` loader size log; `[budget]` vram_budget.cpp.
 | persistent_workspace (hidden+resid+norm+logits) | 53 | 53 | `[vram_alloc]` incl. logits 8×vocab |
 | moe_3x_packed/sf, moe_dequant, cutlass_act data/sf | 50 | 50 | `[vram_alloc]` |
 | CUDA context / driver baseline (WSL2/WDDM) | 1679 | 1679 | checkpoint 00 |
-| reconciliation residual (cudaMallocAsync pool reserve + cuBLAS/CUTLASS internal + fragmentation) | ~537 | — | device_used − Σ above |
+| reconciliation residual (cudaMallocAsync pool reserve + cuBLAS/CUTLASS internal + fragmentation) | ~2537 | — | device_used − Σ above; see note below |
 | **TOTAL** | **28289** | **28309** | |
+
+> Note: the per-pool `note()` counters are write-only — they do not see a raw
+> `cudaFree` that follows (e.g. #679 frees the scattered ms_ref scales after the
+> contiguous copy), so the `WEIGHTS` note can over-read while `nvfp4_moe_ms_ref`
+> double-books the same logical bytes. The lifecycle **checkpoints** and the
+> **device totals** are the ground truth; the residual absorbs both genuine
+> untracked memory and this note skew. The cudaMallocAsync **pool reserve** is a
+> prime residual suspect: imp sets the pool release threshold to UINT64_MAX
+> (`engine_weight_upload.cpp:92`), so init-time `cudaFree`s (incl. #679's ms_ref)
+> are **retained in the pool, not returned to the OS** — still counted as
+> device-used. Quantified in the follow-up section below.
 
 ### Not consumers (verified, so we don't chase phantoms)
 
@@ -105,3 +116,48 @@ report; `[loader]` loader size log; `[budget]` vram_budget.cpp.
 5. **Only 4318 MiB free.** Headroom is thin; the levers below are about buying
    back that headroom (for more KV/context or larger models), since peak does
    not exceed resident.
+
+### Follow-up: cudaMallocAsync pool reserve — MEASURED, refuted as a lever
+
+Hypothesis: the ~2.4 GiB residual is freed-but-retained pool memory (the #679
+ms_ref `cudaFree`s held by the UINT64_MAX release threshold), reclaimable with
+`cudaMemPoolTrimTo`. **Measured on the same workload:**
+
+| | reserved MiB | used MiB | trimmable MiB |
+|---|---:|---:|---:|
+| default mempool at init_complete | 17280 | 17249 | **31** |
+| after `cudaMemPoolTrimTo(0)` | 17248 | 17249 | ~0 |
+
+The pool is ~fully *used* (live NVFP4 weights 15467 + ms_ref copy 1728 ≈ pool
+used); only **31 MiB** is slack and the trim reclaimed **32 MiB**. **Refuted.**
+The #679-freed scatter scales did NOT accumulate as pool slack. The ~2.4 GiB
+residual is therefore **CUDA primary context + cuBLAS/CUTLASS internal
+reservations + WSL2/WDDM driver overhead** (baseline checkpoint 00 alone is
+1679 MiB), which is driver-owned and not cleanly reclaimable.
+
+### Follow-up: Lever-A (`nvfp4_moe_ms_ref` slab) — already shipped, no resident win
+
+The 1728 MiB `nvfp4_moe_ms_ref` is **not a duplicate** — #679 already frees the
+scattered per-expert source scales after the contiguous copy
+(`pre_dequant_phase3_nvfp4_decode.cu:1676`, confirmed in the run log: "freed
+1728.00 MiB duplicated per-expert micro-scales"). Making the SafeTensors loader
+emit a contiguous scale slab would set `scales_contig=true` and skip the *copy*,
+but the scales must be resident for NVFP4 decode either way — it only removes a
+**transient init-time 2× peak**, not steady-state resident VRAM. **Not a
+footprint-reduction lever.**
+
+### Net: which levers actually reduce resident VRAM (measured)
+
+- **attn_scores 380 MiB** — genuinely resident, removable by lowering the FA2
+  prefill threshold (needs FA2 short-prefill PPL+perf parity). The one clean
+  no-accuracy/no-throughput win the data supports.
+- **KV FP8 ~768 MiB** — halves the 1536 MiB F16 KV; author declares FP8 KV.
+  Accuracy trade-off (per-family long-context PPL gate). Better framed as a
+  *context-capacity* lever (KV is min-sized, not over-sized).
+- **CUTLASS NVFP4 SF caches 3582 MiB** (phase0 prefill 1782 + phase3 decode
+  1800) — the only large remaining prize; needs a probe to confirm whether both
+  are independently required or dedupable. Higher risk (touches prefill + decode
+  GEMM correctness).
+- Refuted/out-of-scope: ms_ref slab (no win), pool trim (32 MiB), decode-
+  redundant prefill weights 7721 MiB (not freeable without a decode-only mode →
+  prefill throughput regression).

@@ -130,6 +130,22 @@ void MemAccount::report(const char* phase_label) {
     emit("device: total=%.0f MiB  used=%.0f MiB  free=%.0f MiB  peak_used=%.0f MiB",
          total_b / kMiB, used / kMiB, free_b / kMiB, peak / kMiB);
 
+    // cudaMallocAsync default-pool slack: freed-but-not-returned-to-OS memory
+    // (e.g. the #679 ms_ref cudaFree's) sits here as reserved and still counts
+    // as device-used. reserved - used = trimmable headroom (cudaMemPoolTrimTo).
+    {
+        cudaMemPool_t pool = nullptr;
+        int dev = 0;
+        cudaGetDevice(&dev);
+        if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool) {
+            unsigned long long rsv = 0, usd = 0;
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv);
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd);
+            emit("mempool(async): reserved=%.0f MiB  used=%.0f MiB  trimmable=%.0f MiB",
+                 rsv / kMiB, usd / kMiB, (double(rsv) - double(usd)) / kMiB);
+        }
+    }
+
     if (!checkpoints_.empty()) {
         emit("--- lifecycle checkpoints (phase delta = measured cost) ---");
         emit("%-26s %12s %12s %12s", "checkpoint", "used_MiB", "free_MiB", "delta_MiB");
