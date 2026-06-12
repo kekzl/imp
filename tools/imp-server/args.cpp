@@ -14,6 +14,7 @@ void print_server_usage(const char* prog) {
             "  --host <addr>         Listen address (default: 127.0.0.1)\n"
             "  --port <n>            Listen port (default: 8080)\n"
             "  --max-tokens <n>      Default max tokens (default: 8192)\n"
+            "  --max-batch <n>       Decode batch / KV+workspace sizing (default: 0 = auto)\n"
             "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
             "  --device <n>          CUDA device ID (default: 0)\n"
             "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"
@@ -68,6 +69,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.port = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {
             args.max_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-batch") == 0 && i + 1 < argc) {
+            args.max_batch_size = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--gpu-layers") == 0 && i + 1 < argc) {
             args.gpu_layers = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {

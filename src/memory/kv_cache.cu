@@ -1,5 +1,6 @@
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
+#include "memory/mem_account.h"
 #include "runtime/graph_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -55,6 +56,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 
     // Zero-initialize the pool so fresh blocks start clean
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
+    MemAccount::instance().note("KV_BLOCK_POOL", static_cast<std::ptrdiff_t>(total));
 
     // Allocate separate scale buffer for quantized KV cache modes.
     //   INT8/INT4: 1 half (FP16) per head per token slot.
@@ -92,6 +94,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
             throw std::runtime_error(msg);
         }
         IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, scale_total));
+        MemAccount::instance().note("KV_BLOCK_POOL", static_cast<std::ptrdiff_t>(scale_total));
     }
 
     // Initialise per-block ref counts (0 = free) and build free list

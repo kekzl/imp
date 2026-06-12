@@ -510,6 +510,12 @@ struct RuntimeConfig {
         // Audit NVFP4 weight scales at load time. Legacy env:
         // IMP_AUDIT_NVFP4_SCALES.
         bool audit_nvfp4_scales = false;
+        // Per-component VRAM accounting harness (MemAccount): lifecycle
+        // checkpoints + per-pool notes + device-used peak sampler. Default off
+        // (zero overhead). See src/memory/mem_account.h.
+        bool vram_audit = false;
+        // Optional append-only file the VRAM audit table is mirrored into.
+        std::string vram_audit_dump;
         // [RETIRED] tq_skip_qjl removed in Phase 5 (TurboQuant retired 2026-05-17).
     } diagnostics;
 

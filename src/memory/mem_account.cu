@@ -1,0 +1,179 @@
+#include "memory/mem_account.h"
+#include "core/logging.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cuda_runtime.h>
+
+namespace imp {
+
+namespace {
+constexpr double kMiB = 1024.0 * 1024.0;
+
+size_t query_free() {
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess)
+        return 0;
+    return free_b;
+}
+
+void query_free_total(size_t& free_b, size_t& total_b) {
+    free_b = 0;
+    total_b = 0;
+    cudaMemGetInfo(&free_b, &total_b);
+}
+}  // namespace
+
+MemAccount& MemAccount::instance() {
+    static MemAccount inst;
+    return inst;
+}
+
+MemAccount::~MemAccount() {
+    sampler_stop();
+}
+
+void MemAccount::set_dump_path(std::string path) {
+    std::lock_guard<std::mutex> lock(mu_);
+    dump_path_ = std::move(path);
+}
+
+MemAccount::Pool& MemAccount::pool_locked(const char* name) {
+    for (auto& p : pools_) {
+        if (p.name == name)
+            return p;
+    }
+    pools_.push_back(Pool{name, 0, 0, 0});
+    return pools_.back();
+}
+
+void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
+    if (!enabled_.load(std::memory_order_relaxed) || delta_bytes == 0)
+        return;
+    std::lock_guard<std::mutex> lock(mu_);
+    Pool& p = pool_locked(pool);
+    p.current += delta_bytes;
+    if (delta_bytes > 0)
+        p.alloc_count++;
+    if (p.current > p.peak)
+        p.peak = p.current;
+}
+
+void MemAccount::checkpoint(const char* name) {
+    size_t free_b = 0, total_b = 0;
+    query_free_total(free_b, total_b);
+    if (total_b)
+        total_vram_ = total_b;
+    sample_once();  // fold the checkpoint instant into the peak too
+    if (!enabled_.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(mu_);
+    checkpoints_.push_back(Checkpoint{name, free_b, total_b - free_b});
+}
+
+void MemAccount::sample_once() {
+    size_t free_b = 0, total_b = 0;
+    query_free_total(free_b, total_b);
+    if (!total_b)
+        return;
+    size_t used = total_b - free_b;
+    size_t prev = peak_used_.load(std::memory_order_relaxed);
+    while (used > prev && !peak_used_.compare_exchange_weak(prev, used, std::memory_order_relaxed)) {
+    }
+}
+
+void MemAccount::sampler_start(int interval_us) {
+    if (!enabled_.load(std::memory_order_relaxed))
+        return;
+    if (sampler_run_.exchange(true))
+        return;  // already running
+    sampler_interval_us_ = interval_us > 0 ? interval_us : 2000;
+    sampler_ = std::thread([this] {
+        while (sampler_run_.load(std::memory_order_relaxed)) {
+            sample_once();
+            std::this_thread::sleep_for(std::chrono::microseconds(sampler_interval_us_));
+        }
+    });
+    IMP_LOG_INFO("MemAccount: peak sampler started (interval=%d us)", sampler_interval_us_);
+}
+
+void MemAccount::sampler_stop() {
+    if (!sampler_run_.exchange(false))
+        return;
+    if (sampler_.joinable())
+        sampler_.join();
+}
+
+void MemAccount::report(const char* phase_label) {
+    sample_once();
+
+    size_t free_b = 0, total_b = 0;
+    query_free_total(free_b, total_b);
+    size_t used = total_b ? (total_b - free_b) : 0;
+    size_t peak = peak_used_.load(std::memory_order_relaxed);
+    peak = std::max(peak, used);
+
+    std::lock_guard<std::mutex> lock(mu_);
+
+    // Build the table into a buffer so it lands atomically in the log and the
+    // append-only dump file.
+    std::string out;
+    char line[256];
+    auto emit = [&](const char* fmt, auto... args) {
+        std::snprintf(line, sizeof(line), fmt, args...);
+        out += line;
+        out += '\n';
+    };
+
+    emit("===== VRAM AUDIT [%s] =====", phase_label ? phase_label : "?");
+    emit("device: total=%.0f MiB  used=%.0f MiB  free=%.0f MiB  peak_used=%.0f MiB",
+         total_b / kMiB, used / kMiB, free_b / kMiB, peak / kMiB);
+
+    if (!checkpoints_.empty()) {
+        emit("--- lifecycle checkpoints (phase delta = measured cost) ---");
+        emit("%-26s %12s %12s %12s", "checkpoint", "used_MiB", "free_MiB", "delta_MiB");
+        size_t prev_used = 0;
+        bool first = true;
+        for (const auto& c : checkpoints_) {
+            double delta = first ? 0.0 : (double(c.used_bytes) - double(prev_used)) / kMiB;
+            emit("%-26s %12.1f %12.1f %12.1f", c.name.c_str(), c.used_bytes / kMiB,
+                 c.free_bytes / kMiB, delta);
+            prev_used = c.used_bytes;
+            first = false;
+        }
+    }
+
+    if (!pools_.empty()) {
+        std::vector<Pool> sorted = pools_;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const Pool& a, const Pool& b) { return a.peak > b.peak; });
+        emit("--- per-pool notes (tracked allocation sites) ---");
+        emit("%-26s %12s %12s %10s", "pool", "current_MiB", "peak_MiB", "allocs");
+        int64_t cur_sum = 0, peak_sum = 0;
+        for (const auto& p : sorted) {
+            emit("%-26s %12.1f %12.1f %10lld", p.name.c_str(), p.current / kMiB, p.peak / kMiB,
+                 (long long)p.alloc_count);
+            cur_sum += p.current;
+            peak_sum += p.peak;
+        }
+        emit("%-26s %12.1f %12.1f", "TRACKED TOTAL", cur_sum / kMiB, peak_sum / kMiB);
+        // Reconciliation: device_used - tracked = untracked (weights bypass the
+        // notes) + allocator fragmentation + driver/context overhead.
+        emit("%-26s %12.1f", "UNTRACKED (weights+frag)", (double(used) - double(cur_sum)) / kMiB);
+    }
+    emit("===== END VRAM AUDIT [%s] =====", phase_label ? phase_label : "?");
+
+    IMP_LOG_INFO("\n%s", out.c_str());
+
+    if (!dump_path_.empty()) {
+        FILE* f = std::fopen(dump_path_.c_str(), "a");
+        if (f) {
+            std::fputs(out.c_str(), f);
+            std::fputc('\n', f);
+            std::fclose(f);
+        }
+    }
+}
+
+}  // namespace imp
