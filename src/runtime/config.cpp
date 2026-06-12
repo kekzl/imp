@@ -134,6 +134,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
     B("attention.fa2_f16acc", cfg.attention.fa2_f16acc);
     B("attention.fa2_pv_f16acc", cfg.attention.fa2_pv_f16acc);
+    B("attention.fp8_qk_scaled", cfg.attention.fp8_qk_scaled);
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
     I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
     S("attention.mxfp4", cfg.attention.mxfp4);
@@ -324,6 +325,11 @@ void seed_from_env(RuntimeConfig& cfg) {
     // PV MMA in f16 (full-rate HMMA + halved O-fragment registers).
     if (const char* e = std::getenv("IMP_FA2_PV_F16ACC"))
         cfg.attention.fa2_pv_f16acc = (std::atoi(e) != 0);
+
+    // attention.fp8_qk_scaled — IMP_FP8_QK_SCALED: '1' enables amax-scaled
+    // e4m3 conversion in the fp8-QK FA2 path (#680).
+    if (const char* e = std::getenv("IMP_FP8_QK_SCALED"))
+        cfg.attention.fp8_qk_scaled = (std::atoi(e) != 0);
 
     // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
     if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))

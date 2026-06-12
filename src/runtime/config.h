@@ -143,6 +143,12 @@ struct RuntimeConfig {
         // 2026-06-11; set false to restore f32 PV accumulate. Requires
         // fa2_f16acc. Env: IMP_FA2_PV_F16ACC.
         bool fa2_pv_f16acc = true;
+        // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
+        // raw conversion is the #511 quality cliff; scaling Q and K to the
+        // full e4m3 range is the numerics class FlashInfer runs. Only
+        // takes effect on the fp8-QK path (fa2_fp16qk=never or declined).
+        // Experimental quality probe. Env: IMP_FP8_QK_SCALED.
+        bool fp8_qk_scaled = false;
         std::string mxfp4 = "auto";
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16

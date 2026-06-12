@@ -591,6 +591,37 @@ __device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3(const half* src) {
     return result;
 }
 
+// Scaled variant (#680 fp8-QK campaign): multiply by 1/s before the convert so
+// the operand uses the full e4m3 dynamic range. The raw (unscaled) conversion
+// is the #511 quality cliff — ~10% relative score error on real activations.
+__device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3_scaled(const half* src, __half2 inv_s) {
+    uint32_t result;
+    uint16_t lo, hi;
+    const __half2* s2 = reinterpret_cast<const __half2*>(src);
+    __half2 a = __hmul2(s2[0], inv_s);
+    __half2 b = __hmul2(s2[1], inv_s);
+    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(lo)
+                 : "r"(*reinterpret_cast<uint32_t*>(&a)));
+    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(hi)
+                 : "r"(*reinterpret_cast<uint32_t*>(&b)));
+    result = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    return result;
+}
+
+// Grid-stride |x| max over a contiguous fp16 buffer (Q or gathered K of one
+// chunk — small next to the attention itself). Caller zeroes `amax` first.
+__global__ void fa2_amax_fp16_kernel(const half* __restrict__ x, int64_t n, float* __restrict__ amax) {
+    float m = 0.f;
+    for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < n;
+         i += (int64_t)gridDim.x * blockDim.x)
+        m = fmaxf(m, fabsf(__half2float(x[i])));
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
+    if ((threadIdx.x & 31) == 0)
+        atomicMax(reinterpret_cast<unsigned int*>(amax), __float_as_uint(m));
+}
+
 template <int Bq, int HD>
 __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
@@ -1238,12 +1269,17 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
 // from the 1/4-rate f32-acc class to full rate AND halves the O-fragment
 // register footprint (N_O*4 floats -> N_O*2 b32), the dominant per-thread
 // register cost of the Bq=128 band. Requires FP16QK.
+// FP8SCALED (#680): amax-scaled e4m3 conversion for the fp8-QK path. Q and K
+// convert as x*(448/amax) (full e4m3 range, no saturation/mantissa cliff) and
+// the score scale absorbs (amax_q*amax_k/448^2). d_amax = device floats
+// {amax_q, amax_k} produced by fa2_amax_fp16_kernel just before launch.
 template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
-          bool PVF16 = false>
+          bool PVF16 = false, bool FP8SCALED = false>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
-                                      bool causal, int sliding_window, float softcap, int q_offset) {
+                                      bool causal, int sliding_window, float softcap, int q_offset,
+                                      const float* __restrict__ d_amax = nullptr) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1301,6 +1337,24 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     // exactly once per CTA, and dropping the staging tile frees enough smem
     // for the 8-warp Bq=128 config: the kernel is latency-bound at 4 warps,
     // 1 warp/scheduler). ----
+    // FP8SCALED operand scales (uniform per-thread loads; amax==0 -> identity).
+    float fp8_sq = 1.0f, fp8_sk = 1.0f;
+    __half2 fp8_inv_sq2 = __float2half2_rn(1.0f);
+    __half2 fp8_inv_sk2 = __float2half2_rn(1.0f);
+    if constexpr (FP8SCALED) {
+        const float aq = d_amax ? d_amax[0] : 0.0f;
+        const float ak = d_amax ? d_amax[1] : 0.0f;
+        if (aq > 0.0f) {
+            fp8_sq = aq / 448.0f;
+            fp8_inv_sq2 = __float2half2_rn(448.0f / aq);
+        }
+        if (ak > 0.0f) {
+            fp8_sk = ak / 448.0f;
+            fp8_inv_sk2 = __float2half2_rn(448.0f / ak);
+        }
+    }
+    (void)fp8_sq;
+    (void)fp8_sk;
     if constexpr (!FP16QK) {
         const int total_vec4 = (Bq * head_dim) / 4;
         for (int vi = tid; vi < total_vec4; vi += NTHREADS) {
@@ -1310,6 +1364,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
             uint32_t* dst = reinterpret_cast<uint32_t*>(Q_fp8 + r * QSTRIDE + d);
             if (q_start + r >= seq_q) {
                 *dst = 0;
+            } else if constexpr (FP8SCALED) {
+                *dst = cvt_4xfp16_to_4xe4m3_scaled(&Q_ptr[(int64_t)r * q_row_stride + d], fp8_inv_sq2);
             } else {
                 *dst = cvt_4xfp16_to_4xe4m3(&Q_ptr[(int64_t)r * q_row_stride + d]);
             }
@@ -1520,8 +1576,14 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                     uint32_t a2 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE + cl * 2);
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE + cl * 2 + 16);
                     const half* kb = K_cur + n * 8 * KVSTRIDE + k * 32;
-                    uint32_t b0 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + cl * 2);
-                    uint32_t b1 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + cl * 2 + 16);
+                    uint32_t b0, b1;
+                    if constexpr (FP8SCALED) {
+                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + rl * KVSTRIDE + cl * 2, fp8_inv_sk2);
+                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + rl * KVSTRIDE + cl * 2 + 16, fp8_inv_sk2);
+                    } else {
+                        b0 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + cl * 2);
+                        b1 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + cl * 2 + 16);
+                    }
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
                         "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
@@ -1567,6 +1629,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                 int lq = lqA + ((e < 2) ? 0 : 8);
                 float v = S[n][e];
                 if (lq < seq_q && col < seq_kv) {
+                    if constexpr (FP8SCALED)
+                        v *= fp8_sq * fp8_sk;
                     v *= scale;
                     if (softcap > 0.0f)
                         v = softcap * tanhf(v / softcap);
@@ -1794,6 +1858,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     const bool pv_f16 = f16acc && imp::process_diag_fa2_pv_f16acc();
     int Bq, Bkv;
     bool twoslot = false;
+    bool fp8_scaled = false;
     decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
     if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
@@ -1821,7 +1886,15 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         const bool use_bq64 = blocks_128 < (long)sm_count;
         Bq = use_bq64 ? 64 : 128;
         Bkv = 64;
-        kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
+        // #680 fp8-QK campaign: amax-scaled e4m3 conversion (the raw variant
+        // is the #511 quality cliff and stays the default for A/B).
+        if (imp::process_diag_fp8_qk_scaled()) {
+            fp8_scaled = true;
+            kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128, false, false, 64, false, false, true>
+                            : fmha_sm120_fa2_kernel<128, 128, false, false, 64, false, false, true>;
+        } else {
+            kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
+        }
     }
 
     const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk, Bkv, twoslot);
@@ -1845,11 +1918,30 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
             twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
     }
+    // FP8SCALED: per-chunk operand amaxes for Q and the gathered K (two tiny
+    // grid-stride passes; persistent 2-float buffer, process lifetime).
+    static float* s_d_amax = nullptr;
+    if (fp8_scaled) {
+        if (!s_d_amax && cudaMalloc(&s_d_amax, 2 * sizeof(float)) != cudaSuccess) {
+            s_d_amax = nullptr;
+            fp8_scaled = false;  // fall back to raw conversion this call
+        }
+        if (s_d_amax) {
+            cudaMemsetAsync(s_d_amax, 0, 2 * sizeof(float), stream);
+            const int64_t qn = (int64_t)batch_size * seq_q * n_heads * head_dim;
+            const int64_t kn = (int64_t)batch_size * seq_kv * n_kv_heads * head_dim;
+            fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(Q.data), qn,
+                                                          s_d_amax);
+            fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(K.data), kn,
+                                                          s_d_amax + 1);
+        }
+    }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
                                         reinterpret_cast<const half*>(V.data),
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
-                                        n_kv_heads, scale, causal, sliding_window, softcap, q_offset);
+                                        n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
+                                        fp8_scaled ? s_d_amax : nullptr);
     return true;
 }
 
