@@ -199,3 +199,50 @@ The PPL match (identical mean_nll to 4 dp on a separate before/after build) plus
 the unchanged Phase-3b cache confirm the saving is pure dead-memory removal with
 **no correctness and no throughput regression**. New peak under load: 26408 MiB
 resident, free headroom 4318 → 6198 MiB.
+
+---
+
+## 2026-06-12 — Lever B (attn_scores → FA2) REFUTED by measurement
+
+Hypothesis: lower `attention.attn_scores_mib` (default 384 → the 380 MiB cuBLAS
+materialized-scores buffer) so the FA2 path covers prefill, freeing 380 MiB. The
+stale note in `executor_workspace_buffers.cu:268` said cuBLAS was only "~30%
+faster than FMHA at n==cap"; FA2 gained ~25% since (#653/#673/#674), so parity
+seemed plausible. Tested via `--set attention.attn_scores_mib=1` (threshold=129,
+buffer → 1 MiB, FA2 handles all prefill); no rebuild (runtime knob).
+
+VRAM + correctness checked out — but the **throughput gate failed catastrophically
+at short prefill** (`imp-cli --bench`, 12 reps, 2-3 trials, healthy host 13801 MHz):
+
+| metric | cuBLAS (default) | FA2 (mib=1) | Δ |
+|---|---:|---:|---:|
+| VRAM (attn_scores buffer) | 380 MiB | 1 MiB | −379 |
+| PPL (deterministic) | 5.7878 | 5.7673 | −0.36% (FA2 marginally better) |
+| **pp512** | **19600 tok/s** | **1480 tok/s** | **−92% (12× slower)** |
+| pp2048 | 43004 tok/s | 42820 tok/s | −0.43% (parity) |
+| tg256 (decode) | 319.3 | 319.2 | ~0% |
+
+**Refuted.** FA2 is at parity only at the larger chunk (pp2048); at short prefill
+(pp512) it is ~12× slower than cuBLAS GEMM+softmax on the small materialized
+matrix — short prefill is exactly where cuBLAS wins most, and it is the common
+TTFT case. The 380 MiB attn_scores buffer is **load-bearing for short-prefill
+throughput** (and, separately, for hd=256 / gemma-3 correctness —
+`executor_attention.cu:973-990`, where FA2 mis-serves hd=256). Not reclaimable.
+
+Lesson: pp2048 alone (−0.43%) would have green-lit a −92% pp512 regression. The
+gated metric (pp512) and the short-prefill regime must be measured explicitly.
+
+---
+
+## Net result of this audit pass
+
+- **Shipped: −1810 MiB** (Phase-0b SF dedup), correctness- and throughput-neutral,
+  applies to every NVFP4-prequant model. Free headroom 4388 → 6198 MiB.
+- **Refuted by measurement: ms_ref slab** (0, #679 done), **pool trim** (32 MiB),
+  **attn_scores→FA2** (−92% pp512). Each would have been a plausible-looking lever
+  on estimate alone.
+- **Remaining, accuracy-gated:** KV FP8 ~768 MiB (per-family long-context PPL
+  gate; better as a context-capacity lever — KV is min-sized at 1536 MiB).
+- The dominant footprint (weights 14.6 GiB + NVFP4 SF/overlay + scales) and the
+  ~1.7 GiB CUDA-context/cuBLAS reservation are structural / irreducible without
+  an accuracy or prefill-throughput trade.
