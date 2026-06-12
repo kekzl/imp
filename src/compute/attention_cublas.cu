@@ -352,6 +352,17 @@ __global__ void softcap_fp16_kernel(half* S, int64_t n, float softcap) {
     }
 }
 
+// FP32 counterpart: the use_fp32_s path keeps scores in a float scratch and the
+// FP32 softmax reads them directly, so softcap must be applied to the float
+// buffer here (Gemma-2 attn_logit_softcap=50 was silently dropped on this path).
+__global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val = S[idx];
+        S[idx] = softcap * tanhf(val / softcap);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Static device pointer arrays for cublasGemmBatchedEx (GQA attention).
 // Allocated once, grown as needed. Layout: [A_ptrs..., B_ptrs..., C_ptrs...]
@@ -480,12 +491,17 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                    use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s, strideS, n_heads,
                                    CUBLAS_COMPUTE_32F, kGemmAlgo);
 
-        // Softcap (if enabled — only for FP16 path, Gemma-4 has no attn softcap)
-        if (softcap > 0.0f && !use_fp32_s) {
+        // Softcap (if enabled): applied to whichever buffer the softmax reads —
+        // S_f32 on the use_fp32_s path, S_base otherwise. Gemma-2 sets softcap=50;
+        // skipping it on the FP32 path sharpened the softmax incorrectly.
+        if (softcap > 0.0f) {
             int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
-            softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+            if (use_fp32_s)
+                softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
+            else
+                softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
         }
 
         // Softmax (FP32 or FP16)
@@ -534,12 +550,16 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s,
                             n_heads, CUBLAS_COMPUTE_32F, kGemmAlgo);
 
-        // Softcap (only FP16 path — Gemma-4 has no attn softcap)
-        if (softcap > 0.0f && !use_fp32_s) {
+        // Softcap (if enabled): applied to S_f32 on the use_fp32_s path, else S_base
+        // (same fix as the MHA path above — was dropped on FP32-S for Gemma-2).
+        if (softcap > 0.0f) {
             int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
-            softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+            if (use_fp32_s)
+                softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
+            else
+                softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
         }
 
         // Softmax

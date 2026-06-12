@@ -378,5 +378,24 @@ TEST_F(AttentionCrossPathTest, SharpLongGQA_F32ChainStrict) {
                imp_refs::sharp_long_gqa_spot_idx, imp_refs::sharp_long_gqa_spot_val, 64);
 }
 
+// Regression for the FP32-S softcap drop (Gemma-2 attn_logit_softcap=50).
+// The mild softcap config above keeps scores << 50, so tanh(s/50)*50 ≈ s and a
+// dropped softcap is invisible. Here softcap=2 with amp=8 SATURATES the cap
+// (|score| >> 2 → tanh(s/2)*2 → ±2), so the cuBLAS FP32-S path (and the
+// pairwise-equal fa2_f16 path, which applies softcap) MUST cap or they diverge
+// from the capped fp64 reference. No committed golden spots (n_spots=0): the
+// in-test fp64 ref IS ground truth here. Covers both the MHA and GQA softcap
+// launch sites in attention_cublas_prefill. Was RED before the FP32-S softcap
+// kernel was added (softcap was gated behind !use_fp32_s).
+TEST_F(AttentionCrossPathTest, SaturatingSoftcap_FP32S_MHA) {
+    run_config(4, "saturating_softcap_mha", 64, 64, 4, 4, 128, true, 0, /*softcap=*/2.0f, 8.0f,
+               /*mild=*/false, nullptr, nullptr, 0);
+}
+
+TEST_F(AttentionCrossPathTest, SaturatingSoftcap_FP32S_GQA) {
+    run_config(5, "saturating_softcap_gqa", 64, 64, 8, 2, 128, true, 0, /*softcap=*/2.0f, 8.0f,
+               /*mild=*/false, nullptr, nullptr, 0);
+}
+
 }  // namespace
 }  // namespace imp
