@@ -161,3 +161,41 @@ footprint-reduction lever.**
 - Refuted/out-of-scope: ms_ref slab (no win), pool trim (32 MiB), decode-
   redundant prefill weights 7721 MiB (not freeable without a decode-only mode →
   prefill throughput regression).
+
+---
+
+## 2026-06-12 — Lever: drop Phase-0b redundant CUTLASS SF build (−1810 MiB)
+
+Investigation of the CUTLASS NVFP4 SF caches found a **duplicate build**, not two
+independent caches:
+- Phase 0b (`pre_dequant_phase0_nvfp4_loader.cu`) built a CUTLASS SfAtom buffer
+  for every prequant weight (18624 tensors, 1782 MiB) and stored it in
+  `wcache_->cutlass_nvfp4`.
+- Phase 3b (`nvfp4_decode_convert_cutlass_`) then iterates the **same**
+  `wcache_->nvfp4` map and unconditionally rebuilds `cutlass_nvfp4[ptr]` for
+  every entry (18625 tensors, 1800 MiB), **overwriting** Phase 0b's map entries
+  without freeing them (`CutlassNvFP4Weight` has a raw `scale_factors` pointer
+  and no destructor). Phase 4 snapshots the final map (Phase 3b's entries) into
+  the weight handles the GEMM kernels read, so **Phase 0b's 1782 MiB was
+  allocated, orphaned, and resident-dead until process exit** — never wired to
+  any consumer.
+
+Fix: Phase 0b now only seeds `wcache_->nvfp4` (the decode-GEMV registration that
+Phase 3b iterates); the redundant `convert_nvfp4_to_cutlass` build is removed.
+Phase 3b remains the sole, authoritative, budget-aware builder.
+
+### Measured before/after (same fixed workload, deterministic PPL)
+
+| metric | before (fb22c234) | after | Δ |
+|---|---:|---:|---:|
+| device resident MiB | 28218 | **26408** | **−1810** |
+| device free MiB | 4388 | **6198** | **+1810 (+41%)** |
+| Phase 3b cutlass cache | 18625 T / 1800.55 MiB | 18625 T / 1800.55 MiB | identical (live cache unchanged) |
+| Phase 0b | "1782 MiB" SfAtom | "registered 18624" (no alloc) | dedup |
+| **PPL (deterministic, 199 tok)** | **5.7878** (nll 1.7558) | **5.7878** (nll 1.7558) | **0 — byte-identical** |
+| throughput, 8 concurrent | 124.9 tok/s | 136.8 tok/s | no regression |
+
+The PPL match (identical mean_nll to 4 dp on a separate before/after build) plus
+the unchanged Phase-3b cache confirm the saving is pure dead-memory removal with
+**no correctness and no throughput regression**. New peak under load: 26408 MiB
+resident, free headroom 4318 → 6198 MiB.
