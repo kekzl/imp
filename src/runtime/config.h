@@ -450,6 +450,12 @@ struct RuntimeConfig {
         // the ~2x eager per-token tax until the next draft shows up.
         // 0 = stay eager between drafts (legacy behavior).
         int miss_burst = 8;
+        // Reuse the parked captured graph across bursts (rearm instead of
+        // recapture, ~10-20 ms saved per burst). DISABLED by default: the
+        // rearmed burst's first forward emits a deterministic wrong token
+        // (#683 — behaves as if the previous burst's last KV entries are
+        // invisible). Re-enable for debugging the root cause only.
+        bool burst_rearm = false;
     } speculative;
 
     struct FFN {

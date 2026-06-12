@@ -250,6 +250,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.give_up_after", cfg.speculative.give_up_after);
     I("speculative.burst", cfg.speculative.burst);
     I("speculative.miss_burst", cfg.speculative.miss_burst);
+    B("speculative.burst_rearm", cfg.speculative.burst_rearm);
 
     if (!matched)
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());

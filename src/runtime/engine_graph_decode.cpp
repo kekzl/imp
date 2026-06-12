@@ -187,7 +187,13 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // request keeps its captured graph — reseed device state instead of
     // recapturing (the burst-hybrid n-gram speculation path relaunches every
     // few tokens; a full setup costs ~10-20 ms per launch).
-    if (async_graph_runner_.is_setup() && async_parked_req_id_ >= 0) {
+    // #683: the rearm fast path's first forward behaves as if the previous
+    // burst's last ~2 KV entries are invisible (deterministic duplicated
+    // token, e.g. "gamma, gamma" on repeat-exactly prompts); a fresh capture
+    // per burst is byte-perfect. Until root-caused, the fast path is opt-in:
+    // correctness beats the ~10-20 ms capture saving per burst.
+    if (runtime_config_.speculative.burst_rearm && async_graph_runner_.is_setup() &&
+        async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);
         const int ctx = req->context_len();
         if (async_parked_req_id_ == req->id && async_d_block_tables_ != nullptr &&
@@ -208,6 +214,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                 think_limit = std::max(
                     1, static_cast<int>(req->max_tokens * req->think_budget) - used);
             }
+            if (getenv("IMP_SPEC_TRACE"))
+                IMP_LOG_INFO("[burst-launch] REARM seed=%d pos=%d ctx=%d limit=%d", (int)first_token,
+                             ctx - 1, ctx, step_limit);
             if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx,
                                           step_limit, req->in_think_block, think_limit, stream) &&
                 async_graph_runner_.launch(stream)) {
@@ -267,6 +276,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         }
     }
 
+    if (getenv("IMP_SPEC_TRACE"))
+        IMP_LOG_INFO("[burst-launch] FRESH seed=%d ctx=%d limit=%d remaining=%d", (int)first_token,
+                     req->context_len(), step_limit, remaining);
     auto gcfg = build_graph_config(*req, remaining);
     gcfg.step_limit = step_limit;
 
