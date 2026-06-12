@@ -217,11 +217,24 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16
-    // Used for prefill at medium sequence lengths (faster than WMMA flash attention
-    // due to higher TC utilization in cuBLAS GEMM). Falls back to flash attention
-    // for long sequences or when VRAM-constrained.
-    if (!skip_batch_dequant) {
+    // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16.
+    // Only the materialized cuBLAS prefill fallback consumes this. On hd=128
+    // models without learned sinks (gpt-oss is hd=64, so hd==128 already excludes
+    // it) or per-layer shapes, FP16-QK FA2 serves ALL prefill at-or-above cuBLAS
+    // at every length (Qwen3-Coder-30B NVFP4: ~parity pp512, +24% pp1024, +52%
+    // pp2048, measured 2026-06-12) — the buffer is dead weight there, so skip it (reclaims
+    // up to ~380 MiB at batch8/ctx4096). cuBLAS stays the reference for hd != 128
+    // (gemma hd=256), per-layer shapes (gemma-4 hd=512), and the explicit
+    // fa2_fp16qk=never opt-out. See the run_attention dispatch (FA2 tried first).
+    const int hd_for_attn = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+    const bool fa2_serves_all_prefill = hd_for_attn == 128 &&
+                                        runtime_config().attention.fa2_fp16qk != "never" &&
+                                        cfg.head_dim_per_layer.empty() &&
+                                        cfg.n_kv_heads_per_layer.empty();
+    if (fa2_serves_all_prefill) {
+        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all hd=128 prefill — "
+                     "no S-matrix needed)");
+    } else if (!skip_batch_dequant) {
         int nh = cfg.n_heads;
         // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
         // 32-head models). Longer sequences auto-route to FMHA via the
@@ -261,13 +274,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
     }
 
-    // Auto-derive fmha_prefill_threshold from S-matrix capacity.
-    // Route to FMHA only when the materialized S-matrix does NOT fit, i.e.
-    // n > cap. The dispatch uses `prefer_fmha = (n >= threshold)`, so the
-    // threshold must be cap+1 — otherwise the largest prefill chunk (n == cap),
-    // for which the S-matrix fits exactly, mis-routes to FMHA. Measured: cuBLAS
-    // is ~30% faster than FMHA at n == cap for dense NVFP4 (Qwen3-8B pp2048:
-    // 28.3k vs 21.6k tok/s), so the boundary belongs to cuBLAS.
+    // Auto-derive fmha_prefill_threshold from S-matrix capacity. This only
+    // governs the cuBLAS-vs-tiled-FMHA boundary on the configs that still use
+    // the S-matrix (hd != 128, per-layer, sinks); on hd=128 FP16-QK FA2 is tried
+    // first and the threshold is moot (cap=0 → threshold=1). The dispatch uses
+    // `prefer_fmha = (n >= threshold)`, so the threshold is cap+1 — the chunk
+    // with n == cap, for which the S-matrix fits exactly, belongs to cuBLAS.
+    // (Historical note: the old "cuBLAS ~30% faster than FMHA at n == cap" was
+    // measured against the pre-#653/#673/#674 tiled FMHA, NOT FP16-QK FA2; FA2
+    // now matches cuBLAS at pp512 and beats it +24%/+52% at pp1024/pp2048 —
+    // measured 2026-06-12.)
     if (runtime_config().attention.fmha_prefill_threshold == -1) {
         int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() + 1 : 1;
         const_cast<RuntimeConfig::Attention&>(runtime_config().attention).fmha_prefill_threshold =

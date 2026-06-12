@@ -819,7 +819,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int kv_layer = get_kv_layer(kv_layer_map_, layer);
             int kv_bs = cache->block_size();
             int ctx_len = q_offset + n;
-            // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked use stores
+            // Of the three chunked branches below, ONLY cuBLAS consumes attn_scores_.
+            // FP16-QK FA2 (hd=128) and the tiled FMHA dispatch are O(n) and need no
+            // S-matrix, so the capacity guard applies only when neither will serve
+            // this chunk — otherwise a deliberately skipped S-matrix on a fa2-served
+            // hd=128 model (executor_workspace_buffers.cu) would wrongly abort here.
+            const bool chunk_fa2_serves = !per_layer_shapes && !attn_sinks && hd == 128 &&
+                                          runtime_config().attention.fa2_fp16qk != "never";
+            const bool chunked_use_fmha = !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
+                                          (runtime_config().attention.fmha_prefill_threshold > 0 &&
+                                           ctx_len >= runtime_config().attention.fmha_prefill_threshold);
+            // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked cuBLAS stores
             // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The
             // capacity constraint is `n * ctx_len <= s_cap²`, NOT `ctx_len <= s_cap`
             // (which was the previous guard — overly strict, wrongly aborted at any
@@ -831,7 +841,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
             int64_t fp16_elems_needed = static_cast<int64_t>(n) * ctx_len;
             int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
-            if (s_cap == 0 || fp16_elems_needed > fp16_elems_avail || n > s_cap) {
+            if (!chunk_fa2_serves && !(chunked_use_fmha && !attn_sinks) &&
+                (s_cap == 0 || fp16_elems_needed > fp16_elems_avail || n > s_cap)) {
                 IMP_LOG_ERROR(
                     "chunked_prefill: attn_scores_ capacity %d×%d=%lld too small for "
                     "n=%d × ctx_len=%d = %lld at L%d — engine should have prevented this",
@@ -909,9 +920,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // gated behind the S-matrix-capacity threshold where it has
             // history in production. fp8-attention quality above the
             // threshold is tracked separately (see issue #511).
-            const int fmha_threshold = runtime_config().attention.fmha_prefill_threshold;
-            const bool chunked_use_fmha = !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
-                                          (fmha_threshold > 0 && ctx_len >= fmha_threshold);
+            // (chunk_fa2_serves / chunked_use_fmha computed above, before the
+            // S-matrix capacity guard.)
 
             // Chunked attention routing (#548): prefer the FP16-QK FA2 kernel
             // at EVERY ctx_len, not only below the threshold. It is O(n)
@@ -941,11 +951,27 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 Tensor o4 = ao.reshape(4, o4s);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
-            } else {
-                // cuBLAS: needs S-matrix for [n × ctx_len]
+            } else if (attn_scores_buf_) {
+                // cuBLAS: needs S-matrix for [n × ctx_len]; also the only chunked
+                // path that honors learned sinks (attn_sinks → gpt-oss).
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window, attn_sinks);
+            } else {
+                // Safety net: the S-matrix was skipped (hd=128 fa2-served model) but
+                // fa2 unexpectedly declined this chunk and it is below the FMHA
+                // threshold — fall back to the O(n) tiled dispatch rather than
+                // dereferencing a null attn_scores_. Unreachable with attn_sinks:
+                // sink models (gpt-oss, hd=64) always keep the S-matrix.
+                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
+                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                Tensor q4 = qv.reshape(4, q4s);
+                Tensor k4 = k_full_t.reshape(4, kv4s);
+                Tensor v4 = v_full_t.reshape(4, kv4s);
+                Tensor o4 = ao.reshape(4, o4s);
+                attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
+                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
             }
 
             cudaFreeAsync(k_full, stream);
@@ -978,19 +1004,25 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // serves hd=256 instead is PPL-identical to cuBLAS (15.53 both,
         // n=3441 incl. window). cuBLAS stays preferred below the threshold
         // for throughput and as the materialized reference.
-        if (s_matrix_fits && !prefer_fmha) {
-            // Below the FMHA threshold: prefer the FP16-QK FA2 kernel over the
-            // materialized cuBLAS path (same f16/f32 numerics, O(n) memory).
-            if (!force_cublas_attn &&
-                try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
-                                       layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
-                                       stream)) {
-                // handled by FA2 f16
-            } else {
-                attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
-                                         /*causal=*/true, cfg.attn_logit_softcap,
-                                         /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
-            }
+        // FP16-QK FA2 is the primary hd=128 prefill kernel at EVERY length — it is
+        // O(n) memory (no S-matrix) AND at-or-above the materialized cuBLAS path
+        // across the whole range (Qwen3-Coder-30B NVFP4: ~parity pp512 within the
+        // prefill restart noise, +24% pp1024, +52% pp2048; measured 2026-06-12).
+        // Try it BEFORE the S-matrix gate so the
+        // fast path does not depend on the attn_scores buffer being allocated or
+        // large enough for n: a too-small buffer used to make s_matrix_fits false
+        // and drop n≈512 chunks into the slow tiled dispatch (−93% pp512). cuBLAS
+        // stays the fallback for the configs f16-QK declines (hd != 128) and for
+        // force_cublas_attn (learned sinks / per-layer shapes).
+        if (!force_cublas_attn &&
+            try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
+                                   layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
+                                   stream)) {
+            // handled by FA2 f16 — no S-matrix needed
+        } else if (s_matrix_fits && !prefer_fmha) {
+            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                                     /*causal=*/true, cfg.attn_logit_softcap,
+                                     /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
         } else {
             if (attn_sinks) {
                 static bool warned_sinks_fmha = false;
