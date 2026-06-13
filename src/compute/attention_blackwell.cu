@@ -5,7 +5,7 @@
 // Flash Attention 2 kernel using WMMA tensor cores with 8 warps (256 threads),
 // double-buffered KV tiles, and adaptive Q tile height.
 //
-// Key improvements over the 64x64 / 4-warp WMMA path (attention_tc.cu):
+// Key improvements over an older 64x64 / 4-warp WMMA layout:
 //   - 8 warps: 2x WMMA parallelism, each warp handles fewer tiles
 //   - Double-buffered KV: overlaps next-K prefetch with current-tile computation
 //   - S/P union shared memory: float S and half P share the same region
@@ -468,10 +468,11 @@ bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
     }
     // Unsupported head_dim or smem too small (e.g. hd=256: Br=64 needs ~176 KB
     // vs the 99 KB sm_120 opt-in) → DECLINE so the dispatcher can fail loudly.
-    // The old silent fallback to flash_attention_prefill_tc was the #654 bug:
-    // the tc launcher also exceeds smem at hd=256, nobody checked the launch
-    // error, and O kept garbage (teacher-forced PPL ~1e10) — and tc has no
-    // q_offset, so chunked continuations would mask wrongly even when it runs.
+    // The old silent fallback to a generic WMMA prefill kernel (since removed)
+    // was the #654 bug: that kernel also exceeded smem at hd=256, nobody checked
+    // the launch error, and O kept garbage (teacher-forced PPL ~1e10) — and it
+    // had no q_offset, so chunked continuations would mask wrongly even when it
+    // ran.
     if (launched) {
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {

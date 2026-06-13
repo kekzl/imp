@@ -277,7 +277,7 @@ static inline int compute_splitk_splits(int batch_size, int n_heads, int head_di
 }
 
 // ---------------------------------------------------------------------------
-// WMMA tile dimensions shared by attention_tc.cu and attention_blackwell.cu.
+// WMMA tile dimensions used by attention_blackwell.cu.
 // ---------------------------------------------------------------------------
 static constexpr int kWmmaTileM = 16;
 static constexpr int kWmmaTileN = 16;

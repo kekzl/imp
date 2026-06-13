@@ -170,18 +170,14 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
         ASSERT_TRUE(ok);
     }
 
-    // FP16 reference (Blackwell or TC kernel)
+    // FP16 reference (Blackwell kernel; can_run() already gated sm_120+)
     {
         cudaMemset(d_o_ref, 0, qo_elems * sizeof(half));
         Tensor Q(d_q, QType::F16, 4, qo_shape, true);
         Tensor K(d_k, QType::F16, 4, kv_shape, true);
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
-        if (sm_ >= 120) {
-            ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream_));
-        } else {
-            flash_attention_prefill_tc(Q, K, V, O, scale, true, 0, 0.0f, stream_);
-        }
+        ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream_));
     }
 
     cudaStreamSynchronize(stream_);
