@@ -205,7 +205,6 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [generation]
     B("generation.no_logit_softcap", cfg.generation.no_logit_softcap);
     B("generation.lm_dequant_fp16", cfg.generation.lm_dequant_fp16);
-    I("generation.think_budget", cfg.generation.think_budget);
     B("generation.force_bos", cfg.generation.force_bos);
     B("generation.no_ban", cfg.generation.no_ban);
     B("generation.mtp_no_rope", cfg.generation.mtp_no_rope);
