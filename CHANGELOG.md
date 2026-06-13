@@ -4,6 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-13
+
+47 commits since v0.10.0. Headlines: faithful per-family pre-tokenizers (#657 —
+the entire measured cross-engine perplexity gap turned out to be tokenization,
+not numerics; four families are now byte-identical to llama.cpp/HF), NVFP4
+long-context prefill pushed at-or-ahead of vLLM (chunk-2048 default + FP16-QK
+FA2 as the primary hd=128 prefill — MoE pp4096 now leads vLLM, dense pp4096 a
+near-tie), `kv_cache.dtype=auto` honoring the model's FP8-KV hint for verified
+Qwen3 families (~768 MiB saved), opt-in n-gram speculative decoding, full
+gpt-oss-20b GGUF MoE support, and a VRAM audit that reclaimed several GiB on
+NVFP4. Benchmarks refreshed (`BENCHMARKS.md`, commit-anchored); correctness gate
+(full GTest suite) green.
+
 ### Added
 
 - **N-gram prompt-lookup speculative decoding** (#668–#670, opt-in). Draft tokens
