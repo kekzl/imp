@@ -12,6 +12,10 @@ third_party/
 # the source of the per_kernel / phase_time_ns god-nodes. Kept in git for the
 # regress-trend pipeline, but worthless as graph structure.
 tools/roofline/history/
+# Agent/harness config + skill docs — not imp's architecture. settings.json JSON
+# keys (allow/PreToolUse) were mis-extracted as code nodes and became misleading
+# high-betweenness bridge-nodes in the report.
+.claude/
 
 # --- carried over from root .gitignore (build outputs + vendored deps) ---
 build/
