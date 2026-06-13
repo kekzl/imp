@@ -316,7 +316,7 @@ __device__ __forceinline__ void compute_kv_tile_bounds(int q_start, int Br, int 
 // ---------------------------------------------------------------------------
 // Apply scale, softcap, and causal/sliding_window mask to a score tile.
 // S_tile is [Br x Bc] row-major.  Called by all threads in the block with a
-// strided loop.  Used by both Hopper and Blackwell WMMA prefill kernels.
+// strided loop.  Used by the sm_120 WMMA prefill kernels.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void apply_score_masks(float* S_tile, int Br, int Bc, int block_threads, int tid,
                                                   int q_start, int kv_start, int seq_q, int seq_kv,

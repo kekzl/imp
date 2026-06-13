@@ -1,19 +1,18 @@
 // =============================================================================
-// attention_fmha_sm120.cu -- Native WGMMA Flash Attention for sm_120 (Blackwell)
+// attention_fmha_sm120.cu -- Native sm_120 (Consumer Blackwell) Flash Attention 2
 // =============================================================================
 //
-// Flash Attention 2 kernel using WGMMA (Warp Group MMA) asynchronous tensor
-// core instructions via CuTe/CUTLASS primitives. Key advantages over the
-// CUTLASS Hopper FMHA (which runs on Blackwell via binary compatibility):
+// Flash Attention 2 prefill kernel built on WMMA HMMA fragments
+// (mma.sync.m16n8k16.f16 for QK^T / PV; the FP8 variant uses
+// mma.sync.m16n8k32.e4m3 for QK^T). This is NOT wgmma/tcgen05/TMEM -- those are
+// Hopper- and datacenter-Blackwell-only (sm_90+/sm_100) and do not exist on
+// sm_120a (see attention_fmha_sm120.h). Capabilities over a stock FMHA:
 //
-//   - WGMMA for both QK^T and PV GEMMs (64x64x16 tiles, 4x larger than WMMA)
-//   - Supports sliding window (CUTLASS FMHA does not)
+//   - Supports sliding window
 //   - Supports softcap + causal + sliding window combined
-//   - Register-based online softmax (no shared memory materialization of S)
+//   - Online softmax (running row max/sum), no global materialization of S
 //
-// Thread organization: 256 threads = 2 warp groups of 128 threads.
-// Both warp groups cooperate on WGMMA; warp group 0's first warp handles
-// data loading when not in WGMMA.
+// Thread organization: 256 threads (8 warps of 32).
 //
 // Tile sizes (Bq selected dynamically based on smem fit):
 //   HD=64:      Bq=128, Bkv=64  (89 KB smem)
@@ -55,9 +54,9 @@ static constexpr int SM120_BLOCK_THREADS = SM120_WARP_SIZE * SM120_NUM_WARPS;  /
 static constexpr int SM120_Bkv = 64;                                           // KV tile size (columns)
 
 // WMMA tile dimensions -- we use WMMA m16n16k16 as the building block.
-// While WGMMA can issue larger tiles, WMMA is more portable and the
-// compiler can fuse consecutive WMMA ops into WGMMA on sm_120.
-// This approach gives us explicit control over the softmax fusion.
+// On sm_120a these WMMA ops lower to HMMA (mma.sync); there is no wgmma on
+// this target. The explicit WMMA tiling gives us control over the softmax
+// fusion.
 static constexpr int SM120_WMMA_M = 16;
 static constexpr int SM120_WMMA_N = 16;
 static constexpr int SM120_WMMA_K = 16;
