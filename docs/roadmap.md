@@ -22,11 +22,13 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 The genuinely-open levers (most of the 06-12 campaign closed everything else — see "Investigated and shelved"):
 
-- **pp4096 NVFP4 prefill, ~1.19-1.25× behind vLLM** -- the lone remaining competitive gap. FA2 is
-  instruction-mix-bound near its practical ceiling; the bounded levers (Cross-Tile pipeline, Grouped-GEMM
-  tile axis, chunk-4096, occupancy/2-CTA, fp8-QK) are all empirically refuted. The only surviving idea is
-  **scaled fp8-KV storage with f16 compute** (vLLM's actual win — halves KV traffic, 2× QK density via
-  `m16n8k32`), not the refuted raw-e4m3 path. Multi-day, well-scoped.
+- **NVFP4 prefill vs vLLM — mostly closed by #687.** Making FP16-QK FA2 the primary hd=128 prefill
+  (re-measured 2026-06-13, commit `290a163a`) lifted pp4096 +21–24%: **MoE pp4096 is now +4% ahead of
+  vLLM**, MoE pp2048 +27%, dense pp2048 ~tie. The **lone surviving gap is dense pp4096 at ~1.04×**
+  (24.2k vs 25.3k). FA2 is instruction-mix-bound near its practical ceiling and the bounded kernel levers
+  (Cross-Tile pipeline, Grouped-GEMM tile axis, chunk-4096, occupancy/2-CTA, fp8-QK) are all refuted;
+  the only surviving idea for the last ~4% is **scaled fp8-KV storage with f16 compute** (halves KV
+  traffic, 2× QK density via `m16n8k32`). Marginal — the competitive case is essentially won.
 
 - **kv-fp8 storage default-on** -- SHIPPED for Qwen3 dense + Qwen3 MoE. `kv_cache.dtype` now defaults to
   `auto`, which honors a model author's `kv_cache_quant_algo=FP8` hint for arch families that pass the
