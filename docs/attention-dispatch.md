@@ -49,7 +49,7 @@ Tried in order, first hit wins:
 5. **`flash_attention_blackwell`** — WMMA 128×64 tiles, last tier. Declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in).
 6. **Chain exhausted → `std::runtime_error`** (#654). The old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10); tc also lacks `q_offset`, so chunked continuations would mask wrongly even when it launches. Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim — both error loudly now.
 
-The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) live in `docs/archive/` with resurrection memos.
+The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) are summarized in [`archive/README.md`](archive/README.md); their full source is in git history.
 
 ### Chunked prefill carve-out (default for most archs)
 
@@ -74,7 +74,7 @@ When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest 
 
 ## Sliding-window mask
 
-cuBLAS path uses `attention_cublas_prefill`'s `sliding_window` parameter (Gemma-4 SWA layers). FMHA path uses `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it). Naive FP32 SWA path is archived (`docs/archive/attention_naive/`).
+cuBLAS path uses `attention_cublas_prefill`'s `sliding_window` parameter (Gemma-4 SWA layers). FMHA path uses `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it). Naive FP32 SWA path is archived (see [`archive/README.md`](archive/README.md); source in git history).
 
 ## Soft-cap (logit cap)
 

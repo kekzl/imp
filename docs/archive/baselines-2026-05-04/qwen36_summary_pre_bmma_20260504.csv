@@ -1,2 +1,0 @@
-model,verdict,failure_phase,failure_reason,arch,param_b,weight_gb,phase4_passed,phase4_total,det3_ok,logit_ok,graph_replay_identical,vram_peak_mb
-Qwen3.6-35B-A3B-NVFP4,FAIL,4_or_5,"battery passed 3/4; logit_health_ok=True; det3=True; graph_replay=4/4",Qwen3_5MoeForConditionalGeneration,50.1,25.04,3,4,True,True,4/4,25943
