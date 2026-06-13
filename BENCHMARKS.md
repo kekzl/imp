@@ -89,30 +89,29 @@ On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
 NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no
 native NVFP4 path).
 
-## NVFP4 prefill (post FA2 full-rate accumulate, #673/#674)
+## NVFP4 prefill (post FP16-QK FA2 primary hd=128 prefill, #687)
 
-imp rows: 2026-06-12, commit `bcb7354d`, CUDA 13.3, median of 3 isolated
-trials × 10 reps, fresh container per run, clocks verified healthy. Command:
-`imp-cli --model <dir> --bench --bench-pp <n> --bench-reps 10 --max-tokens 1`.
+imp rows: 2026-06-13, commit `290a163a`, CUDA 13.3, median of 3 isolated
+trials × 40 reps, fresh container per run, clocks verified healthy (warm
+40-rep windows; cross-trial spread <1%). Command:
+`imp-cli --model <dir> --bench --bench-pp <n> --bench-reps 40 --max-tokens 256`.
 vLLM reference: 0.22.1 FlashInfer-NVFP4 (fp8 KV), same host, measured
-2026-06-11 — one day older than the imp rows, so the ratios carry that
-cross-day caveat.
+2026-06-11 — older than the imp rows, so the ratios carry that cross-day caveat.
 
 | Model | pp | imp tok/s | vLLM tok/s (06-11) | verdict |
 |---|---|---:|---:|---|
-| Qwen3-30B-A3B (MoE) | 2048 | **41 668** | 34 500 | **imp +21%** |
-| Qwen3-30B-A3B (MoE) | 4096 | **30 300** | 36 200 | 1.19× behind (was 1.38×) |
-| Qwen3-14B (dense) | 2048 | **25 932** | 26 600 | ~tie (1.03×) |
-| Qwen3-14B (dense) | 4096 | **19 938** | 25 300 | 1.27× behind (was ~1.5×) |
+| Qwen3-30B-A3B (MoE) | 2048 | **43 646** | 34 500 | **imp +27%** |
+| Qwen3-30B-A3B (MoE) | 4096 | **37 639** | 36 200 | **imp +4%** (was 1.19× behind) |
+| Qwen3-14B (dense) | 2048 | **26 918** | 26 600 | ~tie (imp +1.2%) |
+| Qwen3-14B (dense) | 4096 | **24 232** | 25 300 | 1.04× behind (was 1.27×) |
 
-imp wins TTFT/pp512 outright (2.1–3.4×, vLLM has a flat-cost small-M
-regime) and now MoE pp2048 by a clear margin; the remaining pp4096 gap is
-grouped-GEMM/attention mix at long context (FA2 QK^T and PV both run
-full-rate f16-accumulate since #673/#674 — the prior "quartered f32-acc
-class" explanation no longer applies; the FA2 kernel is dependency-chain
-bound, see the 2026-06-12 dead-ends entry). Decode: imp +27–40% (14B
-153–168 vs 121–126; 30B-A3B 291–323 vs 223–233). Nemotron-3-Nano is
-arch-limited (hybrid Mamba2 + attention FP16-projection mix).
+**#687 (FP16-QK FA2 as the primary hd=128 prefill) closed most of the pp4096
+gap:** MoE pp4096 went 30 300 → 37 639 (**+24%**, now *ahead* of vLLM) and dense
+pp4096 19 938 → 24 232 (**+21%**, gap 1.27× → 1.04×). pp2048 moved +3.8–4.7%.
+imp also wins TTFT/pp512 outright (2.1–3.4×, vLLM has a flat-cost small-M regime).
+The lone surviving NVFP4-prefill gap is dense pp4096 at ~1.04×. Decode (tg256
+@ctx2048): 14B 159, 30B-A3B ~317. Nemotron-3-Nano is arch-limited (hybrid
+Mamba2 + attention FP16-projection mix).
 
 ## Output-quality gate
 
