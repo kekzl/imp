@@ -8,9 +8,9 @@ plus the dimensions not covered by the 06-04 audit (perf variance,
 stale/dead, runtime/split).
 
 Phase 0 note: `AGENTS.md` and `AUDIT.md` do not exist in the repo
-(audit sources were CLAUDE.md, DISPATCH.md, docs/TEST_AUDIT.md, CMakeLists,
-Makefile, scripts/verify.sh, tests/refs/README.md). `DISPATCH.md` describes
-the shelved cuTile-FA2 track and does not concern the suite.
+(audit sources were CLAUDE.md, docs/archive/tile-fa2-dispatch-shelved.md,
+docs/TEST_AUDIT.md, CMakeLists, Makefile, scripts/verify.sh, tests/refs/README.md).
+That dispatch log describes the shelved cuTile-FA2 track and does not concern the suite.
 
 Classification (as 06-04): **A** = independent reference (fp64/format spec,
 committed generator, documented tolerance) · **A−** = real reference, but

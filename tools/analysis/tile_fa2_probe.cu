@@ -3,7 +3,7 @@
 // runs correctly on sm_120a vs a CPU softmax-attention reference. NOT integrated
 // into imp — pure viability/correctness prototype (zero degeneration risk).
 //
-// Run via the WSL-driver dev recipe (see DISPATCH.md). Build:
+// Run via the WSL-driver dev recipe (see docs/archive/tile-fa2-dispatch-shelved.md). Build:
 //   nvcc -std=c++20 --enable-tile -arch=sm_120a -o tile_fa2_probe tile_fa2_probe.cu
 #include "cuda_tile.h"
 #include <cuda_fp16.h>

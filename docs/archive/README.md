@@ -29,6 +29,15 @@ live audit memos in [`../audit/`](../audit/).
 | `fmha_mxf4nvf4_sm120/` (`.cu` + `.h`) | FP4 `mxf4nvf4` block-scale FMHA prefill experiment. Not merged — raw e4m3/FP4 score quality cliff on real activations (#511 class). FP4 attention stayed opt-in elsewhere. |
 | `attention_naive/` (`attention_naive.cu` + `.h`) | Naive FP32 reference attention (incl. SWA). Was a correctness oracle; superseded by `flash_attention_blackwell` as the in-tree FP16 reference. |
 
+## `tile-fa2-dispatch-shelved.md` (was root `DISPATCH.md`)
+
+Progress log for the autonomous cuTile-FA2 (CUDA 13.3 Tile / C++) mandate. The
+decisive 2026-05-29 experiment pinned the autotuned cuTile ceiling at ~26.5
+TFLOPS (3.2% of roofline) — far below the hand-written FA2 — so the Tile backend
+was **shelved** (GOAL §4.4 negative branch; see [`../roadmap.md`](../roadmap.md)).
+Kept as a file (not consolidated) because the live `tools/analysis/tile_fa2_probe.cu`
+still points to its WSL-driver dev recipe for any future re-evaluation.
+
 ## `sm120-real-perf-plan_2026-05-04.md`
 
 The original five-lever sm_120 performance plan (RTX 5090). All five levers
