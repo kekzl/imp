@@ -28,9 +28,12 @@ The genuinely-open levers (most of the 06-12 campaign closed everything else —
   **scaled fp8-KV storage with f16 compute** (vLLM's actual win — halves KV traffic, 2× QK density via
   `m16n8k32`), not the refuted raw-e4m3 path. Multi-day, well-scoped.
 
-- **kv-fp8 storage default-on** -- viable opt-in today (−768 MiB VRAM, +0.83% PPL); the −35% MoE tax was
-  diagnosed (deterministic-cuBLAS forcing, not the gather) and removed (#682). Blocked only on building
-  long-context quality gates per model family before honoring `kv_cache_quant_algo=FP8` by default.
+- **kv-fp8 storage default-on** -- SHIPPED for Qwen3 dense + Qwen3 MoE. `kv_cache.dtype` now defaults to
+  `auto`, which honors a model author's `kv_cache_quant_algo=FP8` hint for arch families that pass the
+  long-context quality gate (`kv_fp8_hint_default_safe` — measured on a 3.9k-token context: Qwen3-14B PPL
+  +1.07%, Qwen3-30B-A3B neutral, both coherent; ~768 MiB KV VRAM saved). The −35% MoE tax was removed in
+  #682. **Remaining:** verify the other hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4)
+  and add them to the allowlist; they stay FP16 (or `--kv-fp8` opt-in) until measured.
 
 The two items below are **retained for the record but evidence-refuted**, not active work:
 

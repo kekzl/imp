@@ -4,6 +4,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+
+- **KV cache: `kv_cache.dtype` now defaults to `auto` — honors the model
+  author's `kv_cache_quant_algo=FP8` hint for verified arch families.** Modelopt
+  NVFP4 checkpoints declare `kv_cache_quant_algo=FP8`; imp previously parsed but
+  ignored it (FP16, manual `--kv-fp8` to opt in). `auto` upgrades KV to FP8 E4M3
+  only for arch families that pass a long-context quality gate
+  (`kv_fp8_hint_default_safe`). Allowlisted today: **Qwen3 dense + Qwen3 MoE** —
+  measured on a 3.9k-token context, FP8 vs FP16 KV: Qwen3-14B PPL +1.07%,
+  Qwen3-30B-A3B neutral, both coherent, ~768 MiB KV VRAM saved. Other
+  hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4) stay FP16
+  until verified. `dtype = "fp16"` opts out; `--kv-fp8` forces FP8 on any model.
+  The `auto` resolver also makes config-file `dtype = "fp8"|"int8"|"int4"|…`
+  selections take effect (previously only the CLI flags did).
+
 ### Fixed
 
 - **SPM tokenization: USER_DEFINED pieces now literal-matched — gemma

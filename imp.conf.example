@@ -48,8 +48,11 @@ debug_raw            = false
 no_vision_graph      = false
 
 [kv_cache]
-# KV-cache element type: fp16 | fp8 | int8 | int4 | nvfp4
-dtype                       = "fp16"
+# KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
+# models whose author declares kv_cache_quant_algo=FP8 and whose arch family is
+# verified safe for long-context FP8 KV (currently Qwen3 dense + Qwen3 MoE; ~768
+# MiB saved, +~1% PPL). "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
+dtype                       = "auto"
 # Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
 # but reproducibility is lost.
 allow_nondeterministic_fp8  = false

@@ -94,10 +94,12 @@ Set via `--kv-fp8` / `--kv-int8` / `--kv-int4` / `--kv-nvfp4` / `--kv-mxfp4`, or
 
 ```toml
 [kv_cache]
-dtype = "fp16"  # fp16 (default) | fp8 | int8 | int4 | nvfp4 | mxfp4
+dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 ```
 
-The default flipped to FP16 in PR #51 — FP8 had been silently breaking Llama, Mistral, and DeepSeek at first decode. FP8 is now opt-in; it is verified coherent on Qwen3 dense, Qwen3.5 / 3.6 GDN, Llama-3.2, and Gemma-4 (FP8 KV warmup-calibration bug fixed in PR #89; Gemma-4 dual-head_dim carve-out removed in PR #91).
+`dtype = "auto"` (the default) keeps FP16 but upgrades to FP8 E4M3 for models whose author declares `kv_cache_quant_algo=FP8` (Modelopt NVFP4 checkpoints) **and** whose arch family has passed the long-context FP8-KV quality gate (`kv_fp8_hint_default_safe` in `src/model/model.cpp`). Currently allowlisted: **Qwen3 dense + Qwen3 MoE** — measured on a 3.9k-token context, FP8 vs FP16 KV: Qwen3-14B PPL 13.95→14.10 (+1.07%), Qwen3-30B-A3B ~16.20→~15.99 (neutral), both coherent, ~768 MiB KV VRAM saved. Other hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4) stay FP16 until measured; pass `--kv-fp8` to force, or `dtype = "fp16"` to opt out.
+
+The default flipped to FP16 in PR #51 — FP8 had been silently breaking Llama, Mistral, and DeepSeek at first decode. Beyond the `auto` allowlist, FP8 stays opt-in; it is verified coherent on Qwen3 dense, Qwen3.5 / 3.6 GDN, Llama-3.2, and Gemma-4 (FP8 KV warmup-calibration bug fixed in PR #89; Gemma-4 dual-head_dim carve-out removed in PR #91).
 
 INT4 KV is for VRAM-pressure cases only — coherent but ~22% decode regression at 20K context. NVFP4-KV (`--kv-nvfp4`) and MXFP4-KV (`--kv-mxfp4`, PR #249) both store FP4 at 25% of FP16 — NVFP4 uses E4M3 micro-scales, MXFP4 uses UE8M0; both ship chunked prefill via `paged_kv_gather_*_to_fp16`. The legacy `--kv-turboquant{,-lite}` flags remain as deprecated aliases routing to `--kv-mxfp4` (TurboQuant retired in PR #251).
 

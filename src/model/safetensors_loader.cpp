@@ -1145,9 +1145,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                      nvfp4_cfg.group_size);
         if (!cfg.kv_cache_quant_hint.empty()) {
             IMP_LOG_INFO(
-                "Model author declared kv_cache_quant_algo=%s; imp keeps the "
-                "engine's KV-cache dtype default (FP16). Pass --kv-fp8 to honor "
-                "the author's hint (correctness varies by family — see docs).",
+                "Model author declared kv_cache_quant_algo=%s; with kv_cache.dtype=auto "
+                "(default) imp honors it for arch families verified safe for long-context "
+                "FP8 KV, else keeps FP16. Force with --kv-fp8 or opt out with kv_cache.dtype=fp16.",
                 cfg.kv_cache_quant_hint.c_str());
         }
     }
