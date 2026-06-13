@@ -20,6 +20,20 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 ## Open performance work
 
+The genuinely-open levers (most of the 06-12 campaign closed everything else — see "Investigated and shelved"):
+
+- **pp4096 NVFP4 prefill, ~1.19-1.25× behind vLLM** -- the lone remaining competitive gap. FA2 is
+  instruction-mix-bound near its practical ceiling; the bounded levers (Cross-Tile pipeline, Grouped-GEMM
+  tile axis, chunk-4096, occupancy/2-CTA, fp8-QK) are all empirically refuted. The only surviving idea is
+  **scaled fp8-KV storage with f16 compute** (vLLM's actual win — halves KV traffic, 2× QK density via
+  `m16n8k32`), not the refuted raw-e4m3 path. Multi-day, well-scoped.
+
+- **kv-fp8 storage default-on** -- viable opt-in today (−768 MiB VRAM, +0.83% PPL); the −35% MoE tax was
+  diagnosed (deterministic-cuBLAS forcing, not the gather) and removed (#682). Blocked only on building
+  long-context quality gates per model family before honoring `kv_cache_quant_algo=FP8` by default.
+
+The two items below are **retained for the record but evidence-refuted**, not active work:
+
 - **Q4_K_M prefill gap** (-38% vs llama.cpp) -- the in-SMEM Q4_K MMQ + FP16 HMMA approach is now **evidence-refuted**: the `feat/q4k-mmq-hmma` forge experiment built exactly this kernel and ncu-proved it's decode-throughput-bound, *tying* (not beating) cuBLAS — and the gap is vs llama.cpp beating cuBLAS, so closing it needs to beat cuBLAS (decode-tax-blocked) or pay 2× weight VRAM via pre-shuffle (rejected). The biggest gaps are also MoE-expert (small-M) which a dense tile kernel doesn't touch. See the "Evidence from the forge experiment" section in [`specs/2026-05-28-q4k-mmq-kernel-design.md`](superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md). Practical resolution: recommend NVFP4 SafeTensors for fast Q4_K-class prefill.
 
 - **Sawtooth Wavefront Reordering** (PR #456) -- alternate KV scan direction per Q tile for L2 locality. **MEASURED 2026-05-29 — no realized benefit, REFUTED.** (1) It lives ONLY in `flash_attention_blackwell` (the WMMA *fallback*), not in the cuBLAS / FP8-FMHA / FA2 paths (the "both FMHA kernels" claim was wrong). (2) That kernel is **unreachable on the NVFP4 prefill hot path**: prefill routes to `attention_cublas_prefill` (≈30% faster than FMHA per the in-tree note), and the per-attention-call seq stays under the auto `fmha_prefill_threshold` (~cap+1) — blackwell only runs if you force `threshold=1` + `fp8_fmha=never` + `fmha_sm120=never`. (3) Even force-routed, A/B is flat-to-slightly-negative (pp8192 13.10k ON vs 13.14k OFF; pp16384 12.45k vs 12.49k; ON ~0.3% slower, within noise). Left in place (harmless, 32k+ untested due to OOM on single-chunk 14B). A/B harness: `tools/analysis/sawtooth_ab.sh`. Memory: `sawtooth_reordering_refuted_2026_05_29`.

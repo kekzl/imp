@@ -7,53 +7,48 @@
 
 ## RESUME HERE (always current)
 
-**Session:** 2026-05-29. Work lands via PRs off main (branch then `gh pr create --base main`).
-**Phase:** Optimization loop, iterations 1-3 complete. LEAD-1 (#465) + LEAD-2 (#469) MERGED to main.
-**Build:** main green (commit 33b39d0) w/ both wins. Full scoreboard + measured llama.cpp (below).
-**On resume:** re-read this journal + `competitive_ground_truth_2026_05_29` memory. Rebuild
-`make build`. Re-run `scripts/scoreboard.sh` if trusting absolute numbers. Then pick from NEXT.
+**Session:** 2026-06-13. Work lands via PRs off main (branch then `gh pr create --base main`).
+**Phase:** Post-NVFP4-limit campaign. main green at `0b4ed9d1` (PR #700). The 05-30 → 06-13 arc
+(40+ PRs) was logged in `CHANGELOG.md` + PR descriptions, not in this journal — see the catch-up
+entry at the bottom of the Log for the strategic summary.
+**On resume:** read this block + `CHANGELOG.md [Unreleased]` + the `perf_baselines_detail_2026_06_11`
+memory. Rebuild `make build`. Trust `tests/perf_baseline.json` + `BENCHMARKS.md` for numbers
+(SHA-anchored); decode is the A/B signal (prefill 2.6× restart variance, host days ±8-15%).
 NOTE: force-push + `git reset --hard` are BLOCKED in this env — land via fresh branch + merge,
 not rebase+force. Profile MoE decode at **pp512** not pp128 (split-K only engages at ctx≥512).
 
-**LANDED this session (both MERGED to main, CI green):**
-- **LEAD-1 (#465): NVFP4 decode cache for FP16/BF16 lm_head.** Dense NVFP4 decode +8-16%
-  (Qwen3-8B 240→277, Qwen3-14B 148→166, Phi-4 +8%). Beats GGUF same-model; crushes llama.cpp.
-- **LEAD-2 (#469): fast per-expert NVFP4 MoE decode (zero-copy data borrow).** +52-84% MoE/hybrid:
-  Qwen3-30B-A3B 171→307, Coder-30B 171→308, Gemma-4-26B 160→258 (beats llama +22%),
-  Qwen3.6-35B hybrid 150→228 (matches llama 229; was −31%). Greedy token-identical to CUTLASS.
-- **Net: imp NVFP4 decode is now best-or-tied vs llama.cpp on EVERY measured dense+MoE+hybrid model.**
+**WHERE THINGS STAND (NVFP4 = the priority path):** imp wins dense + MoE decode best-in-class
+vs llama.cpp AND vLLM, wins TTFT everywhere, and wins MoE pp2048 vs vLLM. The whole prior
+cross-engine PPL gap turned out to be tokenization, now closed for 4 families (#657, byte-identical
+to HF). Decode sits at the HBM roofline; FA2 prefill is instruction-mix-bound near its practical
+ceiling. The **single remaining competitive gap is pp4096 NVFP4 prefill ~1.19-1.25× behind vLLM**,
+and every *bounded* lever for it was empirically closed in the 06-12 campaign.
 
-**NEXT (priority order) — remaining gaps are harder (kernel-level):**
-1. **GGUF prefill 1.3-2.4× behind llama.cpp** (Qwen3-8B Q8_0 7971 vs 14068; Gemma/MoE Q4_K_M ~2.4×).
-   dequant→cuBLAS vs llama MMQ. Biggest consistent gap. Needs a custom quantized-matmul (MMQ)
-   prefill kernel — multi-day. NOTE: NVFP4 prefill (imp 16-24k) already crushes llama GGUF, so this
-   only matters for users on GGUF. Forge raw-HMMA Q4_K/Q6_K branch exists (feat/q4k-mmq-hmma).
-2. **MoE/hybrid GGUF decode** (Qwen3-30B Q4_K_M 276 vs llama 317; −13%). dp4a path; profile at pp512.
-3. **Stand up vLLM NVFP4** on this machine to confirm imp's NVFP4 prefill/decode lead is real
-   (research says vLLM MoE-NVFP4 broken on sm_120, dense-NVFP4 works — measure it).
-4. **Spec-decode / EAGLE / MTP** (1.5-4× batch=1) — biggest ceiling, multi-week, parked at 196 tok/s.
-5. **Completeness pass** (mission §6): Gemma-3-12B Q4_K_M degeneration (bogus bench), server
-   continuous-batching stability, OOM/malformed-input handling, both API dialects under load.
+**OPEN WORK (most big levers are refuted — see roadmap "Investigated and shelved"):**
+1. **pp4096 NVFP4 prefill ~1.19-1.25× vs vLLM.** Cross-Tile (+9/+15% refuted), Grouped-GEMM tile
+   axis, chunk-4096, and fp8-QK (format-intrinsic, #511/#681) are all closed. Only surviving idea:
+   scaled fp8-KV storage with f16 compute (vLLM's actual win) — see #2.
+2. **kv-fp8 storage default-on.** −768 MiB VRAM, +0.83% PPL, the −35% MoE tax was diagnosed and
+   removed (#682). Blocked on building long-context quality gates per model family before honoring
+   `kv_cache_quant_algo=FP8` by default.
+3. **GGUF-only gaps (deprioritized — recommend NVFP4):** Q4_K_M prefill MMQ (evidence-refuted, see
+   roadmap), MoE/hybrid GGUF decode (dp4a, ~−13%).
+4. **Open model bugs:** Qwen3.5-27B MXFP4 IMA (blocked on public MXFP4 + a NaN bug); Gemma-4 Q4_K_M
+   gen drift (model-intrinsic — use Q5_K_M/Q8_0). gpt-oss GGUF MoE NaN is FIXED (#690).
+5. **Small cleanups:** ms_ref loader slab (last VRAM-audit item); spec-decode default-on needs an
+   engagement heuristic (opt-in tg128 −15% on short / draft-poor prompts).
 
-**GPU at start:** RTX 5090, 29°C idle. Host nsys works (recipe in memory nsys-host-to-container;
-use `--no-cuda-graphs` imp flag + `--trace=cuda`, --user root, /tmp/nsys_out chmod 777).
+**GPU:** RTX 5090, 32607 MiB, water-cooled (never warm — no cooldown waits between benches). Host
+`nvidia-smi` + host nsys work (WSL2; nsys recipe in memory nsys-host-to-container, `--no-cuda-graphs`
++ `--trace=cuda`, --user root, /tmp/nsys_out chmod 777). Healthy load = ~2850 MHz SM / 13801 MHz mem
+/ ~500 W — sample DURING the bench before trusting a cross-day decode delta. Warm clocks >1s before
+timed reps (built-in `Warmup...` is too few iters); nsys with CUDA Graphs ON hides captured kernels.
 
-**Next actions:**
-1. ✅ Build green, tests green, scoreboard measured (see below). llama.cpp bench bg-agent running.
-2. **IN PROGRESS — LEAD-1 fix (NVFP4 lm_head decode cache):** native-NVFP4 checkpoints store
-   `lm_head.weight` BF16 → decode pays a cuBLAS FP16 GEMV. PROFILE CONFIRMS: 19.3% of decode
-   GPU time, 0.78 ms/token (Qwen3-8B NVFP4). Fix = quantize BF16 lm_head → NVFP4, register in
-   `wcache_.nvfp4[output_proj.data]` (forward_logits `lm_nvfp4_secondary` hook already reads it).
-   Predicted: Qwen3-8B NVFP4 decode 239 → ~279 (would beat Q8_0 274). Quality-safe: GGUF Q8_0
-   already NVFP4-quantizes output_proj and passes. Reading phase-3 quantize path to implement.
-3. After LEAD-1: profile LEAD-2 (NVFP4 MoE decode 170 vs Q4_K_M 276) → biggest gap.
-4. Update scoreboard with measured llama.cpp; find next-biggest gap.
-
-**Key facts verified this session:**
-- GPU: RTX 5090 32607 MiB, host `nvidia-smi` works (WSL2).
-- Models present: see Inventory below.
-- Canonical perf gate: `tests/perf_baseline.json` (Qwen3-8B Q8_0: pp512=7736, tg128=276.59, 3%/5% thresholds).
-- North-star: Qwen3-14B Q6_K decode @ctx2048 = 157.71 tok/s (May 23, cold-median).
+**Canonical references (not this journal — it lagged the 06-xx campaign):**
+- Perf gate: `tests/perf_baseline.json` (3% decode / 5% prefill). Reproducible numbers (SHA-anchored):
+  `BENCHMARKS.md`. User-visible changes: `CHANGELOG.md`. Current focus: `docs/roadmap.md`.
+- Detailed campaign index lives in the agent's private memory (`perf_baselines_detail_2026_06_11` et al.).
+- North-star: Qwen3-14B Q6_K decode @ctx2048 = 157.71 tok/s.
 
 ---
 
@@ -416,3 +411,31 @@ Picked up the iter8b lever: rewrite the smem-materializing fp8 FMHA into a true 
 - **Roadmap (13.3 tooling):** CUDA Tile **for C++** shipped (`cuda_tile.h` confirmed in-toolkit) — gated
   on the sm_120 perf question (Yadav et al.: cuTile = 0.53× FA2 on sm_120); CompileIQ auto-tuner (~15%
   on optimized kernels) queued as last-mile pass on the FA2 kernel. Both in `docs/roadmap.md`.
+
+### 2026-06-13 — Catch-up: the 05-30 → 06-13 arc (40+ PRs, detail in CHANGELOG/PRs)
+
+The per-iteration log above stops at 2026-05-29. The campaign continued through ~PR #700 but was
+tracked in `CHANGELOG.md`, PR descriptions, and the agent's private memory rather than here. Strategic
+summary so this journal isn't misleading on resume:
+
+- **Cross-engine quality gap was tokenization, not numerics (#657).** Faithful Qwen2 / o200k / SPM /
+  cl100k pre-tokenizers made 4 families byte-identical to HF; matched-band NLL gaps collapsed to ≤1.3%.
+  This reframed several "quality" suspicions as canonicalization, not kernel error.
+- **NVFP4-limit campaign (06-11/06-12).** prefill_chunk default 512→2048 (MoE pp2048 +127%); FA2
+  PV/QK f16-acc default-on (#673/#674); FA2 became the primary hd=128 prefill, reclaiming ~380 MiB
+  (#687). pp4096 was driven to the structural wall: every bounded lever (Cross-Tile, Grouped-GEMM
+  tile axis, chunk-4096, occupancy/2-CTA, fp8-QK) was empirically refuted. fp8-QK is format-intrinsic
+  infeasible (e4m3 3-mantissa-bit compounding); reframed vLLM's fp8 win as fp8-KV *storage*, and the
+  −35% kv-fp8 MoE tax was diagnosed (deterministic-cuBLAS forcing, not the gather) and removed (#682).
+- **VRAM audit.** Net multi-GiB reclamation on NVFP4 (#678/#679/#686/#687/#689) via fallback-buffer
+  gating, SF dedup, and a contiguous per-(layer,proj) micro-scale slab. Last open item: ms_ref loader slab.
+- **Speculative decode (n-gram prompt-lookup) shipped opt-in** (#668-#670; CLI +6.6%, server +5.4%).
+  Graph-captured verify root-caused: a conditional-loop off-by-one wrote KV one slot high (#683 → #692).
+  Spec stays opt-in: tg128 −15% on short / draft-poor prompts; default-on needs an engagement heuristic.
+- **gpt-oss:** SafeTensors PPL is model-intrinsic (#663 closed); GGUF MXFP4→NVFP4 MoE support landed (#690).
+- **Housekeeping:** dead-path removals (sm_90 WMMA, Hopper FMHA include), arch-comment fixes, baseline
+  refresh + roofline pins, and `imp.conf.example`/parser reconciliation (#693-#700).
+
+Net competitive position: NVFP4 decode + TTFT + MoE-pp2048 are won vs llama.cpp and vLLM; the lone
+open gap is pp4096 NVFP4 prefill (~1.19-1.25× vs vLLM), now bounded-lever-exhausted. See the RESUME
+block's OPEN WORK list for what's actually actionable next.
