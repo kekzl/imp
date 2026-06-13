@@ -127,7 +127,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 
 ## Publishing numbers (keep docs from going stale)
 
-- **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. Current Q8 `tg128≈286` was sampled on a **peak day** (normal healthy range 266–278) — a small gate failure on an ordinary day can be host drift against a hot baseline, not a regression; sample clocks before concluding.
+- **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. Current Q8 `tg128 = 269.50` (cold-median, 2026-06-12; normal healthy range 266–278). The previous 286.4 baseline (2026-06-07) was sampled on a documented **peak day** — its 3% gate threshold (277.8) sat INSIDE the normal range, so it failed on ordinary days; it was corrected down in #697. A small gate failure can be host drift, not a regression; sample clocks before concluding.
 - **`BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
 - `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
