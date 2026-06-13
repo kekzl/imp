@@ -855,8 +855,22 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
             req->status = imp::RequestStatus::DECODING;
         }
 
+        // Drain unconsumed tokens BEFORE the finished check — a multi-token
+        // step (spec-ngram verify chunk) can emit several tokens AND finish
+        // the request in the same engine step; returning the error here would
+        // drop the queued tail (#683: CLI output ended mid-chunk).
+        if (ctx->consumed_output < req->output_tokens.size()) {
+            *out_token = req->output_tokens[ctx->consumed_output++];
+            if (req->status == imp::RequestStatus::FINISHED &&
+                ctx->consumed_output >= req->output_tokens.size()) {
+                ctx->active_request = nullptr;
+            }
+            return IMP_SUCCESS;
+        }
+
         // Check if already finished
         if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED) {
+            ctx->active_request = nullptr;
             return IMP_ERROR_INTERNAL;
         }
 
@@ -867,37 +881,31 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
         req->json_mode = (params->json_mode != 0);
 
-        // Self-speculative (and future multi-token) steps may produce
-        // multiple tokens per engine->step().  Track how many have been
-        // consumed so we only call step() when all previous tokens are
-        // returned to the caller.
-        if (ctx->consumed_output < req->output_tokens.size()) {
-            // Still have unconsumed tokens from a previous multi-token step
-            *out_token = req->output_tokens[ctx->consumed_output++];
-        } else {
-            // Need a new engine step. A step may legitimately yield ZERO new
-            // tokens when it only launches an async graph-loop burst (n-gram
-            // speculation miss path) — the burst's tokens arrive on the next
-            // step's drain. Retry a bounded number of times; a persistent
-            // zero-token stream is still an internal error.
-            size_t prev_output_size = req->output_tokens.size();
-            for (int attempts = 0;
-                 attempts < 8 && req->output_tokens.size() == prev_output_size &&
-                 req->status == imp::RequestStatus::DECODING;
-                 ++attempts) {
-                (void)ctx->engine->step();
-            }
-
-            if (req->output_tokens.size() > prev_output_size) {
-                ctx->consumed_output = prev_output_size;
-                *out_token = req->output_tokens[ctx->consumed_output++];
-            } else {
-                return IMP_ERROR_INTERNAL;
-            }
+        // Need a new engine step (the multi-token drain above returned any
+        // leftovers). A step may legitimately yield ZERO new tokens when it
+        // only launches an async graph-loop burst (n-gram speculation miss
+        // path) — the burst's tokens arrive on the next step's drain. Retry a
+        // bounded number of times; a persistent zero-token stream is still an
+        // internal error.
+        size_t prev_output_size = req->output_tokens.size();
+        for (int attempts = 0;
+             attempts < 8 && req->output_tokens.size() == prev_output_size &&
+             req->status == imp::RequestStatus::DECODING;
+             ++attempts) {
+            (void)ctx->engine->step();
         }
 
-        // If the request finished (eos or max_tokens), clean up
-        if (req->status == imp::RequestStatus::FINISHED) {
+        if (req->output_tokens.size() <= prev_output_size) {
+            return IMP_ERROR_INTERNAL;
+        }
+        ctx->consumed_output = prev_output_size;
+        *out_token = req->output_tokens[ctx->consumed_output++];
+
+        // If the request finished (eos or max_tokens), clean up — but only
+        // once every queued token has been handed to the caller (a verify
+        // chunk can emit several tokens and finish in one step).
+        if (req->status == imp::RequestStatus::FINISHED &&
+            ctx->consumed_output >= req->output_tokens.size()) {
             // KV cache is already freed by engine step() on FINISHED
             ctx->active_request = nullptr;
         }

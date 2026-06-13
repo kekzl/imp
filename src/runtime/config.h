@@ -451,11 +451,12 @@ struct RuntimeConfig {
         // 0 = stay eager between drafts (legacy behavior).
         int miss_burst = 8;
         // Reuse the parked captured graph across bursts (rearm instead of
-        // recapture, ~10-20 ms saved per burst). DISABLED by default: the
-        // rearmed burst's first forward emits a deterministic wrong token
-        // (#683 — behaves as if the previous burst's last KV entries are
-        // invisible). Re-enable for debugging the root cause only.
-        bool burst_rearm = false;
+        // recapture, ~10-20 ms saved per burst). The #683 wrong-token
+        // artifact was NOT the rearm itself but the fresh-captured loop
+        // initializing position/context one too high (fixed in
+        // CudaGraphConditionalRunner::setup) — rearm and fresh capture now
+        // share the same first-forward semantics.
+        bool burst_rearm = true;
     } speculative;
 
     struct FFN {

@@ -743,8 +743,14 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
     // ---- Initialize device state ----
     {
-        int init_pos = config_.initial_position + 1;     // next position after prefill
-        int init_ctx = config_.initial_context_len + 1;  // context grows by 1
+        // Same semantics as the eager decode step and rearm(): the loop's
+        // first forward processes first_token at slot initial_position with
+        // the context window covering it (#683 — the former +1 here shifted
+        // every fresh-captured loop's KV writes and RoPE one slot too high;
+        // the next correct-positioned writer, e.g. the spec-ngram verify
+        // chunk, then overwrote the burst's last KV entry).
+        int init_pos = config_.initial_position;
+        int init_ctx = config_.initial_context_len;
         int init_step = 0;
         *h_step_counter_ = 0;
         memset(h_ring_buffer_, 0, config_.max_steps * sizeof(int32_t));

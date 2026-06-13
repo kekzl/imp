@@ -333,6 +333,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;
     if (!check(cudaStreamSynchronize(stream), "verify sync")) return false;
 
+    if (getenv("IMP_SPEC_TRACE")) {
+        std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
+                        " draft=[";
+        for (int j = 0; j < K; ++j) s += std::to_string(draft[j]) + (j + 1 < K ? "," : "");
+        s += "] argmax=[";
+        for (int j = 0; j < chunk_len; ++j)
+            s += std::to_string(h_spec_argmax_[j]) + (j + 1 < chunk_len ? "," : "");
+        s += "]";
+        IMP_LOG_INFO("%s", s.c_str());
+    }
+
     // Accept the longest matching prefix and emit tokens through the same
     // per-token bookkeeping as the eager decode path.
     int matched = 0;  // accepted draft tokens (their KV entries are valid)
