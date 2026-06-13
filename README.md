@@ -75,7 +75,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 - **MoE/hybrid GGUF decode loses on Qwen3.6-35B** (~−31% vs llama.cpp): an FP16-projection tax on the GDN/attention path that NVFP4 can't address.
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
-- **Single-author, experimental.** Don't deploy this anywhere it matters.
+- **Single-author, experimental.** A fast prototype, not production-hardened — run it for what it's good at (single-user inference on a 5090), not mission-critical serving.
 
 ## Quickstart
 
