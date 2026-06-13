@@ -97,10 +97,8 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor K(d_k, QType::F16, 4, kv_shape, true);
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
-        if (sm >= 120)
-            ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream));
-        else
-            flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+        ASSERT_GE(sm, 120) << "imp targets sm_120 only";
+        ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream));
     }
 
     cudaStreamSynchronize(stream);

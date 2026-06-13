@@ -162,7 +162,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_nvfp4.cu
     src/compute/attention_paged_nvfp4_tc.cu
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
-    src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
     src/compute/attention_dispatch.cu
@@ -508,7 +507,6 @@ if(IMP_BUILD_TESTS)
     )
 
     imp_add_test_module(test-attention SOURCES
-        tests/test_attention_tc.cu
         tests/test_attention_fmha_sm120.cu
         tests/test_attention_crosspath.cu
         tests/test_gpt_oss_sinks_ref.cu

@@ -198,7 +198,7 @@
   {
    "name": "attn_wmma_fallback",
    "group": "attention",
-   "regex": "flash_attention_blackwell_kernel|flash_attention_prefill_tc_kernel"
+   "regex": "flash_attention_blackwell_kernel"
   },
   {
    "name": "attn_legacy_softmax",
