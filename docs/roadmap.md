@@ -98,7 +98,12 @@ any future codegen-bound kernel. Memory: `compileiq_ptxas_native_refuted_2026_05
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
 - **Blackwell only.** No Hopper, Ada, Ampere. No AMD, Intel, Apple, CPU.
-- **Gemma-4 Q4_K_M code-gen drift** -- accumulated FP16 rounding. Use Q5_K_M or Q8_0.
+- **Gemma-4 Q4_K_M code-gen drift** -- the original `gemma-4-26B-A4B-it-Q4_K_M.gguf` degenerated into
+  backtick loops on code prompts at temp=0 (Q8_0 stayed clean). **No longer reproduces (verified
+  2026-06-13):** the current local `UD-Q4_K_M` produces coherent valid Python on the same prompt.
+  Likely closed by intervening work (tokenizer #657, gemma SWA prefill routing #566/#569) and/or the
+  better Unsloth-dynamic quant; the original file is gone, so it can't be A/B'd. If you hit
+  degeneration on some other Q4_K_M quant of this model, fall back to Q5_K_M or Q8_0.
 - **Qwen3.5-27B MXFP4 fails at load** -- blocked on no public MXFP4 GGUF + NaN bug.
 
 ## Investigated and shelved

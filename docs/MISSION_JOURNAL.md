@@ -33,8 +33,9 @@ and every *bounded* lever for it was empirically closed in the 06-12 campaign.
    `kv_cache_quant_algo=FP8` by default.
 3. **GGUF-only gaps (deprioritized — recommend NVFP4):** Q4_K_M prefill MMQ (evidence-refuted, see
    roadmap), MoE/hybrid GGUF decode (dp4a, ~−13%).
-4. **Open model bugs:** Qwen3.5-27B MXFP4 IMA (blocked on public MXFP4 + a NaN bug); Gemma-4 Q4_K_M
-   gen drift (model-intrinsic — use Q5_K_M/Q8_0). gpt-oss GGUF MoE NaN is FIXED (#690).
+4. **Open model bugs:** Qwen3.5-27B/4B MXFP4 (blocked — community files never verified in any engine,
+   27B not even local); Qwen3.6-27B-VL NVFP4 (wontfix — ~30 GB OOMs a 32 GB card). gpt-oss GGUF MoE
+   NaN FIXED (#690); Gemma-4 Q4_K_M code-gen drift no longer reproduces (verified 06-13, see roadmap).
 5. **Small cleanups:** ms_ref loader slab (last VRAM-audit item); spec-decode default-on needs an
    engagement heuristic (opt-in tg128 −15% on short / draft-poor prompts).
 
