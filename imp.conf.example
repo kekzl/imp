@@ -217,8 +217,6 @@ q4k_imma_prefill     = false
 [generation]
 no_logit_softcap     = false
 lm_dequant_fp16      = false
-# Max tokens spent in <think>...</think> blocks (0 = unlimited).
-think_budget         = 0
 # Force-prepend BOS token even when the tokenizer says no.
 force_bos            = false
 # Disable the banned-token list (debug).

@@ -385,7 +385,6 @@ struct RuntimeConfig {
     struct Generation {
         bool no_logit_softcap = false;
         bool lm_dequant_fp16 = false;
-        int think_budget = 0;
         bool force_bos = false;
         // Disable banned-token list (debug). Legacy env: IMP_NO_BAN.
         bool no_ban = false;
