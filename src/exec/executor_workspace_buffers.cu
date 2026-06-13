@@ -271,7 +271,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
     } else {
-        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
+        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using tiled WMMA FMHA fallback)");
     }
 
     // Auto-derive fmha_prefill_threshold from S-matrix capacity. This only
