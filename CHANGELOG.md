@@ -4,6 +4,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+
+- **N-gram prompt-lookup speculative decoding** (#668–#670, opt-in). Draft tokens
+  are matched from the prompt/context suffix and verified in a burst-hybrid loop;
+  output stays token-identical to plain greedy. `--set speculative.ngram=true`
+  (knobs: `k`, `min_match` default 6 — precision beats frequency, `give_up_after`,
+  `burst`). CLI ~+6% on long generations; opt-in because draft-poor workloads
+  regress. Server-enabled (penalties in verify, think-budget bursts).
+- **gpt-oss-20b GGUF MoE** (#690) — full GGUF path: MXFP4→NVFP4 expert conversion,
+  expert biases, attention sinks, sliding-window attention, residual rescale. The
+  GGUF checkpoint previously NaN'd in MoE prefill; SafeTensors gpt-oss already
+  worked.
+- **`IMP_PPL_DUMP=full`** dumps per-position NLL for cross-engine perplexity
+  forensics (#655).
+
 ### Changed
 
 - **KV cache: `kv_cache.dtype` now defaults to `auto` — honors the model
@@ -18,6 +33,33 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   until verified. `dtype = "fp16"` opts out; `--kv-fp8` forces FP8 on any model.
   The `auto` resolver also makes config-file `dtype = "fp8"|"int8"|"int4"|…`
   selections take effect (previously only the CLI flags did).
+
+### Performance
+
+- **Prefill chunk size default 512 → 2048** (#672) — MoE pp2048 **+127%**
+  (Qwen3-30B-A3B 15.7k→35.7k tok/s), pp4096 +77%; activation-quant dedupe is
+  bit-identical. Also fixed a grouped device-args GEMM silent corruption at n≈900.
+- **FP16-QK FA2 is now the primary hd=128 prefill** (#687) — at-or-above cuBLAS at
+  every pp (pp1024 +24%, pp2048 +52%), so the S-matrix buffer is skipped for
+  hd=128: **−380 MiB** device memory. Re-benched 2026-06-13: MoE pp4096 now +4%
+  ahead of vLLM, dense pp4096 ~1.04× (was 1.27×).
+- **FA2 full-rate accumulate default-on** (#673/#674) — f16-accumulate QK^T and PV
+  in the FP16-QK FA2 prefill kernel: −18% pp4096 kernel time, MoE e2e +9.7%, PPL
+  unchanged.
+- **Conditional-graph decode loop for NVFP4 "think" models** (#649) — **+45%**
+  think-decode by keeping the reasoning loop inside one captured graph.
+- **Pipelined constrained decoding** (#650/#651) — schema-mask fast path +
+  forward-N+1 pipeline: `json_schema` decode **102 → 235 tok/s**.
+- **FP8-KV deterministic-cuBLAS forcing scoped to non-FA2 configs** (#682) — removes
+  a −35% pp4096 MoE tax on `--kv-fp8` (it was an April-era forcing of the
+  single-block deterministic MoE permute, not the gather).
+- **VRAM reclamation on NVFP4** — fallback-only workspace buffers skipped on
+  SafeTensors (#678, +827 MiB free), duplicated per-expert micro-scales freed
+  (#679, −1728 MiB on 30B-A3B), CUTLASS scale-factor dedup (#685/#686, −1810 MiB on
+  NVFP4-prequant), contiguous per-(layer,proj) micro-scale slab (#689).
+- **FA2 grid-underfill band** — TWOSLOT K/V rotation runs 2 CTAs/SM at full Bkv=64
+  (#653); Bkv=32 variant for the same band (#597). 16-B vectorized x/gate/up loads
+  in the NVFP4 GEMV dot helpers (#671).
 
 ### Fixed
 
@@ -75,6 +117,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   Qwen3-8B pp4096 +6.9% (the tuned f16-QK FA2 replaces fp8-QK in the
   unchunked chain). Follow-ups: #654 (broken `flash_attention_blackwell`
   last-resort), #655 (IMP_PPL_DUMP position mapping).
+
+- **Speculative-decode conditional-graph loop wrote KV one slot too high**
+  (#683 → #692). `CudaGraphConditionalRunner::setup()` double-incremented the
+  first-forward position, so every fresh-captured verify loop duplicated the
+  last burst KV entry (wrong first token on rearm). Root-caused to the
+  position off-by-one (not the rearm fast path, which #684 had disabled as a
+  stopgap and is now default-on again). Byte-perfect across mb=8/4/0, server
+  API, and Q8 / NVFP4-dense / NVFP4-MoE. Also drains the multi-token verify
+  tail when a request finishes mid-chunk.
+- **`attn_logit_softcap` was silently dropped on the cuBLAS FP32-S prefill
+  path** (#688) — Gemma-2-class hd=256 prefill skipped the cap. Fixed via a
+  `softcap_fp32_kernel`; FA2/decode/KV-write paths were already correct.
+- **`gemm_kv_batched` output stride** is now derived from the actual K/V
+  pointer distance (#677/#691), fixing a Q4_0 determinism mismatch plus a
+  cross-block WAR hazard in the fused FP32→FP16 softmax downcast.
+- **Constrained decoding SIGBUS** on SafeTensors `json_mode` + raw control
+  characters in constrained strings (#650).
 
 ## [0.10.0] - 2026-06-09
 
