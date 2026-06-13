@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "runtime/config.h"
+#include "model/model_arch.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,10 +26,23 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
     EXPECT_FALSE(cfg.runtime.warmup);  // off by default; opt-in for prod rollout
-    EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
+    EXPECT_EQ(cfg.kv_cache.dtype, "auto");
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
     EXPECT_FALSE(cfg.gdn.fp32_scan);
     EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
+}
+
+// The long-context FP8-KV quality gate (kv_cache.dtype=auto): only arch families
+// empirically verified safe honor the model author's kv_cache_quant_algo=FP8 hint
+// by default. Keep this allowlist conservative — see model.cpp for the evidence.
+TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
+    EXPECT_TRUE(kv_fp8_hint_default_safe(ModelArch::QWEN3));
+    EXPECT_TRUE(kv_fp8_hint_default_safe(ModelArch::QWEN3_MOE));
+    // Not yet verified on this box → must stay FP16 by default.
+    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GEMMA4));
+    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN35));
+    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
 TEST(RuntimeConfigTest, ParsesBasicSections) {
@@ -119,7 +133,7 @@ TEST(RuntimeConfigTest, MissingFileFallsBackToDefaults) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.load_from_file("/nonexistent/path/imp.conf"));
     // Defaults still in place.
-    EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
+    EXPECT_EQ(cfg.kv_cache.dtype, "auto");
 }
 
 }  // namespace

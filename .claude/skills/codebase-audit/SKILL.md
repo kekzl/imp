@@ -29,7 +29,7 @@ verification, not the sweep.
 
 1. **Fan out** — Explore agents / grep to surface candidates (breadth is fine here).
 2. **Verify each** with the recipe above. Demote refuted ones immediately.
-3. **Write it up** — `docs/audit/structural_debt_YYYY-MM-DD.md`. Counts are evidence,
+3. **Write it up** — `docs/audit/structural_debt_YYYY_MM_DD.md`. Counts are evidence,
    not estimates. Keep a **"Refuted (do not re-chase)"** section so the next pass
    doesn't re-flag the same false positives.
 4. **Ship cleanups** as small PRs (REQUIRED SUB-SKILL: building-and-testing) — branch
@@ -38,7 +38,7 @@ verification, not the sweep.
 
 ## Priors — settled, do NOT re-flag
 
-From `docs/audit/structural_debt_2026-06-08.md` (D1–D4) + `..._2026-06-09.md`:
+From `docs/audit/structural_debt_2026_06_08.md` (D1–D4) + `..._2026_06_09.md`:
 - **exec/ god-object** (`GraphExecutor`) is intrinsically forward-pass-coupled; the
   D2 runner-extraction track ENDED (cosmetic friend-backdoor only). Header split done
   (1188→584 lines). Don't re-attempt runner classes.

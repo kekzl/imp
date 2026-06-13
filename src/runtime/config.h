@@ -78,7 +78,12 @@ struct RuntimeConfig {
     } runtime;
 
     struct KVCache {
-        std::string dtype = "fp16";  // fp16 | fp8 | int8 | int4 | nvfp4
+        // "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for models whose
+        // author declares kv_cache_quant_algo=FP8 AND whose arch family is
+        // verified safe for long-context FP8 KV (see kv_fp8_hint_default_safe).
+        // "fp16" forces FP16 (opt out of the hint). fp8|int8|int4|nvfp4|mxfp4
+        // force that dtype regardless of the hint.
+        std::string dtype = "auto";
         bool allow_nondeterministic_fp8 = false;
         bool fp8_auto_legacy = false;  // legacy IMP_KV_FP8_AUTO compat
         // BitDecoding Phase 3: residual FP16 cache for newest N tokens.

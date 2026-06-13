@@ -7,12 +7,12 @@ description: Use when adding support for a new model architecture to imp, portin
 
 ## Integration checklist (gpt-oss PR #572 is the reference example)
 
-1. **Enum + registry**: add to `ModelArch` in `src/model/model_arch.h`; wire `parse_model_arch` (GGUF `general.architecture`, `gguf_loader.cpp:1114`) and/or HF detection (`hf_config_loader.cpp:76` — `architectures` array, `model_type` fallback), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model_arch.cpp`. **Then register the arch's traits in `ModelProfile`** (`src/model/model_profile.h` — single source of truth since PRs #622/#623, incl. the `AttnVariant` SWA/NoPE dispatch enum). Never add new `cfg.arch == X` checks in hot-path code — the profile is what dispatch reads.
+1. **Enum + registry**: add to `ModelArch` in `src/model/model_arch.h`; wire `parse_model_arch` (GGUF `general.architecture`, `gguf_loader.cpp:1137`) and/or HF detection (`hf_config_loader.cpp:76` — `architectures` array, `model_type` fallback), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model.cpp` (registry + `parse_model_arch`/`apply_arch_defaults` live there; `src/model/model_arch.h` holds only the enum + decls). **Then register the arch's traits in `ModelProfile`** (`src/model/model_profile.h` — single source of truth since PRs #622/#623, incl. the `AttnVariant` SWA/NoPE dispatch enum). Never add new `cfg.arch == X` checks in hot-path code — the profile is what dispatch reads.
 2. **Loader**: tensor-name mapping in `src/model/tensor_kind_matcher.cpp` / `weight_map.cpp`; SafeTensors path in `safetensors_loader.cpp` (NVFP4 prequant via `llm_compressor_loader.cpp` if applicable).
 3. **Arch config**: RoPE variant (NeoX vs GPT-J pair layout! see traps), YaRN/`rope_freq_scale`, SWA layer pattern, attention quirks (NoPE, sinks, softcap), norm placement, MoE router type — in `model_config.h` + `apply_arch_defaults`.
 4. **Chat template**: `src/model/chat_template.cpp` (+ `jinja.cpp` if templated); think/reasoning channel handling if applicable.
 5. **Kernels** only if genuinely new ops (sinks, new gating) — check `src/exec/` + `src/compute/` for an existing path first.
-6. **Verify** (in order): loads → coherent greedy output (run `check-degeneration` battery) → **perplexity vs HF reference** (`imp-cli --perplexity`; expect within ~10-20% of HF, e.g. gpt-oss 7.67 vs HF 6.71) → decode/prefill sanity (`benchmark-cuda`).
+6. **Verify** (in order): loads → coherent greedy output (run `check-degeneration` battery) → **perplexity vs HF reference** (`imp-cli --perplexity`; expect within ~10-20% of HF — often much closer, e.g. gpt-oss imp 4.68 vs HF bf16 4.607, #663: the residual elevation is model-intrinsic) → decode/prefill sanity (`benchmark-cuda`).
 7. **Docs**: row in `docs/supported-models.md` (+ BENCHMARKS.md if hero-class); perf baseline entry if it becomes a gated model.
 
 ## Diagnostic fingerprints (wrong-output triage)

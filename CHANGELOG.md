@@ -19,6 +19,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - **`IMP_PPL_DUMP=full`** dumps per-position NLL for cross-engine perplexity
   forensics (#655).
 
+### Changed
+
+- **KV cache: `kv_cache.dtype` now defaults to `auto` — honors the model
+  author's `kv_cache_quant_algo=FP8` hint for verified arch families.** Modelopt
+  NVFP4 checkpoints declare `kv_cache_quant_algo=FP8`; imp previously parsed but
+  ignored it (FP16, manual `--kv-fp8` to opt in). `auto` upgrades KV to FP8 E4M3
+  only for arch families that pass a long-context quality gate
+  (`kv_fp8_hint_default_safe`). Allowlisted today: **Qwen3 dense + Qwen3 MoE** —
+  measured on a 3.9k-token context, FP8 vs FP16 KV: Qwen3-14B PPL +1.07%,
+  Qwen3-30B-A3B neutral, both coherent, ~768 MiB KV VRAM saved. Other
+  hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4) stay FP16
+  until verified. `dtype = "fp16"` opts out; `--kv-fp8` forces FP8 on any model.
+  The `auto` resolver also makes config-file `dtype = "fp8"|"int8"|"int4"|…`
+  selections take effect (previously only the CLI flags did).
+
 ### Performance
 
 - **Prefill chunk size default 512 → 2048** (#672) — MoE pp2048 **+127%**
@@ -26,7 +41,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   bit-identical. Also fixed a grouped device-args GEMM silent corruption at n≈900.
 - **FP16-QK FA2 is now the primary hd=128 prefill** (#687) — at-or-above cuBLAS at
   every pp (pp1024 +24%, pp2048 +52%), so the S-matrix buffer is skipped for
-  hd=128: **−380 MiB** device memory.
+  hd=128: **−380 MiB** device memory. Re-benched 2026-06-13: MoE pp4096 now +4%
+  ahead of vLLM, dense pp4096 ~1.04× (was 1.27×).
 - **FA2 full-rate accumulate default-on** (#673/#674) — f16-accumulate QK^T and PV
   in the FP16-QK FA2 prefill kernel: −18% pp4096 kernel time, MoE e2e +9.7%, PPL
   unchanged.
