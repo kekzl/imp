@@ -24,6 +24,12 @@ enum class ModelArch {
 
 const char* model_arch_name(ModelArch arch);
 
+// True iff this arch family has been empirically verified safe to honor a model
+// author's kv_cache_quant_algo=FP8 hint BY DEFAULT (long-context FP8 KV). This is
+// the long-context quality gate for kv_cache.dtype=auto; see the definition in
+// model.cpp for the measured per-family evidence. Keep the list conservative.
+bool kv_fp8_hint_default_safe(ModelArch arch);
+
 // C API enum value for this architecture.
 int model_arch_c_api_id(ModelArch arch);
 

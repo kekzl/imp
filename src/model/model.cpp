@@ -157,6 +157,25 @@ static const ArchEntry& lookup_arch(ModelArch arch) {
 
 const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
 
+// Arch families empirically verified safe to honor a model author's
+// kv_cache_quant_algo=FP8 hint BY DEFAULT (kv_cache.dtype=auto, no explicit
+// --kv-fp8). Measured 2026-06-13 on a 3.9k-token context, FP8 vs FP16 KV, same
+// corpus, RTX 5090:
+//   QWEN3     (Qwen3-14B-NVFP4, dense):  PPL 13.95 -> 14.10  (+1.07%), coherent
+//   QWEN3_MOE (Qwen3-30B-A3B-NVFP4):     PPL ~16.20 -> ~15.99 (neutral), coherent
+// Other families (gemma/phi/nemotron/qwen35/qwen36/...) stay FP16 until measured
+// on this box; users can still force FP8 explicitly with --kv-fp8. This list IS
+// the long-context quality gate — keep it conservative, extend only with evidence.
+bool kv_fp8_hint_default_safe(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::QWEN3:
+        case ModelArch::QWEN3_MOE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int model_arch_c_api_id(ModelArch arch) { return lookup_arch(arch).c_api_id; }
 
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {

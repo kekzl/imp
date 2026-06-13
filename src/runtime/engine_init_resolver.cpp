@@ -8,6 +8,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
+#include "model/model_arch.h"
 #include "runtime/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
@@ -58,6 +59,36 @@ void Engine::init_resolve_kv_dtype_policy_() {
     const bool debug_raw_ = runtime_config_.runtime.debug_raw;
     const bool force_kv_fp16 = (runtime_config_.kv_cache.dtype == "fp16");
     const bool fp8_auto_legacy = runtime_config_.kv_cache.fp8_auto_legacy;
+
+    // Resolve the config-file KV dtype string into the engine enum. The CLI flags
+    // (--kv-fp8 / --kv-int4 / …) set config_.kv_cache_dtype directly and win — we
+    // only resolve here when the CLI left it at the F16 default. The default "auto"
+    // honors the model author's kv_cache_quant_algo=FP8 hint, but ONLY for arch
+    // families verified safe for long-context FP8 KV (kv_fp8_hint_default_safe — the
+    // measured PPL/coherence gate). Explicit "fp16" opts out; explicit
+    // fp8/int8/int4/nvfp4/mxfp4 force that dtype.
+    if (config_.kv_cache_dtype == QType::F16) {
+        const std::string& kv_str = runtime_config_.kv_cache.dtype;
+        if (kv_str == "fp8") {
+            config_.kv_cache_dtype = QType::FP8_E4M3;
+        } else if (kv_str == "int8") {
+            config_.kv_cache_dtype = QType::INT8;
+        } else if (kv_str == "int4") {
+            config_.kv_cache_dtype = QType::INT4;
+        } else if (kv_str == "nvfp4") {
+            config_.kv_cache_dtype = QType::NVFP4;
+        } else if (kv_str == "mxfp4") {
+            config_.kv_cache_dtype = QType::MXFP4_KV;
+        } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
+                   kv_fp8_hint_default_safe(mcfg.arch)) {
+            config_.kv_cache_dtype = QType::FP8_E4M3;
+            IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — honoring model author's "
+                         "kv_cache_quant_algo=FP8; %s verified safe for long-context FP8 KV; "
+                         "set kv_cache.dtype=fp16 to opt out)",
+                         model_arch_name(mcfg.arch));
+        }
+    }
+
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
