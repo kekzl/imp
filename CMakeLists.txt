@@ -338,7 +338,6 @@ if(IMP_USE_CUTLASS)
     target_include_directories(imp PRIVATE
         ${cutlass_SOURCE_DIR}/include
         ${cutlass_SOURCE_DIR}/tools/util/include
-        ${cutlass_SOURCE_DIR}/examples/88_hopper_fmha
     )
     target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
 endif()
