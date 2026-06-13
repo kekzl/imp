@@ -187,11 +187,10 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // request keeps its captured graph — reseed device state instead of
     // recapturing (the burst-hybrid n-gram speculation path relaunches every
     // few tokens; a full setup costs ~10-20 ms per launch).
-    // #683: the rearm fast path's first forward behaves as if the previous
-    // burst's last ~2 KV entries are invisible (deterministic duplicated
-    // token, e.g. "gamma, gamma" on repeat-exactly prompts); a fresh capture
-    // per burst is byte-perfect. Until root-caused, the fast path is opt-in:
-    // correctness beats the ~10-20 ms capture saving per burst.
+    // #683 postscript: the "rearm emits a wrong token" artifact was the
+    // fresh-captured loop writing KV one slot too high (setup() position
+    // off-by-one) — the correctly-positioned rearm then collided with the
+    // shifted layout. Both paths share the eager first-forward semantics now.
     if (runtime_config_.speculative.burst_rearm && async_graph_runner_.is_setup() &&
         async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);

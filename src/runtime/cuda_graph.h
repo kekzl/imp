@@ -124,8 +124,12 @@ public:
 
     struct Config {
         int max_steps = 0;              // max tokens to generate
-        int initial_context_len = 0;    // context length after prefill
-        int initial_position = 0;       // position of last prefill token
+        // Position/context of the loop's FIRST forward — identical semantics
+        // to the eager decode step and rearm(): first_token is processed at
+        // slot initial_position with initial_context_len covering it
+        // (callers pass req.context_len()-1 / req.context_len()).
+        int initial_context_len = 0;
+        int initial_position = 0;
         int eos_id = -1;                // EOS token ID
         std::vector<int32_t> stop_ids;  // additional stop token IDs (chat template)
         float temperature = 1.0f;
