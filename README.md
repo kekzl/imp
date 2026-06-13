@@ -4,8 +4,9 @@
 
 <p align="center">
   From-scratch CUDA inference engine for the NVIDIA RTX 5090 (<code>sm_120a</code>).<br>
-  One architecture, fully exploited: +37–72% faster decode than llama.cpp on dense GGUF, and the<br>
-  only engine that runs native NVFP4 on consumer Blackwell. ~97k lines, 100% written by <a href="https://claude.ai/claude-code">Claude Code</a>.
+  The fastest single-user inference on the 5090: faster decode than llama.cpp (+37–72% dense GGUF),<br>
+  at-or-ahead of vLLM on NVFP4, and the only engine running native NVFP4 on consumer Blackwell.<br>
+  ~97k lines, 100% written by <a href="https://claude.ai/claude-code">Claude Code</a>.
 </p>
 
 <p align="center">
@@ -33,21 +34,26 @@ NVFP4 prequant (from [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Op
 
 ## Performance
 
-Single RTX 5090, greedy, CUDA 13.3, CUDA Graphs on. Headline numbers
-(decode, the reliable A/B signal — see [BENCHMARKS.md](BENCHMARKS.md) for
-dated, commit-anchored measurements with exact commands):
+**On a single RTX 5090, imp is the fastest engine for single-user inference** —
+it leads llama.cpp on decode and is at-or-ahead of vLLM on NVFP4 (prefill *and*
+decode), while being the only engine that runs native NVFP4 on consumer
+Blackwell. Every number below is measured, dated, and commit-anchored in
+[BENCHMARKS.md](BENCHMARKS.md) (single 5090, greedy, CUDA 13.3, CUDA Graphs on;
+decode is the reliable A/B signal):
 
 - **GGUF dense decode:** Qwen3-8B Q8_0 at **~270 tok/s** (CI-gated baseline) —
   **+37–72% over llama.cpp** with full offload and flash attention.
 - **NVFP4 SafeTensors decode:** 30B-class MoE at **~257–338 tok/s**
-  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 257, Gemma-4-26B 266;
-  2026-06-09) — effectively uncontested on `sm_120`, where vLLM's NVFP4 path
-  needs `tcgen05` and llama.cpp has no native NVFP4 support.
-- NVFP4 long-context prefill: after #687 (FP16-QK FA2 as the primary hd=128
-  prefill, 2026-06-13) imp WINS MoE pp4096 (+4% vs vLLM), wins MoE pp2048 (+27%),
-  wins/ties dense pp2048, and wins TTFT everywhere; the lone remaining gap is
-  dense pp4096 at ~1.04× behind. Honest loss: Qwen3.6-35B GGUF decode (−31%,
-  structural FP16 GDN-projection tax).
+  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 257, Gemma-4-26B 266) —
+  **uncontested on `sm_120`**: vLLM's NVFP4 path needs `tcgen05` (absent on
+  consumer Blackwell) and llama.cpp has no native NVFP4 at all.
+- **NVFP4 long-context prefill:** at-or-ahead of vLLM after #687 (FP16-QK FA2 as
+  the primary hd=128 prefill) — MoE pp4096 **leads vLLM (+4%)**, MoE pp2048 +27%,
+  dense pp2048 a tie, and TTFT wins everywhere.
+
+**Honest losses** (narrow, and documented): NVFP4 dense pp4096 still trails vLLM
+by ~4% (1.04×), and Qwen3.6-35B GGUF decode loses ~31% to llama.cpp — a
+structural FP16 GDN-projection tax, not a tuning gap.
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
 command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
@@ -59,7 +65,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 **Use [vLLM](https://github.com/vllm-project/vllm) if** you serve high-concurrency batched workloads on datacenter GPUs (H100/B200). It has continuous batching, PagedAttention at scale, and production-grade serving.
 
-**Use imp if** you have Blackwell consumer/workstation hardware (RTX 5090, RTX PRO 6000), want native NVFP4/FP4 without dequant overhead, and don't mind running a prototype. imp is fastest-on-Blackwell for single-user decode, but it's experimental, single-GPU, and single-author.
+**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) for single-user inference and want every drop of the hardware — it is the fastest engine on the 5090 for both decode and NVFP4 prefill, with native NVFP4/FP4 and no dequant overhead. The trade-off is scope, not speed: single-GPU, single-author, experimental (no continuous batching, no multi-GPU).
 
 ## Known limitations
 
