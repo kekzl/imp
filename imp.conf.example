@@ -70,6 +70,10 @@ fp8_prefill          = "auto"
 # PPL gemma-3-12b 16.6 -> 549 when it served prefill. Default "never" routes
 # hd!=128 prefill to the FP16 WMMA kernel instead.
 fp8_fmha             = "never"
+# amax-scaled e4m3 QK conversion on the fp8-QK path (only takes effect when
+# fa2_fp16qk=never or declined). Experimental quality probe; default off.
+# Legacy env: IMP_FP8_QK_SCALED.
+fp8_qk_scaled        = false
 fmha_sm120           = "auto"
 # Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).
 # Default "on" since PR #478; QK^T runs in f16 unless fa2_fp16qk=never AND
@@ -275,6 +279,9 @@ burst                = 128
 # no graph recapture) instead of stepping eagerly until the next draft.
 # 0 = stay eager between drafts.
 miss_burst           = 8
+# Re-arm an existing conditional decode graph on a draft miss instead of a
+# fresh capture (both share the same first-forward semantics since #692).
+burst_rearm          = true
 
 [ffn]
 # SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
@@ -313,3 +320,8 @@ mtp_pattern_log      = false
 mtp_prenorm_h        = false
 # Audit NVFP4 weight scales at load time.
 audit_nvfp4_scales   = false
+# VRAM accounting audit: allocation checkpoints + per-pool notes + device-used
+# peak sampler. Default off (zero overhead). See src/memory/mem_account.h.
+vram_audit           = false
+# Optional append-only file the VRAM audit table is mirrored into ("" = off).
+vram_audit_dump      = ""
