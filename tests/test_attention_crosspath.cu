@@ -272,8 +272,12 @@ protected:
 
         // hd=128 is the production hot shape: the register-resident paths must
         // not silently decline (a perf rewrite that stops running is a bug).
+        // Gated on Sq>=16: a 1-/2-token prefill is legitimately routed through
+        // the decode path, so the prefill FA2 kernels MAY decline there — we
+        // still check correctness of whatever paths do run (below).
         for (auto& r : results)
-            if (HD == 128 && (r.name == "fa2_e4m3" || r.name == "fa2_f16" || r.name == "fmha_sm120_f16"))
+            if (HD == 128 && Sq >= 16 &&
+                (r.name == "fa2_e4m3" || r.name == "fa2_f16" || r.name == "fmha_sm120_f16"))
                 EXPECT_TRUE(r.ran) << r.name << " declined hd=128 config " << name;
 
         // f32-score-chain paths: exact-ish QK accumulation + f32 softmax —
@@ -395,6 +399,37 @@ TEST_F(AttentionCrossPathTest, SaturatingSoftcap_FP32S_MHA) {
 TEST_F(AttentionCrossPathTest, SaturatingSoftcap_FP32S_GQA) {
     run_config(5, "saturating_softcap_gqa", 64, 64, 8, 2, 128, true, 0, /*softcap=*/2.0f, 8.0f,
                /*mild=*/false, nullptr, nullptr, 0);
+}
+
+// ---- seqlen edge cases (TEST_AUDIT.md §7 Tier-0): the crosspath matrix
+// previously bottomed out at Sq=24. These cover the degenerate single-/two-token
+// prefill (empty-row / minimal-causal softmax) and the 512-tile boundary +1.
+// No committed golden (n_spots=0): the in-test fp64 reference IS ground truth,
+// exactly as for the SaturatingSoftcap configs. cfg indices >= 6 keep distinct
+// LCG seeds (seed = base + cfg_idx*3) so the data differs per config.
+// "max single-pass" (engine max_tokens, ~4096) is deliberately NOT taken
+// literally — a 4096x4096 host fp64 reference is too slow for a unit test; 513
+// exercises the multi-tile + boundary behavior that the max shape also hits.
+
+TEST_F(AttentionCrossPathTest, SingleTokenPrefill) {
+    // Sq=Skv=1: softmax over a single key → O must equal V exactly. The
+    // degenerate empty-row case no prefill path tested before.
+    run_config(6, "single_token", 1, 1, 4, 2, 128, true, 0, 0.0f, 2.0f, /*mild=*/true, nullptr, nullptr,
+               0);
+}
+
+TEST_F(AttentionCrossPathTest, TwoTokenCausalPrefill) {
+    // Sq=Skv=2 causal: row 0 sees key 0 only; row 1 sees keys 0,1 — the minimal
+    // causal mask.
+    run_config(7, "two_token_causal", 2, 2, 4, 2, 128, true, 0, 0.0f, 2.0f, /*mild=*/true, nullptr,
+               nullptr, 0);
+}
+
+TEST_F(AttentionCrossPathTest, TileBoundaryPlusOne_Sq513) {
+    // Sq=Skv=513: one full 512-tile plus a 1-row remainder — the ±1-of-tile edge
+    // the dispatcher branches on, and a proxy for the largest single-pass shape.
+    run_config(8, "tile_boundary_513", 513, 513, 4, 2, 128, true, 0, 0.0f, 2.0f, /*mild=*/true, nullptr,
+               nullptr, 0);
 }
 
 }  // namespace

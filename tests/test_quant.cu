@@ -387,6 +387,88 @@ TEST(QuantTest, FP8RoundTrip) {
 }
 
 // ===========================================================================
+// Test 5b: FP8 E4M3 DECODE vs an INDEPENDENT host LUT.
+//
+// WHY: FP8RoundTrip above is imp-vs-imp (cast both ways) — it cannot catch a
+// systematically wrong decode that the matching encode hides. This decodes
+// cast_fp8_to_fp16 against a from-scratch OCP E4M3 reference (sign|exp4(bias7)|
+// mant3): e=0 subnormal (2^-6), e=15&m=7 NaN, else (1+m/8)*2^(e-7). Every E4M3
+// value is exactly representable in f16, so the EXACT comparison is justified
+// (atol 0) for the spec-unambiguous range. The e=15 region (256..448 in OCP,
+// but some impls treat it as NaN) is checked as a no-silent-corruption guard:
+// the decode must be EITHER the OCP value OR NaN, never a wrong finite number.
+// ===========================================================================
+namespace {
+double ref_e4m3_decode(uint8_t b, bool& is_nan) {
+    is_nan = false;
+    int sign = (b >> 7) & 1;
+    int e = (b >> 3) & 0xF;
+    int m = b & 0x7;
+    double s = sign ? -1.0 : 1.0;
+    if (e == 15 && m == 7) {
+        is_nan = true;
+        return 0.0;
+    }
+    if (e == 0)
+        return s * (static_cast<double>(m) / 8.0) * std::ldexp(1.0, -6);
+    return s * (1.0 + static_cast<double>(m) / 8.0) * std::ldexp(1.0, e - 7);
+}
+}  // namespace
+
+TEST(QuantTest, FP8_E4M3_DecodeMatchesIndependentLUT) {
+    std::vector<uint8_t> bytes(256);
+    for (int i = 0; i < 256; ++i)
+        bytes[i] = static_cast<uint8_t>(i);
+
+    void* d_fp8 = nullptr;
+    void* d_out = nullptr;
+    cudaMalloc(&d_fp8, 256);
+    cudaMalloc(&d_out, 256 * sizeof(half));
+    cudaMemcpy(d_fp8, bytes.data(), 256, cudaMemcpyHostToDevice);
+    cast_fp8_to_fp16(d_fp8, d_out, 256, nullptr);
+    cudaDeviceSynchronize();
+    std::vector<half> out(256);
+    cudaMemcpy(out.data(), d_out, 256 * sizeof(half), cudaMemcpyDeviceToHost);
+
+    int exact_checked = 0, e15_ocp = 0, e15_nan = 0;
+    for (int i = 0; i < 256; ++i) {
+        uint8_t b = static_cast<uint8_t>(i);
+        int e = (b >> 3) & 0xF;
+        bool ref_nan = false;
+        double ref = ref_e4m3_decode(b, ref_nan);
+        float got = __half2float(out[i]);
+
+        if (ref_nan) {
+            EXPECT_TRUE(std::isnan(got)) << "byte 0x" << std::hex << i << ": NaN encoding decoded to " << got;
+            continue;
+        }
+        if (e != 15) {
+            // Spec-unambiguous: must match the LUT exactly (all E4M3 values fit f16).
+            ASSERT_FALSE(std::isnan(got) || std::isinf(got))
+                << "byte 0x" << std::hex << i << " decoded to non-finite";
+            EXPECT_EQ(static_cast<double>(got), ref)
+                << "byte 0x" << std::hex << i << ": decode " << got << " != independent LUT " << ref;
+            ++exact_checked;
+        } else {
+            // e=15 finite region: OCP value (256..448) OR NaN — never wrong finite.
+            if (std::isnan(got)) {
+                ++e15_nan;
+            } else {
+                EXPECT_EQ(static_cast<double>(got), ref)
+                    << "byte 0x" << std::hex << i << ": e=15 decode " << got
+                    << " is finite but != OCP value " << ref;
+                ++e15_ocp;
+            }
+        }
+    }
+    printf("[fp8 e4m3 decode] exact=%d e15_ocp=%d e15_nan=%d\n", exact_checked, e15_ocp, e15_nan);
+    EXPECT_EQ(exact_checked, 240) << "expected 240 spec-unambiguous bytes (2 sign * 15 exp * 8 mant)";
+
+    cudaFree(d_fp8);
+    cudaFree(d_out);
+}
+
+// ===========================================================================
 // Test 6: FP8Saturation -- values > 448 saturate; tiny values flush to zero
 // ===========================================================================
 TEST(QuantTest, FP8Saturation) {
