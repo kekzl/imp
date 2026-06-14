@@ -328,6 +328,16 @@ int imp_model_max_seq_len(ImpModel model) {
     return model->model->config().max_seq_len;
 }
 
+// Effective context window the engine actually allocated (VRAM-aware auto-size).
+// May be smaller than imp_model_max_seq_len when VRAM is tight — gate prompt
+// length on THIS, not the model's declared max, to avoid KV/position overruns.
+int imp_context_max_seq_len(ImpContext ctx) {
+    if (!ctx || !ctx->engine) {
+        return 0;
+    }
+    return ctx->engine->max_seq_len();
+}
+
 // --- Context / Runtime ---
 
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx) {
