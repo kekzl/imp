@@ -42,6 +42,7 @@ RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 
 ARG IMP_BUILD_TESTS=OFF
 ARG IMP_BUILD_BENCH=OFF
+ARG IMP_EXTRA_CMAKE=
 
 RUN cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
@@ -49,6 +50,7 @@ RUN cmake -B build -G Ninja \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \
         -DIMP_BUILD_SERVER=ON \
+        ${IMP_EXTRA_CMAKE} \
         -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
         -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
         -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \

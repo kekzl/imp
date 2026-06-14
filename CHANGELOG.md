@@ -5,6 +5,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- **Embeddings reject inputs longer than the single-pass hidden buffer (was a server abort).**
+  Follow-up to the over-long-prompt fix below: `/v1/embeddings` mean-pools every
+  token's hidden state, which only fits when the whole input is prefilled in one
+  pass. A longer input is chunked and `hidden_` keeps only the last chunk, so
+  `view_hidden(n)` sliced out of a `[max_tokens, *]` buffer and aborted the whole
+  process (`Tensor::slice` IMP_CHECK) — and `max_tokens` (the executor workspace,
+  e.g. 4096) can be far below `max_seq_len` (e.g. 32768). The embeddings guard now
+  also bounds on `executor->max_tokens()`. (Found via the new coverage harness.)
 - **Over-long prompts are rejected (400) instead of crashing the server (SIGSEGV).**
   The server gated prompt length on the model's *declared* max context
   (`imp_model_max_seq_len`), but the engine VRAM-auto-sizes the *actual*
