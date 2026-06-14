@@ -7,6 +7,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <memory>
@@ -196,6 +197,87 @@ TEST(MoEExecutorTest, Deterministic) {
     cudaDeviceSynchronize();
 
     EXPECT_EQ(token1, token2) << "MoE forward should be deterministic with greedy sampling";
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+    tm.cleanup();
+}
+
+// ============================================================================
+// Test 4b: MoE run-to-run LOGIT drift is bounded (TEST_AUDIT.md §7 Tier-1).
+//
+// The existing Deterministic test asserts the sampled TOKEN is identical across
+// two forwards — but token equality hides logit drift below the argmax margin.
+// The known MoE nondeterminism source is the grouped-GEMM expert-scatter using
+// float atomics (accumulation order is not fixed → the NVFP4 MoE greedy A/B flip
+// on Qwen3-30B-A3B, MEMORY ModelProfile D1). This test MEASURES the per-logit
+// drift across K repeated forwards and asserts it stays under a documented
+// epsilon, so a regression that injects nondeterminism here is caught and
+// BOUNDED rather than silently tolerated.
+//
+// NOTE: the synthetic FP16 test model exercises the scatter path but is expected
+// to be deterministic (drift ~0); the genuinely non-deterministic case is the
+// NVFP4 atomic-scatter on a real MoE model, which is a model-level property
+// (gated, e2e) not reproducible in this unit. This test locks the unit path and
+// records the measured envelope.
+// ============================================================================
+TEST(MoEExecutorTest, LogitDriftBounded) {
+    SKIP_IF_NO_CUDA();
+
+    auto tm = MoETestModel::create(
+        /*d_model=*/64, /*d_ff=*/128, /*vocab_size=*/256,
+        /*n_layers=*/2, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_experts=*/8, /*n_experts_active=*/2, /*expert_d_ff=*/128);
+
+    GraphExecutor executor;
+    init_executor_moe(executor, *tm.model);
+
+    const int n_tokens = 4;
+    std::vector<int32_t> h_tokens = {3, 7, 11, 23};
+    std::vector<int> h_positions = {0, 1, 2, 3};
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, n_tokens * sizeof(int32_t));
+    cudaMalloc(&d_positions, n_tokens * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), n_tokens * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), n_tokens * sizeof(int), cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = n_tokens;
+    state.is_prefill = true;
+    state.n_sequences = 1;
+    state.temperature = 0.0f;
+
+    const int K = 5;
+    std::vector<float> ref;
+    double max_abs_drift = 0.0, ref_rms = 0.0;
+    for (int k = 0; k < K; ++k) {
+        Tensor logits;
+        executor.forward_logits(state, logits, nullptr);
+        cudaDeviceSynchronize();
+        int64_t numel = logits.numel();
+        std::vector<float> h(numel);
+        cudaMemcpy(h.data(), logits.data, numel * sizeof(float), cudaMemcpyDeviceToHost);
+        if (k == 0) {
+            ref = h;
+            double ss = 0.0;
+            for (float v : ref)
+                ss += (double)v * v;
+            ref_rms = std::sqrt(ss / std::max<int64_t>(1, numel));
+        } else {
+            for (int64_t i = 0; i < numel; ++i)
+                max_abs_drift = std::max(max_abs_drift, (double)std::fabs(h[i] - ref[i]));
+        }
+    }
+    double rel_drift = ref_rms > 1e-9 ? max_abs_drift / ref_rms : max_abs_drift;
+    printf("[moe logit drift] K=%d max_abs=%.3e rel(rms)=%.3e ref_rms=%.4f\n", K, max_abs_drift,
+           rel_drift, ref_rms);
+    // Documented epsilon: the synthetic FP16 MoE path is deterministic, so drift
+    // must be negligible (1e-3 of the logit rms is generous and catches any
+    // newly-introduced nondeterminism while tolerating benign fp reassociation).
+    EXPECT_LT(rel_drift, 1e-3) << "MoE run-to-run logit drift exceeds the documented bound";
 
     cudaFree(d_tokens);
     cudaFree(d_positions);

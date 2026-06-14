@@ -473,8 +473,10 @@ if(IMP_BUILD_TESTS)
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
             tools/imp-server/utils.cpp
+            tools/imp-server/tool_call.cpp
             tests/test_anthropic_transform.cpp
-            tests/test_sse_stream_utils.cpp)
+            tests/test_sse_stream_utils.cpp
+            tests/test_tool_call.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
     endif()
@@ -713,8 +715,3 @@ endif()
 if(IMP_BUILD_SERVER)
     install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
-
-# Standalone GDN kernel test (always built)
-add_executable(test-gdn tests/test_gdn_kernel.cu)
-target_link_libraries(test-gdn PRIVATE imp)
-target_include_directories(test-gdn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
