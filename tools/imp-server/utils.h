@@ -26,6 +26,14 @@ std::string dump_safe(const json& j);
 // 400-class bad-input case into a bare 500 (DEBUG-500-on-bad-input.md).
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message);
 
+// Constant-time Bearer-token check. Returns true iff `authorization` equals
+// "Bearer " + api_key, compared without early-out so response timing cannot leak
+// the key prefix (std::string::operator== short-circuits on the first differing
+// byte — a timing oracle). The comparison runs over the full expected length
+// regardless of where (or whether) the input differs. Extracted from main.cpp's
+// pre-routing handler so the security-critical compare is unit-testable.
+bool bearer_token_matches(const std::string& authorization, const std::string& api_key);
+
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
 size_t utf8_complete_len(const std::string& s);

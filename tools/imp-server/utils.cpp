@@ -15,6 +15,18 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
     res.set_content(dump_safe(err), "application/json");
 }
 
+bool bearer_token_matches(const std::string& authorization, const std::string& api_key) {
+    const std::string expected = "Bearer " + api_key;
+    // Accumulate the difference over the full expected length; do NOT early-out
+    // on the first mismatch (that leaks the key prefix via response timing).
+    unsigned char diff = static_cast<unsigned char>(authorization.size() != expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        unsigned char ac = (i < authorization.size()) ? static_cast<unsigned char>(authorization[i]) : 0;
+        diff |= ac ^ static_cast<unsigned char>(expected[i]);
+    }
+    return diff == 0;
+}
+
 json safe_token_json(const std::string& text) {
     std::string safe;
     safe.reserve(text.size());
