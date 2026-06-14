@@ -32,7 +32,10 @@ graph_capture_mode   = "relaxed"
 # Auto-disabled when the model's prefill path is uncapturable.
 prefill_graph        = true
 # Max concurrent sequences in a decode batch (server continuous batching).
-max_batch_size       = 4
+# 0 = auto: the engine sizes it from the model's weight footprint (a >20 GiB
+# MoE auto-picks 1). Set a positive value to force it (e.g. 4). The --max-batch
+# CLI flag and a per-request "max_batch_size" override take precedence.
+max_batch_size       = 0
 # Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
 # Off by default — opt in for prod rollouts where first-request TTFT
 # matters. In dev / CI / one-shot runs the warmup is pure overhead and can
