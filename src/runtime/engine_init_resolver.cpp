@@ -160,6 +160,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
             config_.max_batch_size = 16;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)", config_.max_batch_size,
                      approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
+    } else {
+        IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 }
 

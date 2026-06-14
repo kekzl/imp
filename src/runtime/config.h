@@ -74,7 +74,11 @@ struct RuntimeConfig {
         // `--set runtime.prefill_graph=false` or imp.conf if a model
         // regresses. Legacy env: IMP_PREFILL_GRAPH.
         bool prefill_graph = true;
-        int max_batch_size = 4;
+        // 0 = auto: the engine sizes the decode batch from the model's weight
+        // footprint (a >20 GiB MoE auto-picks 1). A positive value forces it.
+        // (Was 4, which both contradicted the documented "0 = auto" semantics
+        // and never reached engine sizing — it only acted as the decode cap.)
+        int max_batch_size = 0;
     } runtime;
 
     struct KVCache {

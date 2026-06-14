@@ -296,12 +296,16 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     config.device_id = args.device;
 
     // max_seq_len / max_batch_size: 0 = auto-detect in engine.
-    // JSON override wins; else the --max-batch CLI arg (0 = auto) seeds the
-    // engine sizing. This is the ONLY way to force batched-decode sizing on a
-    // >20 GiB MoE model, whose auto-heuristic picks max_batch_size=1.
+    // Precedence for the batch size: per-request JSON override > --max-batch CLI
+    // flag > [runtime] max_batch_size from imp.conf > 0 (engine auto-sizes from
+    // the model's weight footprint; a >20 GiB MoE auto-picks 1). The imp.conf
+    // value used to be dropped here — only the CLI arg seeded sizing — so
+    // `[runtime] max_batch_size` silently affected nothing but the decode cap.
     if (overrides.contains("max_seq_len"))
         config.max_seq_len = overrides.value("max_seq_len", 0);
-    config.max_batch_size = overrides.value("max_batch_size", args.max_batch_size);
+    int batch_cli_or_conf =
+        args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
+    config.max_batch_size = overrides.value("max_batch_size", batch_cli_or_conf);
 
     config.gpu_layers = args.gpu_layers;
     if (args.ssm_fp16)

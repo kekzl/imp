@@ -4,6 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **`[runtime] max_batch_size` from imp.conf is now honored for engine sizing.**
+  The server built `ImpConfig.max_batch_size` only from the `--max-batch` CLI
+  flag (default 0 = auto), so the imp.conf value was dropped — it reached the
+  engine only as the decode-batch cap, never the scheduler/KV/workspace sizing.
+  Precedence is now: per-request override > `--max-batch` > `[runtime]
+  max_batch_size` > 0 (engine auto-sizes from the model's weight footprint). The
+  `runtime.max_batch_size` default changed 4 → 0 to match the documented
+  "0 = auto" semantics (and the engine now logs the resolved batch size). Audit:
+  this args-vs-imp.conf drop was unique to `max_batch_size`; all other imp.conf
+  keys reach the engine via the ImpConfig builder or a direct `runtime_config_`
+  read.
+
 ## [0.11.2] - 2026-06-14
 
 Patch release. Hardens the HTTP surface so malformed/invalid client input can
