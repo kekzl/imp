@@ -5,6 +5,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- **Over-long prompts are rejected (400) instead of crashing the server (SIGSEGV).**
+  The server gated prompt length on the model's *declared* max context
+  (`imp_model_max_seq_len`), but the engine VRAM-auto-sizes the *actual*
+  allocated context, which can be much smaller (e.g. ~4096 for a 14B on a tight
+  budget). A prompt longer than the allocated context but shorter than the model
+  max passed the length check and overran the per-sequence KV/position buffers →
+  SIGSEGV. Added `imp_context_max_seq_len()` (the engine's effective allocated
+  context) and gate on it; also added the missing length guard to the
+  `/v1/embeddings` path. Over-long input now returns
+  `400 "… exceeds context window (N tokens >= M max)"`.
 - **`[runtime] max_batch_size` from imp.conf is now honored for engine sizing.**
   The server built `ImpConfig.max_batch_size` only from the `--max-batch` CLI
   flag (default 0 = auto), so the imp.conf value was dropped — it reached the

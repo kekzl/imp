@@ -221,6 +221,12 @@ public:
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
     Model* model() const noexcept { return model_.get(); }
+    // Effective context window actually allocated by the engine (after VRAM-aware
+    // auto-sizing in init_compute_max_seq_len_). May be < the model's declared
+    // max context when VRAM is tight — callers MUST gate prompt length on this,
+    // not on model().config().max_seq_len, or an over-long prompt overruns the
+    // KV/position buffers (SIGSEGV instead of a clean rejection).
+    int max_seq_len() const noexcept { return config_.max_seq_len; }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }

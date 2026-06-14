@@ -461,8 +461,15 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         }
     }
 
-    // Store max sequence length for token clamping
-    state.max_seq_len = imp_model_max_seq_len(state.model);
+    // Store max sequence length for prompt-length gating. Use the EFFECTIVE
+    // context the engine actually allocated, not the model's declared max: the
+    // engine VRAM-auto-sizes it and can land well below the model max (e.g.
+    // ~4096 for a 14B on a tight budget). Gating on the model max let an
+    // over-long prompt pass the length check and overrun the KV/position
+    // buffers — a SIGSEGV instead of a clean 400.
+    state.max_seq_len = imp_context_max_seq_len(state.ctx);
+    if (state.max_seq_len <= 0)
+        state.max_seq_len = imp_model_max_seq_len(state.model);
     if (state.max_seq_len <= 0)
         state.max_seq_len = static_cast<int>(config.max_seq_len);
 
@@ -3556,6 +3563,17 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
                 {"error",
                  {{"message", "Input tokenizes to zero tokens"}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
+            return;
+        }
+
+        // Reject over-long inputs before prefill: the embeddings path drives
+        // imp_prefill directly, and a prompt longer than the engine's allocated
+        // context overruns the KV/position buffers (SIGSEGV) instead of failing
+        // cleanly. (state.max_seq_len is the effective allocated context.)
+        if (state.max_seq_len > 0 && n_tokens > state.max_seq_len) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "Input exceeds context window (" + std::to_string(n_tokens) +
+                                " tokens > " + std::to_string(state.max_seq_len) + " max)");
             return;
         }
 

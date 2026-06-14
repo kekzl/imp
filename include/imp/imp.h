@@ -50,6 +50,10 @@ int imp_model_n_layers(ImpModel model);
 int imp_model_d_model(ImpModel model);
 int imp_model_vocab_size(ImpModel model);
 int imp_model_max_seq_len(ImpModel model);
+/* Effective context window the engine actually allocated for this context
+ * (VRAM-aware auto-sizing). May be smaller than imp_model_max_seq_len when VRAM
+ * is tight; gate prompt length on this to reject over-long prompts cleanly. */
+int imp_context_max_seq_len(ImpContext ctx);
 /* BOS token id when the model's tokenizer prepends one (add_bos), else -1.
  * Teacher-forced eval (perplexity) must prepend it for BOS-dependent
  * families (Gemma, Llama) or the NLL measures an out-of-distribution
