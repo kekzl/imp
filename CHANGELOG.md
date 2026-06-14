@@ -4,6 +4,29 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-14
+
+Patch release. Fixes a server wedge where interleaved `/v1/embeddings` +
+`/v1/chat/completions` traffic returned empty completions.
+
+### Fixed
+- **Embeddings no longer cancels in-flight generations (#710).** The
+  `/v1/embeddings` handler took exclusive C-API access by calling
+  `BatchingEngine::stop()`, which cancels every in-flight request. Under
+  interleaved embed+chat load any concurrently-running generation came back
+  empty (`finish_reason:"cancelled"`, the lone reasoning token logged as
+  "0 completion tokens"); `stop()` also left the cancelled sequences' KV blocks
+  allocated, piling up orphaned decode work under sustained load. Added a
+  graceful `BatchingEngine::pause()`/`resume()` handshake that lets the worker
+  *finish* in-flight requests before parking (no cancellation, no thread churn)
+  and switched the embeddings path to it.
+
+### Added
+- `tests/test_server_0token_battery.py` and
+  `tests/test_server_embed_chat_interleave.sh` — manual server-level regression
+  coverage for the wedge (content / size / temperature / trailing-cue /
+  assistant-prefill / sustained-load lanes; gate on the empty-completion rate).
+
 ## [0.11.0] - 2026-06-13
 
 47 commits since v0.10.0. Headlines: faithful per-family pre-tokenizers (#657 —
