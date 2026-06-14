@@ -15,6 +15,8 @@ void BatchingEngine::start(ImpContext ctx) {
     }
     ctx_ = ctx;
     stop_requested_.store(false);
+    pause_requested_.store(false);
+    paused_.store(false);
     running_.store(true);
     worker_thread_ = std::thread(&BatchingEngine::worker_loop, this);
 }
@@ -24,6 +26,7 @@ void BatchingEngine::stop() {
         return;
     stop_requested_.store(true);
     queue_cv_.notify_all();
+    pause_cv_.notify_all();  // wake the worker if it is parked in pause()
     if (worker_thread_.joinable()) {
         worker_thread_.join();
     }
@@ -45,6 +48,32 @@ void BatchingEngine::stop() {
     active_requests_.clear();
 }
 
+bool BatchingEngine::pause(int timeout_ms) {
+    if (!running_.load())
+        return true;  // nothing running → caller already has exclusive access
+    pause_requested_.store(true);
+    queue_cv_.notify_all();  // wake the worker if it is idle-waiting
+    std::unique_lock<std::mutex> lock(pause_mutex_);
+    bool ok = pause_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] {
+        return paused_.load() || !running_.load() || stop_requested_.load();
+    });
+    if (!ok) {
+        // Timed out waiting for the worker to drain in-flight work. Do NOT
+        // proceed (driving engine->step() while the worker is live would race);
+        // clear the request so the worker keeps running normally.
+        pause_requested_.store(false);
+        queue_cv_.notify_all();
+        return false;
+    }
+    return true;
+}
+
+void BatchingEngine::resume() {
+    pause_requested_.store(false);
+    pause_cv_.notify_all();
+    queue_cv_.notify_all();
+}
+
 void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -63,27 +92,55 @@ void BatchingEngine::worker_loop() {
     imp::KVCacheManager* kv_mgr = engine->kv_manager();
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
+        // 0. Graceful pause handshake. When a caller wants exclusive engine
+        //    access (embeddings / blocking vision), it calls pause(). We must
+        //    NOT cancel in-flight generations — instead we keep stepping until
+        //    active work has drained, then park here until resume(). New
+        //    pending requests are left queued (not admitted, not cancelled) so
+        //    they run after resume. The caller holds state.mtx, so no new chat
+        //    can be submitted while we are parked.
+        if (pause_requested_.load(std::memory_order_relaxed) && active_requests_.empty()) {
+            std::unique_lock<std::mutex> lock(pause_mutex_);
+            paused_.store(true);
+            pause_cv_.notify_all();
+            pause_cv_.wait(lock, [this] {
+                return !pause_requested_.load(std::memory_order_relaxed) ||
+                       stop_requested_.load(std::memory_order_relaxed);
+            });
+            paused_.store(false);
+            continue;
+        }
+
         // 1. Drain incoming queue and add new requests to the scheduler
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
 
-            // If no active work, wait for new requests (with timeout to check stop)
+            // If no active work, wait for new requests (with timeout to check
+            // stop / pause). When a pause is pending we still need to wake so
+            // step 0 can park, hence the predicate also watches pause_requested_.
             if (active_requests_.empty() && pending_queue_.empty()) {
                 queue_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
-                    return !pending_queue_.empty() || stop_requested_.load(std::memory_order_relaxed);
+                    return !pending_queue_.empty() ||
+                           stop_requested_.load(std::memory_order_relaxed) ||
+                           pause_requested_.load(std::memory_order_relaxed);
                 });
                 if (stop_requested_.load(std::memory_order_relaxed))
                     break;
             }
 
-            // Move all pending requests to active
-            while (!pending_queue_.empty()) {
-                auto sr = std::move(pending_queue_.front());
-                pending_queue_.pop_front();
+            // While a pause is pending, do not admit new pending requests —
+            // let active work drain so step 0 can park. Leaving them queued
+            // preserves them for after resume().
+            if (!pause_requested_.load(std::memory_order_relaxed)) {
+                // Move all pending requests to active
+                while (!pending_queue_.empty()) {
+                    auto sr = std::move(pending_queue_.front());
+                    pending_queue_.pop_front();
 
-                sr->notified_count = sr->request->output_tokens.size();
-                engine->add_request(sr->request);
-                active_requests_.push_back(std::move(sr));
+                    sr->notified_count = sr->request->output_tokens.size();
+                    engine->add_request(sr->request);
+                    active_requests_.push_back(std::move(sr));
+                }
             }
         }
 

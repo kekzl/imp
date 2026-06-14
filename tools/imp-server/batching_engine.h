@@ -82,8 +82,23 @@ public:
     void start(ImpContext ctx);
 
     // Stop the background worker thread. Must be called before destroying
-    // the ImpContext. Waits for the worker to finish.
+    // the ImpContext. Waits for the worker to finish. Cancels any in-flight
+    // requests — use pause()/resume() instead when the generations must
+    // survive (e.g. embeddings/vision exclusive-access windows).
     void stop();
+
+    // Graceful exclusive-access handshake. pause() lets the worker FINISH all
+    // in-flight requests (it never cancels them), then parks the worker thread
+    // so the caller can drive engine->step() directly (embeddings / blocking
+    // vision) without racing the worker. resume() unparks it. The worker thread
+    // stays alive across the window (no thread churn, no cancellation).
+    //
+    // Caller MUST hold state.mtx so no new request is submitted during the
+    // window (chat submit also takes state.mtx). pause() blocks until the
+    // worker is idle and parked, bounded by timeout_ms (0 = no in-flight work
+    // to drain → returns immediately). Returns true once parked.
+    bool pause(int timeout_ms = 60000);
+    void resume();
 
     // Submit a request for inference. Thread-safe.
     // The request will be picked up by the worker on the next iteration.
@@ -102,6 +117,13 @@ private:
     std::thread worker_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+
+    // Graceful pause handshake (see pause()/resume()). pause_requested_ tells
+    // the worker to drain in-flight work and park; paused_ reports that it has.
+    std::atomic<bool> pause_requested_{false};
+    std::atomic<bool> paused_{false};
+    std::mutex pause_mutex_;
+    std::condition_variable pause_cv_;
 
     // Incoming request queue (HTTP threads -> worker thread)
     mutable std::mutex queue_mutex_;
