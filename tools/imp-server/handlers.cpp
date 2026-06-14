@@ -3512,13 +3512,27 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
-    // Pause batching engine for exclusive C API access, restart on scope exit
+    // Pause the batching engine for exclusive C-API access (imp_prefill drives
+    // engine->step() directly, which must not race the worker). pause() lets
+    // in-flight generations FINISH before parking the worker — stop() would
+    // cancel them, so any chat running concurrently with this embeddings call
+    // returned an empty `finish_reason:"cancelled"` completion (the "0
+    // completion tokens" wedge). We hold state.mtx, so no new chat is admitted
+    // while paused; resume() unparks on scope exit.
     bool had_batching = (state.batching && state.batching->is_running());
-    if (had_batching)
-        state.batching->stop();
+    if (had_batching) {
+        if (!state.batching->pause()) {
+            res.status = 503;
+            json err = {{"error",
+                         {{"message", "Server busy draining in-flight requests. Please retry."},
+                          {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+    }
     auto restart_batching = [&] {
-        if (had_batching && state.batching && state.ctx)
-            state.batching->start(state.ctx);
+        if (had_batching && state.batching)
+            state.batching->resume();
     };
     // Use a simple scope guard
     struct ScopeGuard {
