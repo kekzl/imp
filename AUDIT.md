@@ -282,6 +282,22 @@ gemv_q4_0_q8_1)` against `ref_dequant_q4_0`. **Status:** quarantined (not assert
 decision — fix the kernel's unpack to split layout, or confirm it is dead and remove it. The
 Q4_0 *dequant* arithmetic is now independently oracled regardless.
 
+**F2 — Qwen3.5-4B GGUF tokenizer diverges from the HF golden on punctuation /
+contractions / whitespace (UNCONFIRMED — confounded).**
+A committed-golden attempt (HF `AutoTokenizer` golden for Qwen3.5-4B vs the GGUF tokenizer from
+`Qwen3.5-4B-mxfp4.gguf`) measured **13/20 strings byte-exact**. The 7 mismatches cluster on
+contractions (`don't` → imp splits the apostrophe: HF `…2688…` vs imp `…6 76…`), multi-space
+runs, and special-char/code punctuation — characteristic *pretokenizer-regex* differences. NOT
+filed as a confirmed bug because three causes are entangled and were not separable in the time
+box: (i) a genuine imp pretokenizer divergence for the Qwen3.5 family (plausible — #657 fixed the
+*qwen2* pretokenizer; Qwen3.5 has a distinct 248k-vocab tokenizer that may not be covered); (ii) a
+GGUF-vs-HF model-version mismatch (local re-downloads can differ — MEMORY); (iii) artifacts of the
+test's crude inline JSON parser on cases containing `{`/`}`/`"` (the "JSON" case decoded to empty
+HF ids — a parser bug, not a tokenizer one). The committed-golden test was reverted (an unsound,
+conflated assertion must not ship). **Follow-up:** a clean repro needs a proper JSON golden parser
++ a confirmed-identical HF/GGUF pair; then either confirm+file a pretokenizer bug or commit the
+byte-exact golden. The existing env-gated `TokenizerCompatTest.MatchesHuggingFace` (≥80%) remains.
+
 Remaining genuinely no-/weak-oracle paths (FP8 dequant/GEMV now oracled; mxfp4 attention bias
 now guarded) are tracked in §7. Any further real bug found while building tests will be filed
 here with a minimal repro, per the dispatch rule (tests adapt to the engine, not the reverse).
@@ -336,3 +352,45 @@ test binary. Cross-checking against the source found these **false-positive "no 
 Net effect: the original §5 tables remain accurate for *risk*, but the Tier-0 quant/compute work
 is ~half what it first looked like (Q6_K GEMV, MMVQ, and grouped-GEMM were already oracled), and
 greedy bit-exactness is already locked. Implementation proceeds against this reconciled list only.
+
+---
+
+## 8. Implementation status (Step 3/4 — what shipped)
+
+Delivered as small green-gated commits (each: `make build` + the affected GPU binaries on the
+RTX 5090, no previously-passing test regressed). Tolerances are justified inline per test and
+summarised in `tests/README.md`.
+
+**Shipped (committed, green):**
+- *Tier 0* — Q4_0 + Q5_K dequant added to the fp64 GGUF anchor (`test_gguf_dequant_ref.cu`,
+  bit-exact); FP8 E4M3 decode vs an independent OCP LUT (`test_quant.cu`, 240 bytes exact);
+  FP8 GEMV nonzero vs fp64 (`test_fp8_gemm.cu`, replaced the all-zero smoke); FA2↔cuBLAS
+  crosspath parity at seqlen {1,2,513} (`test_attention_crosspath.cu`); mxfp4 attention
+  independent fp64 ref + signed-mean bias guard (`test_attention_mxfp4.cu`).
+- *Tier 1* — MoE run-to-run logit-drift bound (`test_moe_executor.cu`).
+- *Tier 2* — tool-call parse/validate unit suite (`test_tool_call.cpp`, 17 tests, CPU/CI);
+  Bearer-auth constant-time compare extracted + unit-tested (`test_server_auth.cpp`, 8 tests,
+  CPU/CI; `bearer_token_matches` in `utils.cpp`).
+- *Step 4* — `tests/README.md` (run/partition, CI no-GPU reality, oracle/tolerance policy,
+  golden regeneration).
+- *Hygiene* — removed dead `test_gdn_kernel.cu` + its `test-gdn` target.
+- *Findings* — F1 (`gemv_q4_0_q8_1` interleaved-vs-split nibble layout, quarantined),
+  F2 (Qwen3.5 tokenizer divergence, unconfirmed/confounded — §6).
+
+**Remaining genuine gaps — NOT yet implemented:**
+- *Tier 1 (GPU, tractable, each ~1 build cycle):* FA2 crosspath parity at HD∈{64,96,256}
+  (hd=256 = #566 hot-spot); INT4 added to the `paged_oracle` typed-test (currently only the
+  self-referential dequant in `test_paged_attention.cu`); FP8 KV **write**/quantize round-trip;
+  dispatch format→tier *selection* (currently wiring-only, scales forced to 1.0); MXFP4 GEMV
+  value oracle (reuse the convert LUT).
+- *Tier 2 (infra-blocked):* real-server tests for `/v1/chat/completions` logprob sum + top-k
+  ordering, `/v1/messages` synthetic-streaming sequence, and CI-wiring of the #712 robustness /
+  #710 0-token batteries **all require a running GPU server in CI — and CI has no GPU runner**
+  (§1). These are achievable only as *local-gated* suites; the logprob assembly also lives inside
+  `handlers.cpp` (not a free function) so a CPU unit test would need a larger extraction than the
+  auth one. Committed-golden tokenizer/chat-template parity is blocked on shipping a real
+  tokenizer (large) or running HF in CI (no transformers/model there) — see F2.
+
+**Deliberately out of scope (unchanged from §5):** `compute-sanitizer` lane (can't run on this
+WSL2 host — WDDM); trivial-handler contract tests; bench-only files; re-enabling the documented
+`DISABLED_` determinism boundaries.
