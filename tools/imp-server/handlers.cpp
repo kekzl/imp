@@ -3566,14 +3566,25 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             return;
         }
 
-        // Reject over-long inputs before prefill: the embeddings path drives
-        // imp_prefill directly, and a prompt longer than the engine's allocated
-        // context overruns the KV/position buffers (SIGSEGV) instead of failing
-        // cleanly. (state.max_seq_len is the effective allocated context.)
-        if (state.max_seq_len > 0 && n_tokens > state.max_seq_len) {
+        // Reject over-long inputs before prefill. Two independent bounds:
+        //   1. the engine's allocated context (state.max_seq_len), and
+        //   2. the executor's single-pass hidden capacity (max_tokens()): the
+        //      embeddings path mean-pools EVERY token's hidden state, which only
+        //      works when the whole input is prefilled in one pass. A longer
+        //      input is chunked and hidden_ keeps only the last chunk, so
+        //      view_hidden(n) would slice [0,n) out of a [max_tokens,*] buffer
+        //      and abort the whole server (Tensor::slice IMP_CHECK). max_tokens
+        //      can be far below max_seq_len (e.g. 4096 vs a 32768 context).
+        int embed_cap = state.max_seq_len;
+        if (state.ctx && state.ctx->engine && state.ctx->engine->executor()) {
+            int hid = state.ctx->engine->executor()->max_tokens();
+            if (hid > 0 && (embed_cap <= 0 || hid < embed_cap))
+                embed_cap = hid;
+        }
+        if (embed_cap > 0 && n_tokens > embed_cap) {
             send_json_error(res, 400, "invalid_request_error",
-                            "Input exceeds context window (" + std::to_string(n_tokens) +
-                                " tokens > " + std::to_string(state.max_seq_len) + " max)");
+                            "Input exceeds the embedding context (" + std::to_string(n_tokens) +
+                                " tokens > " + std::to_string(embed_cap) + " max)");
             return;
         }
 

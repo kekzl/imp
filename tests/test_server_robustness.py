@@ -248,6 +248,26 @@ def main():
                 "/v1/chat/completions",
                 jb({"model": M, "messages": [{"role": "user", "content": "x"}], "max_tokens": big}))
 
+    print("\n[4b] context overflow — over-long prompt must 4xx, never crash (SIGSEGV/abort):")
+    # ~20k tokens: longer than any allocated context AND any single-pass hidden
+    # buffer. Must be rejected cleanly on chat (KV/position buffers) and on
+    # embeddings (the mean-pool hidden buffer). Regression for the 14B-4096-ctx
+    # SIGSEGV and the embeddings view_hidden() abort.
+    overlong = "word " * 50000  # ~50k tokens: beyond any context / single-pass buffer
+    check_bad("/v1/chat/completions  over-long prompt", "/v1/chat/completions",
+              jb({"model": M, "messages": [{"role": "user", "content": overlong}], "max_tokens": 8}))
+    check_bad("/v1/embeddings  over-long input", "/v1/embeddings",
+              jb({"model": M, "input": overlong}))
+    # Server must still be alive (the bug aborted the whole process).
+    try:
+        h = json.loads(urllib.request.urlopen(BASE + "/health", timeout=10).read())
+        alive = bool(h.get("model_loaded"))
+    except Exception:
+        alive = False
+    print(f"  {'ok  ' if alive else 'FAIL'} server alive after over-long prompts: {alive}")
+    if not alive:
+        _fail.append(("server alive after over-long prompts", "server crashed (5xx-class / unreachable)"))
+
     print("\n[5] valid control requests (must be 2xx):")
     check_valid("/v1/chat/completions valid", "/v1/chat/completions",
                 {"model": M, "messages": [{"role": "user", "content": "Say PONG"}], "max_tokens": 8})

@@ -403,6 +403,14 @@ if(IMP_BUILD_SERVER)
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json)
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
+    # left uninstrumented — nvcc can't take --coverage). Measures real line
+    # coverage of tools/imp-server/ over an E2E run. Off by default.
+    option(IMP_COVERAGE "Instrument imp-server with gcov" OFF)
+    if(IMP_COVERAGE)
+        target_compile_options(imp-server PRIVATE --coverage -O0 -g)
+        target_link_options(imp-server PRIVATE --coverage)
+    endif()
 endif()
 
 # --- Tests ---

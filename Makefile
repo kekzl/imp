@@ -10,7 +10,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -41,6 +41,12 @@ test-unit: build
 # stale.
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
+
+# Measured gcov line coverage of tools/imp-server/ over an end-to-end GPU run
+# (builds an instrumented imp-server, drives every endpoint + the manual server
+# batteries, reports coverage). Needs a GPU + a local model. See the script header.
+coverage:
+	bash scripts/coverage_server.sh
 
 # Fast: unit tests only (no Docker GPU needed if built already)
 test-fast: test-unit
