@@ -4,6 +4,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-14
+
+Patch release. Hardens the HTTP surface so malformed/invalid client input can
+never crash a request into an opaque 5xx.
+
 ### Fixed
 - **Bad request input now returns 400 + a JSON error envelope, never a bare 500.**
   Invalid UTF-8 in a request body (e.g. an agent byte-truncating a prompt and
