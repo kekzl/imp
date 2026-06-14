@@ -1,4 +1,5 @@
 #include "tool_call.h"
+#include "utils.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -23,7 +24,7 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
             json fn_desc = {{"name", fn.value("name", "")},
                             {"description", fn.value("description", "")},
                             {"parameters", fn.value("parameters", json::object())}};
-            prompt += fn_desc.dump() + "\n\n";
+            prompt += dump_safe(fn_desc) + "\n\n";
         }
         prompt +=
             "For each function call, return a JSON object within <function=function_name> tags:\n"
@@ -35,7 +36,7 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
             "\n\n# Tools\n\n"
             "You may call one or more functions to assist with the user query.\n\n"
             "<tools>\n" +
-            tools.dump() +
+            dump_safe(tools) +
             "\n</tools>\n\n"
             "For each function call, return a JSON object within <tool_call></tool_call> XML tags:\n"
             "<tool_call>\n"
@@ -135,7 +136,7 @@ static bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         args[key] = std::move(jv);
         pos = pv_end + 12;
     }
-    tc.arguments = args.dump();
+    tc.arguments = dump_safe(args);
     return true;
 }
 
@@ -197,11 +198,11 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
                 tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
                 tc.name = j.value("name", "");
                 if (j.contains("arguments")) {
-                    tc.arguments = j["arguments"].dump();
+                    tc.arguments = dump_safe(j["arguments"]);
                 } else {
                     json args = j;
                     args.erase("name");
-                    tc.arguments = args.dump();
+                    tc.arguments = dump_safe(args);
                 }
                 if (!tc.name.empty()) {
                     calls.push_back(std::move(tc));
@@ -271,7 +272,7 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
             ParsedToolCall tc;
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
             tc.name = name;
-            tc.arguments = j.dump();
+            tc.arguments = dump_safe(j);
             calls.push_back(std::move(tc));
         } catch (...) {
             // Malformed JSON — skip
@@ -525,7 +526,7 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
             ParsedToolCall tc;
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
             tc.name = std::move(name);
-            tc.arguments = ok ? args.dump() : "{}";
+            tc.arguments = ok ? dump_safe(args) : "{}";
             if (!tc.name.empty())
                 calls.push_back(std::move(tc));
         }
@@ -558,7 +559,7 @@ static std::string json_to_gemma_value(const json& v) {
     if (v.is_null())
         return "null";
     if (v.is_number())
-        return v.dump();
+        return dump_safe(v);
     if (v.is_array()) {
         std::string out = "[";
         bool first = true;
@@ -583,7 +584,7 @@ static std::string json_to_gemma_value(const json& v) {
         out += "}";
         return out;
     }
-    return v.dump();
+    return dump_safe(v);
 }
 
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
@@ -619,7 +620,7 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
             json call_obj = {{"name", name}, {"arguments", json::parse(args, nullptr, false)}};
             if (call_obj["arguments"].is_discarded())
                 call_obj["arguments"] = args;
-            result += "\n<tool_call>\n" + call_obj.dump() + "\n</tool_call>";
+            result += "\n<tool_call>\n" + dump_safe(call_obj) + "\n</tool_call>";
         }
     }
 
@@ -726,7 +727,7 @@ std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg
     std::string content;
     if (msg.contains("content") && !msg["content"].is_null()) {
         const auto& c = msg["content"];
-        content = c.is_string() ? c.get<std::string>() : c.dump();
+        content = c.is_string() ? c.get<std::string>() : dump_safe(c);
     }
 
     if (family == imp::ChatTemplateFamily::LLAMA3) {

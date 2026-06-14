@@ -137,7 +137,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
             queue = state.batching->queue_depth();
     }
     json body = {{"status", "ok"}, {"model_loaded", loaded}, {"queue_depth", queue}};
-    res.set_content(body.dump(), "application/json");
+    res.set_content(dump_safe(body), "application/json");
 }
 
 // Recursively find all model files in a directory, returning (display_name, full_path) pairs.
@@ -206,7 +206,7 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     }
 
     json body = {{"object", "list"}, {"data", data}};
-    res.set_content(body.dump(), "application/json");
+    res.set_content(dump_safe(body), "application/json");
 }
 
 // Find a model by name in models_dir. Returns full path or empty string.
@@ -253,7 +253,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
                 {"error",
                  {{"message", "No model loaded and '" + requested_model + "' not found in models directory"},
                   {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
         printf("[auto-load] Loading %s...\n", requested_model.c_str());
@@ -262,7 +262,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         if (!error.empty()) {
             res.status = 500;
             json err = {{"error", {{"message", "Auto-load failed: " + error}, {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
         printf("[auto-load] %s loaded successfully\n", requested_model.c_str());
@@ -281,7 +281,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
                   {"type", "invalid_request_error"},
                   {"param", "model"},
                   {"code", "model_not_found"}}}};
-    res.set_content(err.dump(), "application/json");
+    res.set_content(dump_safe(err), "application/json");
     return false;
 }
 
@@ -515,7 +515,7 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         res.status = 400;
         json err = {
             {"error", {{"message", "\"messages\" must be an array"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return false;
     }
 
@@ -526,7 +526,7 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
             json err = {{"error",
                          {{"message", "\"temperature\" must be between 0 and 2"},
                           {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
     }
@@ -538,7 +538,7 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
             json err = {
                 {"error",
                  {{"message", "\"top_p\" must be between 0 and 1"}, {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
     }
@@ -550,7 +550,7 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
             json err = {
                 {"error",
                  {{"message", "\"max_tokens\" must be at least 1"}, {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
     }
@@ -561,7 +561,7 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
             res.status = 400;
             json err = {{"error",
                          {{"message", "\"n\" must be between 1 and 4."}, {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
     }
@@ -631,11 +631,7 @@ static bool parse_chat_request_params(
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-        res.status = 400;
-        json err = {
-            {"error",
-             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return false;
     }
 
@@ -650,7 +646,7 @@ static bool parse_chat_request_params(
         json err = {{"error",
                      {{"message", "messages array is required and must not be empty"},
                       {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return false;
     }
     // Bound the conversation length: each message is tokenized + template-expanded
@@ -661,7 +657,7 @@ static bool parse_chat_request_params(
         json err = {{"error",
                      {{"message", "messages array exceeds maximum of 10000 entries"},
                       {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return false;
     }
 
@@ -690,7 +686,7 @@ static bool parse_chat_request_params(
         json err = {
             {"error",
              {{"message", "streaming with n > 1 is not supported"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return false;
     }
 
@@ -758,7 +754,7 @@ static bool parse_chat_request_params(
                                             sch["properties"].empty()) &&
                                            !sch.contains("enum");
                     if (!free_form) {
-                        ctx.params.json_schema_str = sch.dump();
+                        ctx.params.json_schema_str = dump_safe(sch);
                     }
                 }
             }
@@ -901,7 +897,7 @@ static bool parse_chat_request_params(
     if (ctx.params.requested_model.empty()) {
         res.status = 400;
         json err = {{"error", {{"message", "\"model\" is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return false;
     }
 
@@ -977,7 +973,7 @@ static bool snapshot_state_and_tokenize_(
                 tf.name = t["function"].value("name", "");
                 tf.description = t["function"].value("description", "");
                 if (t["function"].contains("parameters")) {
-                    tf.parameters_json = t["function"]["parameters"].dump();
+                    tf.parameters_json = dump_safe(t["function"]["parameters"]);
                 }
                 ctx.snap.tool_defs.push_back(std::move(tf));
             }
@@ -992,7 +988,7 @@ static bool snapshot_state_and_tokenize_(
         if (!lock.owns_lock()) {
             res.status = 503;
             json err = {{"error", {{"message", "Server is busy. Please retry."}, {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return false;
         }
         // Stop batching engine for exclusive vision access
@@ -1006,7 +1002,7 @@ static bool snapshot_state_and_tokenize_(
             res.status = 400;
             json error = {
                 {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
-            res.set_content(error.dump(), "application/json");
+            res.set_content(dump_safe(error), "application/json");
             return false;
         }
     }
@@ -1174,7 +1170,7 @@ static bool snapshot_state_and_tokenize_(
                                         std::to_string(ctx.snap.n_prompt_tokens) + " > " +
                                         std::to_string(state.max_input_tokens) + ")"},
                         {"type", "invalid_request_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return false;
     }
 
@@ -1190,7 +1186,7 @@ static bool snapshot_state_and_tokenize_(
                        {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
                                         " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
                         {"type", "invalid_request_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return false;
     }
 
@@ -1209,7 +1205,7 @@ static bool snapshot_state_and_tokenize_(
                                {{"message", "Unknown LoRA adapter '" + ctx.params.lora_name +
                                                 "' (load at startup via --lora NAME=PATH)"},
                                 {"type", "invalid_request_error"}}}};
-                res.set_content(error.dump(), "application/json");
+                res.set_content(dump_safe(error), "application/json");
                 return false;
             }
             want = it->second;
@@ -1247,7 +1243,7 @@ static void handle_vision_chat_blocking_(
         json error = {{"error",
                        {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
                         {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
@@ -1266,7 +1262,7 @@ static void handle_vision_chat_blocking_(
         json error = {{"error",
                        {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
                         {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
@@ -1370,7 +1366,7 @@ static void handle_vision_chat_blocking_(
                       {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                        {"completion_tokens", n_output_tokens},
                        {"total_tokens", ctx.snap.n_prompt_tokens + n_output_tokens}}}};
-    res.set_content(response.dump(), "application/json");
+    res.set_content(dump_safe(response), "application/json");
 }
 
 // Non-streaming chat completion: run n_completions independent generations
@@ -1736,7 +1732,7 @@ static void nonstream_chat_response_(
                       ctx.log_client_ip, ctx.log_raw_body,
                       ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish, response);
 
-    res.set_content(response.dump(), "application/json");
+    res.set_content(dump_safe(response), "application/json");
 }
 
 // Set up SSE chunked content provider for streaming chat completion.
@@ -2173,15 +2169,15 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                     tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
                     if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
                         tc.name = tool_fn_name;
-                        tc.arguments = j.dump();
+                        tc.arguments = dump_safe(j);
                     } else {
                         tc.name = j.value("name", "");
                         if (j.contains("arguments")) {
-                            tc.arguments = j["arguments"].dump();
+                            tc.arguments = dump_safe(j["arguments"]);
                         } else {
                             json args = j;
                             args.erase("name");
-                            tc.arguments = args.dump();
+                            tc.arguments = dump_safe(args);
                         }
                     }
                     if (!tc.name.empty()) {
@@ -2545,7 +2541,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                           {"model", snap_model_name},
                           {"choices", json::array()},
                           {"usage", usage}};
-        std::string usage_chunk = "data: " + usage_obj.dump() + "\n\n";
+        std::string usage_chunk = "data: " + dump_safe(usage_obj) + "\n\n";
         sink.write(usage_chunk.data(), usage_chunk.size());
     }
 
@@ -2654,7 +2650,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             json err = {
                 {"error",
                  {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return;
         }
         state.batching->submit(server_req);
@@ -2676,11 +2672,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-        res.status = 400;
-        json err = {
-            {"error",
-             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
     }
 
@@ -2695,7 +2687,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         json err = {{"error",
                      {{"message", "\"prompt\" is required and must not be empty"},
                       {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -2777,7 +2769,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (requested_model.empty()) {
         res.status = 400;
         json err = {{"error", {{"message", "\"model\" is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -2809,7 +2801,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                        {{"message", "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) +
                                         " > " + std::to_string(state.max_input_tokens) + ")"},
                         {"type", "invalid_request_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
@@ -2819,7 +2811,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                        {{"message", "Prompt exceeds context window (" + std::to_string(n_prompt_tokens) +
                                         " tokens >= " + std::to_string(snap_max_seq_len) + " max)"},
                         {"type", "invalid_request_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
@@ -2867,7 +2859,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
             json err = {
                 {"error",
                  {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return;
         }
         state.batching->submit(server_req);
@@ -3057,7 +3049,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                                        {{"prompt_tokens", n_prompt_tokens},
                                         {"completion_tokens", n_output_tokens},
                                         {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
-                    std::string usage_chunk = "data: " + usage_obj.dump() + "\n\n";
+                    std::string usage_chunk = "data: " + dump_safe(usage_obj) + "\n\n";
                     sink.write(usage_chunk.data(), usage_chunk.size());
                 }
 
@@ -3200,7 +3192,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                            {"completion_tokens", n_output_tokens},
                            {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
 
-        res.set_content(response.dump(), "application/json");
+        res.set_content(dump_safe(response), "application/json");
     }
 }
 
@@ -3209,11 +3201,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-        res.status = 400;
-        json err = {
-            {"error",
-             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
     }
 
@@ -3221,7 +3209,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     if (content.empty()) {
         res.status = 400;
         json err = {{"error", {{"message", "\"content\" is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3234,7 +3222,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3246,13 +3234,13 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
         json error = {{"error",
                        {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
                         {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
     tokens.resize(n_tokens);
     json response = {{"tokens", tokens}};
-    res.set_content(response.dump(), "application/json");
+    res.set_content(dump_safe(response), "application/json");
 }
 
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
@@ -3260,11 +3248,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-        res.status = 400;
-        json err = {
-            {"error",
-             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
     }
 
@@ -3272,7 +3256,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
         res.status = 400;
         json err = {
             {"error", {{"message", "\"tokens\" array is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3285,7 +3269,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3296,7 +3280,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
         json err = {{"error",
                      {{"message", "tokens array exceeds maximum of 1000000 entries"},
                       {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3309,12 +3293,12 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
         json error = {{"error",
                        {{"message", std::string("Detokenize failed: ") + imp_error_string(err)},
                         {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+        res.set_content(dump_safe(error), "application/json");
         return;
     }
 
     json response = {{"content", std::string(buf.data())}};
-    res.set_content(response.dump(), "application/json");
+    res.set_content(dump_safe(response), "application/json");
 }
 
 void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
@@ -3445,11 +3429,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     try {
         body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-        res.status = 400;
-        json err = {
-            {"error",
-             {{"message", std::string("Invalid JSON: ") + e.what()}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
         return;
     }
 
@@ -3467,7 +3447,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
                     json err = {
                         {"error",
                          {{"message", "Each input must be a string"}, {"type", "invalid_request_error"}}}};
-                    res.set_content(err.dump(), "application/json");
+                    res.set_content(dump_safe(err), "application/json");
                     return;
                 }
             }
@@ -3476,13 +3456,13 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json err = {{"error",
                          {{"message", "\"input\" must be a string or array of strings"},
                           {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return;
         }
     } else {
         res.status = 400;
         json err = {{"error", {{"message", "\"input\" is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3490,7 +3470,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         res.status = 400;
         json err = {
             {"error", {{"message", "\"input\" must not be empty"}, {"type", "invalid_request_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3501,14 +3481,14 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         json err = {{"error",
                      {{"message", "Server is busy processing another request. Please retry."},
                       {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
     if (!state.model_loaded()) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -3526,7 +3506,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json err = {{"error",
                          {{"message", "Server busy draining in-flight requests. Please retry."},
                           {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return;
         }
     }
@@ -3561,7 +3541,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json error = {{"error",
                            {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
                             {"type", "server_error"}}}};
-            res.set_content(error.dump(), "application/json");
+            res.set_content(dump_safe(error), "application/json");
             return;
         }
         tokens.resize(n_tokens);
@@ -3571,7 +3551,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json error = {
                 {"error",
                  {{"message", "Input tokenizes to zero tokens"}, {"type", "invalid_request_error"}}}};
-            res.set_content(error.dump(), "application/json");
+            res.set_content(dump_safe(error), "application/json");
             return;
         }
 
@@ -3585,7 +3565,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json error = {{"error",
                            {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
                             {"type", "server_error"}}}};
-            res.set_content(error.dump(), "application/json");
+            res.set_content(dump_safe(error), "application/json");
             return;
         }
 
@@ -3606,7 +3586,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             json error = {{"error",
                            {{"message", std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err)},
                             {"type", "server_error"}}}};
-            res.set_content(error.dump(), "application/json");
+            res.set_content(dump_safe(error), "application/json");
             return;
         }
 
@@ -3650,7 +3630,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
                      {"model", body.value("model", state.model_name)},
                      {"usage",
                       {{"prompt_tokens", total_prompt_tokens}, {"total_tokens", total_prompt_tokens}}}};
-    res.set_content(response.dump(), "application/json");
+    res.set_content(dump_safe(response), "application/json");
 }
 
 // ===========================================================================
@@ -3673,7 +3653,7 @@ struct AnthropicSSE {
         std::string buf = "event: ";
         buf += event_name;
         buf += "\ndata: ";
-        buf += payload.dump();
+        buf += dump_safe(payload);
         buf += "\n\n";
         return sink.write(buf.data(), buf.size());
     }
@@ -4082,15 +4062,15 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
                     tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
                     if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
                         tc.name = tool_fn_name;
-                        tc.arguments = j.dump();
+                        tc.arguments = dump_safe(j);
                     } else {
                         tc.name = j.value("name", "");
                         if (j.contains("arguments"))
-                            tc.arguments = j["arguments"].dump();
+                            tc.arguments = dump_safe(j["arguments"]);
                         else {
                             json args = j;
                             args.erase("name");
-                            tc.arguments = args.dump();
+                            tc.arguments = dump_safe(args);
                         }
                     }
                     if (!tc.name.empty()) {
@@ -4366,7 +4346,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                     {"error",
                      {{"type", "invalid_request_error"},
                       {"message", std::string("Invalid JSON: ") + e.what()}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -4375,7 +4355,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         json err = {{"type", "error"},
                     {"error",
                      {{"type", "invalid_request_error"}, {"message", "Request body must be a JSON object"}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -4394,7 +4374,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                     {"error",
                      {{"type", "invalid_request_error"},
                       {"message", std::string("Failed to transform Anthropic body: ") + e.what()}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -4407,7 +4387,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         httplib::Request shim_req = req;
         json shim_body = oai_body;
         shim_body["stream"] = true;
-        shim_req.body = shim_body.dump();
+        shim_req.body = dump_safe(shim_body);
         shim_req.headers.erase("Content-Length");
         shim_req.headers.erase("content-length");
 
@@ -4428,7 +4408,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
             json out = {{"type", "error"},
                         {"error", parsed.value("error",
                                                json{{"type", "invalid_request_error"}, {"message", "bad request"}})}};
-            res.set_content(out.dump(), "application/json");
+            res.set_content(dump_safe(out), "application/json");
             return;
         }
 
@@ -4454,7 +4434,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                         {"error",
                          {{"type", "invalid_request_error"},
                           {"message", "Streaming is not supported for vision/image requests"}}}};
-            res.set_content(err.dump(), "application/json");
+            res.set_content(dump_safe(err), "application/json");
             return;
         }
 
@@ -4498,7 +4478,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                 json err = {{"type", "error"},
                             {"error",
                              {{"type", "server_error"}, {"message", "Inference engine not ready. Please retry."}}}};
-                res.set_content(err.dump(), "application/json");
+                res.set_content(dump_safe(err), "application/json");
                 return;
             }
             state.batching->submit(server_req);
@@ -4525,7 +4505,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     httplib::Request shim_req = req;
     json shim_body = oai_body;
     shim_body["stream"] = false;
-    shim_req.body = shim_body.dump();
+    shim_req.body = dump_safe(shim_body);
     shim_req.headers.erase("Content-Length");
     shim_req.headers.erase("content-length");
 
@@ -4549,7 +4529,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         }
         json out = {{"type", "error"},
                     {"error", parsed.value("error", json{{"type", "server_error"}, {"message", "unknown"}})}};
-        res.set_content(out.dump(), "application/json");
+        res.set_content(dump_safe(out), "application/json");
         return;
     }
 
@@ -4562,7 +4542,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
                     {"error",
                      {{"type", "server_error"},
                       {"message", std::string("Upstream returned non-JSON: ") + e.what()}}}};
-        res.set_content(err.dump(), "application/json");
+        res.set_content(dump_safe(err), "application/json");
         return;
     }
 
@@ -4585,5 +4565,5 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // Non-streaming requests are fully assembled above (the want_stream path
     // returned earlier with a native incremental SSE stream).
     res.status = 200;
-    res.set_content(anth_response.dump(), "application/json");
+    res.set_content(dump_safe(anth_response), "application/json");
 }

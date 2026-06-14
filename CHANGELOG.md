@@ -4,6 +4,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **Bad request input now returns 400 + a JSON error envelope, never a bare 500.**
+  Invalid UTF-8 in a request body (e.g. an agent byte-truncating a prompt and
+  splitting a multibyte char) made `json::parse` throw, the error envelope
+  echoed the offending bytes, and `err.dump()` then threw `json::type_error.316`
+  (dump rejects ill-formed UTF-8) — which escaped the parse-error catch and
+  surfaced as an opaque `500 Internal Server Error` with no body. Added a global
+  `set_exception_handler` (json exceptions → 400 `invalid_request_error`, others
+  → 500 with a JSON body) plus a `dump_safe()` helper (`dump` with
+  `error_handler_t::replace`) used on every response / SSE / error / request-log
+  body, so an ill-formed byte can never crash a request. Audited all body-taking
+  endpoints (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+  `/v1/messages`, `/tokenize`, `/detokenize`). (DEBUG-500-on-bad-input.md)
+
+### Added
+- `tests/test_server_robustness.py` — manual server-level battery asserting that
+  malformed JSON / invalid UTF-8 / non-object / wrong-type / missing-field input
+  on every endpoint returns 4xx + an error envelope (never 5xx) and valid
+  requests return 2xx.
+
 ## [0.11.1] - 2026-06-14
 
 Patch release. Fixes a server wedge where interleaved `/v1/embeddings` +

@@ -11,6 +11,21 @@
 
 using json = nlohmann::json;
 
+// Serialize `j` to a string that never throws on invalid UTF-8. nlohmann's
+// default dump() throws json::type_error.316 the moment it hits an ill-formed
+// UTF-8 byte; user- and model-derived strings (byte-truncated prompts, decoded
+// tokens) routinely contain those. Invalid bytes are replaced with U+FFFD. For
+// well-formed UTF-8 the output is byte-identical to dump(). Use this for ANY
+// response/SSE/error body that can carry client- or model-supplied text.
+std::string dump_safe(const json& j);
+
+// Send an OpenAI-style error envelope {"error":{"message":..,"type":..}} with
+// the given HTTP status. Dumps via dump_safe so an invalid-UTF-8 byte echoed
+// into the message (e.g. a parse-error what() on byte-truncated input) can
+// never make the dump throw — that throw used to escape the handler and turn a
+// 400-class bad-input case into a bare 500 (DEBUG-500-on-bad-input.md).
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message);
+
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
 size_t utf8_complete_len(const std::string& s);
