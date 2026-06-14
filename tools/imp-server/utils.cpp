@@ -3,6 +3,18 @@
 
 #include <cstdio>
 
+std::string dump_safe(const json& j) {
+    // error_handler_t::replace: emit U+FFFD for ill-formed UTF-8 instead of
+    // throwing json::type_error.316. Identical output for valid UTF-8.
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message) {
+    json err = {{"error", {{"message", message}, {"type", type}}}};
+    res.status = status;
+    res.set_content(dump_safe(err), "application/json");
+}
+
 json safe_token_json(const std::string& text) {
     std::string safe;
     safe.reserve(text.size());
@@ -352,7 +364,7 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                 {"created", created},
                 {"model", model},
                 {"choices", json::array({choice})}};
-    return "data: " + obj.dump() + "\n\n";
+    return "data: " + dump_safe(obj) + "\n\n";
 }
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
@@ -365,5 +377,5 @@ std::string sse_completion_chunk(const std::string& id, int64_t created, const s
                 {"created", created},
                 {"model", model},
                 {"choices", json::array({choice})}};
-    return "data: " + obj.dump() + "\n\n";
+    return "data: " + dump_safe(obj) + "\n\n";
 }

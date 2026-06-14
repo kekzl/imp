@@ -48,7 +48,10 @@ struct RequestLogger {
         if (!enabled)
             return;
         std::lock_guard<std::mutex> lock(mtx);
-        file << record.dump() << '\n';
+        // replace: the record echoes raw client bodies / decoded model text,
+        // which can contain ill-formed UTF-8 — a plain dump() would throw
+        // (json::type_error.316) and take down the request mid-log.
+        file << record.dump(-1, ' ', false, json::error_handler_t::replace) << '\n';
         file.flush();
     }
 };

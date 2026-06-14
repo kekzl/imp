@@ -1,5 +1,6 @@
 #include "args.h"
 #include "handlers.h"
+#include "utils.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
@@ -9,6 +10,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -209,6 +211,26 @@ int main(int argc, char** argv) {
     svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_metrics(req, res, state);
     });
+
+    // Global safety net: any exception that escapes a handler must become a
+    // JSON error envelope, never a bare "500 Internal Server Error". Malformed
+    // or invalid-UTF-8 client input surfaces as a json::exception (parse_error,
+    // or type_error.316 when an error message echoes the offending bytes) — map
+    // those to 400. Everything else is a genuine internal failure → 500, but
+    // still with a JSON body. dump_safe (inside send_json_error) guarantees the
+    // envelope itself can't throw on bad bytes.
+    svr.set_exception_handler(
+        [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
+            try {
+                std::rethrow_exception(ep);
+            } catch (const nlohmann::json::exception& e) {
+                send_json_error(res, 400, "invalid_request_error", e.what());
+            } catch (const std::exception& e) {
+                send_json_error(res, 500, "server_error", e.what());
+            } catch (...) {
+                send_json_error(res, 500, "server_error", "unknown internal error");
+            }
+        });
 
     // Track failed requests via post-routing
     svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {

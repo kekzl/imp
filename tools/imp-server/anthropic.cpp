@@ -2,6 +2,7 @@
 // See anthropic.h for the public surface.
 
 #include "anthropic.h"
+#include "utils.h"
 
 #include <atomic>
 #include <cstdio>
@@ -95,7 +96,7 @@ void push_assistant_turn(json& out, const json& anth_msg) {
                 {"function",
                  {
                      {"name", name},
-                     {"arguments", input.dump()},
+                     {"arguments", dump_safe(input)},
                  }},
             });
         } else if (type == "thinking") {
