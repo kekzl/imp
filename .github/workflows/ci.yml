@@ -96,6 +96,16 @@ jobs:
       - name: ccache stats
         run: ccache -s
 
+      # Stage 2 (CI / CPU): run every CPU-runnable GTest. The `unit` ctest label
+      # (unit_core, unit_text, the CPU subset of test-e2e, guard_e2e_lane_split)
+      # needs no GPU and no model — it is the half of the suite that CAN run here.
+      # GPU correctness lives in the local pre-commit hook (Stage 1), since this
+      # CUDA build container has no device. Before this step CI built the CPU
+      # tests but never ran them (only mock-api + the usually-absent self-hosted
+      # GPU job did), so e.g. the tool-call and Bearer-auth unit tests were dark.
+      - name: Run CPU unit tests (ctest -L unit)
+        run: cd build && ctest -L unit --output-on-failure --timeout 120
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
         with:

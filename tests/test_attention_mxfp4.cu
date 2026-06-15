@@ -12,6 +12,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <cstdlib>
@@ -65,6 +66,51 @@ static void compute_errors(const half* ref, const half* test, size_t n, float& m
         sum_err += err;
     }
     mean_err = static_cast<float>(sum_err / n);
+}
+
+// Independent fp64 attention reference from the f16-rounded inputs (NOT imp's
+// FP16 kernel). Layout matches the [B=1,S,H,HD] tensors: Q[(i*NH+h)*HD+d],
+// K/V[(j*NKV+kvh)*HD+d]. Used to turn the MXFP4 check from "imp-FP4 vs imp-FP16"
+// (two imp kernels, absolute tol) into "imp-FP4 vs independent fp64", with a
+// signed-mean BIAS guard — the thing an absolute-error budget cannot catch
+// (a systematically shifted dequant within 0.1 abs passes the old test).
+static void ref_attention_f64_mha(const std::vector<half>& Qh, const std::vector<half>& Kh,
+                                  const std::vector<half>& Vh, std::vector<double>& O, int Sq, int Skv,
+                                  int NH, int NKV, int HD, bool causal, double softcap) {
+    const double scale = 1.0 / std::sqrt((double)HD);
+    const int gqa = NH / NKV;
+    O.assign((size_t)Sq * NH * HD, 0.0);
+    std::vector<double> S(Skv);
+    for (int h = 0; h < NH; h++) {
+        int kvh = h / gqa;
+        for (int i = 0; i < Sq; i++) {
+            double m = -1e300;
+            for (int j = 0; j < Skv; j++) {
+                double dot = 0.0;
+                for (int d = 0; d < HD; d++)
+                    dot += (double)__half2float(Qh[((size_t)i * NH + h) * HD + d]) *
+                           (double)__half2float(Kh[((size_t)j * NKV + kvh) * HD + d]);
+                dot *= scale;
+                if (softcap > 0.0)
+                    dot = softcap * std::tanh(dot / softcap);
+                if (causal && j > i)
+                    dot = -1e300;
+                S[j] = dot;
+                m = std::max(m, dot);
+            }
+            double l = 0.0;
+            for (int j = 0; j < Skv; j++) {
+                S[j] = (S[j] <= -1e299) ? 0.0 : std::exp(S[j] - m);
+                l += S[j];
+            }
+            for (int d = 0; d < HD; d++) {
+                double acc = 0.0;
+                for (int j = 0; j < Skv; j++)
+                    acc += S[j] * (double)__half2float(Vh[((size_t)j * NKV + kvh) * HD + d]);
+                O[((size_t)i * NH + h) * HD + d] = acc / l;
+            }
+        }
+    }
 }
 
 TEST_F(AttentionMxFP4Test, AvailabilityReflectsSM) {
@@ -184,20 +230,58 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     cudaError_t err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    // Compare outputs — MXFP4 has quantization error so allow generous tolerance
     std::vector<half> h_mxfp4(qo_elems), h_ref(qo_elems);
     cudaMemcpy(h_mxfp4.data(), d_o_mxfp4, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_ref.data(), d_o_ref, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
 
+    // (legacy abs-error check kept as a coarse tripwire)
     float max_err, mean_err;
     compute_errors(h_ref.data(), h_mxfp4.data(), qo_elems, max_err, mean_err);
-
-    // FP4 quantization gives roughly 1-2 bits of mantissa, so expect ~10-20%
-    // relative error in attention output. Use generous absolute thresholds.
     EXPECT_LT(mean_err, 0.1f) << "Mean absolute error too large";
     EXPECT_LT(max_err, 0.5f) << "Max absolute error too large";
 
-    printf("  MXFP4 vs FP16 attention: max_err=%.4f mean_err=%.6f\n", max_err, mean_err);
+    // ---- INDEPENDENT fp64 oracle + BIAS guard (TEST_AUDIT.md §7 Tier-0) ----
+    // The abs-error check above is imp-FP4 vs imp-FP16 — a systematically
+    // shifted mxfp4 dequant (wrong scale exponent / off-by-one block) that
+    // stays within 0.5 abs passes it. Compute the attention from the ORIGINAL
+    // f16 inputs in fp64 and check (a) the mxfp4 output is unbiased relative to
+    // it, and (b) its noise envelope is comparable to imp's own FP16 kernel's
+    // (not systematically worse).
+    std::vector<half> Qh(qo_elems), Kh(kv_elems), Vh(kv_elems);
+    cudaMemcpy(Qh.data(), d_q, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(Kh.data(), d_k, kv_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(Vh.data(), d_v, kv_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    std::vector<double> oref;
+    ref_attention_f64_mha(Qh, Kh, Vh, oref, SQ, SKV, NH, NKV, HD, /*causal=*/true, 0.0);
+
+    auto stats = [&](const std::vector<half>& out, double& nrmse, double& nbias) {
+        double sum_sq = 0.0, sum_err_sq = 0.0, sum_signed = 0.0;
+        for (size_t i = 0; i < oref.size(); i++) {
+            double r = oref[i];
+            double g = (double)__half2float(out[i]);
+            sum_sq += r * r;
+            sum_err_sq += (g - r) * (g - r);
+            sum_signed += (g - r);
+        }
+        double ref_rms = std::sqrt(sum_sq / oref.size());
+        double inv = ref_rms > 1e-9 ? 1.0 / ref_rms : 0.0;
+        nrmse = std::sqrt(sum_err_sq / oref.size()) * inv;
+        nbias = (sum_signed / oref.size()) * inv;  // signed mean / rms(ref)
+    };
+    double mx_nrmse = 0, mx_nbias = 0, fp16_nrmse = 0, fp16_nbias = 0;
+    stats(h_mxfp4, mx_nrmse, mx_nbias);
+    stats(h_ref, fp16_nrmse, fp16_nbias);
+    printf("  MXFP4 vs fp64: nrmse=%.4f nbias=%.4f | FP16-kernel vs fp64: nrmse=%.4f nbias=%.4f\n",
+           mx_nrmse, mx_nbias, fp16_nrmse, fp16_nbias);
+
+    // (a) No systematic bias: unbiased 4-bit noise averages to ~0 over the
+    //     output; a shifted dequant moves the signed mean. 5% of rms(ref) is
+    //     generous for honest noise yet catches a real bias.
+    EXPECT_LT(std::fabs(mx_nbias), 0.05) << "MXFP4 attention output is systematically biased vs fp64";
+    // (b) Noise envelope bounded and comparable to the FP16 kernel's own
+    //     discretization error (not an order of magnitude worse). 0.30 is the
+    //     characterized 4-bit envelope for this shape; printed above.
+    EXPECT_LT(mx_nrmse, 0.30) << "MXFP4 attention nrmse outside the characterized 4-bit envelope";
 
     cudaFree(d_q);
     cudaFree(d_k);

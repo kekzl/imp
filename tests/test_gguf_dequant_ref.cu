@@ -105,6 +105,21 @@ void ref_dequant_q8_0(const uint8_t* blk, double* out) {
         out[i] = dd * static_cast<double>(qs[i]);
 }
 
+// Q4_0: 18 bytes / 32 elems. [ d:f16 | qs:u8[16] ]. 4-bit symmetric quant
+// centered at 8. ggml dequantize_row_q4_0: for j in 0..15,
+//   y[j]    = d * ((qs[j] & 0xF) - 8)   (low nibble)
+//   y[j+16] = d * ((qs[j] >> 4)  - 8)   (high nibble)
+void ref_dequant_q4_0(const uint8_t* blk, double* out) {
+    half d;
+    std::memcpy(&d, blk, 2);
+    const uint8_t* qs = blk + 2;
+    double dd = f16_to_f64(d);
+    for (int j = 0; j < 16; ++j) {
+        out[j] = dd * (static_cast<double>(qs[j] & 0xF) - 8.0);
+        out[j + 16] = dd * (static_cast<double>((qs[j] >> 4) & 0xF) - 8.0);
+    }
+}
+
 // Q6_K: 210 bytes / 256 elems. [ ql:u8[128] | qh:u8[64] | scales:int8[16] | d:f16 ].
 // ggml dequantize_row_q6_K: for each of 2 groups of 128, four 32-quads:
 //   q = (high2<<4 | low4) - 32 ; val = d * scale[i/16] * q
@@ -268,6 +283,19 @@ void build_q8_0(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode)
         }
 }
 
+void build_q4_0(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
+    int bpr = K / 32;
+    buf.resize((size_t)N * bpr * 18);
+    for (int r = 0; r < N; ++r)
+        for (int b = 0; b < bpr; ++b) {
+            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 18;
+            half d = pick_d(g, mode);
+            std::memcpy(bp, &d, 2);
+            for (int i = 0; i < 16; ++i)
+                bp[2 + i] = g.byte();  // packed 4-bit nibbles, full range
+        }
+}
+
 void build_q6_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
     int bpr = K / 256;
     buf.resize((size_t)N * bpr * 210);
@@ -398,6 +426,11 @@ void ref_dequant_all(const std::vector<uint8_t>& buf, int N, int K, QType qt,
         for (int r = 0; r < N; ++r)
             for (int b = 0; b < bpr; ++b)
                 ref_dequant_q8_0(buf.data() + ((size_t)r * bpr + b) * 34, &out[(size_t)r * K + b * 32]);
+    } else if (qt == QType::Q4_0) {
+        int bpr = K / 32;
+        for (int r = 0; r < N; ++r)
+            for (int b = 0; b < bpr; ++b)
+                ref_dequant_q4_0(buf.data() + ((size_t)r * bpr + b) * 18, &out[(size_t)r * K + b * 32]);
     } else if (qt == QType::Q6_K) {
         int bpr = K / 256;
         for (int r = 0; r < N; ++r)
@@ -434,8 +467,12 @@ void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, dou
     std::vector<uint8_t> buf;
     if (qt == QType::Q8_0)
         build_q8_0(buf, N, K, g, mode);
+    else if (qt == QType::Q4_0)
+        build_q4_0(buf, N, K, g, mode);
     else if (qt == QType::Q6_K)
         build_q6_k(buf, N, K, g, mode);
+    else if (qt == QType::Q5_K)
+        build_q5_k(buf, N, K, g, mode);
     else if (qt == QType::IQ4_NL)
         build_iq4_nl(buf, N, K, g, mode);
     else if (qt == QType::IQ4_XS)
@@ -582,13 +619,16 @@ template <typename T>
 class GgufDequant : public ::testing::Test {};
 
 using GgufDequantFormats =
-    ::testing::Types<QTypeTag<QType::Q8_0>, QTypeTag<QType::Q6_K>, QTypeTag<QType::Q4_K>,
-                     QTypeTag<QType::IQ4_NL>, QTypeTag<QType::IQ4_XS>>;
+    ::testing::Types<QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q6_K>,
+                     QTypeTag<QType::Q5_K>, QTypeTag<QType::Q4_K>, QTypeTag<QType::IQ4_NL>,
+                     QTypeTag<QType::IQ4_XS>>;
 
 inline const char* qtype_name(QType qt) {
     switch (qt) {
         case QType::Q8_0: return "Q8_0";
+        case QType::Q4_0: return "Q4_0";
         case QType::Q6_K: return "Q6_K";
+        case QType::Q5_K: return "Q5_K";
         case QType::Q4_K: return "Q4_K";
         case QType::IQ4_NL: return "IQ4_NL";
         case QType::IQ4_XS: return "IQ4_XS";
@@ -686,6 +726,8 @@ void run_dp4a_gemv(const char* name, QType qt, int N, int K,
     std::vector<uint8_t> buf;
     if (qt == QType::Q8_0)
         build_q8_0(buf, N, K, g, NORMAL);
+    else if (qt == QType::Q4_0)
+        build_q4_0(buf, N, K, g, NORMAL);
     else if (qt == QType::Q6_K)
         build_q6_k(buf, N, K, g, NORMAL);
     else if (qt == QType::Q5_K)
@@ -780,6 +822,18 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
 }  // namespace
 
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
+// NOTE: a Q4_0 dp4a-GEMV oracle is intentionally NOT added here. Adding one
+// surfaced a layout inconsistency (AUDIT.md §6 finding F1): gemv_q4_0_q8_1
+// (Q4_0_Traits::dp4a_block via unpack_nibbles_2) consumes nibbles in an
+// INTERLEAVED order (block element 2k = qs[k] low, 2k+1 = qs[k] high), whereas
+// standard ggml Q4_0 — and imp's own dequant_q4_0_kernel, validated bit-exact by
+// GgufDequant/Q4_0 above — is SPLIT (element e = qs[e] low, e+16 = qs[e] high).
+// Fed a standard Q4_0 block the kernel is ~6x off. No repack to interleaved was
+// found, and Q4_0 decode is registered as StorageTier::FP16 (dequant→fp16 GEMV,
+// gemm_kernel_gguf.cu), so the dp4a Q4_0 GEMV appears latent/unreached. Filed
+// for investigation rather than asserted (a green oracle here would require
+// either a kernel fix or confirming+feeding the interleaved layout the kernel
+// actually expects). The Q4_0 DEQUANT path IS now oracled (above).
 TEST(GgufRef, Q6_K_GemvDp4a) { run_dp4a_gemv("Q6_K", QType::Q6_K, 256, 1024, gemv_q6k_q8_1); }
 TEST(GgufRef, Q4_K_GemvDp4a) { run_dp4a_gemv("Q4_K", QType::Q4_K, 256, 1024, gemv_q4_k_q8_1); }
 TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gemv_q5_k_q8_1); }

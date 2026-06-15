@@ -6,6 +6,8 @@
 #include <cuda_fp16.h>
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 
 namespace imp {
 namespace {
@@ -16,6 +18,26 @@ protected:
     void TearDown() override { cudaStreamDestroy(stream_); }
     cudaStream_t stream_ = nullptr;
 };
+
+// Independent host decode of an OCP/NVIDIA E4M3 byte (1 sign, 4 exp bias-7,
+// 3 mantissa). e=15&m=7 = NaN; e=15&m<=6 are normal finite up to 448; e=0 is
+// subnormal (2^(1-7)=2^-6). Deliberately NOT __nv_fp8_e4m3 — this is the
+// ground-truth oracle the GPU kernel ((float)__nv_fp8_e4m3) is checked against.
+double e4m3_decode_ref(uint8_t b, bool& is_nan) {
+    is_nan = false;
+    int sign = (b >> 7) & 1;
+    int e = (b >> 3) & 0xF;
+    int m = b & 0x7;
+    double s = sign ? -1.0 : 1.0;
+    if (e == 15 && m == 7) {
+        is_nan = true;
+        return 0.0;
+    }
+    if (e == 0)
+        return s * (static_cast<double>(m) / 8.0) * std::ldexp(1.0, -6);  // subnormal
+    return s * (1.0 + static_cast<double>(m) / 8.0) * std::ldexp(1.0, e - 7);
+}
+inline bool e4m3_byte_is_nan(uint8_t b) { return (b & 0x7F) == 0x7F; }
 
 TEST_F(FP8GemmTest, GemmCublasLtFP16) {
     // Test cuBLASLt GEMM with FP16 operands
@@ -92,6 +114,88 @@ TEST_F(FP8GemmTest, GemvFP8Basic) {
     std::vector<half> h_y(M);
     cudaMemcpy(h_y.data(), d_y, M * sizeof(half), cudaMemcpyDeviceToHost);
     EXPECT_NEAR(__half2float(h_y[0]), 0.0f, 0.001f);
+
+    cudaFree(d_a);
+    cudaFree(d_x);
+    cudaFree(d_y);
+}
+
+// gemv_fp8 with NONZERO weights vs an independent fp64 reference. The all-zero
+// GemvFP8Basic above cannot catch a wrong E4M3 decode or scale application; this
+// fills A with real (non-NaN) E4M3 bytes and checks y = sum_k decode(A)*scale*x
+// against a host fp64 dot using the independent e4m3_decode_ref LUT.
+// Tolerance: fp8 values decode exactly (LUT-exact, all E4M3 values fit f16), so
+// the only spread is fp32-GPU vs fp64-host accumulation over K + one f16 output
+// round = fp16-class. Normalized by rms(ref) (cancellation-robust), asserted 1e-2.
+TEST_F(FP8GemmTest, GemvFP8NonzeroMatchesReference) {
+    const int M = 96, K = 256;  // M non-round (row-stride bug surfaces); K%16==0
+    const float scale = 0.05f;  // realistic per-tensor weight scale
+
+    std::vector<uint8_t> h_a((size_t)M * K);
+    uint32_t s = 0xF8F8u;
+    auto next = [&]() { s = s * 1664525u + 1013904223u; return s; };
+    for (auto& b : h_a) {
+        uint8_t v = static_cast<uint8_t>(next() >> 24);
+        if (e4m3_byte_is_nan(v))
+            v = 0;  // avoid NaN encodings; the kernel/ref agree on finite bytes
+        b = v;
+    }
+    std::vector<half> h_x(K);
+    for (int k = 0; k < K; ++k)
+        h_x[k] = __float2half(((next() >> 8) * (1.0f / 8388608.0f) - 1.0f) * 2.0f);  // ~[-2,2]
+
+    void *d_a = nullptr, *d_x = nullptr, *d_y = nullptr;
+    cudaMalloc(&d_a, (size_t)M * K);
+    cudaMalloc(&d_x, K * sizeof(half));
+    cudaMalloc(&d_y, M * sizeof(half));
+    cudaMemcpy(d_a, h_a.data(), (size_t)M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, h_x.data(), K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_y, 0, M * sizeof(half));
+
+    int64_t a_shape[] = {M, K};
+    int64_t x_shape[] = {K};
+    int64_t y_shape[] = {M};
+    Tensor A(d_a, QType::FP8_E4M3, 2, a_shape, true);
+    Tensor x(d_x, QType::F16, 1, x_shape, true);
+    Tensor y(d_y, QType::F16, 1, y_shape, true);
+    gemv_fp8(A, x, y, scale, stream_);
+    cudaStreamSynchronize(stream_);
+
+    std::vector<half> h_y(M);
+    cudaMemcpy(h_y.data(), d_y, M * sizeof(half), cudaMemcpyDeviceToHost);
+
+    // fp64 reference + scaled error metric.
+    std::vector<double> yref(M);
+    double sum_sq = 0.0;
+    for (int r = 0; r < M; ++r) {
+        double acc = 0.0;
+        for (int k = 0; k < K; ++k) {
+            bool nan = false;
+            double w = e4m3_decode_ref(h_a[(size_t)r * K + k], nan);
+            acc += w * static_cast<double>(scale) * static_cast<double>(__half2float(h_x[k]));
+        }
+        yref[r] = acc;
+        sum_sq += acc * acc;
+    }
+    double ref_rms = std::sqrt(sum_sq / M);
+    double inv = ref_rms > 1e-9 ? 1.0 / ref_rms : 0.0;
+    double max_rel = 0.0;
+    int worst = 0;
+    bool any_nan_inf = false;
+    for (int r = 0; r < M; ++r) {
+        float gf = __half2float(h_y[r]);
+        if (std::isnan(gf) || std::isinf(gf))
+            any_nan_inf = true;
+        double rel = std::fabs(static_cast<double>(gf) - yref[r]) * inv;
+        if (rel > max_rel) {
+            max_rel = rel;
+            worst = r;
+        }
+    }
+    printf("[gemv_fp8 nonzero] M=%d K=%d scale=%.3f max_rel=%.3e ref_rms=%.4f (row=%d gpu=%.4f ref=%.4f)\n",
+           M, K, scale, max_rel, ref_rms, worst, __half2float(h_y[worst]), yref[worst]);
+    EXPECT_FALSE(any_nan_inf) << "gemv_fp8 produced NaN/Inf on finite weights";
+    EXPECT_LT(max_rel, 1e-2) << "gemv_fp8 nonzero output diverges from independent fp64 reference";
 
     cudaFree(d_a);
     cudaFree(d_x);
