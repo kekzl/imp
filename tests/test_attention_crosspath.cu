@@ -432,5 +432,23 @@ TEST_F(AttentionCrossPathTest, TileBoundaryPlusOne_Sq513) {
                nullptr, 0);
 }
 
+// ---- head-dim edges (TEST_AUDIT.md §7 Tier-1): the parity matrix above is
+// HD=128-only. These add cross-path agreement at HD≠128. Whatever production
+// path runs at a given HD is held to its class tolerance vs the fp64 ref (the
+// "must-not-decline" guard is HD==128-only, so a path that legitimately has no
+// HD=64/256 kernel just declines and is skipped). HD=256 is the Gemma-3 #566
+// correctness hot-spot; HD=64 a common small-head config. n_spots=0: the in-test
+// fp64 ref is ground truth.
+
+TEST_F(AttentionCrossPathTest, HeadDim64) {
+    run_config(9, "headdim64", 128, 128, 8, 2, 64, true, 0, 0.0f, 2.0f, /*mild=*/true, nullptr, nullptr,
+               0);
+}
+
+TEST_F(AttentionCrossPathTest, HeadDim256_Gemma3Hotspot) {
+    run_config(10, "headdim256", 128, 128, 4, 2, 256, true, 0, 0.0f, 2.0f, /*mild=*/true, nullptr,
+               nullptr, 0);
+}
+
 }  // namespace
 }  // namespace imp

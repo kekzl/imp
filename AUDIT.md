@@ -367,7 +367,8 @@ summarised in `tests/README.md`.
   FP8 GEMV nonzero vs fp64 (`test_fp8_gemm.cu`, replaced the all-zero smoke); FA2↔cuBLAS
   crosspath parity at seqlen {1,2,513} (`test_attention_crosspath.cu`); mxfp4 attention
   independent fp64 ref + signed-mean bias guard (`test_attention_mxfp4.cu`).
-- *Tier 1* — MoE run-to-run logit-drift bound (`test_moe_executor.cu`).
+- *Tier 1* — MoE run-to-run logit-drift bound (`test_moe_executor.cu`); FA2↔cuBLAS crosspath
+  parity at HD∈{64,256} (`test_attention_crosspath.cu`; HD=256 = the Gemma-3 #566 hot-spot).
 - *Tier 2* — tool-call parse/validate unit suite (`test_tool_call.cpp`, 17 tests, CPU/CI);
   Bearer-auth constant-time compare extracted + unit-tested (`test_server_auth.cpp`, 8 tests,
   CPU/CI; `bearer_token_matches` in `utils.cpp`).
@@ -377,12 +378,29 @@ summarised in `tests/README.md`.
 - *Findings* — F1 (`gemv_q4_0_q8_1` interleaved-vs-split nibble layout, quarantined),
   F2 (Qwen3.5 tokenizer divergence, unconfirmed/confounded — §6).
 
-**Remaining genuine gaps — NOT yet implemented:**
-- *Tier 1 (GPU, tractable, each ~1 build cycle):* FA2 crosspath parity at HD∈{64,96,256}
-  (hd=256 = #566 hot-spot); INT4 added to the `paged_oracle` typed-test (currently only the
-  self-referential dequant in `test_paged_attention.cu`); FP8 KV **write**/quantize round-trip;
-  dispatch format→tier *selection* (currently wiring-only, scales forced to 1.0); MXFP4 GEMV
-  value oracle (reuse the convert LUT).
+**More reconciliation (false positives found while implementing):**
+- "INT4 not in the paged_oracle typed-test" — FALSE: `PathINT4` is in the `KVDtypes` list
+  (`test_attention_paged_oracle.cu:641`), oracled vs fp64. Already covered.
+- "MXFP4 GEMV value oracle" — N/A: there is no standalone mxfp4 weight-GEMV kernel; MXFP4 weights
+  are converted to NVFP4 at load (convert path oracled by `test_gpt_oss_mxfp4_convert_ref.cu`) and
+  decode goes through the already-oracled NVFP4 GEMV. Nothing to add.
+
+**Remaining genuine gaps — NOT yet implemented (lower value, follow-up):**
+- *FP8 KV write addressing* — the FP8 *values* are round-tripped (`test_fp8_kv_cache.cu` via
+  `quantize_fp16_to_fp8_e4m3_scaled`); only the paged-write *addressing* of
+  `write_kv_cache_fp8_kernel` (block-table placement) is unverified, whereas FP16/INT8 writes are
+  (`test_kv_cache_write.cu`). Marginal — the quant arithmetic is already covered.
+- *Dispatch format→tier selection* — `test_weight_dispatch.cu` tests that the dispatched kernel
+  matches the direct one (wiring), with the tier hand-set and scales forced to 1.0; the
+  format→tier *selection* logic itself is not asserted.
+
+**Two-stage test gate (added this pass, per request):**
+- *Stage 1 — pre-commit (GPU):* `scripts/pre-commit.hook` runs `make test-gpu` (full GTest suite)
+  on staged source changes. GPU correctness can only be gated locally — CI has no GPU runner.
+- *Stage 2 — CI (CPU):* `ci.yml` now runs `ctest -L unit` in the build job — every CPU-runnable
+  GTest (test-core incl. tool-call + Bearer-auth, test-text, the e2e CPU subset). Before this the
+  CPU GTests were built in CI but never run (only `mock-api` + the usually-absent self-hosted GPU
+  job executed tests). `make install-hooks` installs the pre-commit hook alongside pre-push.
 - *Tier 2 (infra-blocked):* real-server tests for `/v1/chat/completions` logprob sum + top-k
   ordering, `/v1/messages` synthetic-streaming sequence, and CI-wiring of the #712 robustness /
   #710 0-token batteries **all require a running GPU server in CI — and CI has no GPU runner**

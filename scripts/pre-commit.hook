@@ -1,0 +1,34 @@
+#!/bin/bash
+# Stage 1 of the two-stage test gate (the other is CI, which runs the CPU-only
+# `ctest -L unit` lane — see .github/workflows/ci.yml).
+#
+# This pre-commit hook runs the GPU test suite locally, because CI has no GPU
+# runner: GPU correctness can ONLY be gated here, before the commit lands. It
+# fires only when staged changes touch buildable sources (src/, include/, tools/,
+# tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated.
+#
+# Runs `make test-gpu` (Docker build + the full GTest suite via imp-tests; this
+# includes the CPU binaries too, so a commit that passes here has run everything).
+# Heavy by design. Skip a single commit with:  git commit --no-verify
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
+          | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
+          || true)
+
+if [ -z "$CHANGED" ]; then
+    echo "pre-commit: no buildable source changes staged, skipping GPU tests"
+    exit 0
+fi
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "pre-commit: WARNING — no GPU detected on this host; cannot run Stage-1 GPU tests." >&2
+    echo "            Commit allowed, but run 'make test-gpu' on a 5090 box before pushing." >&2
+    exit 0
+fi
+
+echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu"
+exec make -s test-gpu

@@ -40,14 +40,23 @@ docker run --rm --gpus all -v /home/kekz/models:/models imp:test \
   test-quant --gtest_filter='GgufDequant/*:GgufRef.*'
 ```
 
-### CI reality
+### Two-stage gate (CI has no GPU runner)
 
-CI has **no GPU runner**: only the `unit` lane (`test-core`, `test-text`, the
-CPU subset of `test-e2e`) and the Python mock-API suite run. The `gpu`/`perf`
-lanes — i.e. most of the kernel oracles below — are **local-only** (`make
-verify-fast` before push). When adding a kernel correctness test, prefer
-expressing the oracle on the CPU side where feasible so a regression is at least
-reproducible without the 5090.
+GPU correctness cannot run in CI (no GPU runner), so the suite is gated in two
+stages — install both hooks with `make install-hooks`:
+
+- **Stage 1 — pre-commit (GPU), local.** `scripts/pre-commit.hook` runs
+  `make test-gpu` (the full GTest suite, which includes the CPU binaries too)
+  when staged changes touch `src/ include/ tools/ tests/ CMakeLists/ *.cmake`.
+  This is where the kernel oracles below are actually gated. (`pre-push` keeps
+  the `make verify-fast` perf + smoke regression gate.)
+- **Stage 2 — CI (CPU).** `.github/workflows/ci.yml` builds everything and runs
+  `ctest -L unit` (`test-core` incl. tool-call + Bearer-auth, `test-text`, the
+  CPU subset of `test-e2e`) plus the Python mock-API suite. The `gpu`/`perf`
+  lanes are skipped (the self-hosted GPU job runs only if `HAS_GPU_RUNNER`).
+
+When adding a kernel correctness test, prefer expressing the oracle on the CPU
+side where feasible so a regression is reproducible in CI without the 5090.
 
 ## Tags / partitions
 
