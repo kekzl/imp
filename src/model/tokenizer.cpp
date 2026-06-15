@@ -1217,6 +1217,20 @@ bool Tokenizer::load(const std::string& path) {
             int id = static_cast<int>(id_v->num_val);
             const std::string& content = content_v->str_val;
             bool is_special = special_v && special_v->type == JType::NUMBER && special_v->num_val != 0.0;
+            // HF semantics: an added token with `normalized=false` is matched
+            // ATOMICALLY against the raw input, regardless of `special` (which
+            // only governs decode-skipping / add_special_tokens). imp previously
+            // keyed atomic matching on `special` alone, so Qwen3's non-special
+            // markers — `<think>`/`</think>` (151667/151668), `<tool_call>`,
+            // `<|fim_*|>` — were BPE-split into "<","think",">" pieces. That broke
+            // the `<think>`-as-stop-token guard and no-think suppression (the
+            // closed `<think></think>` prompt block was just text the model
+            // re-opened) and mis-tokenised tool-call markers. Promote them to
+            // USER_DEFINED so build_special_pieces() pre-splits them atomically;
+            // unlike CONTROL(3) they stay visible in decode (special=false).
+            const JValue* normalized_v = jobj_find(tok, "normalized");
+            bool is_normalized_false = normalized_v && normalized_v->type == JType::NUMBER &&
+                                       normalized_v->num_val == 0.0;
 
             // Ensure vectors are large enough
             if (id >= static_cast<int>(vocab_.size())) {
@@ -1231,7 +1245,9 @@ bool Tokenizer::load(const std::string& path) {
             token_to_id_[content] = id;
             added_token_ids_[id] = true;
             if (is_special)
-                token_types_[id] = 3;  // CONTROL
+                token_types_[id] = 3;  // CONTROL (atomic-match + decode-skippable)
+            else if (is_normalized_false)
+                token_types_[id] = 4;  // USER_DEFINED (atomic-match, decode-visible)
 
             // Detect BOS/EOS tokens
             if (content == "<s>" || content == "<|begin_of_text|>" || content == "<|startoftext|>") {

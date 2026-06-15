@@ -1147,8 +1147,17 @@ static bool snapshot_state_and_tokenize_(
     // level ("<think>" renders as plain text pieces, "</think>" closes it) —
     // when their chat template injects the prefix, the output is reasoning
     // from token 0 and must flow into reasoning_content, not content.
+    //
+    // Only an OPEN think prefix counts: when thinking is suppressed, Qwen3's
+    // template injects a *closed* empty block `<think>\n\n</think>\n\n` (so the
+    // model answers directly). That tail contains "<think>" too — re-enabling on
+    // it would defeat suppression entirely (the model thinks despite the closed
+    // block). Require "<think>" present AND no matching "</think>" in the tail.
+    // Window 16 (not 8) so both tags of the adjacent closed block fall inside
+    // the same tail — otherwise "<think>" could be in-window while "</think>"
+    // just falls off, mis-reading a closed block as an open prefix.
     if (!ctx.snap.enable_thinking) {
-        if (prompt_tail_contains("<think>", 8)) {
+        if (prompt_tail_contains("<think>", 16) && !prompt_tail_contains("</think>", 16)) {
             ctx.snap.enable_thinking = true;
         }
     }

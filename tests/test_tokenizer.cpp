@@ -1,6 +1,11 @@
 #include "model/tokenizer.h"
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <fstream>
+#include <string>
+#include <vector>
+
 namespace imp {
 namespace {
 
@@ -744,6 +749,68 @@ TEST(Cl100kPreTokenizeTest, DigitTriplesCaseBlindStandaloneContractions) {
     EXPECT_EQ(cl100k_pre_tokenize("don't stop"), (Chunks{"don", "'t", " stop"}));
     EXPECT_EQ(cl100k_pre_tokenize("a->b https://x.com/y"),
               (Chunks{"a", "->", "b", " https", "://", "x", ".com", "/y"}));
+}
+
+// ---- Added-token atomic matching: `normalized=false` regardless of `special` ----
+//
+// HF matches an added token atomically against the raw input iff normalized=false
+// (special only governs decode-skipping). Qwen3 ships <think>/</think> and
+// <tool_call> as special=false, normalized=false — they MUST tokenize to their
+// single atomic id, not BPE-split into "<","think",">". A regression here breaks
+// the <think>-as-stop-token guard and no-think suppression.
+
+static std::string write_temp_tokenizer_json(const std::string& body) {
+    std::string path = std::string("/tmp/imp_tok_test_") + std::to_string(::getpid()) +
+                       "_" + std::to_string(reinterpret_cast<uintptr_t>(&body)) + ".json";
+    std::ofstream(path) << body;
+    return path;
+}
+
+// id 200 = <think> (special=false, normalized=false) -> atomic
+// id 201 = <plain> (special=false, normalized=true)  -> NOT atomic (BPE-split)
+// id 202 = <|ctrl|> (special=true)                   -> atomic (control)
+static const char* kAddedTokenJson = R"JSON({
+  "model": { "type": "BPE", "vocab": { "a": 0, "b": 1, "c": 2 }, "merges": [] },
+  "added_tokens": [
+    { "id": 200, "content": "<think>",  "special": false, "normalized": false },
+    { "id": 201, "content": "<plain>",  "special": false, "normalized": true  },
+    { "id": 202, "content": "<|ctrl|>", "special": true,  "normalized": false }
+  ]
+})JSON";
+
+static bool contains_id(const std::vector<int32_t>& v, int32_t id) {
+    for (int32_t x : v)
+        if (x == id)
+            return true;
+    return false;
+}
+
+TEST(TokenizerAddedTokens, NormalizedFalseNonSpecialIsAtomic) {
+    std::string path = write_temp_tokenizer_json(kAddedTokenJson);
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load(path));
+    std::remove(path.c_str());
+
+    // <think>: special=false but normalized=false -> single atomic id 200.
+    auto think = tok.encode("<think>");
+    EXPECT_TRUE(contains_id(think, 200)) << "<think> not matched atomically (BPE-split)";
+
+    // It must NOT decode-skip (special=false stays visible).
+    EXPECT_NE(tok.decode({200}).find("<think>"), std::string::npos);
+
+    // Control token (special=true) is atomic as before.
+    EXPECT_TRUE(contains_id(tok.encode("<|ctrl|>"), 202));
+}
+
+TEST(TokenizerAddedTokens, NormalizedTrueIsNotPromoted) {
+    std::string path = write_temp_tokenizer_json(kAddedTokenJson);
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load(path));
+    std::remove(path.c_str());
+
+    // <plain>: normalized=true -> must NOT be matched as the atomic id 201.
+    EXPECT_FALSE(contains_id(tok.encode("<plain>"), 201))
+        << "normalized=true token should not be promoted to atomic matching";
 }
 
 }  // namespace
