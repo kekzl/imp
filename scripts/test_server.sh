@@ -83,6 +83,7 @@ run "endpoints smoke"     python3 tests/exercise_all_endpoints.py
 run "robustness (#712)"   python3 tests/test_server_robustness.py
 run "logprobs"            python3 tests/test_server_logprobs.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
+run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py
 
