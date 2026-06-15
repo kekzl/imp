@@ -4,6 +4,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Anthropic `/v1/messages` honours the `thinking` field.** `{"type":"enabled","budget_tokens":N}`
+  enables extended thinking with a budget and `{"type":"disabled"}` requests it
+  off; previously the field was dropped in the Anthropic→OpenAI conversion, so the
+  request could not influence thinking at all. The field now routes to the same
+  internal controls as the OpenAI path (`enable_thinking` + `think_budget`);
+  `budget_tokens` maps to imp's fractional `think_budget` (`budget_tokens /
+  max_tokens`, clamped to 1.0). Note: actually suppressing a think-model still
+  relies on imp's existing `/no_think` mechanism, which is model/prompt-dependent
+  — a separate pre-existing limitation (reproducible on the OpenAI path too).
+
 ### Fixed
 - **Embeddings reject inputs longer than the single-pass hidden buffer (was a server abort).**
   Follow-up to the over-long-prompt fix below: `/v1/embeddings` mean-pools every

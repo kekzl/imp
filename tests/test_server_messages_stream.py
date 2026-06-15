@@ -64,14 +64,13 @@ def stream_events():
     the socket timeout. A timeout is treated as end-of-stream (the gate then
     fails on the missing message_stop rather than crashing on a traceback).
     """
-    # A think-model (Qwen3 default-on) emits a `thinking` block first; the
-    # Anthropic route does not expose a thinking toggle (anthropic_to_openai_body
-    # maps neither `thinking` nor `enable_thinking`), so we don't fight it — we
-    # assert the protocol shape AROUND any thinking block and give a budget large
-    # enough that the whole think+answer completes with a clean message_stop.
-    # `enable_thinking:false` is a harmless no-op here, kept for when the route
-    # learns to honour it. The prompt is trivial so reasoning stays short.
-    body = {"model": M, "max_tokens": 512, "stream": True, "enable_thinking": False,
+    # `thinking:disabled` is best-effort: imp's underlying /no_think suppression
+    # is model/prompt-dependent (a think-model may still reason), so we don't rely
+    # on it — the budget is large enough for a full think+answer to finish with a
+    # clean message_stop, and the assertions below tolerate a thinking block. The
+    # prompt is trivial so any reasoning stays short.
+    body = {"model": M, "max_tokens": 512, "stream": True,
+            "thinking": {"type": "disabled"},
             "messages": [{"role": "user", "content": "What is 2+2? Reply with just the number."}]}
     req = urllib.request.Request(BASE + "/v1/messages", json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})

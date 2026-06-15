@@ -306,6 +306,37 @@ json anthropic_to_openai_body(const json& anth) {
     if (anth.contains("stop_sequences"))
         oai["stop"] = anth["stop_sequences"];
 
+    // Extended-thinking control. Anthropic uses a `thinking` object:
+    //   {"type":"enabled","budget_tokens":N}  |  {"type":"disabled"}
+    // imp's orchestrator (handlers.cpp) reads `enable_thinking` (bool) and
+    // `think_budget` on the OpenAI body. `think_budget` is a FRACTION of
+    // max_tokens (default 0.5), so map Anthropic's absolute budget_tokens to
+    // budget_tokens/max_tokens, clamped to [0,1]. Without this mapping a
+    // think-model always reasoned on /v1/messages regardless of the request.
+    if (anth.contains("thinking") && anth["thinking"].is_object()) {
+        const auto& think = anth["thinking"];
+        const std::string ttype = think.value("type", "");
+        if (ttype == "disabled") {
+            // Suppressing thinking on a think-model needs BOTH signals: the
+            // orchestrator only sets suppress_thinking (which injects /no_think
+            // so the template emits no <think>) when enable_thinking is false
+            // AND think_budget <= 0 (handlers.cpp). The server's default budget
+            // is 0.5, so without zeroing it the model would still reason.
+            oai["enable_thinking"] = false;
+            oai["think_budget"] = 0.0;
+        } else if (ttype == "enabled") {
+            oai["enable_thinking"] = true;
+            if (think.contains("budget_tokens") && think["budget_tokens"].is_number()) {
+                double budget = think["budget_tokens"].get<double>();
+                double max_tokens = anth.value("max_tokens", 0.0);
+                if (budget > 0.0 && max_tokens > 0.0) {
+                    double frac = budget / max_tokens;
+                    oai["think_budget"] = frac > 1.0 ? 1.0 : frac;
+                }
+            }
+        }
+    }
+
     // Messages -------------------------------------------------------------
     json oai_messages = json::array();
 
