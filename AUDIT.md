@@ -394,20 +394,25 @@ summarised in `tests/README.md`.
   matches the direct one (wiring), with the tier hand-set and scales forced to 1.0; the
   format→tier *selection* logic itself is not asserted.
 
-**Two-stage test gate (added this pass, per request):**
+**Three-stage test gate (added this pass, per request):**
 - *Stage 1 — pre-commit (GPU):* `scripts/pre-commit.hook` runs `make test-gpu` (full GTest suite)
   on staged source changes. GPU correctness can only be gated locally — CI has no GPU runner.
 - *Stage 2 — CI (CPU):* `ci.yml` now runs `ctest -L unit` in the build job — every CPU-runnable
   GTest (test-core incl. tool-call + Bearer-auth, test-text, the e2e CPU subset). Before this the
   CPU GTests were built in CI but never run (only `mock-api` + the usually-absent self-hosted GPU
   job executed tests). `make install-hooks` installs the pre-commit hook alongside pre-push.
-- *Tier 2 (infra-blocked):* real-server tests for `/v1/chat/completions` logprob sum + top-k
-  ordering, `/v1/messages` synthetic-streaming sequence, and CI-wiring of the #712 robustness /
-  #710 0-token batteries **all require a running GPU server in CI — and CI has no GPU runner**
-  (§1). These are achievable only as *local-gated* suites; the logprob assembly also lives inside
-  `handlers.cpp` (not a free function) so a CPU unit test would need a larger extraction than the
-  auth one. Committed-golden tokenizer/chat-template parity is blocked on shipping a real
-  tokenizer (large) or running HF in CI (no transformers/model there) — see F2.
+- *Stage 3 — server (GPU, local, opt-in):* `make test-server` (`scripts/test_server.sh`) boots a
+  real `imp-server` against a live model and **gates** on the OpenAI+Anthropic wire batteries —
+  the only place `handlers.cpp` / `batching_engine.cpp` and the SSE protocols run end-to-end. This
+  closes the former "Tier 2 (infra-blocked)" item: the two missing assertions were written
+  (`tests/test_server_logprobs.py` — logprob non-positivity + **top-k descending order** + greedy
+  token == top-1 tie-in; `tests/test_server_messages_stream.py` — `/v1/messages` event sequence
+  `message_start → (content_block_start → delta+ → stop)+ → message_delta → message_stop`, balanced
+  and `event:`-vs-`data.type` consistent), and the pre-existing #712/#710 batteries are now run as
+  hard gates instead of `coverage_server.sh`'s `|| true`. Still GPU-only (not CI-wired): CI has no
+  GPU runner (§1), so this is a *local* stage, run before relying on a server change.
+- *Still infra-blocked:* committed-golden tokenizer/chat-template parity needs a shipped real
+  tokenizer (large) or HF in CI (no transformers/model there) — see F2.
 
 **Deliberately out of scope (unchanged from §5):** `compute-sanitizer` lane (can't run on this
 WSL2 host — WDDM); trivial-handler contract tests; bench-only files; re-enabling the documented

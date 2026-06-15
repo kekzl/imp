@@ -42,6 +42,14 @@ test-unit: build
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
 
+# Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
+# a live model and GATES on the OpenAI+Anthropic wire batteries (endpoints,
+# robustness #712, logprobs, /v1/messages stream, embed/chat interleave,
+# 0-token #710). CI has no GPU runner, so this is the only place handlers.cpp /
+# batching_engine run end-to-end. See the script header for env knobs.
+test-server: build
+	bash scripts/test_server.sh
+
 # Measured gcov line coverage of tools/imp-server/ over an end-to-end GPU run
 # (builds an instrumented imp-server, drives every endpoint + the manual server
 # batteries, reports coverage). Needs a GPU + a local model. See the script header.
