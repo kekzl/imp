@@ -40,10 +40,10 @@ docker run --rm --gpus all -v /home/kekz/models:/models imp:test \
   test-quant --gtest_filter='GgufDequant/*:GgufRef.*'
 ```
 
-### Two-stage gate (CI has no GPU runner)
+### Three-stage gate (CI has no GPU runner)
 
-GPU correctness cannot run in CI (no GPU runner), so the suite is gated in two
-stages — install both hooks with `make install-hooks`:
+GPU correctness cannot run in CI (no GPU runner), so the suite is gated in
+stages — install the hooks with `make install-hooks`:
 
 - **Stage 1 — pre-commit (GPU), local.** `scripts/pre-commit.hook` runs
   `make test-gpu` (the full GTest suite, which includes the CPU binaries too)
@@ -54,6 +54,19 @@ stages — install both hooks with `make install-hooks`:
   `ctest -L unit` (`test-core` incl. tool-call + Bearer-auth, `test-text`, the
   CPU subset of `test-e2e`) plus the Python mock-API suite. The `gpu`/`perf`
   lanes are skipped (the self-hosted GPU job runs only if `HAS_GPU_RUNNER`).
+- **Stage 3 — server (GPU), local, opt-in.** `make test-server`
+  (`scripts/test_server.sh`) boots a real `imp-server` against a live model and
+  GATES on the OpenAI+Anthropic wire batteries — the only place `handlers.cpp` /
+  `batching_engine.cpp` and the SSE protocols run end-to-end (CI's `mock-api`
+  suite is a contract stub, not the real handlers). It is opt-in (a model load +
+  boot costs minutes), not hooked; run it before relying on a server change.
+  Batteries, all hard-gated:
+  `exercise_all_endpoints.py` (no 5xx), `test_server_robustness.py` (#712 bad
+  input → 4xx+envelope), `test_server_logprobs.py` (logprob sum + top-k
+  descending order), `test_server_messages_stream.py` (Anthropic `/v1/messages`
+  event sequence), `test_server_embed_chat_interleave.sh` + `test_server_0token_battery.py`
+  (#710 no empty-completion wedge). `make coverage` runs the same set
+  ungated to measure `tools/imp-server/` line coverage.
 
 When adding a kernel correctness test, prefer expressing the oracle on the CPU
 side where feasible so a regression is reproducible in CI without the 5090.
