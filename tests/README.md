@@ -64,9 +64,10 @@ stages — install the hooks with `make install-hooks`:
   `exercise_all_endpoints.py` (no 5xx), `test_server_robustness.py` (#712 bad
   input → 4xx+envelope), `test_server_logprobs.py` (logprob sum + top-k
   descending order), `test_server_messages_stream.py` (Anthropic `/v1/messages`
-  event sequence), `test_server_embed_chat_interleave.sh` + `test_server_0token_battery.py`
-  (#710 no empty-completion wedge). `make coverage` runs the same set
-  ungated to measure `tools/imp-server/` line coverage.
+  event sequence), `test_server_thinking_toggle.py` (thinking actually
+  disables/enables on both dialects), `test_server_embed_chat_interleave.sh` +
+  `test_server_0token_battery.py` (#710 no empty-completion wedge). `make
+  coverage` runs the same set ungated to measure `tools/imp-server/` line coverage.
 
 When adding a kernel correctness test, prefer expressing the oracle on the CPU
 side where feasible so a regression is reproducible in CI without the 5090.

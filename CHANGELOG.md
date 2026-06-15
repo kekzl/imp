@@ -6,16 +6,29 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - **Anthropic `/v1/messages` honours the `thinking` field.** `{"type":"enabled","budget_tokens":N}`
-  enables extended thinking with a budget and `{"type":"disabled"}` requests it
-  off; previously the field was dropped in the Anthropic→OpenAI conversion, so the
-  request could not influence thinking at all. The field now routes to the same
+  enables extended thinking with a budget and `{"type":"disabled"}` turns it off;
+  previously the field was dropped in the Anthropic→OpenAI conversion, so the
+  request could not influence thinking at all. The field routes to the same
   internal controls as the OpenAI path (`enable_thinking` + `think_budget`);
   `budget_tokens` maps to imp's fractional `think_budget` (`budget_tokens /
-  max_tokens`, clamped to 1.0). Note: actually suppressing a think-model still
-  relies on imp's existing `/no_think` mechanism, which is model/prompt-dependent
-  — a separate pre-existing limitation (reproducible on the OpenAI path too).
+  max_tokens`, clamped to 1.0).
 
 ### Fixed
+- **Disabling thinking now actually suppresses reasoning.** When thinking was
+  turned off, a think-model still reasoned for many prompts (on both `/v1/messages`
+  and the OpenAI path with `enable_thinking:false`+`think_budget:0`). Two root
+  causes, both fixed:
+  - **Tokenizer:** Qwen3 ships `<think>`/`</think>` (and `<tool_call>`, `<|fim_*|>`)
+    as added tokens with `special=false, normalized=false`. imp only atomic-matched
+    `special` tokens, so these were BPE-split into `"<","think",">"` — the model's
+    `<think>` never hit the single-token stop guard, and the template's closed
+    `<think></think>` no-think block was just text the model re-opened. imp now
+    follows HF semantics and atomic-matches any `normalized=false` added token
+    (also fixes tool-call/FIM marker tokenization).
+  - **Server:** the heuristic that re-enables thinking when the prompt tail
+    contains `<think>` (for Nemotron/Phi-4 templates injecting an *open* prefix)
+    fired on the *closed* no-think block too. It now requires an **unclosed**
+    prefix (`<think>` present, no matching `</think>`).
 - **Embeddings reject inputs longer than the single-pass hidden buffer (was a server abort).**
   Follow-up to the over-long-prompt fix below: `/v1/embeddings` mean-pools every
   token's hidden state, which only fits when the whole input is prefilled in one
