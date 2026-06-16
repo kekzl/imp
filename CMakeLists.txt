@@ -10,6 +10,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Custom cmake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
+include(imp-deps)  # third-party dependency pins (single source; mirrored by Dockerfile)
+
+# First-party warning flags as an INTERFACE target. Linked PRIVATE by every
+# imp target (lib, tools, server, tests) so warnings apply to OUR host C++ TUs
+# only — never nvcc, never FetchContent deps. (Was a global CMAKE_CXX_FLAGS.)
+add_library(imp_warnings INTERFACE)
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
 
 # --- CUDA Toolkit ---
 find_package(CUDAToolkit 13.2 REQUIRED)
@@ -61,7 +69,7 @@ if(IMP_BUILD_TESTS)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.17.0
+        GIT_TAG ${IMP_DEP_GOOGLETEST_TAG}
     )
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
@@ -71,7 +79,7 @@ option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
 if(IMP_USE_CUTLASS)
     FetchContent_Declare(cutlass
         GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-        GIT_TAG v4.5.1
+        GIT_TAG ${IMP_DEP_CUTLASS_TAG}
         GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL
     )
@@ -331,6 +339,7 @@ target_link_libraries(imp
         CUDA::cublasLt
     PRIVATE
         pthread
+        imp_warnings
 )
 
 if(IMP_USE_CUTLASS)
@@ -355,7 +364,7 @@ if(IMP_BUILD_TOOLS)
         tools/imp-cli/main.cpp
         tools/imp-cli/args.cpp
     )
-    target_link_libraries(imp-cli PRIVATE imp)
+    target_link_libraries(imp-cli PRIVATE imp imp_warnings)
     target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # imp-bench
@@ -366,7 +375,7 @@ if(IMP_BUILD_TOOLS)
             tools/imp-bench/bench_attention.cu
             tools/imp-bench/bench_e2e.cpp
         )
-        target_link_libraries(imp-bench PRIVATE imp)
+        target_link_libraries(imp-bench PRIVATE imp imp_warnings)
         target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         set_target_properties(imp-bench PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
@@ -379,14 +388,14 @@ endif()
 if(IMP_BUILD_SERVER)
     FetchContent_Declare(httplib
         GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG v0.46.1
+        GIT_TAG ${IMP_DEP_HTTPLIB_TAG}
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(httplib)
 
     FetchContent_Declare(nlohmann_json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.12.0
+        GIT_TAG ${IMP_DEP_NLOHMANN_JSON_TAG}
         GIT_SHALLOW TRUE
     )
     set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
@@ -401,7 +410,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers.cpp
         tools/imp-server/batching_engine.cpp
     )
-    target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json)
+    target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
     # left uninstrumented — nvcc can't take --coverage). Measures real line
@@ -430,7 +439,7 @@ if(IMP_BUILD_TESTS)
             list(APPEND _sources tests/gguf_stub.cpp)
         endif()
         add_executable(${target} ${_sources})
-        target_link_libraries(${target} PRIVATE imp GTest::gtest GTest::gtest_main)
+        target_link_libraries(${target} PRIVATE imp GTest::gtest GTest::gtest_main imp_warnings)
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests

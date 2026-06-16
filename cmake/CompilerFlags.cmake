@@ -1,7 +1,11 @@
 # CompilerFlags.cmake - Compiler and CUDA flags for IMP
 
 # C++ flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+# NOTE: warning flags (-Wall -Wextra -Wpedantic) are NOT set globally here — that
+# leaked them onto FetchContent deps (gtest/cutlass) as un-fixable noise. They now
+# live on the `imp_warnings` INTERFACE target in CMakeLists.txt, linked PRIVATE by
+# every first-party target and scoped to $<COMPILE_LANGUAGE:CXX> (host TUs only,
+# never nvcc), which preserves the previous behavior for our own code.
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DIMP_DEBUG=1")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=x86-64-v3 -DNDEBUG")
 # RelWithDebInfo: keep Release-grade optimizer (-O3, host vectorization), add -g

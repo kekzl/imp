@@ -28,11 +28,17 @@ ENV CUDA_HOME=/usr/local/cuda
 # Pre-clone third-party deps into their own layer. Only invalidated when the
 # pinned tags below change — code-only edits keep this layer cached, saving
 # the FetchContent git-clone step (~30-60s) on every Docker rebuild.
-# Tags must mirror the FetchContent_Declare entries in CMakeLists.txt.
-RUN git clone --depth=1 --branch v1.17.0 https://github.com/google/googletest.git /deps/googletest \
- && git clone --depth=1 --branch v4.5.1  https://github.com/NVIDIA/cutlass.git    /deps/cutlass    \
- && git clone --depth=1 --branch v0.46.1 https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
- && git clone --depth=1 --branch v3.12.0 https://github.com/nlohmann/json.git     /deps/json
+# Tags are authoritative in cmake/imp-deps.cmake; `make build` injects them as
+# --build-arg from that file. The defaults below keep a bare `docker build .`
+# working and MUST match cmake/imp-deps.cmake.
+ARG IMP_DEP_GOOGLETEST_TAG=v1.17.0
+ARG IMP_DEP_CUTLASS_TAG=v4.5.1
+ARG IMP_DEP_HTTPLIB_TAG=v0.46.1
+ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
+RUN git clone --depth=1 --branch ${IMP_DEP_GOOGLETEST_TAG} https://github.com/google/googletest.git /deps/googletest \
+ && git clone --depth=1 --branch ${IMP_DEP_CUTLASS_TAG}    https://github.com/NVIDIA/cutlass.git    /deps/cutlass    \
+ && git clone --depth=1 --branch ${IMP_DEP_HTTPLIB_TAG}    https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
+ && git clone --depth=1 --branch ${IMP_DEP_NLOHMANN_JSON_TAG} https://github.com/nlohmann/json.git   /deps/json
 
 WORKDIR /src
 COPY . .

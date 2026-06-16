@@ -1,0 +1,34 @@
+# clang-tidy for imp — host C++ static analysis.
+#
+# SCOPE: host .cpp / .h translation units. clang-tidy cannot parse CUDA .cu files
+# without a full nvcc-equivalent flagset, so `make tidy` and the CI lint job run
+# it over the non-.cu TUs from compile_commands.json (built with the host C++
+# compiler). For IDEs, clangd picks this file up automatically.
+#
+# Advisory: WarningsAsErrors is empty, so findings surface but do not block. The
+# noisy/opinionated checks below are disabled on purpose for a perf-CUDA codebase
+# (magic numbers, swappable params, cognitive complexity, …). Tighten over time.
+
+Checks: >
+  bugprone-*,
+  performance-*,
+  misc-*,
+  readability-*,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-pro-type-member-init,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-braces-around-statements,
+  -readability-implicit-bool-conversion,
+  -readability-named-parameter,
+  -readability-isolate-declaration
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
+FormatStyle: file
