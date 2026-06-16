@@ -9,7 +9,7 @@ From-scratch C++20/CUDA LLM inference engine targeting **exactly one chip: NVIDI
 The host has **no CUDA toolkit** by design — build inside Docker. `build/` is created root-owned by the container; remove it via a throwaway container, never `sudo` on the host.
 
 ```
-make build         # Docker build (CUDA 13.3) (or: cmake -B build && cmake --build build on a CUDA 13.3+ host)
+make build         # Docker build (CUDA 13.3) (or: cmake --preset ci && cmake --build --preset ci on a CUDA 13.3+ host)
 make test-unit     # CPU/host unit tests
 make test-gpu      # GPU tests (requires RTX 5090)
 make verify-fast   # ~90s pre-push gate
@@ -18,8 +18,9 @@ make install-hooks # pre-push hook: runs verify-fast on src/include/tools/tests 
 make format        # clang-format
 ```
 
-- Targets exist for `bench`, `test-perf`, `test-golden`, `test-vision`, `gen-perf-baseline`, `verify-north-star`, `verify-chunked`, `sanitize`, and the roofline pipeline (`roofline-measure`, `roofline-pin`, `roofline-regress` — see `tools/roofline/README.md`).
-- sm_120a is selected via raw gencode (CMake <3.31 workaround); 120f PTX fallback covers non-5090 SKUs.
+- Targets exist for `bench`, `test-perf`, `test-golden`, `test-vision`, `gen-perf-baseline`, `verify-north-star`, `verify-chunked`, `tidy` (clang-tidy, advisory), `sanitize`, and the roofline pipeline (`roofline-measure`, `roofline-pin`, `roofline-regress` — see `tools/roofline/README.md`).
+- Configure presets live in `CMakePresets.json` (`default`/`ci`/`debug`/`relwithdebinfo`); dependency pins are single-sourced in `cmake/imp-deps.cmake` (the Dockerfile takes them as build-args). sm_120a is selected via raw gencode (CMake <3.31 workaround); 120f PTX fallback covers non-5090 SKUs.
+- See also: [`AGENTS.md`](AGENTS.md) (subagent roles + guardrails) and [`BENCHMARKING.md`](BENCHMARKING.md) (measurement methodology contract).
 
 ## Conventions
 

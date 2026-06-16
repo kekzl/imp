@@ -1,419 +1,251 @@
-# AUDIT.md — imp Test-Coverage Audit (Step 1 of TEST_AUDIT.md)
+# AUDIT.md — imp structural & hardening audit (Phase 1, READ-ONLY)
 
-**Date:** 2026-06-15 · **Scope:** all of `tests/` + inline test usage vs `src/` subsystems.
-**Method:** CMakeLists test-registration analysis + 6 parallel read-only subsystem audits
-(compute, attention, quant, moe/gdn/kv, model/tokenizer/vision, api/runtime/e2e), each
-mapping production code → test → oracle → tolerance, then cross-checked against the source.
+**Date:** 2026-06-17 · **Scope:** whole repo (build · layers · CUDA · C++ · tests · bench · tooling · CI · docs · git).
+**Method:** direct read of every build/config file (CMake, CI, Makefile, clang-format, editorconfig,
+gitignore) + 3 verification sub-agents (CUDA hygiene, C++ hygiene, layer/include discipline), each
+finding re-checked against source per the codebase-audit rule "never act on a raw finding". Counts are
+measured, not estimated. No file other than this one was modified.
 
-**This is the Step-1 deliverable. No tests have been written or changed yet.** It ends with
-a prioritized plan (Step 3 tiers) awaiting go/no-go.
+> **Supersedes the prior `AUDIT.md`** (a test-coverage-only deliverable dated 2026-06-15; recoverable via
+> git history). Its verified conclusions and its two open bugs (F1/F2) are folded into §5 (Testing). The
+> full prior methodology also lives in `docs/TEST_AUDIT.md`.
 
----
+**Codebase size (measured):** 105,547 lines across `src/` + `include/` (151 `.h`, 115 `.cu`, 50 `.cpp`,
+6 `.cuh`). Layers under `src/`: core · memory · model · quant · compute · exec · runtime · lora · vision · api.
 
-## 0. TL;DR — where the safety net is thin
-
-The suite is large (~110 test files, 8 binaries, ~574 GTest cases) and in several places
-**exemplary**. The weak spots are not "missing tests" broadly — they are **specific kernels
-and contracts with no *independent* oracle**, where a silent corruption passes today:
-
-1. **Q4_0 dequant/GEMV has zero correctness oracle** (only e2e no-NaN smoke). Common GGUF
-   format; was a real bug site (PR #691 `Q4_0Deterministic`).
-2. **FP8 E4M3 dequant values are never checked against an independent reference** — only loose
-   round-trip (1.5 abs on a ±2 range). FP8 KV is now *auto-default* for Qwen3 (PR #704).
-3. **MoE run-to-run nondeterminism is asserted as *exact-equal*, not epsilon-bounded** — the
-   known Qwen3-30B-A3B-NVFP4 greedy A/B flip has no characterization test. *(The grouped-GEMM
-   expert compute itself IS oracled — see §7; the original "no oracle" finding was a cross-agent
-   false positive.)*
-4. **mxfp4 attention uses the wrong oracle methodology** (absolute-error vs imp's own FP16 kernel,
-   `EXPECT_LT(max_err,0.5)` — not per-block relative-error vs a dequantized reference).
-5. **No tokenizer HF-parity and no byte-exact chat-template golden run in CI** — the one true
-   parity test is env-gated/skipped and only requires ≥80% match. The entire prior cross-engine
-   PPL gap (#657) was a pretokenizer bug — exactly this blind spot.
-6. **The real server `handlers.cpp` (~4600 LOC) is ~0% exercised in CI** — the Python `tests/api/`
-   suite runs against a hand-written `mock_server.py`. Tool-call arg parsing and API-key auth
-   have **no test at all**.
-
-**Important caveat (§7):** this audit was assembled from 6 parallel per-area sub-agents, each of
-which saw only its own slice. A post-audit reconciliation found **several false-positive "no
-oracle" gaps** — coverage that exists in a *different* test binary than the agent searched. The
-verified-genuine gap list is in §7; the tables in §5 are annotated accordingly. These map onto the
-dispatch's Tier-0/Tier-1/Tier-2 priorities (§5).
+**Headline:** the repo is **healthy and production-grade** — no blockers, build green, ~574 tests. The real
+gaps are in **CI enforcement** (no format/tidy gate; GPU correctness + perf gates are dark because there is
+no GPU runner), **build-system polish** (global flags instead of target-scoped; no presets; no package
+export), and a few **hygiene nits** (a stale hard-coded version string in tracked markdown; CLAUDE.md is
+gitignored; no `.clang-tidy`). Severity legend: **blocker / high / med / low**; effort **S/M/L**.
 
 ---
 
-## 1. Test infrastructure & the CI reality
+## 1. Build system (CMake)
 
-- **8 GTest binaries** (`CMakeLists.txt:449-606`): `test-core, test-text, test-compute,
-  test-attention, test-quant, test-kv, test-moe-gdn, test-e2e`. Split so a kernel change relinks
-  one binary, not all 60 files.
-- **`ctest` registration is via 3 label aggregates** (`unit`/`gpu`/`perf`, lines 627-652), NOT
-  `gtest_discover_tests` (that double-ran the suite, R5/#580). The `unit`/`gpu` split inside
-  `test-e2e` is a gtest filter guarded by `guard_e2e_lane_split` so a rename can't silently move
-  a test into the wrong lane.
-- **CI has no GPU runner** (per `building-and-testing`): the `gpu` and `perf` lanes are
-  **skipped in CI**; only the `unit` lane + the mock API suite run. GPU correctness/perf is a
-  **local-only** gate (`make verify-fast`). This is the single biggest structural fact of this
-  audit: **most of the strong GPU oracles below never execute in CI** — they protect against
-  local regressions only.
-- **`make coverage`** (per memory, PR #716) measured ~51% server line coverage; the real
-  handler path is ~0% in CI. This audit confirms the structural cause (§4G, §api).
+**Current state.** `CMakeLists.txt` (719 lines) is modern and largely target-based: `target_include_directories`
+with `BUILD_INTERFACE`/`INSTALL_INTERFACE` generator expressions (`:316`), `target_link_libraries` with
+PUBLIC/PRIVATE (`:326`), `target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)` (`:341`).
+`CMAKE_EXPORT_COMPILE_COMMANDS ON` (`:8`). Separable compilation + device-symbol resolve on the main lib and
+every test/bench target (`:345`, `:438`). Single-arch is correctly enforced via raw gencode
+(`arch=compute_120a,code=sm_120a` + `compute_120f` PTX fallback) with `CMAKE_CUDA_ARCHITECTURES OFF` (`:31-39`)
+— the documented CMake-<3.31 workaround for the `a`/`f` suffix. Deps via `FetchContent` with pinned tags
+(gtest v1.17.0, cutlass v4.5.1, httplib v0.46.1, json v3.12.0). Clean option matrix (`IMP_BUILD_TESTS/TOOLS/
+BENCH/SERVER`, `IMP_SANITIZERS`, `IMP_COVERAGE`, `IMP_DISABLE_120F_FALLBACK`). `install(TARGETS imp …)` +
+header install present.
 
----
-
-## 2. Subsystem coverage summary (what's strong vs thin)
-
-### compute (test-compute) — mostly strong, a few no-oracle GEMVs
-- **Strong, independent oracle:** `test_rope.cu` (CPU fp32 ref), `test_gpt_oss_yarn_ref.cu`
-  (fp64 + committed numpy golden + inversion sensitivity guard — best-in-class), `test_layernorm`,
-  `test_activation`, `test_reduce`, `test_embedding`, `test_gemm` (CPU GEMM + cuBLAS),
-  `test_gemm_q4k_fused_prefill` (full in-test Q4_K dequant ref), `test_ffn_sparsity`,
-  `test_executor_kernels`.
-- **No independent oracle (HIGH):** **Q6_K dp4a GEMV** (`test_gemm_dp4a.cu:130` finite-only),
-  **MMVQ** (differential vs dp4a only — shared bug passes), **FP8 GEMV** (`test_fp8_gemm.cu:63`
-  tested only with all-zero input → output zero).
-- **Property-only (MED):** stochastic sampling (no chi-square vs softmax dist), general softmax
-  rows (sum=1 property, not abs-err vs CPU).
-- **Edge gaps:** norm/activation/GEMM lack {1,31,32,33,511,512,513}-boundary + NaN/Inf + K-not-
-  mult-of-MMA-tile; embedding has no out-of-range-token-ID test.
-
-### attention (test-attention) — best-covered subsystem; two flagship suites
-- **Exemplary:** `test_attention_crosspath.cu` answers the Tier-0 question — **FA2 ↔ legacy
-  cuBLAS parity is asserted** (f32-score chain agrees pairwise ≤1e-2, both track an fp64 ref
-  pinned to a numpy golden at 1e-9, on realistic heavy-tailed magnitudes). `test_attention_
-  paged_oracle.cu` is a typed-test over 6 KV dtypes vs fp64-from-original-f16 with per-dtype
-  *characterized* envelopes — the correct quant methodology.
-- **Parity shape holes:** HD=128 only; **seqlen ∈ {1,2,max} absent everywhere**; HD∈{64,96,256}
-  never cross-path parity-tested (hd=256 = historic #566 hot-spot); no non-causal or B>1 in the
-  parity assert; tile-boundary ±1 (32±1/512±1) not hit.
-- **Wrong oracle (HIGH):** mxfp4 attention (`test_attention_mxfp4.cu:187`,
-  `test_attention_fmha_mxfp4.cu:117`) compares FP4 to an FP16 kernel with *absolute*-error tol on
-  uniform fills — a biased dequant within 0.1 abs passes. INT4 paged decode
-  (`test_paged_attention.cu:1148`) builds its CPU ref from the *same* INT4-dequantized K/V →
-  tautology (and INT4 is not in the paged_oracle typed list).
-- All `GTEST_SKIP`s here are sm-gated → they **run** on the sm_120a target; only
-  `DISABLED_BasicHD256` (`test_attention_fmha_mxfp4.cu:139`) never runs.
-
-### quant (test-quant) — strong GGUF/NVFP4 anchors, FP8/Q4_0/MXFP4-GEMV thin
-`test_gguf_dequant_ref.cu` is the class-A anchor (fp64 host re-derivation from the format def,
-explicitly anti-tautology). Per-format matrix:
-
-| Format | Round-trip | Dequant-vs-ref | Oracle | Verdict |
+| # | Finding | Gap vs best practice | Sev | Effort |
 |---|---|---|---|---|
-| Q8_0 | n/a | **yes** | fp64 host re-deriv + IMMA exact-model | strong |
-| Q4_K_M | n/a | **yes** | fp64 host re-deriv; IMMA grid-derived | strong (gemm uses *mean*-rel — masks local error) |
-| Q5_K | n/a | **partial** | fp64 ref exists but only dp4a GEMV path tested | no dequant-kernel assert |
-| Q6_K | n/a | **yes** | fp64 host re-deriv | strong |
-| **Q4_0** | n/a | **NO** | none — e2e no-NaN smoke only | **no oracle at all** |
-| **FP8 E4M3** | yes (loose) | **NO** | imp round-trip + imp-FP16 consistency | **no independent value oracle** |
-| NVFP4 | yes | **yes** | spec host decode + fp64 numpy golden | strong on tested paths |
-| INT8 | n/a | yes | CPU-naive reimpl | ok (same one-line formula) |
-| MXFP4 | n/a | converter **yes** / GEMV **NO** | fp64 spec (converter); imp-vs-imp (GEMV) | GEMV arithmetic unchecked |
-
-CI compounding: the genuine NVFP4 GEMM oracles (`test_cutlass_grouped_ref.cu`, `_3x`, `_alpha`,
-`_smallM`) are all `GTEST_SKIP` on non-sm120 → **CI runs ~0% of the real NVFP4 GEMM math**, only
-imp-vs-imp dispatch/wiring. `test_weight_dispatch.cu` tests wiring, not format→tier *selection*
-(tier hand-set, scales forced to 1.0).
-
-### moe / gdn / kv (test-moe-gdn, test-kv) — routing/GDN/KV solid, expert-GEMM blind
-- **Strong oracle:** MoE *routing* (`test_moe.cu` `cpu_topk_gating` — selected experts, softmax
-  weights, prefix-sum, gather/scatter), GDN scan (full delta-rule CPU ref), SSM conv1d (causal
-  no-future-leak), KV write (paged addressing, INT8 round-trip), KV gather (bit-exact + FP8
-  dequant-vs-ref), FP8/INT8 KV decode (split-K parity), prefix cache (byte-equivalence on a
-  zero-init pool — non-tautological, + ref-count/eviction/stale-block guards).
-- **No oracle (HIGH):** **grouped-GEMM expert compute** (only NaN/shape/self-consistency);
-  **MoE nondeterminism bound** (`MoEExecutorTest.Deterministic` does a same-process double-forward
-  asserting *exact* equality — neither detects nor bounds the documented NVFP4 atomic-scatter drift).
-- **No oracle (MED):** FP8 KV *write*/quantize path (only read/decode side); end-to-end
-  prefix-cache *logit* equivalence (only KV-byte identity).
-
-### model / tokenizer / chat-template / vision (test-core, test-text, vision)
-- **Strong:** loader fault-injection (`test_gguf_fault_injection.cpp` 19 cases — bad magic, trunc,
-  2^60 counts, OOB offsets; non-tautological), SafeTensors/SPM/llm-compressor parsers,
-  `test_tokenizer_robustness.cpp` (byte-level GPT2 encode∘decode identity over all 256 bytes,
-  surrogates, OOB-id), dequant-on-load (shares the class-A `test_gguf_dequant_ref.cu`).
-- **HIGH gaps:** **no tokenizer HF-parity in CI** — `test_tokenizer_compat.cpp` is the only true
-  HF-golden test, but `GTEST_SKIP` unless `IMP_TEST_MODEL`/`IMP_TEST_GOLDEN` are set (CI sets
-  neither), bar is only ≥80% (`:172`), golden not committed. Pretokenizer chunk truths are
-  hand-typed constants, no committed generator. **Chat templates are token-COUNT/contains
-  asserts, not byte-exact**, for all 9 families *except* gpt-oss (the only HF-golden:
-  `test_gpt_oss_harmony_golden.cpp`). **Tool-call / thinking-channel rendering is detected but
-  never rendered/asserted.**
-- **MED:** vision goldens (`test_vision_golden.cu`) are committed stability locks (no fp64 oracle)
-  but GPU-gated → never run in CI; HF-config arch detection covers 7 arches (Phi-4/Nemotron/
-  Qwen3-dense/Mistral/gpt-oss not unit-tested); SafeTensors has no full-model load test.
-
-### api / runtime / e2e (test-e2e, test-core server bits, tests/api/*.py)
-- **Strong:** `test_e2e_greedy_lock.cpp` (frozen token sequences through the CUDA-graph path),
-  `test_determinism_e2e.cpp` (same-context bit-identical greedy + PPL), `test_json_constrain.cu`
-  (deep schema-FSM: pattern masking, premature-close/trailing-comma rejection, $ref/recursion,
-  ~92 asserts), `test_sse_stream_utils.cpp` (byte-level NUL-leak #510 + think-leak regression —
-  **note: this file embeds literal NUL bytes, so `grep` reports it "binary"; it is in fact
-  assertion-heavy, not assert-free**), `test_anthropic_transform.cpp`, `test_config.cpp`,
-  `test_routing_decision.cpp`.
-- **HIGH gaps:** **tool-call arg parsing** (`tool_call.cpp` 754 LOC, `parse_tool_calls_*` /
-  `validate_tool_call`) has **zero unit tests**; **API-key auth** (`main.cpp:152-168`,
-  constant-time Bearer compare, /health bypass) is **untested**; **real-server logprobs**
-  sum + top-k ordering stability is unasserted (Tier-0 contract).
-- **Structural:** the Python `tests/api/` suite runs against `mock_server.py`; `run_mock_tests.sh`
-  even excludes the only real-server marks (`tools`, `perf`). `/v1/messages` is absent from the
-  mock; its synthetic streaming event sequence is asserted **nowhere**. The #712 robustness
-  battery (`test_server_robustness.py`, 72 cases) and the #710 0-token battery are **manual, not
-  CI-wired**.
+| **B1** | Warnings/flags set **globally** via `set(CMAKE_CXX_FLAGS … -Wall -Wextra -Wpedantic)` and `set(CMAKE_CUDA_FLAGS …)` in `cmake/CompilerFlags.cmake:4,13` | Best practice = target-scoped `target_compile_options(imp PRIVATE …)` / INTERFACE warnings. Global flags also leak `-Wall -Wpedantic` onto FetchContent deps (gtest/cutlass) → warning noise the team can't fix. | med | M |
+| **B2** | **No `CMakePresets.json`** (confirmed absent) | Configure args are duplicated by hand in `Makefile`, `ci.yml:79`, and docs. A `default`/`ci`/`debug` preset set would make `cmake --preset ci` the single source of truth. | med | S |
+| **B3** | Install rules exist but **no `install(EXPORT)` / package-config / `imp::imp` ALIAS** (`CMakeLists.txt:699-707`) | Downstream `find_package(imp)` is impossible; the static lib isn't consumable as a package. Low impact *if* imp is only ever an app, but the install target implies otherwise. | low | M |
+| **B4** | Ninja not enforced (CI `cmake -B build` uses the default Makefiles generator, `ci.yml:79`); ccache wired in CI only | Ninja + ccache as the default (via a preset) speeds local incremental builds; today ccache helps CI but not the local Docker build. | low | S |
+| **B5** | **Dual dependency pinning** — versions live in both CMake `FetchContent` *and* the Dockerfile deps-clone (documented in `CLAUDE.md`) | A bump must touch two places or silently drift. A single pinned-versions include or build-arg would dedupe. | low | M |
+| **B6** | `cmake_minimum_required(VERSION 3.25)` keeps the raw-gencode workaround alive | CMake ≥3.31 parses `CMAKE_CUDA_ARCHITECTURES "120a"` natively, dropping the `set(CMAKE_CUDA_FLAGS …gencode)` hack. Must stay **single-arch** (no multi-arch added). | low | S |
 
 ---
 
-## 3. Reference oracles available for new tests (Step 2)
+## 2. Directory & layer structure
 
-Good news: most oracles needed for the gaps already exist in-repo and can be reused:
-- **GGUF dequant fp64 re-derivation** → `test_gguf_dequant_ref.cu` (extend to Q4_0, Q5_K-dequant).
-- **NVFP4 spec decode** → `test_nvfp4_quant_ref.cu` / `src/compute/nvfp4_quant_ref.cu` (reuse for
-  NVFP4/MXFP4 GEMV value oracles).
-- **MXFP4 E2M1×UE8M0 spec decode** → `test_gpt_oss_mxfp4_convert_ref.cu` LUT (reuse for MXFP4 GEMV).
-- **fp64 attention ref + numpy golden** → `test_attention_crosspath.cu` /
-  `gen_attention_crosspath_golden.py` (extend to seqlen{1,2,max}, HD≠128).
-- **CPU top-k gating** → `test_moe.cu` (pairs with a CPU/cuBLAS per-expert matmul for grouped-GEMM).
-- **HF `apply_chat_template` / `AutoTokenizer`** → `generate_tokenizer_golden.py` +
-  `gen_harmony_golden.py` (extend to per-family tokenizer + chat-template + tool-call goldens).
-- FP8 E4M3: no in-repo oracle → add a host E4M3 decode LUT (or PyTorch `to(float8_e4m3)` golden).
+**Current state — strong.** Public headers in `include/imp/` (`imp.h`, `config.h`, `error.h`, `types.h`) form a
+coherent C surface (see §4). Layers are cohesive; no `../../`-style relative includes cross layers (verified:
+includes are layer-rooted `#include "core/…"`, `"exec/…"`); no `.cu`/`.cuh` is `#include`d as a fragile sibling
+TU. Largest files are **single-domain**, not god-files (per prior audits and re-checked): `model/jinja.cpp`
+(~2.6k), `model/tokenizer.cpp` (~2.5k), `model/weight_upload.cu`, `compute/gdn.cu`,
+`exec/pre_dequant_phase3_nvfp4_decode.cu`, `compute/attention_fmha_sm120.cu`, `model/gguf_loader.cpp`,
+`compute/sampling.cu` — each one concern. `exec/`’s `GraphExecutor` is intrinsically forward-pass-coupled (prior
+audit settled — **do not** split into runner classes).
 
----
-
-## 4. Hygiene findings
-
-- **A. Dead test:** `tests/test_gdn_kernel.cu` is built standalone (`add_executable(test-gdn …)`,
-  `CMakeLists.txt:718`) but **never `add_test`-registered**, is printf/`main`-style with **0
-  EXPECT/ASSERT**, and its CPU ref was superseded by the identical `gdn_scan_cpu` in `test_gdn.cu`.
-  → **Delete or convert to GTest.**
-- **B. Intentional bench (no-assert, expected):** `test_mxf4nvf4_mma_variants_bench.cu` and the
-  other `*_bench` files — print-only, correctly outside the correctness lanes.
-- **C. False-positive note:** `test_sse_stream_utils.cpp` is NOT assert-free (see §api) — `grep`
-  mis-classifies it as binary due to embedded NUL test vectors.
-- **D. `DISABLED_`:** `test_determinism_e2e.cpp` (×2, cross-context GDN limit — documented,
-  correct), `test_attention_fmha_mxfp4.cu` (`DISABLED_BasicHD256` — mxfp4 hd=256 uncovered),
-  `test_chunked_prefill.cu`. None should be naively re-enabled (known boundaries).
-- **E. `GTEST_SKIP` that hides coverage in CI:** the NVFP4 GEMM ref tests + all GPU/model-gated
-  tests (vision golden, tokenizer HF-compat, e2e model tests) skip in the GPU-less CI. This is
-  expected given no GPU runner, but means the *strong* oracles are local-only.
-- **F. Loose/arbitrary tolerances to revisit:** FP8 scaled round-trip (1.5 abs / 0.5 rmse on a ±2
-  range), GEMM mean-rel 3%/1% (mean masks localized error), smallM 3e-2/5e-2 (self-described
-  "generous, tighten later"), `nvfp4_quant_hw` 0.15 RMS.
-- **G. CI executes ~0% of the real `handlers.cpp` and ~0% of the real NVFP4 GEMM math.**
-
----
-
-## 5. Prioritized gap table & plan (Step 3 tiers)
-
-Ranked by blast radius (wrong dequant/mask/routing silently corrupts every token = high;
-`/health` = low). Maps to the dispatch's tier structure.
-
-### Tier 0 — highest blast radius (do first)
-
-| subsystem | risk | current | target | reference source |
+| # | Finding | Gap vs best practice | Sev | Effort |
 |---|---|---|---|---|
-| Q4_0 dequant + GEMV | high | e2e no-NaN only | dequant-vs-ref + dp4a GEMV err bound | extend `test_gguf_dequant_ref.cu` (fp64 `d·(nibble−8)`) |
-| FP8 E4M3 dequant values | high (auto-default #704) | loose round-trip only | dequant-vs-ref, grid-derived rel bound | host E4M3 LUT / PyTorch `float8_e4m3` golden |
-| MMVQ Q4_K/Q5_K/Q8_0 | high | mmvq↔dp4a differential | abs err vs CPU dequant GEMV | in-test GGUF dequant CPU ref |
-| Q6_K dp4a GEMV | high | finite/no-NaN only | abs/rel err vs dequant | port `test_gemm_q4k_fused_prefill.cu` ref |
-| FP8 GEMV (`gemv_fp8`) | high | zero-input only | nonzero abs err | host fp8 decode + GEMV |
-| mxfp4 attention oracle | high | abs-err vs FP16 kernel | per-block rel-err vs host dequant | fp64 from dequantized mxfp4 grid (mirror paged_oracle) |
-| FA2 parity seqlen {1,2,max} | high | min tested Sq=24 | crosspath parity at Sq=1,2,max | existing fp64 crosspath ref |
-| Sampling determinism (greedy/logprobs) | high (Tier-0 contract) | greedy locked; logprobs unasserted | greedy bit-exact + logprob sum/top-k order stable | self-consistency + softmax dist |
+| **D1** | A foundational layer reaches **up** into `runtime/`: `compute/*` includes `runtime/pdl.h` / config (~18 sites; sub-agent count), plus a few `quant/→runtime`, `memory/→runtime` for `process_diag.h`/`pdl.h` | These are instrumentation/diagnostic hooks, not algorithmic coupling — acceptable but they blur the layer DAG. A thin `core/diag.h` interface would let compute/quant depend down instead of up. Do **not** over-chase (prior audits refuted bigger versions of this). | low | M |
 
-### Tier 1
+*No circular dependencies, no API-layer leakage, no conflated god-files.* Verdict: **healthy.**
 
-| subsystem | risk | current | target | reference source |
+---
+
+## 3. CUDA specifics
+
+**Current state — mostly good.** Centralized error macros in `src/core/logging.h:67-99`
+(`IMP_CUDA_CHECK_LOG/_BOOL/_VOID`) + a throwing `IMP_CUDA_CHECK` in `src/memory/device_allocator.cu:13-22`.
+Allocator strategy is a real **memory pool**: `DeviceAllocator` uses `cudaMallocAsync`/`cudaFreeAsync` over a
+`cudaMemPool` (`device_allocator.cu:29,73,102`); scattered direct `cudaMalloc` exists only for scoped one-shot
+scratch (quant conversion, spec-decode buffers) — no per-iteration bypass found. RAII wrappers exist:
+`src/core/cuda_raii.h` (`CudaStream`, `CudaEvent`, non-copyable/moveable, dtor-destroy). Launch configs use
+named constants (`gemm.cu:42 kGemvThreads=256`, `nvfp4_quant.cu:108 kMicroBlockSize=16`) + helpers
+(`gemv_blocks`). `__host__ __device__` used purposefully (CUTLASS interop, shared device helpers), no misuse.
+`-lineinfo` in RelWithDebInfo, stripped in Release (`cmake/CompilerFlags.cmake:15,22`). PTX fallback documented.
+
+| # | Finding | Gap vs best practice | Sev | Effort |
 |---|---|---|---|---|
-| MoE grouped-GEMM expert compute | high | NaN/shape/self-consistency | per-element output vs reference | CPU-naive per-expert matmul or cuBLAS dense-per-expert |
-| MoE nondeterminism bound | high | exact-equal double-forward | drift ≤ ε logits / ≤ N flips over K cold runs | fresh-executor reruns, NVFP4 atomic-scatter path |
-| MXFP4 GEMV arithmetic | high | imp-vs-imp dispatch | dequant-vs-ref, per-block rel budget | reuse `test_gpt_oss_mxfp4_convert_ref.cu` LUT |
-| Q5_K dequant kernel | med | dp4a GEMV only | add dequant-kernel case | existing `ref_dequant_q5_k` |
-| FA2 parity HD∈{64,96,256} | med-high | WMMA/fp8-vs-CPU only | crosspath assert per HD | crosspath fp64 + numpy golden |
-| INT4 paged decode | med | self-referential dequant | add INT4 to paged_oracle typed-test | fp64 from original-f16 K/V |
-| FP8 KV write/quantize path | med-high | none (read side only) | write→read round-trip bound | host FP16→FP8 quantize ref |
-| Tile-boundary seqlen (32±1, 512±1) | med | odd lengths only | explicit ±1-of-tile cases | existing fp64 refs |
-| Dispatch format→tier selection | med | wiring-only, scale=1.0 | assert selection + real scales | format-detection vs expected tier |
+| **C1** | RAII wrappers exist but are **not universally adopted** — `memory/layer_offload.cu`, `exec/expert_cache.cu`, `runtime/green_ctx.cu`, `runtime/engine_weight_upload.cpp` create streams/events raw and destroy them manually in dtors | Works today (each has a matching destroy), but is not exception-safe across multi-step init and is inconsistent with `cuda_raii.h`. Migrating these to `CudaStream`/`CudaEvent` removes the manual-cleanup class of bug. | low-med | M |
+| **C2** | Kernel launches are **mostly not** followed by an explicit `cudaGetLastError()` check (385 `<<<>>>` sites; only a handful checked, e.g. `dequant_fp16.cu:62`) | Launch-config errors (smem/reg over-budget) surface late and opaquely. A debug-only `IMP_LAUNCH_CHECK()` macro after launches (no-op in Release) would localize them without a hot-path cost. | low | M |
 
-### Tier 2
+*Allocator, error macros, launch constants, profiling flags, `__host__/__device__`, PTX policy: **good**.*
 
-| subsystem | risk | current | target | reference source |
+---
+
+## 4. C++ hygiene
+
+**Current state — strong.** Everything is in `namespace imp {` (verified across implementation files); no
+global-namespace leakage. The public ABI is a **clean PIMPL C API**: `include/imp/*.h` expose only opaque
+handles (`typedef struct ImpModel_T* ImpModel`) + POD structs and include **only** `<stdint.h>/<stddef.h>` and
+each other — zero CUDA/cutlass/internal leakage (verified by grepping the four headers’ includes). Smart
+pointers dominate (151 `unique_ptr`/`shared_ptr` sites); the ~5 raw `new`/`delete` are justified (C-API
+ownership bridge, static CUTLASS singletons). No `using namespace` in any header. Move semantics explicit
+(`Buffer(Buffer&&) noexcept`). `.cuh` template files are large by necessity (device inlining).
+
+| # | Finding | Gap vs best practice | Sev | Effort |
 |---|---|---|---|---|
-| Tokenizer HF parity (per family) | high | opt-in, CI-dark, ≥80% bar, no golden | committed byte-exact golden, runs in CI | HF `AutoTokenizer` via `generate_tokenizer_golden.py` |
-| Pretokenizer regex chunking | high | hand-typed constants | committed generator → chunk goldens | HF `tokenizers.pre_tokenize_str` |
-| Chat-template render (8 families) | high | token-count/contains only | byte-exact rendered-string golden | HF `apply_chat_template` (extend `gen_harmony_golden.py`) |
-| Tool-call render + arg parsing | high | detection only / 0 unit tests | render+parse per family + schema validation | `tool_call.cpp`; HF templates with tools |
-| API-key auth | high | untested | 401 bad / 200 good / timing-safe / health-bypass | `main.cpp:152-168` |
-| Real-server logprobs | high | 5xx smoke only | descending top-k, stable order, sum sanity | `utils.cpp:355` |
-| `/v1/messages` real + synthetic streaming | high/med | transform unit-tested; e2e absent | assert synthetic SSE sequence + round-trip | `anthropic.cpp` |
-| json_schema returned-output validity (e2e) | med | FSM masking only | real-server completion validates vs schema | `test_json_constrain.cu` |
-| Wire #712 robustness + #710 0-token batteries into CI | med | manual scripts | gated CI job | existing `test_server_robustness.py` etc. |
-| Vision encoder golden in CI | med | committed, GPU-gated | gated GPU lane or numeric anchor | (no fp64 oracle — document as lock) |
-| GGUF MoE/GDN/vision structural parse + HF-config arches | med | llama-only / 7 arches | per-arch parse smoke + config fixtures | format spec / committed config.json |
-| Prefix-cache logit equivalence (e2e) | med | KV-byte identity only | hit-vs-cold logits identical | cold full-prefill forward |
+| **H1** | `std::span` barely used (8 sites) vs the dominant host-side `T* ptr, size_t n` signature (e.g. `core/buffer.h:38`, `runtime/batch.h add_prefill_sequence`) | ptr+len is fine at kernel boundaries, but host-side APIs lose C++20 bounds/type safety. Incremental `std::span` adoption on host signatures is a safety win, not a rewrite. | low | M |
+| **H2** | `noexcept` is sparse (~65 sites) on obviously-non-throwing getters | Cosmetic; marking trivial accessors `noexcept` documents the contract and can help the optimizer. | low | S |
 
-### Deliberately OUT of scope (low blast radius / correct-as-is)
-- `/health`, `/v1/models`, `/metrics` contract (trivial handlers, mock-tested).
-- Bench-only files (`*_bench`, `test_mma_peak_saturated`, `test_mxf4nvf4_probe`) — timing, not
-  correctness, by design.
-- `cluster_launch` host helpers (fully covered).
-- Re-enabling the 3 `DISABLED_` determinism-boundary tests (documented hardware limits).
-- `compute-sanitizer` lane: **cannot run on this WSL2 host** (WDDM, no debugger interface — per
-  `building-and-testing`); a native-Linux CI lane is the only place Step-4 racecheck/initcheck
-  can live. Flagged, not implementable here.
+*Namespacing, ABI/PIMPL, RAII-vs-raw, header discipline, casts: **good**.*
 
 ---
 
-## 6. Bugs surfaced during the audit
+## 5. Testing
 
-One dead artifact (`test_gdn_kernel.cu`, §4A) and one layout inconsistency surfaced while
-building the Tier-0 oracles:
+**Current state — large and, in places, exemplary.** ~574 GTest cases in 8 per-module binaries
+(`CMakeLists.txt:449-609`); `ctest` registered via three label aggregates `unit`/`gpu`/`perf` (not
+`gtest_discover_tests`, which double-ran — R5/#580), with `guard_e2e_lane_split` asserting the CPU/GPU filter
+can’t silently drift. Best-in-class oracles: fp64 GGUF dequant re-derivation, fp64 attention crosspath +
+numpy golden, GDN delta-rule CPU ref, GGUF fault-injection (19 cases), determinism/greedy locks. The prior
+test-coverage audit (now §-folded) was **largely shipped** — Q4_0/Q5_K/FP8 oracles, mxfp4-attention ref,
+tool-call + Bearer-auth unit tests, the 3-stage gate.
 
-**F1 — `gemv_q4_0_q8_1` nibble-layout inconsistency (Q4_0 dp4a GEMV).**
-Building a Q4_0 dp4a-GEMV oracle (feeding a standard ggml Q4_0 block, the exact bytes that
-`dequant_q4_0_kernel` decodes bit-exactly — see the now-green `GgufDequant/Q4_0` oracle) produced
-a ~6× error vs the independent fp64 reference (`max_rel=6.27`, gpu=-14.6 vs ref=3.37).
-Root cause: `Q4_0_Traits::dp4a_block` (`src/compute/gemv_dp4a_traits.cuh:251`, via
-`unpack_nibbles_2`) consumes nibbles **interleaved** — block element `2k`=`qs[k]`&0xF,
-`2k+1`=`qs[k]`>>4 — whereas standard ggml Q4_0 and imp's own `dequant_q4_0_kernel`
-(`src/quant/dequant_gpu.cu:299`) are **split** (element `e`=`qs[e]`&0xF, `e+16`=`qs[e]`>>4).
-No repack to interleaved was found, and Q4_0 decode is registered as `StorageTier::FP16`
-(`src/exec/gemm_kernel_gguf.cu:287`, dequant→fp16 GEMV), so `gemv_q4_0_q8_1` appears latent /
-not on the production Q4_0 decode path. **Repro:** `run_dp4a_gemv("Q4_0", QType::Q4_0, 256, 1024,
-gemv_q4_0_q8_1)` against `ref_dequant_q4_0`. **Status:** quarantined (not asserted) pending a
-decision — fix the kernel's unpack to split layout, or confirm it is dead and remove it. The
-Q4_0 *dequant* arithmetic is now independently oracled regardless.
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **T1** | **CI runs only the CPU `unit` lane + the Python mock-API suite** — every GPU oracle and the real `handlers.cpp` (~4600 LOC) are local-only, because there is no GPU runner (`ci.yml:153-161`) | The strong correctness net protects against *local* regressions only; a GPU-path regression can reach `main` if the author skips the local gate. Structural (shared root cause with CI3/BM1). Fixable only with a self-hosted RTX 5090 runner. | high | L |
+| **T2** | **Open bug F1** — `gemv_q4_0_q8_1` consumes Q4_0 nibbles *interleaved* (`gemv_dp4a_traits.cuh:251`) while ggml + imp’s own `dequant_q4_0_kernel` are *split* (`dequant_gpu.cu:299`); a fp64 oracle showed ~6× error. **Phase-3 call-graph trace CORRECTS the original "latent" framing:** it is NOT dead and NOT FP16-only — `gguf_q4_0_kernel` → `run_gguf_smallm` → `dispatch_dp4a_gemv` (`gemm_kernel_gguf.cu:129`, `executor_kernels.cu:67`) feeds it native split-layout Q4_0 weights, so it IS the live Q4_0 dense-decode backend (+ MoE batch path). It has simply never been exercised because **no Q4_0 model is in the local suite** — reachable-but-untested. | Real latent bug. The fix is correctness-sensitive (nibble unpack AND the q8_1 dot-product pairing), so it MUST be verified by the `test-quant` fp64 oracle on-GPU before commit — not a blind one-liner. | med | M |
+| **T3** | **Open bug F2** — Qwen3.5-4B GGUF tokenizer diverged from an HF golden (13/20 byte-exact, contractions/whitespace) but is **unconfirmed/confounded** (pretokenizer vs model-version vs test-parser) | Needs a clean repro (proper JSON golden parser + confirmed-identical HF/GGUF pair) before filing. The entire prior cross-engine PPL gap (#657) was exactly this blind spot. | med | M |
+| **T4** | Tokenizer HF-parity + byte-exact chat-template goldens remain **env-gated / not committed** for most families (`test_tokenizer_compat.cpp` skips unless `IMP_TEST_MODEL` set, ≥80% bar) | Committing per-family goldens + a generator closes the highest-blast-radius dark spot. Infra-bound (needs a shipped tokenizer or HF in CI). | med | M |
 
-**F2 — Qwen3.5-4B GGUF tokenizer diverges from the HF golden on punctuation /
-contractions / whitespace (UNCONFIRMED — confounded).**
-A committed-golden attempt (HF `AutoTokenizer` golden for Qwen3.5-4B vs the GGUF tokenizer from
-`Qwen3.5-4B-mxfp4.gguf`) measured **13/20 strings byte-exact**. The 7 mismatches cluster on
-contractions (`don't` → imp splits the apostrophe: HF `…2688…` vs imp `…6 76…`), multi-space
-runs, and special-char/code punctuation — characteristic *pretokenizer-regex* differences. NOT
-filed as a confirmed bug because three causes are entangled and were not separable in the time
-box: (i) a genuine imp pretokenizer divergence for the Qwen3.5 family (plausible — #657 fixed the
-*qwen2* pretokenizer; Qwen3.5 has a distinct 248k-vocab tokenizer that may not be covered); (ii) a
-GGUF-vs-HF model-version mismatch (local re-downloads can differ — MEMORY); (iii) artifacts of the
-test's crude inline JSON parser on cases containing `{`/`}`/`"` (the "JSON" case decoded to empty
-HF ids — a parser bug, not a tokenizer one). The committed-golden test was reverted (an unsound,
-conflated assertion must not ship). **Follow-up:** a clean repro needs a proper JSON golden parser
-+ a confirmed-identical HF/GGUF pair; then either confirm+file a pretokenizer bug or commit the
-byte-exact golden. The existing env-gated `TokenizerCompatTest.MatchesHuggingFace` (≥80%) remains.
-
-Remaining genuinely no-/weak-oracle paths (FP8 dequant/GEMV now oracled; mxfp4 attention bias
-now guarded) are tracked in §7. Any further real bug found while building tests will be filed
-here with a minimal repro, per the dispatch rule (tests adapt to the engine, not the reverse).
+*Detail: prior `AUDIT.md` (git history) + `docs/TEST_AUDIT.md` + `tests/README.md`.*
 
 ---
 
-## 7. Reconciliation — false positives & verified-genuine gap list
+## 6. Benchmarks
 
-The 6 parallel sub-agents were each scoped to one area and could not see oracles living in another
-test binary. Cross-checking against the source found these **false-positive "no oracle" findings**
-(coverage that already exists — do NOT duplicate):
+**Current state — strong and reproducible.** `imp-bench` + a canonical regression gate
+(`tests/perf_baseline.json`, 3% decode / 5% prefill), refreshed by `scripts/gen_perf_baseline.sh` under a
+cold-median methodology (5 trials, median). Roofline pipeline (`tools/roofline/`, ncu+nsys) with pin/regress.
+Methodology is documented in depth in `CLAUDE.md` (clock warmup, idle-downclock artifact, cuBLAS restart
+variance, host-day ±8-15% drift, sample clocks during bench). `make check-gpu` refuses to bench on a busy GPU.
 
-| Claimed gap (origin) | Reality — already covered | Evidence |
-|---|---|---|
-| "Q6_K dp4a GEMV has no oracle" (compute agent, from `test_gemm_dp4a.cu`) | Independent fp64 oracle exists in the **quant** binary | `test_gguf_dequant_ref.cu:783` `Q6_K_GemvDp4a` vs fp64 `ref_dequant_q6_k` |
-| "MMVQ has no independent oracle" (compute agent, from `test_mmvq.cu`) | fp64 oracle exists for MMVQ Q8_0/Q4_K | `test_gguf_dequant_ref.cu:787-788` `*_GemvMmvq` |
-| "MoE grouped-GEMM expert compute has no reference oracle" (moe/gdn agent) | Independent **per-expert fp64 CPU matmul** of the read-back NVFP4 bits exists | `test_cutlass_grouped_ref.cu` (header §11, `dequant_to_fp64`, body `:212`) — sm120-gated, **runs on the RTX 5090 target** |
-| "greedy not bit-exact run-to-run" (implied Tier-0) | Greedy argmax determinism + e2e token locks already present | `test_sampling.cu:40-96`, `test_e2e_greedy_lock.cpp`, `test_determinism_e2e.cpp` (same-context) |
-
-**Verified-genuine gaps actually worth implementing** (each re-confirmed against current source):
-
-*Tier 0*
-- **Q4_0 dequant + GEMV** — no fp64 oracle anywhere; only constant-nibble e2e smoke
-  (`test_quant_integration.cu:73`). `gemv_q4_0_q8_1` kernel exists and is untested for correctness.
-- **Q5_K dequant kernel** — `ref_dequant_q5_k`/`build_q5_k` already exist but Q5_K is absent from
-  the dequant TYPED_TEST (`test_gguf_dequant_ref.cu:586`) — only its dp4a GEMV is tested.
-- **FP8 E4M3 independent value oracle** — only imp↔imp round-trip (`test_quant.cu:322`) +
-  saturation; no independent E4M3-decode LUT check of `cast_fp8_to_fp16`.
-- **FP8 GEMV nonzero** — `gemv_fp8` tested only with all-zero input (`test_fp8_gemm.cu:75`).
-- **mxfp4 attention proper oracle** — replace abs-err-vs-FP16 (`test_attention_mxfp4.cu:197`,
-  `test_attention_fmha_mxfp4.cu:117`) with per-block rel-err vs host-dequant reference.
-- **FA2↔cuBLAS crosspath parity at seqlen {1,2,max}** — crosspath min tested Sq=24.
-
-*Tier 1*
-- **MoE nondeterminism ε-bound** — `MoEExecutorTest.Deterministic` asserts exact-equal
-  same-process; no cold-rerun drift characterization on the NVFP4 atomic-scatter path.
-- **FP8 KV write/quantize path** — only read/decode side tested.
-- **FA2 crosspath parity at HD∈{64,96,256}**; **INT4 in paged_oracle typed-test**;
-  **dispatch format→tier selection** (currently wiring-only, scales forced to 1.0).
-
-*Tier 2*
-- **Tokenizer HF-parity golden** committed + CI-runnable (currently env-gated, ≥80% bar);
-  **pretokenizer chunk goldens** from a committed generator.
-- **Byte-exact chat-template goldens** per family (currently count/contains only, except gpt-oss).
-- **Tool-call render + arg parsing** unit tests (`tool_call.cpp`, 0 tests today).
-- **API-key auth** (401/200/constant-time/health-bypass) — untested.
-- **Real-server logprobs** sum + top-k descending-order stability — untested (handlers.cpp).
-- **`/v1/messages` synthetic-streaming event sequence** assertion.
-- **CI-wire** the #712 robustness battery + #710 0-token battery.
-- **`tests/README.md`** (Step-4 deliverable).
-
-Net effect: the original §5 tables remain accurate for *risk*, but the Tier-0 quant/compute work
-is ~half what it first looked like (Q6_K GEMV, MMVQ, and grouped-GEMM were already oracled), and
-greedy bit-exactness is already locked. Implementation proceeds against this reconciled list only.
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **BM1** | The perf-regression gate runs **only in the GPU `test` CI job**, which is gated on a non-existent self-hosted runner (`ci.yml:161,185`) → in practice the gate is local-only (pre-push `verify-fast`) | A decode regression can reach `main` unflagged unless the author runs the local gate — the exact failure mode the gate’s own comment cites (tg128 284→146). Same root cause as T1/CI3. | med (high once a runner exists) | L |
+| **BM2** | Warmup/iters/headline-metric policy is spread across `CLAUDE.md` + script comments, no single `BENCHMARKING.md` contract | A one-page methodology doc (which metric is headline, warmup discards, single-session-only comparison) makes the gate auditable by outsiders. | low | S |
 
 ---
 
-## 8. Implementation status (Step 3/4 — what shipped)
+## 7. Tooling
 
-Delivered as small green-gated commits (each: `make build` + the affected GPU binaries on the
-RTX 5090, no previously-passing test regressed). Tolerances are justified inline per test and
-summarised in `tests/README.md`.
+**Current state.** `.clang-format` (Google-based, tuned to the codebase, run via a throwaway `silkeh/clang:18`
+container — clean-host policy) + `make format`/`format-check`. `.editorconfig` covers C/C++/CUDA/CMake/MD/
+Python. Hand-rolled git hooks (`scripts/pre-commit.hook` = Stage-1 GPU suite, `pre-push.hook` = verify-fast)
+installed by `make install-hooks`. `make sanitize` (compute-sanitizer memcheck) target exists. Nsight entry
+points documented (`docs/nsys_profiling.md`, roofline ncu wrappers).
 
-**Shipped (committed, green):**
-- *Tier 0* — Q4_0 + Q5_K dequant added to the fp64 GGUF anchor (`test_gguf_dequant_ref.cu`,
-  bit-exact); FP8 E4M3 decode vs an independent OCP LUT (`test_quant.cu`, 240 bytes exact);
-  FP8 GEMV nonzero vs fp64 (`test_fp8_gemm.cu`, replaced the all-zero smoke); FA2↔cuBLAS
-  crosspath parity at seqlen {1,2,513} (`test_attention_crosspath.cu`); mxfp4 attention
-  independent fp64 ref + signed-mean bias guard (`test_attention_mxfp4.cu`).
-- *Tier 1* — MoE run-to-run logit-drift bound (`test_moe_executor.cu`); FA2↔cuBLAS crosspath
-  parity at HD∈{64,256} (`test_attention_crosspath.cu`; HD=256 = the Gemma-3 #566 hot-spot).
-- *Tier 2* — tool-call parse/validate unit suite (`test_tool_call.cpp`, 17 tests, CPU/CI);
-  Bearer-auth constant-time compare extracted + unit-tested (`test_server_auth.cpp`, 8 tests,
-  CPU/CI; `bearer_token_matches` in `utils.cpp`).
-- *Step 4* — `tests/README.md` (run/partition, CI no-GPU reality, oracle/tolerance policy,
-  golden regeneration).
-- *Hygiene* — removed dead `test_gdn_kernel.cu` + its `test-gdn` target.
-- *Findings* — F1 (`gemv_q4_0_q8_1` interleaved-vs-split nibble layout, quarantined),
-  F2 (Qwen3.5 tokenizer divergence, unconfirmed/confounded — §6).
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **TL1** | **No `.clang-tidy`** (confirmed absent) | No static-analysis config; a CUDA-aware tidy (bugprone-*, performance-*, cppcoreguidelines-* subset, with `HeaderFilterRegex` scoped to `src/`+`include/`) is the single biggest tooling win. | med | M |
+| **TL2** | **No `.pre-commit-config.yaml`** — hooks are hand-rolled shell instead of the `pre-commit` framework | Functional today, but the framework gives versioned, shareable hooks (clang-format, trailing-whitespace, EOF, large-file guard) that run identically for every contributor. | low | S |
+| **TL3** | `compute-sanitizer` can’t run on this WSL2 host (WDDM, no debugger interface — documented in `Makefile:202`) | memcheck/racecheck/synccheck/initcheck can only live on a native-Linux GPU runner. Flagged, not fixable here. | low | — |
+| **TL4** | No IWYU / cppcheck (optional) | Include-what-you-use would catch transitive-include reliance; cppcheck adds a second analyzer. Nice-to-have. | low | M |
 
-**More reconciliation (false positives found while implementing):**
-- "INT4 not in the paged_oracle typed-test" — FALSE: `PathINT4` is in the `KVDtypes` list
-  (`test_attention_paged_oracle.cu:641`), oracled vs fp64. Already covered.
-- "MXFP4 GEMV value oracle" — N/A: there is no standalone mxfp4 weight-GEMV kernel; MXFP4 weights
-  are converted to NVFP4 at load (convert path oracled by `test_gpt_oss_mxfp4_convert_ref.cu`) and
-  decode goes through the already-oracled NVFP4 GEMV. Nothing to add.
+---
 
-**Remaining genuine gaps — NOT yet implemented (lower value, follow-up):**
-- *FP8 KV write addressing* — the FP8 *values* are round-tripped (`test_fp8_kv_cache.cu` via
-  `quantize_fp16_to_fp8_e4m3_scaled`); only the paged-write *addressing* of
-  `write_kv_cache_fp8_kernel` (block-table placement) is unverified, whereas FP16/INT8 writes are
-  (`test_kv_cache_write.cu`). Marginal — the quant arithmetic is already covered.
-- *Dispatch format→tier selection* — `test_weight_dispatch.cu` tests that the dispatched kernel
-  matches the direct one (wiring), with the tier hand-set and scales forced to 1.0; the
-  format→tier *selection* logic itself is not asserted.
+## 8. CI/CD
 
-**Three-stage test gate (added this pass, per request):**
-- *Stage 1 — pre-commit (GPU):* `scripts/pre-commit.hook` runs `make test-gpu` (full GTest suite)
-  on staged source changes. GPU correctness can only be gated locally — CI has no GPU runner.
-- *Stage 2 — CI (CPU):* `ci.yml` now runs `ctest -L unit` in the build job — every CPU-runnable
-  GTest (test-core incl. tool-call + Bearer-auth, test-text, the e2e CPU subset). Before this the
-  CPU GTests were built in CI but never run (only `mock-api` + the usually-absent self-hosted GPU
-  job executed tests). `make install-hooks` installs the pre-commit hook alongside pre-push.
-- *Stage 3 — server (GPU, local, opt-in):* `make test-server` (`scripts/test_server.sh`) boots a
-  real `imp-server` against a live model and **gates** on the OpenAI+Anthropic wire batteries —
-  the only place `handlers.cpp` / `batching_engine.cpp` and the SSE protocols run end-to-end. This
-  closes the former "Tier 2 (infra-blocked)" item: the two missing assertions were written
-  (`tests/test_server_logprobs.py` — logprob non-positivity + **top-k descending order** + greedy
-  token == top-1 tie-in; `tests/test_server_messages_stream.py` — `/v1/messages` event sequence
-  `message_start → (content_block_start → delta+ → stop)+ → message_delta → message_stop`, balanced
-  and `event:`-vs-`data.type` consistent), and the pre-existing #712/#710 batteries are now run as
-  hard gates instead of `coverage_server.sh`'s `|| true`. Still GPU-only (not CI-wired): CI has no
-  GPU runner (§1), so this is a *local* stage, run before relying on a server change.
-- *Still infra-blocked:* committed-golden tokenizer/chat-template parity needs a shipped real
-  tokenizer (large) or HF in CI (no transformers/model there) — see F2.
+**Current state.** `.github/workflows/ci.yml`: `Build` job on `nvidia/cuda:13.3.0-devel` with ccache (8G,
+content check) + build-dir cache, asserts nvcc==13.3, configures Release, builds, **runs `ctest -L unit`**,
+uploads artifacts. Separate `mock-api` job (Python schema/SSE/error contract vs `mock_server.py`). A `test`
+job (GPU ctest + perf gate) is present but `if: vars.HAS_GPU_RUNNER == 'true'`. `auto-merge.yml`,
+`release-docker.yml`, `roofline.yml` round it out. The required branch-ruleset check is the literal name
+`Build` (do not rename).
 
-**Deliberately out of scope (unchanged from §5):** `compute-sanitizer` lane (can't run on this
-WSL2 host — WDDM); trivial-handler contract tests; bench-only files; re-enabling the documented
-`DISABLED_` determinism boundaries.
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **CI1** | **No format-check gate** in CI (`make format-check` exists but no workflow runs it — verified) | Style can drift into `main`; the cheapest possible CI gate is missing. Add a tiny ubuntu job running `format-check`. | med | S |
+| **CI2** | **No clang-tidy gate** (depends on TL1) | Static-analysis regressions land unflagged. | med | M |
+| **CI3** | The GPU correctness job + perf gate are dark (no self-hosted runner) — `if: vars.HAS_GPU_RUNNER` is never true | CI verifies *compilation* + the CPU lane only; the real correctness/perf gates never run in CI. Root cause shared with T1/BM1; honest + documented, but it means "green CI" ≠ "GPU-correct". | high | L |
+
+*Positives: pinned toolchain, ccache, unit lane runs, mock-API contract, artifact upload, protected check name.*
+
+---
+
+## 9. Docs & agent files
+
+**Current state — rich.** `docs/` has `architecture.md` (canonical), `sm120.md`, `quantization.md`,
+`determinism.md`, `nsys_profiling.md`, `supported-models.md`, `MISSION_JOURNAL.md`, plus `docs/audit/`.
+`CONTRIBUTING.md`, `README.md`, `CHANGELOG.md`, `GOAL.md` present. A local `CLAUDE.md` (rich project
+instructions) drives the agent workflow.
+
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **DOC1** | **Root `CLAUDE.md` is gitignored** (`.gitignore:99 CLAUDE.md`, verified `git check-ignore`) → it is **not in the repo** | The project’s primary agent-instruction file can’t be a committed/shared deliverable while that ignore rule stands. Phase-2 asks for a "populated CLAUDE.md" — must first decide: commit it (drop the ignore) or keep it local and make **AGENTS.md** the tracked equivalent. | med | S |
+| **DOC2** | **No `AGENTS.md`** (the cross-tool standard many agents read; not blocked by `.gitignore`) | Phase-2 deliverable. A tracked AGENTS.md is the natural home for committed agent-role guardrails. | low-med | S |
+| **DOC3** | `README.md`/`BENCHMARKS.md` carry hardcoded perf + version claims that drift (see G1) | Docs accuracy: tie benchmark headline numbers to `tests/perf_baseline.json` rather than re-typing them. | low | M |
+
+---
+
+## 10. Git hygiene
+
+**Current state — good.** Comprehensive `.gitignore` (build, CUDA artifacts, models/weights, profiling
+output, secrets `.env`/`*.key`/`*.pem`, agent state). Conventional Commits with PR refs throughout
+(`fix:`, `test(server):`, `docs(readme):`, `release:`). No build artifacts tracked (`build/` ignored). Secrets
+ignored.
+
+| # | Finding | Gap vs best practice | Sev | Effort |
+|---|---|---|---|---|
+| **G1** | **Version strings in tracked markdown** violate the "versions live in CMake/lockfiles only" rule: `BENCHMARKS.md:6` hardcodes `v0.11.0` (**stale** — CMake is `0.11.2`), and `.claude/skills/shipping-prs/SKILL.md:71` hardcodes `v0.11.2` (tracked, `.gitignore` un-ignores `.claude/skills/`) | A re-typed version drifts on every release. CHANGELOG version headers are inherent and fine; free-text "current: vX.Y.Z" is not. | med | S |
+| **G2** | `imp.conf` sits **untracked but not gitignored** (`?? imp.conf`) — only `imp.conf.example` is the tracked template | Easy to commit a local runtime config by accident. Add `imp.conf` to `.gitignore` (keep `.example`). | low | S |
+| **G3** | **No `.gitattributes`** (no LFS, no enforced `eol`/linguist) | Committed binaries (`docs/architecture.png`, fixtures) are small so LFS isn’t urgent, but a `* text=auto eol=lf` + `linguist-vendored` for `third_party/` would harden the repo. | low | S |
+
+---
+
+## Prioritized findings (sorted by severity, then effort)
+
+| Rank | ID | Area | Finding | Sev | Effort |
+|---|---|---|---|---|---|
+| 1 | **CI3** | CI/CD | GPU correctness + perf jobs dark (no self-hosted runner) — green CI ≠ GPU-correct | high | L |
+| 2 | **T1** | Testing | GPU oracles + real `handlers.cpp` run local-only (same root cause as CI3) | high | L |
+| 3 | **CI1** | CI/CD | No `format-check` gate in CI (cheapest missing gate) | med | S |
+| 4 | **B2** | Build | No `CMakePresets.json`; configure args duplicated across Makefile/CI/docs | med | S |
+| 5 | **G1** | Git | Stale/hardcoded version strings in tracked markdown (`BENCHMARKS.md`, skill) | med | S |
+| 6 | **DOC1** | Docs | Root `CLAUDE.md` gitignored → can’t be a committed deliverable | med | S |
+| 7 | **T2** | Testing | F1 `gemv_q4_0_q8_1` nibble-layout bug (quarantined) — fix or delete | med | S |
+| 8 | **B1** | Build | Global `CMAKE_CXX/CUDA_FLAGS` instead of target-scoped INTERFACE warnings | med | M |
+| 9 | **TL1** | Tooling | No `.clang-tidy` (CUDA-aware static analysis) | med | M |
+| 10 | **CI2** | CI/CD | No clang-tidy gate (depends on TL1) | med | M |
+| 11 | **T3** | Testing | F2 Qwen3.5 tokenizer divergence (unconfirmed/confounded) | med | M |
+| 12 | **T4** | Testing | Tokenizer/chat-template goldens env-gated, not committed | med | M |
+| 13 | **BM1** | Bench | Perf-regression gate effectively local-only (root cause = CI3) | med | L |
+| 14 | **DOC2** | Docs | No `AGENTS.md` (Phase-2 deliverable) | low-med | S |
+| 15 | **C1** | CUDA | RAII stream/event wrappers exist but not universally adopted | low-med | M |
+| 16 | **B3** | Build | No package export / `find_package(imp)` config | low | M |
+| 17 | **TL2** | Tooling | No `pre-commit` framework config (hand-rolled hooks instead) | low | S |
+| 18 | **B6** | Build | CMake 3.25 min keeps raw-gencode workaround (3.31 drops it) | low | S |
+| 19 | **B4** | Build | Ninja not enforced; ccache CI-only | low | S |
+| 20 | **H2** | C++ | `noexcept` sparse on trivial getters | low | S |
+| 21 | **BM2** | Bench | No single `BENCHMARKING.md` methodology contract | low | S |
+| 22 | **G2** | Git | `imp.conf` untracked but not gitignored | low | S |
+| 23 | **G3** | Git | No `.gitattributes` (eol/LFS/linguist) | low | S |
+| 24 | **DOC3** | Docs | README/BENCHMARKS perf numbers drift from baseline json | low | M |
+| 25 | **C2** | CUDA | Kernel launches mostly lack a post-launch error check (debug-only) | low | M |
+| 26 | **B5** | Build | Dual dependency pinning (CMake + Dockerfile) | low | M |
+| 27 | **D1** | Layers | `compute/quant/memory` reach up into `runtime/` for diag/instrumentation | low | M |
+| 28 | **H1** | C++ | `std::span` underused vs host-side ptr+len | low | M |
+| 29 | **TL4** | Tooling | No IWYU/cppcheck (optional) | low | M |
+| 30 | **TL3** | Tooling | compute-sanitizer can’t run on WSL2 (infra, not fixable here) | low | — |
+
+**No blockers.** Build is green, ~574 tests pass, architecture is sound. The high-value/low-effort cluster for
+Phase 3 is **CI1, B2, G1, DOC1, T2** (all med/S) plus the structural **CI3/T1/BM1** trio that only a GPU
+runner resolves. The single-arch target, the documented hardware constraints, and the deliberate two-config
+split are **correct as-is** and must be preserved.
+
+---
+
+*Phase 1 complete. No implementation performed. Awaiting confirmation before Phase 2 (STRUCTURE.md).*
