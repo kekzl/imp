@@ -7,9 +7,13 @@ and the empirical refutations accumulated through 2026-06, not in datacenter
 (B200 / FA4) assumptions that do not port.
 
 Companion docs: [`sm120.md`](sm120.md) (kernel notes), [`performance.md`](performance.md)
-(baselines + methodology). Hot-path source: `src/compute/attention_fmha_mxf4nvf4_sm120.h`
-(primary register-resident FA2), `src/compute/attention_fmha_sm120.cu` (the slow
-tiled-FMHA **fallback** — not an optimization target).
+(baselines + methodology). Hot-path source, both in
+`src/compute/attention_fmha_sm120.cu`: `fmha_sm120_fa2_kernel` (the primary
+register-resident FA2, dispatched by `fmha_sm120_fa2_prefill`) and
+`fmha_sm120_kernel` (the slow tiled-FMHA **fallback** — not an optimization
+target). The FA2 kernel is templated on `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT,
+PVF16, …>`; the dispatcher bands the tile config by grid-fill (`blocks_128` vs
+`sm_count`).
 
 ---
 
@@ -115,12 +119,19 @@ Barriers:      1× __syncthreads / KV tile (cp.async.wait)
 pipeline, more occupancy, FP4-QK) has been empirically refuted. The 52 %→100 %
 roofline gap is **architecture, not implementation debt.**
 
-> Caveat for re-litigation: the Bq=128 and deeper-pipeline refutations were run
-> *before* the register-resident-O envelope freed the 64 KB smem block. If a future
-> lever claims to beat the ceiling, it must A/B inside the **Bq=128 + register-O +
-> f16-acc** configuration specifically — not against the tiled fallback, and not at
-> Bq=64. Re-validating the refuted levers under that exact envelope is the only
-> open theoretical question here.
+> No open re-litigation. An earlier draft of this doc speculated that the Bq=128
+> and deeper-pipeline refutations predated the register-resident-O envelope and
+> were worth re-running. Reading the actual dispatcher (`fmha_sm120_fa2_prefill`)
+> refutes that: the register-resident-O + Q-in-registers + **Bq=128** config is
+> already the *shipped* large-seq path (selected when `blocks_128 >= sm_count`),
+> with f16-acc QK^T and PV-f16-acc as config-gated variants on top. The 2-CTA
+> refutation is baked into the design — the Bq=128 path explicitly forgoes 2-CTA
+> residency in favor of deeper cp.async overlap at Bkv=64 (see the comment at the
+> top of `fmha_sm120_fa2_prefill`), and the underfill band (`sm_count/2 <=
+> blocks_128 < sm_count`) deliberately drops to **Bq=64 + TWOSLOT** to put 2
+> CTAs/SM resident where the grid would otherwise underfill the 170 SMs. The
+> refuted levers were measured against this exact kernel family (#597 / #648 /
+> #653 / #674); they are closed, not pending.
 
 ## 5. The wall (silicon, not code)
 
