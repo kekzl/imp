@@ -158,3 +158,32 @@ NVFP4 GEMVs at the GDDR7 ceiling (~1.5 GB/ms = 86 % datasheet) + a conditional
 CUDA graph + PDL. It is built, at the limit, and its only remaining wall-breaker
 is algorithmic (speculation), not kernel-technical. See the decode levers in
 `MEMORY.md` and `docs/performance.md`.
+
+## 7. Runnable companions + the GEMM addendum
+
+Two self-contained, bit-exact reference kernels (one file each, no imp/CUTLASS
+deps) live in `tools/standalone/` and were built profiling-driven from scratch:
+
+- **`fa2_sm120a_optimal.cu`** — the attention kernel specced above, made runnable.
+  50 → 114 / 158 / 187 TFLOP/s (S=4k/8k/16k) ≈ 90 % of a dedicated speed-of-light
+  FA effort; the residual gap is silicon (no tcgen05/TMEM), per §5.
+- **`gemm_nvfp4_sm120a.cu`** — the *other* hot path: NVFP4 GEMM on the peak
+  `mxf4nvf4` block-scaled mma (m16n8k64) with real per-16 UE4M3 scales.
+  1.8 → 807 / 972 TFLOP/s (4k/8k) = **48 % of the measured FP4 peak, beating the
+  production CUTLASS path (~41 %)**. (`gemm_nvfp4_sm120a_tma.cu` is the
+  documented TMA+warp-spec negative result.)
+
+**The transferable lesson — re-diagnose before you optimize.** The GEMM was
+"L2-bound" at 82 %. Every textbook lever to fix that (threadblock swizzle,
+3-stage pipeline, TMA, warp-specialization) FAILED — because the diagnosis was
+wrong. ncu showed L2 *requests* at 82 % but *sectors* at only 44 %: it was
+**request-rate-bound, not bandwidth-bound**. The fix was two layout changes, not
+a kernel-structure trick:
+1. **CTA-tile-major packing** — a tile's rows were 2 KB apart, so each 32 B row
+   landed in its own 128 B L2 line at 25 % fill; storing each CTA tile contiguous
+   gives full lines → L2 requests 82 → 41 % (+26–31 %).
+2. **Column-interleave** so a fragment pair {col T0, col T0+4} is adjacent and
+   reads as one `uint2` → mio_throttle 5.77 → 2.74 (+1.5–7.6 %).
+
+Out-of-the-box (questioning the metric) beat brute force (porting CUTLASS's
+machinery) by ~40 %. The headers of both kernels carry the full ncu trail.
