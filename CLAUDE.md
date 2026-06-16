@@ -1,0 +1,60 @@
+# imp — Project Instructions
+
+From-scratch C++20/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~100k LOC (src/ + include/). See [`docs/architecture.md`](docs/architecture.md) (canonical narrative) and [`docs/sm120.md`](docs/sm120.md).
+
+## Build & test
+
+**Before using the GPU, ALWAYS check that it is free.** Run any GPU job (`make test-gpu`, benchmarks, profiling, inference) only after confirming no other process is using the card: `docker ps -q | wc -l` MUST be `0` and `nvidia-smi` must show no active compute processes (idle ~30°C, low power draw). A busy GPU corrupts benchmark numbers and can OOM; never start GPU work on a card that is already in use.
+
+The host has **no CUDA toolkit** by design — build inside Docker. `build/` is created root-owned by the container; remove it via a throwaway container, never `sudo` on the host.
+
+```
+make build         # Docker build (CUDA 13.3) (or: cmake -B build && cmake --build build on a CUDA 13.3+ host)
+make test-unit     # CPU/host unit tests
+make test-gpu      # GPU tests (requires RTX 5090)
+make verify-fast   # ~90s pre-push gate
+make verify        # ~5min full
+make install-hooks # pre-push hook: runs verify-fast on src/include/tools/tests changes
+make format        # clang-format
+```
+
+- Targets exist for `bench`, `test-perf`, `test-golden`, `test-vision`, `gen-perf-baseline`, `verify-north-star`, `verify-chunked`, `sanitize`, and the roofline pipeline (`roofline-measure`, `roofline-pin`, `roofline-regress` — see `tools/roofline/README.md`).
+- sm_120a is selected via raw gencode (CMake <3.31 workaround); 120f PTX fallback covers non-5090 SKUs.
+
+## Conventions
+
+- **English only in the repo.** All PRs (title + body), commit messages, code comments, docs, and `.md` files are written entirely in English. (Chat replies to the user stay German per global instructions — this rule covers artifacts that land in the repository or on GitHub.)
+- **Always branch off `main` and `gh pr create --base main`.** Never stack PRs (squash-merge + stacking caused recovery-PR cascades). Prefer fewer, batched PRs over one-per-fix.
+- **Performance is gated.** `tests/perf_baseline.json` is the canonical baseline (CI: 3% decode / 5% prefill thresholds). Refresh via `scripts/gen_perf_baseline.sh` when a change intentionally moves perf, and say so in the PR.
+- Runtime config lives in `src/runtime/config.h` as `RuntimeConfig` (loaded from `imp.conf` + `--config`; legacy `IMP_*` env vars still seed it). Don't reintroduce ad-hoc env-var reads.
+- Internal errors throw and are translated to `ImpError` at the `src/api/imp_api.cpp` boundary — this is intentional, don't convert those throws to status returns.
+- Match surrounding code style; keep it simple and direct, no speculative abstraction.
+
+## Benchmarking gotchas
+
+- **The GPU is water-cooled and never warm** — do NOT insert temperature cooldown waits between benchmarks (it idles ~30°C and does not thermal-throttle). A decode drop across a sweep is a real regression or stale baseline, never heat.
+- **The GPU downclocks at idle and takes ~1s for clocks to ramp up under load.** The first ~1s of any benchmark runs at reduced clocks and reads artificially LOW — this (not heat) is the dominant cold-start bench artifact (it produced a spurious −42% in one A/B that re-measured +20% clean). **Always warm the clocks before timed reps**: precede the measured run with a discarded warmup run (or busy-spin >1s); imp's built-in `Warmup...` is too few iterations to cover the 1s ramp. Never trust a cold single-shot number.
+- cuBLAS prefill varies up to **2.6× across container restarts** and drifts under sustained load — use **decode** for A/B and follow the bench methodology (`CUBLAS_WORKSPACE_CONFIG=:4096:8`, 10 reps, 3+ trials, one model per process / isolated).
+- **Decode is stable within a session but can read 8–15% low for a whole day** (host/driver state on this WSL2 box; issue #526: identical builds measured tg 238 on one day, 278 the next — full methodology both times). Before trusting a cross-day decode delta or refreshing the baseline, sample `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw` DURING the bench: healthy load = ~2850 MHz SM / 13801 MHz mem / ~500 W. Lower mem clock or power = depressed host state, not a regression. GPU history: `gpu-stats` skill (7-day retention).
+- nsys with CUDA Graphs ON hides captured kernels — profile with `--no-cuda-graphs` to see the true decode kernel mix.
+
+## Hardware reality (sm_120 ≠ datacenter Blackwell)
+
+- **No `tcgen05` / TMEM / wgmma / TMA-WS grouped GEMM.** FP4 path is `mma.sync` `mxf4nvf4` with FA2-style block-scaling. Ignore B200/`sm_100` (FlashAttention-4-style) kernel designs unless porting.
+- **No FP4 cuBLASLt kernels on sm_120** → CUTLASS (v4.5.1) is the primary GEMM path. Dependency pins live in TWO places — CMakeLists `FetchContent` AND the Dockerfile deps-clone; always bump both. FP8 prefill is unavailable on sm_120.
+- For GGUF, weights are converted to an NVFP4 decode cache at init (bandwidth win on the decode hot path); prefill stays full-precision via source dequant. `nvfp4_beneficial` weights skip the FP16 cache.
+- Docker build cache must **not** use `--mount=type=cache` (silently invalidates test results).
+
+## After hot-path changes
+
+Verify the model still produces coherent output (no repetition loops / token-stuck / state corruption) after touching the forward pass, MoE routing, KV cache, GDN state, or CUDA-graph capture.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

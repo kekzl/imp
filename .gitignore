@@ -95,8 +95,9 @@ test_detail.json
 # Release-readiness audit (local-only triage notes)
 _audit/
 
-# Local AI-agent state (must never be published)
-CLAUDE.md
+# Local AI-agent state (must never be published). NOTE: the repo-root CLAUDE.md
+# is PROJECT instructions and IS tracked on purpose — only personal .claude/*
+# session state is ignored (the global personal CLAUDE.md lives in ~/.claude/).
 .claude/*
 !.claude/skills/
 tools/roofline/history/raw/**/*.ncu-rep
