@@ -1,0 +1,20 @@
+# Normalize line endings: LF in the repo, auto on checkout.
+* text=auto eol=lf
+
+# Binary assets — never diff/merge or eol-normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.gguf binary
+*.safetensors binary
+*.ncu-rep binary
+*.nsys-rep binary
+
+# Keep vendored third-party out of language stats / diffs.
+third_party/** linguist-vendored
+graphify-out/** linguist-generated
+
+# Shell scripts are always LF.
+*.sh text eol=lf
