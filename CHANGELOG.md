@@ -4,7 +4,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-06-17
+
 ### Added
+- **Stage-3 server test gate** (`make test-server`) boots a real `imp-server` and
+  gates on the OpenAI+Anthropic wire batteries; plus a gcov coverage harness
+  (`make coverage`) and a coverage-hardening oracle sweep (Q4_0/Q5_K/FP8/mxfp4,
+  tool-call + Bearer-auth units) on a two-stage CI gate.
+- **Developer tooling & build hygiene:** `CMakePresets.json`, `AGENTS.md`, an
+  in-repo `CLAUDE.md`, `.clang-tidy` + `make tidy`, a CI `lint` job (changed-lines
+  clang-format + advisory clang-tidy), single-sourced dependency pins
+  (`cmake/imp-deps.cmake`), `.gitattributes`, `BENCHMARKING.md`, and a reusable
+  `scripts/bench_gate.sh` perf gate.
 - **Anthropic `/v1/messages` honours the `thinking` field.** `{"type":"enabled","budget_tokens":N}`
   enables extended thinking with a budget and `{"type":"disabled"}` turns it off;
   previously the field was dropped in the Anthropic→OpenAI conversion, so the
@@ -13,7 +24,27 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   `budget_tokens` maps to imp's fractional `think_budget` (`budget_tokens /
   max_tokens`, clamped to 1.0).
 
+### Changed
+- **CUTLASS v4.5.1 → v4.5.2.** Verified by a full build + 187/187 quant tests
+  (including the grouped-GEMM fp64 oracles) — NVFP4 GEMM bit-exact under 4.5.2.
+- **Internal hygiene:** a structural audit (`AUDIT.md`/`STRUCTURE.md`/`DISPATCH.md`);
+  84 mechanical clang-tidy fixes (member-init, multiplication-widening,
+  value-param) with two verified-false-positive checks suppressed;
+  reserved-identifier `_COUNT`→`COUNT`; `.gitignore` no longer ignores
+  `src/core/`; a canonical sm_120a kernel-spec doc + standalone reference kernels.
+
 ### Fixed
+- **Q4_0 GGUF decode was silently wrong (correctness fix).** The Q4_0 dp4a GEMV
+  read packed nibbles INTERLEAVED while ggml Q4_0 is SPLIT (low nibbles =
+  elements 0–15, high = 16–31) and trusted a mis-scaled zero-point, so every Q4_0
+  dense **and** MoE decode produced garbage. It was never caught because no Q4_0
+  model is in the test suite; a new fp64 oracle surfaced it. Fixed to the proven
+  Q4_K nibble extraction with an internally-summed zero-point — one traits
+  function covers the dense decode, fp32, residual, and MoE Q4_0 paths.
+- **`scripts/bench_gate.sh` perf gate was silently broken.** A stray `2>&1` left
+  the parsed stderr empty, so `set -e` exited before the gate could report — and
+  the gate had in fact never run (the GPU CI job is skipped). Fixed and validated
+  live on the RTX 5090.
 - **Disabling thinking now actually suppresses reasoning.** When thinking was
   turned off, a think-model still reasoned for many prompts (on both `/v1/messages`
   and the OpenAI path with `enable_thinking:false`+`think_budget:0`). Two root
