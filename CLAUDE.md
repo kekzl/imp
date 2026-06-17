@@ -42,7 +42,7 @@ make format        # clang-format
 ## Hardware reality (sm_120 ≠ datacenter Blackwell)
 
 - **No `tcgen05` / TMEM / wgmma / TMA-WS grouped GEMM.** FP4 path is `mma.sync` `mxf4nvf4` with FA2-style block-scaling. Ignore B200/`sm_100` (FlashAttention-4-style) kernel designs unless porting.
-- **No FP4 cuBLASLt kernels on sm_120** → CUTLASS (v4.5.1) is the primary GEMM path. Dependency pins live in TWO places — CMakeLists `FetchContent` AND the Dockerfile deps-clone; always bump both. FP8 prefill is unavailable on sm_120.
+- **No FP4 cuBLASLt kernels on sm_120** → CUTLASS is the primary GEMM path. Dependency pins are single-sourced in `cmake/imp-deps.cmake` (the Dockerfile takes them as build-args via `scripts/dep_build_args.sh`; bump only that one file). FP8 prefill is unavailable on sm_120.
 - For GGUF, weights are converted to an NVFP4 decode cache at init (bandwidth win on the decode hot path); prefill stays full-precision via source dequant. `nvfp4_beneficial` weights skip the FP16 cache.
 - Docker build cache must **not** use `--mount=type=cache` (silently invalidates test results).
 

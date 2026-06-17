@@ -30,7 +30,7 @@ PUBLIC/PRIVATE (`:326`), `target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS
 every test/bench target (`:345`, `:438`). Single-arch is correctly enforced via raw gencode
 (`arch=compute_120a,code=sm_120a` + `compute_120f` PTX fallback) with `CMAKE_CUDA_ARCHITECTURES OFF` (`:31-39`)
 — the documented CMake-<3.31 workaround for the `a`/`f` suffix. Deps via `FetchContent` with pinned tags
-(gtest v1.17.0, cutlass v4.5.1, httplib v0.46.1, json v3.12.0). Clean option matrix (`IMP_BUILD_TESTS/TOOLS/
+(gtest v1.17.0, cutlass v4.5.2, httplib v0.46.1, json v3.12.0). Clean option matrix (`IMP_BUILD_TESTS/TOOLS/
 BENCH/SERVER`, `IMP_SANITIZERS`, `IMP_COVERAGE`, `IMP_DISABLE_120F_FALLBACK`). `install(TARGETS imp …)` +
 header install present.
 
