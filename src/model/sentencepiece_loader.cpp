@@ -380,7 +380,7 @@ SentencePieceModel load_sentencepiece_model_file(const std::string& path) {
         IMP_LOG_ERROR("SentencePiece: failed to open %s", path.c_str());
         return result;
     }
-    struct stat st;
+    struct stat st {};
     if (::fstat(fd, &st) != 0) {
         ::close(fd);
         IMP_LOG_ERROR("SentencePiece: fstat failed on %s", path.c_str());

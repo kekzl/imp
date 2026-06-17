@@ -913,7 +913,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         return nullptr;
     }
 
-    struct stat st;
+    struct stat st {};
     if (fstat(fd, &st) != 0) {
         IMP_LOG_ERROR("Failed to stat GGUF file: %s", path.c_str());
         close(fd);
@@ -1037,7 +1037,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
         // Derive shard filenames: path ends with -00001-of-NNNNN.gguf
         // Replace the shard number for each additional shard
-        std::string base_path = path;
+        const std::string& base_path = path;
         auto dash_pos = base_path.rfind("-00001-of-");
         if (dash_pos == std::string::npos) {
             // Try without the -00001 suffix (user passed the base name)
@@ -1057,7 +1057,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                     return nullptr;
                 }
 
-                struct stat sst;
+                struct stat sst {};
                 fstat(sfd, &sst);
                 size_t shard_size = static_cast<size_t>(sst.st_size);
                 void* shard_mmap = mmap(nullptr, shard_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, sfd, 0);

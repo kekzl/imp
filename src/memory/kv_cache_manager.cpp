@@ -639,7 +639,7 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
         return;
 
     // Re-pinning replaces the owner's previous pin set.
-    if (pinned_seq_blocks_.count(seq_id))
+    if (pinned_seq_blocks_.contains(seq_id))
         unpin_prefix(seq_id);
 
     // Budget: cap the request to the budget, then unpin the oldest owners
@@ -660,13 +660,13 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
         int bid = blocks[i];
         if (bid < 0)
             continue;  // StreamingLLM sentinel — physical block already freed
-        bool already_pinned = pinned_blocks_.count(bid) != 0;
+        bool already_pinned = pinned_blocks_.contains(bid);
         if (++pin_refcount_[bid] == 1 && !already_pinned) {
             pinned_blocks_.insert(bid);
             // Pinned blocks stay in the cached LRU (if there) so reuse and
             // reporting keep working, but they are excluded from the
             // reclaimable count; reclaim_cached_block() rotates past them.
-            if (cached_blocks_map_.count(bid))
+            if (cached_blocks_map_.contains(bid))
                 reclaimable_cached_count_--;
         }
         owned.push_back(bid);
@@ -699,7 +699,7 @@ void KVCacheManager::unpin_prefix(int seq_id) {
         // if it sits in the cached LRU it is reclaimable again now. Blocks
         // currently referenced by an active seq are not in the LRU — their
         // free_sequence() takes the normal hashed-block path later.
-        if (cached_blocks_map_.count(bid))
+        if (cached_blocks_map_.contains(bid))
             reclaimable_cached_count_++;
     }
 
@@ -986,7 +986,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
         return 0;
     }
 
-    PrefixCacheHeader hdr;
+    PrefixCacheHeader hdr{};
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != kPrefixCacheMagic) {
         IMP_LOG_WARN("Prefix cache: invalid header in %s", path.c_str());
         fclose(f);
@@ -1045,7 +1045,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
             break;
 
         // Skip if hash already exists (shouldn't happen on fresh start)
-        if (block_hash_to_id_.count(hash)) {
+        if (block_hash_to_id_.contains(hash)) {
             skipped++;
             continue;
         }

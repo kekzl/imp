@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <utility>
 
 using json = nlohmann::json;
 
@@ -214,7 +215,7 @@ int main(int argc, char** argv) {
     svr.set_exception_handler(
         [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
             try {
-                std::rethrow_exception(ep);
+                std::rethrow_exception(std::move(ep));
             } catch (const nlohmann::json::exception& e) {
                 send_json_error(res, 400, "invalid_request_error", e.what());
             } catch (const std::exception& e) {

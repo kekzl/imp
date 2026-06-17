@@ -11,6 +11,15 @@
 # performance-* / clang-diagnostic-* signal and drop the cosmetic mass (const on
 # locals, literal-suffix case, anon-namespace style, branch-clone on intentional
 # explicit case enumerations, …) so the gate surfaces real issues, not noise.
+#
+# Two bugprone-* checks are also disabled as verified FALSE POSITIVES here:
+#   - unchecked-optional-access: every hit is guarded by has_value() in the same
+#     short-circuit (e.g. `!m->opt_.has_value() || !m->opt_->loaded`); the
+#     dataflow can't track the guard through the `m->opt_->` pointer-member chain.
+#   - signed-char-misuse: the hits are deliberate int8_t reads (GGUF/vision
+#     metadata) where sign extension to int64 is the intended behavior.
+# (Intentional empty catches — try-parse-with-default — are left flagged; the
+#  bugprone-empty-catch check stays on as a guard for genuinely-new swallows.)
 
 Checks: >
   bugprone-*,
@@ -22,6 +31,8 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
   -bugprone-branch-clone,
+  -bugprone-unchecked-optional-access,
+  -bugprone-signed-char-misuse,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
   -misc-include-cleaner,

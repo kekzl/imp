@@ -78,13 +78,12 @@ public:
     bool has_device_allocator() const noexcept { return device_alloc_ != nullptr; }
 
     // -- Budget + storage planning (wrap free functions) ------------------
-    VRAMBudget compute_budget(const Model& model, const EngineConfig& config, int n_kv_layers,
-                              int head_dim, size_t free_vram) const {
+    static VRAMBudget compute_budget(const Model& model, const EngineConfig& config, int n_kv_layers,
+                                     int head_dim, size_t free_vram) {
         return compute_vram_budget(model, config, n_kv_layers, head_dim, free_vram);
     }
 
-    StoragePlan plan_storage_for(const Model& model, const ModelConfig& cfg,
-                                 const PlanHints& hints) const {
+    static StoragePlan plan_storage_for(const Model& model, const ModelConfig& cfg, const PlanHints& hints) {
         return plan_storage(model, cfg, hints);
     }
 

@@ -65,7 +65,7 @@ struct WeightHandle {
             void* linear_scales;
             int hadamard_bs;
         } mxfp4;
-    } payload;
+    } payload{};
 
     bool is_populated() const { return primary_tier != StorageTier::Undefined; }
 

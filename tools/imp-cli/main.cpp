@@ -42,11 +42,11 @@ int main(int argc, char** argv) {
 
     // Check if path is a directory with SafeTensors files
     {
-        struct stat st;
+        struct stat st {};
         if (stat(args.model_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
             std::string index = args.model_path + "/model.safetensors.index.json";
             std::string single = args.model_path + "/model.safetensors";
-            struct stat idx_st;
+            struct stat idx_st {};
             if (stat(index.c_str(), &idx_st) == 0 || stat(single.c_str(), &idx_st) == 0) {
                 format = IMP_FORMAT_SAFETENSORS;
             }

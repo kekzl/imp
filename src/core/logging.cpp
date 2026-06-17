@@ -33,7 +33,7 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
 
     // Timestamp
     time_t now = time(nullptr);
-    struct tm tm_buf;
+    struct tm tm_buf {};
     localtime_r(&now, &tm_buf);
     char time_str[32];
     strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_buf);

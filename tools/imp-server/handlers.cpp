@@ -154,7 +154,7 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
     std::string base_prefix = base.string() + "/";
 
     for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
-        auto path = entry.path();
+        const auto& path = entry.path();
         // GGUF files
         if ((entry.is_regular_file() || entry.is_symlink()) && path.extension() == ".gguf" &&
             path.string().find(".no_exist") == std::string::npos) {
@@ -471,7 +471,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     if (state.max_seq_len <= 0)
         state.max_seq_len = imp_model_max_seq_len(state.model);
     if (state.max_seq_len <= 0)
-        state.max_seq_len = static_cast<int>(config.max_seq_len);
+        state.max_seq_len = config.max_seq_len;
 
     // Detect thinking model (DeepSeek R1, Qwen3 etc.) by checking for <think> token.
     // Only treat as think model if <think> is a special/added token (high vocab ID),
@@ -1248,12 +1248,8 @@ static bool snapshot_state_and_tokenize_(
 // blocking loop until EOS/stop/max_tokens, build a non-streaming JSON response
 // (vision doesn't support SSE — state is per-engine, not per-request).
 // Caller must hold no lock on entry. Returns after sending the response.
-static void handle_vision_chat_blocking_(
-    httplib::Response& res,
-    ServerState& state,
-    ChatRequestContext& ctx,
-    std::shared_ptr<imp::Request> imp_req)
-{
+static void handle_vision_chat_blocking_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
+                                         const std::shared_ptr<imp::Request>& imp_req) {
     // Vision path: use blocking C API (batching engine is stopped)
     ImpError err = imp_context_reset(state.ctx);
     if (err != IMP_SUCCESS) {
@@ -1485,7 +1481,7 @@ static void nonstream_chat_response_(
             }
 
             // Read next token from the batching engine
-            TokenEvent evt;
+            TokenEvent evt{};
             if (!server_req->pop_token(evt)) {
                 continue;  // timeout — loop back to check request timeout
             }
@@ -1761,14 +1757,10 @@ static void nonstream_chat_response_(
 // this function returns; ctx is a stack-local in handle_chat_completions
 // which keeps the request frame alive until the response is fully sent).
 static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                             std::shared_ptr<ServerRequest> server_req);
+                             const std::shared_ptr<ServerRequest>& server_req);
 
-static void stream_chat_response_(
-    httplib::Response& res,
-    ServerState& state,
-    ChatRequestContext& ctx,
-    std::shared_ptr<ServerRequest> server_req)
-{
+static void stream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
+                                  const std::shared_ptr<ServerRequest>& server_req) {
     // SSE streaming response
     res.set_header("Cache-Control", "no-cache");
     res.set_header("Connection", "keep-alive");
@@ -1783,7 +1775,6 @@ static void stream_chat_response_(
         });
 }
 
-
 // Streaming chat response loop body. Extracted from the
 // res.set_chunked_content_provider() lambda in stream_chat_response_ so
 // the 760-LOC body is no longer a god-function nested four levels deep.
@@ -1792,7 +1783,7 @@ static void stream_chat_response_(
 // lambda (so it survives stream_chat_response_'s return); state is
 // captured by reference (lives in the long-lived ServerState).
 static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                             std::shared_ptr<ServerRequest> server_req) {
+                             const std::shared_ptr<ServerRequest>& server_req) {
     // Local aliases so the body reads unchanged from its previous
     // capture-list-based form. These were 30+ individual lambda captures
     // before this refactor.
@@ -1932,7 +1923,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
         }
 
         // Read next token from the batching engine (with timeout)
-        TokenEvent evt;
+        TokenEvent evt{};
         if (!server_req->pop_token(evt)) {
             continue;  // timeout — loop back to check disconnect/timeout
         }
@@ -2947,7 +2938,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                         }
                     }
 
-                    TokenEvent evt;
+                    TokenEvent evt{};
                     if (!server_req->pop_token(evt)) {
                         continue;
                     }
@@ -3106,7 +3097,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 }
             }
 
-            TokenEvent evt;
+            TokenEvent evt{};
             if (!server_req->pop_token(evt)) {
                 continue;
             }
@@ -3691,7 +3682,7 @@ namespace {
 // Anthropic SSE event writer. Emits "event: <name>\ndata: <json>\n\n".
 struct AnthropicSSE {
     httplib::DataSink& sink;
-    bool emit(const char* event_name, const json& payload) {
+    bool emit(const char* event_name, const json& payload) const {
         std::string buf = "event: ";
         buf += event_name;
         buf += "\ndata: ";
@@ -3713,7 +3704,7 @@ enum class AnthBlock { NONE, THINKING, TEXT, TOOL_USE };
 //   content   -> text block (text_delta)
 //   tool call -> tool_use block (input_json_delta, chunked)
 static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                                  std::shared_ptr<ServerRequest> server_req,
+                                  const std::shared_ptr<ServerRequest>& server_req,
                                   const std::string& anth_model, const std::string& msg_id) {
     AnthropicSSE out{sink};
 
@@ -3903,7 +3894,7 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             }
         }
 
-        TokenEvent evt;
+        TokenEvent evt{};
         if (!server_req->pop_token(evt))
             continue;
 

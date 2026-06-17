@@ -15,8 +15,8 @@ namespace imp {
 // ---------------------------------------------------------------------------
 struct FP8CacheEntry {
     Tensor weight;     // [N, K] FP8_E4M3 on device
-    float host_scale;  // absmax / 448
-    float* d_scale;    // device-side scale (1 float)
+    float host_scale{};  // absmax / 448
+    float* d_scale{};    // device-side scale (1 float)
 };
 
 // ---------------------------------------------------------------------------

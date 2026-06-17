@@ -1120,7 +1120,7 @@ bool Tokenizer::load(const std::string& path) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0)
         return false;
-    struct stat st;
+    struct stat st {};
     if (fstat(fd, &st) != 0) {
         close(fd);
         return false;

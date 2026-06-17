@@ -26,10 +26,10 @@ struct Nvfp4DecodeContext {
     // One entry per weight that may receive NVFP4 quantization. Populated by
     // the collect phase; consumed by the mode-1 / mode-2 / second-pass phases.
     struct Entry {
-        const void* orig_ptr;
+        const void* orig_ptr{};
         Tensor weight;
         QType qtype;
-        bool from_scratch;
+        bool from_scratch{};
     };
 
     std::unordered_set<const void*> exclude_ptrs;
