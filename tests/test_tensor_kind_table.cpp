@@ -6,7 +6,7 @@
 using namespace imp;
 
 TEST(TensorKindTable, EveryKindHasEntry) {
-    for (int i = 0; i < static_cast<int>(TensorKind::_COUNT); ++i) {
+    for (int i = 0; i < static_cast<int>(TensorKind::COUNT); ++i) {
         auto k = static_cast<TensorKind>(i);
         const auto& cap = capabilities_of(k);
         EXPECT_NE(cap.supported, TierMask{0})
@@ -15,7 +15,7 @@ TEST(TensorKindTable, EveryKindHasEntry) {
 }
 
 TEST(TensorKindTable, RequiredFloorIsInSupported) {
-    for (int i = 0; i < static_cast<int>(TensorKind::_COUNT); ++i) {
+    for (int i = 0; i < static_cast<int>(TensorKind::COUNT); ++i) {
         auto k = static_cast<TensorKind>(i);
         const auto& cap = capabilities_of(k);
         EXPECT_TRUE(mask_contains(cap.supported, cap.required_floor))
@@ -137,7 +137,7 @@ TEST(EffectiveCapabilities, FP16OnlyKindsAreUnaffected) {
 TEST(EffectiveCapabilities, FloorAlwaysInSupported) {
     // For every (kind, qtype) combination, required_floor must remain in
     // supported mask after refinement.
-    for (int k = 0; k < static_cast<int>(TensorKind::_COUNT); ++k) {
+    for (int k = 0; k < static_cast<int>(TensorKind::COUNT); ++k) {
         auto kind = static_cast<TensorKind>(k);
         for (auto qtype : {QType::F16, QType::Q4_K, QType::Q5_K, QType::Q6_K, QType::Q8_0,
                            QType::NVFP4, QType::MXFP4, QType::F32}) {
@@ -150,7 +150,7 @@ TEST(EffectiveCapabilities, FloorAlwaysInSupported) {
 }
 
 TEST(TensorKindTable, EveryKindHasName) {
-    for (int i = 1; i < static_cast<int>(TensorKind::_COUNT); ++i) {
+    for (int i = 1; i < static_cast<int>(TensorKind::COUNT); ++i) {
         auto k = static_cast<TensorKind>(i);
         const char* name = tensor_kind_name(k);
         EXPECT_NE(std::string(name), "UNKNOWN")

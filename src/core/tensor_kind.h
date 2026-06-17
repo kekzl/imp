@@ -70,7 +70,7 @@ enum class TensorKind : uint8_t {
     SIGLIP_NORM,
     MM_PROJ,
 
-    _COUNT,
+    COUNT,
 };
 
 const char* tensor_kind_name(TensorKind k);

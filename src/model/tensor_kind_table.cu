@@ -20,8 +20,8 @@ constexpr TierMask FP16_OR_FP32 = mask(StorageTier::FP16) | mask(StorageTier::FP
 
 constexpr KindCapabilities build(TierMask s, StorageTier f, bool fus = false) { return {s, f, fus}; }
 
-constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> kKindTable = [] {
-    std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> t{};
+constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::COUNT)> kKindTable = [] {
+    std::array<KindCapabilities, static_cast<size_t>(TensorKind::COUNT)> t{};
     t[(size_t)TensorKind::UNKNOWN] = build(FP16_ONLY, StorageTier::FP16);
     t[(size_t)TensorKind::WQ] = build(ALL_QUANT, StorageTier::NVFP4);
     t[(size_t)TensorKind::WK] = build(ALL_QUANT, StorageTier::FP8, true);
@@ -71,7 +71,7 @@ constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> 
 }  // namespace
 
 const KindCapabilities& capabilities_of(TensorKind k) {
-    IMP_CHECK(k != TensorKind::_COUNT && static_cast<size_t>(k) < kKindTable.size(),
+    IMP_CHECK(k != TensorKind::COUNT && static_cast<size_t>(k) < kKindTable.size(),
               "capabilities_of: invalid TensorKind=%zu (table size=%zu)",
               static_cast<size_t>(k), kKindTable.size());
     return kKindTable[static_cast<size_t>(k)];

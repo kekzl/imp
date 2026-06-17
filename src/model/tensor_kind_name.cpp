@@ -90,7 +90,7 @@ const char* tensor_kind_name(TensorKind k) {
             return "SIGLIP_NORM";
         case TensorKind::MM_PROJ:
             return "MM_PROJ";
-        case TensorKind::_COUNT:
+        case TensorKind::COUNT:
             break;
     }
     return "UNKNOWN";
