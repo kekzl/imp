@@ -1,5 +1,7 @@
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include "quant/quant_gemm.h"
+#include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
@@ -194,6 +196,129 @@ static float bench_int4_gemm(const GemmSize& sz) {
     cudaFree(d_C);
 
     return avg_ms;
+}
+
+// Benchmark the PRODUCTION CUTLASS sm_120 block-scaled NVFP4xNVFP4 dense GEMM
+// (gemm_nvfp4_cutlass_sm120) — the kernel the from-scratch tools/standalone/
+// gemm_nvfp4_sm120a.cu reference beats (48% vs ~41% of FP4 peak). Square shapes
+// match the standalone's M=N=K cubed measurements so ncu profiles line up
+// apples-to-apples (occupancy + lts__t_requests/sectors). Returns avg ms.
+static float bench_nvfp4_cutlass_gemm(const GemmSize& sz) {
+    int64_t M = sz.M, N = sz.N, K = sz.K;
+    if (!cutlass_sm120_nvfp4_available()) {
+        fprintf(stderr, "bench_nvfp4_cutlass_gemm: CUTLASS sm_120 NVFP4 GEMM not compiled\n");
+        return -1.0f;
+    }
+
+    // --- Activation A [M,K] FP16 -> CUTLASS NVFP4 (packed FP4 + SfAtom scales) ---
+    std::vector<half> h_A(static_cast<size_t>(M) * K);
+    fill_random_fp16(h_A.data(), M * K);
+    void* d_A_fp16 = nullptr;
+    cudaMalloc(&d_A_fp16, h_A.size() * sizeof(half));
+    cudaMemcpy(d_A_fp16, h_A.data(), h_A.size() * sizeof(half), cudaMemcpyHostToDevice);
+
+    void* a_data = nullptr;  // [M, K/2] packed FP4
+    void* a_sf = nullptr;    // SfAtom UE4M3 scales
+    cudaMalloc(&a_data, static_cast<size_t>(M) * (K / 2));
+    cudaMalloc(&a_sf, cutlass_nvfp4_sf_size(static_cast<int>(M), static_cast<int>(K)));
+    quantize_fp16_to_nvfp4_cutlass(d_A_fp16, a_data, a_sf, static_cast<int>(M), static_cast<int>(K), nullptr);
+
+    // --- Weight B [N,K] FP16 -> NvFP4QuantResult -> CUTLASS block-scaled ---
+    std::vector<half> h_B(static_cast<size_t>(N) * K);
+    fill_random_fp16(h_B.data(), N * K);
+    void* d_B_fp16 = nullptr;
+    cudaMalloc(&d_B_fp16, h_B.size() * sizeof(half));
+    cudaMemcpy(d_B_fp16, h_B.data(), h_B.size() * sizeof(half), cudaMemcpyHostToDevice);
+    int64_t bshape[2] = {N, K};
+    Tensor b_t(d_B_fp16, QType::F16, 2, bshape, /*on_device=*/true);
+    NvFP4QuantResult qr{};
+    quantize_fp16_to_nvfp4(b_t, qr, nullptr);
+    CutlassNvFP4Weight cw{};
+    convert_nvfp4_to_cutlass(qr, cw, nullptr);
+
+    // --- Output + workspace ---
+    void* d_D = nullptr;
+    cudaMalloc(&d_D, static_cast<size_t>(M) * N * sizeof(half));
+    size_t ws_size = gemm_nvfp4_cutlass_sm120_workspace(static_cast<int>(M), static_cast<int>(N),
+                                                        static_cast<int>(K));
+    void* ws = nullptr;
+    if (ws_size > 0)
+        cudaMalloc(&ws, ws_size);
+    cudaDeviceSynchronize();
+
+    auto run = [&]() {
+        return gemm_nvfp4_cutlass_sm120(a_data, a_sf, cw, d_D, static_cast<int>(M), static_cast<int>(N),
+                                        static_cast<int>(K), ws, ws_size, nullptr);
+    };
+
+    // Warmup >1s to ramp clocks (idle-downclock is the dominant cold-start artifact).
+    bool ok = true;
+    for (int i = 0; i < 50; ++i)
+        ok = run() && ok;
+    cudaDeviceSynchronize();
+    if (!ok)
+        fprintf(stderr, "bench_nvfp4_cutlass_gemm: kernel returned false for M=%ld N=%ld K=%ld\n", M, N, K);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start, nullptr);
+    for (int i = 0; i < kTimedIters; ++i)
+        run();
+    cudaEventRecord(stop, nullptr);
+    cudaEventSynchronize(stop);
+    float total_ms = 0.0f;
+    cudaEventElapsedTime(&total_ms, start, stop);
+    float avg_ms = total_ms / static_cast<float>(kTimedIters);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    free_cutlass_nvfp4_weight(cw);
+    free_nvfp4_result(qr);
+    if (ws)
+        cudaFree(ws);
+    cudaFree(d_D);
+    cudaFree(a_data);
+    cudaFree(a_sf);
+    cudaFree(d_A_fp16);
+    cudaFree(d_B_fp16);
+    return avg_ms;
+}
+
+// Square NVFP4 shapes matching tools/standalone/gemm_nvfp4_sm120a.cu (M=N=K cubed).
+static const GemmSize kNvfp4Sizes[] = {
+    {2048, 2048, 2048, "M=N=K=2048"},
+    {4096, 4096, 4096, "M=N=K=4096"},
+    {8192, 8192, 8192, "M=N=K=8192"},
+    // Realistic prefill shapes (small M = chunk size, N/K = model dims) — the
+    // grid-underfill regime where warp-spec's 1-block/SM could lose to a
+    // higher-occupancy cp.async path. N=K=5120 ~ Qwen3-14B hidden.
+    {128, 5120, 5120, "M=128 N=K=5120"},
+    {256, 5120, 5120, "M=256 N=K=5120"},
+    {512, 5120, 5120, "M=512 N=K=5120"},
+    {1024, 5120, 5120, "M=1024 N=K=5120"},
+    {2048, 5120, 5120, "M=2048 N=K=5120"},
+};
+static constexpr int kNumNvfp4Sizes = sizeof(kNvfp4Sizes) / sizeof(kNvfp4Sizes[0]);
+
+void bench_gemm_nvfp4_cutlass() {
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        printf("bench_gemm_nvfp4_cutlass: no CUDA device available, skipping.\n");
+        return;
+    }
+    printf("=== Production CUTLASS sm_120 NVFP4 dense GEMM ===\n");
+    printf("(peak FP4 mma.sync ~2019 TOPS measured; standalone ref hits 48%%)\n\n");
+    for (int i = 0; i < kNumNvfp4Sizes; ++i) {
+        const GemmSize& sz = kNvfp4Sizes[i];
+        float avg_ms = bench_nvfp4_cutlass_gemm(sz);
+        if (avg_ms <= 0.0f)
+            continue;
+        double tops = 2.0 * sz.M * sz.N * sz.K / (avg_ms * 1e-3) / 1e12;
+        double pct_peak = tops / 2019.0 * 100.0;
+        printf("  [%-14s] %8.3f ms  %7.1f TOP/s  %5.1f%% of 2019 peak\n", sz.label, avg_ms, tops, pct_peak);
+    }
+    printf("\n");
 }
 
 void bench_gemm() {
