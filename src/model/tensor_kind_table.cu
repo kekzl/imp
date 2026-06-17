@@ -72,8 +72,8 @@ constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::COUNT)> k
 
 const KindCapabilities& capabilities_of(TensorKind k) {
     IMP_CHECK(k != TensorKind::COUNT && static_cast<size_t>(k) < kKindTable.size(),
-              "capabilities_of: invalid TensorKind=%zu (table size=%zu)",
-              static_cast<size_t>(k), kKindTable.size());
+              "capabilities_of: invalid TensorKind=%zu (table size=%zu)", static_cast<size_t>(k),
+              kKindTable.size());
     return kKindTable[static_cast<size_t>(k)];
 }
 
