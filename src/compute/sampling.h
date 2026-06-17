@@ -94,7 +94,7 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, f
 // token logprob + top-N alternatives. Called after D2H copy of logits.
 // ---------------------------------------------------------------------------
 struct LogprobResult {
-    float sampled_logprob;                       // logprob of the sampled token
+    float sampled_logprob{};                     // logprob of the sampled token
     std::vector<std::pair<int32_t, float>> top;  // (token_id, logprob) sorted desc
 };
 

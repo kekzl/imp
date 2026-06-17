@@ -565,7 +565,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         return false;
     }
 
-    struct stat st;
+    struct stat st {};
     if (fstat(fd, &st) != 0) {
         close(fd);
         return false;

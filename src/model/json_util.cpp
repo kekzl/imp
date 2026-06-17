@@ -311,7 +311,7 @@ std::string read_file(const std::string& path) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0)
         return "";
-    struct stat st;
+    struct stat st {};
     if (fstat(fd, &st) != 0) {
         close(fd);
         return "";

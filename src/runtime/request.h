@@ -15,7 +15,7 @@ struct TokenLogprob {
 };
 
 struct TokenLogprobInfo {
-    float logprob;                  // logprob of the sampled token
+    float logprob{};                // logprob of the sampled token
     std::string text;               // decoded text of the sampled token
     std::vector<TokenLogprob> top;  // top_logprobs alternatives
 };

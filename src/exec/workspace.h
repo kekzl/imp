@@ -139,13 +139,13 @@ private:
 
     // Saved prefill workspace pointers (restored when switching back).
     struct SavedWorkspace {
-        void* persistent;
-        size_t persistent_size;
-        void* shared;
-        size_t shared_size;
-        int shared_max_tokens;
+        void* persistent{};
+        size_t persistent_size{};
+        void* shared{};
+        size_t shared_size{};
+        int shared_max_tokens{};
         Tensor hidden, residual, norm_out, logits;
-        void* fp32_accum;
+        void* fp32_accum{};
         Tensor fp32_hidden;
     };
     SavedWorkspace saved_prefill_ws_;

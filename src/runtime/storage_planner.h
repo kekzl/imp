@@ -24,13 +24,13 @@ struct PlanHints {
 
 struct StoragePlan {
     struct Entry {
-        TensorID id;
+        TensorID id{};
         TensorKind kind;
         QType source_qtype;  // source storage; feeds effective_capabilities() in downgrade loop
         StorageTier tier;
-        int64_t bytes;
-        int64_t rows;
-        int64_t cols;
+        int64_t bytes{};
+        int64_t rows{};
+        int64_t cols{};
         const void* source_data = nullptr;  // GGUF/source pointer — the key the
                                             // pre-dequant phases dispatch on.
         // Stage 1: arch rule (gemma-3) requires the NVFP4 decode cache to be

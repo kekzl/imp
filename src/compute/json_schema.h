@@ -65,7 +65,7 @@ public:
     // True if any state in `states` is accepting.
     bool accepts(const std::vector<int>& states) const;
 
-    bool empty_set_dead(const std::vector<int>& states) const { return states.empty(); }
+    static bool empty_set_dead(const std::vector<int>& states) { return states.empty(); }
 
 private:
     std::vector<NfaState> states_;
@@ -94,7 +94,7 @@ private:
     bool parse_repeat(Frag& out);
     bool parse_atom(Frag& out);
     bool parse_class(Frag& out);  // [...]
-    bool make_shorthand(char esc, std::vector<uint8_t>& cls);  // \d \w \s ...
+    static bool make_shorthand(char esc, std::vector<uint8_t>& cls);  // \d \w \s ...
 };
 
 enum class SchemaType {

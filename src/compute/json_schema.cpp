@@ -225,7 +225,7 @@ private:
         return result;
     }
 
-    SchemaType type_from_string(const std::string& s) {
+    static SchemaType type_from_string(const std::string& s) {
         if (s == "string")
             return SchemaType::STRING;
         if (s == "number")
@@ -788,7 +788,7 @@ bool RegexNfa::parse_repeat(Frag& out) {
     // source span of *this* atom (parse_atom may advance pos_ arbitrarily for
     // groups / classes).
     size_t atom_begin = pos_;
-    Frag atom;
+    Frag atom{};
     if (!parse_atom(atom))
         return false;
 
@@ -891,7 +891,7 @@ bool RegexNfa::parse_repeat(Frag& out) {
         }
 
         for (long i = built; i < n; i++) {
-            Frag f;
+            Frag f{};
             if (!clone_atom(f))
                 return false;
             add_epsilon(cur, f.start);
@@ -901,7 +901,7 @@ bool RegexNfa::parse_repeat(Frag& out) {
         int a = new_state();
         if (m < 0) {
             // {n,} -> after n mandatory, a Kleene star of the atom
-            Frag f;
+            Frag f{};
             if (!clone_atom(f))
                 return false;
             int ls = new_state();
@@ -913,7 +913,7 @@ bool RegexNfa::parse_repeat(Frag& out) {
         } else {
             // {n,m} -> (m-n) optional copies
             for (long i = n; i < m; i++) {
-                Frag f;
+                Frag f{};
                 if (!clone_atom(f))
                     return false;
                 add_epsilon(cur, f.start);
@@ -937,7 +937,7 @@ bool RegexNfa::parse_concat(Frag& out) {
     int cur = s;
     bool any = false;
     while (pos_ < src_->size() && (*src_)[pos_] != '|' && (*src_)[pos_] != ')') {
-        Frag f;
+        Frag f{};
         if (!parse_repeat(f))
             return false;
         add_epsilon(cur, f.start);
@@ -959,7 +959,7 @@ bool RegexNfa::parse_concat(Frag& out) {
 
 // alt := concat ('|' concat)*
 bool RegexNfa::parse_alt(Frag& out) {
-    Frag first;
+    Frag first{};
     if (!parse_concat(first))
         return false;
     if (pos_ >= src_->size() || (*src_)[pos_] != '|') {
@@ -972,7 +972,7 @@ bool RegexNfa::parse_alt(Frag& out) {
     add_epsilon(first.accept, a);
     while (pos_ < src_->size() && (*src_)[pos_] == '|') {
         pos_++;  // consume '|'
-        Frag next;
+        Frag next{};
         if (!parse_concat(next))
             return false;
         add_epsilon(s, next.start);
@@ -990,7 +990,7 @@ bool RegexNfa::compile(const std::string& pattern) {
     src_ = &pattern;
     pos_ = 0;
 
-    Frag root;
+    Frag root{};
     if (!parse_alt(root)) {
         src_ = nullptr;
         return false;
@@ -1086,7 +1086,7 @@ bool gbnf_expr_to_regex(const std::string& expr, const std::map<std::string, std
 // Translate a single rule by name (with recursion detection).
 bool gbnf_rule_to_regex(const std::string& name, const std::map<std::string, std::string>& rules,
                         std::set<std::string>& active, std::string& out, std::string* err) {
-    if (active.count(name)) {
+    if (active.contains(name)) {
         *err = "recursive rule '" + name + "' is not supported by the NFA backend";
         return false;
     }

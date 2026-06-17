@@ -305,7 +305,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         return nullptr;
     }
 
-    struct stat st;
+    struct stat st {};
     if (fstat(fd, &st) != 0) {
         close(fd);
         return nullptr;
@@ -362,10 +362,10 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
     // 4. Parse tensor infos
     struct TensorInfo {
         std::string name;
-        uint32_t n_dims;
-        int64_t dims[4];
+        uint32_t n_dims{};
+        int64_t dims[4]{};
         GgufWireType type;
-        uint64_t offset;
+        uint64_t offset{};
     };
 
     std::vector<TensorInfo> tensor_infos;

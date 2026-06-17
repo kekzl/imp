@@ -78,7 +78,7 @@ bool Engine::init_weights() {
 
     // Reserve L2 persisting cache for decode GEMV
     {
-        cudaDeviceProp prop;
+        cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, 0);
         size_t max_persist = prop.persistingL2CacheMaxSize;
         if (max_persist > 0) {
