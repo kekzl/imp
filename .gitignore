@@ -31,8 +31,11 @@ tools/analysis/bench_*
 *.log
 bringup_artifacts/
 mtp_retest/
-core
-core.*
+# Core dumps — anchored to repo root so the pattern does NOT match the
+# src/core/ source directory (it did; that hid src/core from ripgrep/grep and
+# blocked `git add` of new files there).
+/core
+/core.*
 *.dump
 
 # Model files / weights
