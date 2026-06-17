@@ -270,7 +270,8 @@ struct DequantTraits<DPQTag::Q4_0> {
         sumi = __dp4a(static_cast<int>((w[2] >> 4) & 0x0F0F0F0Fu), xi[6], sumi);  // elems 24..27
         sumi = __dp4a(static_cast<int>((w[3] >> 4) & 0x0F0F0F0Fu), xi[7], sumi);  // elems 28..31
 #pragma unroll
-        for (int j = 0; j < 8; j++) q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
+        for (int j = 0; j < 8; j++)
+            q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
 
         return d_w * dq * ((float)sumi - 8.0f * (float)q8_sum_int);
     }
