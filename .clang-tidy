@@ -6,8 +6,11 @@
 # compiler). For IDEs, clangd picks this file up automatically.
 #
 # Advisory: WarningsAsErrors is empty, so findings surface but do not block. The
-# noisy/opinionated checks below are disabled on purpose for a perf-CUDA codebase
-# (magic numbers, swappable params, cognitive complexity, …). Tighten over time.
+# disabled checks below are calibrated against a full sweep (it reported ~2000
+# findings, ~85% of them low-value style churn). We keep the bugprone-* /
+# performance-* / clang-diagnostic-* signal and drop the cosmetic mass (const on
+# locals, literal-suffix case, anon-namespace style, branch-clone on intentional
+# explicit case enumerations, …) so the gate surfaces real issues, not noise.
 
 Checks: >
   bugprone-*,
@@ -18,16 +21,28 @@ Checks: >
   cppcoreguidelines-pro-type-member-init,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
+  -bugprone-branch-clone,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
   -misc-include-cleaner,
+  -misc-const-correctness,
+  -misc-use-anonymous-namespace,
+  -performance-enum-size,
   -readability-magic-numbers,
   -readability-identifier-length,
   -readability-function-cognitive-complexity,
   -readability-braces-around-statements,
   -readability-implicit-bool-conversion,
   -readability-named-parameter,
-  -readability-isolate-declaration
+  -readability-isolate-declaration,
+  -readability-uppercase-literal-suffix,
+  -readability-qualified-auto,
+  -readability-static-definition-in-anonymous-namespace,
+  -readability-avoid-nested-conditional-operator,
+  -readability-use-anyofallof,
+  -readability-else-after-return,
+  -readability-redundant-member-init,
+  -readability-simplify-boolean-expr
 
 WarningsAsErrors: ''
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'

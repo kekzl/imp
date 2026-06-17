@@ -229,8 +229,8 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // model that has tensor kinds the runtime caches but plan_storage
         // doesn't yet enumerate (or vice versa).
         if (registry_count < plan_overlay) {
-            int plan_per_kind[static_cast<int>(TensorKind::_COUNT)] = {0};
-            int registry_per_kind[static_cast<int>(TensorKind::_COUNT)] = {0};
+            int plan_per_kind[static_cast<int>(TensorKind::COUNT)] = {0};
+            int registry_per_kind[static_cast<int>(TensorKind::COUNT)] = {0};
             for (const auto& e : ideal_plan.entries) {
                 bool overlay = (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
                                 e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
@@ -241,7 +241,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id) {
                 ++registry_per_kind[static_cast<int>(registry_->handle(id).kind)];
             }
-            for (int k = 0; k < static_cast<int>(TensorKind::_COUNT); ++k) {
+            for (int k = 0; k < static_cast<int>(TensorKind::COUNT); ++k) {
                 int diff = plan_per_kind[k] - registry_per_kind[k];
                 if (diff > 0) {
                     IMP_LOG_INFO("Phase-4 gap by kind: %s plan=%d registry=%d (uncached=%d)",

@@ -227,7 +227,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
 
     // Validate pairs + collect max rank.
     for (size_t li = 0; li < layers_.size(); li++) {
-        for (int pi = 0; pi < static_cast<int>(LoraProj::_COUNT); pi++) {
+        for (int pi = 0; pi < static_cast<int>(LoraProj::COUNT); pi++) {
             LoraWeights& w = layers_[li].proj[pi];
             if ((w.A == nullptr) != (w.B == nullptr)) {
                 IMP_LOG_ERROR("LoRA: layer %zu proj %d has unpaired A/B", li, pi);

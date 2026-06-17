@@ -20,7 +20,7 @@
 
 namespace imp {
 
-enum class LoraProj : uint8_t { Q = 0, K, V, O, GATE, UP, DOWN, _COUNT };
+enum class LoraProj : uint8_t { Q = 0, K, V, O, GATE, UP, DOWN, COUNT };
 
 struct LoraWeights {
     void* A = nullptr;  // device F16 [r, K]
@@ -59,7 +59,7 @@ public:
 
 private:
     struct LayerSlots {
-        LoraWeights proj[static_cast<int>(LoraProj::_COUNT)];
+        LoraWeights proj[static_cast<int>(LoraProj::COUNT)];
     };
     std::vector<LayerSlots> layers_;
     std::vector<void*> device_allocs_;
