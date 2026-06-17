@@ -60,14 +60,6 @@ __device__ __forceinline__ float q6k_dp4a_group_preloaded(
     return group_sum;
 }
 
-__device__ __forceinline__ int unpack_nibbles_2(uint8_t b0, uint8_t b1) {
-    int r;
-    int8_t vals[4] = {static_cast<int8_t>(b0 & 0xF), static_cast<int8_t>(b0 >> 4),
-                      static_cast<int8_t>(b1 & 0xF), static_cast<int8_t>(b1 >> 4)};
-    memcpy(&r, vals, 4);
-    return r;
-}
-
 // 6-bit scale/min unpacker matching ggml get_scale_min_k4, register variant
 // (#598): the 12 scale bytes arrive as three words (s0 = sc[0..3],
 // s1 = sc[4..7], s2 = sc[8..11]) from a single uint4 header load instead of
@@ -243,38 +235,44 @@ struct DequantTraits<DPQTag::Q4_0> {
     static constexpr int kBlockBytes = 18;
     static constexpr int kBlockElems = 32;
     static constexpr int kQ8PerWeight = 1;
-    static constexpr bool kNeedsQ8Sum = true;
-    static constexpr int kSmemExtra = 2;  // half s field per Q8_1 block
+    static constexpr bool kNeedsQ8Sum = false;  // computed internally (like every other type)
+    static constexpr int kSmemExtra = 0;
     static constexpr int kMaxNRows = 4;
     static constexpr bool kPreferKpar = false;  // simple dequant: row-par smem wins on ties
 
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int /*sub*/, const int* xi,
-                                                       float dq, float q8_sum) {
+                                                       float dq, float /*q8_sum*/) {
         half d_w_h;
         memcpy(&d_w_h, bp, sizeof(half));
         float d_w = __half2float(d_w_h);
-        const uint8_t* qs = bp + 2;
 
-        int ni0 = unpack_nibbles_2(qs[0], qs[1]);
-        int ni1 = unpack_nibbles_2(qs[2], qs[3]);
-        int ni2 = unpack_nibbles_2(qs[4], qs[5]);
-        int ni3 = unpack_nibbles_2(qs[6], qs[7]);
-        int ni4 = unpack_nibbles_2(qs[8], qs[9]);
-        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
-        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
-        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
+        // ggml Q4_0 packs 32 elements as SPLIT nibbles: of the 16 qs bytes, the
+        // low nibbles are elements 0..15 and the high nibbles are elements 16..31
+        // (same convention as imp's dequant_q4_0_kernel). The Q8_1 activations
+        // xi[0..7] are natural-order, so pair four consecutive low nibbles (then
+        // four consecutive high nibbles) with each xi[j] — the proven Q4_K
+        // extraction (q4k_dp4a_sub). Reading nibbles interleaved instead mispairs
+        // weights with activations. q8_sum (for the -8 zero-point) is summed
+        // internally from xi, like every other type, instead of trusting the
+        // passed value (AUDIT.md F1).
+        uint32_t w[4];
+        memcpy(w, bp + 2, 16);
 
+        const int ones = 0x01010101;
         int32_t sumi = 0;
-        sumi = __dp4a(ni0, xi[0], sumi);
-        sumi = __dp4a(ni1, xi[1], sumi);
-        sumi = __dp4a(ni2, xi[2], sumi);
-        sumi = __dp4a(ni3, xi[3], sumi);
-        sumi = __dp4a(ni4, xi[4], sumi);
-        sumi = __dp4a(ni5, xi[5], sumi);
-        sumi = __dp4a(ni6, xi[6], sumi);
-        sumi = __dp4a(ni7, xi[7], sumi);
+        int32_t q8_sum_int = 0;
+        sumi = __dp4a(static_cast<int>(w[0] & 0x0F0F0F0Fu), xi[0], sumi);         // elems 0..3
+        sumi = __dp4a(static_cast<int>(w[1] & 0x0F0F0F0Fu), xi[1], sumi);         // elems 4..7
+        sumi = __dp4a(static_cast<int>(w[2] & 0x0F0F0F0Fu), xi[2], sumi);         // elems 8..11
+        sumi = __dp4a(static_cast<int>(w[3] & 0x0F0F0F0Fu), xi[3], sumi);         // elems 12..15
+        sumi = __dp4a(static_cast<int>((w[0] >> 4) & 0x0F0F0F0Fu), xi[4], sumi);  // elems 16..19
+        sumi = __dp4a(static_cast<int>((w[1] >> 4) & 0x0F0F0F0Fu), xi[5], sumi);  // elems 20..23
+        sumi = __dp4a(static_cast<int>((w[2] >> 4) & 0x0F0F0F0Fu), xi[6], sumi);  // elems 24..27
+        sumi = __dp4a(static_cast<int>((w[3] >> 4) & 0x0F0F0F0Fu), xi[7], sumi);  // elems 28..31
+#pragma unroll
+        for (int j = 0; j < 8; j++) q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
 
-        return d_w * (dq * (float)sumi - 8.0f * q8_sum);
+        return d_w * dq * ((float)sumi - 8.0f * (float)q8_sum_int);
     }
 };
 

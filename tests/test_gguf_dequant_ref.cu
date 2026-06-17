@@ -822,18 +822,12 @@ void run_mmvq_gemv(const char* name, QType qt, int N, int K,
 }  // namespace
 
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
-// NOTE: a Q4_0 dp4a-GEMV oracle is intentionally NOT added here. Adding one
-// surfaced a layout inconsistency (AUDIT.md §6 finding F1): gemv_q4_0_q8_1
-// (Q4_0_Traits::dp4a_block via unpack_nibbles_2) consumes nibbles in an
-// INTERLEAVED order (block element 2k = qs[k] low, 2k+1 = qs[k] high), whereas
-// standard ggml Q4_0 — and imp's own dequant_q4_0_kernel, validated bit-exact by
-// GgufDequant/Q4_0 above — is SPLIT (element e = qs[e] low, e+16 = qs[e] high).
-// Fed a standard Q4_0 block the kernel is ~6x off. No repack to interleaved was
-// found, and Q4_0 decode is registered as StorageTier::FP16 (dequant→fp16 GEMV,
-// gemm_kernel_gguf.cu), so the dp4a Q4_0 GEMV appears latent/unreached. Filed
-// for investigation rather than asserted (a green oracle here would require
-// either a kernel fix or confirming+feeding the interleaved layout the kernel
-// actually expects). The Q4_0 DEQUANT path IS now oracled (above).
+// Q4_0 dp4a-GEMV vs the fp64 reference. This oracle surfaced AUDIT.md F1:
+// Q4_0_Traits::dp4a_block read nibbles INTERLEAVED (2k = qs[k] low, 2k+1 = qs[k]
+// high) while standard ggml Q4_0 is SPLIT (element e = qs[e] low, e+16 = qs[e]
+// high), mispairing weights with the natural-order Q8_1 activations (~6x off).
+// Fixed to the split extraction the Q4_K path already uses; now asserted.
+TEST(GgufRef, Q4_0_GemvDp4a) { run_dp4a_gemv("Q4_0", QType::Q4_0, 256, 1024, gemv_q4_0_q8_1); }
 TEST(GgufRef, Q6_K_GemvDp4a) { run_dp4a_gemv("Q6_K", QType::Q6_K, 256, 1024, gemv_q6k_q8_1); }
 TEST(GgufRef, Q4_K_GemvDp4a) { run_dp4a_gemv("Q4_K", QType::Q4_K, 256, 1024, gemv_q4_k_q8_1); }
 TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gemv_q5_k_q8_1); }
