@@ -1,0 +1,74 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CUDA_COMPILER_LAUNCHER": "ccache"
+      }
+    },
+    {
+      "name": "default",
+      "inherits": "base",
+      "displayName": "Release — tests + tools + server (local default)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IMP_BUILD_TESTS": "ON",
+        "IMP_BUILD_TOOLS": "ON",
+        "IMP_BUILD_BENCH": "OFF",
+        "IMP_BUILD_SERVER": "ON"
+      }
+    },
+    {
+      "name": "ci",
+      "inherits": "base",
+      "displayName": "CI — mirrors the ci.yml Build job",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IMP_BUILD_TESTS": "ON",
+        "IMP_BUILD_TOOLS": "ON",
+        "IMP_BUILD_BENCH": "OFF",
+        "IMP_BUILD_SERVER": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug + ASan/UBSan (host code)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IMP_BUILD_TESTS": "ON",
+        "IMP_BUILD_TOOLS": "ON",
+        "IMP_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "relwithdebinfo",
+      "inherits": "base",
+      "displayName": "Profiling — Release optimizer + -lineinfo",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "IMP_BUILD_TESTS": "ON",
+        "IMP_BUILD_TOOLS": "ON",
+        "IMP_BUILD_BENCH": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "ci", "configurePreset": "ci" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo" }
+  ],
+  "testPresets": [
+    { "name": "unit", "configurePreset": "default", "filter": { "include": { "label": "unit" } }, "output": { "outputOnFailure": true } },
+    { "name": "gpu", "configurePreset": "default", "filter": { "include": { "label": "gpu" } }, "output": { "outputOnFailure": true } }
+  ]
+}

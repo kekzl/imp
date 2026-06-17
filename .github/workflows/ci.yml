@@ -106,6 +106,17 @@ jobs:
       - name: Run CPU unit tests (ctest -L unit)
         run: cd build && ctest -L unit --output-on-failure --timeout 120
 
+      # clang-tidy over host C++ TUs (advisory — does not block). Runs here, in the
+      # CUDA Build container, because that is where the CUDA headers our .cpp files
+      # include and build/compile_commands.json both exist. Scoped to .cpp (clang-tidy
+      # can't parse .cu without a full nvcc flagset). Flip continue-on-error off once
+      # the baseline is clean to make it a hard gate (CI2).
+      - name: clang-tidy (advisory, host TUs)
+        continue-on-error: true
+        run: |
+          apt-get install -y --no-install-recommends clang-tidy
+          clang-tidy -p build --warnings-as-errors= $(find src tools -name '*.cpp')
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
         with:
@@ -150,6 +161,42 @@ jobs:
           IMP_USE_MOCK: "1"
         run: python -m pytest tests/api -m "not perf and not tools" --tb=short -q
 
+  # Format gate (CI1). clang-format on CHANGED LINES only (git clang-format), so
+  # pre-existing formatting drift doesn't block and whole CUDA files are never
+  # reformatted (see CLAUDE.md). New/edited lines must be clean — run `make format`.
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install clang-format
+        # ubuntu-24.04 is a non-container host runner — apt and /usr/local/bin
+        # need sudo (the CUDA Build job runs in a container as root, so it doesn't).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format git curl ca-certificates
+          if ! command -v git-clang-format >/dev/null; then
+            sudo curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/release/18.x/clang/tools/clang-format/git-clang-format \
+              -o /usr/local/bin/git-clang-format && sudo chmod +x /usr/local/bin/git-clang-format
+          fi
+      - name: clang-format (changed lines)
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          [ -z "$base" ] && base="${{ github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "diff base: $base"
+          diff="$(git clang-format --style=file --diff "$base" 2>/dev/null || true)"
+          if [ -z "$diff" ] || echo "$diff" | grep -qiE 'did not modify|no modified files'; then
+            echo "format clean on changed lines"; exit 0
+          fi
+          echo "$diff"
+          echo "::error::clang-format would change the above changed lines — run 'make format'"
+          exit 1
+
   test:
     name: Test
     needs: build
@@ -183,34 +230,9 @@ jobs:
       # step closes that gap. Skips (does not fail) when the baseline model isn't on
       # the runner — set IMP_MODELS_DIR to the directory holding the baseline GGUF.
       - name: Perf regression gate
+        # Logic extracted to scripts/bench_gate.sh so the same gate runs locally
+        # (scripts/verify.sh) and here. Skips when the baseline model isn't on the
+        # runner; set IMP_MODELS_DIR to the directory holding the baseline GGUF.
         run: |
-          chmod +x build/imp-cli || true
-          BASELINE=tests/perf_baseline.json
-          MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
-          BL_MODEL=$(jq -r '.model' "$BASELINE")
-          MODEL_PATH="$MODELS_DIR/$BL_MODEL"
-          if [ ! -f "$MODEL_PATH" ]; then
-            echo "::warning::perf gate skipped — baseline model $MODEL_PATH not on runner (set IMP_MODELS_DIR)"
-            exit 0
-          fi
-          BL_TG=$(jq -r '.metrics.decode_tps.tg128' "$BASELINE")
-          BL_PP=$(jq -r '.metrics.prefill_tps.pp512' "$BASELINE")
-          DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
-          PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
-          ERR=$(mktemp)
-          CUBLAS_WORKSPACE_CONFIG=:4096:8 build/imp-cli --model "$MODEL_PATH" --bench \
-            --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
-            --temperature 0 >/dev/null 2>"$ERR"
-          PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-          TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-          if [ -z "$PP" ] || [ -z "$TG" ]; then echo "could not parse bench output"; tail -15 "$ERR"; exit 1; fi
-          DEC_DELTA=$(awk -v c="$TG" -v b="$BL_TG" 'BEGIN{printf "%.2f",(c-b)/b*100}')
-          PRE_DELTA=$(awk -v c="$PP" -v b="$BL_PP" 'BEGIN{printf "%.2f",(c-b)/b*100}')
-          echo "decode tg128=$TG (baseline $BL_TG, delta ${DEC_DELTA}%); prefill pp512=$PP (baseline $BL_PP, delta ${PRE_DELTA}%)"
-          if awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{exit !(-d > t)}'; then
-            echo "::error::decode regression > ${DEC_THR}% (if intended: scripts/gen_perf_baseline.sh)"; exit 1
-          fi
-          if awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{exit !(-d > t)}'; then
-            echo "::warning::prefill regression > ${PRE_THR}% (often cuBLAS variance)"
-          fi
-          echo "perf gate passed"
+          chmod +x build/imp-cli scripts/bench_gate.sh || true
+          scripts/bench_gate.sh build/imp-cli tests/perf_baseline.json

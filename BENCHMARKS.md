@@ -3,7 +3,7 @@
 Reproducibly anchored measurements. Every row states **when**, **on what
 commit**, **with which CUDA version and quant**, and **the exact command** —
 re-run the command on the stated commit to reproduce. The commit SHA is the
-authoritative version; tagged releases (current: **v0.11.0**) snapshot a SHA.
+authoritative version; tagged releases snapshot a SHA.
 
 **Hardware (constant across all runs):** single RTX 5090 (GB202, 32 GB GDDR7,
 water-cooled — never thermally throttled), Ryzen host, WSL2, Docker.

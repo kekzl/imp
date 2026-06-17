@@ -9,8 +9,12 @@ SHELL := bash
 DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
+# Dependency pins live once in cmake/imp-deps.cmake; inject them into the Docker
+# build so the tags are not duplicated (bump that file only). Extraction is in a
+# script — inlining the sed breaks make's $(shell ...) paren matching.
+DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check tidy sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -28,7 +32,7 @@ check-gpu:
 	echo "GPU is free (utilization: $${GPU_UTIL:-0}%)"
 
 build:
-	docker build $(BUILD_ARGS) -t $(DOCKER_IMG) .
+	docker build $(BUILD_ARGS) $(DEP_ARGS) -t $(DOCKER_IMG) .
 
 # Unit tests: CPU-only, no GPU, no model, < 5s
 # Mirrors `ctest -L unit`. Filter is sourced from CMakeLists.txt (_unit_e2e_filter).
@@ -219,3 +223,18 @@ format:
 # Check formatting without modifying files. Exits non-zero on violation.
 format-check:
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
+
+# clang-tidy over host C++ TUs (advisory — findings surface, do not fail). Runs in
+# the CUDA builder image so the CUDA headers our .cpp files include are present;
+# clang-tidy is apt-installed on the fly. .cu files are out of scope (need full
+# nvcc flags). Configures first so build/compile_commands.json exists.
+CLANG_TIDY_FILES = $$(find src tools -name '*.cpp')
+tidy:
+	@docker run --rm -v $(PWD):/work -w /work imp:builder bash -c '\
+	  apt-get update -qq && apt-get install -y -qq clang-tidy >/dev/null 2>&1; \
+	  test -f build/compile_commands.json || cmake --preset ci \
+	      -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
+	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
+	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
+	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
+	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true'

@@ -1,0 +1,30 @@
+# pre-commit framework hooks — https://pre-commit.com
+# Opt-in:  pip install pre-commit && pre-commit install
+#
+# These are the cheap, language-agnostic guards + clang-format. The heavier gates
+# stay where they belong and are NOT duplicated here:
+#   - GPU test suite  -> scripts/pre-commit.hook (native, via `make install-hooks`)
+#   - perf + smoke    -> scripts/pre-push.hook   (native, via `make install-hooks`)
+#   - clang-tidy / build / unit tests -> CI (.github/workflows/ci.yml)
+# (The framework can't gate a Docker GPU run, so those remain native hooks.)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'  # .md keeps trailing whitespace (line breaks) per .editorconfig
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: ['--maxkb=1024']  # weights/models are gitignored; catch stray blobs
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8  # matches the silkeh/clang:18 image used by `make format`
+    hooks:
+      - id: clang-format
+        files: '^(src|include|tools|tests)/.*\.(c|cc|cpp|cxx|h|hh|hpp|cu|cuh)$'
