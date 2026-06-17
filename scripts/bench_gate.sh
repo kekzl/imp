@@ -26,9 +26,13 @@ DEC_THR=$(jq -r '.thresholds.decode_regression_pct' "$BASELINE")
 PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
 
 run_bench() {
+  # NOTE: imp-cli prints the "pp 512 …" / "tg 128 …" result lines to STDERR, so
+  # do NOT merge 2>&1 here — the measured call below captures stderr into $ERR and
+  # parses it. (Merging would send the result lines to the caller's /dev/null and
+  # leave $ERR empty, which set -e then turns into a silent early exit.)
   CUBLAS_WORKSPACE_CONFIG=:4096:8 "$CLI" --model "$MODEL_PATH" --bench \
     --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
-    --temperature 0 2>&1
+    --temperature 0
 }
 
 # Warm the clocks: the GPU downclocks at idle and the first ~1s reads low. One
