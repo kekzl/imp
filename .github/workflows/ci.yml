@@ -172,12 +172,14 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install clang-format
+        # ubuntu-24.04 is a non-container host runner — apt and /usr/local/bin
+        # need sudo (the CUDA Build job runs in a container as root, so it doesn't).
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends clang-format git curl ca-certificates
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format git curl ca-certificates
           if ! command -v git-clang-format >/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/release/18.x/clang/tools/clang-format/git-clang-format \
-              -o /usr/local/bin/git-clang-format && chmod +x /usr/local/bin/git-clang-format
+            sudo curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/release/18.x/clang/tools/clang-format/git-clang-format \
+              -o /usr/local/bin/git-clang-format && sudo chmod +x /usr/local/bin/git-clang-format
           fi
       - name: clang-format (changed lines)
         run: |
