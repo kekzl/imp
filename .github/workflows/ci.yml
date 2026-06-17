@@ -115,7 +115,14 @@ jobs:
         continue-on-error: true
         run: |
           apt-get install -y --no-install-recommends clang-tidy
-          clang-tidy -p build --warnings-as-errors= $(find src tools -name '*.cpp')
+          # Filter the noise: clang-tidy prints a "[N/M] Processing file" progress
+          # line and a cumulative "N warnings generated" line per TU. Because our
+          # .cpp pull in CUTLASS/CUDA headers, that generated count runs into the
+          # hundreds of thousands — all suppressed from DISPLAY by the .clang-tidy
+          # HeaderFilterRegex, but the COUNT lines flooded the log. Drop both; what
+          # remains is only our own src/tools diagnostics.
+          clang-tidy -p build --warnings-as-errors= $(find src tools -name '*.cpp') 2>&1 \
+            | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
