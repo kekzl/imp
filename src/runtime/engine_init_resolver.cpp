@@ -150,16 +150,61 @@ void Engine::init_resolve_kv_dtype_policy_() {
             approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
                                    mcfg.n_layers * 2;
         }
+        // Weight-footprint tier — kept as a FLOOR so this never regresses below
+        // the previous default for any model.
+        int tier;
         if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 1;
+            tier = 1;
         else if (approx_weight_bytes > 10ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 4;
+            tier = 4;
         else if (approx_weight_bytes > 5ULL * 1024 * 1024 * 1024)
-            config_.max_batch_size = 8;
+            tier = 8;
         else
-            config_.max_batch_size = 16;
-        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)", config_.max_batch_size,
-                     approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
+            tier = 16;
+
+        // VRAM-aware concurrency cap. The KV cache is a shared paged pool clamped
+        // to the free-VRAM headroom downstream (vram_budget), so a larger cap can
+        // NOT OOM — it only lets more sequences share the pool (continuous
+        // batching). The old weight-footprint-only heuristic capped a 30B MoE at
+        // batch=1 even with ~10 GB headroom, serving concurrent requests one at a
+        // time (measured: batch=16 ≈ 2.4× aggregate server throughput). Size the
+        // cap so each concurrent slot retains at least a serving context floor
+        // (kRefCtxTokens) of KV within a fraction of the headroom. max_seq_len is
+        // not resolved yet here, so use the reference length (not the model max)
+        // — this avoids the batch↔seq_len circular dependency and the downstream
+        // KV clamp keeps it safe regardless. FP16-conservative + all-layers
+        // over-estimate KV per token (safe: over-estimate → smaller batch).
+        int auto_batch = tier;
+        size_t free_vram = 0, total_vram = 0;
+        size_t headroom = 0;
+        if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess && free_vram > 0) {
+            constexpr int kRefCtxTokens = 4096;  // per-slot serving context floor
+            constexpr int kMaxAutoBatch = 32;
+            constexpr double kKvHeadroomFrac = 0.6;  // rest: workspaces + long-ctx + safety
+            // Weights are NOT in VRAM yet at resolver time (still host/mmap; the
+            // GPU upload runs later), so cudaMemGetInfo reports the near-empty
+            // card. Subtract the weight footprint that WILL be uploaded to get the
+            // real post-load headroom. approx_weight_bytes under-counts the NVFP4
+            // decode + CUTLASS-SF caches, but kKvHeadroomFrac (0.6) reserves for
+            // those + workspaces, and the downstream KV clamp is the hard backstop.
+            headroom = (free_vram > approx_weight_bytes) ? (free_vram - approx_weight_bytes) : 0;
+            int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
+            int hd = mcfg.head_dim > 0 ? mcfg.head_dim
+                                       : (mcfg.n_heads > 0 ? mcfg.d_model / mcfg.n_heads : 128);
+            // K+V, 2 B/elem (fp16-conservative; FP8 KV is half), all layers.
+            size_t per_tok_kv = static_cast<size_t>(nkv) * hd * 2 * 2 * mcfg.n_layers;
+            size_t per_slot_kv = per_tok_kv * static_cast<size_t>(kRefCtxTokens);
+            if (per_slot_kv > 0) {
+                int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
+                                           static_cast<double>(per_slot_kv));
+                auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
+            }
+        }
+        config_.max_batch_size = auto_batch;
+        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
+                     "tier-floor=%d, VRAM-aware)",
+                     config_.max_batch_size, approx_weight_bytes / (1024.0 * 1024.0 * 1024.0),
+                     headroom / (1024.0 * 1024.0 * 1024.0), tier);
     } else {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
