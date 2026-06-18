@@ -349,7 +349,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     nvfp4_decode_cache_fp16_projections_(cfg, stream);
 
     if (!wcache_->nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
-        nvfp4_decode_convert_cutlass_(remaining_budget, stream);
+        nvfp4_decode_convert_cutlass_(cfg, remaining_budget, stream);
     }
 
     nvfp4_decode_convert_mxfp4_and_native_(cfg, stream);
@@ -804,7 +804,8 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 // Must run after FP16-free; the CUTLASS cache approximately doubles NVFP4
 // VRAM (repacked data + SfAtom scales).  Budget-aware: stops if VRAM
 // budget runs out and emits an info line.
-void QuantPipeline::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cudaStream_t stream) {
+void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t& remaining_budget,
+                                                  cudaStream_t stream) {
     // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
     size_t ct_budget;
     if (wcache_->nvfp4_decode_mode == 2) {
@@ -824,60 +825,152 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
                         ? (remaining_budget - wcache_->nvfp4_bytes)
                         : 0;
     }
-    // All SfAtom scale buffers share ONE slab allocation (each entry borrows a
-    // sub-region) instead of a per-tensor cudaMalloc+cudaMemsetAsync. On a
-    // 128-expert MoE the old loop issued ~18.6k allocs + memsets (~600 ms of
-    // load time). Pass 1 selects the included tensors with the SAME skip +
-    // VRAM-budget rules and sums their 256B-aligned SfAtom sizes; Pass 2
-    // converts each into its slab offset (one alloc, one memset, one teardown).
+    // SfAtom scale factors share ONE slab allocation (each entry borrows a
+    // sub-region) instead of a per-tensor cudaMalloc+cudaMemsetAsync (#734). MoE
+    // experts additionally convert in ONE batched launch per (layer,projection)
+    // group instead of one launch per expert: on a 128-expert MoE that collapses
+    // ~18.6k convert launches into ~144. Pass 1 sizes the slab (contiguous MoE
+    // groups first, then per-tensor dense / non-contiguous entries) under the
+    // SAME skip + VRAM-budget rules; pass 2 converts each into its slab offset.
     constexpr size_t kSfAlign = 256;  // keep each entry's SF base CUTLASS-aligned
     auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
-    std::vector<std::pair<const void*, size_t>> ct_included;  // (src ptr, slab offset)
-    size_t ct_total = 0;  // running padded slab size = real SF VRAM
-    int ct_skipped_dead = 0;
-    for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
-        // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1
-        // prefill uses IMMA raw-read on the GGUF source — the CUTLASS GEMM path
-        // (executor_kernels gemm_via_handle_, primary_tier==CUTLASS_NVFP4) is
-        // never reached for them, so the SF buffer is dead VRAM (~0.45 GB on an
-        // 8B Q8_0 model). Today that is Q8_0 with q8_imma_enabled. CUTLASS stays
-        // for native-NVFP4 (prefill IS CUTLASS) and Q6_K/Q5_K (not IMMA-routed →
-        // CUTLASS is their prefill path). Decode is unaffected: decode_tier stays
-        // NVFP4 (the plain wcache_->nvfp4 GEMV), independent of the SF buffer.
-        const auto* pe = storage_plan_.entry_of(ptr);
-        if (pe && pe->source_qtype == QType::Q8_0 && runtime_config().gemm.q8_imma_enabled) {
-            ++ct_skipped_dead;
-            continue;
+
+    // Identify contiguous MoE expert groups from the model. The grouping comes
+    // from the model because wcache_->nvfp4_moe is not populated until a later
+    // phase. The loader's contiguity invariant is re-checked here; any group
+    // that is non-contiguous, non-uniform, or partly absent from the decode
+    // cache falls back to the per-tensor path below (correctness over speed).
+    struct MoeGroup {
+        const void* base_ms;
+        int ne, N, K;
+        size_t sf_per_expert, slab_off;
+        std::vector<float> tscale;
+        std::vector<const void*> data_ptrs;
+    };
+    std::vector<MoeGroup> moe_groups;
+    std::unordered_set<const void*> grouped;  // expert data ptrs handled by a group
+    auto try_group = [&](const std::vector<Tensor>& experts) {
+        int ne = static_cast<int>(experts.size());
+        if (ne < 2 || !experts[0].data || !experts[0].scales)
+            return;
+        const int N = static_cast<int>(experts[0].shape[0]);
+        const int Kp = static_cast<int>(experts[0].shape[1]);  // packed K/2
+        const int K = Kp * 2;
+        const size_t e_ms = static_cast<size_t>(N) * (K / 16);  // micro-scale bytes/expert
+        for (int e = 0; e < ne; ++e) {
+            const Tensor& w = experts[e];
+            if (!w.data || !w.scales || static_cast<int>(w.shape[0]) != N ||
+                static_cast<int>(w.shape[1]) != Kp)
+                return;  // non-uniform shape
+            if (static_cast<const char*>(w.scales) !=
+                static_cast<const char*>(experts[0].scales) + static_cast<size_t>(e) * e_ms)
+                return;  // micro-scales not contiguous → per-tensor fallback
+            if (!wcache_->nvfp4.count(w.data))
+                return;  // not a registered CUTLASS candidate
         }
-        size_t est = align_up(cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K)),
-                              kSfAlign);
-        if (ct_total + est > ct_budget) {
-            IMP_LOG_INFO(
-                "CUTLASS NVFP4 cache: VRAM budget reached after %zu tensors "
-                "(%.1f / %.1f MiB)",
-                ct_included.size(), ct_total / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
+        MoeGroup g;
+        g.base_ms = experts[0].scales;
+        g.ne = ne;
+        g.N = N;
+        g.K = K;
+        g.sf_per_expert = cutlass_nvfp4_sf_size(N, K);
+        g.slab_off = 0;
+        g.tscale.resize(ne);
+        g.data_ptrs.resize(ne);
+        for (int e = 0; e < ne; ++e) {
+            g.tscale[e] = experts[e].tensor_scale;
+            g.data_ptrs[e] = experts[e].data;
+            grouped.insert(experts[e].data);
+        }
+        moe_groups.push_back(std::move(g));
+    };
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& L = model_->layer(i);
+        try_group(L.expert_w_gate);
+        try_group(L.expert_w_up);
+        try_group(L.expert_w_down);
+    }
+
+    // Pass 1: size the slab. Groups first (each placed contiguously so the
+    // batched kernel can stride by sf_per_expert), then per-tensor entries.
+    std::vector<std::pair<const void*, size_t>> ct_included;  // (src ptr, slab offset)
+    size_t ct_total = 0;       // running padded slab size = real SF VRAM
+    size_t n_groups_inc = 0;   // leading moe_groups that fit the budget
+    int ct_skipped_dead = 0;
+    bool ct_exhausted = false;
+    for (auto& g : moe_groups) {
+        size_t group_sf = align_up(static_cast<size_t>(g.ne) * g.sf_per_expert, kSfAlign);
+        if (ct_total + group_sf > ct_budget) {
+            ct_exhausted = true;
             break;
         }
-        ct_included.emplace_back(ptr, ct_total);
-        ct_total += est;
+        g.slab_off = ct_total;
+        ct_total += group_sf;
+        ++n_groups_inc;
     }
+    if (!ct_exhausted) {
+        for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
+            if (grouped.count(ptr))
+                continue;  // converted by a batched MoE group above
+            // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1
+            // prefill uses IMMA raw-read on the GGUF source — the CUTLASS GEMM
+            // path is never reached for them, so the SF buffer is dead VRAM.
+            // Today that is Q8_0 with q8_imma_enabled. CUTLASS stays for native-
+            // NVFP4 (prefill IS CUTLASS) and Q6_K/Q5_K. Decode is unaffected:
+            // decode_tier stays NVFP4 (the plain wcache_->nvfp4 GEMV).
+            const auto* pe = storage_plan_.entry_of(ptr);
+            if (pe && pe->source_qtype == QType::Q8_0 && runtime_config().gemm.q8_imma_enabled) {
+                ++ct_skipped_dead;
+                continue;
+            }
+            size_t est = align_up(
+                cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K)), kSfAlign);
+            if (ct_total + est > ct_budget) {
+                ct_exhausted = true;
+                break;
+            }
+            ct_included.emplace_back(ptr, ct_total);
+            ct_total += est;
+        }
+    }
+    if (ct_exhausted)
+        IMP_LOG_INFO("CUTLASS NVFP4 cache: VRAM budget reached (%.1f / %.1f MiB)",
+                     ct_total / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
 
     int ct_count = 0;
     if (ct_total > 0) {
         void* sf_slab = nullptr;
         IMP_CUDA_CHECK_LOG(cudaMalloc(&sf_slab, ct_total));
-        // Zero every entry's SfAtom padding rows at once (the convert kernel
-        // writes only valid (n, k_group) cells).
+        // Zero every entry's SfAtom padding rows at once (convert kernels write
+        // only valid (n, k_group) cells).
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(sf_slab, 0, ct_total, stream));
         wcache_->cutlass_sf_slab = sf_slab;
         wcache_->cutlass_sf_slab_size = ct_total;
+        auto* slab = static_cast<uint8_t*>(sf_slab);
+        // Pass 2a: one batched convert per MoE group → per-expert borrowed slices.
+        for (size_t gi = 0; gi < n_groups_inc; ++gi) {
+            const MoeGroup& g = moe_groups[gi];
+            convert_nvfp4_moe_scales_to_sfatom(g.base_ms, slab + g.slab_off, g.ne, g.N, g.K, stream);
+            for (int e = 0; e < g.ne; ++e) {
+                CutlassNvFP4Weight cw;
+                cw.data = g.data_ptrs[e];
+                cw.scale_factors = slab + g.slab_off + static_cast<size_t>(e) * g.sf_per_expert;
+                cw.tensor_scale = g.tscale[e];
+                cw.N = g.N;
+                cw.K = g.K;
+                cw.sf_bytes = g.sf_per_expert;
+                cw.sf_borrowed = true;
+                wcache_->cutlass_nvfp4[g.data_ptrs[e]] = cw;
+                ++ct_count;
+            }
+        }
+        // Pass 2b: per-tensor convert for dense / non-contiguous entries.
         for (auto& [ptr, off] : ct_included) {
             auto it = wcache_->nvfp4.find(ptr);
             if (it == wcache_->nvfp4.end())
                 continue;
             CutlassNvFP4Weight cw;
-            convert_nvfp4_to_cutlass_borrowed(it->second, cw, static_cast<uint8_t*>(sf_slab) + off,
-                                              stream);
+            convert_nvfp4_to_cutlass_borrowed(it->second, cw, slab + off, stream);
             if (cw.data) {
                 wcache_->cutlass_nvfp4[ptr] = cw;
                 ct_count++;
