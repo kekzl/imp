@@ -33,6 +33,14 @@ struct CutlassNvFP4Weight {
 // Borrows packed_data pointer (RowMajor). tensor_scale is stored for GEMM alpha.
 void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, cudaStream_t stream);
 
+// Same conversion, but writes the SfAtom scale factors into a caller-provided,
+// pre-zeroed buffer `sf_dst` (a sub-region of a shared slab) instead of doing a
+// per-tensor cudaMalloc+cudaMemset. Sets dst.sf_borrowed=true — the caller owns
+// the backing slab and frees it once. `sf_dst` must have at least
+// cutlass_nvfp4_sf_size(src.N, src.K) bytes and be pre-zeroed (padding rows).
+void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, void* sf_dst,
+                                       cudaStream_t stream);
+
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w);
 
 // Compute SfAtom buffer size for given dimensions (rows x K).

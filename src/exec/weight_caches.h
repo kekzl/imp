@@ -76,6 +76,14 @@ struct WeightCaches {
     std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
     size_t cutlass_nvfp4_bytes = 0;
 
+    // Single bulk allocation backing every cutlass_nvfp4 entry's SfAtom scale
+    // factors (mirrors fp16_bulk_data). Each entry's scale_factors is a
+    // sub-pointer with sf_borrowed=true, so the per-tensor cudaFree is skipped
+    // and this slab is freed once at teardown. Replaces ~18k per-tensor
+    // cudaMalloc+cudaMemsetAsync on large MoE loads (~600 ms of load time).
+    void* cutlass_sf_slab = nullptr;
+    size_t cutlass_sf_slab_size = 0;
+
     // --- CUTLASS sm_120 MXFP4 ---
     std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;
     size_t cutlass_mxfp4_bytes = 0;
