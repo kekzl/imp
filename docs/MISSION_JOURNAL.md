@@ -7,10 +7,11 @@
 
 ## RESUME HERE (always current)
 
-**Session:** 2026-06-13. Work lands via PRs off main (branch then `gh pr create --base main`).
-**Phase:** Post-NVFP4-limit campaign. main green at `0b4ed9d1` (PR #700). The 05-30 → 06-13 arc
+**Session:** 2026-06-18. Work lands via PRs off main (branch then `gh pr create --base main`).
+**Phase:** Post-NVFP4-limit campaign. main green at `40803986` (PR #736). The 05-30 → 06-13 arc
 (40+ PRs) was logged in `CHANGELOG.md` + PR descriptions, not in this journal — see the catch-up
-entry at the bottom of the Log for the strategic summary.
+entry at the bottom of the Log for the strategic summary. 06-18 added 3 wins (load/serving) and
+exhausted the decode frontier — see the 2026-06-18 Log entry.
 **On resume:** read this block + `CHANGELOG.md [Unreleased]` + the `perf_baselines_detail_2026_06_11`
 memory. Rebuild `make build`. Trust `tests/perf_baseline.json` + `BENCHMARKS.md` for numbers
 (SHA-anchored); decode is the A/B signal (prefill 2.6× restart variance, host days ±8-15%).
@@ -440,3 +441,47 @@ summary so this journal isn't misleading on resume:
 Net competitive position: NVFP4 decode + TTFT + MoE-pp2048 are won vs llama.cpp and vLLM; the lone
 open gap is pp4096 NVFP4 prefill (~1.19-1.25× vs vLLM), now bounded-lever-exhausted. See the RESUME
 block's OPEN WORK list for what's actually actionable next.
+
+### 2026-06-18 — Load-time + serving-throughput campaign; decode frontier exhausted
+
+Three wins shipped, every "frontier" lever decisively refuted by a cheap deterministic gate **before**
+sinking days into it. Primary model: Qwen3-Coder-30B-A3B-FP4 (NVFP4, FP8 KV by default).
+
+**Shipped (merged):**
+- **#734 — CUTLASS NVFP4 SF-cache slab.** The prefill SF cache built ~18.6k SfAtom buffers via 18.6k
+  per-tensor `cudaMalloc`+`cudaMemsetAsync`. One slab alloc + 256B-aligned borrowed sub-regions
+  (`sf_borrowed`, mirrors `fp16_bulk_data`). nsys CUDA-API trace: malloc 433→16 ms, memset 174→0.08 ms,
+  free 215→21 ms ⇒ **~785 ms load+teardown saved**, byte-identical SF (1800.55 MiB / 18,625 tensors).
+- **#735 — batch the MoE expert convert LAUNCHES.** After #734 the loop still launched one convert
+  kernel per tensor. Native NVFP4 experts are contiguous per (layer,proj), so group from the model and
+  do ONE `convert_nvfp4_moe_scales_to_sfatom` (grid.y=ne) per group (the gpt-oss path already did this):
+  **18,625 → 337 launches (−98%); convert GPU 24.6 → 8.1 ms.**
+- **#736 — VRAM-aware auto `max_batch_size`.** The auto heuristic sized by weight footprint (>20 GB →
+  batch=1), so imp-server served concurrent requests one-at-a-time despite ~10 GB free. KV is a shared
+  paged pool clamped to free VRAM downstream (no OOM from a larger cap). Made it VRAM-aware (subtract the
+  about-to-upload weight footprint — weights are host/mmap at resolver time so cudaMemGetInfo reads the
+  near-empty card): **MoE auto 1→15, dense 4→17; ~2.36× aggregate server throughput at conc 16.**
+  Serving-only (imp-cli/--bench force batch=1 → perf-baseline gate untouched).
+
+All three degen-verified (55 server-suite checks, 0 fail; dense byte-exact stream==non-stream).
+
+**Refuted with measurement (do NOT re-pursue — full detail in agent memory `perf_hunt_*_2026_06_18`):**
+- **Decode-attention occupancy** (short ctx): split-K 11→22→43 = 0.00 e2e (serialized ncu over-states
+  critical-path share; under CUDA graphs attention overlaps and is off-path).
+- **Upload-memcpy batching** (4 attempts): the 38k H2D copies are per-expert from IRREGULAR host
+  addresses (`break_e=2`); neither contiguous nor strided 2D copy can gather them. 867 ms H2D is fundamental.
+- **Long-context decode attention:** at 16k ctx it dominates decode (~70%) but the kernel is
+  compute-latency-bound on the per-token online-softmax chain — more splits raised occ 35→49% but
+  kernel time +5%, DRAM flat ~10%. (e2e long-ctx decode A/B is host-variance noise — trust ncu.)
+- **TC (tensor-core) decode attention:** a WMMA path already exists (`paged_attention_decode_nvfp4_tc`,
+  BitDecoding, opt-in). ncu @16k: WMMA 118.4 µs vs scalar 119.0 µs — IDENTICAL. TC doesn't help; the
+  matmul isn't the bottleneck (the softmax/dequant/latency chain is). This is why it's opt-in/default-off.
+- **Graph-preserving spec-verify:** conditional-graph body hardcodes +1 token/iteration (no variable
+  accept without a deep rewrite); the only device-side draft (MTP) is ~25-30% acceptance (dead-end).
+  Path-B (graph the verify forward) refuted by nsys gate — verify is host-sync-bound (sync 21.9%, launch
+  only 4.9%), so hiding launches doesn't help. NB: spec on REAL code is ~neutral (268 vs 300 tok/s), the
+  earlier "−73%" was a synthetic --bench artifact.
+
+Methodology note: deterministic ncu/nsys gates caught two near-phantom "wins" that were host-day decode
+variance, and pre-empted two multi-day kernel rewrites (TC attention, spec-verify) shown futile by a
+single measurement. Refutations > wins here — they save the next session from re-treading dead ends.
