@@ -1044,11 +1044,18 @@ void GraphExecutor::free_buffers() {
             free_nvfp4_moe_result(result);
         wcache_.nvfp4_moe.clear();
         wcache_.nvfp4_moe_bytes = 0;
-        // CUTLASS NVFP4 cache
+        // CUTLASS NVFP4 cache. Entries' scale_factors are sub-pointers into
+        // cutlass_sf_slab (sf_borrowed=true) so free_cutlass_nvfp4_weight skips
+        // the per-tensor cudaFree; the slab is freed once below.
         for (auto& [ptr, cw] : wcache_.cutlass_nvfp4)
             free_cutlass_nvfp4_weight(cw);
         wcache_.cutlass_nvfp4.clear();
         wcache_.cutlass_nvfp4_bytes = 0;
+        if (wcache_.cutlass_sf_slab) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.cutlass_sf_slab));
+            wcache_.cutlass_sf_slab = nullptr;
+            wcache_.cutlass_sf_slab_size = 0;
+        }
         // CUTLASS MXFP4 cache
         for (auto& [ptr, mw] : wcache_.cutlass_mxfp4)
             free_cutlass_mxfp4_weight(mw);

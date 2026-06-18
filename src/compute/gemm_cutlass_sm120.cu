@@ -417,6 +417,34 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
                   (long long)K, sf_bytes / (1024.0 * 1024.0));
 }
 
+void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, void* sf_dst,
+                                       cudaStream_t stream) {
+    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_cutlass_borrowed: src.packed_data is null");
+    IMP_CHECK(sf_dst != nullptr, "convert_nvfp4_to_cutlass_borrowed: sf_dst is null");
+    int64_t N = src.N;
+    int64_t K = src.K;
+
+    // Write micro-scales into the caller's pre-zeroed slab sub-region (no alloc,
+    // no memset — the slab is zeroed once for all entries). Same kernel/layout
+    // as convert_nvfp4_to_cutlass.
+    int K_groups = static_cast<int>(K) / kSFVecSize;
+    int total = static_cast<int>(N) * K_groups;
+    int n_k_tiles = (static_cast<int>(K) + kAtomKElems - 1) / kAtomKElems;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    convert_scales_sfatom_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(sf_dst),
+        static_cast<int>(N), static_cast<int>(K), n_k_tiles);
+
+    dst.data = src.packed_data;  // borrowed pointer (not owned)
+    dst.scale_factors = sf_dst;  // borrowed slab sub-region
+    dst.tensor_scale = src.tensor_scale;
+    dst.N = N;
+    dst.K = K;
+    dst.sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    dst.sf_borrowed = true;  // slab owns the memory; skip per-tensor cudaFree
+}
+
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;

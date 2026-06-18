@@ -824,13 +824,18 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
                         ? (remaining_budget - wcache_->nvfp4_bytes)
                         : 0;
     }
-    int ct_count = 0;
-    size_t ct_total = 0;
-    bool ct_exhausted = false;
+    // All SfAtom scale buffers share ONE slab allocation (each entry borrows a
+    // sub-region) instead of a per-tensor cudaMalloc+cudaMemsetAsync. On a
+    // 128-expert MoE the old loop issued ~18.6k allocs + memsets (~600 ms of
+    // load time). Pass 1 selects the included tensors with the SAME skip +
+    // VRAM-budget rules and sums their 256B-aligned SfAtom sizes; Pass 2
+    // converts each into its slab offset (one alloc, one memset, one teardown).
+    constexpr size_t kSfAlign = 256;  // keep each entry's SF base CUTLASS-aligned
+    auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
+    std::vector<std::pair<const void*, size_t>> ct_included;  // (src ptr, slab offset)
+    size_t ct_total = 0;  // running padded slab size = real SF VRAM
     int ct_skipped_dead = 0;
     for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
-        if (ct_exhausted)
-            break;
         // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1
         // prefill uses IMMA raw-read on the GGUF source — the CUTLASS GEMM path
         // (executor_kernels gemm_via_handle_, primary_tier==CUTLASS_NVFP4) is
@@ -844,22 +849,39 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(size_t& remaining_budget, cuda
             ++ct_skipped_dead;
             continue;
         }
-        // Estimate CUTLASS allocation (only scale factors — data is borrowed)
-        size_t est = cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K));
+        size_t est = align_up(cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N), static_cast<int>(nvfp4.K)),
+                              kSfAlign);
         if (ct_total + est > ct_budget) {
-            ct_exhausted = true;
             IMP_LOG_INFO(
-                "CUTLASS NVFP4 cache: VRAM budget reached after %d tensors "
+                "CUTLASS NVFP4 cache: VRAM budget reached after %zu tensors "
                 "(%.1f / %.1f MiB)",
-                ct_count, ct_total / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
+                ct_included.size(), ct_total / (1024.0 * 1024.0), ct_budget / (1024.0 * 1024.0));
             break;
         }
-        CutlassNvFP4Weight cw;
-        convert_nvfp4_to_cutlass(nvfp4, cw, stream);
-        if (cw.data) {
-            wcache_->cutlass_nvfp4[ptr] = cw;
-            ct_total += cw.sf_bytes;
-            ct_count++;
+        ct_included.emplace_back(ptr, ct_total);
+        ct_total += est;
+    }
+
+    int ct_count = 0;
+    if (ct_total > 0) {
+        void* sf_slab = nullptr;
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&sf_slab, ct_total));
+        // Zero every entry's SfAtom padding rows at once (the convert kernel
+        // writes only valid (n, k_group) cells).
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(sf_slab, 0, ct_total, stream));
+        wcache_->cutlass_sf_slab = sf_slab;
+        wcache_->cutlass_sf_slab_size = ct_total;
+        for (auto& [ptr, off] : ct_included) {
+            auto it = wcache_->nvfp4.find(ptr);
+            if (it == wcache_->nvfp4.end())
+                continue;
+            CutlassNvFP4Weight cw;
+            convert_nvfp4_to_cutlass_borrowed(it->second, cw, static_cast<uint8_t*>(sf_slab) + off,
+                                              stream);
+            if (cw.data) {
+                wcache_->cutlass_nvfp4[ptr] = cw;
+                ct_count++;
+            }
         }
     }
     if (ct_count > 0) {
