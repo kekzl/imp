@@ -9,7 +9,7 @@ class Model;
 // Architecture-derived facts, decided ONCE at init and read everywhere — the
 // single source of truth that replaces the scattered inline `if (arch==…)`
 // branches and the repeated "loop the layers, check gdn_gate/ssm_in" detection
-// (D1 in docs/audit/structural_debt_2026_06_08.md; the #514/#516 bug class).
+// (D1 in the structural-debt audit, docs/archive/README.md; the #514/#516 bug class).
 //
 // ModelConfig holds STATIC metadata (loaded from the file). ModelProfile holds
 // the DERIVED classification/dispatch decisions computed from that metadata +

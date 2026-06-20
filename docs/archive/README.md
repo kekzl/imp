@@ -107,6 +107,41 @@ implementation plan and (often) a findings memo:
   phase 2.2/3.5/5.5 + wiring (parked — see `docs/audit` / memory: "MTP no bug,
   genuine ~25-30%, parked").
 
+## 2026-06-20 consolidation — superseded audits, closed specs, diagnostic memos
+
+A second sweep of dated one-off material whose conclusions are now embedded in code,
+the live `audit/` memos, or shipped PRs. Originals removed; full text in git history.
+
+**Structural-audit chain (superseded by `audit/housekeeping_2026_06_13.md` + root `AUDIT.md`):**
+- `audit/structural_debt_2026_06_08.md` — D1–D4 debt audit (ModelProfile / GraphExecutor /
+  god-functions / flag sprawl). D1 shipped #622–#623; rest re-verified later.
+- `audit/structural_debt_2026_06_09.md` — C1–C8 follow-up; C1/C2/C4 refuted, C5–C8 tracked.
+  Final verdicts live in `housekeeping_2026_06_13.md`.
+- `audit/structural_consistency_2026_06_06.md` — doc↔code/build/CI consistency pass;
+  M1–M3 resolved (CUTLASS 4.5.1 bump, `imp.conf.example` gaps, stale `performance.md`).
+- `audit/vram_cache_structure_2026_06_07.md` — VRAM-cache rebuild audit; shipped as the
+  StoragePlanner / RAII-caches rework (PR #621).
+- `audit/known_issue_context_carryover_2026_05_31.md` — sporadic cross-request context
+  carryover investigation; Phi-4 path closed (#503), remainder tracked via memory/issues.
+
+**Diagnostic / gap memos (findings shipped or rolled into the roadmap):**
+- `decode-gap-analysis-2026-05-29.md` — decode-gap decomposition; levers shipped #479
+  (lm_head decode cache, opt-in) / #480 (perplexity harness).
+- `plans/nvfp4_pp2048_analysis_2026_05_25.md` — NVFP4 dense pp2048 lever analysis (research-only).
+- `plans/q4k_prefill_analysis_2026_05_25.md` — Q4K MoE prefill bandwidth root-cause memo (research-only).
+
+**Closed / refuted design specs:**
+- `superpowers/specs/2026-05-22-q4k-imma-phase3-eval.md` — Q4K INT8-IMMA phase-3 e2e eval;
+  **refuted** on the real model, dense IMMA stays default-off.
+- `superpowers/specs/2026-05-22-track-e-closed.md` — Track E closure (six-variant FA2);
+  **code removed** PR #358.
+- `superpowers/specs/2026-05-25-legacy-switch-cleanup.md` — legacy `gemm_dispatch` switch
+  cleanup; **completed** PR #404.
+
+**Superseded toolchain snapshot:**
+- `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey, superseded by
+  the canonical `docs/ptx-status-2026-05-29-cuda133-sm120a.md` (13.3 is the build toolchain).
+
 ---
 
-*Consolidated 2026-06-13 (housekeeping). Originals live in git history.*
+*Consolidated 2026-06-13 (housekeeping) and 2026-06-20. Originals live in git history.*

@@ -38,7 +38,8 @@ verification, not the sweep.
 
 ## Priors — settled, do NOT re-flag
 
-From `docs/audit/structural_debt_2026_06_08.md` (D1–D4) + `..._2026_06_09.md`:
+From the structural-debt audit chain (D1–D4 / C1–C8, archived in `docs/archive/README.md`;
+current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
 - **exec/ god-object** (`GraphExecutor`) is intrinsically forward-pass-coupled; the
   D2 runner-extraction track ENDED (cosmetic friend-backdoor only). Header split done
   (1188→584 lines). Don't re-attempt runner classes.
