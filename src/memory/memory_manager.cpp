@@ -6,8 +6,7 @@
 // telemetry, or pre-allocation orchestration) so callers can keep including
 // the header without forcing a rebuild when implementation changes land.
 //
-// Phase 5 Track C of
-// docs/superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md
+// Phase 5 Track C of the architecture-refactor roadmap (archived: docs/archive/README.md)
 
 namespace imp {
 }  // namespace imp

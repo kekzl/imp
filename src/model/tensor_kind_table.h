@@ -28,8 +28,8 @@ const KindCapabilities& capabilities_of(TensorKind k);
 // treated as "no compression-overlay" (current LM-head / embeddings policy).
 //
 // Used by StoragePlanner so plans don't propose NVFP4 for Q4_K weights —
-// the cause of the 2026-05-24 Q4_K_M cache coverage gap. See
-// docs/superpowers/specs/2026-05-24-phase5-pr1-plan-driven-cache.md.
+// the cause of the 2026-05-24 Q4_K_M cache coverage gap. See the
+// plan-driven-cache design memo (archived: docs/archive/README.md).
 KindCapabilities effective_capabilities(TensorKind k, QType source_qtype);
 
 }  // namespace imp

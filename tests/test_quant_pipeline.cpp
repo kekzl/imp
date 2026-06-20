@@ -6,8 +6,8 @@
 // (FP16 / FP8 / NVFP4) that the forward hot path reads. The whole point of
 // the extraction is that this stage is now a separable, testable component.
 //
-// FALLBACK PATH (sanctioned by docs/superpowers/specs/2026-06-08-
-// quant-pipeline-design.md, "Testing"): we drive the pipeline through the
+// FALLBACK PATH (sanctioned by the QuantPipeline design memo, "Testing"
+// — archived: docs/archive/README.md): we drive the pipeline through the
 // normal engine / C-API path and assert its observable post-condition — the
 // model decodes coherent, non-degenerate output — which only happens because
 // build() successfully populated the decode caches. A truly standalone unit

@@ -51,8 +51,8 @@ struct Nvfp4DecodeContext {
 // Init-time weight-quantization pipeline, extracted from GraphExecutor (D2).
 // Runs once via build(); fills the four long-lived caches (owned by the caller)
 // and owns only the build-only StoragePlan + decode context. The forward hot
-// path reads the caches unchanged (byte-identical). See
-// docs/superpowers/specs/2026-06-08-quant-pipeline-design.md.
+// path reads the caches unchanged (byte-identical). See the QuantPipeline
+// design memo (archived: docs/archive/README.md).
 class QuantPipeline {
 public:
     // Runs the full init-time quantization pipeline once. Populates the four

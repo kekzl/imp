@@ -107,6 +107,57 @@ implementation plan and (often) a findings memo:
   phase 2.2/3.5/5.5 + wiring (parked — see `docs/audit` / memory: "MTP no bug,
   genuine ~25-30%, parked").
 
+## 2026-06-20 consolidation — superseded audits, closed specs, diagnostic memos
+
+A second sweep of dated one-off material whose conclusions are now embedded in code,
+the live `audit/` memos, or shipped PRs. Originals removed; full text in git history.
+
+**Structural-audit chain (superseded by `audit/housekeeping_2026_06_13.md` + root `AUDIT.md`):**
+- `audit/structural_debt_2026_06_08.md` — D1–D4 debt audit (ModelProfile / GraphExecutor /
+  god-functions / flag sprawl). D1 shipped #622–#623; rest re-verified later.
+- `audit/structural_debt_2026_06_09.md` — C1–C8 follow-up; C1/C2/C4 refuted, C5–C8 tracked.
+  Final verdicts live in `housekeeping_2026_06_13.md`.
+- `audit/structural_consistency_2026_06_06.md` — doc↔code/build/CI consistency pass;
+  M1–M3 resolved (CUTLASS 4.5.1 bump, `imp.conf.example` gaps, stale `performance.md`).
+- `audit/vram_cache_structure_2026_06_07.md` — VRAM-cache rebuild audit; shipped as the
+  StoragePlanner / RAII-caches rework (PR #621).
+- `audit/known_issue_context_carryover_2026_05_31.md` — sporadic cross-request context
+  carryover investigation; Phi-4 path closed (#503), remainder tracked via memory/issues.
+
+**Diagnostic / gap memos (findings shipped or rolled into the roadmap):**
+- `decode-gap-analysis-2026-05-29.md` — decode-gap decomposition; levers shipped #479
+  (lm_head decode cache, opt-in) / #480 (perplexity harness).
+- `plans/nvfp4_pp2048_analysis_2026_05_25.md` — NVFP4 dense pp2048 lever analysis (research-only).
+- `plans/q4k_prefill_analysis_2026_05_25.md` — Q4K MoE prefill bandwidth root-cause memo (research-only).
+
+**Closed / refuted design specs:**
+- `superpowers/specs/2026-05-22-q4k-imma-phase3-eval.md` — Q4K INT8-IMMA phase-3 e2e eval;
+  **refuted** on the real model, dense IMMA stays default-off.
+- `superpowers/specs/2026-05-22-track-e-closed.md` — Track E closure (six-variant FA2);
+  **code removed** PR #358.
+- `superpowers/specs/2026-05-25-legacy-switch-cleanup.md` — legacy `gemm_dispatch` switch
+  cleanup; **completed** PR #404.
+
+**Superseded toolchain snapshot:**
+- `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey, superseded by
+  the canonical `docs/ptx-status-2026-05-29-cuda133-sm120a.md` (13.3 is the build toolchain).
+
+**Completed design specs + plans (`superpowers/`) — work shipped, refactor program closed (#404):**
+The component rationale now lives in the headers themselves (`quant_pipeline.h`, `workspace.h`,
+`engine_internal.h`, `pre_dequant_internal.h`, `memory_manager.h`, `tensor_kind_table.h`), which
+point here. Forward-looking, *not-yet-implemented* specs (DeepSeek MLA, the Q4_K MMQ kernel) stay
+live under `superpowers/specs/`.
+- `specs/2026-05-20-architecture-refactor-roadmap-design.md` — Phase 1–5 refactor master roadmap;
+  program **closed** (#404), Phases 3/4/5-TrackC landed across exec/runtime/memory.
+- `specs/2026-05-24-phase5-pr1-plan-driven-cache.md` + `specs/2026-05-24-q4k-vs-llamacpp-mmq-analysis.md`
+  — plan-driven StoragePlan cache (shipped #398/#621) + the Q4_K-vs-llama.cpp MMQ gap analysis behind it.
+- `specs/2026-05-28-phase2-decode-batching-design.md` — concurrent decode (batch≤4), shipped #454.
+- `specs/2026-06-07-vram-cache-architecture-design.md` — StoragePlan-authoritative VRAM cache, shipped #621.
+- `specs/2026-06-08-model-profile-design.md` — central `ModelProfile` arch-fact source, shipped #622.
+- `specs/2026-06-08-quant-pipeline-design.md` + `plans/2026-06-08-quant-pipeline.md` — D2 QuantPipeline extraction, shipped #629.
+- `specs/2026-06-08-header-decongestion-design.md` + `plans/2026-06-08-header-decongestion.md` — D2 header split, shipped #630.
+- `specs/2026-06-08-workspace-component-design.md` + `plans/2026-06-08-workspace-component.md` — D2 Workspace extraction, shipped #631.
+
 ---
 
-*Consolidated 2026-06-13 (housekeeping). Originals live in git history.*
+*Consolidated 2026-06-13 (housekeeping) and 2026-06-20. Originals live in git history.*
