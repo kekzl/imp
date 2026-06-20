@@ -57,4 +57,4 @@ Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus
 
 ## PR / merge conventions
 
-Branch off `main`, `gh pr create --base main`, never stack PRs. Batch related fixes into one PR. CI green (`Build`) + auto-merge; GPU validation stays your job locally. If a change intentionally moves perf, refresh `tests/perf_baseline.json` (see `benchmark-cuda` skill → Publishing numbers) and say so in the PR.
+Branch off `main`, `gh pr create --base main`, never stack PRs, batch related fixes. CI green (`Build`, no GPU runner) + auto-merge; GPU validation stays your job locally (`make verify-fast`). If a change intentionally moves perf, refresh `tests/perf_baseline.json` (see `benchmark-cuda` → Publishing numbers) and say so in the PR. For the full ship/merge/release flow — the **auto-merge race** (pushing after arming auto-merge can drop your last commit), the `Build`-ruleset `BLOCKED` gotcha, and version-bump + CHANGELOG + tag steps — use **`shipping-prs`**.
