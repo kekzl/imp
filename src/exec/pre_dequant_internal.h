@@ -3,7 +3,7 @@
 // Internal helpers shared across pre_dequant_*.cu translation units.
 // Not part of any public API; included only by src/exec/pre_dequant_*.cu.
 //
-// Phase 3 of docs/superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md
+// Phase 3 of the architecture-refactor roadmap (archived: docs/archive/README.md)
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"

@@ -2,8 +2,7 @@
 
 // Façade that consolidates VRAM ownership for the imp Engine.
 //
-// Phase 5 Track C of
-// docs/superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md
+// Phase 5 Track C of the architecture-refactor roadmap (archived: docs/archive/README.md)
 //
 // Before this façade, Engine carried a `VRAMAllocator vram_alloc_` field
 // directly and the budget + storage-plan free functions lived in

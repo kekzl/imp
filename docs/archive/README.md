@@ -142,6 +142,22 @@ the live `audit/` memos, or shipped PRs. Originals removed; full text in git his
 - `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey, superseded by
   the canonical `docs/ptx-status-2026-05-29-cuda133-sm120a.md` (13.3 is the build toolchain).
 
+**Completed design specs + plans (`superpowers/`) — work shipped, refactor program closed (#404):**
+The component rationale now lives in the headers themselves (`quant_pipeline.h`, `workspace.h`,
+`engine_internal.h`, `pre_dequant_internal.h`, `memory_manager.h`, `tensor_kind_table.h`), which
+point here. Forward-looking, *not-yet-implemented* specs (DeepSeek MLA, the Q4_K MMQ kernel) stay
+live under `superpowers/specs/`.
+- `specs/2026-05-20-architecture-refactor-roadmap-design.md` — Phase 1–5 refactor master roadmap;
+  program **closed** (#404), Phases 3/4/5-TrackC landed across exec/runtime/memory.
+- `specs/2026-05-24-phase5-pr1-plan-driven-cache.md` + `specs/2026-05-24-q4k-vs-llamacpp-mmq-analysis.md`
+  — plan-driven StoragePlan cache (shipped #398/#621) + the Q4_K-vs-llama.cpp MMQ gap analysis behind it.
+- `specs/2026-05-28-phase2-decode-batching-design.md` — concurrent decode (batch≤4), shipped #454.
+- `specs/2026-06-07-vram-cache-architecture-design.md` — StoragePlan-authoritative VRAM cache, shipped #621.
+- `specs/2026-06-08-model-profile-design.md` — central `ModelProfile` arch-fact source, shipped #622.
+- `specs/2026-06-08-quant-pipeline-design.md` + `plans/2026-06-08-quant-pipeline.md` — D2 QuantPipeline extraction, shipped #629.
+- `specs/2026-06-08-header-decongestion-design.md` + `plans/2026-06-08-header-decongestion.md` — D2 header split, shipped #630.
+- `specs/2026-06-08-workspace-component-design.md` + `plans/2026-06-08-workspace-component.md` — D2 Workspace extraction, shipped #631.
+
 ---
 
 *Consolidated 2026-06-13 (housekeeping) and 2026-06-20. Originals live in git history.*

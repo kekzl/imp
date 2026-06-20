@@ -3,7 +3,7 @@
 // Internal helpers shared across engine_*.cpp translation units.
 // Not part of any public API; included only by src/runtime/engine*.cpp.
 //
-// Phase 4 of docs/superpowers/specs/2026-05-20-architecture-refactor-roadmap-design.md
+// Phase 4 of the architecture-refactor roadmap (archived: docs/archive/README.md)
 
 #include "runtime/engine.h"
 #include "runtime/request.h"

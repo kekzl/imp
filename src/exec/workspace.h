@@ -29,7 +29,7 @@ struct MoEWorkspace;
 // writes the caller-owned caches. The sizing logic is unchanged, so the move is
 // behaviour-neutral.
 //
-// See docs/superpowers/specs/2026-06-08-workspace-component-design.md.
+// See the Workspace-component design memo (archived: docs/archive/README.md).
 class Workspace {
 public:
     // Build context, set once from GraphExecutor::init (mirrors QuantPipeline's
