@@ -37,6 +37,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   on the deliberately-empty parse-fallback catches. No behavior change; the remaining
   findings are intentional (documented empty catches, two large functions) or
   clang-tidy parser artifacts.
+- **Zero-warning build + single-arch CI.** Silenced every remaining compiler
+  warning — nvcc `#128-D` (unreachable loop, fixed via `if constexpr`/`else`),
+  `#550-D` (set-but-unused), GCC `-Wformat-security`, a test hex-escape that was
+  actually round-tripping invalid UTF-8 instead of "Grüße", and ignored
+  `[[nodiscard]]` results. CI now compiles `sm_120a` only
+  (`IMP_DISABLE_120F_FALLBACK=ON`), halving device-compile time and no longer
+  emitting each `.cu` diagnostic twice; the shipped fatbin (release-docker) keeps
+  the `compute_120f` PTX fallback for 5080/5070 SKUs.
 
 ### Fixed
 - **Dense models no longer OOM-crash at startup under auto `max_batch_size`.** The
