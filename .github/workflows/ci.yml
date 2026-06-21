@@ -81,12 +81,17 @@ jobs:
             -DIMP_BUILD_TESTS=ON \
             -DIMP_BUILD_TOOLS=ON \
             -DIMP_BUILD_BENCH=OFF \
+            -DIMP_DISABLE_120F_FALLBACK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
-          # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. CI compiles PTX/SASS
-          # for sm_120a only; runtime tests need a self-hosted RTX 5090 runner.
+          # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
+          # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
+          # verifies the build compiles + CPU tests; runtime tests need a self-hosted
+          # RTX 5090 runner. This halves device-compile time and stops every .cu
+          # diagnostic from being emitted twice (once per gencode). The shipped
+          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070 SKUs.
           # IMP_BUILD_BENCH=OFF skips ~30-60s of mxf4nvf4 microbench TUs that
           # are bench-only — production server builds don't link them.
 

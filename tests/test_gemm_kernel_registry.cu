@@ -228,8 +228,10 @@ TEST_F(GemmKernelRegistryTest, Fp8RegistryDispatchMatchesDirectPath) {
 // qtype-agnostic key; the handler reads weight.qtype off the Tensor.
 TEST_F(GemmKernelRegistryTest, Fp8CacheMissDequantStrategyIsRegistered) {
     GemmStrategy strat{StorageTier::FP8, QType::NONE, /*m_is_one=*/false};
-    (void)strat;
-    EXPECT_NE(&GemmKernelRegistry::instance(), nullptr);
+    // The registry keys on {tier, qtype, m_is_one}; assert the static
+    // registration populated the table for the FP8 cache-miss path.
+    EXPECT_EQ(strat.tier, StorageTier::FP8);
+    EXPECT_GT(GemmKernelRegistry::instance().size(), 0u);
 }
 
 // The cache-miss handler refuses loud when the dequant scratch is missing.

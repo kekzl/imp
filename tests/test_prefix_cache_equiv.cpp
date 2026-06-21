@@ -125,7 +125,7 @@ TEST(PrefixEquivTest, PartialOneBlockShared) {
 
     std::vector<int32_t> a(32);
     std::iota(a.begin(), a.end(), 0);
-    mgr->allocate_blocks_with_prefix(0, a);
+    (void)mgr->allocate_blocks_with_prefix(0, a);  // seed: reuse count asserted below via a fresh seq
     mgr->register_block_hashes(0, a);
     mgr->free_sequence(0);
     ASSERT_EQ(mgr->num_cached_blocks(), 2);
@@ -147,7 +147,7 @@ TEST(PrefixEquivTest, NoCommonPrefixZeroReuse) {
 
     std::vector<int32_t> a(48);
     std::iota(a.begin(), a.end(), 0);
-    mgr->allocate_blocks_with_prefix(0, a);
+    (void)mgr->allocate_blocks_with_prefix(0, a);  // seed: reuse count asserted below via a fresh seq
     mgr->register_block_hashes(0, a);
     mgr->free_sequence(0);
 
