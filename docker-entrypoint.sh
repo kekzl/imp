@@ -4,6 +4,13 @@ set -e
 # Translate environment variables to imp-server CLI flags.
 # Usage: docker run ... -e IMP_MODEL=/models/model.gguf imp:latest
 
+# If the first argument is a flag (e.g. --help, --model, --version), it is meant
+# for the default command, not a command name. Prepend imp-server so the flag
+# reaches the real binary instead of being exec'd as a command.
+if [ "${1#-}" != "$1" ]; then
+    set -- imp-server "$@"
+fi
+
 CMD="$1"
 shift 2>/dev/null || true
 
