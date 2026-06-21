@@ -395,13 +395,21 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                         // Attention layer (the 6 starred layers in hybrid_pattern)
                         if (sub == "q_proj" || sub == "k_proj" || sub == "v_proj" ||
                             sub == "o_proj") {
-                            name = "model.layers." + layer_idx + ".self_attn." + sub + suffix;
+                            name = "model.layers.";
+                            name += layer_idx;
+                            name += ".self_attn.";
+                            name += sub;
+                            name += suffix;
                         }
                         // Mamba2 layer (in_proj/out_proj/conv1d/norm/A_log/D/dt_bias)
                         else if (sub == "in_proj" || sub == "out_proj" || sub == "conv1d" ||
                                  sub == "norm" || sub == "A_log" || sub == "D" ||
                                  sub == "dt_bias") {
-                            name = "model.layers." + layer_idx + ".mamba." + sub + suffix;
+                            name = "model.layers.";
+                            name += layer_idx;
+                            name += ".mamba.";
+                            name += sub;
+                            name += suffix;
                         }
                         // MoE router: mixer.gate.{weight,e_score_correction_bias}
                         // We translate gate.weight→mlp.gate.weight (matches existing parser);
@@ -411,17 +419,26 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                             if (suffix == ".e_score_correction_bias") {
                                 name = "model.layers." + layer_idx + ".mlp.gate.bias";
                             } else {
-                                name = "model.layers." + layer_idx + ".mlp.gate" + suffix;
+                                name = "model.layers.";
+                                name += layer_idx;
+                                name += ".mlp.gate";
+                                name += suffix;
                             }
                         }
                         // MoE experts: mixer.experts.E.<rest> → mlp.experts.E.<rest>
                         else if (sub == "experts") {
-                            name = "model.layers." + layer_idx + ".mlp.experts" + suffix;
+                            name = "model.layers.";
+                            name += layer_idx;
+                            name += ".mlp.experts";
+                            name += suffix;
                         }
                         // Shared expert: mixer.shared_experts.<rest> → mlp.shared_expert.<rest>
                         // (Nemotron uses plural; imp's matcher expects singular.)
                         else if (sub == "shared_experts") {
-                            name = "model.layers." + layer_idx + ".mlp.shared_expert" + suffix;
+                            name = "model.layers.";
+                            name += layer_idx;
+                            name += ".mlp.shared_expert";
+                            name += suffix;
                         }
                         // Unknown subkey: fall through; will warn below.
                     }

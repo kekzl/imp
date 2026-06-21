@@ -101,8 +101,8 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
     }
     cudaMemcpyAttributes attrs{};
     attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-    attrs.srcLocHint     = { cudaMemLocationTypeHostNumaCurrent, 0 };
-    attrs.dstLocHint     = { cudaMemLocationTypeDevice, 0 };
+    attrs.srcLocHint     = { cudaMemLocationTypeHostNumaCurrent, {0} };
+    attrs.dstLocHint     = { cudaMemLocationTypeDevice, {0} };
     attrs.flags          = 0;
     cudaMemcpyWithAttributesAsync(d_px, h_pixels, pixel_bytes, &attrs, stream);
 

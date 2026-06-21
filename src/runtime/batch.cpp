@@ -30,7 +30,8 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
     }
 
     if (max_blocks_per_seq > 0) {
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_tables, n_sequences * max_blocks_per_seq * sizeof(int)));
+        IMP_CUDA_CHECK_LOG(
+            cudaMalloc(&d_block_tables, static_cast<unsigned long>(n_sequences) * max_blocks_per_seq * sizeof(int)));
     }
 
     // Async copy
@@ -48,7 +49,7 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
 
     if (d_block_tables && !batch.block_tables.empty()) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, batch.block_tables.data(),
-                                           n_sequences * max_blocks_per_seq * sizeof(int),
+                                           static_cast<unsigned long>(n_sequences) * max_blocks_per_seq * sizeof(int),
                                            cudaMemcpyHostToDevice, stream));
     }
 }
@@ -136,7 +137,7 @@ Batch BatchBuilder::build() {
 
     // Build padded 2D block table: [n_sequences, max_blocks_per_seq]
     batch_.block_tables.clear();
-    batch_.block_tables.resize(batch_.n_sequences * max_blocks, 0);
+    batch_.block_tables.resize(static_cast<unsigned long>(batch_.n_sequences) * max_blocks, 0);
 
     for (int s = 0; s < batch_.n_sequences; s++) {
         auto& [ptr, n] = raw_block_tables_[s];
@@ -198,7 +199,6 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllo
     d_context_lens_ = reinterpret_cast<int*>(ptr);
     ptr += ctx_lens_sz;
     d_sample_result_ = reinterpret_cast<int32_t*>(ptr);
-    ptr += sample_res_sz;
 }
 
 GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream) {
@@ -239,7 +239,8 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
             // Skip — block_table content is identical to last upload
         } else {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_, batch.block_tables.data(),
-                                               batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
+                                               static_cast<unsigned long>(batch.n_sequences) *
+                                                   batch.max_blocks_per_seq * sizeof(int),
                                                cudaMemcpyHostToDevice, stream));
             if (batch.n_sequences == 1)
                 last_upload_block_tables_ = batch.block_tables;

@@ -38,7 +38,7 @@ struct SamplingDefaults;
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k);
 
 // Parse architecture string (e.g. from GGUF "general.architecture")
-ModelArch parse_model_arch(const std::string& arch_str);
+ModelArch parse_model_arch(const std::string& s);
 
 // Apply arch-specific config defaults (call after loading metadata)
 struct ModelConfig;

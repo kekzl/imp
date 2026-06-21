@@ -1464,9 +1464,7 @@ static void nonstream_chat_response_(
         auto active_req = server_req->request;
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
-        std::string output_text;   // accumulated output for stop matching
-        bool ns_in_think = false;  // non-streaming think budget tracking
-        int ns_think_tokens = 0;
+        std::string output_text;  // accumulated output for stop matching
 
         auto ns_request_start = std::chrono::steady_clock::now();
         for (;;) {
@@ -1531,19 +1529,6 @@ static void nonstream_chat_response_(
                     break;
                 }
                 finish = evt.finish_reason ? evt.finish_reason : "length";
-            }
-
-            // Track think tokens for usage reporting (no forced cap — model
-            // decides when to stop thinking, matching llama.cpp behavior).
-            if (ctx.snap.is_think_model && ctx.snap.think_end_id >= 0 &&
-                state.default_args.reasoning_format == "deepseek") {
-                if (token == ctx.snap.think_start_id) {
-                    ns_in_think = true;
-                } else if (token == ctx.snap.think_end_id) {
-                    ns_in_think = false;
-                } else if (ns_in_think) {
-                    ns_think_tokens++;
-                }
             }
 
             output_ids.push_back(token);
@@ -2885,7 +2870,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start, stop_sequences,
+            [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences,
              max_stop_len, echo, prompt, include_usage, snap_tok, snap_model_name,
              snap_is_think_model](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 int n_output_tokens = 0;
@@ -3835,7 +3820,6 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
     };
 
     int n_output_tokens = 0;
-    int n_reasoning_tokens = 0;
     const char* finish = nullptr;
     double ttft_ms = 0.0;
 
@@ -3962,14 +3946,12 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
         if (think_phase == ThinkPhase::SCAN) {
             if (token == snap_think_start_id) {
                 think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens++;
                 continue;
             }
             think_scan_buf += piece;
             think_scan_count++;
             if (think_scan_buf.find("<think>") != std::string::npos) {
                 think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens += think_scan_count;
                 auto pos = think_scan_buf.find("<think>");
                 std::string after = think_scan_buf.substr(pos + 7);
                 think_scan_buf.clear();
@@ -3979,7 +3961,6 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             }
             if (think_scan_count == 1 && piece.empty()) {
                 think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens++;
                 continue;
             }
             if (think_scan_count >= kThinkScanLimit) {
@@ -3992,7 +3973,6 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
         }
 
         if (think_phase == ThinkPhase::REASONING) {
-            n_reasoning_tokens++;
             if (token == snap_think_end_id) {
                 size_t complete = utf8_complete_len(reasoning_utf8_buf);
                 if (!emit_thinking(reasoning_utf8_buf.substr(0, complete)))
@@ -4053,13 +4033,11 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             if (token == snap_think_start_id) {
                 if (think_reentries < kMaxThinkReentries) {
                     think_phase = ThinkPhase::REASONING;
-                    n_reasoning_tokens++;
                     think_reentries++;
                 }
                 continue;
             }
             if (token == snap_think_end_id) {
-                n_reasoning_tokens++;
                 continue;
             }
             for (;;) {
@@ -4118,6 +4096,7 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
                         tool_calls_emitted = true;
                     }
                 } catch (...) {
+                    // Malformed tool-call JSON — skip this block and continue streaming
                 }
                 std::string after = tool_body_buf.substr(close_pos + tool_close_tag.size());
                 tool_body_buf.clear();

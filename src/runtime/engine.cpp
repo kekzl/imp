@@ -33,12 +33,7 @@ namespace imp {
 
 // File-local helpers were lifted to runtime/engine_internal.h so that
 // the per-subsystem engine_*.cpp translation units (Phase 4 Tasks 2-7)
-// can share them. The using-declarations below preserve the unqualified
-// call sites in this file.
-using engine_internal::build_logprob_info;
-using engine_internal::compute_step_seed;
-using engine_internal::ensure_prefill_workspace;
-using engine_internal::free_prefill_buffers;
+// can share them.
 
 Engine::~Engine() {
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table
@@ -481,7 +476,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_->build_profile();
     {
         const auto& mp = model_->profile();
-        const char* av = "standard";
+        const char* av = nullptr;
         switch (mp.attn_variant) {
             case ModelProfile::AttnVariant::GEMMA4_SWA: av = "gemma4_swa"; break;
             case ModelProfile::AttnVariant::GPTOSS_SWA: av = "gptoss_swa"; break;

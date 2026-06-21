@@ -44,8 +44,12 @@ json convert_message_content(const json& anth_content) {
             if (src_type == "base64") {
                 std::string mime = src.value("media_type", "image/png");
                 std::string data = src.value("data", "");
+                std::string data_url = "data:";
+                data_url += mime;
+                data_url += ";base64,";
+                data_url += data;
                 oai_parts.push_back(
-                    {{"type", "image_url"}, {"image_url", {{"url", "data:" + mime + ";base64," + data}}}});
+                    {{"type", "image_url"}, {"image_url", {{"url", data_url}}}});
             } else if (src_type == "url") {
                 oai_parts.push_back({{"type", "image_url"}, {"image_url", {{"url", src.value("url", "")}}}});
             }

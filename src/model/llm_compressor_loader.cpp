@@ -255,13 +255,15 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
             if (sv.find("num_bits:") == 0) {
                 try {
                     weights_num_bits = std::stoi(trim_value(sv.substr(9)));
-                } catch (...) {}
+                } catch (...) {  // best-effort parse — keep default num_bits on malformed value
+                }
             } else if (sv.find("type:") == 0) {
                 weights_type = trim_value(sv.substr(5));
             } else if (sv.find("group_size:") == 0) {
                 try {
                     weights_group_size = std::stoi(trim_value(sv.substr(11)));
-                } catch (...) {}
+                } catch (...) {  // best-effort parse — keep default group_size on malformed value
+                }
             }
             continue;
         }
@@ -279,7 +281,7 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
         } else if (sv.find("group_size:") == 0) {
             try {
                 cfg.group_size = std::stoi(trim_value(sv.substr(11)));
-            } catch (...) { /* keep default */
+            } catch (...) {  // best-effort parse — keep default group_size on malformed value
             }
         }
     }

@@ -4,6 +4,60 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-21
+
+### Added
+- **VRAM-aware auto `max_batch_size` — up to ~2.4× server throughput on MoE.**
+  The old heuristic sized the concurrency cap purely by weight footprint, so a
+  >20 GB model (e.g. Qwen3-Coder-30B-A3B-FP4) was pinned to batch=1 and served
+  concurrent requests strictly one at a time — even with ~10 GB of free VRAM
+  sitting idle. The cap is now derived from the real *post-load* headroom (free
+  VRAM minus the about-to-be-uploaded weight footprint), sizing each concurrent
+  slot to keep a 4096-token serving-context floor of KV within 60 % of that
+  headroom. The KV cache is already a shared paged pool clamped to free VRAM
+  downstream, so a larger cap engages continuous batching **without** OOM risk;
+  the weight-footprint tier remains a floor, so the cap never regresses below the
+  old default. Measured on Qwen3-Coder-30B-A3B-FP4: auto cap **1 → 15**, aggregate
+  decode **258 → 609 tok/s at 16 concurrent (2.4×)**; Qwen3-14B-NVFP4 **4 → 17**,
+  no OOM. Serving-only: `imp-cli`/`--bench` still force batch=1, so single-stream
+  throughput, the perf-baseline gate, and CLI behaviour are unchanged.
+- **`imp-bench nvfp4` — isolated NVFP4 dense GEMM bench mode** that times the GEMM
+  kernel on its own (used to refute the cp.async-occupancy hypothesis on sm_120a).
+
+### Changed
+- **MoE NVFP4 models load materially faster.** Two init-time wins on the
+  per-expert scale-factor path: the CUTLASS NVFP4 SF cache is now slab-allocated
+  in a **single** `malloc` instead of 18.6k (≈ **−785 ms** on a 30B MoE), and the
+  per-expert SfAtom conversion is batched (**18.6k → 337** convert launches).
+- CI: `setup-python` v5 → v6 (Node 24) to clear the Node 20 deprecation warning.
+- **Internal: clang-tidy cleanup.** Fixed ~51 host-side findings — int-multiplication
+  widening before 64-bit use (KV/SSM/weight-upload size math), uninitialized struct
+  members, dead stores, set-but-unused counters, an unused lambda capture, unused
+  `using` declarations, and inefficient string concatenations — plus intent comments
+  on the deliberately-empty parse-fallback catches. No behavior change; the remaining
+  findings are intentional (documented empty catches, two large functions) or
+  clang-tidy parser artifacts.
+
+### Fixed
+- **Dense models no longer OOM-crash at startup under auto `max_batch_size`.** The
+  VRAM-aware auto batch sizing (above) sizes the cap against a 4096-token reference
+  context, but the KV pool is provisioned at `max_batch_size × max_seq_len`. On a
+  small-weight / large-headroom config (e.g. dense Q8 on a 32 GB card: batch auto→25,
+  25 × 16384-token slots = 25600 blocks / 57.6 GB) the KV `cudaMalloc` exceeded VRAM
+  and the server aborted with `out of memory` at context creation. The KV pool is now
+  clamped to the post-weight VRAM that physically remains — it is a paged pool with
+  scheduler admission control, so a smaller pool only bounds concurrency under load and
+  never under-serves a single sequence. MoE/NVFP4 configs (which already fit) are
+  unchanged; verified no-OOM + coherent + continuous-batching on dense Q8, MoE NVFP4,
+  and dense NVFP4.
+- **`docker run imp:latest --help` now prints imp-server's flags.** A leading flag
+  was taken as the *command name*; it didn't match `imp-server|imp-cli`, fell
+  through the entrypoint's passthrough branch, and ran `exec --help` — printing the
+  bash `exec` builtin's help instead of the server's. The entrypoint now follows
+  the standard official-image pattern: if the first argument starts with `-`, it is
+  a flag for the default command, so `imp-server` is prepended before dispatch and
+  `--help`/`--version` reach the real binary.
+
 ## [0.11.3] - 2026-06-17
 
 ### Added
