@@ -86,7 +86,7 @@ struct GGUFTensorInfo {
     std::string name;
     uint32_t n_dims{};
     int64_t dims[4]{};  // GGUF order: dims[0] = innermost (fastest-changing)
-    GgufWireType type;
+    GgufWireType type{};
     uint64_t offset{};                   // relative to start of tensor data section
     const uint8_t* data_base = nullptr;  // shard data base pointer (for split GGUF)
     size_t data_limit = 0;               // bytes available from data_base (for bounds checks)

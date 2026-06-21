@@ -14,7 +14,7 @@ namespace imp {
 static bool preprocess_pixels(const uint8_t* rgb, int w, int h, int target_size, const float mean[3],
                               const float std[3], ImageData& out) {
     // Resize to target_size x target_size using bilinear interpolation
-    std::vector<uint8_t> resized(target_size * target_size * 3);
+    std::vector<uint8_t> resized(static_cast<size_t>(target_size) * target_size * 3);
     stbir_resize_uint8_linear(rgb, w, h, w * 3, resized.data(), target_size, target_size, target_size * 3,
                               STBIR_RGB);
 
@@ -22,7 +22,7 @@ static bool preprocess_pixels(const uint8_t* rgb, int w, int h, int target_size,
     out.width = target_size;
     out.height = target_size;
     int n_pixels = target_size * target_size;
-    out.pixels.resize(3 * n_pixels);
+    out.pixels.resize(static_cast<size_t>(3) * n_pixels);
 
     for (int c = 0; c < 3; c++) {
         float inv_std = 1.0f / std[c];

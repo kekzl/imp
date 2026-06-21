@@ -1120,8 +1120,6 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                              shard_size / (1024.0 * 1024.0));
             }
         }
-
-        tensor_count = tensor_infos.size();
     }
 
     // 6. Extract model config from metadata
@@ -1526,7 +1524,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         int fused_count = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             auto& ly = model->layers_[i];
-            if (ly.w_gate.data == nullptr && ly.w_up.data != nullptr && ly.w_up.shape[0] == 2 * cfg.d_ff) {
+            if (ly.w_gate.data == nullptr && ly.w_up.data != nullptr && ly.w_up.shape[0] == static_cast<int64_t>(2) * cfg.d_ff) {
                 int64_t d_model = ly.w_up.shape[1];
                 int64_t d_ff = cfg.d_ff;
                 size_t row_bytes = qtype_row_bytes(ly.w_up.qtype, d_model);

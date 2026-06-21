@@ -474,7 +474,12 @@ bool RuntimeConfig::load_from_file(const std::string& path) {
         std::string key = trim(s.substr(0, eq));
         std::string val = trim(s.substr(eq + 1));
 
-        std::string dotted = section.empty() ? key : (section + "." + key);
+        std::string dotted = key;
+        if (!section.empty()) {
+            dotted = section;
+            dotted += '.';
+            dotted += key;
+        }
         apply_one(*this, dotted, val);
     }
     return true;

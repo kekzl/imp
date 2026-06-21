@@ -208,7 +208,8 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
                     calls.push_back(std::move(tc));
                     parsed = true;
                 }
-            } catch (...) { /* fall through */
+            } catch (...) {
+                // Not valid JSON tool-call syntax — fall through to other formats
             }
         }
         if (!parsed && body.find("<function=") != std::string::npos) {
@@ -601,7 +602,11 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
         std::string args = tc["function"].value("arguments", "{}");
 
         if (family == imp::ChatTemplateFamily::LLAMA3) {
-            result += "\n<function=" + name + ">" + args + "</function>";
+            result += "\n<function=";
+            result += name;
+            result += ">";
+            result += args;
+            result += "</function>";
         } else if (family == imp::ChatTemplateFamily::GEMMA) {
             json args_json = json::parse(args, nullptr, false);
             std::string args_body;
@@ -614,7 +619,11 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
                     first = false;
                 }
             }
-            result += "<|tool_call>call:" + name + "{" + args_body + "}<tool_call|>";
+            result += "<|tool_call>call:";
+            result += name;
+            result += "{";
+            result += args_body;
+            result += "}<tool_call|>";
         } else {
             // ChatML format
             json call_obj = {{"name", name}, {"arguments", json::parse(args, nullptr, false)}};

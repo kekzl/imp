@@ -364,7 +364,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         std::string name;
         uint32_t n_dims{};
         int64_t dims[4]{};
-        GgufWireType type;
+        GgufWireType type{};
         uint64_t offset{};
     };
 

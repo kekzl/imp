@@ -268,7 +268,7 @@ enum class TokenType {
 };
 
 struct Token {
-    TokenType type;
+    TokenType type{};
     std::string value;
     bool trim_left = false;   // whitespace control: strip left
     bool trim_right = false;  // whitespace control: strip right

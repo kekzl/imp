@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
     httplib::Server svr;
 
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)
-    svr.set_payload_max_length(100 * 1024 * 1024);
+    svr.set_payload_max_length(static_cast<size_t>(100) * 1024 * 1024);
 
     // Store API key and limits in state
     state.api_key = args.api_key;

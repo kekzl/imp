@@ -25,9 +25,9 @@ struct PlanHints {
 struct StoragePlan {
     struct Entry {
         TensorID id{};
-        TensorKind kind;
-        QType source_qtype;  // source storage; feeds effective_capabilities() in downgrade loop
-        StorageTier tier;
+        TensorKind kind{};
+        QType source_qtype{};  // source storage; feeds effective_capabilities() in downgrade loop
+        StorageTier tier{};
         int64_t bytes{};
         int64_t rows{};
         int64_t cols{};

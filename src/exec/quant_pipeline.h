@@ -28,7 +28,7 @@ struct Nvfp4DecodeContext {
     struct Entry {
         const void* orig_ptr{};
         Tensor weight;
-        QType qtype;
+        QType qtype{};
         bool from_scratch{};
     };
 

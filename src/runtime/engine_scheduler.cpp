@@ -700,7 +700,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             });
             prefill_graph_runner_.execute(pf_stream);
             if (logits_out.data == nullptr) {
-                logits_out = executor_->get_logits_view(/*n_sequences=*/1);
+                logits_out = executor_->get_logits_view(/*n=*/1);
             }
         } else {
             executor_->forward_logits(state, logits_out, pf_stream);
@@ -1080,15 +1080,15 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             const size_t meta_bytes = static_cast<size_t>(3) * N * sizeof(int);
             if (cudaMallocAsync(&residual_meta_d_buf_, meta_bytes, dec_stream) == cudaSuccess) {
                 int* base = residual_meta_d_buf_;
-                cudaMemcpyAsync(base + 0 * N, residual_meta_h_slots_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 1 * N, residual_meta_h_counts_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 2 * N, residual_meta_h_widxes_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                state.d_residual_seq_slots = base + 0 * N;
-                state.d_residual_counts = base + 1 * N;
-                state.d_residual_write_idxes = base + 2 * N;
+                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(0) * N, residual_meta_h_slots_.data(),
+                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(1) * N, residual_meta_h_counts_.data(),
+                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(2) * N, residual_meta_h_widxes_.data(),
+                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
+                state.d_residual_seq_slots = base + static_cast<ptrdiff_t>(0) * N;
+                state.d_residual_counts = base + static_cast<ptrdiff_t>(1) * N;
+                state.d_residual_write_idxes = base + static_cast<ptrdiff_t>(2) * N;
                 state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
             }
         }

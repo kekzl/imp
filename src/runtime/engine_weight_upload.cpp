@@ -142,8 +142,10 @@ bool Engine::init_weights() {
                 if (model_->layer(i).ssm_in.data != nullptr)
                     n_ssm++;
             expert_reserve += static_cast<size_t>(n_ssm) * config_.max_batch_size *
-                              (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
-                               n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
+                              (static_cast<unsigned long>(conv_ch) * std::max(mcfg.ssm_conv_kernel - 1, 0) *
+                                   sizeof(float) +
+                               static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
+                                   dtype_size(config_.ssm_state_dtype));
         }
 
         size_t safety = 256ULL * 1024 * 1024;  // base safety
@@ -159,8 +161,8 @@ bool Engine::init_weights() {
     // Upload weights
     size_t free_before = 0, total_before = 0;
     cudaMemGetInfo(&free_before, &total_before);
-    IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total", free_before / (1024 * 1024),
-                 total_before / (1024 * 1024));
+    IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
+                 free_before / (1024UL * 1024), total_before / (1024UL * 1024));
 
     cudaStream_t upload_stream = nullptr;
     IMP_CUDA_CHECK_LOG(cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking));
@@ -185,8 +187,8 @@ bool Engine::init_weights() {
     size_t free_after = 0, total_after = 0;
     cudaMemGetInfo(&free_after, &total_after);
     IMP_LOG_INFO("GPU memory after weight upload: %zu MiB free / %zu MiB total (weights ~%zu MiB)",
-                 free_after / (1024 * 1024), total_after / (1024 * 1024),
-                 (free_before - free_after) / (1024 * 1024));
+                 free_after / (1024UL * 1024), total_after / (1024UL * 1024),
+                 (free_before - free_after) / (1024UL * 1024));
 
     // Check for host-resident expert weights.
     // gpt-oss is exempt: its MXFP4 experts are intentionally kept host-resident

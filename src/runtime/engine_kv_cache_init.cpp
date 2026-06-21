@@ -49,7 +49,7 @@ bool Engine::init_kv_cache() {
 
     // VRAM budget
     auto vram_budget =
-        memory_manager_.compute_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram());
+        MemoryManager::compute_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram());
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
