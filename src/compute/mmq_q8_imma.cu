@@ -266,7 +266,7 @@ __global__ void __launch_bounds__(kThreads)
 
     // SPLITK epilogue: store the fp32 partial tile to this split's slice;
     // the finalize kernel reduces slices and applies beta/residual.
-    if (SPLITK) {
+    if constexpr (SPLITK) {
         float* Cs = split_out + static_cast<size_t>(blockIdx.z) * (static_cast<size_t>(M) * N);
 #pragma unroll
         for (int mf = 0; mf < kMF; ++mf) {
@@ -286,27 +286,26 @@ __global__ void __launch_bounds__(kThreads)
                 }
             }
         }
-        return;
-    }
-
-    // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
+    } else {
+        // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
 #pragma unroll
-    for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
-        const int row_hi = row_lo + 8;
+        for (int mf = 0; mf < kMF; ++mf) {
+            const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+            const int row_hi = row_lo + 8;
 #pragma unroll
-        for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
-            if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
-            if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
-                __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-            if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
-                __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
+            for (int nf = 0; nf < kNF; ++nf) {
+                const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+                if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
+                if (row_lo < rows) {
+                    __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                    __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
+                    *p = BETA1 ? __hadd2(*p, v) : v;
+                }
+                if (row_hi < rows) {
+                    __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                    __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
+                    *p = BETA1 ? __hadd2(*p, v) : v;
+                }
             }
         }
     }

@@ -121,7 +121,12 @@ void MemAccount::report(const char* phase_label) {
     std::string out;
     char line[256];
     auto emit = [&](const char* fmt, auto... args) {
+        // fmt is a compile-time literal at every call site below; the forwarding
+        // through a const char* parameter is what trips -Wformat-security.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-security"
         std::snprintf(line, sizeof(line), fmt, args...);
+#pragma GCC diagnostic pop
         out += line;
         out += '\n';
     };

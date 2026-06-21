@@ -103,7 +103,11 @@ TEST(TokenizerRobustness, RoundtripASCII) {
 TEST(TokenizerRobustness, RoundtripUtf8TwoByte) {
     Tokenizer tok = make_byte_gpt2_tokenizer();
     // German umlauts + sharp s: ä ö ü ß — all 2-byte UTF-8.
-    expect_roundtrip(tok, "Gr\xc3\xbc\xc3\x9fe \xc3\xa4\xc3\xb6\xc3\xbc", "utf8 2-byte");
+    // Split after \x9f so the following 'e' is not swallowed into the hex escape
+    // (\x is greedy: "\x9fe" would parse as one out-of-range escape, not ß + 'e').
+    expect_roundtrip(tok, "Gr\xc3\xbc\xc3\x9f"
+                          "e \xc3\xa4\xc3\xb6\xc3\xbc",
+                     "utf8 2-byte");
 }
 
 TEST(TokenizerRobustness, RoundtripUtf8ThreeByte) {
