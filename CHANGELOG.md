@@ -30,8 +30,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   in a **single** `malloc` instead of 18.6k (≈ **−785 ms** on a 30B MoE), and the
   per-expert SfAtom conversion is batched (**18.6k → 337** convert launches).
 - CI: `setup-python` v5 → v6 (Node 24) to clear the Node 20 deprecation warning.
+- **Internal: clang-tidy cleanup.** Fixed ~51 host-side findings — int-multiplication
+  widening before 64-bit use (KV/SSM/weight-upload size math), uninitialized struct
+  members, dead stores, set-but-unused counters, an unused lambda capture, unused
+  `using` declarations, and inefficient string concatenations — plus intent comments
+  on the deliberately-empty parse-fallback catches. No behavior change; the remaining
+  findings are intentional (documented empty catches, two large functions) or
+  clang-tidy parser artifacts.
 
 ### Fixed
+- **Dense models no longer OOM-crash at startup under auto `max_batch_size`.** The
+  VRAM-aware auto batch sizing (above) sizes the cap against a 4096-token reference
+  context, but the KV pool is provisioned at `max_batch_size × max_seq_len`. On a
+  small-weight / large-headroom config (e.g. dense Q8 on a 32 GB card: batch auto→25,
+  25 × 16384-token slots = 25600 blocks / 57.6 GB) the KV `cudaMalloc` exceeded VRAM
+  and the server aborted with `out of memory` at context creation. The KV pool is now
+  clamped to the post-weight VRAM that physically remains — it is a paged pool with
+  scheduler admission control, so a smaller pool only bounds concurrency under load and
+  never under-serves a single sequence. MoE/NVFP4 configs (which already fit) are
+  unchanged; verified no-OOM + coherent + continuous-batching on dense Q8, MoE NVFP4,
+  and dense NVFP4.
 - **`docker run imp:latest --help` now prints imp-server's flags.** A leading flag
   was taken as the *command name*; it didn't match `imp-server|imp-cli`, fell
   through the entrypoint's passthrough branch, and ran `exec --help` — printing the

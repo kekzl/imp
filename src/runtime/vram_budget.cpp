@@ -64,8 +64,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             int n_heads = mcfg.ssm_dt_rank;
             int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_footprint = static_cast<size_t>(n_ssm) * config.max_batch_size *
-                            (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
-                             n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config.ssm_state_dtype));
+                            (static_cast<unsigned long>(conv_ch) * std::max(mcfg.ssm_conv_kernel - 1, 0) *
+                                 sizeof(float) +
+                             static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
+                                 dtype_size(config.ssm_state_dtype));
         }
     }
 
@@ -224,6 +226,29 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                             : needed_blocks * 2;
     budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
+
+    // Hard backstop: never request more KV blocks than the post-weight VRAM can
+    // physically hold. The strategy above can raise kv_max_blocks toward
+    // needed_blocks (= max_batch_size × max_seq_len); with the VRAM-aware auto
+    // max_batch_size (#736) that product blows past real headroom on a
+    // small-weight / large-card config — dense Q8 on a 32 GB card sizes batch
+    // auto→25, so 25 × 16384-token slots = 25600 blocks (57.6 GB) and the KV
+    // cudaMalloc OOMs at context creation. The KV pool is paged with scheduler
+    // admission control (Scheduler::can_allocate), so clamping the pool to what
+    // fits only bounds concurrency under load — no single sequence is
+    // under-served. Subtract the NVFP4 decode + CUTLASS-SF caches, which share
+    // the same post-weight headroom (FP8 is computed from the remainder below).
+    if (per_block_total > 0) {
+        size_t weight_caches = nvfp4_estimate + cutlass_sf_estimate;
+        size_t kv_room = (available > weight_caches) ? (available - weight_caches) : available;
+        int max_fit_blocks = std::max(static_cast<int>(kv_room / per_block_total), 16);
+        if (budget.kv_max_blocks > max_fit_blocks) {
+            IMP_LOG_INFO("VRAM budget: KV clamped %d → %d blocks to fit post-weight VRAM "
+                         "(paged pool; concurrency bounded by scheduler admission)",
+                         budget.kv_max_blocks, max_fit_blocks);
+            budget.kv_max_blocks = max_fit_blocks;
+        }
+    }
 
     // Enforce minimum KV token budget. Auto default: 16K tokens or 4x max_seq_len,
     // whichever is smaller (capped to not exceed what VRAM can physically hold).
