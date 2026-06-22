@@ -30,6 +30,7 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 | [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | Q8_0 | 4.2 GB | 222 | GGUF |
 | [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) | Q8_0 | 8.9 GB | 142 | GGUF |
 | [Qwen3.5-27B](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | Q4_K_M | 16 GB | — | GGUF |
+| [Qwable-3.6-27B](https://huggingface.co/Mia-AiLab/Qwable-3.6-27b) | Q4_K_M | 16 GB | ~18 | GGUF, validated dense-GDN 27B (Qwen3.6-27B fine-tune, 64 layers: 16 attn + 48 GDN). ~29 GB resident (Q4_K + NVFP4 decode cache + GDN state) → relies on the auto KV clamp to serve. Heavy trace-reasoner: give it generous `max_tokens`. |
 | Qwen3.5-27B | MXFP4 | — | — | Loads OOM on 32 GB — see [roadmap](roadmap.md) |
 
 ## Mixture-of-Experts
