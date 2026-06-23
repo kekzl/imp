@@ -770,6 +770,35 @@ TEST(SchemaConstrainTest, IntegerLeadingZeroRejected) {
     EXPECT_TRUE(a[9]) << "'}' must be allowed to close the number/object";
 }
 
+// #751: an unbounded integer/number must not run digits forever — once the digit
+// run hits the cap the continue-number category is dropped, forcing the number to
+// close (valid, terminated JSON instead of a runaway to max_tokens).
+TEST(SchemaConstrainTest, IntegerDigitRunCappedForcesClose) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4    5    6    7    8    9
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", ":", "1", "0", "}"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    for (int t : {3, 4, 5, 4, 6, 7})  // { "n" : 1  -> NUMBER_VALUE, digit_count=1
+        sc.update(t);
+    // Below the cap (after a handful of digits) more digits are still allowed.
+    sc.update(8);  // "0" -> digit_count=2
+    auto below = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(below[8]) << "digit must be allowed well below the cap";
+    // Drive the digit run to the cap (kMaxNumberDigits=40); digit_count is now 2.
+    for (int i = 0; i < 38; i++)
+        sc.update(8);  // -> digit_count=40
+    auto capped = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(capped[8]) << "digit must be masked once the digit-run cap is hit";
+    EXPECT_TRUE(capped[9]) << "'}' must be allowed to close the capped number";
+}
+
 // A combined value token must be validated against an enum/integer constraint,
 // not just its opening quote/digit category.
 TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {

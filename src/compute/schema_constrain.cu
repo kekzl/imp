@@ -294,8 +294,19 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         case SchemaPhase::STRING_ESCAPE:
             return 0xFFFF;  // any char valid after backslash
 
-        case SchemaPhase::NUMBER_VALUE:
-            return CAT_NUMBER_CONT | CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+        case SchemaPhase::NUMBER_VALUE: {
+            uint16_t m = CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+            // Cap the digit run so a model that degenerates into a digit loop
+            // (e.g. "age":42000000…) can't run an unbounded number to max_tokens
+            // and leave the JSON unterminated (#751). f.string_len counts digits;
+            // once it hits the cap, drop continue-number so the number must close
+            // — the result is a valid (if large) JSON number, not a runaway. The
+            // cap (40) is far beyond any real int64 (≤19) / double (~17 sig) value.
+            constexpr int kMaxNumberDigits = 40;
+            if (f.string_len < kMaxNumberDigits)
+                m |= CAT_NUMBER_CONT;
+            return m;
+        }
 
         case SchemaPhase::LITERAL_VALUE:
             return CAT_LITERAL_CONT;
