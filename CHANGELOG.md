@@ -4,6 +4,57 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-23
+
+A bug-fix release closing the issues found in a black-box acceptance test of
+v0.12.0 — mostly server/API correctness and out-of-the-box defaults. No kernel
+or perf changes; published benchmark numbers are unaffected.
+
+### Fixed
+- **SSE streaming is real per-token again** on `/v1/chat/completions` and
+  `/v1/messages`. A single-stream request was buffering every token and
+  flushing them all at generation end (TTFT ≈ full latency): the GPU-autonomous
+  conditional-graph decode loop only surfaces its tokens to the host once the
+  whole burst completes. Streaming requests now stay on per-step decode for
+  genuine per-token delivery; non-streaming requests keep the faster loop
+  (~2–5% decode cost for streams on 8B-Q8). (#754)
+- **Streaming no longer hangs the client.** `/v1/messages` with a thinking model
+  and a small `max_tokens`, and `/v1/completions` with `stream:true`, could spin
+  forever without ever emitting a terminal event (`message_stop` / `[DONE]`) when
+  the final token was swallowed by the reasoning / think-strip path. The stream
+  loops now always terminate. (#755, #757)
+- **`response_format: json_schema` can no longer emit invalid JSON.** An unbounded
+  `integer`/`number` field let a degeneration-prone model run a digit loop to
+  `max_tokens`, leaving the JSON unterminated. The `NUMBER_VALUE` grammar now
+  caps the digit run so the number always closes. (#751)
+- **`think_budget = 0` now disables thinking** (as documented) instead of removing
+  the budget cap — which made a think-capable model reason until `max_tokens` and
+  return empty `content`. (#752)
+- **SafeTensors directory with a trailing slash is addressable again.** The served
+  model id is derived from the path basename; a trailing slash made it empty, so
+  `/v1/models` returned `id: ""` and every request was rejected. Trailing
+  separators are now stripped. (#756)
+- **Clearer model-load errors.** A present-but-corrupt file (e.g. bad GGUF magic)
+  now reports *"invalid or corrupt model file"* instead of *"file not found"*, and
+  a missing local path is no longer misrouted to the HuggingFace resolver with a
+  nonsensical `git clone` hint. (#759)
+- **Version string no longer drifts.** `imp_version()` was hardcoded `0.11.2`
+  while the project version was `0.12.0`; it is now single-sourced from the CMake
+  project version. (#760)
+- **Docs:** dropped the stale "no continuous batching" claim, added the required
+  `model` field to the README quickstart curl, removed the trailing slash from the
+  SafeTensors examples, and documented the C API as source-build-only (the runtime
+  image ships only binaries). (#760)
+
+### Changed
+- **Prefix/prompt caching is now ON by default for the server.** It shipped
+  default-off, so `cache_read_input_tokens` always reported 0 and warm prompts got
+  no TTFT win unless an `imp.conf` opted in — contradicting the documented
+  behaviour. Library/C-API embedders (who drive `EngineConfig` directly) are
+  unaffected; it remains auto-disabled for SSM/GDN models. (#758)
+- **The released Docker image now ships `imp-bench`** (it is documented; CI keeps
+  it off for build speed). (#760)
+
 ## [0.12.0] - 2026-06-21
 
 ### Added
