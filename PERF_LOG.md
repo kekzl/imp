@@ -4,6 +4,41 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-06-24 · Concurrency cliff — profiled root cause (corrects earlier note)
+
+**Method:** env-gated per-step instrumentation (`IMP_PROFILE_STEPS`, reverted —
+not committed) logging prefill/decode batch size + wall (with a stream sync, so
+absolute ms are inflated; ratios/cadence are the signal). Qwen3-4B-2507-Q8_0,
+16 concurrent requests sharing a warm ~3367-tok cached prefix, max_tokens=40.
+
+**Measured cadence (one c=16 burst):**
+- Prefill: a few requests prefill individually (~70–167 ms each, first is cold)
+  as they arrive staggered, then a batch of 14 prefills in ONE step at
+  **28.9 ms/req** — i.e. **batched prefill is ~3× cheaper per request than
+  single prefills** (same-cycle arrivals amortize the per-step setup).
+- Decode steady state: **batch-15 decode ≈ 200 ms/step** vs batch-1 ≈ 130 ms
+  (sync-inflated; harness-real ≈ 188 ms vs 36 ms). So 15× the sequences for
+  ~1.5× (sync) / ~5× (real) the step time → **decode batches POSITIVELY**
+  (≈3× aggregate token throughput at c=15). The high *per-sequence* ITL under
+  load is the normal latency↔throughput trade of batching, not a bug.
+
+**Corrected diagnosis:** the earlier entry's "decode is the cliff" intuition was
+wrong, and "all prefills serialize" was only half right. Decode scales fine. The
+real reducible cost is the **per-request prefill fixed overhead**: a cache-hit
+prefill of ~12 uncached tokens still costs ~30–70 ms of GPU time (should be a few
+ms), which only amortizes when many requests land in the same scheduler cycle.
+Staggered real-agent arrivals each pay it → TTFT grows under concurrency.
+
+**Next lever (focused follow-up):** nsys a single cache-hit prefill (no profiling
+sync) to attribute the 30–70 ms — suspects: prefill runs eager (no CUDA-graph
+capture, `executor_workspace_buffers.cu:923` notes graph capture disabled when
+the largest NVFP4 weight exceeds the 512 MiB workspace cap), per-prefill
+workspace `ensure_*`, green-context reconfig, metadata upload. Reducing it (or a
+graph-captured cache-hit prefill fast path) directly lowers TTFT under load
+without touching decode or the −2% single-stream gate. Deep but well-scoped.
+
+---
+
 ## 2026-06-24 · Phase 5b — deterministic mode validation (existing feature)
 
 **Feature:** opt-in ordered MoE reduction via `--set runtime.deterministic=true`
