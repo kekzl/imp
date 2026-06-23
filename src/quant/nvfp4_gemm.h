@@ -33,6 +33,11 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y, int M, i
 void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, int M, int K,
                           cudaStream_t stream);
 
+// Batched-M FP32 GEMV (LM head at batch>1): y[n_act, N_out] computed in one weight
+// pass per launch. x is [n_act, K] row-major, y is [n_act, N_out] row-major.
+void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, float* y, int N_out, int K,
+                                  int n_act, cudaStream_t stream);
+
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk, const NvFP4QuantResult& wv,
                           const half* x, half* yq, half* yk, half* yv, int q_rows, int k_rows, int v_rows,

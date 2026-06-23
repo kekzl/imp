@@ -737,8 +737,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n > 1 && lm_is_nvfp4) {
-            // Per-row NVFP4 GEMV LM head for batched decode.
-            // NVFP4 GEMV is M=1 only — loop over rows.
+            // Batched-M NVFP4 GEMV LM head for batched decode. The old code looped
+            // a single M=1 GEMV per sequence, re-reading the whole ~389 MiB LM-head
+            // matrix from HBM once per row (it does not fit in L2) — the #2 decode
+            // GPU consumer at batch>1. gemv_nvfp4_kpar_batched_fp32 reads the weight
+            // ONCE and reuses it across all rows.
             NvFP4QuantResult nvfp4_lm_r;
             if (lm_nvfp4_secondary) {
                 nvfp4_lm_r = lm_nvfp4_it->second;
@@ -751,14 +754,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 nvfp4_lm_r.N = cfg.vocab_size;
                 nvfp4_lm_r.K = cfg.d_model;
             }
-            Tensor no_row = view_tokens(norm_out_, 1);
-            for (int row = 0; row < n; ++row) {
-                Tensor h_row = h_final.slice(row, row + 1);
-                Tensor lg_row = lg.slice(row, row + 1);
-                rmsnorm(h_row, model_->output_norm(), no_row, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_row.data),
-                                     static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
-            }
+            Tensor no_final = view_tokens(norm_out_, n);
+            rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+            gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
+                                         static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, n, stream);
         } else if (use_dp4a_lm && n > 1) {
             // Per-row Q8_1 GEMV LM head for batched decode.
             // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.
