@@ -44,6 +44,19 @@ request reports `cached=4512/4524` (shared, not recomputed).
   agentic server under load" — flagged for a dedicated continuous-batching/prefill-pipelining
   investigation. Not a regression (no prior agent baseline existed); this entry IS the baseline.
 
+  **Root cause (diagnosed):** `Engine::step()` runs *all* prefills in the batch sequentially
+  (`step_prefill` loops `step_prefill_one` per request, `engine_scheduler.cpp:367-368`) and only
+  *then* runs one decode step (`engine_scheduler.cpp:75-85`). Decode produces the first token, so
+  every concurrent request's first token waits for the **entire** prefill batch to finish. With
+  16 cache-hit requests the prefill work per request is tiny (~12 uncached tokens) but each is a
+  separate non-graph forward with ~90 ms fixed overhead → 16×90 ms ≈ the observed 1443 ms (note
+  p50≈p90≈p99: they all unblock together). Two candidate fixes, both non-trivial: (a) ragged
+  *batched* prefill — one forward over the whole prefill batch (proper fix, deep: ragged attention
+  + chunked-prefill + graph interplay); (b) interleave decode between prefills / cap prefills per
+  step (cheaper, latency-fairness trade). A per-step prefill-*count* cap would not touch single-
+  stream pp/tg (batch size 1), so the −2% throughput gate is not at risk — but the win is bounded
+  by the per-prefill fixed overhead, so (a) is the real lever. Deferred to a profiling-led effort.
+
 ### Gate status
 - Decode/prefill throughput: untouched by Phases N1/5a/6 (host-side + KV-persist only) — no
   hot-path kernel change, `−2%` throughput gate not at risk.
