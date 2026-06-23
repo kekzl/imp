@@ -1043,9 +1043,17 @@ static bool snapshot_state_and_tokenize_(
     const bool want_thinking = ctx.params.enable_thinking_set
                                    ? ctx.params.enable_thinking_requested
                                    : thinking_default;
+    // think_budget is the fraction of max_tokens reserved for reasoning;
+    // think_budget <= 0 means "no reasoning headroom" → disable thinking entirely
+    // (documented "0 = disabled"). Folding it into enable_thinking keeps the two
+    // flags consistent: without this, budget=0 left thinking ON yet never armed
+    // the force-close, so the model reasoned to max_tokens and returned empty
+    // content (#752). The Anthropic "disabled" path already zeroes the budget.
+    const bool budget_disables_thinking = ctx.params.think_budget <= 0.0f;
     ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 &&
-                               want_thinking;
-    ctx.snap.suppress_thinking = ctx.snap.is_think_model && !ctx.snap.enable_thinking && ctx.params.think_budget <= 0.0f;
+                               want_thinking && !budget_disables_thinking;
+    ctx.snap.suppress_thinking =
+        ctx.snap.is_think_model && !ctx.snap.enable_thinking && budget_disables_thinking;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
     if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
