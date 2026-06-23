@@ -145,6 +145,28 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
 // Full forward pass
 // ---------------------------------------------------------------------------
 
+void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
+    if (lm_head_cutlass_ready_)
+        return;
+    // Opt-in (gemm.nvfp4_lm_head_cutlass). Only batched decode (n>1) uses it;
+    // single-stream (n==1) keeps the weight-bound M=1 GEMV.
+    if (!runtime_config().gemm.nvfp4_lm_head_cutlass || !cutlass_sm120_nvfp4_available())
+        return;
+    auto it = wcache_.nvfp4.find(model_->output_proj().data);
+    if (it == wcache_.nvfp4.end())
+        return;  // LM head is not in the NVFP4 decode cache (nvfp4_lm_head off / GDN)
+    // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
+    convert_nvfp4_to_cutlass(it->second, lm_head_cutlass_, stream);
+    cudaStreamSynchronize(stream);
+    lm_head_cutlass_ready_ =
+        (lm_head_cutlass_.data != nullptr && lm_head_cutlass_.scale_factors != nullptr);
+    if (lm_head_cutlass_ready_)
+        IMP_LOG_INFO("LM head: CUTLASS NVFP4 tensor-core GEMM enabled for batched decode "
+                     "(N=%lld K=%lld, +%zu KiB SfAtom scales)",
+                     static_cast<long long>(lm_head_cutlass_.N),
+                     static_cast<long long>(lm_head_cutlass_.K), lm_head_cutlass_.sf_bytes / 1024);
+}
+
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
     if (!initialized_) {
         IMP_LOG_ERROR("GraphExecutor::forward_logits called before init()");
@@ -756,8 +778,24 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
             Tensor no_final = view_tokens(norm_out_, n);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-            gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
-                                         static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, n, stream);
+            bool lm_done = false;
+            // Tensor-core path: one CUTLASS NVFP4 GEMM (M=n) reads the LM-head
+            // weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (the
+            // samplers read float logits). Falls back to the GEMV if disabled or
+            // the kernel declines the shape.
+            if (lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
+                qscratch_.cutlass_act_sf != nullptr) {
+                quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data,
+                                               qscratch_.cutlass_act_sf, n, cfg.d_model, stream);
+                lm_done = gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
+                                                        lm_head_cutlass_, static_cast<float*>(lg.data), n,
+                                                        cfg.vocab_size, cfg.d_model, nullptr, 0, stream);
+            }
+            if (!lm_done) {
+                gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
+                                             static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, n,
+                                             stream);
+            }
         } else if (use_dp4a_lm && n > 1) {
             // Per-row Q8_1 GEMV LM head for batched decode.
             // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.

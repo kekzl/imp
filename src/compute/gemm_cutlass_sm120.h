@@ -133,6 +133,13 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
 // Get CUTLASS GEMM workspace size for given problem dimensions.
 size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K);
 
+// FP32-output NVFP4 GEMM (large-N cooperative tile). Used for the batched-decode
+// LM head, which needs float logits. d_fp32 is [M, N] row-major float.
+bool gemm_nvfp4_cutlass_sm120_fp32(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
+                                   void* d_fp32, int M, int N, int K, void* workspace,
+                                   size_t workspace_size, cudaStream_t stream);
+size_t gemm_nvfp4_cutlass_sm120_fp32_workspace(int M, int N, int K);
+
 // Check if sm_120 CUTLASS NVFP4 GEMM is compiled and available.
 bool cutlass_sm120_nvfp4_available();
 

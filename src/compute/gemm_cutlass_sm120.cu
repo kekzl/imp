@@ -85,6 +85,35 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
+// ---------------------------------------------------------------------------
+// FP32-output variant (large-N cooperative tile only). The LM head writes FP32
+// logits (the samplers read `const float*`), so the batched-decode LM head GEMM
+// (N = vocab » kSmallNThreshold) needs a float epilogue rather than the half_t
+// output above. ElementC = ElementD = float keeps the (unused, beta=0) C and D
+// pointers the same type so the shared impl reinterprets one buffer for both.
+// ---------------------------------------------------------------------------
+using ElementDFp32 = float;
+using ElementCFp32 = float;
+constexpr int AlignmentDFp32 = 128 / cutlass::sizeof_bits<ElementDFp32>::value;  // 4
+constexpr int AlignmentCFp32 = 128 / cutlass::sizeof_bits<ElementCFp32>::value;  // 4
+
+using CollectiveEpilogueFp32 = typename cutlass::epilogue::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ThreadBlockShape, ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementAccumulator, ElementCFp32, LayoutCTag, AlignmentCFp32, ElementDFp32,
+    LayoutDTag, AlignmentDFp32, cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+
+using CollectiveMainloopFp32 = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass, ElementA, LayoutATag, AlignmentA, ElementB, LayoutBTag, AlignmentB,
+    ElementAccumulator, ThreadBlockShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogueFp32::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
+
+using GemmKernelFp32 = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>,
+                                                           CollectiveMainloopFp32, CollectiveEpilogueFp32,
+                                                           void>;
+using GemmFp32 = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelFp32>;
+
 // Strides / SF layouts are derived per-variant inside the templated impl
 // below (typename GemmT::GemmKernel::StrideA etc.) — both variants share the
 // same SfAtom data layout, only the CTA tiling differs.
@@ -700,7 +729,7 @@ size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
                                    : cutlass_workspace_for<Gemm>(M, N, K);
 }
 
-template <class GemmT>
+template <class GemmT, class ElemD = ElementD>
 static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
                                           void* d_fp16, int M, int N, int K, void* workspace,
                                           size_t workspace_size, cudaStream_t stream) {
@@ -732,7 +761,7 @@ static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, 
     // C pointer must be valid even with beta=0 — CUTLASS creates a TMA
     // descriptor for C during initialize() and cuTensorMapEncodeTiled
     // fails on nullptr.  Re-use the D buffer since it's never read.
-    auto* d_ptr = reinterpret_cast<ElementD*>(d_fp16);
+    auto* d_ptr = reinterpret_cast<ElemD*>(d_fp16);
 
     // Use tensor_scale as alpha: compensates for not absorbing it into SFB.
     // D = tensor_scale * (A_fp4 * SFA * B_fp4 * micro_scale_only) = correct result.
@@ -792,6 +821,18 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
                                                          workspace_size, stream);
     return gemm_nvfp4_cutlass_sm120_impl<Gemm>(a_data, a_sf, b, d_fp16, M, N, K, workspace, workspace_size,
                                                stream);
+}
+
+// FP32-output entry — large-N cooperative tile only (LM head: N = vocab » 2048).
+bool gemm_nvfp4_cutlass_sm120_fp32(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
+                                   void* d_fp32, int M, int N, int K, void* workspace,
+                                   size_t workspace_size, cudaStream_t stream) {
+    return gemm_nvfp4_cutlass_sm120_impl<GemmFp32, ElementDFp32>(a_data, a_sf, b, d_fp32, M, N, K, workspace,
+                                                                workspace_size, stream);
+}
+
+size_t gemm_nvfp4_cutlass_sm120_fp32_workspace(int M, int N, int K) {
+    return cutlass_workspace_for<GemmFp32>(M, N, K);
 }
 
 bool cutlass_sm120_nvfp4_available() { return true; }

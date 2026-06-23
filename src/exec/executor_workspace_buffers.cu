@@ -1128,6 +1128,12 @@ void GraphExecutor::free_buffers() {
         nvfp4_dequant_ws_buf_ = nullptr;
         nvfp4_dequant_ws_size_ = 0;
     }
+    if (lm_head_cutlass_ready_) {
+        // Frees only the owned SfAtom scales; .data is borrowed from the decode cache.
+        free_cutlass_nvfp4_weight(lm_head_cutlass_);
+        lm_head_cutlass_ = {};
+        lm_head_cutlass_ready_ = false;
+    }
     if (d_sample_result_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_sample_result_));
         d_sample_result_ = nullptr;

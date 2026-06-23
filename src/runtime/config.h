@@ -346,6 +346,14 @@ struct RuntimeConfig {
         // lm_head for maximum coherence. Env IMP_NO_NVFP4_LM_HEAD=1 still kills
         // the NVFP4 lm_head entirely (dense + GDN) via gemm.nvfp4_lm_head.
         bool nvfp4_lm_head_gdn = true;
+        // Batched-decode (n>1) LM head via a single CUTLASS NVFP4 tensor-core
+        // GEMM instead of the FP16-activation batched-M GEMV. Reads the LM-head
+        // weight once for the whole batch (vs ceil(n/4)x for the GEMV), but the
+        // FP4×FP4 MMA forces NVFP4 activations on the final logits (the GEMV kept
+        // FP16 activations) — a quality/speed trade. Costs ~vocab*d_model/16 B of
+        // SfAtom scales (FP4 data borrowed from the decode cache). Opt-in until
+        // the PPL trade is measured per family. Single-stream (n==1) is unaffected.
+        bool nvfp4_lm_head_cutlass = false;
         // Hybrid GDN/SSM models (Nemotron-3-Nano-30B, Qwen3.6-35B-A3B) keep the
         // recurrent in_proj/out_proj (ssm_in/ssm_out) OUT of the NVFP4 decode
         // cache by default: they feed the GDN/SSM recurrent scan, which
