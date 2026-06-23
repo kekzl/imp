@@ -2914,9 +2914,16 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 std::string pending_text;
                 bool text_stop_matched = false;
 
-                // Strip <think> blocks for completions (no reasoning_content field)
+                // Strip <think> blocks for completions (no reasoning_content field).
+                // think_confirmed starts FALSE so a raw /v1/completions prompt
+                // (no chat template → no injected <think>) streams incrementally
+                // instead of buffering every token into think_buf waiting for a
+                // </think> that never comes (#760: completions stream arrived as
+                // one frame). It flips true only if a real <think> opener shows
+                // up in the first kThinkScanLimit tokens, so genuine think blocks
+                // are still stripped.
                 bool think_strip = (snap_is_think_model && state.default_args.reasoning_format != "none");
-                bool think_confirmed = think_strip;
+                bool think_confirmed = false;
                 std::string think_buf;
                 int think_tokens = 0;
                 const int kThinkScanLimit = 8;

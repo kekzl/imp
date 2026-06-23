@@ -66,6 +66,17 @@ int main(int argc, char** argv) {
         printf("Models directory: %s\n", state.models_dir.c_str());
     }
 
+    // Set up the HTTP server and BIND the listen socket now — before the (slow)
+    // model load — so a port conflict fails in <1 s instead of after a full
+    // model load (#760). Routes are registered once the model is ready;
+    // listen_after_bind() below starts accepting connections then.
+    httplib::Server svr;
+    if (svr.bind_to_port(args.host, args.port) == 0) {
+        fprintf(stderr, "Failed to start server on %s:%d: port already in use\n", args.host.c_str(),
+                args.port);
+        return 1;
+    }
+
     printf("Loading model: %s\n", resolved_model.c_str());
     {
         std::string error = load_model_into_state(state, resolved_model);
@@ -86,8 +97,7 @@ int main(int argc, char** argv) {
         printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
     }
 
-    // Set up HTTP server
-    httplib::Server svr;
+    // (svr was created + bound to the port above, before the model load.)
 
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)
     svr.set_payload_max_length(static_cast<size_t>(100) * 1024 * 1024);
@@ -260,8 +270,8 @@ int main(int argc, char** argv) {
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
-    if (!svr.listen(args.host, args.port)) {
-        // listen() returns false on stop() or bind failure
+    if (!svr.listen_after_bind()) {
+        // listen_after_bind() returns false on stop() or bind failure
         if (!g_server.load(std::memory_order_relaxed)) {
             // Server was nulled by signal — clean shutdown
         } else {
