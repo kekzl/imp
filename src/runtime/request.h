@@ -92,6 +92,16 @@ struct Request {
     // survive eviction until the pin budget recycles them (FIFO).
     bool pin_kv_prefix = false;
 
+    // SSE streaming request: the client consumes tokens as they are produced.
+    // The async conditional graph loop (GPU-autonomous multi-token decode) only
+    // surfaces its tokens to the host after the whole burst completes — on this
+    // platform the mapped-pinned ring buffer is not reliably host-visible
+    // mid-flight — so a streamed request would receive every token at
+    // generation end (TTFT == full latency, #754). Streaming requests therefore
+    // stay on per-step decode (one token per step) for real per-token delivery;
+    // non-streaming requests keep the faster autonomous loop.
+    bool stream = false;
+
     // Logprobs
     bool logprobs = false;                          // Return logprobs for sampled tokens
     int top_logprobs = 0;                           // 0-20, number of top alternatives
