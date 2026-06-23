@@ -1,5 +1,6 @@
 #include "model/hf_hub.h"
 #include "core/logging.h"
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 
@@ -36,8 +37,18 @@ std::string resolve_model_path(const std::string& model_id, const std::string& r
         return model_id;
     }
 
-    // 2. If it doesn't look like a HF repo ID (no '/'), it's a bad path.
-    if (model_id.find('/') == std::string::npos) {
+    // 2. Decide whether this is a missing LOCAL path or a HuggingFace repo id.
+    // A HF repo id is "org/repo": exactly one '/', not absolute/relative, and
+    // no model-file extension. Anything else (an absolute path, a ./ or ../
+    // path, a *.gguf / *.safetensors file, or a multi-segment path) is a local
+    // path that simply doesn't exist — report that instead of nonsensically
+    // suggesting `git clone https://huggingface.co//models/...` (#759).
+    const bool looks_like_hf_repo =
+        !model_id.empty() && model_id.front() != '/' && model_id.front() != '.' &&
+        model_id.front() != '~' && std::count(model_id.begin(), model_id.end(), '/') == 1 &&
+        model_id.find(".gguf") == std::string::npos &&
+        model_id.find(".safetensors") == std::string::npos;
+    if (!looks_like_hf_repo) {
         IMP_LOG_ERROR("Model path does not exist: %s", model_id.c_str());
         return "";
     }

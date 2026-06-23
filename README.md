@@ -65,7 +65,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 **Use [vLLM](https://github.com/vllm-project/vllm) if** you serve high-concurrency batched workloads on datacenter GPUs (H100/B200). It has continuous batching, PagedAttention at scale, and production-grade serving.
 
-**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) for single-user inference and want every drop of the hardware — it is the fastest engine on the 5090 for both decode and NVFP4 prefill, with native NVFP4/FP4 and no dequant overhead. The trade-off is scope, not speed: single-GPU, single-author, experimental (no continuous batching, no multi-GPU).
+**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) for single-user inference and want every drop of the hardware — it is the fastest engine on the 5090 for both decode and NVFP4 prefill, with native NVFP4/FP4 and no dequant overhead. The trade-off is scope, not speed: single-GPU, single-author, experimental (no multi-GPU).
 
 ## Known limitations
 
@@ -91,10 +91,11 @@ mkdir -p models
 docker run --gpus all -v ./models:/models -p 8080:8080 \
   ghcr.io/kekzl/imp:latest --model /models/your-model.gguf
 
-# Hit the OpenAI-compatible endpoint
+# Hit the OpenAI-compatible endpoint (the model id is the file/dir basename;
+# GET /v1/models lists it, and the `model` field is required).
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+  -d '{"model":"your-model.gguf","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
 ```
 
 Or build from source (tracks `main` instead of the latest release):

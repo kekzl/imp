@@ -14,6 +14,7 @@
 #include <vector>
 #include <new>
 #include <exception>
+#include <filesystem>
 
 #include <cuda_runtime.h>
 
@@ -58,7 +59,7 @@ const char* imp_error_string(ImpError err) {
         case IMP_ERROR_FILE_NOT_FOUND:
             return "file not found";
         case IMP_ERROR_INVALID_MODEL:
-            return "invalid model";
+            return "invalid or corrupt model file";
         case IMP_ERROR_UNSUPPORTED:
             return "unsupported operation";
         case IMP_ERROR_INTERNAL:
@@ -144,7 +145,14 @@ ImpGenerateParams imp_generate_params_default(void) {
 
 // --- Version ---
 
-const char* imp_version(void) { return "0.11.2"; }
+// Single-sourced from the CMake project version (-DIMP_VERSION_STRING=...).
+// Falls back to a sentinel for non-CMake/ad-hoc builds so it never silently
+// drifts from CMakeLists.txt again (#760).
+#ifndef IMP_VERSION_STRING
+#define IMP_VERSION_STRING "0.0.0-dev"
+#endif
+
+const char* imp_version(void) { return IMP_VERSION_STRING; }
 
 // --- Helper: map ImpDType to imp::QType ---
 
@@ -225,6 +233,13 @@ ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp
         }
 
         if (!model) {
+            // Distinguish a genuinely missing path from one that exists but
+            // failed to parse (bad GGUF magic, truncated SafeTensors, …). The
+            // loaders return nullptr for both; reporting "file not found" for a
+            // file that is present but corrupt is misleading (#759).
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec))
+                return IMP_ERROR_INVALID_MODEL;
             return IMP_ERROR_FILE_NOT_FOUND;
         }
 

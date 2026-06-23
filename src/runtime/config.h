@@ -411,13 +411,16 @@ struct RuntimeConfig {
     } generation;
 
     struct Server {
-        // Prefix caching: reuse KV blocks for shared prompt prefixes. Defaults
-        // OFF here to match the EngineConfig default (off-by-default for
-        // library/C-API embedders); the server/CLI opt in via imp.conf
-        // ([server] prefix_cache = true, the value in imp.conf.example). The
-        // engine ORs this into EngineConfig.use_prefix_caching at init.
-        // PrefixCacheE2ETest is the ship gate; auto-disabled for SSM/GDN.
-        bool prefix_cache = false;
+        // Prefix caching: reuse KV blocks for shared prompt prefixes. Default
+        // ON for the server/CLI — this is the documented behaviour (README,
+        // imp.conf.example) and what delivers the advertised warm-prompt TTFT
+        // win + cache_read_input_tokens reporting (#758: shipping OFF meant the
+        // prebuilt image never cached unless an imp.conf opted in). Library /
+        // C-API embedders are unaffected — they drive EngineConfig directly
+        // (off-by-default there). The engine ORs this into
+        // EngineConfig.use_prefix_caching at init. PrefixCacheE2ETest is the
+        // ship gate; auto-disabled for SSM/GDN.
+        bool prefix_cache = true;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
         // Green Contexts / prefill-decode overlap streams in the server engine.
