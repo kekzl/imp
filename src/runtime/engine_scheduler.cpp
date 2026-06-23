@@ -1548,7 +1548,16 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                                        : spec_effective_miss_burst_(*dreq);
                 if (spec_limit < 0) spec_limit = 0;
             }
-            try_launch_async_graph_loop(dreq, last_token, dec_stream, spec_limit);
+            // #754: an UNBOUNDED loop (spec_limit == 0) generates the whole
+            // remaining sequence on-device and only surfaces its tokens to the
+            // host when the burst finishes — for a streaming request that means
+            // every token lands in the client at generation end (TTFT == full
+            // latency). Keep streaming requests on per-step decode so SSE is
+            // real per-token. Bounded (speculation) bursts still stream in
+            // groups via the per-burst sync, so they stay enabled.
+            const bool stream_unbounded = dreq->stream && spec_limit == 0;
+            if (!stream_unbounded)
+                try_launch_async_graph_loop(dreq, last_token, dec_stream, spec_limit);
         }
     }
 

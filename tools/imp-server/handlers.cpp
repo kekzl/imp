@@ -1898,6 +1898,15 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
 
     auto request_start = std::chrono::steady_clock::now();
     for (;;) {
+        // Terminate as soon as a finish reason has been recorded. The is_last
+        // token sets `finish` and then falls through to the per-token
+        // post-processing below, where a think/reasoning/channel `continue`
+        // can skip the trailing `if (finish) break`. Re-checking here means the
+        // stream always ends (and the terminal SSE frame is emitted) even when
+        // the final token is swallowed by one of those paths (#755/#757).
+        if (finish)
+            break;
+
         // Check client disconnect
         if (!sink.is_writable()) {
             server_req->cancel();
@@ -2628,6 +2637,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         // max_tokens (content empty, finish=length).
         req->started_in_think = ctx.snap.enable_thinking;
         req->in_think_block = ctx.snap.enable_thinking;
+        // Stream requests stay on per-step decode for real per-token SSE (#754).
+        req->stream = ctx.params.stream;
         req->status = imp::RequestStatus::PENDING;
         return req;
     };
@@ -2851,6 +2862,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
+    // Stream requests stay on per-step decode for real per-token SSE (#754).
+    imp_req->stream = stream;
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();
@@ -2914,6 +2927,16 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                 auto request_start_c = std::chrono::steady_clock::now();
                 for (;;) {
+                    // #757: the is_last token sets `finish` then falls through
+                    // to think-stripping, which `continue`s on every swallowed
+                    // token — bypassing the trailing `if (finish) break`. For a
+                    // think-capable model whose final token lands inside the
+                    // think buffer the loop would otherwise spin on pop_token
+                    // until the client gives up (0 bytes, never terminates).
+                    // Break here so the buffers flush and [DONE] is sent.
+                    if (finish)
+                        break;
+
                     // Check client disconnect
                     if (!sink.is_writable()) {
                         server_req->cancel();
@@ -3872,6 +3895,15 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
 
     auto request_start = std::chrono::steady_clock::now();
     for (;;) {
+        // #755: when a thinking model exhausts its token budget the final
+        // (is_last) token lands inside the REASONING phase, which `continue`s
+        // and skips the trailing `if (finish) break`. The loop would then spin
+        // on pop_token forever — message_delta/message_stop never emitted, so
+        // the Anthropic client (SDK or curl -N) hangs indefinitely. Breaking
+        // here guarantees the terminal events are always sent.
+        if (finish)
+            break;
+
         if (!sink.is_writable()) {
             server_req->cancel();
             finish = "cancelled";
@@ -4466,6 +4498,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         imp_req->top_k = ctx.params.top_k;
         imp_req->seed = ctx.params.seed;
         imp_req->pin_kv_prefix = ctx.params.cache_prompt;
+        // This is the streaming /v1/messages path — stay on per-step decode so
+        // SSE is real per-token rather than one burst at generation end (#754).
+        imp_req->stream = true;
         imp_req->min_p = ctx.params.min_p;
         imp_req->typical_p = ctx.params.typical_p;
         imp_req->repetition_penalty = ctx.params.repetition_penalty;
