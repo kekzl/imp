@@ -56,10 +56,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Sampling result buffer: sized to hold the argmax result plus the
-    // multi-block partial reduction scratch (ARGMAX_SCRATCH_BYTES).
+    // Sampling result buffer: sized to hold the result plus the multi-block
+    // partial reduction scratch for BOTH the greedy and the top-k/top-p paths
+    // (SAMPLE_SCRATCH_BYTES >= ARGMAX_SCRATCH_BYTES).
     {
-        cudaError_t err = cudaMalloc(&d_sample_result_, ARGMAX_SCRATCH_BYTES);
+        cudaError_t err = cudaMalloc(&d_sample_result_, SAMPLE_SCRATCH_BYTES);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s", cudaGetErrorString(err));
             d_sample_result_ = nullptr;

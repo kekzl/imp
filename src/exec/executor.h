@@ -145,8 +145,8 @@ public:
     // Constrained async sampling (pipelined constrained decode): applies
     // device-side banned-token masking + the active json/schema constraint
     // mask, then samples on device. Writes the token to d_result (which must
-    // be ARGMAX_SCRATCH_BYTES, argmax scratch follows the token) and async-
-    // copies it to h_pinned. No host-device sync — order via an event.
+    // be SAMPLE_SCRATCH_BYTES — multi-block sampler scratch follows the token)
+    // and async-copies it to h_pinned. No host-device sync — order via an event.
     void masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
                              int32_t* h_pinned, cudaStream_t stream);
 

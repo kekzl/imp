@@ -329,7 +329,7 @@ private:
         CudaGraphRunner runner;  // captures forward_logits only
         InferenceState state{};  // stable device pointers for the whole run
         Tensor logits;           // fixed-address logits view (workspace buffer)
-        int32_t* d_token = nullptr;  // ARGMAX_SCRATCH_BYTES (token + argmax scratch)
+        int32_t* d_token = nullptr;  // SAMPLE_SCRATCH_BYTES (token + multi-block sampler scratch)
         int* d_pos = nullptr;        // [1] current position
         int* d_ctx = nullptr;        // [1] current context length
         int* d_bt = nullptr;         // uploaded block table
