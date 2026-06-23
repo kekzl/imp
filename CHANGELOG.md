@@ -4,6 +4,32 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-23
+
+Follow-up bug-fix release from a v0.12.1 acceptance re-test. Server/API polish
+and gpt-oss output formatting; no kernel or perf changes.
+
+### Fixed
+- **gpt-oss Harmony channels are now parsed** instead of leaking into the
+  response. The model emits `<|channel|>analysis<|message|>…<|end|><|start|>assistant<|channel|>final<|message|>…`;
+  the analysis/commentary channels now map to `reasoning_content` (Anthropic:
+  `thinking` block) and the final channel to `content`, with all control markup
+  stripped. Applied on non-stream + streaming `/v1/chat/completions` and
+  `/v1/messages`. (The MXFP4 decode itself was already correct.) (#765)
+- **`/v1/completions` streaming is per-token again** for think-capable models —
+  it was buffering the whole response into a single SSE frame. (#766)
+- **Port-in-use fails fast**: the listen socket is bound before the model load,
+  so a port conflict errors in <1 s instead of after a full model load. (#766)
+- **gpt-oss MXFP4 SafeTensors load** no longer prints the stale "no SafeTensors
+  MXFP4 decode path" warning — the path exists (experts are transcoded
+  MXFP4→NVFP4 at init and run the CUTLASS NVFP4 grouped GEMM). (#765)
+
+### Changed
+- **cpp-httplib v0.46.1 → v0.48.0** (security hardening + a fix that ignores
+  Range headers on unknown-length streaming responses; other pinned deps —
+  CUTLASS v4.5.2, GoogleTest v1.17.0, nlohmann/json v3.12.0, CUDA 13.3 — were
+  already current).
+
 ## [0.12.1] - 2026-06-23
 
 A bug-fix release closing the issues found in a black-box acceptance test of
