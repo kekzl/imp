@@ -196,13 +196,23 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // NVFP4 decode cache is critical for performance — ensure it fits first.
             // FP8 prefill cache is nice-to-have but not essential (fallback: dequant on-the-fly).
             budget.nvfp4_cache_bytes = nvfp4_estimate;
-            double kv_fraction = (config.use_nvfp4_decode == 2) ? 0.1 : 0.8;
+            // KV target = 0.8 of available for BOTH modes. Mode 2 (native-NVFP4
+            // second pass) previously used 0.1 and skipped the needed_blocks
+            // floor — intended to leave room for an FP8 prefill cache. But on
+            // sm_120 FP8 prefill is unavailable (native NVFP4 uses the CUTLASS
+            // NVFP4 GEMM, no FP8 weight cache is built), so the 90% reserve was
+            // dead VRAM: an NVFP4 SafeTensors model starved its KV pool to ~24K
+            // tokens while 16 GB sat free — the long-context/agentic default was
+            // effectively broken. target_blocks (below) still clamps mode 2 to
+            // needed_blocks, so 0.8 only lifts KV up to the per-sequence need
+            // and leaves the remainder for FP8 (computed post-clamp) when it IS
+            // enabled — no regression for fp8-prefill configs.
+            double kv_fraction = 0.8;
             budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
                                        ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
                                        : needed_blocks;
-            if (config.use_nvfp4_decode != 2)
-                budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
+            budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
             // FP8 budget is computed below — after the kv_max_blocks clamp /
             // min_kv_blocks enforcement — so it reflects the FINAL KV size.
             budget.nvfp4_second_pass = (config.use_nvfp4_decode == 2);
