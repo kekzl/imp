@@ -1961,6 +1961,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
         // Check client disconnect
         if (!sink.is_writable()) {
             server_req->cancel();
+            state.metrics.requests_cancelled++;
             finish = "cancelled";
             break;
         }
@@ -2671,6 +2672,10 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     state.metrics.request_duration.observe(ms / 1000.0);
     if (n_output_tokens > 0)
         state.metrics.ttft.observe(ttft_ms / 1000.0);
+    // Mean inter-token latency: post-first-token decode time spread over the
+    // remaining tokens. Streaming-only (non-stream has no per-token cadence).
+    if (n_output_tokens > 1)
+        state.metrics.inter_token.observe((ms - ttft_ms) / 1000.0 / (n_output_tokens - 1));
 
     // Streaming response content is not accumulated across SSE
     // chunks, so the JSONL `response` field stays null. The
@@ -3043,6 +3048,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     // Check client disconnect
                     if (!sink.is_writable()) {
                         server_req->cancel();
+                        state.metrics.requests_cancelled++;
                         finish = "cancelled";
                         break;
                     }
@@ -3463,6 +3469,9 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_tokens_cached_total Total prompt tokens served from prefix cache\n";
     out += "# TYPE imp_tokens_cached_total counter\n";
     out += "imp_tokens_cached_total " + std::to_string(m.tokens_cached_total.load()) + "\n";
+    out += "# HELP imp_requests_cancelled_total Requests cancelled by client disconnect\n";
+    out += "# TYPE imp_requests_cancelled_total counter\n";
+    out += "imp_requests_cancelled_total " + std::to_string(m.requests_cancelled.load()) + "\n";
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
@@ -3505,6 +3514,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
                    m.request_duration);
     emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
+    emit_histogram("imp_inter_token_seconds", "Mean inter-token latency (ITL) per request in seconds",
+                   m.inter_token);
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded;
@@ -4026,6 +4037,7 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
 
         if (!sink.is_writable()) {
             server_req->cancel();
+            state.metrics.requests_cancelled++;
             finish = "cancelled";
             break;
         }
