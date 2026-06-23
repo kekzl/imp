@@ -6,13 +6,13 @@ different: time-to-first-token and inter-token latency *under concurrency*, with
 a large static prefix (system + tool defs) reused across turns via prompt
 caching, plus a short dynamic suffix.
 
-This harness measures what agents feel:
-  - TTFT p50/p90/p99 at 1 / 4 / 16 / 64 concurrent streams
-  - ITL (inter-token latency) p50/p90/p99 under the same concurrency
-  - Warm-vs-cold cache TTFT for a shared static prefix (cache_control pinned)
-
-Stdlib only (urllib + threading) so it runs on the clean host against the
-dockerised server. Streaming SSE is parsed to time the *first* token precisely.
+CONCURRENCY VIA OS PROCESSES (curl), NOT Python threads. An earlier threaded
+version under-reported badly: 16+ concurrent SSE streams parsed in Python threads
+serialize on the GIL, so the measured TTFT was the *client's* parsing throughput,
+not the server's. Driving each request with a separate `curl` process (true
+parallelism, no shared interpreter) is the only honest way to load the server
+from a single box. TTFT is measured as curl's time_total for a max_tokens=1
+request (= prefill + one decode = time to the first content token).
 
 Example:
   python3 tools/agent_bench.py --url http://localhost:8080 \
@@ -20,29 +20,16 @@ Example:
 """
 import argparse
 import json
-import statistics
+import subprocess
 import sys
-import threading
 import time
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
-# A chunky static prefix standing in for an agent's system prompt + tool
-# definitions. Repeated to ~2-3K tokens so prompt caching has something to bite.
-TOOL_BLOCK = """You are a coding agent with access to the following tools.
-- read_file(path: string): returns the file contents.
-- write_file(path: string, content: string): overwrites the file.
-- run_shell(cmd: string): runs a shell command, returns stdout/stderr.
-- search(query: string, k: int): returns the top-k matching code spans.
-- list_dir(path: string): lists directory entries with sizes and mtimes.
-Always think step by step, prefer minimal diffs, and never fabricate file paths.
-Follow the project conventions exactly and keep changes surgical and reviewable.
-"""
+TOOL_BLOCK = ("Tool spec: read_file write_file run_shell search list_dir; "
+              "follow conventions, minimal diffs, never fabricate paths. ")
 
 
 def static_prefix(repeat: int) -> str:
-    return ("SYSTEM INSTRUCTIONS (cached static prefix)\n" + TOOL_BLOCK * repeat +
-            "\nEnd of system instructions. Answer user turns concisely.\n")
+    return "SYSTEM INSTRUCTIONS (cached static prefix)\n" + TOOL_BLOCK * repeat + "\n"
 
 
 def percentile(xs, q):
@@ -53,76 +40,51 @@ def percentile(xs, q):
         return xs[0]
     pos = (len(xs) - 1) * q
     lo = int(pos)
-    frac = pos - lo
-    hi = min(lo + 1, len(xs) - 1)
-    return xs[lo] * (1 - frac) + xs[hi] * frac
+    return xs[lo] + (xs[min(lo + 1, len(xs) - 1)] - xs[lo]) * (pos - lo)
 
 
-def stream_request(url, model, system, user, max_tokens, cache_prompt):
-    """Fire one streaming chat request. Returns (ttft_s, itl_mean_s, e2e_s, n_tok)."""
-    body = json.dumps({
+def body(model, system, user, max_tokens, cache_prompt, stream=False):
+    return json.dumps({
         "model": model,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "temperature": 0.0,
         "max_tokens": max_tokens,
-        "stream": True,
+        "stream": stream,
         "cache_prompt": cache_prompt,
-    }).encode()
-    req = urllib.request.Request(url + "/v1/chat/completions", data=body,
-                                 headers={"Content-Type": "application/json"})
-    t0 = time.perf_counter()
-    t_first = None
-    n_tok = 0
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if payload == "[DONE]":
-                break
-            try:
-                obj = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            delta = obj.get("choices", [{}])[0].get("delta", {})
-            if delta.get("content"):
-                if t_first is None:
-                    t_first = time.perf_counter()
-                n_tok += 1
-    t_end = time.perf_counter()
-    if t_first is None:
+    })
+
+
+def curl_popen(url, payload, write_fmt="%{time_total}"):
+    """Launch a curl process (non-blocking). Returns the Popen handle."""
+    return subprocess.Popen(
+        ["curl", "-s", "-o", "/dev/null", "-w", write_fmt + "\n",
+         url + "/v1/chat/completions", "-H", "Content-Type: application/json",
+         "-d", payload],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+
+def curl_one(url, payload, write_fmt="%{time_total}"):
+    p = curl_popen(url, payload, write_fmt)
+    out, _ = p.communicate(timeout=180)
+    try:
+        return float(out.strip())
+    except (ValueError, AttributeError):
         return None
-    ttft = t_first - t0
-    e2e = t_end - t0
-    itl = (t_end - t_first) / max(n_tok - 1, 1)
-    return ttft, itl, e2e, n_tok
 
 
-def run_level(url, model, system, user, max_tokens, concurrency, n_requests):
-    results = []
-    lock = threading.Lock()
-
-    def worker(i):
+def run_concurrent(url, model, system, c, max_tokens, prefix_label):
+    """Fire c requests as concurrent curl processes; return list of time_total (s)."""
+    procs = [curl_popen(url, body(model, system, f"go {prefix_label}-{i}", max_tokens, True))
+             for i in range(c)]
+    out = []
+    for p in procs:
         try:
-            r = stream_request(url, model, system, f"{user} (variant {i})", max_tokens, True)
-            if r:
-                with lock:
-                    results.append(r)
-        except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"  request {i} failed: {e}\n")
-
-    t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        list(ex.map(worker, range(n_requests)))
-    wall = time.perf_counter() - t0
-    return results, wall
-
-
-def fmt_ms(xs):
-    return (f"p50={percentile(xs, 0.5)*1000:7.1f}  p90={percentile(xs, 0.9)*1000:7.1f}  "
-            f"p99={percentile(xs, 0.99)*1000:7.1f}  max={max(xs)*1000:7.1f}")
+            s, _ = p.communicate(timeout=180)
+            out.append(float(s.strip()))
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def main():
@@ -130,51 +92,56 @@ def main():
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--model", required=True)
     ap.add_argument("--concurrency", default="1,4,16,64")
-    ap.add_argument("--requests-per-level", type=int, default=0,
-                    help="0 = 4x concurrency (so every level does real fan-out)")
-    ap.add_argument("--max-tokens", type=int, default=64)
-    ap.add_argument("--prefix-repeat", type=int, default=24,
+    ap.add_argument("--itl-tokens", type=int, default=64,
+                    help="token count for the ITL measurement run")
+    ap.add_argument("--prefix-repeat", type=int, default=180,
                     help="repeats of the tool block in the static prefix (~tokens)")
     args = ap.parse_args()
 
     levels = [int(x) for x in args.concurrency.split(",")]
     system = static_prefix(args.prefix_repeat)
-    approx_prefix_tok = len(system) // 4
-    print(f"# imp agent-bench  model={args.model}")
-    print(f"# static prefix ~{approx_prefix_tok} tokens (cache_prompt pinned), "
-          f"max_tokens={args.max_tokens}\n")
+    print(f"# imp agent-bench  model={args.model}  (curl-process concurrency)")
+    print(f"# static prefix ~{len(system)//4} tokens (cache_prompt pinned)\n")
 
-    # Warm the model + clocks + prime the prefix cache (discarded).
-    sys.stderr.write("warming up (clocks + prefix cache)...\n")
+    # Warm model + clocks + prime the shared prefix cache (discarded).
+    sys.stderr.write("warming up...\n")
     for _ in range(2):
-        stream_request(args.url, args.model, system, "Warmup turn.", args.max_tokens, True)
+        curl_one(args.url, body(args.model, system, "warmup", 8, True))
 
-    # --- Cold vs warm cache TTFT (single stream, unique cold prefix) ---
-    # Nonce at the START so the entire block-hash chain is fresh (block hashes
-    # are parent-chained; a trailing marker would leave the prefix blocks warm
-    # from the warmup above and understate the cache win).
+    # --- Cold vs warm cache TTFT (max_tokens=1 = prefill + 1 token) ---
     cold_system = f"FRESH-COLD-{time.time_ns()}\n" + system
-    cold = stream_request(args.url, args.model, cold_system, "First turn.", args.max_tokens, True)
-    warm = stream_request(args.url, args.model, cold_system, "Second turn.", args.max_tokens, True)
-    print("## Prefix cache (single stream)")
+    cold = curl_one(args.url, body(args.model, cold_system, "first", 1, True))
+    warm = curl_one(args.url, body(args.model, cold_system, "second", 1, True))
+    print("## Prefix cache (single request, TTFT = max_tokens=1 time_total)")
     if cold and warm:
-        print(f"  cold TTFT = {cold[0]*1000:7.1f} ms   warm TTFT = {warm[0]*1000:7.1f} ms   "
-              f"speedup = {cold[0]/warm[0]:4.2f}x\n")
+        print(f"  cold = {cold*1000:7.1f} ms   warm = {warm*1000:7.1f} ms   "
+              f"speedup = {cold/warm:4.2f}x\n")
 
-    # --- TTFT / ITL under concurrency ---
-    print("## TTFT / ITL under concurrency (ms)")
+    # --- TTFT under concurrency (max_tokens=1) ---
+    print("## TTFT under concurrency (ms) — first content token, warm shared prefix")
+    ttft1 = {}
     for c in levels:
-        n = args.requests_per_level or max(c * 4, 8)
-        results, wall = run_level(args.url, args.model, system, "Summarize the tool list.",
-                                  args.max_tokens, c, n)
-        if not results:
+        ts = run_concurrent(args.url, args.model, system, c, 1, f"t{c}")
+        if not ts:
             print(f"  c={c:3d}: no successful requests")
             continue
-        ttfts = [r[0] for r in results]
-        itls = [r[1] for r in results]
-        thru = len(results) / wall
-        print(f"  c={c:3d} (n={len(results):3d})  TTFT {fmt_ms(ttfts)}")
-        print(f"            {'':17s}ITL  {fmt_ms(itls)}   throughput={thru:5.1f} req/s")
+        ttft1[c] = percentile(ts, 0.5)
+        print(f"  c={c:3d} (n={len(ts):3d})  p50={percentile(ts,0.5)*1000:7.1f}  "
+              f"p90={percentile(ts,0.9)*1000:7.1f}  p99={percentile(ts,0.99)*1000:7.1f}  "
+              f"max={max(ts)*1000:7.1f}")
+
+    # --- ITL under concurrency: (time_total(K) - TTFT) / (K-1) ---
+    K = args.itl_tokens
+    print(f"\n## Mean ITL under concurrency (ms) — from max_tokens={K} runs")
+    for c in levels:
+        ts = run_concurrent(args.url, args.model, system, c, K, f"i{c}")
+        if not ts or c not in ttft1:
+            continue
+        itls = [(t - ttft1[c]) / (K - 1) for t in ts if t > ttft1[c]]
+        if itls:
+            print(f"  c={c:3d}  ITL p50={percentile(itls,0.5)*1000:6.1f}  "
+                  f"p90={percentile(itls,0.9)*1000:6.1f}  "
+                  f"aggregate={c/percentile(ts,0.5):6.1f} tok/s")
     print()
 
 

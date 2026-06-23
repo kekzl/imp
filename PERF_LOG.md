@@ -4,6 +4,42 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-06-24 · CORRECTION — the "concurrency cliff" was a harness artifact
+
+The Phase-7 baseline below (c=16 TTFT 1443 ms, c=64 17376 ms) and the
+"concurrency-prefill cliff" it spawned were **wrong** — they measured the Python
+*client*, not the server. The threaded harness parsed N concurrent SSE streams in
+Python threads; at 16+ streams the GIL serializes the per-token JSON parsing, so
+the reported TTFT/ITL was the client's parsing throughput. Re-measured by driving
+each request with a separate **`curl` OS process** (true parallelism, no shared
+interpreter; TTFT = curl `time_total` for a `max_tokens=1` request = prefill + one
+decode = time to first content token):
+
+| concurrency | TTFT p50 (TRUE, curl) | old threaded harness | inflation |
+|---|---|---|---|
+| 1  |   37 ms |   225 ms | 6× |
+| 4  |   98 ms |   261 ms | 2.7× |
+| 16 |  237 ms |  1443 ms | 6× |
+| 64 |  905 ms | 17376 ms | **19×** |
+
+Prompt cache cold→warm (max_tokens=1): **207.7 → 28.9 ms = 7.2×** (the threaded
+harness's 1.67× was also GIL-depressed). Single-stream ITL is **~4.6 ms**, not the
+36 ms the threaded harness reported — even c=1 was client-bound.
+
+**Conclusion:** imp's server concurrency is GOOD — c=16 TTFT ~237 ms, c=64 ~905 ms
+on one RTX 5090 with a shared cached prefix. There is NO cliff. The earlier
+"prefill serialization / eager-dispatch" root-cause stands as a *modest, optional*
+lever (c=64's ~900 ms is ~64 cache-hit prefills at ~8 ms each + a decode step —
+batching the prefills could shave it) but it is NOT urgent and NOT a defect. The
+flagship optimization is **deprioritized**. The harness (`tools/agent_bench.py`)
+was rewritten to use curl-process concurrency; the numbers above are the real
+baseline. ITL still grows with concurrency (c=1 4.6 ms → c=64 ~594 ms) — that is
+the normal batched-decode latency↔throughput trade, working as intended.
+
+Lesson: never measure server concurrency with a GIL-bound single-process client.
+
+---
+
 ## 2026-06-24 · Concurrency cliff — profiled root cause (corrects earlier note)
 
 **Method:** env-gated per-step instrumentation (`IMP_PROFILE_STEPS`, reverted —
