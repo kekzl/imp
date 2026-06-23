@@ -3877,6 +3877,15 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             return false;
     }
 
+    // ---- ping (initial keepalive) -----------------------------------------
+    // Anthropic streams emit periodic `ping` events; sending one immediately
+    // signals liveness before the first token (TTFT can be >1s under load /
+    // long prefills), and the loop below re-pings during idle gaps so clients
+    // and intermediary proxies don't time out the connection.
+    if (!out.emit("ping", json{{"type", "ping"}}))
+        return false;
+    auto last_ping = std::chrono::steady_clock::now();
+
     int block_index = -1;
     AnthBlock open_block = AnthBlock::NONE;
 
@@ -4051,8 +4060,17 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
         }
 
         TokenEvent evt{};
-        if (!server_req->pop_token(evt))
+        if (!server_req->pop_token(evt)) {
+            // No token ready yet (prefill / generation gap). Re-ping at most
+            // every ~10s so idle streams stay alive without spamming.
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_ping > std::chrono::seconds(10)) {
+                last_ping = now;
+                if (!out.emit("ping", json{{"type", "ping"}}))
+                    break;
+            }
             continue;
+        }
 
         if (evt.token_id < 0) {
             finish = evt.finish_reason ? evt.finish_reason : "stop";
