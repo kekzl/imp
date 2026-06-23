@@ -144,7 +144,25 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
         int csz = (chunk_len - c < mb) ? (chunk_len - c) : mb;
         Tensor hc = hidden_all.slice(c, c + csz);          // [csz, d]
         Tensor lg = view_tokens(logits_, csz);             // [csz, V]
-        if (lm_is_nvfp4) {
+        bool lm_cutlass_done = false;
+        if (lm_is_nvfp4 && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
+            qscratch_.cutlass_act_sf != nullptr) {
+            // Same NVFP4-activation tensor-core path as batched decode — lets the
+            // perplexity harness measure its quality (the per-row GEMV below keeps
+            // FP16 activations, so toggling gemm.nvfp4_lm_head_cutlass gives the
+            // PPL trade directly). NVFP4 act quant is per-row, so the M dimension
+            // (csz) affects only speed, not the measured quality.
+            Tensor noc = view_tokens(norm_out_, csz);
+            rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
+            quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
+                                           csz, cfg.d_model, stream);
+            lm_cutlass_done = gemm_nvfp4_cutlass_sm120_fp32(
+                qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_,
+                static_cast<float*>(lg.data), csz, cfg.vocab_size, cfg.d_model, nullptr, 0, stream);
+        }
+        if (lm_cutlass_done) {
+            // logits already written
+        } else if (lm_is_nvfp4) {
             Tensor no_row = view_tokens(norm_out_, 1);
             for (int r = 0; r < csz; ++r) {
                 Tensor h_row = hc.slice(r, r + 1);

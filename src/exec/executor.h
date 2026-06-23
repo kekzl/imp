@@ -166,6 +166,14 @@ public:
     // fallback continues to use lazy cudaMalloc on non-captured streams.
     bool allocate_nvfp4_dequant_workspace();
 
+    // Build a CUTLASS NVFP4 weight for the LM head so batched decode (n>1) can
+    // do a single tensor-core GEMM (weight read once) instead of the per-row /
+    // batched-M GEMV (weight read ceil(M/4)x). Only the SfAtom scale buffer is
+    // allocated (~vocab*d_model/16 bytes); the FP4 data is borrowed from the
+    // NVFP4 decode cache. No-op unless serving (max_logit_tokens_ > 1) and the
+    // LM head is NVFP4. Must run AFTER pre_dequant_weights().
+    void build_lm_head_cutlass_(cudaStream_t stream);
+
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
         kv_layer_map_ = std::move(map);
@@ -432,6 +440,12 @@ private:
 
     // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
     QuantScratch qscratch_;
+
+    // CUTLASS NVFP4 LM head for batched-decode (n>1) tensor-core GEMM. Borrows
+    // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.
+    // Built by build_lm_head_cutlass_() when serving; freed in the destructor.
+    CutlassNvFP4Weight lm_head_cutlass_{};
+    bool lm_head_cutlass_ready_ = false;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output

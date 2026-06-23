@@ -218,6 +218,10 @@ bool Engine::init_kv_cache() {
     // multi-token verify / spec-decode) run inside CUDA stream capture
     // without crashing on cudaMalloc.
     (void)executor_->allocate_nvfp4_dequant_workspace();
+    // Build the CUTLASS NVFP4 LM head for batched-decode tensor-core GEMM (no-op
+    // unless serving with max_batch>1 and the LM head is NVFP4). Must come AFTER
+    // pre_dequant_weights so the NVFP4 decode cache exists.
+    executor_->build_lm_head_cutlass_(stream_);
     if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 
