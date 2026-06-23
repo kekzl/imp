@@ -14,6 +14,21 @@ static constexpr int ARGMAX_NBLOCKS = 64;
 static constexpr size_t ARGMAX_SCRATCH_BYTES = sizeof(int32_t) +
                                                ARGMAX_NBLOCKS * (sizeof(float) + sizeof(int32_t));
 
+// Multi-block top-k/top-p sampling scratch. The single-block sampler used 1 of
+// 170 SMs (~737 us/call, the #1 GPU consumer in batched decode); the two-phase
+// multi-block sampler spreads the full-vocab scans across SAMPLE_NBLOCKS blocks.
+// Phase 1 writes, per block: block_max, block_sum, and the block's top_k logit
+// candidates; phase 2 merges them, applies top-p and samples. Any buffer passed
+// as d_result to the top-k/top-p path must be at least SAMPLE_SCRATCH_BYTES so
+// the partials can live right after the int32 result (graph-capture safe — no
+// allocation during capture). SAMPLE_SCRATCH_BYTES >= ARGMAX_SCRATCH_BYTES, so
+// the same buffer also backs the greedy multi-block path.
+static constexpr int SAMPLE_NBLOCKS = 64;
+static constexpr int SAMPLE_MAX_TOP_K = 128;
+static constexpr size_t SAMPLE_SCRATCH_BYTES =
+    sizeof(int32_t) + SAMPLE_NBLOCKS * (2 * sizeof(float) +
+                                        SAMPLE_MAX_TOP_K * (sizeof(float) + sizeof(int32_t)));
+
 // Greedy: argmax over logits
 int32_t sample_greedy(const Tensor& logits, cudaStream_t stream = nullptr);
 

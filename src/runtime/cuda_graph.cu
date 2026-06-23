@@ -622,9 +622,10 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     cudaError_t err;
 
     // ---- Allocate device state ----
-    // Must be ARGMAX_SCRATCH_BYTES — sample_greedy_device uses multi-block
-    // argmax that writes partial reduction arrays after the result token.
-    err = cudaMalloc(&d_token_id_, ARGMAX_SCRATCH_BYTES);
+    // Must be SAMPLE_SCRATCH_BYTES — both samplers write multi-block partial
+    // reduction arrays after the result token (greedy argmax: ARGMAX scratch;
+    // top-k/top-p: the larger SAMPLE scratch). SAMPLE_SCRATCH_BYTES covers both.
+    err = cudaMalloc(&d_token_id_, SAMPLE_SCRATCH_BYTES);
     if (err != cudaSuccess)
         goto fail;
     err = cudaMalloc(&d_position_, sizeof(int));

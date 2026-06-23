@@ -322,10 +322,11 @@ size_t Workspace::workspace_estimate() const {
         auxiliary += max_elems * sizeof(uint16_t);
     }
 
-    // Sampling result (ARGMAX_SCRATCH_BYTES ~16 KiB) + MMVQ scratch + split-K scratch
+    // Sampling result (SAMPLE_SCRATCH_BYTES ~65 KiB, multi-block top-k/top-p
+    // partials) + MMVQ scratch + split-K scratch
     int nh_est = cfg.n_heads;
     int hd_est = cfg.head_dim > 0 ? cfg.head_dim : (d / nh_est);
-    auxiliary += 16 * 1024;   // sampling
+    auxiliary += 128 * 1024;  // sampling (covers SAMPLE_SCRATCH_BYTES)
     auxiliary += 256 * 1024;  // MMVQ scratch (conservative)
     auxiliary += static_cast<size_t>(*max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
                  sizeof(float);  // split-K

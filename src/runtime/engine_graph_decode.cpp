@@ -331,7 +331,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     auto& p = cpipe_;
     if (cudaMalloc(&p.d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
         return false;
-    bool ok = cudaMalloc(&p.d_token, ARGMAX_SCRATCH_BYTES) == cudaSuccess &&
+    bool ok = cudaMalloc(&p.d_token, SAMPLE_SCRATCH_BYTES) == cudaSuccess &&
               cudaMalloc(&p.d_pos, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&p.d_ctx, sizeof(int)) == cudaSuccess &&
               cudaHostAlloc(&p.h_token, sizeof(int32_t), cudaHostAllocDefault) == cudaSuccess &&

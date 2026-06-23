@@ -17,17 +17,6 @@ namespace imp {
 static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
 
-namespace {
-
-// Shared memory size for topk_topp_sample_kernel.
-static inline size_t topk_topp_smem_size(int top_k) {
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    return static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int)) + BLOCK_SIZE * sizeof(float) +
-           2 * sizeof(float) + NUM_WARPS * top_k * (sizeof(float) + sizeof(int));
-}
-
-}  // anonymous namespace
-
 // ============================================================================
 // Greedy sampling (argmax)
 // ============================================================================
@@ -235,213 +224,41 @@ __device__ __forceinline__ float lcg_rand_float(unsigned int& state) {
     return static_cast<float>(lcg_rand(state)) / 4294967296.0f;
 }
 
-// Full top-k + top-p sampling in a single block.
+// ============================================================================
+// Multi-block top-k + top-p sampling (two phases).
 //
-// Strategy (single block, BLOCK_SIZE threads):
-//   1. Find global max for numerical stability of softmax.
-//   2. Compute exp(logits[i] - max) and the sum across all elements.
-//   3. Each thread maintains a local top-k heap of (prob, index) pairs.
-//   4. Merge the per-thread heaps into a shared top-k list.
-//   5. Sort the shared top-k list by descending probability.
-//   6. Cumulative sum; find top-p cutoff.
-//   7. Renormalize remaining probabilities and sample using LCG RNG.
+// The original single-block kernel ran <<<1, BLOCK_SIZE>>>, using 1 of 170 SMs,
+// and scanned the full vocab (~150k) three times — ~737 us/call, the #1 GPU
+// consumer in batched server decode (profiled 2026-06-23). This splits the
+// full-vocab work across SAMPLE_NBLOCKS blocks.
 //
-// For the per-thread local top-k, we use a simple insertion-sorted array
-// (k is typically small, e.g. 2-50).
-//
-// Because top_k can vary at runtime, we cap it at a compile-time maximum
-// and branch on the actual value.
-static constexpr int MAX_TOP_K = 128;
+// Phase 1 (multi-block): each block scans a strided vocab subset and emits
+//   block_max, block_sum (= sum exp((logit-block_max)*invT)), and the block's
+//   top_k *logits* (sorted desc) into candidate scratch. Candidates store
+//   logits, not probabilities, so the global softmax can be applied in phase 2.
+// Phase 2 (single block): merges block partials into the global max/sum via the
+//   online-softmax rescale, k-way merges the SAMPLE_NBLOCKS candidate lists into
+//   the global top_k, converts to probabilities, applies top-p and samples with
+//   the same LCG as before. Distribution-identical to the old kernel (not
+//   bit-identical: reduction order differs).
+// ============================================================================
 
-__global__ void topk_topp_sample_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
-                                        float top_p, float inv_temperature, unsigned int seed,
-                                        int32_t* __restrict__ d_result) {
-    // --- Shared memory layout ---
-    // We use dynamic shared memory to hold the merged top-k candidates.
-    extern __shared__ char smem_raw[];
-
-    // Partition shared memory:
-    //   float  s_topk_val[top_k]    -- merged top-k probabilities
-    //   int    s_topk_idx[top_k]    -- merged top-k vocab indices
-    //   float  s_reduce[BLOCK_SIZE] -- scratch for reductions
-    float* s_topk_val = reinterpret_cast<float*>(smem_raw);
-    int* s_topk_idx = reinterpret_cast<int*>(s_topk_val + top_k);
-    float* s_reduce = reinterpret_cast<float*>(s_topk_idx + top_k);
-    // Additional single-value shared vars
-    float* s_global_max = s_reduce + BLOCK_SIZE;  // 1 float
-    float* s_global_sum = s_global_max + 1;       // 1 float
-
+// Block-cooperative top-k selection. Each thread passes its own (unsorted) local
+// candidate list; produces the block's global top_k (sorted desc, tie-break by
+// smaller index) in out_val/out_idx (may be smem or global, written by thread 0).
+// s_warp_vals/idxs: smem scratch of NUM_WARPS*top_k each. Caller must have all
+// threads reach this with their local arrays populated.
+__device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_idxs, int local_count,
+                                                  int top_k, float* s_warp_vals, int* s_warp_idxs,
+                                                  float* out_val, int* out_idx) {
     const int tid = threadIdx.x;
-
-    // ---- Step 1: Find global max (for softmax numerical stability) ----
-    float local_max = -FLT_MAX;
-    for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float v = logits[i];
-        if (v > local_max)
-            local_max = v;
-    }
-    // Warp reduction
-    local_max = warp_reduce_max(local_max);
-    // Store per-warp result
-    s_reduce[tid] = -FLT_MAX;
-    __syncthreads();
-    if (tid % WARP_SIZE == 0)
-        s_reduce[tid / WARP_SIZE] = local_max;
-    __syncthreads();
-    // Thread 0 reduces across warps
-    if (tid == 0) {
-        float mx = -FLT_MAX;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; ++w) {
-            if (s_reduce[w] > mx)
-                mx = s_reduce[w];
-        }
-        s_global_max[0] = mx;
-    }
-    __syncthreads();
-    float gmax = s_global_max[0];
-
-    // ---- Step 2: Compute exp((logits[i] - gmax) * inv_temperature) and partial sum ----
-    // Temperature is folded into the softmax: softmax(logits/T) = softmax((logits-max)/T)
-    float local_sum = 0.0f;
-    for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float e = expf((logits[i] - gmax) * inv_temperature);
-        local_sum += e;
-    }
-    // Warp reduction for sum
-    local_sum = warp_reduce_sum(local_sum);
-    s_reduce[tid] = 0.0f;
-    __syncthreads();
-    if (tid % WARP_SIZE == 0)
-        s_reduce[tid / WARP_SIZE] = local_sum;
-    __syncthreads();
-    if (tid == 0) {
-        float sm = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; ++w)
-            sm += s_reduce[w];
-        s_global_sum[0] = sm;
-    }
-    __syncthreads();
-    float inv_sum = 1.0f / s_global_sum[0];
-
-    // ---- Step 3: Each thread maintains a local top-k min-heap ----
-    // We store local_k pairs in registers (capped at MAX_TOP_K per thread,
-    // but we only need top_k total, so each thread keeps top_k candidates
-    // and we merge later).
-    // For efficiency, limit per-thread candidates to top_k.
-    int local_k = min(top_k, MAX_TOP_K);
-
-    float local_vals[MAX_TOP_K];
-    int local_idxs[MAX_TOP_K];
-    int local_count = 0;
-    float local_min_val = -FLT_MAX;  // min of current heap
-    int local_min_pos = 0;
-
-    for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float prob = expf((logits[i] - gmax) * inv_temperature) * inv_sum;
-        if (local_count < local_k) {
-            local_vals[local_count] = prob;
-            local_idxs[local_count] = i;
-            local_count++;
-            // Recompute min
-            if (local_count == local_k) {
-                local_min_val = local_vals[0];
-                local_min_pos = 0;
-                for (int j = 1; j < local_k; ++j) {
-                    if (local_vals[j] < local_min_val) {
-                        local_min_val = local_vals[j];
-                        local_min_pos = j;
-                    }
-                }
-            }
-        } else if (prob > local_min_val) {
-            // Replace the minimum
-            local_vals[local_min_pos] = prob;
-            local_idxs[local_min_pos] = i;
-            // Recompute min
-            local_min_val = local_vals[0];
-            local_min_pos = 0;
-            for (int j = 1; j < local_k; ++j) {
-                if (local_vals[j] < local_min_val) {
-                    local_min_val = local_vals[j];
-                    local_min_pos = j;
-                }
-            }
-        }
-    }
-
-    // ---- Step 4: Merge per-thread top-k into shared top-k ----
-    // Initialize shared top-k with very small values
-    if (tid < top_k) {
-        s_topk_val[tid] = -1.0f;
-        s_topk_idx[tid] = -1;
-    }
-    __syncthreads();
-
-    // Each thread tries to insert its local candidates into the shared top-k.
-    // We use atomicAdd-free approach: since we only need approximate top-k and
-    // k is small, each thread serially tries to insert.
-    // For correctness, we do a simple serial merge: threads go one at a time
-    // through a lock, which is slow but k*BLOCK_SIZE is typically <32K ops.
-    // Better approach: gather all local candidates to shared memory, then
-    // do a parallel selection.
-
-    // Gather: each thread writes its local_count candidates to a staging area.
-    // staging area: BLOCK_SIZE * local_k entries in shared memory (too large).
-    // Instead, we iterate: each thread contributes candidates in waves.
-
-    // Practical approach: thread 0 gathers from all threads sequentially.
-    // We store each thread's candidates to shared memory in batches.
-
-    // Actually the simplest correct approach: have all threads write their
-    // candidates to global memory scratch, then single-thread select top-k.
-    // But that's wasteful. Instead, use a tournament approach:
-
-    // Simple approach for small top_k: serialize through shared memory.
-    // Each thread, in turn, merges its candidates into the shared top-k.
-    // We process threads in parallel within warps using warp-level primitives.
-
-    // Pragmatic: For correctness and simplicity, we use a shared-memory
-    // min-value approach. Each thread iterates over its local candidates.
-    // For each candidate, if it's larger than the current shared minimum,
-    // the thread atomically tries to replace the minimum.
-    // We use a spinlock per shared-memory slot -- too complex.
-
-    // Final practical approach: Use a two-phase parallel merge.
-    // Phase 1: Each of the 8 warps produces a warp-level top-k by
-    //          reducing lane-local candidates across the warp.
-    // Phase 2: Thread 0 merges the 8 warp-level top-k lists.
-
-    // Phase 1: Warp-level merge
-    // Each warp has 32 threads, each with up to local_k candidates.
-    // Total per warp: up to 32 * local_k candidates; we want the top_k.
-    // We iterate top_k times: in each iteration, every lane broadcasts its
-    // best remaining candidate; the warp selects the global best; the lane
-    // owning that candidate removes it.
-
     const int warp_id = tid / WARP_SIZE;
     const int lane_id = tid % WARP_SIZE;
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
 
-    // Shared memory for warp-level top-k results: NUM_WARPS * top_k
-    // We'll reuse s_reduce area which has BLOCK_SIZE floats + 2 extra.
-    // That's 258 floats = 1032 bytes.  We need NUM_WARPS * top_k * (float + int).
-    // For top_k = 50, NUM_WARPS = 8: 400 floats + 400 ints = 3200 bytes.
-    // We already have s_topk_val/idx for final result.
-    // Let's allocate per-warp results after s_global_sum.
-    float* s_warp_vals = s_global_sum + 1;  // NUM_WARPS * top_k floats
-    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
-
-    // Pointer to this warp's output area
-    float* my_warp_vals = s_warp_vals + warp_id * top_k;
-    int* my_warp_idxs = s_warp_idxs + warp_id * top_k;
-
-    // Each lane has local candidates in registers.
-    // We'll iterate top_k times to extract the top_k from the warp.
-    int my_ptr = 0;  // next candidate to offer from local sorted order
-
-    // Pre-sort local candidates in descending order (insertion sort, local_k is small)
-    for (int i = 0; i < local_count - 1; ++i) {
-        for (int j = i + 1; j < local_count; ++j) {
+    // sort this thread's candidates descending (local_count is small)
+    for (int i = 0; i < local_count - 1; ++i)
+        for (int j = i + 1; j < local_count; ++j)
             if (local_vals[j] > local_vals[i]) {
                 float tv = local_vals[i];
                 local_vals[i] = local_vals[j];
@@ -450,111 +267,301 @@ __global__ void topk_topp_sample_kernel(const float* __restrict__ logits, int vo
                 local_idxs[i] = local_idxs[j];
                 local_idxs[j] = ti;
             }
-        }
-    }
 
-    for (int k_iter = 0; k_iter < top_k; ++k_iter) {
-        // Each lane offers its best remaining candidate
-        float my_best_val = (my_ptr < local_count) ? local_vals[my_ptr] : -1.0f;
-        int my_best_idx = (my_ptr < local_count) ? local_idxs[my_ptr] : -1;
-
-        // Warp reduction to find the max
-        float best_val = my_best_val;
-        int best_idx = my_best_idx;
-        int best_lane = lane_id;
-
+    // each warp produces a sorted top_k list via repeated warp-max extraction
+    float* my_warp_vals = s_warp_vals + warp_id * top_k;
+    int* my_warp_idxs = s_warp_idxs + warp_id * top_k;
+    int my_ptr = 0;
+    for (int ki = 0; ki < top_k; ++ki) {
+        float bv = (my_ptr < local_count) ? local_vals[my_ptr] : -FLT_MAX;
+        int bi = (my_ptr < local_count) ? local_idxs[my_ptr] : -1;
+        int bl = lane_id;
 #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-            float other_val = __shfl_xor_sync(0xFFFFFFFF, best_val, offset);
-            int other_idx = __shfl_xor_sync(0xFFFFFFFF, best_idx, offset);
-            int other_lane = __shfl_xor_sync(0xFFFFFFFF, best_lane, offset);
-            if (other_val > best_val || (other_val == best_val && other_lane < best_lane)) {
-                best_val = other_val;
-                best_idx = other_idx;
-                best_lane = other_lane;
+        for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+            float ov = __shfl_xor_sync(0xFFFFFFFF, bv, off);
+            int oi = __shfl_xor_sync(0xFFFFFFFF, bi, off);
+            int ol = __shfl_xor_sync(0xFFFFFFFF, bl, off);
+            if (ov > bv || (ov == bv && oi >= 0 && (bi < 0 || oi < bi))) {
+                bv = ov;
+                bi = oi;
+                bl = ol;
             }
         }
-
-        // The winning lane advances its pointer
-        if (lane_id == best_lane && best_val >= 0.0f) {
+        if (lane_id == bl && my_ptr < local_count)
             my_ptr++;
-        }
-
-        // Lane 0 writes the result for this warp
         if (lane_id == 0) {
-            my_warp_vals[k_iter] = best_val;
-            my_warp_idxs[k_iter] = best_idx;
+            my_warp_vals[ki] = bv;
+            my_warp_idxs[ki] = bi;
         }
     }
     __syncthreads();
 
-    // Phase 2: Thread 0 merges NUM_WARPS * top_k candidates into final top_k
+    // thread 0: k-way merge of the NUM_WARPS sorted lists into the block top_k
     if (tid == 0) {
-        // We have NUM_WARPS sorted lists, each of length top_k.
-        // Merge using pointers (like k-way merge).
         int ptrs[NUM_WARPS];
         for (int w = 0; w < NUM_WARPS; ++w)
             ptrs[w] = 0;
-
-        for (int k_iter = 0; k_iter < top_k; ++k_iter) {
-            float best_val = -1.0f;
-            int best_idx = -1;
-            int best_warp = 0;
+        for (int ki = 0; ki < top_k; ++ki) {
+            float bv = -FLT_MAX;
+            int bi = -1;
+            int bw = 0;
             for (int w = 0; w < NUM_WARPS; ++w) {
                 if (ptrs[w] < top_k) {
                     float v = s_warp_vals[w * top_k + ptrs[w]];
-                    if (v > best_val) {
-                        best_val = v;
-                        best_idx = s_warp_idxs[w * top_k + ptrs[w]];
-                        best_warp = w;
+                    int idx = s_warp_idxs[w * top_k + ptrs[w]];
+                    if (idx >= 0 && (v > bv || (v == bv && (bi < 0 || idx < bi)))) {
+                        bv = v;
+                        bi = idx;
+                        bw = w;
                     }
                 }
             }
-            s_topk_val[k_iter] = best_val;
-            s_topk_idx[k_iter] = best_idx;
-            ptrs[best_warp]++;
+            out_val[ki] = bv;
+            out_idx[ki] = bi;
+            if (bi >= 0)
+                ptrs[bw]++;
         }
-    }
-    __syncthreads();
-
-    // ---- Step 5: Top-p filtering and sampling (thread 0) ----
-    if (tid == 0) {
-        // s_topk_val is already sorted descending from the merge.
-        // Compute cumulative sum and find top-p cutoff.
-        float cumsum = 0.0f;
-        int cutoff = top_k;
-        for (int i = 0; i < top_k; ++i) {
-            cumsum += s_topk_val[i];
-            if (cumsum >= top_p) {
-                cutoff = i + 1;
-                break;
-            }
-        }
-
-        // Renormalize the remaining candidates
-        float norm = 0.0f;
-        for (int i = 0; i < cutoff; ++i) {
-            norm += s_topk_val[i];
-        }
-        float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-
-        // Sample using LCG RNG
-        unsigned int rng_state = seed;
-        float r = lcg_rand_float(rng_state);
-
-        float acc = 0.0f;
-        int chosen = s_topk_idx[0];  // fallback
-        for (int i = 0; i < cutoff; ++i) {
-            acc += s_topk_val[i] * inv_norm;
-            if (r < acc) {
-                chosen = s_topk_idx[i];
-                break;
-            }
-        }
-
-        d_result[0] = static_cast<int32_t>(chosen);
     }
 }
+
+// Phase 1: per-block max, sum, and top_k logit candidates over a strided subset.
+__global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
+                                    float inv_temperature, float* __restrict__ block_max_out,
+                                    float* __restrict__ block_sum_out, float* __restrict__ cand_val_out,
+                                    int* __restrict__ cand_idx_out) {
+    extern __shared__ char smem_raw[];
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    float* s_reduce = reinterpret_cast<float*>(smem_raw);  // BLOCK_SIZE
+    float* s_gmax = s_reduce + BLOCK_SIZE;                 // 1
+    float* s_gsum = s_gmax + 1;                            // 1
+    float* s_warp_vals = s_gsum + 1;                       // NUM_WARPS * top_k
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
+
+    const int tid = threadIdx.x;
+    const int gstride = blockDim.x * gridDim.x;
+    const int gstart = blockIdx.x * blockDim.x + tid;
+
+    // ---- block max over strided subset ----
+    float local_max = -FLT_MAX;
+    for (int i = gstart; i < vocab_size; i += gstride) {
+        float v = logits[i];
+        if (v > local_max)
+            local_max = v;
+    }
+    local_max = warp_reduce_max(local_max);
+    s_reduce[tid] = -FLT_MAX;
+    __syncthreads();
+    if (tid % WARP_SIZE == 0)
+        s_reduce[tid / WARP_SIZE] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float mx = -FLT_MAX;
+        for (int w = 0; w < NUM_WARPS; ++w)
+            if (s_reduce[w] > mx)
+                mx = s_reduce[w];
+        s_gmax[0] = mx;
+    }
+    __syncthreads();
+    float bmax = s_gmax[0];
+
+    // ---- block sum exp((logit-bmax)*invT) ----
+    float local_sum = 0.0f;
+    if (bmax > -FLT_MAX) {
+        for (int i = gstart; i < vocab_size; i += gstride)
+            local_sum += expf((logits[i] - bmax) * inv_temperature);
+    }
+    local_sum = warp_reduce_sum(local_sum);
+    s_reduce[tid] = 0.0f;
+    __syncthreads();
+    if (tid % WARP_SIZE == 0)
+        s_reduce[tid / WARP_SIZE] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < NUM_WARPS; ++w)
+            sm += s_reduce[w];
+        block_max_out[blockIdx.x] = bmax;
+        block_sum_out[blockIdx.x] = sm;
+    }
+
+    // ---- per-thread top_k by logit over the subset ----
+    int local_k = min(top_k, SAMPLE_MAX_TOP_K);
+    float local_vals[SAMPLE_MAX_TOP_K];
+    int local_idxs[SAMPLE_MAX_TOP_K];
+    int local_count = 0;
+    float local_min_val = -FLT_MAX;
+    int local_min_pos = 0;
+    for (int i = gstart; i < vocab_size; i += gstride) {
+        float v = logits[i];
+        if (local_count < local_k) {
+            local_vals[local_count] = v;
+            local_idxs[local_count] = i;
+            local_count++;
+            if (local_count == local_k) {
+                local_min_val = local_vals[0];
+                local_min_pos = 0;
+                for (int j = 1; j < local_k; ++j)
+                    if (local_vals[j] < local_min_val) {
+                        local_min_val = local_vals[j];
+                        local_min_pos = j;
+                    }
+            }
+        } else if (v > local_min_val) {
+            local_vals[local_min_pos] = v;
+            local_idxs[local_min_pos] = i;
+            local_min_val = local_vals[0];
+            local_min_pos = 0;
+            for (int j = 1; j < local_k; ++j)
+                if (local_vals[j] < local_min_val) {
+                    local_min_val = local_vals[j];
+                    local_min_pos = j;
+                }
+        }
+    }
+    // reduce per-thread candidates into the block's top_k (sorted desc) → scratch
+    block_reduce_topk(local_vals, local_idxs, local_count, top_k, s_warp_vals, s_warp_idxs,
+                      cand_val_out + static_cast<size_t>(blockIdx.x) * top_k,
+                      cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
+}
+
+// Phase 2: merge the per-block candidate lists into the global top_k, apply
+// top-p and sample. All threads cooperate to select the global top_k from the
+// candidate pool (block_reduce_topk over the SAMPLE_NBLOCKS*top_k candidates read
+// straight from global — coalesced, no big smem staging); only the final
+// top-p/sample over top_k entries is serial. Runs inside graph capture.
+__global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
+                                     int n_blocks, const float* __restrict__ block_max_in,
+                                     const float* __restrict__ block_sum_in,
+                                     const float* __restrict__ cand_val_in,
+                                     const int* __restrict__ cand_idx_in, int32_t* __restrict__ d_result) {
+    extern __shared__ char smem_raw[];
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    float* s_warp_vals = reinterpret_cast<float*>(smem_raw);  // NUM_WARPS * top_k
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
+    float* s_val = reinterpret_cast<float*>(s_warp_idxs + NUM_WARPS * top_k);  // top_k
+    int* s_idx = reinterpret_cast<int*>(s_val + top_k);                        // top_k
+
+    const int tid = threadIdx.x;
+    const int n_cand = n_blocks * top_k;
+
+    // each thread builds a local top_k over its slice of the candidate pool
+    int local_k = min(top_k, SAMPLE_MAX_TOP_K);
+    float local_vals[SAMPLE_MAX_TOP_K];
+    int local_idxs[SAMPLE_MAX_TOP_K];
+    int local_count = 0;
+    float local_min_val = -FLT_MAX;
+    int local_min_pos = 0;
+    for (int i = tid; i < n_cand; i += blockDim.x) {
+        int idx = cand_idx_in[i];
+        if (idx < 0)
+            continue;
+        float v = cand_val_in[i];
+        if (local_count < local_k) {
+            local_vals[local_count] = v;
+            local_idxs[local_count] = idx;
+            local_count++;
+            if (local_count == local_k) {
+                local_min_val = local_vals[0];
+                local_min_pos = 0;
+                for (int j = 1; j < local_k; ++j)
+                    if (local_vals[j] < local_min_val) {
+                        local_min_val = local_vals[j];
+                        local_min_pos = j;
+                    }
+            }
+        } else if (v > local_min_val) {
+            local_vals[local_min_pos] = v;
+            local_idxs[local_min_pos] = idx;
+            local_min_val = local_vals[0];
+            local_min_pos = 0;
+            for (int j = 1; j < local_k; ++j)
+                if (local_vals[j] < local_min_val) {
+                    local_min_val = local_vals[j];
+                    local_min_pos = j;
+                }
+        }
+    }
+    block_reduce_topk(local_vals, local_idxs, local_count, top_k, s_warp_vals, s_warp_idxs, s_val, s_idx);
+
+    if (tid != 0)
+        return;
+
+    // global max + online-softmax-merged global sum (block partials are tiny)
+    float gmax = -FLT_MAX;
+    for (int b = 0; b < n_blocks; ++b)
+        if (block_max_in[b] > gmax)
+            gmax = block_max_in[b];
+    float gsum = 0.0f;
+    for (int b = 0; b < n_blocks; ++b) {
+        float bm = block_max_in[b];
+        if (bm > -FLT_MAX)
+            gsum += block_sum_in[b] * expf((bm - gmax) * inv_temperature);
+    }
+    float inv_sum = (gsum > 0.0f) ? (1.0f / gsum) : 1.0f;
+
+    // logits -> probabilities (global softmax), top-p cutoff, renormalize, sample
+    for (int i = 0; i < top_k; ++i) {
+        if (s_idx[i] >= 0)
+            s_val[i] = expf((s_val[i] - gmax) * inv_temperature) * inv_sum;
+        else
+            s_val[i] = 0.0f;
+    }
+    float cumsum = 0.0f;
+    int cutoff = top_k;
+    for (int i = 0; i < top_k; ++i) {
+        cumsum += s_val[i];
+        if (cumsum >= top_p) {
+            cutoff = i + 1;
+            break;
+        }
+    }
+    float norm = 0.0f;
+    for (int i = 0; i < cutoff; ++i)
+        norm += s_val[i];
+    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+
+    unsigned int rng_state = seed;
+    float r = lcg_rand_float(rng_state);
+    float acc = 0.0f;
+    int chosen = s_idx[0];
+    for (int i = 0; i < cutoff; ++i) {
+        acc += s_val[i] * inv_norm;
+        if (r < acc) {
+            chosen = s_idx[i];
+            break;
+        }
+    }
+    d_result[0] = static_cast<int32_t>(chosen);
+}
+
+// Launch the two-phase multi-block sampler. Scratch lives right after d_result
+// (caller guarantees >= SAMPLE_SCRATCH_BYTES). Both kernels are graph-capturable
+// (no allocation, fixed topology for a given vocab_size/top_k).
+static void launch_topk_topp_multiblock(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                        float inv_temperature, unsigned int seed, int32_t* d_result,
+                                        cudaStream_t stream) {
+    char* base = reinterpret_cast<char*>(d_result);
+    float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
+    float* block_sum = block_max + SAMPLE_NBLOCKS;
+    float* cand_val = block_sum + SAMPLE_NBLOCKS;
+    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * top_k);
+
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // both phases use NUM_WARPS*top_k warp-merge scratch; phase 1 also needs the
+    // block reduction scratch, phase 2 the merged top_k output.
+    size_t smem1 = static_cast<size_t>(BLOCK_SIZE) * sizeof(float) + 2 * sizeof(float) +
+                   static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int));
+    size_t smem2 = static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int)) +
+                   static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int));
+
+    topk_partial_kernel<<<SAMPLE_NBLOCKS, BLOCK_SIZE, smem1, stream>>>(
+        d_logits, vocab_size, top_k, inv_temperature, block_max, block_sum, cand_val, cand_idx);
+    topk_finalize_kernel<<<1, BLOCK_SIZE, smem2, stream>>>(top_k, top_p, inv_temperature, seed,
+                                                           SAMPLE_NBLOCKS, block_max, block_sum, cand_val,
+                                                           cand_idx, d_result);
+}
+
+static constexpr int MAX_TOP_K = 128;
 
 // ============================================================================
 // CUB-based top-k sampling for k > MAX_TOP_K (128).
@@ -892,10 +899,7 @@ static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int 
         return result;
     }
 
-    size_t smem_bytes = topk_topp_smem_size(top_k);
-
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_logits, vocab_size, top_k, top_p,
-                                                                   inv_temperature, seed, d_result);
+    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
@@ -918,7 +922,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
     float inv_temperature = 1.0f / temperature;
 
     int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+    if (cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES) != cudaSuccess) {
         IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
         return 0;
     }
@@ -978,10 +982,7 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    size_t smem_bytes = topk_topp_smem_size(top_k);
-
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_logits, vocab_size, top_k, top_p,
-                                                                   inv_temperature, seed, d_result);
+    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
 
     // Async copy to mapped pinned memory — no sync needed.
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
