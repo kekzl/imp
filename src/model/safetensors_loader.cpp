@@ -1102,19 +1102,27 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // executor_pre_dequant.cu's Phase 0 promote() resolves each scratch key
     // back to the main weight tensor and writes the device pointer onto its
     // .scales / .tensor_scale sidecars. No load-side linking needed here.
-    // MXFP4 detection. We surface the format declaration but do NOT have a
-    // SafeTensors decode path yet — only the GGUF wire format is decoded.
-    // The warn here lets users know they need to convert to GGUF.
+    // MXFP4 detection. gpt-oss MXFP4 experts ARE decoded natively: they are
+    // transcoded MXFP4→NVFP4 at init (pre_dequant_phase3_nvfp4_decode.cu) and
+    // run through the CUTLASS NVFP4 grouped GEMM. Other MXFP4 SafeTensors
+    // architectures have no decode path yet — only those still need the GGUF
+    // conversion warning.
     HFConfigLoader::MxFP4Config mxfp4_cfg;
     if (HFConfigLoader::load_mxfp4_config(model_dir, mxfp4_cfg)) {
         cfg.is_mxfp4_prequant = true;
         cfg.mxfp4_block_size = mxfp4_cfg.block_size;
-        IMP_LOG_WARN(
-            "MXFP4 SafeTensors detected (block_size=%d) — imp does NOT have "
-            "a SafeTensors MXFP4 decode path yet. Weights will load as their "
-            "wire dtype (typically uint8/FP16) and inference will likely be "
-            "incorrect. Convert to GGUF for actual MXFP4 support.",
-            cfg.mxfp4_block_size);
+        if (cfg.arch == ModelArch::GPT_OSS) {
+            IMP_LOG_INFO("MXFP4 SafeTensors (block_size=%d): gpt-oss experts will be "
+                         "transcoded MXFP4→NVFP4 at init (native decode).",
+                         cfg.mxfp4_block_size);
+        } else {
+            IMP_LOG_WARN(
+                "MXFP4 SafeTensors detected (block_size=%d) — imp has no SafeTensors "
+                "MXFP4 decode path for this architecture yet. Weights will load as "
+                "their wire dtype and inference will likely be incorrect. Convert to "
+                "GGUF for actual MXFP4 support.",
+                cfg.mxfp4_block_size);
+        }
     }
 
     // AWQ detection. Same posture as MXFP4: the metadata is parsed and
