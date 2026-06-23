@@ -9,5 +9,5 @@
 
 set(IMP_DEP_GOOGLETEST_TAG    v1.17.0  CACHE STRING "googletest git tag")
 set(IMP_DEP_CUTLASS_TAG       v4.5.2   CACHE STRING "NVIDIA/cutlass git tag")
-set(IMP_DEP_HTTPLIB_TAG       v0.46.1  CACHE STRING "cpp-httplib git tag")
+set(IMP_DEP_HTTPLIB_TAG       v0.48.0  CACHE STRING "cpp-httplib git tag")
 set(IMP_DEP_NLOHMANN_JSON_TAG v3.12.0  CACHE STRING "nlohmann/json git tag")
