@@ -63,6 +63,12 @@ struct ChannelSegments {
 };
 ChannelSegments split_channel_segments(const std::string& text);
 
+// Harmony-aware split (gpt-oss): parses `<|channel|>NAME<|message|>BODY<|end|>`
+// blocks (and the `<|start|>role` plumbing between them) into reasoning
+// (analysis / commentary channels) vs content (final channel). All Harmony
+// control markup and role names are stripped. Each segment is trimmed.
+ChannelSegments split_harmony_channels(const std::string& text);
+
 std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
                       const char* finish_reason, const json& logprobs = nullptr);
 
