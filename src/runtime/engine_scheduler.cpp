@@ -122,7 +122,7 @@ int Engine::step_async_graph_resume() {
         // buffer parked so the next burst of this request rearms instead of
         // recapturing (~10-20 ms per capture). Fully torn down on request
         // finish or when a different request launches.
-        const bool park = runtime_config_.speculative.ngram && !generation_done;
+        const bool park = saved_req && spec_ngram_enabled_(*saved_req) && !generation_done;
         if (park) {
             async_parked_req_id_ = saved_req->id;
         } else {
@@ -864,7 +864,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // verify step replaces this decode step entirely (it allocates its own
     // KV blocks and emits accepted tokens). Falls through to the normal
     // path on a draft miss or when any gate fails.
-    if (runtime_config_.speculative.ngram && decode_batch.size() == 1) {
+    if (decode_batch.size() == 1 && spec_ngram_enabled_(*decode_batch[0])) {
         spec_maybe_rearm_(*decode_batch[0]);
         if (spec_ngram_gates_ok_(*decode_batch[0])) {
             if (step_spec_verify_(decode_batch[0], dec_stream))
@@ -1521,7 +1521,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                       // (miss_burst) so the host can probe for drafts between
                                       // bursts; with miss_burst=0 the loop stays blocked while
                                       // speculation is engaged (legacy eager-miss behavior).
-                                      (!runtime_config_.speculative.ngram || dreq->spec_ngram_given_up ||
+                                      (!spec_ngram_enabled_(*dreq) || dreq->spec_ngram_given_up ||
                                        runtime_config_.speculative.miss_burst > 0);
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
@@ -1543,7 +1543,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // miss_burst; given-up requests the long re-probe burst (0 =
             // run to completion).
             int spec_limit = 0;
-            if (runtime_config_.speculative.ngram) {
+            if (spec_ngram_enabled_(*dreq)) {
                 spec_limit = dreq->spec_ngram_given_up ? runtime_config_.speculative.burst
                                                        : spec_effective_miss_burst_(*dreq);
                 if (spec_limit < 0) spec_limit = 0;

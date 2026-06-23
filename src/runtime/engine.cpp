@@ -403,7 +403,7 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     constraints_.reset();
     // Server visibility: the engine outlives requests, so cumulative
     // speculation telemetry is logged per request end (no-op when idle).
-    if (runtime_config_.speculative.ngram)
+    if (spec_ngram_enabled_(*req))
         log_spec_stats_();
 }
 

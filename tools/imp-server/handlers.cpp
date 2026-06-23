@@ -42,6 +42,11 @@ struct ChatRequestParams {
     // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
     // "cache_prompt" body field on the OpenAI route).
     bool cache_prompt = false;
+    // Per-request n-gram speculation override (tri-state): -1 = server default,
+    // 0 = force off, 1 = force on. From the imp extension body field
+    // "speculative" (bool). Lets code-gen calls opt into speculation while
+    // short tool-arg generations skip it on the same server.
+    int spec_ngram_override = -1;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
     std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
@@ -800,6 +805,11 @@ static bool parse_chat_request_params(
     // by anthropic_to_openai_body) or a direct llama.cpp-style field.
     ctx.params.cache_prompt = body.value("cache_prompt", false);
 
+    // Per-request speculative-decode override (imp extension). Absent → leave
+    // tri-state at -1 (server default). Present bool → force on/off.
+    if (body.contains("speculative") && body["speculative"].is_boolean())
+        ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+
     // Parse tool calling parameters
     ctx.params.tools = body.value("tools", json::array());
     ctx.params.tool_choice = body.value("tool_choice", json("auto"));
@@ -1423,6 +1433,7 @@ static void nonstream_chat_response_(
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
+        req->spec_ngram_override = ctx.params.spec_ngram_override;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -2691,6 +2702,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
+        req->spec_ngram_override = ctx.params.spec_ngram_override;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -2944,6 +2956,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
+    if (body.contains("speculative") && body["speculative"].is_boolean())
+        imp_req->spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
     // Stream requests stay on per-step decode for real per-token SSE (#754).
     imp_req->stream = stream;
     imp_req->status = imp::RequestStatus::PENDING;
@@ -4645,6 +4659,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         imp_req->top_k = ctx.params.top_k;
         imp_req->seed = ctx.params.seed;
         imp_req->pin_kv_prefix = ctx.params.cache_prompt;
+        imp_req->spec_ngram_override = ctx.params.spec_ngram_override;
         // This is the streaming /v1/messages path — stay on per-step decode so
         // SSE is real per-token rather than one burst at generation end (#754).
         imp_req->stream = true;
