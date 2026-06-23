@@ -4,6 +4,31 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-06-24 · Phase 5b — deterministic mode validation (existing feature)
+
+**Feature:** opt-in ordered MoE reduction via `--set runtime.deterministic=true`
+(or `IMP_DETERMINISTIC=1`) — already implemented (`moe_routing.cu` deterministic
+kernels, wired through `deterministic_gemm`). No code change; this is a validation.
+
+**Protocol:** Qwen3-30B-A3B-NVFP4-Modelopt (MoE), greedy (temp=0, seed=1),
+max_tokens=220, same prompt, server single-stream (batch-1), md5 of response.
+
+| mode | result |
+|---|---|
+| OFF | warmup run + steady runs diverge in length/hash (run1 965 vs runs2-5 1000) |
+| **ON** | warmup differs (cold), **runs 1-5 bit-identical** (md5 d25564…, len 980) |
+
+**Reading:** deterministic mode delivers ≥5-run bit-identical steady-state output
+(Phase-5b acceptance met). Caveat: the FIRST request after model load is not
+reproducible even with the flag ON (cold cuBLAS-algo / graph-capture / workspace
+warmup) — discard one warmup turn for bit-exact reproduction. Per-request
+determinism is a **non-goal**: MoE kernel selection is global per launch, so
+det + non-det requests can't co-batch under continuous batching. Throughput cost
+is in the single-block deterministic permute (cheap at decode/batch-1, severe at
+large-batch prefill per the code comments) — keep it opt-in, server-flag only.
+
+---
+
 ## 2026-06-24 · Phase 7 — agent benchmark harness baseline
 
 **Build:** `feat/agentic-server-hardening` @ Phase 6 (commit 27b08582), CUDA 13.3, `imp:test`.
