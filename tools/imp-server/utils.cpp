@@ -275,6 +275,92 @@ ChannelSegments split_channel_segments(const std::string& text) {
     return out;
 }
 
+ChannelSegments split_harmony_channels(const std::string& text) {
+    // gpt-oss Harmony output looks like:
+    //   <|channel|>analysis<|message|>REASONING<|end|>
+    //   <|start|>assistant<|channel|>final<|message|>ANSWER<|return|>
+    // analysis/commentary channels carry chain-of-thought (-> reasoning_content);
+    // the final channel carries the user-facing answer (-> content). All Harmony
+    // control markup and the <|start|>role plumbing are stripped.
+    static const std::string CH = "<|channel|>";
+    static const std::string MSG = "<|message|>";
+    static const std::string END = "<|end|>";
+    static const std::string START = "<|start|>";
+    static const std::string RET = "<|return|>";
+
+    ChannelSegments out;
+    std::string cur;  // current channel name; empty = no active channel
+    bool in_msg = false;
+    const size_t n = text.size();
+    size_t i = 0;
+    auto at = [&](const std::string& m) { return text.compare(i, m.size(), m) == 0; };
+    auto emit = [&](char c) {
+        if (cur == "analysis" || cur == "commentary")
+            out.reasoning.push_back(c);
+        else if (cur == "final")
+            out.content.push_back(c);
+        else
+            out.other.push_back(c);
+    };
+    while (i < n) {
+        if (at(CH)) {
+            i += CH.size();
+            // Channel name runs up to <|message|> (or any other control marker).
+            std::string name;
+            while (i < n && !at(MSG) && !at(END) && !at(START) && !at(CH) && text[i] != '<')
+                name.push_back(text[i++]);
+            size_t s = name.find_first_not_of("\n\r\t ");
+            size_t e = name.find_last_not_of("\n\r\t ");
+            cur = (s == std::string::npos) ? std::string() : name.substr(s, e - s + 1);
+            in_msg = false;
+            continue;
+        }
+        if (at(MSG)) {
+            i += MSG.size();
+            in_msg = true;
+            continue;
+        }
+        if (at(END)) {
+            i += END.size();
+            in_msg = false;
+            cur.clear();
+            continue;
+        }
+        if (at(RET)) {
+            i += RET.size();
+            in_msg = false;
+            cur.clear();
+            continue;
+        }
+        if (at(START)) {
+            i += START.size();
+            in_msg = false;
+            cur.clear();
+            // Drop the role name up to the next control marker.
+            while (i < n && !at(CH) && !at(MSG) && text[i] != '<')
+                i++;
+            continue;
+        }
+        if (in_msg)
+            emit(text[i]);
+        i++;
+    }
+
+    auto trim = [](std::string& s) {
+        size_t a = s.find_first_not_of("\n\r\t ");
+        if (a == std::string::npos) {
+            s.clear();
+            return;
+        }
+        size_t b = s.find_last_not_of("\n\r\t ");
+        s = s.substr(a, b - a + 1);
+    };
+    trim(out.reasoning);
+    trim(out.content);
+    trim(out.other);
+    return out;
+}
+
 void strip_channel_headers(std::string& text) {
     // Scan for "<|channel>" and "<channel|>" markers. Each one begins a header
     // that runs until the next '\n'. Remove the markers and the characters up

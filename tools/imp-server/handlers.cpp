@@ -1582,8 +1582,17 @@ static void nonstream_chat_response_(
         // template injects "<think>" as plain text — is_think_model is false
         // but the output is reasoning until the literal "</think>".
         std::string reasoning_content;
-        if ((ctx.snap.is_think_model || ctx.snap.enable_thinking) &&
-            state.default_args.reasoning_format == "deepseek") {
+        if (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY) {
+            // gpt-oss Harmony: split the <|channel|>analysis|final<|message|>…
+            // blocks so the analysis channel becomes reasoning_content and the
+            // final channel becomes the answer. Without this the raw Harmony
+            // markup leaks verbatim into content (#760).
+            auto segs = split_harmony_channels(content);
+            content = std::move(segs.content);
+            if (state.default_args.reasoning_format != "none")
+                reasoning_content = std::move(segs.reasoning);
+        } else if ((ctx.snap.is_think_model || ctx.snap.enable_thinking) &&
+                   state.default_args.reasoning_format == "deepseek") {
             // Generation that started inside an injected <think> prefix
             // (chat-template or server-appended; see prompt_tail_contains
             // above) carries no opener in its output. If it also never
@@ -1892,6 +1901,31 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
         return sse_writer.write_reasoning(text, sink);
     };
 
+    // gpt-oss Harmony streaming filter. The model emits
+    //   <|channel|>analysis<|message|>…<|end|><|start|>assistant<|channel|>final<|message|>…
+    // Route analysis/commentary channels to reasoning_content and the final
+    // channel to content, stripping the control markers (which arrive as atomic
+    // special-token pieces) and the <|start|>role plumbing. hm_buf holds the
+    // current channel's bytes so a token that splits a multibyte char is not
+    // emitted mid-codepoint (#760).
+    const bool harmony = (tpl_family == imp::ChatTemplateFamily::HARMONY);
+    // Harmony reasoning is its own mechanism (not the deepseek <think> path), so
+    // it's gated on reasoning_format alone — emit reasoning_content unless the
+    // caller explicitly asked for none.
+    const bool hm_reasoning_on = (state.default_args.reasoning_format != "none");
+    std::string hm_channel, hm_name, hm_buf;
+    bool hm_in_msg = false, hm_reading_name = false;
+    auto hm_flush = [&](bool force) -> bool {
+        size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
+        if (complete == 0)
+            return true;
+        std::string chunk = hm_buf.substr(0, complete);
+        hm_buf.erase(0, complete);
+        if (hm_channel == "analysis" || hm_channel == "commentary")
+            return hm_reasoning_on ? emit_reasoning(chunk) : true;
+        return sse_writer.write_content(chunk.data(), chunk.size(), sink);
+    };
+
     // Helper: flush confirmed text up to a byte position
     auto flush_text = [&](size_t up_to) {
         up_to = std::min(up_to, pending_text.size());  // never read past the buffer
@@ -1994,6 +2028,42 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
             ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
         }
         std::string piece = snap_tok->decode_token(token);
+
+        // gpt-oss Harmony channel routing (analysis/commentary -> reasoning,
+        // final -> content). Markers arrive as atomic special-token pieces.
+        if (harmony) {
+            if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
+                piece == "<|return|>" || piece == "<|start|>") {
+                if (hm_in_msg && !hm_flush(/*force=*/true))
+                    return false;
+                if (piece == "<|channel|>") {
+                    hm_reading_name = true;
+                    hm_in_msg = false;
+                    hm_name.clear();
+                } else if (piece == "<|message|>") {
+                    size_t s = hm_name.find_first_not_of("\n\r\t ");
+                    size_t e = hm_name.find_last_not_of("\n\r\t ");
+                    hm_channel = (s == std::string::npos) ? std::string() : hm_name.substr(s, e - s + 1);
+                    hm_reading_name = false;
+                    hm_in_msg = true;
+                } else {  // <|end|> / <|return|> / <|start|>: close the block
+                    hm_in_msg = false;
+                    hm_reading_name = false;
+                    hm_channel.clear();
+                }
+                continue;
+            }
+            if (hm_reading_name) {  // channel name between <|channel|> and <|message|>
+                hm_name += piece;
+                continue;
+            }
+            if (!hm_in_msg)  // role text / inter-block plumbing
+                continue;
+            hm_buf += piece;
+            if (!hm_flush(/*force=*/false))
+                return false;
+            continue;
+        }
 
         // Gemma-4 channel filter: strip "<|channel>NAME\n" structural
         // headers from the content stream. `<channel|>` is the
@@ -2479,6 +2549,12 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     }
 
     // Flush scan buffer if we never left SCAN phase (model didn't think)
+    // Harmony: flush the final channel's tail (the final block usually ends at
+    // EOS/<|return|> with no trailing <|end|>). The other buffers below stay
+    // empty for harmony, so they're no-ops.
+    if (harmony && !hm_buf.empty())
+        hm_flush(/*force=*/true);
+
     if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
         utf8_buf += think_scan_buf;
         think_scan_buf.clear();
@@ -3831,6 +3907,23 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
                              {"index", block_index},
                              {"delta", {{"type", "thinking_delta"}, {"thinking", text}}}});
     };
+
+    // gpt-oss Harmony streaming filter (analysis/commentary -> thinking block,
+    // final -> text block); markers arrive as atomic special-token pieces. See
+    // the matching filter in run_chat_stream_ (#760).
+    const bool harmony = (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY);
+    std::string hm_channel, hm_name, hm_buf;
+    bool hm_in_msg = false, hm_reading_name = false;
+    auto hm_flush = [&](bool force) -> bool {
+        size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
+        if (complete == 0)
+            return true;
+        std::string chunk = hm_buf.substr(0, complete);
+        hm_buf.erase(0, complete);
+        if (hm_channel == "analysis" || hm_channel == "commentary")
+            return emit_thinking(chunk);
+        return emit_text(chunk);
+    };
     // Open a tool_use block and stream its arguments as chunked
     // input_json_delta events (Task 6: incremental arg deltas).
     auto emit_tool_use = [&](const ParsedToolCall& tc) -> bool {
@@ -3979,6 +4072,42 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
                           std::chrono::high_resolution_clock::now() - t_start)
                           .count();
         std::string piece = snap_tok->decode_token(token);
+
+        // gpt-oss Harmony channel routing (analysis/commentary -> thinking,
+        // final -> text). Markers arrive as atomic special-token pieces.
+        if (harmony) {
+            if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
+                piece == "<|return|>" || piece == "<|start|>") {
+                if (hm_in_msg && !hm_flush(/*force=*/true))
+                    return false;
+                if (piece == "<|channel|>") {
+                    hm_reading_name = true;
+                    hm_in_msg = false;
+                    hm_name.clear();
+                } else if (piece == "<|message|>") {
+                    size_t s = hm_name.find_first_not_of("\n\r\t ");
+                    size_t e = hm_name.find_last_not_of("\n\r\t ");
+                    hm_channel = (s == std::string::npos) ? std::string() : hm_name.substr(s, e - s + 1);
+                    hm_reading_name = false;
+                    hm_in_msg = true;
+                } else {
+                    hm_in_msg = false;
+                    hm_reading_name = false;
+                    hm_channel.clear();
+                }
+                continue;
+            }
+            if (hm_reading_name) {
+                hm_name += piece;
+                continue;
+            }
+            if (!hm_in_msg)
+                continue;
+            hm_buf += piece;
+            if (!hm_flush(/*force=*/false))
+                return false;
+            continue;
+        }
 
         // Gemma-4 channel filter.
         if (snap_channel_open_id >= 0) {
@@ -4310,6 +4439,11 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
     }
 
     // Flush trailing buffers.
+    // Harmony: flush the final channel's tail (ends at EOS/<|return|> with no
+    // trailing <|end|>); the other buffers below stay empty for harmony.
+    if (harmony && !hm_buf.empty())
+        hm_flush(/*force=*/true);
+
     if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
         utf8_buf += think_scan_buf;
         think_scan_buf.clear();
