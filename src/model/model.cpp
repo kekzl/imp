@@ -163,13 +163,26 @@ const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
 // corpus, RTX 5090:
 //   QWEN3     (Qwen3-14B-NVFP4, dense):  PPL 13.95 -> 14.10  (+1.07%), coherent
 //   QWEN3_MOE (Qwen3-30B-A3B-NVFP4):     PPL ~16.20 -> ~15.99 (neutral), coherent
-// Other families (gemma/phi/nemotron/qwen35/qwen36/...) stay FP16 until measured
-// on this box; users can still force FP8 explicitly with --kv-fp8. This list IS
-// the long-context quality gate — keep it conservative, extend only with evidence.
+//   LLAMA     (Phi-4-reasoning-plus-NVFP4, llama arch): PPL 7.135 -> 7.153
+//             (+0.25%), measured 2026-06-23 on a 3.8k-token context. Vanilla
+//             Llama checkpoints do not declare the FP8 hint, so honoring it for
+//             the LLAMA arch only affects Phi-4-style models whose checkpoint
+//             opts in via kv_cache_quant_algo=FP8.
+// Measured 2026-06-23 but NOT added (same gate):
+//   NEMOTRON_H_MOE (Nemotron-3-Nano-30B): FP8-KV PPL is run-to-run nondeterministic
+//     (Δ swung +0.47% .. +1.83% across two runs; MoE+Mamba2 hybrid) — inconclusive,
+//     stays FP16 (--kv-fp8 opt-in) until a stable multi-run mean is established.
+//   GEMMA4 (Gemma-4-26B-A4B-NVFP4): baseline PPL on this corpus is broken (~243),
+//     can't gate. QWEN36MOE (Qwen3.6-35B-A3B): quality fine (-0.97%) but the
+//     checkpoint does not declare the hint, so allowlisting is moot.
+// Other families stay FP16 until measured; force FP8 explicitly with --kv-fp8.
+// This list IS the long-context quality gate — keep it conservative, extend only
+// with evidence.
 bool kv_fp8_hint_default_safe(ModelArch arch) {
     switch (arch) {
         case ModelArch::QWEN3:
         case ModelArch::QWEN3_MOE:
+        case ModelArch::LLAMA:
             return true;
         default:
             return false;
