@@ -52,7 +52,7 @@ TEST(EndToEndTest, ErrorStrings) {
     EXPECT_STREQ(imp_error_string(IMP_ERROR_OUT_OF_MEMORY), "out of memory");
     EXPECT_STREQ(imp_error_string(IMP_ERROR_CUDA), "CUDA error");
     EXPECT_STREQ(imp_error_string(IMP_ERROR_FILE_NOT_FOUND), "file not found");
-    EXPECT_STREQ(imp_error_string(IMP_ERROR_INVALID_MODEL), "invalid model");
+    EXPECT_STREQ(imp_error_string(IMP_ERROR_INVALID_MODEL), "invalid or corrupt model file");
 }
 
 TEST(EndToEndTest, LoadNonexistentModel) {

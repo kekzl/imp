@@ -331,6 +331,10 @@ target_include_directories(imp
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 
+# Single-source the runtime version string from the project version so
+# imp_version() / `imp-cli --version` can never drift from CMakeLists (#760).
+target_compile_definitions(imp PRIVATE IMP_VERSION_STRING="${PROJECT_VERSION}")
+
 target_link_libraries(imp
     PUBLIC
         CUDA::cudart

@@ -76,7 +76,7 @@ The most common keys are also exposed as named CLI flags (`--kv-fp8`,
 ./build/imp-cli --model model.gguf --prompt "Hello, world!"
 
 # SafeTensors directory (NVFP4 prequant from Model Optimizer or llm-compressor)
-./build/imp-cli --model ./Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
+./build/imp-cli --model ./Qwen3-Coder-30B-A3B-FP4 --prompt "Hello"
 
 # Interactive chat
 ./build/imp-cli --model model.gguf --interactive
@@ -193,7 +193,7 @@ Benchmark / eval:
 ./build/imp-server --model model.gguf --port 8080
 
 # Start with SafeTensors (NVFP4 prequant)
-./build/imp-server --model ./Qwen3-Coder-30B-A3B-FP4/ --port 8080
+./build/imp-server --model ./Qwen3-Coder-30B-A3B-FP4 --port 8080
 
 # With vision
 ./build/imp-server --model gemma-3-12b-it.gguf --mmproj mmproj.gguf
@@ -272,6 +272,13 @@ standard pre-norm archs; sandwich-norm o/down (Gemma) and MoE-expert targets
 are declined with a log. C API: `imp_lora_load()` / `imp_lora_set()`.
 
 ## C API
+
+> The C API is consumable only from a **source build**: `cmake --install` stages
+> `libimp.a` and the `include/imp/` headers, which you link against. The prebuilt
+> `ghcr.io/kekzl/imp` runtime image ships only the `imp-server` / `imp-cli` /
+> `imp-bench` binaries — not the static library or headers — so embedding the C
+> API means building from source (or copying the lib/headers out of the Docker
+> `builder` stage).
 
 ```c
 #include <imp/imp.h>

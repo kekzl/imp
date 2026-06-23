@@ -438,9 +438,15 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         return msg;
     }
 
-    // Extract model name from path
-    size_t slash = path.find_last_of('/');
-    state.model_name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+    // Extract model name from path. Strip trailing separators first so a
+    // directory passed with a trailing slash (e.g. /models/Foo-NVFP4/) still
+    // yields a non-empty id instead of "" — an empty id makes the model
+    // unaddressable over the HTTP API (#756).
+    std::string id_path = path;
+    while (id_path.size() > 1 && (id_path.back() == '/' || id_path.back() == '\\'))
+        id_path.pop_back();
+    size_t slash = id_path.find_last_of('/');
+    state.model_name = (slash != std::string::npos) ? id_path.substr(slash + 1) : id_path;
 
     // Set up tokenizer and chat template
     state.tok = state.model->model->tokenizer();

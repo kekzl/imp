@@ -49,6 +49,11 @@ jobs:
         with:
           context: .
           push: true
+          # Ship imp-bench in the released image — it is documented (docs/usage.md)
+          # and the only standalone microbench entry point. CI keeps it OFF for
+          # speed; the release image is built once, so the ~30-60s is fine (#760).
+          build-args: |
+            IMP_BUILD_BENCH=ON
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
