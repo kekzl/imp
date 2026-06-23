@@ -113,6 +113,34 @@ The lone surviving NVFP4-prefill gap is dense pp4096 at ~1.04×. Decode (tg256
 @ctx2048): 14B 159, 30B-A3B ~317. Nemotron-3-Nano is arch-limited (hybrid
 Mamba2 + attention FP16-projection mix).
 
+## Concurrent serving throughput (batched decode)
+
+The VRAM-aware auto `max_batch_size` (#736) made concurrent decode the common
+server path; two batched-decode kernel fixes target it. Aggregate throughput =
+Σ completion tokens / wall-clock across N concurrent `POST /v1/chat/completions`
+against a live `imp-server`. This is a server-level number (not the greedy
+single-stream `--bench`), so it carries the same ±5–10 % host day-to-day decode
+variance (issue #526) — clocks logged healthy here (SM ~2880 MHz, mem 13801 MHz,
+up to 439 W).
+
+| Date | Commit | Model | Concurrency | Aggregate tok/s | Note |
+|---|---|---|---:|---:|---|
+| 2026-06-23 | `b56e9ae5` | Qwen3-14B-NVFP4 | 16 | **767** | #745 + #746 |
+| 2026-06-23 | pre-`#745` | Qwen3-14B-NVFP4 | 16 | 472 | single-block sampler + per-row LM head |
+
+**+62 %** from the two fixes. Drivers (nsys, graphs-off, share of decode GPU
+time): top-k/top-p sampler **36 % → 6 %** (single-block `<<<1>>>` → multi-block,
+737 → 83 µs/call, #745); NVFP4 LM head **18 % → 7 %** (per-sequence M=1 GEMV loop
+→ batched-M, 4.2 → 1.5 ms/step, #746). **Single-stream decode is unchanged by
+design** — both fixes touch only the n>1 / eager-sampling paths; the greedy
+argmax + M=1 GEMV paths (and the `perf_baseline.json` gate) are untouched.
+
+Command: `imp-server --model Qwen3-14B-NVFP4 --max-batch 16`, then 16 concurrent
+`POST /v1/chat/completions` (`max_tokens` 200, `temperature` 0.7); aggregate =
+Σ `completion_tokens` / wall-clock. At sustained n>1 the dominant remaining cost
+is the CUTLASS M=16 NVFP4 GEMMs (~57 %, the real per-layer projection compute,
+already batched and largely launch-hidden under CUDA Graphs).
+
 ## Output-quality gate
 
 Throughput numbers say nothing about correctness — that lesson is paid for
