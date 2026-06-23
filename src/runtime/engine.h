@@ -498,6 +498,11 @@ private:
     void init_resolve_fp8_prefill_();
     void init_resolve_quant_flags_();
     void init_compute_max_seq_len_();
+
+    // Stable identity hash of the loaded model (config scalars + a sample of
+    // real weight bytes) used to gate the persisted prefix cache so KV from a
+    // different model/tokenizer/quant is never restored. See kv_cache_manager.
+    uint64_t model_fingerprint_() const;
     // step_prefill_one sub-phase: allocate KV blocks for `req`. Handles
     // prefix-cache reuse + eviction fallback. Returns false on
     // unrecoverable allocation failure (caller cancels request). On

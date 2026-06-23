@@ -8,6 +8,7 @@
 #include "core/tensor.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <numeric>
@@ -670,6 +671,48 @@ TEST(KVCacheManagerTest, ContentAddressedPrefixCaching) {
 
     // Clean up.
     mgr->free_sequence(1);
+}
+
+// 22b. Persisted prefix cache is gated by a model fingerprint (N1). Block
+// hashes are content-addressed over token IDs only, so a different model with
+// identical KV geometry would otherwise match and serve the WRONG model's KV.
+TEST(KVCacheManagerTest, PersistedCacheFingerprintGate) {
+    SKIP_IF_NO_CUDA();
+
+    const std::string path = "/tmp/imp_prefix_cache_fp_gate.bin";
+    std::remove(path.c_str());
+    constexpr uint64_t kFpA = 0xAAAAAAAAAAAAAAAAull;
+    constexpr uint64_t kFpB = 0xBBBBBBBBBBBBBBBBull;  // same geometry, different model
+
+    // Produce 3 cached blocks and persist them under fingerprint A.
+    {
+        auto mgr = MakeManager(32);
+        mgr->set_prefix_caching_enabled(true);
+        std::vector<int32_t> tokens(48);
+        std::iota(tokens.begin(), tokens.end(), 100);
+        ASSERT_GE(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+        mgr->register_block_hashes(0, tokens);
+        mgr->free_sequence(0);
+        ASSERT_EQ(mgr->num_cached_blocks(), 3);
+        EXPECT_EQ(mgr->save_prefix_cache(path, kFpA), 3);
+    }
+
+    // Matching fingerprint → blocks restored.
+    {
+        auto mgr = MakeManager(32);
+        mgr->set_prefix_caching_enabled(true);
+        EXPECT_EQ(mgr->load_prefix_cache(path, kFpA), 3);
+    }
+
+    // Mismatched fingerprint (identical geometry) → rejected, nothing restored.
+    {
+        auto mgr = MakeManager(32);
+        mgr->set_prefix_caching_enabled(true);
+        EXPECT_LT(mgr->load_prefix_cache(path, kFpB), 0);
+        EXPECT_EQ(mgr->num_cached_blocks(), 0);
+    }
+
+    std::remove(path.c_str());
 }
 
 // 23. PrefixCachingPartialMatch

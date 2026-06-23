@@ -43,7 +43,7 @@ Engine::~Engine() {
 
     // Save prefix cache to disk before shutdown
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled()) {
-        kv_manager_->save_prefix_cache(config_.prefix_cache_path, stream_);
+        kv_manager_->save_prefix_cache(config_.prefix_cache_path, model_fingerprint_(), stream_);
     }
 
     // FFN sparsity probe (Vector 1 research instrumentation): drain per-layer
