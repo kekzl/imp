@@ -155,24 +155,12 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: cd build && ctest -L unit --output-on-failure --timeout 120
 
-      # clang-tidy over host C++ TUs (advisory — does not block). Runs here, in the
-      # CUDA Build container, because that is where the CUDA headers our .cpp files
-      # include and build/compile_commands.json both exist. Scoped to .cpp (clang-tidy
-      # can't parse .cu without a full nvcc flagset). Flip continue-on-error off once
-      # the baseline is clean to make it a hard gate (CI2).
-      - name: clang-tidy (advisory, host TUs)
-        if: steps.changes.outputs.code == 'true'
-        continue-on-error: true
-        run: |
-          apt-get install -y --no-install-recommends clang-tidy
-          # Filter the noise: clang-tidy prints a "[N/M] Processing file" progress
-          # line and a cumulative "N warnings generated" line per TU. Because our
-          # .cpp pull in CUTLASS/CUDA headers, that generated count runs into the
-          # hundreds of thousands — all suppressed from DISPLAY by the .clang-tidy
-          # HeaderFilterRegex, but the COUNT lines flooded the log. Drop both; what
-          # remains is only our own src/tools diagnostics.
-          clang-tidy -p build --warnings-as-errors= $(find src tools -name '*.cpp') 2>&1 \
-            | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' || true
+      # clang-tidy moved OUT of this job into the separate non-required `tidy` job
+      # below. It was ~22 min of this ~26 min job and — being advisory
+      # (continue-on-error) — only delayed the merge-gating `Build` check without
+      # ever failing it. The `tidy` job reuses this job's cached build/ for
+      # compile_commands.json + _deps, lints only the PR's changed .cpp, and never
+      # blocks merge.
 
       - name: Upload build artifacts
         if: steps.changes.outputs.code == 'true'
@@ -191,6 +179,66 @@ jobs:
             build/test-moe-gdn
             build/test-e2e
             build/libimp.a
+
+  # clang-tidy (advisory, NON-REQUIRED) — split out of the Build job so it never
+  # delays the merge-gating `Build` check (it was ~22 min of that job). Reuses the
+  # Build job's cached build/ (compile_commands.json + FetchContent _deps such as
+  # CUTLASS) via the same cache key, so no second CUDA configure is needed. Lints
+  # only the .cpp CHANGED in the PR — a normal PR is seconds; a big refactor is
+  # bounded to its own files. Still .cpp-only (clang-tidy can't parse .cu without
+  # the full nvcc flagset). Kernel (.cu) correctness is covered by the GPU tests +
+  # compute-sanitizer (see the `test` job).
+  tidy:
+    name: clang-tidy
+    needs: build
+    if: needs.build.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.0-devel-ubuntu24.04
+    env:
+      CUDA_VERSION: "13.3"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # base SHA must be present for the changed-files diff
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake g++ git python3 clang-tidy
+      - name: Restore build dir (compile_commands.json + _deps)
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
+          restore-keys: |
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
+      - name: clang-tidy (changed .cpp only, advisory)
+        continue-on-error: true  # advisory — flip to a hard gate once baseline-clean
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          [ -z "$base" ] && base="${{ github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          mapfile -t changed < <(git diff --name-only "$base" HEAD | grep -E '^(src|tools)/.*\.cpp$' || true)
+          if [ ${#changed[@]} -eq 0 ]; then echo "no src/tools .cpp changed — nothing to lint"; exit 0; fi
+          # compile_commands.json comes from the cached build/. If the cache missed
+          # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
+          # a fully cold _deps fetch is the rare worst case.
+          if [ ! -f build/compile_commands.json ]; then
+            echo "::warning::no cached compile_commands.json — reconfiguring"
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON \
+              -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
+          fi
+          echo "linting ${#changed[@]} changed .cpp:"; printf '  %s\n' "${changed[@]}"
+          # Drop the per-TU progress + cumulative count lines (CUTLASS/CUDA headers
+          # inflate the count into the hundreds of thousands); .clang-tidy's
+          # HeaderFilterRegex already restricts displayed diagnostics to our code.
+          clang-tidy -p build --warnings-as-errors= "${changed[@]}" 2>&1 \
+            | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' || true
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
@@ -304,6 +352,25 @@ jobs:
           chmod +x build/imp-tests || true
           chmod +x build/test-* 2>/dev/null || true
           cd build && ctest --output-on-failure --timeout 120
+
+      # compute-sanitizer (memcheck) — the real "linter" for CUDA kernels: catches
+      # out-of-bounds, misaligned and use-after-free device accesses that clang-tidy
+      # fundamentally cannot see (it parses no .cu). Advisory for now (continue-on-
+      # error); scoped to the kernel-heavy binaries to bound the ~10-30x slowdown.
+      # Mirrors the local `make sanitize` target. Flip to a hard gate once clean.
+      - name: compute-sanitizer (memcheck, advisory)
+        continue-on-error: true
+        run: |
+          SAN="$(command -v compute-sanitizer || echo /usr/local/cuda/bin/compute-sanitizer)"
+          # Fast kernel binaries only — memcheck is ~10-30x, so the slow FA2 sweeps
+          # in test-attention are deliberately excluded to keep this advisory step
+          # bounded (run it there on demand via `make sanitize`).
+          for b in test-kv test-moe-gdn test-quant; do
+            echo "== compute-sanitizer memcheck: $b =="
+            chmod +x "build/$b" 2>/dev/null || true
+            "$SAN" --tool memcheck --error-exitcode 1 --leak-check no "build/$b" \
+              || { echo "::warning::compute-sanitizer flagged $b"; }
+          done
 
       # Perf regression gate against tests/perf_baseline.json (decode 3% / prefill 5%).
       # Previously this gate lived ONLY in the local pre-push hook (scripts/verify.sh),
