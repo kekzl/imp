@@ -249,3 +249,169 @@ split are **correct as-is** and must be preserved.
 ---
 
 *Phase 1 complete. No implementation performed. Awaiting confirmation before Phase 2 (STRUCTURE.md).*
+
+<!-- ===================================================================== -->
+
+# AUDIT pass 2 — soundness & hardening (2026-06-24)
+
+**Scope:** adversarial soundness audit over dimensions A–L (correctness/UB · fault
+isolation · memory/VRAM · concurrency · **CUDA-graph↔allocator coupling** ·
+ownership/lifetime · API fidelity · determinism · observability · dead-code ·
+build · test-integrity). The pass-1 audit (above) covered build/CI/tooling/docs
+hygiene; this pass goes after the soundness dimensions it underweighted.
+**Method:** 4 parallel audit sub-agents (E+C / A+D / B+F / G+H+J), every finding
+re-verified against source by call-graph trace before any edit (codebase-audit
+hard rule). **compute-sanitizer cannot run on this WSL2/WDDM host** (TL3) — UB/race
+claims are reasoned statically. Branch `audit/soundness-hardening-2026-06-24`.
+
+## Phase-0 baseline — snapshot `8f2cc9c4` (immutable)
+
+Build GREEN · CPU unit 37/37 · GPU suite exit 0 (model-E2E SKIPPED: `models/`
+symlinks don't resolve under the `$(PWD)/models` mount; synthetic GPU tests pass).
+Bench (Qwen3-Coder-30B-A3B NVFP4, 7 reps × 2 cold restarts) in `PERF_LOG.md`:
+decode tg256 = **341.6 / 322.0 / 266.4 tok/s** @ pp512/2048/4096 (gate signal,
+rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
+
+## Findings ledger (§5 format)
+
+### F-A1  evict_lru frees an in-flight decode-batch sequence → KV use-after-free
+- dimension: C/F · severity: **high**
+- evidence: `kv_cache_manager.cpp:370-384` (victim excludes only *pinned*, not the
+  in-flight batch); `free_sequence` removes the seq from `lru_order_`
+  (`:332-343`) so **every** live LRU entry is an active sequence; decode batch is
+  `touch`ed only at step-end (`engine_scheduler.cpp:1496`), so a batch member is a
+  valid victim when `append_block` fails mid-loop (`engine_scheduler.cpp:951`).
+  `free_sequence(victim)` returns its blocks to the pool, the next `append_block`
+  re-hands them, then `step_decode_forward(valid_decode)` runs the victim on
+  freed/reused blocks.
+- root cause: eviction victim selection has no "in current batch" exclusion; LRU
+  `touch` happens at step-end, not admission.
+- blast radius: multi-sequence (batch>1) decode under full-KV pressure → silent KV
+  corruption / UAF. Single-seq already fails safe (cancel); multi-seq did not.
+- fix: **applied** — `evict_lru(protect)` overload skips protected ids; decode site
+  protects the whole in-flight batch → falls through to the existing safe cancel.
+- validation: new unit `KVCacheManagerTest.ManagerEvictLRUProtectsInflightBatch`
+  (protect LRU-front → skips to next; protect all → returns -1, no table touched).
+  Hot-path A/B: decode-only path unchanged (eviction fires only under KV pressure).
+
+### F-A3  poisoned CUDA context is cleared & ignored — engine serves garbage, no detect
+- dimension: B · severity: **high**
+- evidence: `executor_forward.cu:207-212` clears the sticky error each forward with
+  only a WARN and proceeds; worker catch `batching_engine.cpp:165-201` cancels
+  requests + invalidates graphs but never probes device health; no `cudaDeviceReset`
+  / poisoned-context flag anywhere.
+- root cause: faults are detected only via thrown C++ exceptions; a kernel illegal
+  access does NOT throw — it sets a sticky error that forward() clears, so the
+  process silently serves garbage on a dead context instead of failing.
+- blast radius: one request's IMA corrupts the process-wide context → all later
+  requests garbage until manual restart, with no signal.
+- fix: **applied (conservative)** — worker catch now `cudaDeviceSynchronize()`s and
+  classifies the sticky error; only genuinely context-poisoning classes (illegal/
+  misaligned address, launch failure/timeout, HW-stack, ECC, …) set `stop_requested_`
+  → worker fail-fasts with a loud "context poisoned, restart required" log. A plain
+  host-side throw leaves the device clean and recovers exactly as before.
+- validation: confined to the (already abnormal) exception path; normal path
+  unaffected (full suite + bench green). Poison path is reasoned-correct, not
+  IMA-injected (no fault-injection harness on this host). The deeper /health-gate
+  + graceful drain is PARKED below.
+
+### F-A4 / F-A7  Anthropic /v1/messages: no x-api-key auth; OpenAI-shaped 401
+- dimension: G · severity: **high** (auth) / med (error shape)
+- evidence: `main.cpp:164-172` only checked `Authorization: Bearer`; `x-api-key`
+  (the canonical Anthropic SDK header) was absent → real Anthropic clients 401 on a
+  secured server. 401 body was OpenAI-shaped on all routes.
+- fix: **applied** — `api_key_matches()` (`utils.cpp`, constant-time) accepts both
+  Bearer and `x-api-key`; `/v1/messages` now returns the Anthropic error envelope
+  `{"type":"error","error":{"type":"authentication_error",…}}`.
+- validation: new `ApiKeyAuth.*` unit tests (both headers, neither, empty-key guard).
+
+### F-A8  No SSE `ping` on the Anthropic stream → long-prefill idle-timeout risk
+- dimension: G · severity: med
+- evidence: `run_anthropic_stream_` (`handlers.cpp:3811+`) never emits `event: ping`;
+  a long prefill (large prompt, cold) can trip proxy/client idle timeouts.
+- fix: **applied** — periodic `ping` during sustained idle in the pop loop (15 s;
+  never fires while tokens flow). Disconnect on a failed ping emit cancels cleanly.
+
+### F-A6  force_cublas_decode stack overrun `int32_t h_block_table[1024]` @64K ctx
+- dimension: A · severity: med
+- evidence: `executor_attention.cu:1101-1103` — fixed 1024-int stack array filled
+  with `n_blocks=(ctx_len+15)/16`; at the branch's 64K context cap n_blocks=4096 →
+  4× stack smash via `cudaMemcpy`. Debug arm (`attention.force_cublas_decode`,
+  default-off) but config-triggerable + silent.
+- fix: **applied** — heap `std::vector<int32_t>` sized to n_blocks.
+
+### F-A13  engine_weight_upload raw stream/event leak on throw
+- dimension: F · severity: low
+- evidence: `engine_weight_upload.cpp:167-185` — raw `cudaStream_t`/`cudaEvent_t`
+  held across `upload_weights_gpu()` (which can throw) leak on the unwind.
+- fix: **applied** — `CudaStream`/`CudaEvent` RAII (`core/cuda_raii.h`).
+
+### F-A15 / F-A16  stale comments
+- dimension: J · severity: low
+- `use_nvfp4_decode` "auto (sm_120→mode2, sm_90→mode1)" implied a compute-cap
+  branch that does not exist (resolver picks by quant/MoE/GDN, `engine_init_resolver.cpp:287-332`).
+  `anthropic.cpp:415` claimed "we reject n>1 upstream" — `n` is never parsed and
+  Anthropic Messages has no `n`. **fix: applied** (comments corrected).
+
+## Parked (verified real, not safely landable autonomously — migration plans)
+
+### F-A2  Non-streaming unbounded conditional-graph burst ignores cancel/disconnect/timeout
+- dimension: D/B · severity: **high** · fix: **parked**
+- evidence: `engine_scheduler.cpp:1545-1560` + `cuda_graph.cu:1010-1023` — a lone
+  non-streaming request with spec off launches the unbounded autonomous graph loop
+  bounded only device-side by `max_tokens`; `is_cancelled()`/timeout are polled only
+  *between* `step()`s, so a disconnect burns up to `max_tokens` (8192) dead tokens.
+- migration: bound the device loop to a chunk and re-poll cancel/timeout per chunk —
+  the spec-ngram `miss_burst` path is the existing template. Touches the
+  conditional-graph loop (documented #683/#692 off-by-one history) → needs the
+  multi-token-verify GPU coherence battery (byte-diff graphs-on vs `--no-cuda-graphs`)
+  before it can ship. Streaming requests are already exempt.
+
+### F-A1b  Prefill/spec eviction strips a live non-batch sequence → delayed zombie
+- dimension: C/F · severity: **high** · fix: **parked** (same root as F-A1)
+- evidence: `engine_scheduler.cpp:401,442`, `engine_spec_ngram.cpp:238` — same
+  `evict_lru` mechanism; since `lru_order_` holds only live sequences, a successful
+  eviction here strips an active (non-batch) sequence's KV; it is not cancelled, so
+  it decodes blockless next step → corruption (delayed vs F-A1's same-step UAF).
+- migration: replace silent LRU preemption with explicit backpressure — when
+  eviction would free a live sequence, the scheduler must mark that request
+  CANCELLED (there is no recompute-on-resume path), or disable LRU preemption and
+  rely on the cancel-on-alloc-failure fallbacks already present at all four sites.
+  Needs a multi-sequence KV-exhaustion server test to validate.
+
+### F-A9  NVFP4 grouped-MoE GEMM never consults the deterministic flag — REFUTED
+- dimension: H · severity: med · fix: **refuted (no change)**
+- evidence: `gemm_cutlass_grouped_3x.cu`, `gemm_grouped_nvfp4_smallM.cu` have 0
+  `deterministic` references (gate only in `gemm.cu` + `moe_routing.cu`).
+- experiment: 3 fresh-process greedy (temp=0, `IMP_DETERMINISTIC=1`) generations of
+  Qwen3-Coder-30B NVFP4 → **byte-identical** output (A==B==C). The grouped GEMM is
+  deterministic by construction (compile-time-fixed schedule, no atomic reduction),
+  so the missing flag-check is harmless and `determinism.md` is NOT overstated. The
+  doc was left unchanged. (Over-flag guard: a "0 references" smell did not survive
+  the A/B — the value of the codebase-audit verify rule.)
+
+### Other low / hardening (verified, parked with notes)
+- **F-A5** vision request `stop()/start()` cancels all concurrent in-flight
+  (`handlers.cpp:1004-1018`) — should `pause()/resume()` like the embeddings path;
+  needs vision-e2e (mmproj) to validate, so parked.
+- **F-A10** boundary re-prefill re-quantizes a *shared* KV block with no COW
+  (NVFP4/INT KV only; FP16 safe by idempotency) — `scheduler.cpp:80-83`.
+- **F-A11** `size_t→int` truncation in FP8/NVFP4 migrate APIs
+  (`pre_dequant_phase3_nvfp4_decode.cu:639`, `fp8_quant.cu:277`) — latent (<2³¹ today).
+- **F-A12** KV-write kernels lack an in-kernel `block_id>=0` guard
+  (`executor_kernels.cu`) — defense-in-depth, currently unreachable (host caps).
+- **F-A14** copyable RAII-owning handle types (LayerOffload/ExpertLRUCache/GreenCtx)
+  — latent double-free; mark move-only.
+- **F-A17** swallowed `cudaStreamSynchronize` return at the burst boundary
+  (`cuda_graph.cu:1014`) — diagnostic hygiene.
+
+## Verified SOUND (negatives — do not re-chase)
+KV refcount / COW-teardown / cancellation-free correct; KV size math is `size_t`
+end-to-end; packed sub-byte KV `/2` handled; DeviceAllocator pool sound;
+conditional-graph allocator coupling stable (alloc-once + re-upload), #683/#692
+off-by-one fixed; Model const-after-load + lock-free shareable; SequenceState
+borrows KV correctly; C-ABI boundary catches all; HTTP exception_handler envelope;
+streaming is REAL (incremental TTFT); constraint mask applied in the sampler;
+logprobs descending; Anthropic SSE event ordering spec-correct; constant-time auth;
+**no dead multi-arch scaffolding in the shipped binary** (sm_90/100/wgmma refs are
+live `>=1200` guards or accurate comments); ffn-sparsity / mtp / int4-attn all live.
