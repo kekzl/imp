@@ -1018,14 +1018,26 @@ static bool snapshot_state_and_tokenize_(
             res.set_content(dump_safe(err), "application/json");
             return false;
         }
-        // Stop batching engine for exclusive vision access
-        if (state.batching)
-            state.batching->stop();
+        // PAUSE (not stop) the batching engine for exclusive vision access:
+        // pause() drains in-flight generations and parks the worker (same
+        // exclusivity as stop()) but does NOT cancel concurrent/queued requests
+        // — they complete or wait, then resume after the vision op (F-A5).
+        // Every exit below must clear_image() then resume() (the image is
+        // global; clearing before resume keeps a resumed request from binding
+        // stale vision embeddings). On a pause timeout the worker is still live,
+        // so we must NOT drive the engine — return 503.
+        if (state.batching && !state.batching->pause()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Server is busy. Please retry."}, {"type", "server_error"}}}};
+            res.set_content(dump_safe(err), "application/json");
+            return false;
+        }
 
         state.ctx->engine->clear_image();
         if (!state.ctx->engine->set_image_from_memory(ctx.params.image_data.data(), ctx.params.image_data.size())) {
+            // set_image failed → image already clear (clear_image above); just resume.
             if (state.batching)
-                state.batching->start(state.ctx);
+                state.batching->resume();
             res.status = 400;
             json error = {
                 {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
@@ -1205,8 +1217,9 @@ static bool snapshot_state_and_tokenize_(
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
         if (ctx.snap.has_vision_request) {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
+            state.ctx->engine->clear_image();
             if (state.batching)
-                state.batching->start(state.ctx);
+                state.batching->resume();
         }
         res.status = 400;
         json error = {{"error",
@@ -1222,8 +1235,9 @@ static bool snapshot_state_and_tokenize_(
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
         if (ctx.snap.has_vision_request) {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
+            state.ctx->engine->clear_image();
             if (state.batching)
-                state.batching->start(state.ctx);
+                state.batching->resume();
         }
         res.status = 400;
         json error = {{"error",
@@ -1278,7 +1292,7 @@ static void handle_vision_chat_blocking_(httplib::Response& res, ServerState& st
     ImpError err = imp_context_reset(state.ctx);
     if (err != IMP_SUCCESS) {
         state.ctx->engine->clear_image();
-        state.batching->start(state.ctx);
+        state.batching->resume();
         res.status = 500;
         json error = {{"error",
                        {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
@@ -1297,7 +1311,7 @@ static void handle_vision_chat_blocking_(httplib::Response& res, ServerState& st
                                   &prefill_params);
     if (err != IMP_SUCCESS) {
         state.ctx->engine->clear_image();
-        state.batching->start(state.ctx);
+        state.batching->resume();
         res.status = 500;
         json error = {{"error",
                        {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
@@ -1369,7 +1383,7 @@ static void handle_vision_chat_blocking_(httplib::Response& res, ServerState& st
     }
 
     state.ctx->engine->clear_image();
-    state.batching->start(state.ctx);
+    state.batching->resume();
 
     // Build simple non-streaming response for vision
     auto t_end = std::chrono::high_resolution_clock::now();
@@ -4669,8 +4683,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         if (ctx.snap.has_vision_request) {
             {
                 std::lock_guard<std::timed_mutex> lock(state.mtx);
+                state.ctx->engine->clear_image();
                 if (state.batching)
-                    state.batching->start(state.ctx);
+                    state.batching->resume();
             }
             res.status = 400;
             json err = {{"type", "error"},
