@@ -654,13 +654,22 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // state built during earlier chunks must carry forward.
     fill_recurrent_state(*req, state, /*reset=*/(offset == 0), pf_stream);
 
-    // Vision embeddings on first chunk. Per-request: the batch worker encoded
-    // req->image into req->vision_emb on admission, so vision requests batch
-    // normally with text (no global has_input_, no engine pause).
+    // Vision embeddings on first chunk.
     if (req->vision_emb && offset == 0) {
+        // Per-request (server batched path): the worker encoded req->image into
+        // req->vision_emb on admission, so vision batches with text.
         state.vision_embeddings = req->vision_emb->as<half>();
         state.vision_token_id = req->vision_token_id;
         state.n_vision_tokens = req->n_vision_tokens;
+    } else if (vision_.has_input() && vision_.is_available() && offset == 0) {
+        // Global path: the C-API (imp_set_image) / imp-cli set ONE image on the
+        // engine for the next generation; its request carries no per-request
+        // embeddings, so bind the global ones. (Restores the pre-per-request
+        // binding the server no longer uses — imp_prefill_with_params builds a
+        // bare request, so without this the CLI's image was silently ignored.)
+        state.vision_embeddings = vision_.embeddings();
+        state.vision_token_id = vision_.soft_token_id();
+        state.n_vision_tokens = vision_.num_image_tokens();
     }
 
     if (!is_last_chunk) {
