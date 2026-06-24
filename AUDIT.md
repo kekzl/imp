@@ -402,11 +402,15 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
 - **F-A10** boundary re-prefill re-quantizes a *shared* KV block with no COW
   (NVFP4/INT KV only; FP16 safe by idempotency) — `scheduler.cpp:80-83`.
 - **F-A11** `size_t→int` truncation in FP8/NVFP4 migrate APIs
-  (`pre_dequant_phase3_nvfp4_decode.cu:639`, `fp8_quant.cu:277`) — latent (<2³¹ today).
-- **F-A12** KV-write kernels lack an in-kernel `block_id>=0` guard
-  (`executor_kernels.cu`) — defense-in-depth, currently unreachable (host caps).
+  (`pre_dequant_phase3_nvfp4_decode.cu:639`, `fp8_quant.cu:277`) — **parked**: genuinely
+  unreachable (largest tensor ~778M ≪ 2³¹), and a correct widen touches the live FP8
+  path's kernel grid math + linear indexing across 3 files — poor risk/reward autonomously.
+- **F-A12** KV-write kernels lack an in-kernel `block_id>=0` guard — **parked**: the
+  shared `kv_resolve_slot` chokepoint is also used by read paths and must not reject
+  StreamingLLM's legitimate `-1` sentinels; LOW + unreachable (host caps) doesn't justify
+  the per-kernel guard risk.
 - **F-A14** copyable RAII-owning handle types (LayerOffload/ExpertLRUCache/GreenCtx)
-  — latent double-free; mark move-only.
+  — **FIXED**: deleted copy ops → move-only; clean build confirms no copy/move sites.
 - **F-A17** swallowed `cudaStreamSynchronize` return at the burst boundary
   (`cuda_graph.cu:1014`) — diagnostic hygiene.
 

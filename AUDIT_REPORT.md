@@ -41,6 +41,7 @@ beyond those itemized below.
 | **F-A6** | med | A | `force_cublas_decode` host block-table moved stack→heap (was a 4× overrun at the 64K ctx cap) | builds; debug-arm path |
 | **F-A13** | low | F | weight-upload stream/event → `CudaStream`/`CudaEvent` RAII (no leak on throw) | builds; init-path |
 | **F-A15/16** | low | J | corrected stale `sm_90→mode1` and "reject n>1" comments | — |
+| **F-A14** | low | F | deleted copy ops on raw-handle owners (GreenCtx/LayerOffload/ExpertLRUCache) → move-only, no latent double-free | compile-time-only; clean build proves no copy/move sites |
 
 ## What was parked (verified real; needs more than an autonomous-safe change)
 
@@ -93,12 +94,17 @@ cuBLAS-autotune restart variance (informational, not a gate).
 
 ## Prioritized parked backlog (for a follow-up)
 
-1. **F-A2** bound the non-streaming device loop + re-poll cancel (high; needs coherence battery).
-2. **F-A5** vision `pause()/resume()` (med; needs vision-e2e).
-3. F-A11/F-A12/F-A14 mechanical hardening (low).
-4. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
+1. **F-A2** bound the non-streaming device loop + re-poll cancel, OR add a device-checked
+   cancel flag to the autonomous conditional-graph loop for full-throughput
+   interruptibility (high; a throughput-vs-responsiveness policy call + needs the
+   manual coherence battery — owner decision).
+2. **F-A5** vision `pause()/resume()` instead of `stop()/start()` (med; mechanical mirror
+   of the embeddings path, but needs vision-e2e/mmproj to validate).
+3. **F-A11** `size_t→int` widen (low; unreachable today, touches live FP8 kernel indexing).
+4. **F-A12** KV-write `block_id` guard (low; `kv_resolve_slot` shared w/ reads + StreamingLLM `-1`).
+5. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
 
-(F-A1b resolved this pass; F-A9 refuted by experiment.)
+(F-A1b + F-A14 resolved this pass; F-A9 refuted by experiment.)
 
 ## Honest caveats
 
