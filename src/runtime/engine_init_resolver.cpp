@@ -501,7 +501,14 @@ void Engine::init_compute_max_seq_len_() {
         // afford. (Was 30%, calibrated when weight caches competed at FP16.)
         int max_by_vram = (kv_bytes_per_token > 0) ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
                                                    : 131072;
-        constexpr int kAutoMaxSeqLenCap = 16384;
+        // Agentic workloads (tool loops, accumulating history, large file
+        // context) routinely exceed 16K and run a single long sequence rather
+        // than many short ones, so a high per-request ceiling is the right
+        // default. Cap lifted 16K → 64K; max_by_vram still bounds it to what
+        // VRAM honestly affords and model_ctx to what the model supports, so
+        // this only raises the ceiling on models that declare (and can hold)
+        // more than 16K.
+        constexpr int kAutoMaxSeqLenCap = 65536;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
             "max_seq_len: auto → %d (model=%d, vram_cap=%d, auto_cap=%d, kv=%zu B/tok, attn_layers=%d/%d)",
