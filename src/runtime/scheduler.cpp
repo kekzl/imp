@@ -80,6 +80,19 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         if (skip >= total)
                             skip = (total / bs) * bs;
                         if (skip >= total)
+                            // Full prefix hit: still forward the last token (the
+                            // model needs logits for the next position). That
+                            // re-prefill re-writes KV at total-1, which may sit
+                            // in a SHARED (ref>=2) cached block — there is no
+                            // copy-on-write here (F-A10). It is safe because the
+                            // write is idempotent: a prefix hit requires
+                            // byte-identical tokens+positions (chained block
+                            // hash), and quantizing identical FP16 source is
+                            // deterministic, so the shared holders see the same
+                            // KV bytes. If a future KV-quant scheme makes
+                            // re-quant input-dependent on neighbouring tokens
+                            // (non-idempotent), this site needs COW of the last
+                            // block before the re-prefill.
                             skip = total - 1;
                         req->prefill_offset = skip;
                         // Reporting: usage prompt_tokens_details / Anthropic

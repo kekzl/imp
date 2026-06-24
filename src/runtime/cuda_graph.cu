@@ -1011,8 +1011,18 @@ std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(cudaStream_
     if (!launched_)
         return {};
 
-    cudaStreamSynchronize(stream);
+    cudaError_t sync_err = cudaStreamSynchronize(stream);
     launched_ = false;
+    // F-A17: a swallowed sync error here means the mapped step-counter / ring
+    // buffer below hold stale or garbage data — surface it instead of emitting
+    // bogus tokens. Returning empty lets the worker's step() error path handle
+    // it (and the F-A3 poison check classify it) rather than misattributing the
+    // failure to a later checked call.
+    if (sync_err != cudaSuccess) {
+        IMP_LOG_ERROR("AsyncGraphLoop: stream sync failed (%s) — discarding burst",
+                      cudaGetErrorString(sync_err));
+        return {};
+    }
 
     int total_steps = *h_step_counter_;
     std::vector<int32_t> tokens(total_steps);
