@@ -288,11 +288,17 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
   `touch` happens at step-end, not admission.
 - blast radius: multi-sequence (batch>1) decode under full-KV pressure → silent KV
   corruption / UAF. Single-seq already fails safe (cancel); multi-seq did not.
-- fix: **applied** — `evict_lru(protect)` overload skips protected ids; decode site
-  protects the whole in-flight batch → falls through to the existing safe cancel.
-- validation: new unit `KVCacheManagerTest.ManagerEvictLRUProtectsInflightBatch`
-  (protect LRU-front → skips to next; protect all → returns -1, no table touched).
-  Hot-path A/B: decode-only path unchanged (eviction fires only under KV pressure).
+- fix: **applied (reject-newest, supersedes the initial batch-protect commit and
+  also closes F-A1b).** `allocate_block_with_eviction` already reclaims *cached*
+  (finished) blocks safely; the engine's last-resort `evict_lru` of a *live*
+  sequence is the only unsafe step and has no recompute path. Removed it at ALL
+  three engine sites (decode, prefill ×2, spec) → on true KV exhaustion the
+  already-present cancel/rollback fallback runs (reject-newest: cancel the
+  requesting sequence, leave in-flight ones intact). `evict_lru` kept as a manager
+  primitive with a "do not re-wire into the engine" warning.
+- validation: new unit `KVCacheManagerTest.AllocationNeverEvictsLiveSequenceUnderPressure`
+  (pool full of live seqs, 0 reclaimable → append/allocate FAIL, no table stripped).
+  Full suite + bench green, decode gate held; 3× deterministic A/B coherent.
 
 ### F-A3  poisoned CUDA context is cleared & ignored — engine serves garbage, no detect
 - dimension: B · severity: **high**
@@ -368,16 +374,15 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
   before it can ship. Streaming requests are already exempt.
 
 ### F-A1b  Prefill/spec eviction strips a live non-batch sequence → delayed zombie
-- dimension: C/F · severity: **high** · fix: **parked** (same root as F-A1)
+- dimension: C/F · severity: **high** · fix: **applied (folded into the F-A1
+  reject-newest fix above)**
 - evidence: `engine_scheduler.cpp:401,442`, `engine_spec_ngram.cpp:238` — same
-  `evict_lru` mechanism; since `lru_order_` holds only live sequences, a successful
-  eviction here strips an active (non-batch) sequence's KV; it is not cancelled, so
-  it decodes blockless next step → corruption (delayed vs F-A1's same-step UAF).
-- migration: replace silent LRU preemption with explicit backpressure — when
-  eviction would free a live sequence, the scheduler must mark that request
-  CANCELLED (there is no recompute-on-resume path), or disable LRU preemption and
-  rely on the cancel-on-alloc-failure fallbacks already present at all four sites.
-  Needs a multi-sequence KV-exhaustion server test to validate.
+  `evict_lru` mechanism; `lru_order_` holds only live sequences, so a successful
+  eviction stripped an active sequence's KV → blockless decode next step.
+- resolution: all three sites converted to reject-newest (decode cancels the
+  requester; prefill cancels the new request; spec rolls back to normal decode).
+  The unsafe preemption path is deleted; the safe cached-block reclamation inside
+  `allocate_block_with_eviction` is untouched.
 
 ### F-A9  NVFP4 grouped-MoE GEMM never consults the deterministic flag — REFUTED
 - dimension: H · severity: med · fix: **refuted (no change)**

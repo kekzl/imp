@@ -33,7 +33,7 @@ beyond those itemized below.
 
 | ID | Sev | Dim | Fix | Validation |
 |---|---|---|---|---|
-| **F-A1** | high | C/F | `evict_lru(protect)` shields the in-flight decode batch → existing safe-cancel instead of KV UAF | new unit `ManagerEvictLRUProtectsInflightBatch`; decode-path A/B unchanged |
+| **F-A1+F-A1b** | high | C/F | reject-newest: deleted the unsafe `evict_lru` of *live* sequences at all 3 engine sites (decode/prefill/spec); safe cached-block reclamation untouched; cancel/rollback fallbacks run on true exhaustion | new unit `AllocationNeverEvictsLiveSequenceUnderPressure`; suite+bench green |
 | **F-A3** | high | B | worker catch now syncs + classifies the sticky error; context-poisoning classes fail-fast (`stop_requested_`) with a loud log instead of serving garbage | exception-path-only; full suite + bench green |
 | **F-A4** | high | G | `/v1/messages` accepts Anthropic `x-api-key` (constant-time) as well as Bearer | new unit `ApiKeyAuth.*` (5 cases) |
 | **F-A7** | med | G | `/v1/messages` 401 now uses the Anthropic error envelope | covered by the auth path |
@@ -49,11 +49,9 @@ beyond those itemized below.
   bound the device loop + re-poll per chunk (the spec-ngram `miss_burst` template),
   but it touches the conditional-graph loop with a documented off-by-one history
   (#683/#692) and needs the multi-token-verify GPU coherence battery to ship safely.
-- **F-A1b (high)** — the *other* `evict_lru` sites (prefill/spec admission) strip a
-  live non-batch sequence → delayed zombie corruption (same root mechanism as F-A1).
-  Fix = convert silent LRU preemption into explicit cancel-based backpressure
-  (no recompute-on-resume path exists); needs a multi-sequence KV-exhaustion server
-  test to validate.
+- **F-A1b (high)** — RESOLVED (folded into the F-A1 reject-newest fix above): the
+  prefill/spec `evict_lru` sites shared the same live-sequence-stripping mechanism;
+  all three engine sites now reject-newest instead of preempting.
 - **F-A9 (med, candidate)** — NVFP4 grouped-MoE GEMM never consults the deterministic
   flag. Verified true; whether it makes output non-reproducible is **unproven**
   (CUTLASS fixed-schedule grouped GEMM is typically deterministic). Settled by a
@@ -96,11 +94,11 @@ cuBLAS-autotune restart variance (informational, not a gate).
 ## Prioritized parked backlog (for a follow-up)
 
 1. **F-A2** bound the non-streaming device loop + re-poll cancel (high; needs coherence battery).
-2. **F-A1b** explicit cancel-based KV backpressure across all evict sites (high; needs multi-seq test).
-3. **F-A9** if the A/B shows drift: add a deterministic CUTLASS schedule OR amend `determinism.md` §5 (med).
-4. **F-A5** vision `pause()/resume()` (med; needs vision-e2e).
-5. F-A11/F-A12/F-A14 mechanical hardening (low).
-6. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
+2. **F-A5** vision `pause()/resume()` (med; needs vision-e2e).
+3. F-A11/F-A12/F-A14 mechanical hardening (low).
+4. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
+
+(F-A1b resolved this pass; F-A9 refuted by experiment.)
 
 ## Honest caveats
 
