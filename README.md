@@ -35,10 +35,12 @@ NVFP4 prequant (from [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Op
 
 ## Performance
 
-**On a single RTX 5090, imp is the fastest engine for single-user inference** —
-it leads llama.cpp on decode and is at-or-ahead of vLLM on NVFP4 (prefill *and*
-decode), while being the only engine that runs native NVFP4 on consumer
-Blackwell. Every number below is measured, dated, and commit-anchored in
+**On a single RTX 5090, imp is the fastest engine for single-user and agentic
+inference** — it leads llama.cpp on decode and is at-or-ahead of vLLM on NVFP4
+(prefill *and* decode), while being the only engine that runs native NVFP4 on
+consumer Blackwell. That single-stream speed is the foundation the agentic
+surface (tool calling, long-context loops, concurrent sub-agents) is built on.
+Every number below is measured, dated, and commit-anchored in
 [BENCHMARKS.md](BENCHMARKS.md) (single 5090, greedy, CUDA 13.3, CUDA Graphs on;
 decode is the reliable A/B signal):
 
@@ -66,7 +68,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 **Use [vLLM](https://github.com/vllm-project/vllm) if** you serve high-concurrency batched workloads on datacenter GPUs (H100/B200). It has continuous batching, PagedAttention at scale, and production-grade serving.
 
-**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) for single-user inference and want every drop of the hardware — it is the fastest engine on the 5090 for both decode and NVFP4 prefill, with native NVFP4/FP4 and no dequant overhead. The trade-off is scope, not speed: single-GPU, single-author, experimental (no multi-GPU).
+**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) and want the fastest backend for **agentic AI** — coding agents, tool-using assistants and reasoning loops — on one card. It is the fastest engine on the 5090 for both decode and NVFP4 prefill (native NVFP4/FP4, no dequant overhead), with a first-class agentic surface: tool calling, `json_schema` constrained decoding, separable reasoning channels, prefix-cached long-context multi-turn, and moderate concurrency for sub-agent fan-out. The trade-off is scope, not speed: single-GPU, single-author, experimental (no multi-GPU, no datacenter-scale batching).
 
 ## Known limitations
 
@@ -76,7 +78,8 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 - **MoE/hybrid GGUF decode loses on Qwen3.6-35B** (~−31% vs llama.cpp): an FP16-projection tax on the GDN/attention path that NVFP4 can't address.
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
-- **Single-author, experimental.** A fast prototype, not production-hardened — run it for what it's good at (single-user inference on a 5090), not mission-critical serving.
+- **Moderate concurrency, not datacenter scale.** Concurrent sub-agent fan-out (tens of requests) is a tuned, supported workload; batch=64+ continuous-batching throughput on a rack is not — that's vLLM/SGLang territory.
+- **Single-author, experimental.** A fast prototype, not production-hardened — run it for what it's good at (single-user and agentic inference on a 5090), not mission-critical datacenter serving.
 
 ## Quickstart
 
