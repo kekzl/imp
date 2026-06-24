@@ -13,6 +13,7 @@
 namespace imp {
 
 class Model;
+struct ImageData;  // src/vision/image_processor.h
 
 // Encapsulates the vision (multimodal) pipeline: model loading, image
 // preprocessing, SigLIP encoding, and embedding buffer management.
@@ -32,6 +33,21 @@ public:
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len, cudaStream_t stream);
 
     void clear_image() { has_input_ = false; }
+
+    // --- Per-request binding API (server batched path) -------------------
+    // CPU-only preprocess (decode/resize/normalize) — safe to call off the
+    // batch worker (e.g. an HTTP handler thread). Fills `out` with FP16 pixels.
+    [[nodiscard]] bool preprocess(const uint8_t* data, size_t len, ImageData& out) const;
+    // Encode a preprocessed image into the caller's `out` device buffer (sized
+    // embeddings_bytes()). Encodes into the STABLE scratch d_embeddings_ first
+    // (the encoder CUDA graph is keyed on the output pointer, so a per-request
+    // output would force a full recapture every image) then copies to `out`.
+    // Serialized: the caller MUST be the sole GPU driver (the batch worker).
+    [[nodiscard]] bool encode_to(const ImageData& img, half* out, cudaStream_t stream);
+    size_t embeddings_bytes() const noexcept {
+        return static_cast<size_t>(num_image_tokens()) * static_cast<size_t>(lm_d_) * sizeof(half);
+    }
+    int lm_d() const noexcept { return lm_d_; }
 
     // Accessors
     bool is_available() const noexcept { return encoder_ != nullptr; }
@@ -53,6 +69,7 @@ private:
     size_t d_pixels_size_ = 0;
 
     bool has_input_ = false;
+    int lm_d_ = 0;  // LLM embedding dim (vision embeddings are [num_image_tokens, lm_d_])
     int32_t soft_token_id_ = -1;
     int32_t boi_id_ = -1;
     int32_t eoi_id_ = -1;

@@ -30,6 +30,7 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     }
 
     int lm_d = model_->lm_d_model > 0 ? model_->lm_d_model : lm_d_model;
+    lm_d_ = lm_d;
     encoder_ = std::make_unique<VisionEncoder>();
     if (!encoder_->init(*model_, lm_d, stream, &alloc)) {
         IMP_LOG_ERROR("Failed to init vision encoder");
@@ -116,6 +117,29 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
         IMP_LOG_INFO("Vision: encoded image -> %d tokens", model_->config.num_image_tokens);
     }
     return ok;
+}
+
+bool VisionPipeline::preprocess(const uint8_t* data, size_t len, ImageData& out) const {
+    if (!model_)
+        return false;
+    return load_and_preprocess_image_from_memory(data, len, model_->config.image_size,
+                                                  model_->config.image_mean, model_->config.image_std, out);
+}
+
+bool VisionPipeline::encode_to(const ImageData& img, half* out, cudaStream_t stream) {
+    if (!encoder_ || !d_embeddings_ || !out || img.pixels.empty())
+        return false;
+    // Encode into the stable scratch d_embeddings_ (the encoder CUDA graph is
+    // keyed on the output pointer — encoding straight into a per-request buffer
+    // would recapture ~200 kernels every image), then copy to the caller buffer.
+    if (!encode_image(img.pixels.data(), static_cast<int>(img.pixels.size()), stream))
+        return false;
+    cudaMemcpyAsync(out, d_embeddings_, embeddings_bytes(), cudaMemcpyDeviceToDevice, stream);
+    cudaStreamSynchronize(stream);
+    // encode_image sets the legacy global has_input_ flag as a side effect; the
+    // per-request path doesn't use it, so clear it to avoid leaking global state.
+    has_input_ = false;
+    return true;
 }
 
 bool VisionPipeline::set_image(const std::string& path, cudaStream_t stream) {

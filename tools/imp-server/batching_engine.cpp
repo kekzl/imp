@@ -162,6 +162,17 @@ void BatchingEngine::worker_loop() {
                     auto sr = std::move(pending_queue_.front());
                     pending_queue_.pop_front();
 
+                    // Per-request vision: encode the image on THIS worker thread
+                    // (the encode is serialized + uses the shared encoder
+                    // workspace, so it must not run concurrently with step()).
+                    // The result lands in request->vision_emb; the request then
+                    // batches with text like any other — no engine pause.
+                    if (sr->request->image && !engine->encode_image_for(*sr->request)) {
+                        sr->request->status = imp::RequestStatus::CANCELLED;
+                        sr->push_finish("image_encode_failed");
+                        continue;
+                    }
+
                     sr->notified_count = sr->request->output_tokens.size();
                     engine->add_request(sr->request);
                     active_requests_.push_back(std::move(sr));
