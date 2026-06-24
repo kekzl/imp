@@ -3,9 +3,14 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <memory>
 #include "model/chat_template.h"
 
 namespace imp {
+
+// Forward declares to keep CUDA / buffer headers out of this widely-included file.
+struct ImageData;  // src/vision/image_processor.h
+class Buffer;       // src/core/buffer.h
 
 // Per-token log probability information (for logprobs output)
 struct TokenLogprob {
@@ -125,6 +130,17 @@ struct Request {
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;
+
+    // Vision (multimodal), per-request binding. `image` carries CPU-preprocessed
+    // pixels set by the server/CLI; the batch worker encodes it into `vision_emb`
+    // (device [n_vision_tokens, d_model] fp16) on admission and clears `image`.
+    // step_prefill_one binds vision_emb at offset==0. shared_ptr → auto-freed on
+    // the last request reference (no manual lifecycle across cancel paths).
+    // Null for text-only requests.
+    std::shared_ptr<ImageData> image;
+    std::shared_ptr<Buffer> vision_emb;
+    int32_t vision_token_id = -1;
+    int n_vision_tokens = 0;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
 };

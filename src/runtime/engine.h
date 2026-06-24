@@ -29,6 +29,8 @@
 
 namespace imp {
 
+struct ImageData;  // src/vision/image_processor.h (per-request vision)
+
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
     int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)
@@ -163,6 +165,13 @@ public:
     void clear_image();
     bool has_vision() const noexcept { return vision_.is_available(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
+    // Per-request vision (server batched path). preprocess_image runs CPU-only
+    // (safe off the worker, e.g. an HTTP handler thread). encode_image_for runs
+    // the GPU encode for req->image into a per-request buffer (req->vision_emb) —
+    // MUST be called from the batch worker (the encode is serialized + uses the
+    // shared encoder workspace). Returns false if no vision model / no image.
+    [[nodiscard]] bool preprocess_image(const uint8_t* data, size_t len, ImageData& out);
+    [[nodiscard]] bool encode_image_for(Request& req);
 
     // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
     // Requires model->mtp_->loaded. Allocates the MTP workspace via the VRAM

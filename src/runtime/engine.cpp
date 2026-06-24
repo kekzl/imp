@@ -1,4 +1,7 @@
 #include "runtime/engine.h"
+#include "core/buffer.h"
+#include "vision/image_processor.h"
+#include "runtime/request.h"
 #include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -418,6 +421,25 @@ bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
 }
 
 void Engine::clear_image() { vision_.clear_image(); }
+
+bool Engine::preprocess_image(const uint8_t* data, size_t len, ImageData& out) {
+    return vision_.preprocess(data, len, out);
+}
+
+bool Engine::encode_image_for(Request& req) {
+    if (!req.image || !vision_.is_available())
+        return false;
+    auto buf = std::make_shared<Buffer>(Buffer::device(vision_.embeddings_bytes()));
+    if (!*buf)
+        return false;
+    if (!vision_.encode_to(*req.image, buf->as<half>(), stream_))
+        return false;
+    req.vision_emb = std::move(buf);
+    req.vision_token_id = vision_.soft_token_id();
+    req.n_vision_tokens = vision_.num_image_tokens();
+    req.image.reset();  // host pixels no longer needed after encode
+    return true;
+}
 
 // =====================================================================
 // Initialization — decomposed into sub-phases
