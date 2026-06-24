@@ -2,9 +2,19 @@
 
 ## Mission
 
-**imp shall be the fastest single-GPU LLM inference engine on NVIDIA RTX 5090 (sm_120) for batch size 1, across the model architectures it supports.**
+**imp shall be the best single-GPU *agentic* AI inference engine on NVIDIA RTX 5090 (sm_120) — the fastest, most capable backend for running coding agents, tool-using assistants and reasoning loops on one workstation card.**
 
-Single-user, single-GPU, latency-first. Not a competitor to vLLM/SGLang on throughput. A weapon for the workstation.
+The foundation is unchanged and non-negotiable: **the fastest single-stream (batch=1) decode of any engine on this chip**, across the architectures we support. Low single-stream latency is what makes an agent feel instant — it is the definition of "best" below, and nothing agentic is allowed to erode it.
+
+What "agentic" adds *on top of* raw speed (specified in "Agentic surface" below, gated in the release bar):
+
+- **Tool calling & constrained output** that never breaks the JSON / schema contract.
+- **Long-context loops** — large agent transcripts, prefix-cached multi-turn, KV budgets sized for 64k+ working context.
+- **Reasoning / thinking** as a first-class, separable output channel.
+- **Moderate concurrency** — an agent harness fans out parallel sub-agents; serving *tens* of concurrent requests on one GPU is a goal, not an afterthought (see "What imp is NOT").
+- **Reliability under sustained agentic load** — clean cancel, per-request metrics, no host syncs on the hot path.
+
+Single-user-class hardware, single GPU, latency-first. Not a datacenter throughput competitor to vLLM/SGLang. The agentic weapon for the workstation.
 
 ---
 
@@ -17,6 +27,8 @@ Ranked, non-negotiable order:
 3. **Time-to-first-token (TTFT)** at realistic prompt lengths (512, 2048, 8192, 32k) — must be competitive with vLLM despite our batch=1 focus.
 4. **VRAM efficiency** — must fit larger models than competitors at equivalent quality (NVFP4, FP8 KV, paged cache). 32 GB on a 5090 should serve everything up to ~70B dense at usable quality.
 5. **Quality** — perplexity and downstream eval parity with llama.cpp at the same quant. No silent quality regressions for speed.
+
+These five define raw **engine** quality and are anchored on single-stream latency. Agentic **capability** — the other half of the mission — is specified in "Agentic surface" below and gated in the release bar. Concurrent throughput for agent fan-out is a goal (see "What imp is NOT"), but it is a *secondary* metric: it may never be bought by regressing single-stream decode.
 
 Anything below this bar is a bug.
 
@@ -97,9 +109,22 @@ Concrete technical commitments — these are means, not ends, but progress on th
 - **No host syncs on the decode hot path.** Ever. CI gates this.
 
 ### Surface
-- **OpenAI-compatible HTTP server** stays first-class. Tool calling, SSE streaming, logprobs, /tokenize — already done. Maintain compliance with the test suite as OpenAI evolves the spec.
+- **OpenAI- and Anthropic-compatible HTTP server** stays first-class. `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, SSE streaming, tool calling, logprobs, `/tokenize` — already done. Maintain compliance with the test suite as both wire formats evolve.
 - **C library API** stable enough for embedding.
 - **CLI** for benchmarking and interactive use.
+
+---
+
+## Agentic surface
+
+The other half of the mission. An engine can be fast and still be useless to an agent if it drops tool calls, can't hold a long transcript, or stalls under concurrent sub-agents. These are tracked commitments, not nice-to-haves — each is gated in the release bar:
+
+- **Tool calling & constrained decoding.** OpenAI + Anthropic tool-call wire formats; `response_format=json_schema` with a constrained-decode FSM that is *guaranteed* to emit valid, terminating JSON (e.g. the digit-run cap, #761). A broken JSON contract under any sampler state is a release blocker, not a quality nit.
+- **Reasoning / thinking as a separable channel.** `reasoning_content` split from `content`, `think_budget` honoured (0 disables), gpt-oss Harmony channels parsed (#768). Thinking must be controllable per request and never leak into the answer.
+- **Long-context agent loops.** Prefix cache default-ON for multi-turn (#763), `cache_control` pinning, KV budget defaults sized for agentic working sets (auto max_seq_len to 64k, NVFP4 KV-fraction fix, #771), `kv_cache.dtype=auto` honouring FP8 hints where quality allows (Qwen3, #704). The target is a coding-agent session that stays coherent across a full task, not a one-shot prompt.
+- **Concurrency for sub-agent fan-out.** Per-request spec/vision/sampling state so heterogeneous concurrent requests batch together without an engine pause (per-request vision #774, per-request spec toggle #770). The per-seq decode consumers are batched (sampler #745, batched-M / tensor-core lm_head #746/#748) — concurrent decode 472→767 tok/s @16. Tens of concurrent agent requests on one 5090 must stay responsive (TTFT, ITL) without starving the single-stream path.
+- **Reliability under sustained load.** Clean request cancel, ITL/cancel/queue metrics (#770), bounded decode bursts, fail-fast on bad input — the server must survive an agent that opens, abandons and retries streams for hours.
+- **Multimodal agents.** Vision (gemma-3/4-VL) routed through the normal batched path so image requests interleave with text instead of pausing the engine (#774).
 
 ---
 
@@ -108,7 +133,7 @@ Concrete technical commitments — these are means, not ends, but progress on th
 Defining this is as important as defining the mission. These are explicit non-goals — saying yes to them dilutes the mission:
 
 - **Not a multi-GPU engine.** Tensor/pipeline parallelism is out of scope. Single GPU, period.
-- **Not a high-batch serving engine.** vLLM and SGLang own that space. We don't compete on batch=64 throughput.
+- **Not a datacenter throughput engine.** vLLM and SGLang own batch=64+ continuous-batching serving on racks; we don't chase aggregate tok/s as the headline number. But **moderate agentic concurrency is explicitly in scope** — an agent harness fanning out *tens* of parallel sub-agents on one 5090 is a supported, tuned workload (batched sampler #745 + batched-M lm_head #746/#748 already lift concurrent decode 472→767 tok/s @16). The line: optimize single-stream latency first, then make concurrent agent fan-out efficient — never trade single-stream latency for aggregate throughput.
 - **Not a training framework.** Inference only.
 - **Not a mobile / embedded engine.** Workstation-class GPUs only.
 - **Not a CPU engine.** GPU only. No AVX kernels, no Metal, no Vulkan.
@@ -135,8 +160,10 @@ A release is shippable when, on RTX 5090:
 3. Prefill tok/s ≥ llama.cpp on every dense **NVFP4/SafeTensors** hero. GGUF prefill is explicitly best-effort: the Q4K-MMQ experiment (2026-05-28) showed imp's GGUF prefill ceiling is architectural (ties cuBLAS at ~4.3% of peak; llama.cpp's MMQ leads 1.3-2.4×) — the old "≥ llama.cpp on every dense GGUF hero" bar was permanently violated as written and is dropped (realignment 2026-06-06, #550).
 4. Prefill tok/s ≥ 70% of vLLM single-seq on every MoE hero (measured ~1.4× gap 2026-05-31; the remaining levers are prefill attention and the grouped-GEMM launch/occupancy scheduler, #558).
 5. No host syncs on the decode hot path (CI-enforced).
-6. OpenAI API compliance suite green.
-7. README benchmarks updated, commit hash of competitors recorded.
+6. OpenAI **and Anthropic** API compliance suites green.
+7. **Agentic surface green:** tool-call + `json_schema` constrained-decode batteries pass (valid, terminating JSON under degenerate sampler state); reasoning/`think_budget` and gpt-oss Harmony parsing correct; prefix cache + long-context KV defaults coherent across a multi-turn agent session; vision interleaves with text.
+8. **Concurrency holds:** tens of concurrent agent requests stay responsive (TTFT/ITL within target) with clean cancel, and concurrent fan-out does **not** regress single-stream decode.
+9. README benchmarks updated, commit hash of competitors recorded.
 
 ---
 
