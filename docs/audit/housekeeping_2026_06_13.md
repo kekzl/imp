@@ -78,7 +78,6 @@ wrong:
 - `GOAL.md:86` — "the '20× grouped-GEMM gap' premise is refuted".
 - `docs/audit/performance_agent_readiness_2026_05_31.md:13–17,39,208` — "The central
   audit premise is outdated… '1258' value… conclusively refuted".
-- `docs/audit/gemm_grouped_nvfp4_ceiling_2026_06_09.md:80` — links the refutation memo.
 - `CHANGELOG.md:694` — historical record ("CUTLASS 3.x… scaffold (#22) — path for
   sm_100+"); changelog is an append-only archive, left untouched.
 
