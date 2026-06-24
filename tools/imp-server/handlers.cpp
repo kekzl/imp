@@ -60,6 +60,7 @@ struct ChatRequestParams {
     nlohmann::json tools;
     nlohmann::json tool_choice;
     bool has_tools = false;
+    bool parallel_tool_calls = true;  // OpenAI: false → emit at most one tool call
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;
@@ -813,6 +814,7 @@ static bool parse_chat_request_params(
     // Parse tool calling parameters
     ctx.params.tools = body.value("tools", json::array());
     ctx.params.tool_choice = body.value("tool_choice", json("auto"));
+    ctx.params.parallel_tool_calls = body.value("parallel_tool_calls", true);
     ctx.params.has_tools = !ctx.params.tools.empty() &&
                            !(ctx.params.tool_choice.is_string() &&
                              ctx.params.tool_choice.get<std::string>() == "none");
@@ -1675,6 +1677,9 @@ static void nonstream_chat_response_(
                                                                 state.next_tool_call_id);
             if (!parsed_calls.empty()) {
                 tool_calls = std::move(parsed_calls);
+                // OpenAI parallel_tool_calls=false: emit at most one call.
+                if (!ctx.params.parallel_tool_calls && tool_calls.size() > 1)
+                    tool_calls.resize(1);
                 content = pre_content;
                 finish = "tool_calls";
                 // Validate parsed arguments against each tool's input schema.
@@ -1816,7 +1821,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     // think models) AFTER request parsing computed max_stop_len. A stale 0 made
     // the partial-match holdback `size - max_stop_len + 1` flush one byte PAST
     // pending_text's end — emitting the std::string NUL terminator into every
-    // SSE content delta ("4 ") and disabling cross-token stop matching.
+    // SSE content delta ("4\0") and disabling cross-token stop matching.
     size_t             max_stop_len     = 0;
     for (const auto& s : stop_sequences)
         max_stop_len = std::max(max_stop_len, s.size());
@@ -2281,7 +2286,9 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
                             tc.arguments = dump_safe(args);
                         }
                     }
-                    if (!tc.name.empty()) {
+                    // parallel_tool_calls=false: stream at most one tool call.
+                    if (!tc.name.empty() &&
+                        (ctx.params.parallel_tool_calls || stream_tool_calls.empty())) {
                         int idx = static_cast<int>(stream_tool_calls.size());
                         // Emit name chunk
                         json name_delta = {
