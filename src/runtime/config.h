@@ -79,6 +79,18 @@ struct RuntimeConfig {
         // (Was 4, which both contradicted the documented "0 = auto" semantics
         // and never reached engine sizing — it only acted as the decode cap.)
         int max_batch_size = 0;
+        // Bound for the autonomous decode graph loop on a NON-streaming request
+        // with speculation off (which would otherwise run UNBOUNDED to
+        // max_tokens on-device, so a client disconnect/timeout — polled only
+        // between bursts — couldn't interrupt it and burned a full generation).
+        // The loop runs in bursts of this many tokens and returns to the host
+        // to re-poll cancellation; output is identical (same decode, chunked).
+        // Larger = less relaunch overhead but higher cancel latency. Streaming
+        // and speculation paths are unaffected. <=0 restores the old unbounded
+        // behavior. IGNORED when `deterministic` is set: the unbounded loop is
+        // the only greedy-bit-reproducible decode path, and evals run to
+        // completion (no mid-burst cancel needed), so determinism wins there.
+        int decode_burst = 128;
     } runtime;
 
     struct KVCache {

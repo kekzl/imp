@@ -1550,8 +1550,32 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // real per-token. Bounded (speculation) bursts still stream in
             // groups via the per-burst sync, so they stay enabled.
             const bool stream_unbounded = dreq->stream && spec_limit == 0;
-            if (!stream_unbounded)
-                try_launch_async_graph_loop(dreq, last_token, dec_stream, spec_limit);
+            if (!stream_unbounded) {
+                // F-A2: a NON-streaming request with speculation off would run
+                // the UNBOUNDED on-device loop (spec_limit == 0) all the way to
+                // max_tokens while the host blocks — is_cancelled()/timeout are
+                // only polled between bursts, so a client disconnect couldn't
+                // interrupt it and burned a full generation. Bound it to
+                // runtime.decode_burst so the worker regains control to re-poll
+                // cancellation; output is identical (same decode, chunked +
+                // relaunched, exactly like the speculation burst path).
+                // Speculation keeps its own miss_burst limit; <=0 restores the
+                // old unbounded behavior.
+                int launch_limit = spec_limit;
+                // Bound only in the default (non-deterministic) serving mode.
+                // The fully-on-device unbounded loop is the one decode path that
+                // is greedy bit-reproducible run-to-run (no host re-entry);
+                // chunking it would make non-streaming greedy output
+                // non-reproducible, breaking the determinism.md eval guarantee.
+                // Deterministic mode runs to completion and never needs
+                // mid-burst cancellation, so keep it unbounded there. In
+                // production the model is already non-deterministic, so bounding
+                // costs no reproducibility and buys cancel responsiveness.
+                if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
+                    !runtime_config_.runtime.deterministic)
+                    launch_limit = runtime_config_.runtime.decode_burst;
+                try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
+            }
         }
     }
 
