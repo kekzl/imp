@@ -98,8 +98,9 @@ cuBLAS-autotune restart variance (informational, not a gate).
    cancel flag to the autonomous conditional-graph loop for full-throughput
    interruptibility (high; a throughput-vs-responsiveness policy call + needs the
    manual coherence battery — owner decision).
-2. **F-A5** vision `pause()/resume()` instead of `stop()/start()` (med; mechanical mirror
-   of the embeddings path, but needs vision-e2e/mmproj to validate).
+2. **F-A5** vision request serialization kills concurrent requests (med) — NOT a
+   stop→pause swap (vision mutates global engine image state; pause/resume could leak
+   the image to a concurrent text request). Real fix: per-request image binding.
 3. **F-A11** `size_t→int` widen (low; unreachable today, touches live FP8 kernel indexing).
 4. **F-A12** KV-write `block_id` guard (low; `kv_resolve_slot` shared w/ reads + StreamingLLM `-1`).
 5. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.

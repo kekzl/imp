@@ -397,8 +397,13 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
 
 ### Other low / hardening (verified, parked with notes)
 - **F-A5** vision request `stop()/start()` cancels all concurrent in-flight
-  (`handlers.cpp:1004-1018`) — should `pause()/resume()` like the embeddings path;
-  needs vision-e2e (mmproj) to validate, so parked.
+  (`handlers.cpp:1004-1018`) — **parked, NOT a safe swap.** On inspection the vision
+  path `stop()`s to get *exclusive* access while it mutates GLOBAL engine image state
+  (`clear_image` + `set_image_from_memory`). The embeddings `pause()/resume()` works
+  there because embeddings don't mutate shared image state; for vision, resuming a
+  concurrent *text* request could make it process with the stale vision image. The
+  real fix is per-request image binding (so vision needn't serialize the whole
+  engine), not a stop→pause swap. (The agent's "mirror embeddings" was an over-flag.)
 - **F-A10** boundary re-prefill re-quantizes a *shared* KV block with no COW
   (NVFP4/INT KV only; FP16 safe by idempotency) — `scheduler.cpp:80-83`.
 - **F-A11** `size_t→int` truncation in FP8/NVFP4 migrate APIs
