@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <cfloat>
@@ -274,25 +275,36 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
 // No host sync — caller provides pre-allocated d_block_maxes and d_absmax.
 // The scale is written to d_scale_out on device.
 
-void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int n_elements,
+void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int64_t n_elements,
                                       float* d_block_maxes, int max_grid, float* d_absmax, float* d_scale_out,
                                       cudaStream_t stream) {
     if (!input_fp16 || !output_fp8 || n_elements <= 0)
         return;
+    // The reduction/quantize kernels index with int. No current model is close
+    // (largest tensor ~778M elems), but guard the boundary loudly instead of
+    // silently truncating size_t→int — a >2.1B-element tensor would otherwise
+    // corrupt with a wrong grid + wrapped indices (F-A11). The callers pass the
+    // full size_t now, so the truncation can only ever happen here.
+    if (n_elements > static_cast<int64_t>(INT_MAX)) {
+        IMP_LOG_ERROR("calibrate_and_quantize_fp8_async: n_elements=%lld exceeds int range — skipping",
+                      static_cast<long long>(n_elements));
+        return;
+    }
+    const int n = static_cast<int>(n_elements);
 
-    const int grid = compute_grid(n_elements);
+    const int grid = compute_grid(n);
     const int reduce_grid = (grid <= max_grid) ? grid : max_grid;
 
     // Pass 1: absmax reduction
     absmax_reduce_kernel<<<reduce_grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
-                                                                 d_block_maxes, n_elements);
+                                                                 d_block_maxes, n);
 
     absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_absmax, reduce_grid);
 
     // Pass 2: fused scale computation + quantize (reads absmax from device)
     calibrate_quantize_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
                                                                    static_cast<uint8_t*>(output_fp8),
-                                                                   d_absmax, d_scale_out, n_elements);
+                                                                   d_absmax, d_scale_out, n);
 }
 
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------

@@ -31,11 +31,14 @@ including the bounded-burst F-A2 fix at ~0 cost). No silent behavior change beyo
 those itemized — the two intentional ones (reject-newest under KV exhaustion;
 det-mode-gated burst bounding) are called out with their before/after.
 
-Two validation insights worth flagging: (1) verification refuted or reshaped four
-"findings" that would have been *unsafe* fixes (F-A9 determinism, F-A5 vision swap,
-F-A12 guard) — the codebase-audit "verify before acting" rule earned its keep; and
-(2) the F-A2 fix only proved safe because validation caught that bounding the loop
-silently broke greedy reproducibility on NVFP4-MoE, forcing the determinism gate.
+Two validation insights worth flagging: (1) verification cuts both ways — the first
+pass's static reasoning *over-parked* F-A5 and F-A12 (a deeper re-trace in the
+follow-up showed pause() drains rather than cancels, and that all kv_resolve_slot
+sites are writes), so both shipped safely; while F-A9 (determinism) was genuinely
+refuted by an A/B. The lesson is the same either way: re-trace before deciding, in
+both directions. (2) the F-A2 fix only proved safe because validation caught that
+bounding the loop silently broke greedy reproducibility on NVFP4-MoE, forcing the
+determinism gate.
 
 ## What was fixed (validated, shipped as gated commits)
 
@@ -101,12 +104,24 @@ cuBLAS-autotune restart variance (informational, not a gate).
 
 ## Prioritized parked backlog (for a follow-up)
 
-1. **F-A5** vision request serialization kills concurrent requests (med) — NOT a
-   stop→pause swap (vision mutates global engine image state; pause/resume could leak
-   the image to a concurrent text request). Real fix: per-request image binding.
-2. **F-A11** `size_t→int` widen (low; unreachable today, touches live FP8 kernel indexing).
-3. **F-A12** KV-write `block_id` guard (low; `kv_resolve_slot` shared w/ reads + StreamingLLM `-1`).
-4. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
+**Follow-up pass (2026-06-24) closed the rest:** F-A5, F-A11, F-A12 FIXED (a deeper
+re-trace corrected the F-A5 and F-A12 park-rationales — see below); the pass-1
+build-hygiene backlog (CI1 format-gate, B2 CMakePresets, TL1 .clang-tidy, CI2
+tidy-gate) was found ALREADY DONE on main.
+
+Remaining:
+1. **CI3 / T1 / BM1** — GPU correctness + perf gates are dark without a self-hosted
+   RTX 5090 runner. Genuine infra; cannot be provided from here.
+2. **F-A10** shared-KV COW (low), **F-A17** swallowed sync return (low) — diagnostic/edge.
+
+### Follow-up corrections (verification cuts both ways)
+- **F-A5** was NOT a feature: `pause()` *drains* in-flight requests (verified) so it
+  gives stop()'s exclusivity without cancelling — a safe pause/resume swap + clear-
+  before-resume fixed it. My earlier "needs per-request image binding" was over-cautious.
+- **F-A12**: all 9 `kv_resolve_slot` sites are WRITE kernels (none read), so the guard
+  is safe everywhere — the earlier "shared with reads + StreamingLLM `-1`" was wrong.
+- **F-A11**: fixed the responsible way (int64 wrapper + >INT_MAX guard, kernels untouched)
+  rather than the invasive hot-path widen I'd flagged.
 
 (F-A1b + F-A2 + F-A14 resolved this pass; F-A9 refuted by experiment. **All HIGH
 findings are now fixed-and-validated** — no parked HIGH remaining.)

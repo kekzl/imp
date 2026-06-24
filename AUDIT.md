@@ -403,25 +403,34 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
   doc was left unchanged. (Over-flag guard: a "0 references" smell did not survive
   the A/B — the value of the codebase-audit verify rule.)
 
-### Other low / hardening (verified, parked with notes)
-- **F-A5** vision request `stop()/start()` cancels all concurrent in-flight
-  (`handlers.cpp:1004-1018`) — **parked, NOT a safe swap.** On inspection the vision
-  path `stop()`s to get *exclusive* access while it mutates GLOBAL engine image state
-  (`clear_image` + `set_image_from_memory`). The embeddings `pause()/resume()` works
-  there because embeddings don't mutate shared image state; for vision, resuming a
-  concurrent *text* request could make it process with the stale vision image. The
-  real fix is per-request image binding (so vision needn't serialize the whole
-  engine), not a stop→pause swap. (The agent's "mirror embeddings" was an over-flag.)
+### Other low / hardening
+> **Follow-up pass (2026-06-24, branch `audit/backlog-cleanup`):** F-A5, F-A11,
+> F-A12 FIXED (the deeper re-trace below corrected two of the earlier
+> park-rationales). Pass-1 backlog (CI1 format-gate, B2 CMakePresets, TL1
+> .clang-tidy, CI2 tidy-gate) was found ALREADY DONE on main. Only CI3/T1/BM1
+> (self-hosted GPU runner) remains — genuine infra.
+- **F-A5** vision request `stop()/start()` cancelled all concurrent in-flight —
+  **FIXED**: switched to `pause()/resume()`. Re-trace corrected the earlier
+  "not a safe swap" verdict: `pause()` DRAINS in-flight requests (the worker only
+  parks when `active_requests_` is empty — verified `batching_engine.cpp:76-94,127`)
+  so it gives the same exclusivity as `stop()` without cancelling. The global-image
+  hazard is handled by clearing the image before every `resume()` (added at the
+  reject paths that lacked it). Validated: vision e2e correct + concurrent request
+  not cancelled (gemma-3-4b-vl).
 - **F-A10** boundary re-prefill re-quantizes a *shared* KV block with no COW
-  (NVFP4/INT KV only; FP16 safe by idempotency) — `scheduler.cpp:80-83`.
-- **F-A11** `size_t→int` truncation in FP8/NVFP4 migrate APIs
-  (`pre_dequant_phase3_nvfp4_decode.cu:639`, `fp8_quant.cu:277`) — **parked**: genuinely
-  unreachable (largest tensor ~778M ≪ 2³¹), and a correct widen touches the live FP8
-  path's kernel grid math + linear indexing across 3 files — poor risk/reward autonomously.
-- **F-A12** KV-write kernels lack an in-kernel `block_id>=0` guard — **parked**: the
-  shared `kv_resolve_slot` chokepoint is also used by read paths and must not reject
-  StreamingLLM's legitimate `-1` sentinels; LOW + unreachable (host caps) doesn't justify
-  the per-kernel guard risk.
+  (NVFP4/INT KV only; FP16 safe by idempotency) — `scheduler.cpp:80-83`. (still parked, low)
+- **F-A11** `size_t→int` truncation in FP8/NVFP4 migrate APIs — **FIXED**: widened
+  the wrapper to `int64_t` + a loud >INT_MAX guard (the responsible fix — kernels keep
+  int indexing, only ever reached for in-range sizes; avoids touching hot-path indexing
+  for an unreachable case). FP8 oracle tests pass.
+- **F-A12** KV-write `block_id>=0` guard — **FIXED**: re-trace found all 9
+  `kv_resolve_slot` sites are WRITE kernels (none are reads — the earlier
+  "shared with reads" rationale was wrong), so a block-uniform `if (block_id<0) return;`
+  is safe everywhere. StreamingLLM sink-eviction + KV-write tests pass.
+- **F-A14** copyable RAII-owning handle types (LayerOffload/ExpertLRUCache/GreenCtx)
+  — **FIXED**: deleted copy ops → move-only; clean build confirms no copy/move sites.
+- **F-A17** swallowed `cudaStreamSynchronize` return at the burst boundary
+  (`cuda_graph.cu:1014`) — diagnostic hygiene. (still parked, low)
 - **F-A14** copyable RAII-owning handle types (LayerOffload/ExpertLRUCache/GreenCtx)
   — **FIXED**: deleted copy ops → move-only; clean build confirms no copy/move sites.
 - **F-A17** swallowed `cudaStreamSynchronize` return at the burst boundary

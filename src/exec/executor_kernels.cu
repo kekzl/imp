@@ -462,6 +462,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_kernel(const half* __restr
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     half* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
                 static_cast<int64_t>(slot_in_block) * row_elems;
@@ -494,6 +501,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     // blockIdx.y selects K (0) or V (1)
     const half* src;
@@ -532,6 +546,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     __nv_fp8_e4m3* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
                          static_cast<int64_t>(slot_in_block) * row_elems;
@@ -582,6 +603,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     // Select K or V based on blockIdx.y
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
@@ -667,6 +695,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
     uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
@@ -774,6 +809,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
     uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
@@ -948,6 +990,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
     uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
@@ -1023,6 +1072,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     if (blockIdx.y == 0) {
         // K path: apply RoPE during write
@@ -1103,6 +1159,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     int slot_in_block;
     int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
+    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
+    // sentinel, or a future block-table bug — would index the KV pool OOB.
+    // block_id is uniform across the block (derived from blockIdx.x), so this
+    // skips the whole write without divergence. Never fires today (host-side
+    // admission guarantees every written position has a real block).
+    if (block_id < 0)
+        return;
 
     const half* src;
     __nv_fp8_e4m3* dst;

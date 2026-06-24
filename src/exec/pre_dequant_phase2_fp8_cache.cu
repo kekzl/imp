@@ -195,9 +195,9 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 fp8_offset += e.n_elems;
 
                 // Async calibrate + quantize (no host sync)
-                calibrate_and_quantize_fp8_async(qscratch_->dequant, fp8_buf, static_cast<int>(e.n_elems),
-                                                 d_block_maxes, max_grid, d_absmax,
-                                                 d_scales_all + static_cast<ptrdiff_t>(i), stream);
+                calibrate_and_quantize_fp8_async(qscratch_->dequant, fp8_buf,
+                                                 static_cast<int64_t>(e.n_elems), d_block_maxes, max_grid,
+                                                 d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
                 int64_t fp8_shape[4] = {e.weight.shape[0],
                     (e.qtype == QType::NVFP4) ? e.weight.shape[1] * 2 : e.weight.shape[1],

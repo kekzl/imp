@@ -25,7 +25,7 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, 
 // Fully async calibrate+quantize: no host sync, all on device.
 // Caller provides reusable temp buffers d_block_maxes[max_grid] and d_absmax[1].
 // Scale is written to d_scale_out on device.
-void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int n_elements,
+void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int64_t n_elements,
                                       float* d_block_maxes, int max_grid, float* d_absmax, float* d_scale_out,
                                       cudaStream_t stream = nullptr);
 
