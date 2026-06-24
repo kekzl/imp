@@ -1098,9 +1098,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             cudaMalloc(&v_flat, kv_elems * sizeof(half));
             // Copy from paged KV cache to contiguous buffer
             int kv_bs = cache_dbg->block_size();
-            int32_t h_block_table[1024];
             int n_blocks = (ctx_len + kv_bs - 1) / kv_bs;
-            cudaMemcpy(h_block_table, state.block_tables, n_blocks * sizeof(int32_t), cudaMemcpyDeviceToHost);
+            // Heap-sized to n_blocks — a fixed [1024] stack array overran 4x at
+            // the 64K context cap (n_blocks=4096) and silently smashed the frame.
+            std::vector<int32_t> h_block_table(n_blocks > 0 ? n_blocks : 1);
+            cudaMemcpy(h_block_table.data(), state.block_tables, n_blocks * sizeof(int32_t),
+                       cudaMemcpyDeviceToHost);
             for (int b = 0; b < n_blocks; b++) {
                 int block_id = h_block_table[b];
                 int toks_in_block = std::min(kv_bs, ctx_len - b * kv_bs);
