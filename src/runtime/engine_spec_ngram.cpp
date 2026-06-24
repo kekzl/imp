@@ -235,13 +235,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     while (static_cast<int>(kv_manager_->block_table(req->id).size()) < blocks_needed) {
         int new_block = kv_manager_->append_block(req->id);
         if (new_block < 0) {
-            int evicted = kv_manager_->evict_lru();
-            if (evicted >= 0) new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0) {
-                kv_manager_->rollback(req->id, p0);
-                spec_stats_.miss_steps++;
-                return false;
-            }
+            // KV exhausted. The old evict_lru fallback freed a LIVE sequence (no
+            // recompute path) → silent corruption. Just roll back the
+            // speculative growth and fall through to the normal decode path.
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
         }
     }
     const auto& block_table = kv_manager_->block_table(req->id);

@@ -33,7 +33,6 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
-#include <unordered_set>
 #include <vector>
 
 namespace imp {
@@ -395,19 +394,13 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // skips the reused prefix's forward, leaving those NLL slots at 0.
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 &&
         !ppl_capture_.active) {
-        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
         if (prefix_reused < 0) {
-            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted < 0)
-                    break;
-            }
-            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-            if (prefix_reused < 0) {
-                req->status = RequestStatus::CANCELLED;
-                return false;
-            }
+            // KV exhausted even after cached-block reclamation. The old fallback
+            // evicted live sequences (every lru_order_ entry is live; no
+            // recompute path) → silent corruption. Reject-newest instead.
+            req->status = RequestStatus::CANCELLED;
+            return false;
         }
 
         if (prefix_reused > 0) {
@@ -438,17 +431,14 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     } else {
         int additional = num_blocks - existing;
         if (additional > 0) {
+            // allocate_blocks already reclaims cached blocks; if it still fails
+            // the KV cache is genuinely exhausted. The old evict_lru fallback
+            // freed a LIVE sequence (no recompute path) → silent corruption.
+            // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                while (kv_manager_->num_free_blocks() < additional) {
-                    int evicted = kv_manager_->evict_lru();
-                    if (evicted < 0)
-                        break;
-                }
-                if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    return false;
-                }
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                return false;
             }
         }
     }
@@ -950,27 +940,18 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         if (blocks_needed > blocks_have) {
             int new_block = kv_manager_->append_block(req->id);
             if (new_block < 0) {
-                // Under KV pressure, never evict a sequence that is part of
-                // THIS in-flight decode batch: every sequence in the LRU is
-                // live, so freeing a batch member's blocks here would hand
-                // them to another sequence and then run the victim on
-                // freed/reused blocks (use-after-free). Protect the batch;
-                // if nothing else is evictable, evict_lru returns -1 and we
-                // fall through to the safe cancel below (the policy the
-                // single-sequence case already used).
-                std::unordered_set<int> batch_protect;
-                batch_protect.reserve(decode_batch.size());
-                for (const auto& b : decode_batch)
-                    batch_protect.insert(b->id);
-                int evicted = kv_manager_->evict_lru(batch_protect);
-                if (evicted >= 0) {
-                    new_block = kv_manager_->append_block(req->id);
-                }
-                if (new_block < 0) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    continue;
-                }
+                // KV exhausted: append_block already reclaimed cached blocks, so
+                // the free pool AND all reclaimable cached blocks are empty. The
+                // old fallback evicted an LRU sequence — but every lru_order_
+                // entry is LIVE and imp has no recompute path, so evicting one
+                // (a current-batch member, or a still-active sequence beyond
+                // max_batch_size) silently corrupted it (use-after-free once it
+                // ran). Reject-newest instead: cancel THIS sequence and leave the
+                // others' KV intact. StreamingLLM auto-enable (above) already
+                // handles the graceful FP16 case before we reach here.
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                continue;
             }
         }
 

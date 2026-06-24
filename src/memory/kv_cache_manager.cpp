@@ -368,27 +368,27 @@ void KVCacheManager::touch(int seq_id) {
 }
 
 int KVCacheManager::evict_lru() {
-    static const std::unordered_set<int> kNone;
-    return evict_lru(kNone);
-}
-
-int KVCacheManager::evict_lru(const std::unordered_set<int>& protect) {
     if (lru_order_.empty())
         return -1;
 
-    // Skip pinned and caller-protected sequences — find the first eligible
-    // LRU victim.
+    // Skip pinned sequences — find the first unpinned LRU victim.
+    //
+    // NOTE: every sequence in lru_order_ is LIVE (free_sequence removes finished
+    // ones), and imp has no recompute-on-resume path, so freeing a live
+    // sequence's KV here corrupts it. The engine therefore no longer calls this
+    // to make room under KV pressure (it reject-newests instead — see
+    // prefill_allocate_kv_blocks_/step_decode/step_spec_verify). Kept as a
+    // manager primitive + unit-tested; do NOT reintroduce engine-side eviction
+    // of live sequences without a preempt-and-recompute path.
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
         int candidate = *it;
         if (pinned_seq_blocks_.find(candidate) != pinned_seq_blocks_.end())
-            continue;
-        if (protect.find(candidate) != protect.end())
             continue;
         free_sequence(candidate);  // also removes from lru_order_ / lru_map_
         return candidate;
     }
 
-    return -1;  // All sequences are pinned or protected.
+    return -1;  // All sequences are pinned.
 }
 
 bool KVCacheManager::can_allocate(int num_blocks) const {

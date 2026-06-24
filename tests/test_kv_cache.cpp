@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include <unordered_set>
 #include <numeric>
 #include <unordered_set>
 #include <vector>
@@ -579,34 +578,29 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
     EXPECT_EQ(static_cast<int>(mgr->block_table(2).size()), 2);
 }
 
-// Regression (audit F1): evict_lru must never free a sequence that is part of
-// the in-flight decode batch. Every sequence in the LRU is live, so stripping a
-// batch member's blocks and handing them to another sequence is a use-after-free
-// once the victim is run in the same step. The protect-set guards against it;
-// when the whole batch is protected, eviction must fail-safe (return -1) instead
-// of corrupting a live sequence.
-TEST(KVCacheManagerTest, ManagerEvictLRUProtectsInflightBatch) {
+// Regression (audit F-A1/F-A1b): allocation under full-KV pressure must NEVER
+// evict a live sequence. Every lru_order_ entry is a live sequence and imp has
+// no recompute-on-resume path, so freeing one would corrupt it (use-after-free
+// once it runs). append_block/allocate_blocks reclaim *cached* (finished) blocks
+// only, then fail — the engine reject-newests on that failure rather than
+// preempting a live sequence. This locks the invariant the fix depends on.
+TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
     SKIP_IF_NO_CUDA();
 
     auto mgr = MakeManager(8);
-    (void)mgr->allocate_blocks(0, 3);  // LRU: 0
-    (void)mgr->allocate_blocks(1, 3);  // LRU: 0, 1
-    (void)mgr->allocate_blocks(2, 2);  // LRU: 0, 1, 2
+    (void)mgr->allocate_blocks(0, 5);  // seq 0: 5 live blocks
+    (void)mgr->allocate_blocks(1, 3);  // seq 1: 3 live blocks -> pool full
     EXPECT_EQ(mgr->num_free_blocks(), 0);
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);  // nothing reclaimable — all live
 
-    // Protecting the LRU-front victim (seq 0) forces eviction to skip to seq 1.
-    int victim = mgr->evict_lru(std::unordered_set<int>{0});
-    EXPECT_EQ(victim, 1);
-    EXPECT_TRUE(mgr->block_table(1).empty());
-    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 3);  // protected, untouched
+    // No free and no reclaimable cached blocks => allocation must FAIL, not
+    // evict a live sequence.
+    EXPECT_EQ(mgr->append_block(0), -1);
+    EXPECT_FALSE(mgr->allocate_blocks(1, 1));
 
-    // Protecting EVERY remaining live sequence => nothing is evictable. Must
-    // return -1 and leave all block tables intact (the fail-safe the decode
-    // path relies on to cancel the requester instead of corrupting the batch).
-    int none = mgr->evict_lru(std::unordered_set<int>{0, 2});
-    EXPECT_EQ(none, -1);
-    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 3);
-    EXPECT_EQ(static_cast<int>(mgr->block_table(2).size()), 2);
+    // Both sequences keep every block — neither was stripped.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 5);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 3);
 }
 
 // 18. ManagerCanAllocate
