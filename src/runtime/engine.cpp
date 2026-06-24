@@ -43,7 +43,7 @@ Engine::~Engine() {
 
     // Save prefix cache to disk before shutdown
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled()) {
-        kv_manager_->save_prefix_cache(config_.prefix_cache_path, stream_);
+        kv_manager_->save_prefix_cache(config_.prefix_cache_path, model_fingerprint_(), stream_);
     }
 
     // FFN sparsity probe (Vector 1 research instrumentation): drain per-layer
@@ -403,7 +403,7 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     constraints_.reset();
     // Server visibility: the engine outlives requests, so cumulative
     // speculation telemetry is logged per request end (no-op when idle).
-    if (runtime_config_.speculative.ngram)
+    if (spec_ngram_enabled_(*req))
         log_spec_stats_();
 }
 

@@ -15,10 +15,61 @@
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <vector>
 
 namespace imp {
+
+// Stable identity hash of the loaded model: FNV-1a over config identity
+// scalars plus a small sample of real weight bytes (LM head, token embeddings,
+// layer-0 and mid-layer Q projections). The weight sample is what distinguishes
+// two same-shape fine-tunes (identical config) that the geometry checks cannot.
+// Used only to gate the persisted prefix cache (cold-path, twice per process).
+uint64_t Engine::model_fingerprint_() const {
+    auto fnv = [](uint64_t h, const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) {
+            h ^= b[i];
+            h *= 0x100000001b3ULL;
+        }
+        return h;
+    };
+    uint64_t h = 0xcbf29ce484222325ULL;
+    const auto& c = model_->config();
+    const uint32_t ids[] = {
+        static_cast<uint32_t>(c.arch),    static_cast<uint32_t>(c.n_layers),
+        static_cast<uint32_t>(c.n_heads), static_cast<uint32_t>(c.n_kv_heads),
+        static_cast<uint32_t>(c.d_model), static_cast<uint32_t>(c.d_ff),
+        static_cast<uint32_t>(c.vocab_size), static_cast<uint32_t>(c.head_dim),
+        static_cast<uint32_t>(c.n_experts), static_cast<uint32_t>(c.n_experts_active),
+        static_cast<uint32_t>(c.is_nvfp4_prequant), static_cast<uint32_t>(c.is_mxfp4_prequant)};
+    h = fnv(h, ids, sizeof(ids));
+    h = fnv(h, &c.rope_theta, sizeof(c.rope_theta));
+
+    auto sample = [&](const Tensor& t) {
+        if (!t.data)
+            return;
+        size_t n = std::min<size_t>(t.nbytes(), 512);
+        if (n == 0)
+            return;
+        std::vector<uint8_t> buf(n);
+        if (t.on_device) {
+            if (cudaMemcpy(buf.data(), t.data, n, cudaMemcpyDeviceToHost) != cudaSuccess)
+                return;
+        } else {
+            std::memcpy(buf.data(), t.data, n);
+        }
+        h = fnv(h, buf.data(), n);
+    };
+    sample(model_->output_proj());
+    sample(model_->token_embedding());
+    sample(model_->layer(0).wq);
+    if (c.n_layers > 1)
+        sample(model_->layer(c.n_layers / 2).wq);
+    return h;
+}
 
 bool Engine::init_kv_cache() {
     const auto& mcfg = model_->config();
@@ -134,7 +185,8 @@ bool Engine::init_kv_cache() {
             kv_manager_->set_pin_budget_blocks(pin_budget);
             IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
             if (!config_.prefix_cache_path.empty()) {
-                int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
+                int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path,
+                                                              model_fingerprint_(), stream_);
                 if (restored > 0)
                     IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored,
                                  config_.prefix_cache_path.c_str());

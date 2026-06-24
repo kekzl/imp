@@ -302,6 +302,10 @@ json anthropic_to_openai_body(const json& anth) {
         oai["top_p"] = anth["top_p"];
     if (anth.contains("top_k"))
         oai["top_k"] = anth["top_k"];
+    // imp extension: per-request speculative-decode override, passed through
+    // to the shared OpenAI param parser.
+    if (anth.contains("speculative"))
+        oai["speculative"] = anth["speculative"];
     if (anth.contains("stream"))
         oai["stream"] = anth["stream"];
     if (anth.contains("metadata") && anth["metadata"].is_object() && anth["metadata"].contains("user_id")) {

@@ -42,6 +42,11 @@ struct ChatRequestParams {
     // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
     // "cache_prompt" body field on the OpenAI route).
     bool cache_prompt = false;
+    // Per-request n-gram speculation override (tri-state): -1 = server default,
+    // 0 = force off, 1 = force on. From the imp extension body field
+    // "speculative" (bool). Lets code-gen calls opt into speculation while
+    // short tool-arg generations skip it on the same server.
+    int spec_ngram_override = -1;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
     std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
@@ -800,6 +805,11 @@ static bool parse_chat_request_params(
     // by anthropic_to_openai_body) or a direct llama.cpp-style field.
     ctx.params.cache_prompt = body.value("cache_prompt", false);
 
+    // Per-request speculative-decode override (imp extension). Absent → leave
+    // tri-state at -1 (server default). Present bool → force on/off.
+    if (body.contains("speculative") && body["speculative"].is_boolean())
+        ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+
     // Parse tool calling parameters
     ctx.params.tools = body.value("tools", json::array());
     ctx.params.tool_choice = body.value("tool_choice", json("auto"));
@@ -1423,6 +1433,7 @@ static void nonstream_chat_response_(
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
+        req->spec_ngram_override = ctx.params.spec_ngram_override;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -1950,6 +1961,7 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
         // Check client disconnect
         if (!sink.is_writable()) {
             server_req->cancel();
+            state.metrics.requests_cancelled++;
             finish = "cancelled";
             break;
         }
@@ -2660,6 +2672,10 @@ static bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, S
     state.metrics.request_duration.observe(ms / 1000.0);
     if (n_output_tokens > 0)
         state.metrics.ttft.observe(ttft_ms / 1000.0);
+    // Mean inter-token latency: post-first-token decode time spread over the
+    // remaining tokens. Streaming-only (non-stream has no per-token cadence).
+    if (n_output_tokens > 1)
+        state.metrics.inter_token.observe((ms - ttft_ms) / 1000.0 / (n_output_tokens - 1));
 
     // Streaming response content is not accumulated across SSE
     // chunks, so the JSONL `response` field stays null. The
@@ -2691,6 +2707,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->top_k = ctx.params.top_k;
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
+        req->spec_ngram_override = ctx.params.spec_ngram_override;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -2944,6 +2961,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
+    if (body.contains("speculative") && body["speculative"].is_boolean())
+        imp_req->spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
     // Stream requests stay on per-step decode for real per-token SSE (#754).
     imp_req->stream = stream;
     imp_req->status = imp::RequestStatus::PENDING;
@@ -3029,6 +3048,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     // Check client disconnect
                     if (!sink.is_writable()) {
                         server_req->cancel();
+                        state.metrics.requests_cancelled++;
                         finish = "cancelled";
                         break;
                     }
@@ -3449,6 +3469,9 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_tokens_cached_total Total prompt tokens served from prefix cache\n";
     out += "# TYPE imp_tokens_cached_total counter\n";
     out += "imp_tokens_cached_total " + std::to_string(m.tokens_cached_total.load()) + "\n";
+    out += "# HELP imp_requests_cancelled_total Requests cancelled by client disconnect\n";
+    out += "# TYPE imp_requests_cancelled_total counter\n";
+    out += "imp_requests_cancelled_total " + std::to_string(m.requests_cancelled.load()) + "\n";
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
@@ -3491,6 +3514,8 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
                    m.request_duration);
     emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
+    emit_histogram("imp_inter_token_seconds", "Mean inter-token latency (ITL) per request in seconds",
+                   m.inter_token);
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded;
@@ -3852,6 +3877,15 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
             return false;
     }
 
+    // ---- ping (initial keepalive) -----------------------------------------
+    // Anthropic streams emit periodic `ping` events; sending one immediately
+    // signals liveness before the first token (TTFT can be >1s under load /
+    // long prefills), and the loop below re-pings during idle gaps so clients
+    // and intermediary proxies don't time out the connection.
+    if (!out.emit("ping", json{{"type", "ping"}}))
+        return false;
+    auto last_ping = std::chrono::steady_clock::now();
+
     int block_index = -1;
     AnthBlock open_block = AnthBlock::NONE;
 
@@ -4012,6 +4046,7 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
 
         if (!sink.is_writable()) {
             server_req->cancel();
+            state.metrics.requests_cancelled++;
             finish = "cancelled";
             break;
         }
@@ -4025,8 +4060,17 @@ static bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& c
         }
 
         TokenEvent evt{};
-        if (!server_req->pop_token(evt))
+        if (!server_req->pop_token(evt)) {
+            // No token ready yet (prefill / generation gap). Re-ping at most
+            // every ~10s so idle streams stay alive without spamming.
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_ping > std::chrono::seconds(10)) {
+                last_ping = now;
+                if (!out.emit("ping", json{{"type", "ping"}}))
+                    break;
+            }
             continue;
+        }
 
         if (evt.token_id < 0) {
             finish = evt.finish_reason ? evt.finish_reason : "stop";
@@ -4645,6 +4689,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         imp_req->top_k = ctx.params.top_k;
         imp_req->seed = ctx.params.seed;
         imp_req->pin_kv_prefix = ctx.params.cache_prompt;
+        imp_req->spec_ngram_override = ctx.params.spec_ngram_override;
         // This is the streaming /v1/messages path — stay on per-step decode so
         // SSE is real per-token rather than one burst at generation end (#754).
         imp_req->stream = true;

@@ -449,6 +449,12 @@ private:
     // Returns true when it handled this decode step (tokens emitted);
     // false → caller falls through to the normal decode path.
     bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
+    // Effective n-gram speculation state for a request: honors the per-request
+    // tri-state override (Request::spec_ngram_override), else the global default.
+    bool spec_ngram_enabled_(const Request& req) const {
+        return req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
+                                            : runtime_config_.speculative.ngram;
+    }
     bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
@@ -498,6 +504,11 @@ private:
     void init_resolve_fp8_prefill_();
     void init_resolve_quant_flags_();
     void init_compute_max_seq_len_();
+
+    // Stable identity hash of the loaded model (config scalars + a sample of
+    // real weight bytes) used to gate the persisted prefix cache so KV from a
+    // different model/tokenizer/quant is never restored. See kv_cache_manager.
+    uint64_t model_fingerprint_() const;
     // step_prefill_one sub-phase: allocate KV blocks for `req`. Handles
     // prefix-cache reuse + eviction fallback. Returns false on
     // unrecoverable allocation failure (caller cancels request). On

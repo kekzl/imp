@@ -66,6 +66,11 @@ struct Request {
     // tables) re-trips the acceptance economics after every re-arm window —
     // once doomed, give-up is final for this request.
     bool spec_acceptance_doomed = false;
+    // Per-request n-gram speculation override (tri-state): -1 = use the global
+    // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
+    // request opt into speculation while a short tool-arg generation skips it
+    // (and vice-versa) on the same server. Resolved via Engine::spec_ngram_enabled_.
+    int spec_ngram_override = -1;
     bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
     // Generation began inside an injected <think> prefix (the opener lives in
     // the PROMPT, not the output) — seeds the think-budget recount loop and

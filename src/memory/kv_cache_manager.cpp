@@ -842,11 +842,18 @@ int KVCacheManager::total_allocated_blocks() const {
 
 // Binary format:
 //   Header: magic(4) version(4) n_blocks(4) n_layers(4) n_kv_heads(4)
-//           head_dim(4) dtype(4) block_bytes(8)
+//           head_dim(4) dtype(4) block_bytes(8) model_fingerprint(8)
 //   Per block: hash(8) + KV data (n_layers * 2 * block_bytes)
+//
+// model_fingerprint (v2): identifies the model+tokenizer+quant that produced
+// the KV. Block hashes are content-addressed over token IDs ONLY — two
+// different models with identical KV geometry (common across same-family
+// fine-tunes) would otherwise match each other's token-hashes and serve the
+// WRONG model's KV silently. The geometry checks below cannot catch that.
+// Rejecting on fingerprint mismatch degrades to a clean recompute.
 
 static constexpr uint32_t kPrefixCacheMagic = 0x494D5043;  // "IMPC"
-static constexpr uint32_t kPrefixCacheVersion = 1;
+static constexpr uint32_t kPrefixCacheVersion = 2;
 
 struct PrefixCacheHeader {
     uint32_t magic;
@@ -857,9 +864,11 @@ struct PrefixCacheHeader {
     uint32_t head_dim;
     uint32_t dtype;
     uint64_t block_bytes;
+    uint64_t model_fingerprint;
 };
 
-int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stream) {
+int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fingerprint,
+                                      cudaStream_t stream) {
     if (!prefix_caching_enabled_ || cached_blocks_lru_.empty()) {
         IMP_LOG_INFO("Prefix cache: nothing to save (0 cached blocks)");
         return 0;
@@ -884,6 +893,7 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     hdr.head_dim = static_cast<uint32_t>(cache_->head_dim());
     hdr.dtype = static_cast<uint32_t>(cache_->qtype());
     hdr.block_bytes = bb;
+    hdr.model_fingerprint = model_fingerprint;
 
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
         IMP_LOG_ERROR("Failed to write prefix cache header to %s", path.c_str());
@@ -974,7 +984,8 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     return saved;
 }
 
-int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stream) {
+int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fingerprint,
+                                      cudaStream_t stream) {
     if (!prefix_caching_enabled_) {
         IMP_LOG_WARN("Prefix cache: loading disabled (prefix caching not enabled)");
         return -1;
@@ -1009,6 +1020,18 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
             "dim=%u/%d, dtype=%u/%d)",
             hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(), hdr.head_dim,
             cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->qtype()));
+        fclose(f);
+        return -1;
+    }
+
+    // Reject KV produced by a different model/tokenizer/quant. Same-geometry
+    // models share token-hash keys, so without this gate an evicted-and-reused
+    // cache file would serve another model's KV silently (wrong output).
+    if (hdr.model_fingerprint != model_fingerprint) {
+        IMP_LOG_WARN("Prefix cache: model fingerprint mismatch (cache=0x%016llx, current=0x%016llx) "
+                     "— discarding cache from a different model/tokenizer/quant",
+                     static_cast<unsigned long long>(hdr.model_fingerprint),
+                     static_cast<unsigned long long>(model_fingerprint));
         fclose(f);
         return -1;
     }

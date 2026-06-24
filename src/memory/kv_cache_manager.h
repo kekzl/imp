@@ -165,13 +165,16 @@ public:
 
     // Save all cached (unreferenced) blocks to disk. Includes KV data
     // (GPU→host copy), hash mappings, and metadata for validation.
+    // model_fingerprint identifies the producing model/tokenizer/quant.
     // Returns number of blocks saved, or -1 on error.
-    int save_prefix_cache(const std::string& path, cudaStream_t stream = nullptr);
+    int save_prefix_cache(const std::string& path, uint64_t model_fingerprint,
+                          cudaStream_t stream = nullptr);
 
-    // Load cached blocks from disk. Validates metadata against current
-    // KV cache config. Uploads KV data to GPU and registers hash mappings.
-    // Returns number of blocks restored, or -1 on error.
-    int load_prefix_cache(const std::string& path, cudaStream_t stream = nullptr);
+    // Load cached blocks from disk. Validates metadata + model_fingerprint
+    // against the current model. Uploads KV data to GPU and registers hash
+    // mappings. Returns number of blocks restored, or -1 on error/mismatch.
+    int load_prefix_cache(const std::string& path, uint64_t model_fingerprint,
+                          cudaStream_t stream = nullptr);
 
     // ── BitDecoding Phase 3: residual FP16 cache ─────────────────────
     //
