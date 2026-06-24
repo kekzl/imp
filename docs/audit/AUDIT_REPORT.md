@@ -1,8 +1,9 @@
 # AUDIT_REPORT.md — imp soundness & hardening audit (2026-06-24)
 
-Branch `audit/soundness-hardening-2026-06-24` off `8f2cc9c4`. Companion artifacts:
-`AUDIT.md` (append-only findings ledger), `ARCHMAP.md` (code-derived map),
-`PERF_LOG.md` (bench log).
+Branch `audit/soundness-hardening-2026-06-24` off `8f2cc9c4` (shipped as PRs
+#772/#773/#774). Companion artifacts: `../../AUDIT.md` (append-only findings
+ledger, kept at repo root), `ARCHMAP.md` (code-derived map, alongside this file),
+`../../PERF_LOG.md` (bench log).
 
 ## Executive summary
 
