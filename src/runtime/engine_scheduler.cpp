@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 
 namespace imp {
@@ -949,7 +950,19 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         if (blocks_needed > blocks_have) {
             int new_block = kv_manager_->append_block(req->id);
             if (new_block < 0) {
-                int evicted = kv_manager_->evict_lru();
+                // Under KV pressure, never evict a sequence that is part of
+                // THIS in-flight decode batch: every sequence in the LRU is
+                // live, so freeing a batch member's blocks here would hand
+                // them to another sequence and then run the victim on
+                // freed/reused blocks (use-after-free). Protect the batch;
+                // if nothing else is evictable, evict_lru returns -1 and we
+                // fall through to the safe cancel below (the policy the
+                // single-sequence case already used).
+                std::unordered_set<int> batch_protect;
+                batch_protect.reserve(decode_batch.size());
+                for (const auto& b : decode_batch)
+                    batch_protect.insert(b->id);
+                int evicted = kv_manager_->evict_lru(batch_protect);
                 if (evicted >= 0) {
                     new_block = kv_manager_->append_block(req->id);
                 }

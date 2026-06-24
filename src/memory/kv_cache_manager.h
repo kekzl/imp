@@ -63,6 +63,14 @@ public:
     // Returns the evicted seq_id, or -1 if there is nothing to evict.
     int evict_lru();
 
+    // Same, but never evicts a sequence whose id is in `protect`. Callers in
+    // the decode path MUST protect the in-flight batch: every sequence in
+    // lru_order_ is live, so freeing a batch member's blocks here would hand
+    // them to another sequence and then run the victim on freed/reused blocks
+    // (use-after-free). With the batch protected this returns -1 and the
+    // caller falls through to its safe cancel path.
+    int evict_lru(const std::unordered_set<int>& protect);
+
     // Check whether `num_blocks` blocks are available.  Returns true if
     // the free pool already has enough blocks *or* if evicting LRU
     // sequences could free enough.

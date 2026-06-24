@@ -368,19 +368,27 @@ void KVCacheManager::touch(int seq_id) {
 }
 
 int KVCacheManager::evict_lru() {
+    static const std::unordered_set<int> kNone;
+    return evict_lru(kNone);
+}
+
+int KVCacheManager::evict_lru(const std::unordered_set<int>& protect) {
     if (lru_order_.empty())
         return -1;
 
-    // Skip pinned sequences — find the first unpinned LRU victim.
+    // Skip pinned and caller-protected sequences — find the first eligible
+    // LRU victim.
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
         int candidate = *it;
         if (pinned_seq_blocks_.find(candidate) != pinned_seq_blocks_.end())
+            continue;
+        if (protect.find(candidate) != protect.end())
             continue;
         free_sequence(candidate);  // also removes from lru_order_ / lru_map_
         return candidate;
     }
 
-    return -1;  // All sequences are pinned.
+    return -1;  // All sequences are pinned or protected.
 }
 
 bool KVCacheManager::can_allocate(int num_blocks) const {
