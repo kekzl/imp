@@ -637,7 +637,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 fp8_offset += e.n_elems;
 
                 calibrate_and_quantize_fp8_async(e.fp16_tensor.data, fp8_buf,
-                                                 static_cast<int>(e.n_elems), d_block_maxes, max_grid,
+                                                 static_cast<int64_t>(e.n_elems), d_block_maxes, max_grid,
                                                  d_absmax, d_scales_all + i, stream);
 
                 Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.fp16_tensor.ndim, e.fp16_tensor.shape, true);
