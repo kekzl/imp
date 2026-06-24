@@ -31,6 +31,27 @@ make format        # clang-format
 - Internal errors throw and are translated to `ImpError` at the `src/api/imp_api.cpp` boundary — this is intentional, don't convert those throws to status returns.
 - Match surrounding code style; keep it simple and direct, no speculative abstraction.
 
+## File Layout & Size
+
+The real cost of an oversized file here is **recompile blast radius**, not line count.
+Each `.cu` is one translation unit: touching a kernel in a 1.5k-LOC `.cu` re-`ptxas`es
+the whole TU (the slowest sm_120a build stage) with no intra-file parallelism, and a
+fat header re-triggers every includer. Optimize for compile-time isolation:
+
+- **One logical unit per file** — one kernel concept, one module. If a `.cu` bundles
+  several unrelated kernels, that's a split candidate.
+- **Separate kernel definition / host launch-wrapper / explicit template
+  instantiations.** When recompiles bite, move explicit instantiations into their own
+  `.cu` so a kernel edit doesn't re-build every instantiation.
+- **Line-count thresholds are a proxy/smell, not the metric.** The gate
+  `tools/check_filesize.py` (config `tools/filesize_thresholds.toml`) measures *code*
+  LOC (comments + blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal
+  TU warn>600/hard>800, header warn>500/hard>700. It runs in CI as the `File size` job
+  (advisory warn step + blocking hard step); a hard-review violation fails CI.
+- **A legitimately monolithic file is fine** — add it to `[allow]` in the toml **with a
+  reason** (the gate rejects an empty reason). Don't split for splitting's sake. Current
+  baseline + per-file rationale: `AUDIT_FILESIZE.md`.
+
 ## Benchmarking gotchas
 
 - **The GPU is water-cooled and never warm** — do NOT insert temperature cooldown waits between benchmarks (it idles ~30°C and does not thermal-throttle). A decode drop across a sweep is a real regression or stale baseline, never heat.

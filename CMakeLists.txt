@@ -118,6 +118,8 @@ set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/model_profile.cpp
     src/model/gguf_loader.cpp
+    src/model/gguf_parse.cpp
+    src/model/gguf_tensor_assign.cpp
     src/model/safetensors_loader.cpp
     src/model/llm_compressor_loader.cpp
     src/model/sentencepiece_loader.cpp
@@ -131,6 +133,7 @@ set(IMP_MODEL_SOURCES
     src/model/tensor_kind_table.cu
     src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
+    src/model/chat_template_families.cpp
     src/model/jinja.cpp
 )
 
@@ -143,6 +146,9 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
+    src/quant/nvfp4_gemv_dense.cu
+    src/quant/nvfp4_gemv_fused.cu
+    src/quant/nvfp4_gemv_moe.cu
     src/quant/mxfp4_gemm.cu
     # src/quant/turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/quant/dequant_gptq.cu
@@ -178,6 +184,18 @@ set(IMP_COMPUTE_SOURCES
     src/compute/activation.cu
     src/compute/embedding.cu
     src/compute/sampling.cu
+    src/compute/sampling_topk_topp.cu
+    src/compute/sampling_penalties.cu
+    src/compute/sampling_filters.cu
+    src/compute/gdn_scan.cu
+    src/compute/gdn_scan_tc.cu
+    src/compute/gemm_gemv_dtype.cu
+    src/compute/gemm_moe_gemv.cu
+    src/compute/gemm_batched.cu
+    src/compute/mmq_q8_imma_q4k.cu
+    src/compute/mmq_q8_imma_q6k.cu
+    src/compute/mmq_q8_imma_q51.cu
+    src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
@@ -256,6 +274,11 @@ set(IMP_RUNTIME_SOURCES
 set(IMP_EXEC_SOURCES
     src/exec/executor.cu
     src/exec/executor_kernels.cu
+    src/exec/executor_kv_write_kernels.cu
+    src/exec/executor_elementwise.cu
+    src/exec/pre_dequant_phase3_fp8.cu
+    src/exec/pre_dequant_phase3_cutlass.cu
+    src/exec/pre_dequant_phase3_moe.cu
     src/exec/executor_gemm_dispatch.cu
     src/exec/gemm_kernel_registry.cu
     src/exec/gemm_kernel_fp8.cu
@@ -412,6 +435,11 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/tool_call.cpp
         tools/imp-server/anthropic.cpp
         tools/imp-server/handlers.cpp
+        tools/imp-server/handlers_chat.cpp
+        tools/imp-server/handlers_chat_core.cpp
+        tools/imp-server/handlers_chat_stream.cpp
+        tools/imp-server/handlers_messages.cpp
+        tools/imp-server/handlers_misc.cpp
         tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
