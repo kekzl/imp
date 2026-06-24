@@ -46,7 +46,7 @@ silently broke greedy reproducibility on NVFP4-MoE, forcing the determinism gate
 | **F-A3** | high | B | worker catch now syncs + classifies the sticky error; context-poisoning classes fail-fast (`stop_requested_`) with a loud log instead of serving garbage | exception-path-only; full suite + bench green |
 | **F-A4** | high | G | `/v1/messages` accepts Anthropic `x-api-key` (constant-time) as well as Bearer | new unit `ApiKeyAuth.*` (5 cases) |
 | **F-A7** | med | G | `/v1/messages` 401 now uses the Anthropic error envelope | covered by the auth path |
-| **F-A8** | med | G | periodic SSE `ping` during sustained idle (long prefill) on the Anthropic stream | server battery (`test-server`) |
+| **F-A8** | med | G | Anthropic SSE `ping` — **already on main via #770/N3**; this pass's duplicate dropped in rebase (convergent finding) | n/a (on main) |
 | **F-A6** | med | A | `force_cublas_decode` host block-table moved stack→heap (was a 4× overrun at the 64K ctx cap) | builds; debug-arm path |
 | **F-A13** | low | F | weight-upload stream/event → `CudaStream`/`CudaEvent` RAII (no leak on throw) | builds; init-path |
 | **F-A15/16** | low | J | corrected stale `sm_90→mode1` and "reject n>1" comments | — |

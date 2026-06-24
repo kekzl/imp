@@ -332,11 +332,13 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
 - validation: new `ApiKeyAuth.*` unit tests (both headers, neither, empty-key guard).
 
 ### F-A8  No SSE `ping` on the Anthropic stream → long-prefill idle-timeout risk
-- dimension: G · severity: med
-- evidence: `run_anthropic_stream_` (`handlers.cpp:3811+`) never emits `event: ping`;
-  a long prefill (large prompt, cold) can trip proxy/client idle timeouts.
-- fix: **applied** — periodic `ping` during sustained idle in the pop loop (15 s;
-  never fires while tokens flow). Disconnect on a failed ping emit cancels cleanly.
+- dimension: G · severity: med · fix: **already shipped on main (#770 / N3)**
+- evidence: `run_anthropic_stream_` emitted no `event: ping`; a long prefill could
+  trip proxy/client idle timeouts.
+- resolution: independently fixed on `main` by PR #770 (commit N3) — emits a ping
+  after `message_start` and re-pings every ~10 s during idle. This pass's duplicate
+  fix was DROPPED during the rebase onto main (main's version is kept). Convergent
+  finding, no action needed in this PR.
 
 ### F-A6  force_cublas_decode stack overrun `int32_t h_block_table[1024]` @64K ctx
 - dimension: A · severity: med
