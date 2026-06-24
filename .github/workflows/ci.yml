@@ -10,6 +10,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
 
     container:
       # Native CUDA devel image: nvcc $CUDA_VERSION is on PATH at /usr/local/cuda
@@ -29,7 +31,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Docs-only PRs (only **/*.md or docs/** changed) skip the expensive CUDA
+      # build/test below but still report the required `Build` check as success:
+      # every heavy step is gated on steps.changes.outputs.code, so the job goes
+      # green in seconds instead of pulling the multi-GB CUDA image, configuring
+      # CUTLASS and linking. `predicate-quantifier: every` makes a changed file
+      # count as "code" only when it is NEITHER markdown NOR under docs/ — so a
+      # docs/ image or a root *.md alone won't trip it. Runs before `apt install
+      # git`, hence a JS action (API-based) rather than a git diff.
+      - name: Detect non-docs changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+
       - name: Install build deps
+        if: steps.changes.outputs.code == 'true'
         # The native CUDA devel image already provides nvcc on PATH at
         # /usr/local/cuda; only the non-CUDA build tooling needs installing.
         run: |
@@ -37,6 +58,7 @@ jobs:
           apt-get install -y --no-install-recommends cmake g++ git python3 ccache
 
       - name: Verify nvcc version
+        if: steps.changes.outputs.code == 'true'
         run: |
           nvcc --version
           nvcc --version | grep -q "release ${CUDA_VERSION}" \
@@ -47,6 +69,7 @@ jobs:
       # on the TUs whose post-preprocessor content didn't actually change —
       # saves the slow nvcc ptxas pass for sm_120a.
       - name: Restore ccache
+        if: steps.changes.outputs.code == 'true'
         uses: actions/cache@v4
         with:
           path: /github/home/.ccache
@@ -55,6 +78,7 @@ jobs:
             ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-
 
       - name: Reset ccache stats
+        if: steps.changes.outputs.code == 'true'
         run: |
           ccache --version
           ccache -p | head -20 || true
@@ -65,6 +89,7 @@ jobs:
       # caches when src changes; ninja then incrementally rebuilds and
       # ccache provides per-TU hits even when the build cache misses.
       - name: Cache build directory
+        if: steps.changes.outputs.code == 'true'
         uses: actions/cache@v4
         with:
           path: build
@@ -75,6 +100,7 @@ jobs:
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
 
       - name: Configure
+        if: steps.changes.outputs.code == 'true'
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -96,9 +122,11 @@ jobs:
           # are bench-only — production server builds don't link them.
 
       - name: Build
+        if: steps.changes.outputs.code == 'true'
         run: cmake --build build -j$(nproc)
 
       - name: ccache stats
+        if: steps.changes.outputs.code == 'true'
         run: ccache -s
 
       # Stage 2 (CI / CPU): run every CPU-runnable GTest. The `unit` ctest label
@@ -109,6 +137,7 @@ jobs:
       # tests but never ran them (only mock-api + the usually-absent self-hosted
       # GPU job did), so e.g. the tool-call and Bearer-auth unit tests were dark.
       - name: Run CPU unit tests (ctest -L unit)
+        if: steps.changes.outputs.code == 'true'
         run: cd build && ctest -L unit --output-on-failure --timeout 120
 
       # clang-tidy over host C++ TUs (advisory — does not block). Runs here, in the
@@ -117,6 +146,7 @@ jobs:
       # can't parse .cu without a full nvcc flagset). Flip continue-on-error off once
       # the baseline is clean to make it a hard gate (CI2).
       - name: clang-tidy (advisory, host TUs)
+        if: steps.changes.outputs.code == 'true'
         continue-on-error: true
         run: |
           apt-get install -y --no-install-recommends clang-tidy
@@ -130,6 +160,7 @@ jobs:
             | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' || true
 
       - name: Upload build artifacts
+        if: steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@v5
         with:
           name: imp-build
@@ -220,8 +251,9 @@ jobs:
     # HAS_GPU_RUNNER=true (Settings → Secrets and variables → Actions → Variables)
     # once a runner labeled [self-hosted, gpu, cuda] is registered. Until then,
     # this job is skipped — same effective behavior as the prior `if: false`,
-    # but flips automatically when a runner appears.
-    if: ${{ vars.HAS_GPU_RUNNER == 'true' }}
+    # but flips automatically when a runner appears. Also skipped on docs-only
+    # changes (build uploads no artifact then — nothing to download/test).
+    if: ${{ vars.HAS_GPU_RUNNER == 'true' && needs.build.outputs.code == 'true' }}
     runs-on: [self-hosted, gpu, cuda]
 
     steps:
