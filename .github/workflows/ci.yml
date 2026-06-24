@@ -259,6 +259,25 @@ jobs:
           echo "::warning::clang-format would change the above changed lines — run 'make format' (advisory, not blocking)"
           exit 0
 
+  # File-size gate (recompile blast-radius smell). Own ubuntu job — independent of
+  # the slow CUDA Build, needs no toolchain, just Python 3.11+ for tomllib. Two
+  # steps by design: an ADVISORY warn display (never fails) and a BLOCKING hard-
+  # review gate (fails only on a NON-allowlisted file over its hard threshold).
+  # Thresholds + allowlist live in tools/filesize_thresholds.toml; baseline state
+  # is documented in AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
+  filesize:
+    name: File size
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: File-size smells (advisory, non-blocking)
+        run: python3 tools/check_filesize.py --warn-only
+      - name: File-size hard-review gate (blocking)
+        run: python3 tools/check_filesize.py
+
   test:
     name: Test
     needs: build

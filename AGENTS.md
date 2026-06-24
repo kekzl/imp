@@ -21,6 +21,25 @@ global rules below; each role then narrows scope and lists explicit **MAY NOT** 
 - **Verify every finding** against the real source before acting on it (fan-out sweeps over-flag).
 - Never `sudo` on the host; `build/` is root-owned (remove via a throwaway container); secrets via env only.
 
+## File Layout & Size
+
+The metric that matters is **recompile blast radius**, not line count. Each `.cu` is one
+translation unit — editing one kernel in a 1.5k-LOC `.cu` re-`ptxas`es the whole TU (no
+intra-file parallelism), and a fat header re-triggers every includer. Optimize files for
+compile-time isolation:
+
+- **One logical unit per file** (one kernel concept / one module). A `.cu` bundling several
+  unrelated kernels is a split candidate.
+- **Keep kernel definition, host launch-wrapper, and explicit template instantiations
+  separable.** Push explicit instantiations into their own `.cu` when recompiles bite.
+- **Thresholds are a proxy/smell, not the goal.** Gate: `tools/check_filesize.py` (config
+  `tools/filesize_thresholds.toml`), on *code* LOC per category — kernel `.cu`
+  warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job
+  `File size` = advisory warn step + blocking hard step.
+- **Legitimately monolithic files belong in `[allow]` with a reason** (empty reason =
+  gate failure). Don't split for splitting's sake. Baseline + per-file rationale:
+  `AUDIT_FILESIZE.md`. This matches the "File Layout & Size" section in CLAUDE.md.
+
 ## Roles
 
 ### auditor
