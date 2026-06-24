@@ -270,10 +270,11 @@ mmproj               = ""
 # n-gram (prompt-lookup) speculative decoding: drafts come from suffix
 # matches against the request's own prompt+output — no draft model. Greedy
 # verify accepts the longest matching prefix, so output stays a faithful
-# greedy decode. Batch-1, greedy sampling, dense-attention models only;
+# greedy decode. Batch-1, greedy sampling, dense-attention models only
+# (MoE/recurrent gate off automatically — the async decode loop carries them);
 # disables the async decode graph loop while on. Wins on repetition-heavy
-# (agent/code/RAG) workloads; can cost a few % on free-form prose.
-ngram                = false
+# (agent/code/RAG) workloads; ~neutral on free-form prose. Default-ON.
+ngram                = true
 # Draft tokens proposed per verify step (verify cost is ~flat in k).
 k                    = 16
 # Shortest / longest suffix n-gram match searched. Longer min_match =

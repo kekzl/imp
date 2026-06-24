@@ -454,10 +454,16 @@ struct RuntimeConfig {
     // model, no MTP head. Greedy-only Phase 1: the verify step replays the
     // draft as a teacher-forced continuation chunk and accepts the longest
     // argmax-matching prefix, so output is token-identical to plain greedy
-    // decode. Opt-in: the verify loop runs eager (no async conditional
-    // graph loop), which costs on draft-miss-heavy workloads.
+    // decode. The verify loop runs eager (no async conditional graph loop);
+    // burst_rearm + miss_burst keep draft-miss fragmentation ~free, so the old
+    // tg128 -15% draft-poor downside no longer reproduces (-0.2%/-0.9% on
+    // dense Q8/NVFP4, 2026-06-16) — hence default-ON. spec_ngram_gates_ok_
+    // confines engagement to batch-1 / greedy / no-penalty-window / no-json /
+    // no-logprobs / non-recurrent / NON-MoE requests; everything else falls
+    // back cleanly, so default-on is a no-op for sampled chat, tool/JSON
+    // calls, concurrent batches, and MoE (which the async loop carries).
     struct Speculative {
-        bool ngram = false;  // enable prompt-lookup speculation (batch-1, greedy)
+        bool ngram = true;  // prompt-lookup speculation, default-on (batch-1, greedy, dense)
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
         // Longer suffix matches trade draft frequency for precision — and
         // precision wins decisively: min_match 6 vs 3 measured +16% on
