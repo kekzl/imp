@@ -362,16 +362,22 @@ rock-stable across restarts); prefill pp medians ~20.8k / 48.5k / 42.4k tok/s.
 ## Parked (verified real, not safely landable autonomously — migration plans)
 
 ### F-A2  Non-streaming unbounded conditional-graph burst ignores cancel/disconnect/timeout
-- dimension: D/B · severity: **high** · fix: **parked**
-- evidence: `engine_scheduler.cpp:1545-1560` + `cuda_graph.cu:1010-1023` — a lone
-  non-streaming request with spec off launches the unbounded autonomous graph loop
-  bounded only device-side by `max_tokens`; `is_cancelled()`/timeout are polled only
-  *between* `step()`s, so a disconnect burns up to `max_tokens` (8192) dead tokens.
-- migration: bound the device loop to a chunk and re-poll cancel/timeout per chunk —
-  the spec-ngram `miss_burst` path is the existing template. Touches the
-  conditional-graph loop (documented #683/#692 off-by-one history) → needs the
-  multi-token-verify GPU coherence battery (byte-diff graphs-on vs `--no-cuda-graphs`)
-  before it can ship. Streaming requests are already exempt.
+- dimension: D/B · severity: **high** · fix: **applied (variant B — bounded bursts)**
+- evidence: `engine_scheduler.cpp:1539-1554` — a lone non-streaming request with spec
+  off launched the unbounded autonomous graph loop (`spec_limit==0`); the worker
+  blocked in `wait_and_get_tokens` and polled `is_cancelled()`/timeout only *between*
+  bursts, so a disconnect burned up to `max_tokens` (8192) dead tokens.
+- fix: new `runtime.decode_burst` (default 128) bounds the loop; the worker regains
+  control each burst to re-poll cancellation before relaunching — reusing the exact
+  bounded-burst machinery the speculation (`miss_burst`) and think-budget paths
+  already use. Cancel latency: full generation → ~one burst (~0.37 s).
+- determinism gate (caught in validation): the fully-on-device unbounded loop is the
+  ONLY greedy bit-reproducible decode path (host re-entry flips greedy ties on this
+  NVFP4-MoE model — eager is non-reproducible too). Bounding is SKIPPED when
+  `runtime.deterministic` is set, preserving the determinism.md eval guarantee
+  (verified byte-identical across fresh processes in det mode).
+- validation: GPU suite 0 failures; decode tg256 341.1 vs 342.1 unbounded (~0 cost,
+  `burst_rearm` makes relaunch nearly free, gate held); output coherent.
 
 ### F-A1b  Prefill/spec eviction strips a live non-batch sequence → delayed zombie
 - dimension: C/F · severity: **high** · fix: **applied (folded into the F-A1

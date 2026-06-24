@@ -19,21 +19,30 @@ the shipped binary. Four agents independently confirmed a long list of
 verified-sound negatives (see `AUDIT.md`).
 
 The real debt was a small number of **latent soundness holes on
-error/back-pressure paths** — exactly where the prior audit's "healthy" verdict
-had the least coverage. Two are HIGH and silent (KV use-after-free under KV
-pressure; a poisoned CUDA context served as if healthy). Both are now fixed or
-fail-fast, with the remaining redesign-scale items parked with migration plans.
+error/back-pressure/cancellation paths** — exactly where the prior audit's
+"healthy" verdict had the least coverage. The HIGH ones were silent: KV
+use-after-free under pressure; a poisoned CUDA context served as if healthy; a
+disconnected non-streaming client burning a full generation.
 
-**Net:** 11 findings fixed-and-validated, 9 parked with plans. No perf regression
-(decode gate held). +1 net source file untouched in count; +~90 LOC of fixes,
-+~45 LOC of regression tests, −1 stack-array footgun. No silent behavior change
-beyond those itemized below.
+**Net: all 4 HIGH findings fixed-and-validated**, plus the MED/LOW server-fidelity
+and hardening cluster; F-A9 refuted by experiment; 3 LOW + the pass-1 infra items
+parked with rationale. No perf regression (decode gate held at every step,
+including the bounded-burst F-A2 fix at ~0 cost). No silent behavior change beyond
+those itemized — the two intentional ones (reject-newest under KV exhaustion;
+det-mode-gated burst bounding) are called out with their before/after.
+
+Two validation insights worth flagging: (1) verification refuted or reshaped four
+"findings" that would have been *unsafe* fixes (F-A9 determinism, F-A5 vision swap,
+F-A12 guard) — the codebase-audit "verify before acting" rule earned its keep; and
+(2) the F-A2 fix only proved safe because validation caught that bounding the loop
+silently broke greedy reproducibility on NVFP4-MoE, forcing the determinism gate.
 
 ## What was fixed (validated, shipped as gated commits)
 
 | ID | Sev | Dim | Fix | Validation |
 |---|---|---|---|---|
 | **F-A1+F-A1b** | high | C/F | reject-newest: deleted the unsafe `evict_lru` of *live* sequences at all 3 engine sites (decode/prefill/spec); safe cached-block reclamation untouched; cancel/rollback fallbacks run on true exhaustion | new unit `AllocationNeverEvictsLiveSequenceUnderPressure`; suite+bench green |
+| **F-A2** | high | D/B | bounded non-streaming decode loop (`runtime.decode_burst`=128) so the worker re-polls cancellation each burst; det-mode keeps unbounded (reproducibility gate) | GPU suite 0-fail; tg256 341.1 vs 342.1 (~0 cost); det byte-identical; coherent |
 | **F-A3** | high | B | worker catch now syncs + classifies the sticky error; context-poisoning classes fail-fast (`stop_requested_`) with a loud log instead of serving garbage | exception-path-only; full suite + bench green |
 | **F-A4** | high | G | `/v1/messages` accepts Anthropic `x-api-key` (constant-time) as well as Bearer | new unit `ApiKeyAuth.*` (5 cases) |
 | **F-A7** | med | G | `/v1/messages` 401 now uses the Anthropic error envelope | covered by the auth path |
@@ -45,11 +54,9 @@ beyond those itemized below.
 
 ## What was parked (verified real; needs more than an autonomous-safe change)
 
-- **F-A2 (high)** — non-streaming unbounded conditional-graph burst doesn't re-poll
-  cancel/disconnect/timeout → a dropped client burns up to `max_tokens`. Fix =
-  bound the device loop + re-poll per chunk (the spec-ngram `miss_burst` template),
-  but it touches the conditional-graph loop with a documented off-by-one history
-  (#683/#692) and needs the multi-token-verify GPU coherence battery to ship safely.
+- **F-A2 (high)** — RESOLVED (variant B): bounded the non-streaming decode loop via
+  `runtime.decode_burst` so the worker re-polls cancellation each burst, with a
+  determinism gate (unbounded kept for `deterministic` evals). ~0 throughput cost.
 - **F-A1b (high)** — RESOLVED (folded into the F-A1 reject-newest fix above): the
   prefill/spec `evict_lru` sites shared the same live-sequence-stripping mechanism;
   all three engine sites now reject-newest instead of preempting.
@@ -94,18 +101,15 @@ cuBLAS-autotune restart variance (informational, not a gate).
 
 ## Prioritized parked backlog (for a follow-up)
 
-1. **F-A2** bound the non-streaming device loop + re-poll cancel, OR add a device-checked
-   cancel flag to the autonomous conditional-graph loop for full-throughput
-   interruptibility (high; a throughput-vs-responsiveness policy call + needs the
-   manual coherence battery — owner decision).
-2. **F-A5** vision request serialization kills concurrent requests (med) — NOT a
+1. **F-A5** vision request serialization kills concurrent requests (med) — NOT a
    stop→pause swap (vision mutates global engine image state; pause/resume could leak
    the image to a concurrent text request). Real fix: per-request image binding.
-3. **F-A11** `size_t→int` widen (low; unreachable today, touches live FP8 kernel indexing).
-4. **F-A12** KV-write `block_id` guard (low; `kv_resolve_slot` shared w/ reads + StreamingLLM `-1`).
-5. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
+2. **F-A11** `size_t→int` widen (low; unreachable today, touches live FP8 kernel indexing).
+3. **F-A12** KV-write `block_id` guard (low; `kv_resolve_slot` shared w/ reads + StreamingLLM `-1`).
+4. Carried from pass-1: CI3/T1/BM1 (GPU runner), CI1 (format gate), B2 (CMakePresets) — infra.
 
-(F-A1b + F-A14 resolved this pass; F-A9 refuted by experiment.)
+(F-A1b + F-A2 + F-A14 resolved this pass; F-A9 refuted by experiment. **All HIGH
+findings are now fixed-and-validated** — no parked HIGH remaining.)
 
 ## Honest caveats
 
