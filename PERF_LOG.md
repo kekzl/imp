@@ -158,3 +158,33 @@ request reports `cached=4512/4524` (shared, not recomputed).
   hot-path kernel change, `−2%` throughput gate not at risk.
 - TTFT p50 @ c≤4 is bounded by prefill, not E2E (Phase-1 acceptance).
 - Warm-cache TTFT < cold-cache TTFT by a clear margin (Phase-2 acceptance).
+
+---
+
+## 2026-06-24 · Soundness & hardening audit (audit/soundness-hardening)
+
+Model: Qwen3-Coder-30B-A3B NVFP4, CUDA 13.3, `imp-cli --bench`, 7 reps/run, 2 cold
+restarts. Decode tg256 is the gate signal (prefill pp512 carries the ±2.6× cuBLAS
+restart variance). GPU verified free + warm-clocked. Full ledger: AUDIT.md (pass 2),
+AUDIT_REPORT.md.
+
+### Phase-0 baseline → post-fix (all soundness fixes)
+| shape | baseline | post-fix | gate (3% band) |
+|---|---|---|---|
+| tg256 @ pp512  | 341.6 | 342.2 | ≥ 331.4 ✓ |
+| tg256 @ pp2048 | 322.0 | 321.7 | ≥ 312.4 ✓ |
+| tg256 @ pp4096 | 266.4 | 266.2 | ≥ 258.4 ✓ |
+
+Decode gate **HELD** at every step. Build GREEN · GPU suite 0 failures (1266 tests).
+
+### F-A2 bounded decode-burst (tg256 @ pp512, non-deterministic mode)
+| runtime.decode_burst | tok/s |
+|---|---|
+| 128 (new default) | 341.1 |
+| 256 | 342.5 |
+| 0 (unbounded, legacy) | 342.1 |
+
+Bounding the non-streaming decode loop for cancel-responsiveness costs ~0
+(`burst_rearm` makes relaunch nearly free). Determinism gate: in `deterministic`
+mode the loop stays unbounded → greedy byte-identical across fresh processes (the
+unbounded fully-on-device loop is the only greedy-reproducible decode path).

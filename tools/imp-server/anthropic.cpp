@@ -416,7 +416,8 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         };
     }
 
-    // Dig into the first choice (we reject n>1 for /v1/messages upstream).
+    // Dig into the first choice. The Anthropic Messages API has no `n`
+    // parameter, so the engine only ever produces a single choice here.
     json choice = json::object();
     if (oai.contains("choices") && oai["choices"].is_array() && !oai["choices"].empty()) {
         choice = oai["choices"][0];

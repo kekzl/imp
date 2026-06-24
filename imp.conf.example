@@ -36,6 +36,14 @@ prefill_graph        = true
 # MoE auto-picks 1). Set a positive value to force it (e.g. 4). The --max-batch
 # CLI flag and a per-request "max_batch_size" override take precedence.
 max_batch_size       = 0
+# Burst size for the autonomous decode graph loop on a NON-streaming request
+# with speculation off. The loop runs in bursts of this many tokens and returns
+# to the host to re-poll cancellation/timeout (so a disconnected client doesn't
+# burn a full generation). Output is identical to the old unbounded loop; larger
+# = less relaunch overhead but higher cancel latency. Streaming + speculation
+# paths are unaffected. 0 = legacy unbounded behavior. Ignored when
+# deterministic = true (the unbounded loop stays for bit-reproducible evals).
+decode_burst         = 128
 # Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
 # Off by default — opt in for prod rollouts where first-request TTFT
 # matters. In dev / CI / one-shot runs the warmup is pure overhead and can

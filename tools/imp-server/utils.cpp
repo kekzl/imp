@@ -27,6 +27,30 @@ bool bearer_token_matches(const std::string& authorization, const std::string& a
     return diff == 0;
 }
 
+// Constant-time equality over max(|a|,|b|) bytes — no early-out on the first
+// differing byte (that would leak the key prefix via timing).
+static bool constant_time_equals(const std::string& a, const std::string& b) {
+    const size_t n = a.size() > b.size() ? a.size() : b.size();
+    unsigned char diff = static_cast<unsigned char>(a.size() != b.size());
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ac = (i < a.size()) ? static_cast<unsigned char>(a[i]) : 0;
+        unsigned char bc = (i < b.size()) ? static_cast<unsigned char>(b[i]) : 0;
+        diff |= ac ^ bc;
+    }
+    return diff == 0;
+}
+
+bool api_key_matches(const std::string& authorization, const std::string& x_api_key,
+                     const std::string& api_key) {
+    if (bearer_token_matches(authorization, api_key))
+        return true;
+    // x-api-key carries the raw key (no "Bearer " prefix). Only consider it when
+    // present so an empty header can't match an empty configured key by accident.
+    if (!x_api_key.empty() && constant_time_equals(x_api_key, api_key))
+        return true;
+    return false;
+}
+
 json safe_token_json(const std::string& text) {
     std::string safe;
     safe.reserve(text.size());

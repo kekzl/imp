@@ -60,7 +60,7 @@ typedef struct {
     int use_fp8_prefill;  // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
 
     // NVFP4 decode weight cache
-    int use_nvfp4_decode;  // -1 = auto (sm_120→mode2, sm_90→mode1), 0 = off, 1 = additive, 2 = NVFP4 only
+    int use_nvfp4_decode;  // -1 = auto (by quant/MoE/GDN: dense Q*_K→1, sub-8-bit/MoE/GDN→2), 0 = off, 1 = additive, 2 = NVFP4 only
 
     // MXFP4 prefill: use CUTLASS MXFP4 GEMM for prefill (converts NVFP4 cache to MXFP4 format)
     int use_mxfp4_prefill;  // 0 = off (default), 1 = on (requires sm_120 + NVFP4 cache)

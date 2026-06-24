@@ -9,6 +9,12 @@ public:
     GreenContextManager() = default;
     ~GreenContextManager();
 
+    // Owns raw streams + green-context/resource handles destroyed in the dtor;
+    // a copy would alias them and double-free. Non-copyable (held by value /
+    // unique_ptr, never copied).
+    GreenContextManager(const GreenContextManager&) = delete;
+    GreenContextManager& operator=(const GreenContextManager&) = delete;
+
     // Initialize with SM partitioning: prefill gets prefill_sm_ratio of SMs,
     // decode gets the remainder. device is the CUDA device ordinal.
     bool init(int device, float prefill_sm_ratio = 0.8f);

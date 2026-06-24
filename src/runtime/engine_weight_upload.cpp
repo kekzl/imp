@@ -11,6 +11,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
+#include "core/cuda_raii.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -164,24 +165,24 @@ bool Engine::init_weights() {
     IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
                  free_before / (1024UL * 1024), total_before / (1024UL * 1024));
 
-    cudaStream_t upload_stream = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking));
+    // RAII stream/event: upload_weights_gpu() can throw (internal errors throw
+    // per project convention), and a raw cudaStream_t/cudaEvent_t held across it
+    // would leak on the unwind. The wrappers destroy on scope exit / exception.
+    CudaStream upload_stream_raii;
+    if (!upload_stream_raii.create(cudaStreamNonBlocking))
+        IMP_LOG_WARN("Failed to create weight-upload stream; uploading on the main stream.");
+    cudaStream_t upload_stream = upload_stream_raii.get();  // may be null
 
     if (!model_->upload_weights_gpu(config_.compute_dtype, upload_stream ? upload_stream : stream_,
                                     expert_reserve)) {
         IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
-        if (upload_stream)
-            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(upload_stream));
         return false;
     }
 
     if (upload_stream) {
-        cudaEvent_t upload_done;
-        IMP_CUDA_CHECK_LOG(cudaEventCreate(&upload_done));
-        IMP_CUDA_CHECK_LOG(cudaEventRecord(upload_done, upload_stream));
-        IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream_, upload_done));
-        IMP_CUDA_CHECK_LOG(cudaEventDestroy(upload_done));
-        IMP_CUDA_CHECK_LOG(cudaStreamDestroy(upload_stream));
+        CudaEvent upload_done;
+        if (upload_done.record(upload_stream))
+            IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream_, upload_done.get()));
     }
 
     size_t free_after = 0, total_after = 0;

@@ -61,6 +61,9 @@ public:
 
     // Evict the least-recently-used sequence, freeing its blocks.
     // Returns the evicted seq_id, or -1 if there is nothing to evict.
+    // WARNING: every lru_order_ entry is a LIVE sequence and imp has no
+    // recompute path, so the engine must NOT use this to free room under KV
+    // pressure (it reject-newests instead). Manager primitive only.
     int evict_lru();
 
     // Check whether `num_blocks` blocks are available.  Returns true if

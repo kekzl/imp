@@ -61,3 +61,25 @@ TEST(BearerAuth, HandlesLongTokens) {
     almost.back() = 'x';
     EXPECT_FALSE(bearer_token_matches("Bearer " + almost, key));
 }
+
+// audit F4: /v1/messages must accept the Anthropic `x-api-key` header (raw key,
+// no "Bearer " prefix) as well as OpenAI-style Bearer auth — a Bearer-only check
+// 401s the official Anthropic SDK. api_key_matches() accepts either.
+TEST(ApiKeyAuth, AcceptsBearerHeader) {
+    EXPECT_TRUE(api_key_matches("Bearer secret123", "", "secret123"));
+}
+TEST(ApiKeyAuth, AcceptsXApiKeyHeader) {
+    EXPECT_TRUE(api_key_matches("", "secret123", "secret123"));
+}
+TEST(ApiKeyAuth, AcceptsEitherWhenBothPresent) {
+    EXPECT_TRUE(api_key_matches("Bearer secret123", "wrong", "secret123"));
+    EXPECT_TRUE(api_key_matches("Bearer wrong", "secret123", "secret123"));
+}
+TEST(ApiKeyAuth, RejectsWhenNeitherMatches) {
+    EXPECT_FALSE(api_key_matches("Bearer wrong", "alsowrong", "secret123"));
+    EXPECT_FALSE(api_key_matches("", "", "secret123"));
+}
+TEST(ApiKeyAuth, EmptyXApiKeyDoesNotMatchNonEmptyConfiguredKey) {
+    // An absent x-api-key must never match by accident.
+    EXPECT_FALSE(api_key_matches("", "", "secret123"));
+}

@@ -578,6 +578,31 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
     EXPECT_EQ(static_cast<int>(mgr->block_table(2).size()), 2);
 }
 
+// Regression (audit F-A1/F-A1b): allocation under full-KV pressure must NEVER
+// evict a live sequence. Every lru_order_ entry is a live sequence and imp has
+// no recompute-on-resume path, so freeing one would corrupt it (use-after-free
+// once it runs). append_block/allocate_blocks reclaim *cached* (finished) blocks
+// only, then fail — the engine reject-newests on that failure rather than
+// preempting a live sequence. This locks the invariant the fix depends on.
+TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+    (void)mgr->allocate_blocks(0, 5);  // seq 0: 5 live blocks
+    (void)mgr->allocate_blocks(1, 3);  // seq 1: 3 live blocks -> pool full
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);  // nothing reclaimable — all live
+
+    // No free and no reclaimable cached blocks => allocation must FAIL, not
+    // evict a live sequence.
+    EXPECT_EQ(mgr->append_block(0), -1);
+    EXPECT_FALSE(mgr->allocate_blocks(1, 1));
+
+    // Both sequences keep every block — neither was stripped.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 5);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 3);
+}
+
 // 18. ManagerCanAllocate
 TEST(KVCacheManagerTest, ManagerCanAllocate) {
     SKIP_IF_NO_CUDA();

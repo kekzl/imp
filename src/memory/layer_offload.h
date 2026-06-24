@@ -19,6 +19,11 @@ public:
     LayerOffloadManager() = default;
     ~LayerOffloadManager();
 
+    // Owns raw per-slot cudaStream_t/cudaEvent_t destroyed in the dtor; a copy
+    // would alias them and double-free. Non-copyable.
+    LayerOffloadManager(const LayerOffloadManager&) = delete;
+    LayerOffloadManager& operator=(const LayerOffloadManager&) = delete;
+
     // Initialize offloading for the given model.
     // gpu_layers: number of layers to keep on GPU (0 = all offloaded,
     //             -1 = all on GPU i.e. disabled).

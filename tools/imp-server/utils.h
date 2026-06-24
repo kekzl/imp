@@ -34,6 +34,13 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
 // pre-routing handler so the security-critical compare is unit-testable.
 bool bearer_token_matches(const std::string& authorization, const std::string& api_key);
 
+// Accepts EITHER the OpenAI-style `Authorization: Bearer <key>` header OR the
+// Anthropic-style `x-api-key: <key>` header (the official Anthropic SDK sends
+// the latter, so a Bearer-only check 401s real Anthropic clients on /v1/messages).
+// Both comparisons are constant-time. Pass the raw header values.
+bool api_key_matches(const std::string& authorization, const std::string& x_api_key,
+                     const std::string& api_key);
+
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
 size_t utf8_complete_len(const std::string& s);

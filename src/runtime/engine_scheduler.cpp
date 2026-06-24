@@ -394,19 +394,13 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // skips the reused prefix's forward, leaving those NLL slots at 0.
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 &&
         !ppl_capture_.active) {
-        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
         if (prefix_reused < 0) {
-            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted < 0)
-                    break;
-            }
-            prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
-            if (prefix_reused < 0) {
-                req->status = RequestStatus::CANCELLED;
-                return false;
-            }
+            // KV exhausted even after cached-block reclamation. The old fallback
+            // evicted live sequences (every lru_order_ entry is live; no
+            // recompute path) → silent corruption. Reject-newest instead.
+            req->status = RequestStatus::CANCELLED;
+            return false;
         }
 
         if (prefix_reused > 0) {
@@ -437,17 +431,14 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     } else {
         int additional = num_blocks - existing;
         if (additional > 0) {
+            // allocate_blocks already reclaims cached blocks; if it still fails
+            // the KV cache is genuinely exhausted. The old evict_lru fallback
+            // freed a LIVE sequence (no recompute path) → silent corruption.
+            // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                while (kv_manager_->num_free_blocks() < additional) {
-                    int evicted = kv_manager_->evict_lru();
-                    if (evicted < 0)
-                        break;
-                }
-                if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    return false;
-                }
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                return false;
             }
         }
     }
@@ -949,15 +940,18 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         if (blocks_needed > blocks_have) {
             int new_block = kv_manager_->append_block(req->id);
             if (new_block < 0) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted >= 0) {
-                    new_block = kv_manager_->append_block(req->id);
-                }
-                if (new_block < 0) {
-                    kv_manager_->free_sequence(req->id);
-                    req->status = RequestStatus::CANCELLED;
-                    continue;
-                }
+                // KV exhausted: append_block already reclaimed cached blocks, so
+                // the free pool AND all reclaimable cached blocks are empty. The
+                // old fallback evicted an LRU sequence — but every lru_order_
+                // entry is LIVE and imp has no recompute path, so evicting one
+                // (a current-batch member, or a still-active sequence beyond
+                // max_batch_size) silently corrupted it (use-after-free once it
+                // ran). Reject-newest instead: cancel THIS sequence and leave the
+                // others' KV intact. StreamingLLM auto-enable (above) already
+                // handles the graceful FP16 case before we reach here.
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                continue;
             }
         }
 
@@ -1556,8 +1550,32 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // real per-token. Bounded (speculation) bursts still stream in
             // groups via the per-burst sync, so they stay enabled.
             const bool stream_unbounded = dreq->stream && spec_limit == 0;
-            if (!stream_unbounded)
-                try_launch_async_graph_loop(dreq, last_token, dec_stream, spec_limit);
+            if (!stream_unbounded) {
+                // F-A2: a NON-streaming request with speculation off would run
+                // the UNBOUNDED on-device loop (spec_limit == 0) all the way to
+                // max_tokens while the host blocks — is_cancelled()/timeout are
+                // only polled between bursts, so a client disconnect couldn't
+                // interrupt it and burned a full generation. Bound it to
+                // runtime.decode_burst so the worker regains control to re-poll
+                // cancellation; output is identical (same decode, chunked +
+                // relaunched, exactly like the speculation burst path).
+                // Speculation keeps its own miss_burst limit; <=0 restores the
+                // old unbounded behavior.
+                int launch_limit = spec_limit;
+                // Bound only in the default (non-deterministic) serving mode.
+                // The fully-on-device unbounded loop is the one decode path that
+                // is greedy bit-reproducible run-to-run (no host re-entry);
+                // chunking it would make non-streaming greedy output
+                // non-reproducible, breaking the determinism.md eval guarantee.
+                // Deterministic mode runs to completion and never needs
+                // mid-burst cancellation, so keep it unbounded there. In
+                // production the model is already non-deterministic, so bounding
+                // costs no reproducibility and buys cancel responsiveness.
+                if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
+                    !runtime_config_.runtime.deterministic)
+                    launch_limit = runtime_config_.runtime.decode_burst;
+                try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
+            }
         }
     }
 

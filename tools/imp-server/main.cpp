@@ -160,12 +160,23 @@ int main(int argc, char** argv) {
         }
 
         // Enforce API key if configured. The constant-time compare lives in
-        // bearer_token_matches() (utils.cpp) so it is unit-testable (test-core).
+        // api_key_matches()/bearer_token_matches() (utils.cpp) so it is
+        // unit-testable (test-core). Accept both the OpenAI `Authorization:
+        // Bearer` and the Anthropic `x-api-key` header so real Anthropic SDK
+        // clients aren't 401'd on /v1/messages.
         if (!state.api_key.empty()) {
             std::string auth = req.get_header_value("Authorization");
-            if (!bearer_token_matches(auth, state.api_key)) {
+            std::string xkey = req.get_header_value("x-api-key");
+            if (!api_key_matches(auth, xkey, state.api_key)) {
                 res.status = 401;
-                json err = {{"error", {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
+                json err;
+                if (req.path == "/v1/messages") {
+                    err = {{"type", "error"},
+                           {"error", {{"type", "authentication_error"}, {"message", "Invalid API key"}}}};
+                } else {
+                    err = {{"error",
+                            {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
+                }
                 res.set_content(err.dump(), "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
