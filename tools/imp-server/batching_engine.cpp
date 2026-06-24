@@ -4,8 +4,33 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cuda_runtime_api.h>
 #include <exception>
 #include <stdexcept>
+
+namespace {
+// A kernel illegal-access (or similar) poisons the whole process-wide CUDA
+// context: every later launch returns the same sticky error, which forward()
+// silently clears and ignores, so the engine would serve garbage forever. These
+// classes are NOT recoverable without a process restart. A plain host-side throw
+// (the common case the step() try/catch was written for) leaves the device clean
+// — cudaDeviceSynchronize() returns success — so we recover and continue as before.
+bool cuda_error_is_unrecoverable(cudaError_t e) {
+    switch (e) {
+        case cudaErrorIllegalAddress:
+        case cudaErrorMisalignedAddress:
+        case cudaErrorLaunchFailure:
+        case cudaErrorLaunchTimeout:
+        case cudaErrorHardwareStackError:
+        case cudaErrorIllegalInstruction:
+        case cudaErrorECCUncorrectable:
+        case cudaErrorExternalDevice:
+            return true;
+        default:
+            return false;  // conservative: don't kill the server on recoverable/unknown errors
+    }
+}
+}  // namespace
 
 BatchingEngine::~BatchingEngine() { stop(); }
 
@@ -176,6 +201,20 @@ void BatchingEngine::worker_loop() {
                 }
                 sr->push_finish("internal_error");
             }
+            // Distinguish a host-side throw (device clean — recover) from a CUDA
+            // fault that poisoned the shared context (no recovery without a
+            // restart). Without this, a poisoned context is silently cleared at
+            // the next forward() and the server returns garbage on every request.
+            {
+                cudaError_t sync_err = cudaDeviceSynchronize();
+                cudaError_t sticky = cudaGetLastError();
+                if (cuda_error_is_unrecoverable(sync_err) || cuda_error_is_unrecoverable(sticky)) {
+                    IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
+                                  "worker; the server must be restarted.",
+                                  cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
+                    stop_requested_.store(true, std::memory_order_relaxed);
+                }
+            }
             // Reset engine-level transient state so the next request starts clean.
             engine->invalidate_graphs();
             engine->reset_batch_pool_cache();
@@ -193,6 +232,16 @@ void BatchingEngine::worker_loop() {
                     engine->reset_ssm_state(sr->request->id);
                 }
                 sr->push_finish("internal_error");
+            }
+            {
+                cudaError_t sync_err = cudaDeviceSynchronize();
+                cudaError_t sticky = cudaGetLastError();
+                if (cuda_error_is_unrecoverable(sync_err) || cuda_error_is_unrecoverable(sticky)) {
+                    IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
+                                  "worker; the server must be restarted.",
+                                  cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
+                    stop_requested_.store(true, std::memory_order_relaxed);
+                }
             }
             engine->invalidate_graphs();
             engine->reset_batch_pool_cache();
