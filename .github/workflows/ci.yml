@@ -29,25 +29,40 @@ jobs:
       CCACHE_COMPRESSLEVEL: "6"
 
     steps:
-      - uses: actions/checkout@v5
+      # Minimal git up front so checkout below pulls real history and the
+      # docs-only detection can diff against the PR/push base. (The rest of the
+      # build tooling installs later, gated on the detection result.)
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git
 
-      # Docs-only PRs (only **/*.md or docs/** changed) skip the expensive CUDA
-      # build/test below but still report the required `Build` check as success:
-      # every heavy step is gated on steps.changes.outputs.code, so the job goes
-      # green in seconds instead of pulling the multi-GB CUDA image, configuring
-      # CUTLASS and linking. `predicate-quantifier: every` makes a changed file
-      # count as "code" only when it is NEITHER markdown NOR under docs/ — so a
-      # docs/ image or a root *.md alone won't trip it. Runs before `apt install
-      # git`, hence a JS action (API-based) rather than a git diff.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history so the base SHA is present for `git diff`
+
+      # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
+      # CUDA build/test below but still report the required `Build` check as
+      # success — every heavy step is gated on steps.changes.outputs.code, so the
+      # job goes green in seconds instead of pulling the multi-GB CUDA image,
+      # configuring CUTLASS and linking. Plain `git diff` (no third-party action,
+      # so no Node-deprecation churn). FAIL-OPEN: any uncertainty (no base SHA,
+      # git error, empty diff) → code=true, so detection can never wrongly skip a
+      # code change or leave the required check unreported.
       - name: Detect non-docs changes
         id: changes
-        uses: dorny/paths-filter@v3
-        with:
-          predicate-quantifier: 'every'
-          filters: |
-            code:
-              - '!**/*.md'
-              - '!docs/**'
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          code=true
+          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            files="$(git diff --name-only "$base" HEAD)"
+            # code stays true unless EVERY changed file is markdown or under docs/.
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          printf 'non-docs changes: code=%s\nchanged files:\n%s\n' "$code" "${files:-<none>}"
 
       - name: Install build deps
         if: steps.changes.outputs.code == 'true'
