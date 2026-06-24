@@ -163,6 +163,12 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     // Recurrent state (SSM/GDN) advances on every forwarded token and cannot
     // be rewound on draft rejection.
     if (ssm_state_ || gdn_state_) return false;
+    // MoE decode is carried by the async conditional-graph loop (+27-36%, the
+    // MoE-decode foundation). The eager spec-verify path disables that loop and
+    // regresses MoE -11..-73% even at ~99% draft acceptance (perf hunt
+    // 2026-06-18) — the host must see every token to draft+accept. Net-negative
+    // for MoE as-is, so gate it off and stay on the loop (dense keeps the win).
+    if (model_->profile().is_moe) return false;
     if (mtp_spec_decode_enabled()) return false;
     if (!supports_chunked_prefill_()) return false;
     return true;
