@@ -64,6 +64,12 @@ struct PerLayerAccessRing {
 };
 
 struct ExpertLRUCache {
+    ExpertLRUCache() = default;
+    // Owns a GPU pool + prefetch stream/events freed by destroy(); a copy would
+    // alias them and double-free on the second destroy(). Non-copyable.
+    ExpertLRUCache(const ExpertLRUCache&) = delete;
+    ExpertLRUCache& operator=(const ExpertLRUCache&) = delete;
+
     // Each slot holds one expert's raw quantized bytes on GPU. Slots are
     // partitioned per-layer (Phase 3): `slots_[layer * slots_per_layer_ +
     // slot_idx_within_layer]`. GPU pointer = `pool_ + flat_index * slot_size_`.
