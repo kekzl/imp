@@ -256,3 +256,41 @@ remaining lever (low prior given the overlap evidence): `gemv_nvfp4_moe_gate_up_
 at 50% peak BW — but the swiglu A/B shows kernel-time changes in this FFN don't
 propagate to tg256, so it is unlikely to clear the gate without a structural (cross-
 kernel / graph-level) change, which is out of this dispatch's scope.
+
+### nsys re-measure + H2 (unfuse swiglu decode): SHIPPED +2.6%
+
+The H1 e2e A/B (kernel +10% slower → only −0.34% e2e) had suggested swiglu_mr was
+off the critical path. **nsys (`cuda_gpu_kern_sum`, --no-cuda-graphs) refutes that** —
+true decode wall-clock shares (no ncu-replay distortion):
+
+| Time% | kernel |
+|------:|--------|
+| 18.1 | gemv_nvfp4_moe_gate_up_mr |
+| 17.0 | paged_attention_splitk_fp8_pipeline |
+| **15.5** | gemv_nvfp4_moe_swiglu_mr |
+| 8.5 | gemv_nvfp4_qkv_fused · 8.0 residual · 5.1 topk_gating · … |
+
+swiglu_mr is genuinely **15.5% of decode wall-clock and on the critical path** — H1
+failed specifically because the `__syncthreads` barrier cost more than the dedup
+saved, NOT because the kernel is cheap. Also confirmed `--use_fast_math` is ON, so
+`expf` already lowers to `__expf` (single MUFU) — the per-exp cost is already minimal;
+only the **rows×-redundant** silu is removable.
+
+**H2 (shipped):** remove the redundancy without an in-kernel barrier by computing the
+activation once globally. The gpt-oss and GGUF/mmvq MoE paths already do exactly this
+(`apply_expert_activation(gate,up→act_buf)` once + a plain `gemv_nvfp4_moe_decode`).
+Switched the Qwen3 NVFP4 MoE decode path (`run_moe_decode_fast`) to the same shape,
+turning the XU-bound fused swiglu-down kernel into a bandwidth-bound plain MoE GEMV.
+Reuses existing tested kernels; only the dispatch wiring changed.
+
+**Result (Qwen3-30B-A3B-NVFP4, warm 2902/13801, 3 cold restarts × 7 reps):**
+tg256 **330.45 → 338.99 median = +2.58%**; tg128 +2.0% (generalizes, not shape-special).
+Gates: greedy decode **byte-identical** to baseline (fp16 activation rounding absorbed
+by the 4-bit NVFP4 down weight) + self-deterministic; test-quant 187/187, test-moe-gdn
+106/106; prefill pp2048 within the 5% gate (separate path); nvfp4-dense tg256 neutral.
+
+Below the dispatch's ≥6% primary target, but a real low-variance decode win on a hero
+model — shipped per the "small percents matter" directive. The fused
+`gemv_nvfp4_moe_swiglu_*` kernels are now dead on the NVFP4 MoE path (left in place;
+removable in a hygiene follow-up). Remaining bigger levers (gate_up_mr 18.1%,
+attention-fp8 17.0%) need their own campaigns.
