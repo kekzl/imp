@@ -217,3 +217,42 @@ Clean Release build (sm_120a). GPU free, warm (mem 13801 MHz, SM ~2775). Re-roof
 The least-saturated hot kernel is `gemv_nvfp4_moe_swiglu_mr` (12.3% time, **85% occ but only 27% peak BW** → compute/latency-bound, not occupancy- or BW-starved) in `src/quant/nvfp4_gemv_moe.cu`. The attention path, if pursued, is `attention_paged_fp8.cu`. Both are outside the dispatch's stated editable scope (`attention_paged_nvfp4.cu`, `gemv_nvfp4_kpar`). No edit made; awaiting a re-scoped dispatch.
 
 Roofline history: `tools/roofline/history/runs/aa05c518_20260625_020221.json`.
+
+### Re-scope → H1 (nvfp4_gemv_moe.cu swiglu_mr): REFUTED, reverted
+
+Owner re-scoped to the least-saturated hot kernel, `gemv_nvfp4_moe_swiglu_mr_kernel`
+(12.3% of decode kernel-time, 85% occ, only 27% peak BW — the down-projection GEMV
+with SwiGLU fused on the input).
+
+**ncu limiter (confirmed before edit):** latency-bound, neither saturated (Compute
+47% / DRAM 30%); highest-utilized pipe by executed instructions = **XU 43%** (the
+`expf`/division in `silu(gate)*up`), top stall = short-scoreboard (~37%, SFU/smem
+latency). Root cause: `silu(gate[k])*up[k]` is recomputed once **per output row**
+(NR=8 warps/block each recompute the same activation).
+
+**H1 (bit-exact):** compute `act[k]=silu(gate[k])*up[k]` once per block into shared
+memory, all NR warps read it. Same float expression + FMA order ⇒ byte-identical.
+
+**Gates:** determinism byte-identical (post greedy token-seq == pre, self-deterministic);
+test-quant 187/187, test-moe-gdn 106/106. Correctness perfect.
+
+**Perf — REFUTED.** ncu kernel duration pre **12.8–13.1 µs → post 14.1–14.4 µs (≈ +10%
+SLOWER)**: Compute dropped (47%→36%, redundant exp removed) but Memory rose (34%→44%,
+smem round-trip) and the `__syncthreads` barrier **serializes the fill phase, exposing
+latency that 85% occupancy already hid** across warps. e2e tg256 (imp:preedit vs post,
+3 cold restarts × 7 reps, warm 2917 MHz / 14001 MHz): pre median **328.9** / post
+**327.8** = **−0.34% (noise)**.
+
+**Why e2e didn't move (structural):** a +10% kernel-time change on a "12.3%" kernel
+produced only −0.34% e2e — i.e. swiglu_mr largely **overlaps under the async CUDA-graph
+decode loop (off critical path)**; the ncu time-share overstates its wall-clock weight
+(same lesson as the spec-decode split-K finding). Combined with P2 (gemv already
+71–85% occ, multirow at 76% peak BW), **no single in-scope MoE-FFN kernel lever moves
+nvfp4-moe|tg256 ≥6%** — the cell is at/near its structural decode ceiling at batch 1.
+Change reverted; the high-occupancy per-row recompute is the better design here.
+
+**Decision:** STOP with a documented negative result (dispatch §5). Theoretical
+remaining lever (low prior given the overlap evidence): `gemv_nvfp4_moe_gate_up_mr`
+at 50% peak BW — but the swiglu A/B shows kernel-time changes in this FFN don't
+propagate to tg256, so it is unlikely to clear the gate without a structural (cross-
+kernel / graph-level) change, which is out of this dispatch's scope.
