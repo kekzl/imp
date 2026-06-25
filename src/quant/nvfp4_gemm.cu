@@ -79,10 +79,6 @@ __global__ void gemv_nvfp4_moe_gate_up_fused_kernel(
     const uint8_t* gate_packed, const uint8_t* gate_ms, const float* gate_ts, const uint8_t* up_packed,
     const uint8_t* up_ms, const float* up_ts, const int32_t* expert_indices, const half* x, half* y_gate,
     half* y_up, int rows, int K, size_t expert_stride_packed, size_t expert_stride_ms, int blocks_per_expert);
-__global__ void gemv_nvfp4_moe_swiglu_decode_kernel(
-    const uint8_t* packed_data, const uint8_t* micro_scales, const float* tensor_scales,
-    const int32_t* expert_indices, const half* gate, const half* up, half* y, int rows, int K,
-    size_t expert_stride_packed, size_t expert_stride_ms, int x_stride, int blocks_per_expert);
 
 // ---------------------------------------------------------------------------
 // Tensor-based launcher (existing API, delegates to K-parallel kernel)
@@ -254,7 +250,6 @@ void nvfp4_gemv_pdl_register() {
     // MoE GEMV kernels
     NVFP4_REGISTER(gemv_nvfp4_moe_decode_kernel);
     NVFP4_REGISTER(gemv_nvfp4_moe_gate_up_fused_kernel);
-    NVFP4_REGISTER(gemv_nvfp4_moe_swiglu_decode_kernel);
 
 #undef NVFP4_REGISTER
 }

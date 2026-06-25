@@ -294,3 +294,30 @@ model — shipped per the "small percents matter" directive. The fused
 `gemv_nvfp4_moe_swiglu_*` kernels are now dead on the NVFP4 MoE path (left in place;
 removable in a hygiene follow-up). Remaining bigger levers (gate_up_mr 18.1%,
 attention-fp8 17.0%) need their own campaigns.
+
+### Follow-up: gate_up_mr lever assessed = structural ceiling; dead swiglu kernels removed
+
+After the swiglu-unfuse shipped, profiled the next-largest decode kernel
+`gemv_nvfp4_moe_gate_up_mr` (18.1% wall-clock). ncu: DRAM 60% (1.05 TB/s),
+Compute 28%, L1-hit 87%, **82% short-scoreboard stall on global loads** →
+load-latency-bound. Cross-kernel comparison of the same `warp_k_loop` family:
+
+| kernel | DRAM% | sectors/req | bytes/sector |
+|--------|------:|------------:|-------------:|
+| gemv_nvfp4_moe_decode | 40 | 8.1 | 54.7 |
+| gemv_nvfp4_moe_gate_up_mr | 60 | 16.3 | 55.9 |
+| gemv_nvfp4_multirow (big-K) | 89 | 18.3 | 56.2 |
+
+sectors/req + bytes/sector are **family-inherent** (~55% is the NVFP4 packing, not a
+gate_up coalescing bug). The DRAM% spread is **shape-driven**: large-K GEMVs saturate
+BW (89%), the small per-expert-K (768) MoE GEMVs are latency-bound at batch 1 — the
+known **batch-1 MoE wall** (re-confirmed; the 2-mb/lane MLP variant was already
+measured neutral). No viable ≥2% in-scope lever; not pursued (anti-cheat: no forced
+rewrite against a structural wall). Remaining big lever (attention-fp8, 17%) is a
+separate kernel/campaign.
+
+Hygiene: removed the now-dead `gemv_nvfp4_moe_swiglu_{decode,mr,decode_kernel}` +
+launcher + PDL registration (the decode path uses apply_expert_activation + plain
+gemv_nvfp4_moe_decode since the unfuse). Shared header helpers
+(`dot_micro_block_swiglu`, `gemv_nvfp4_row_swiglu`) kept — still used by the dense /
+mxfp4 SwiGLU paths.
