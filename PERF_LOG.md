@@ -188,3 +188,71 @@ Bounding the non-streaming decode loop for cancel-responsiveness costs ~0
 (`burst_rearm` makes relaunch nearly free). Determinism gate: in `deterministic`
 mode the loop stays unbounded → greedy byte-identical across fresh processes (the
 unbounded fully-on-device loop is the only greedy-reproducible decode path).
+
+---
+
+## 2026-06-25 — NVFP4-MoE decode occupancy/BW campaign → PHASE-1 STOP (ground truth stale, re-anchored)
+
+**Commit:** `aa05c518` (main, post #784 gemv split + #785 CI). **Model:** `/models/Qwen3-30B-A3B-NVFP4-Modelopt`, cell `nvfp4-moe | tg256`. **Decision: do NOT edit — the §0 dispatch ground truth is stale; the named in-scope targets are not on this model's decode hot path.** Per dispatch §1.2 (>20% deviation ⇒ STOP & re-anchor) and §4 anti-cheat (no forced micro-opts, no out-of-scope kernel touches).
+
+### Method
+Clean Release build (sm_120a). GPU free, warm (mem 13801 MHz, SM ~2775). Re-roofline of the one cell via `tools/roofline/roofline measure --models nvfp4-moe --shapes tg256` (run `aa05c518_20260625_020221`, ncu full kernel-replay). Warm tg256 baseline: **328.7 tok/s** (7 reps), pp512 26.1k tok/s.
+
+### Fresh ncu (refutes §0)
+| kernel (decode hot) | time% | GB/s (% of 1792) | occ% |
+|---|--:|--:|--:|
+| `paged_attention_splitk_fp8_pipeline_kernel<128>` | 17.9 | 16 (1%) | **29** |
+| `paged_attention_reduce_kernel` | 4.1 | 36 | 8 |
+| `gemv_nvfp4_moe_gate_up_mr<8>` | 13.2 | 893 (50%) | 82 |
+| `gemv_nvfp4_multirow_fp32<8>` | 12.3 | 1357 (76%) | 71 |
+| `gemv_nvfp4_moe_swiglu_mr<8>` | 12.3 | 480 (27%) | 85 |
+| `gemv_nvfp4_residual` | 6.9 | 578 | 42 |
+| `gemv_nvfp4_qkv_fused` | 6.0 | 732 | 47 |
+
+### Why the §0 limiters are refuted
+- **P1 (attn_decode 12% occ, `num_splits` too conservative) — REFUTED.** No nvfp4 attention kernel is launched at all for this model. Since the KV-fp8 auto-default for Qwen3 MoE, decode attention runs through `paged_attention_splitk_fp8_pipeline_kernel` (attention_paged_**fp8**.cu, OUT of the dispatch's editable scope) at **29% occ** with split-K already active (the reduce kernel is present). Editing `attention_paged_nvfp4.cu` / `compute_splitk_splits` cannot move this cell — that path is dead code here. (Grid math for the nvfp4 path would have given `num_splits=11` ⇒ 352 CTAs anyway; the 12% figure was a 1-block/SM register-bound reading of a kernel that no longer runs.)
+- **P2 (gemv_nvfp4 37% peak, not saturating, occupancy headroom) — REFUTED.** The gemv kernels run at **71–85% occ** and **480–1357 GB/s (27–76% peak)**; `multirow_fp32` already hits 76% of peak BW. There is no occupancy headroom and no single "663 GB/s @ 65% occ" kernel. The #784 split + prior multirow work moved this well past the §0 snapshot.
+
+### Remaining real lever (out of named scope — needs a re-scope decision)
+The least-saturated hot kernel is `gemv_nvfp4_moe_swiglu_mr` (12.3% time, **85% occ but only 27% peak BW** → compute/latency-bound, not occupancy- or BW-starved) in `src/quant/nvfp4_gemv_moe.cu`. The attention path, if pursued, is `attention_paged_fp8.cu`. Both are outside the dispatch's stated editable scope (`attention_paged_nvfp4.cu`, `gemv_nvfp4_kpar`). No edit made; awaiting a re-scoped dispatch.
+
+Roofline history: `tools/roofline/history/runs/aa05c518_20260625_020221.json`.
+
+### Re-scope → H1 (nvfp4_gemv_moe.cu swiglu_mr): REFUTED, reverted
+
+Owner re-scoped to the least-saturated hot kernel, `gemv_nvfp4_moe_swiglu_mr_kernel`
+(12.3% of decode kernel-time, 85% occ, only 27% peak BW — the down-projection GEMV
+with SwiGLU fused on the input).
+
+**ncu limiter (confirmed before edit):** latency-bound, neither saturated (Compute
+47% / DRAM 30%); highest-utilized pipe by executed instructions = **XU 43%** (the
+`expf`/division in `silu(gate)*up`), top stall = short-scoreboard (~37%, SFU/smem
+latency). Root cause: `silu(gate[k])*up[k]` is recomputed once **per output row**
+(NR=8 warps/block each recompute the same activation).
+
+**H1 (bit-exact):** compute `act[k]=silu(gate[k])*up[k]` once per block into shared
+memory, all NR warps read it. Same float expression + FMA order ⇒ byte-identical.
+
+**Gates:** determinism byte-identical (post greedy token-seq == pre, self-deterministic);
+test-quant 187/187, test-moe-gdn 106/106. Correctness perfect.
+
+**Perf — REFUTED.** ncu kernel duration pre **12.8–13.1 µs → post 14.1–14.4 µs (≈ +10%
+SLOWER)**: Compute dropped (47%→36%, redundant exp removed) but Memory rose (34%→44%,
+smem round-trip) and the `__syncthreads` barrier **serializes the fill phase, exposing
+latency that 85% occupancy already hid** across warps. e2e tg256 (imp:preedit vs post,
+3 cold restarts × 7 reps, warm 2917 MHz / 14001 MHz): pre median **328.9** / post
+**327.8** = **−0.34% (noise)**.
+
+**Why e2e didn't move (structural):** a +10% kernel-time change on a "12.3%" kernel
+produced only −0.34% e2e — i.e. swiglu_mr largely **overlaps under the async CUDA-graph
+decode loop (off critical path)**; the ncu time-share overstates its wall-clock weight
+(same lesson as the spec-decode split-K finding). Combined with P2 (gemv already
+71–85% occ, multirow at 76% peak BW), **no single in-scope MoE-FFN kernel lever moves
+nvfp4-moe|tg256 ≥6%** — the cell is at/near its structural decode ceiling at batch 1.
+Change reverted; the high-occupancy per-row recompute is the better design here.
+
+**Decision:** STOP with a documented negative result (dispatch §5). Theoretical
+remaining lever (low prior given the overlap evidence): `gemv_nvfp4_moe_gate_up_mr`
+at 50% peak BW — but the swiglu A/B shows kernel-time changes in this FFN don't
+propagate to tg256, so it is unlikely to clear the gate without a structural (cross-
+kernel / graph-level) change, which is out of this dispatch's scope.
