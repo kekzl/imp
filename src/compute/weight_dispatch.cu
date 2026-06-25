@@ -90,10 +90,17 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr) ? *w.payload.nvfp4.tensor_scale
                                                                          : 1.0f;
             tmp.N = w.shape[0];
-            // shape[1] holds LOGICAL K — matches MXFP4 dispatch (line ~348)
-            // and WeightRegistry::reserve(kind, t.shape[0], t.shape[1]) in
-            // executor_pre_dequant.cu where t.shape[1] is logical K.
-            tmp.K = w.shape[1];
+            // Logical K = the activation's K (GEMM contract: x is [M, K], so
+            // x.shape[1] IS the logical K). Deriving K from the weight handle is
+            // unsafe here: shape[1] is PACKED (K/2) for prequant-loaded NVFP4
+            // weights but LOGICAL for handles built elsewhere (e.g. the
+            // WeightDispatchTest fixture) — an inconsistent convention. The old
+            // `= w.shape[1]` took the packed value, so the M>1 dequant→cuBLAS GEMM
+            // fallback aborted "B.shape[1]=<2K> must equal weight K=<K>" whenever a
+            // prefill reached this shim with a prequant weight — e.g. a native-NVFP4
+            // model whose CUTLASS prefill workspace was starved by a large KV budget
+            // (server agentic long-context defaults), forcing the dequant fallback.
+            tmp.K = static_cast<int>(x.shape[1]);
 
             int M = static_cast<int>(x.shape[0]);
             // Diagnostic: diagnostics.nvfp4_force_dequant (legacy IMP_NVFP4_FORCE_DEQUANT=1)

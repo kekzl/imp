@@ -416,6 +416,76 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     cudaFree(d_y_disp);
 }
 
+// Regression: prequant-loaded NVFP4 weight handles carry the PACKED K/2 in
+// shape[1] (two FP4 nibbles per byte), NOT the logical K — an inconsistent
+// convention vs the handles built above (which use logical K). The phase-2 shim
+// must derive K from the activation, never from the handle, or the M>1 dequant
+// GEMM fallback aborts "B.shape[1]=<K> must equal weight K=<K/2>". This is the
+// native-NVFP4 server crash that surfaced when a large KV budget starved the
+// CUTLASS prefill workspace and forced the dequant fallback. Identical to
+// NVFP4_GemmMatchesDirect except h.shape[1] holds the PACKED dimension.
+TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
+    const int N_OUT = 16, M_BATCH = 8, K = 64;
+
+    std::vector<half> h_w(N_OUT * K), h_x(M_BATCH * K);
+    for (int i = 0; i < N_OUT * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < M_BATCH * K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
+
+    half* d_w = dev_alloc_copy(h_w);
+    half* d_x = dev_alloc_copy(h_x);
+
+    int64_t wshape[2] = {N_OUT, K};
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
+
+    NvFP4QuantResult qr;
+    quantize_fp16_to_nvfp4(w_t, qr, stream_);
+    cudaStreamSynchronize(stream_);
+    float saved_ts = qr.tensor_scale;
+    qr.tensor_scale = 1.0f;
+
+    int64_t xshape[2] = {M_BATCH, K}, yshape[2] = {M_BATCH, N_OUT};
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+
+    half *d_y_direct, *d_y_disp;
+    cudaMalloc(&d_y_direct, M_BATCH * N_OUT * sizeof(half));
+    cudaMalloc(&d_y_disp, M_BATCH * N_OUT * sizeof(half));
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
+
+    gemm_nvfp4(qr, x_t, y_direct, stream_);
+    cudaStreamSynchronize(stream_);
+
+    WeightHandle h;
+    h.kind = TensorKind::WQ;
+    h.primary_tier = StorageTier::NVFP4;
+    h.shape[0] = N_OUT;
+    h.shape[1] = K / 2;  // PACKED — mirrors the prequant loader (logical K = shape[1]*2)
+    h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
+    h.payload.nvfp4.block_scales = static_cast<uint8_t*>(qr.micro_scales);
+    h.payload.nvfp4.tensor_scale = nullptr;
+    h.payload.nvfp4.tensor_scale_2 = nullptr;
+
+    // With the old `tmp.K = w.shape[1]` this aborted in gemm_nvfp4; the activation-
+    // derived K makes it succeed and match the direct call.
+    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
+    cudaStreamSynchronize(stream_);
+
+    auto h_direct = dev_read(d_y_direct, M_BATCH * N_OUT);
+    auto h_disp = dev_read(d_y_disp, M_BATCH * N_OUT);
+    for (int i = 0; i < M_BATCH * N_OUT; ++i)
+        EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
+            << "NVFP4 packed-shape GEMM dispatch mismatch at i=" << i;
+
+    qr.tensor_scale = saved_ts;
+    free_nvfp4_result(qr);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
+}
+
 // gemv_dispatch NVFP4 tier (M=1): single-token decode.
 // Same parity approach: force tensor_scale=1.0f in both paths.
 TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
