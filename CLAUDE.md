@@ -2,6 +2,25 @@
 
 From-scratch C++20/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~100k LOC (src/ + include/). See [`docs/architecture.md`](docs/architecture.md) (canonical narrative) and [`docs/sm120.md`](docs/sm120.md).
 
+## Where to start (task → entry point)
+
+Match the task, invoke that skill first; the skills below are imp-specific and carry the detailed playbooks.
+
+| Task | Start here |
+|------|-----------|
+| Build / run tests / CI red / dep bump | skill **building-and-testing** |
+| Write/optimize a CUDA kernel (sm_120a) | skill **sm120-cuda-expert** |
+| Benchmark, profile, refresh perf baseline | skill **benchmark-cuda** |
+| Verify output coherence after hot-path change | skill **check-degeneration** |
+| Quant formats / loaders / dequant (GGUF, NVFP4, FP8) | skill **quant-formats** |
+| imp-server / OpenAI+Anthropic HTTP API | skill **server-api** |
+| Add a new model architecture | skill **add-model-arch** |
+| Open/merge a PR, cut a release | skill **shipping-prs** |
+| Structure audit / dead code / god-files | skill **codebase-audit** |
+| Keep docs in sync after a change | skill **docs-sync** |
+
+Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `AGENTS.md` (subagent roles + guardrails), `BENCHMARKING.md` (measurement contract).
+
 ## Build & test
 
 **Before using the GPU, ALWAYS check that it is free.** Run any GPU job (`make test-gpu`, benchmarks, profiling, inference) only after confirming no other process is using the card: `docker ps -q | wc -l` MUST be `0` and `nvidia-smi` must show no active compute processes (idle ~30°C, low power draw). A busy GPU corrupts benchmark numbers and can OOM; never start GPU work on a card that is already in use.
@@ -70,13 +89,3 @@ fat header re-triggers every includer. Optimize for compile-time isolation:
 ## After hot-path changes
 
 Verify the model still produces coherent output (no repetition loops / token-stuck / state corruption) after touching the forward pass, MoE routing, KV cache, GDN state, or CUDA-graph capture.
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
