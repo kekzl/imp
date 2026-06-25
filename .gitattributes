@@ -14,7 +14,6 @@
 
 # Keep vendored third-party out of language stats / diffs.
 third_party/** linguist-vendored
-graphify-out/** linguist-generated
 
 # Shell scripts are always LF.
 *.sh text eol=lf
