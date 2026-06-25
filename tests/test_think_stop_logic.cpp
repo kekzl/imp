@@ -163,6 +163,33 @@ TEST(ForceThinkEnd, DisabledWhenBudgetZeroOrNoCloseId) {
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 10, {}, 100, true));
 }
 
+// --- Answer-reserve cap (kMaxAnswerReserve) -------------------------------
+// For generous max_tokens the fractional budget over-reserves; the cap lets the
+// model think up to max_tokens - kMaxAnswerReserve so it is not cut off
+// mid-thought (the reasoning-into-content leak). The cap only ever GROWS the
+// think limit, so small-max_tokens behaviour is unchanged.
+
+TEST(ForceThinkEnd, ReserveCapGrantsMoreThinkingForLargeMaxTokens) {
+    // max_tokens=1024, budget=0.5 -> frac_limit=512, reserve_limit=1024-256=768.
+    // think_limit = max(512, 768) = 768. The model has thought 600 tokens (above
+    // the old 512 limit, below 768) and is still thinking -> must NOT be forced.
+    std::vector<int32_t> out(600, /*non-marker token*/ 1);
+    EXPECT_FALSE(should_force_think_end(0.5f, 200, 1024, out, 100, /*started_in_think=*/true));
+
+    // At 800 reasoning tokens it crosses 768 -> force.
+    std::vector<int32_t> out2(800, 1);
+    EXPECT_TRUE(should_force_think_end(0.5f, 200, 1024, out2, 100, /*started_in_think=*/true));
+}
+
+TEST(ForceThinkEnd, ReserveCapDoesNotChangeSmallMaxTokens) {
+    // max_tokens=200, budget=0.5 -> frac_limit=100, reserve_limit=200-256=-56.
+    // think_limit = max(100, -56) = 100 (unchanged from the pure-fraction rule).
+    std::vector<int32_t> at_limit(100, 1);
+    EXPECT_TRUE(should_force_think_end(0.5f, 200, 200, at_limit, 100, /*started_in_think=*/true));
+    std::vector<int32_t> below(99, 1);
+    EXPECT_FALSE(should_force_think_end(0.5f, 200, 200, below, 100, /*started_in_think=*/true));
+}
+
 // ---------------------------------------------------------------------------
 // Text-tail </think> detection across token boundaries (bug (c))
 // ---------------------------------------------------------------------------

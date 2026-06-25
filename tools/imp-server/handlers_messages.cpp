@@ -9,6 +9,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "reasoning_split.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
@@ -240,22 +241,20 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
 
     // Reasoning extraction (DeepSeek <think>). enable_thinking also covers
     // text-level thinkers (Nemotron) — see the chat streaming path.
-    enum class ThinkPhase { SCAN, REASONING, CONTENT };
-    bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
-                          (snap_is_think_model || enable_thinking));
-    ThinkPhase think_phase;
+    // Shared reasoning/content demux (reasoning_split.h) — identical to the
+    // OpenAI streaming path; emit_thinking is the Anthropic reasoning sink.
+    const bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
+                                (snap_is_think_model || enable_thinking));
+    const bool think_active = use_reasoning || enable_thinking;
+    imp::server::ThinkPhase think_start_phase;
     if (enable_thinking)
-        think_phase = ThinkPhase::REASONING;
+        think_start_phase = imp::server::ThinkPhase::REASONING;
     else if (use_reasoning && think_budget > 0.0f)
-        think_phase = ThinkPhase::SCAN;
+        think_start_phase = imp::server::ThinkPhase::SCAN;
     else
-        think_phase = ThinkPhase::CONTENT;
-    std::string reasoning_utf8_buf, think_scan_buf;
-    int think_scan_count = 0;
-    bool content_started = (think_phase == ThinkPhase::CONTENT);
-    int think_reentries = 0;
-    const int kMaxThinkReentries = 1;
-    const int kThinkScanLimit = 8;
+        think_start_phase = imp::server::ThinkPhase::CONTENT;
+    imp::server::StreamReasoningSplitter think_split(think_start_phase, snap_think_start_id,
+                                                     snap_think_end_id);
     bool channel_header_active = false;
 
     auto flush_text = [&](size_t up_to) -> bool {
@@ -402,118 +401,15 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         }
 
         // Reasoning extraction.
-        if (think_phase == ThinkPhase::SCAN) {
-            if (token == snap_think_start_id) {
-                think_phase = ThinkPhase::REASONING;
+        // Reasoning/content demux (reasoning_split.h) — shared with the OpenAI
+        // streaming path. Reasoning goes to the Anthropic thinking sink.
+        if (think_active) {
+            auto rs = think_split.feed(std::move(piece), token);
+            if (!rs.reasoning.empty() && !emit_thinking(rs.reasoning))
+                return false;
+            if (rs.content.empty())
                 continue;
-            }
-            think_scan_buf += piece;
-            think_scan_count++;
-            if (think_scan_buf.find("<think>") != std::string::npos) {
-                think_phase = ThinkPhase::REASONING;
-                auto pos = think_scan_buf.find("<think>");
-                std::string after = think_scan_buf.substr(pos + 7);
-                think_scan_buf.clear();
-                if (!after.empty())
-                    reasoning_utf8_buf += after;
-                continue;
-            }
-            if (think_scan_count == 1 && piece.empty()) {
-                think_phase = ThinkPhase::REASONING;
-                continue;
-            }
-            if (think_scan_count >= kThinkScanLimit) {
-                think_phase = ThinkPhase::CONTENT;
-                piece = think_scan_buf;
-                think_scan_buf.clear();
-            } else {
-                continue;
-            }
-        }
-
-        if (think_phase == ThinkPhase::REASONING) {
-            if (token == snap_think_end_id) {
-                size_t complete = utf8_complete_len(reasoning_utf8_buf);
-                if (!emit_thinking(reasoning_utf8_buf.substr(0, complete)))
-                    return false;
-                reasoning_utf8_buf.clear();
-                think_phase = ThinkPhase::CONTENT;
-                continue;
-            }
-            if (token == snap_think_start_id)
-                continue;
-            reasoning_utf8_buf += piece;
-            for (;;) {
-                auto tp = reasoning_utf8_buf.find("<think>");
-                if (tp == std::string::npos)
-                    break;
-                reasoning_utf8_buf.erase(tp, 7);
-            }
-            auto end_pos = reasoning_utf8_buf.find("</think>");
-            if (end_pos != std::string::npos) {
-                if (!emit_thinking(reasoning_utf8_buf.substr(0, end_pos)))
-                    return false;
-                think_phase = ThinkPhase::CONTENT;
-                std::string after = reasoning_utf8_buf.substr(end_pos + 8);
-                reasoning_utf8_buf.clear();
-                auto start = after.find_first_not_of("\n\r\t ");
-                if (start != std::string::npos)
-                    piece = after.substr(start);
-                else
-                    continue;
-            } else {
-                constexpr size_t kOverlap = 7;
-                size_t complete = utf8_complete_len(reasoning_utf8_buf);
-                if (complete > kOverlap) {
-                    size_t emit_end = complete - kOverlap;
-                    while (emit_end > 0 &&
-                           (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) == 0x80)
-                        --emit_end;
-                    if (emit_end > 0) {
-                        std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
-                        reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
-                        if (!emit_thinking(to_emit))
-                            return false;
-                    }
-                }
-                continue;
-            }
-        }
-
-        if (!content_started && think_phase == ThinkPhase::CONTENT) {
-            auto ns = piece.find_first_not_of("\n\r\t ");
-            if (ns == std::string::npos)
-                continue;
-            piece = piece.substr(ns);
-            content_started = true;
-        }
-
-        if (use_reasoning) {
-            if (token == snap_think_start_id) {
-                if (think_reentries < kMaxThinkReentries) {
-                    think_phase = ThinkPhase::REASONING;
-                    think_reentries++;
-                }
-                continue;
-            }
-            if (token == snap_think_end_id) {
-                continue;
-            }
-            for (;;) {
-                auto p = piece.find("<think>");
-                if (p != std::string::npos) {
-                    piece.erase(p, 7);
-                    continue;
-                }
-                p = piece.find("</think>");
-                if (p != std::string::npos) {
-                    piece.erase(p, 8);
-                    continue;
-                }
-                break;
-            }
-            if (piece.empty())
-                continue;
+            piece = std::move(rs.content);
         }
 
         // Tool call body accumulation.
@@ -721,13 +617,14 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     if (harmony && !hm_buf.empty())
         hm_flush(/*force=*/true);
 
-    if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
-        utf8_buf += think_scan_buf;
-        think_scan_buf.clear();
-    }
-    if (!reasoning_utf8_buf.empty()) {
-        emit_thinking(reasoning_utf8_buf);
-        reasoning_utf8_buf.clear();
+    // Flush the splitter's held tail: buffered reasoning -> thinking sink,
+    // held/undecided content -> the content flush below.
+    if (think_active) {
+        auto rs = think_split.finish();
+        if (!rs.reasoning.empty())
+            emit_thinking(rs.reasoning);
+        if (!rs.content.empty())
+            utf8_buf += rs.content;
     }
     if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
         std::string leftover = tool_tag_buf + tool_body_buf;

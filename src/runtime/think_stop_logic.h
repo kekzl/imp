@@ -71,15 +71,31 @@ inline int count_reasoning_tokens(const std::vector<int32_t>& output_tokens, int
     return n_reasoning;
 }
 
+// Cap on how many tokens the budget reserves for the answer. `think_budget` is a
+// FRACTION of max_tokens, which over-reserves once max_tokens is generous: at
+// 0.5 it hands half of a 4000-token budget to the answer even though a reasoning
+// model's final answer is usually short. The forced </think> that this early
+// limit triggers is the dominant cause of reasoning bleeding into `content`
+// (BUGREPORT-qwen36-reasoning-leaks-into-content): the model is cut off
+// mid-thought and keeps reasoning past the forced close. Capping the reserve lets
+// the model think up to `max_tokens - kMaxAnswerReserve`, so it force-closes only
+// when the answer floor is actually at risk — eliminating the premature cut (and
+// its leak) whenever the model finishes thinking naturally within that window.
+inline constexpr int kMaxAnswerReserve = 256;
+
 // Should the sampler force a </think> token this step? True when budgeting is
 // active, a </think> id exists, the model is still thinking, and the reasoning
-// count has reached the limit (= max_tokens * think_budget).
+// count has reached the limit. The limit is the LATER of the fractional budget
+// and "everything but a capped answer reserve" — so a larger max_tokens only ever
+// grants MORE thinking room, never less (strictly fewer forced cuts).
 inline bool should_force_think_end(float think_budget, int32_t think_end_id, int max_tokens,
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
                                    bool started_in_think) {
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return false;
-    int think_limit = static_cast<int>(max_tokens * think_budget);
+    int frac_limit = static_cast<int>(max_tokens * think_budget);
+    int reserve_limit = max_tokens - kMaxAnswerReserve;
+    int think_limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
                                              currently_thinking);

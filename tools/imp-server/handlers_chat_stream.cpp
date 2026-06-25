@@ -9,6 +9,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "reasoning_split.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
@@ -138,25 +139,23 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // covers text-level thinkers (Nemotron: template-injected "<think>" as
     // plain text, no special token — is_think_model is false but the output
     // starts mid-reasoning and exits via the literal "</think>").
-    enum class ThinkPhase { SCAN, REASONING, CONTENT };
-    bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
-                          (snap_is_think_model || enable_thinking));
-    ThinkPhase think_phase;
-    if (enable_thinking) {
-        think_phase = ThinkPhase::REASONING;  // <think> in prefill -> start reasoning
-    } else if (use_reasoning && think_budget > 0.0f) {
-        think_phase = ThinkPhase::SCAN;  // model decides whether to think
-    } else {
-        think_phase = ThinkPhase::CONTENT;  // no reasoning extraction
-    }
-    std::string reasoning_utf8_buf;
-    std::string think_scan_buf;
-    int think_scan_count = 0;
+    // Reasoning/content demux is shared with the Anthropic path via the pure
+    // StreamReasoningSplitter (reasoning_split.h) — single source of truth for
+    // the streaming first-vs-last </think> handling
+    // (BUGREPORT-qwen36-reasoning-leaks-into-content).
+    const bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
+                                (snap_is_think_model || enable_thinking));
+    const bool think_active = use_reasoning || enable_thinking;
+    imp::server::ThinkPhase think_start_phase;
+    if (enable_thinking)
+        think_start_phase = imp::server::ThinkPhase::REASONING;  // <think> in prefill
+    else if (use_reasoning && think_budget > 0.0f)
+        think_start_phase = imp::server::ThinkPhase::SCAN;  // model decides
+    else
+        think_start_phase = imp::server::ThinkPhase::CONTENT;  // no extraction
+    imp::server::StreamReasoningSplitter think_split(think_start_phase, snap_think_start_id,
+                                                     snap_think_end_id);
     int n_reasoning_tokens = 0;
-    bool content_started = (think_phase == ThinkPhase::CONTENT);
-    int think_reentries = 0;
-    const int kMaxThinkReentries = 1;
-    const int kThinkScanLimit = 8;
 
     // Gemma-4 channel filter state: when we see <|channel> or <channel|>,
     // skip tokens until the next newline (the channel header).
@@ -358,150 +357,18 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             }
         }
 
-        // Reasoning content extraction (DeepSeek format)
-        if (think_phase == ThinkPhase::SCAN) {
-            if (token == snap_think_start_id) {
-                think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens++;
+        // Reasoning/content demux (DeepSeek <think>) — shared, fixed state
+        // machine in reasoning_split.h. Routes reasoning to reasoning_content
+        // and hands back the user-visible content for this step (empty when the
+        // whole piece was reasoning or is being held for boundary detection).
+        if (think_active) {
+            auto rs = think_split.feed(std::move(piece), token);
+            n_reasoning_tokens += rs.reasoning_tokens;
+            if (!rs.reasoning.empty() && !emit_reasoning(rs.reasoning))
+                return false;
+            if (rs.content.empty())
                 continue;
-            }
-            think_scan_buf += piece;
-            think_scan_count++;
-            if (think_scan_buf.find("<think>") != std::string::npos) {
-                think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens += think_scan_count;
-                auto pos = think_scan_buf.find("<think>");
-                std::string after = think_scan_buf.substr(pos + 7);
-                think_scan_buf.clear();
-                if (!after.empty())
-                    reasoning_utf8_buf += after;
-                continue;
-            }
-            if (think_scan_count == 1 && piece.empty()) {
-                think_phase = ThinkPhase::REASONING;
-                n_reasoning_tokens++;
-                continue;
-            }
-            if (think_scan_count >= kThinkScanLimit) {
-                think_phase = ThinkPhase::CONTENT;
-                piece = think_scan_buf;
-                think_scan_buf.clear();
-            } else {
-                continue;
-            }
-        }
-
-        if (think_phase == ThinkPhase::REASONING) {
-            n_reasoning_tokens++;
-            // No forced </think> injection — let the model decide when
-            // to stop thinking (like llama.cpp).  Forcing </think> via
-            // token replacement corrupts the KV cache: the model sees
-            // the original token, not </think>, so it keeps reasoning
-            // while imp treats subsequent tokens as content.
-            if (token == snap_think_end_id) {
-                if (!emit_reasoning(reasoning_utf8_buf))
-                    return false;
-                reasoning_utf8_buf.clear();
-                think_phase = ThinkPhase::CONTENT;
-                continue;
-            }
-            // Skip duplicate <think> tokens while already reasoning
-            if (token == snap_think_start_id)
-                continue;
-            reasoning_utf8_buf += piece;
-            // Strip <think> text that appears via multi-token encoding
-            for (;;) {
-                auto tp = reasoning_utf8_buf.find("<think>");
-                if (tp == std::string::npos)
-                    break;
-                reasoning_utf8_buf.erase(tp, 7);
-            }
-            auto end_pos = reasoning_utf8_buf.find("</think>");
-            if (end_pos != std::string::npos) {
-                std::string before = reasoning_utf8_buf.substr(0, end_pos);
-                if (!emit_reasoning(before))
-                    return false;
-                think_phase = ThinkPhase::CONTENT;
-                std::string after = reasoning_utf8_buf.substr(end_pos + 8);
-                reasoning_utf8_buf.clear();
-                auto start = after.find_first_not_of("\n\r\t ");
-                if (start != std::string::npos) {
-                    piece = after.substr(start);
-                } else {
-                    continue;
-                }
-            } else {
-                // Keep a tail overlap so "</think>" spanning multiple
-                // tokens can still be detected on the next iteration.
-                // "</think>" is 8 bytes; we need at most 7 bytes of
-                // overlap to catch any partial match at the boundary.
-                constexpr size_t kOverlap = 7;
-                size_t complete = utf8_complete_len(reasoning_utf8_buf);
-                if (complete > kOverlap) {
-                    size_t emit_end = complete - kOverlap;
-                    // Walk emit_end back to a UTF-8 codepoint boundary —
-                    // the 7-byte overlap is geared to literal "</think>"
-                    // bytes, not codepoints, so it can land inside a
-                    // multibyte char (German umlauts, CJK, emoji), which
-                    // emits the lead byte alone and turns the trailing
-                    // continuation byte into a U+FFFD on the next flush
-                    // — visible to the user as "f��r" instead of "für".
-                    while (emit_end > 0 &&
-                           (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) ==
-                               0x80) {
-                        --emit_end;
-                    }
-                    if (emit_end > 0) {
-                        std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
-                        reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
-                        if (!emit_reasoning(to_emit))
-                            return false;
-                    }
-                }
-                continue;
-            }
-        }
-
-        // Strip leading whitespace after </think> → CONTENT transition
-        // (matches extract_reasoning behavior in non-streaming path)
-        if (!content_started && think_phase == ThinkPhase::CONTENT) {
-            auto ns = piece.find_first_not_of("\n\r\t ");
-            if (ns == std::string::npos)
-                continue;  // all whitespace
-            piece = piece.substr(ns);
-            content_started = true;
-        }
-
-        // CONTENT phase: handle stray think tokens from confused models
-        if (use_reasoning) {
-            if (token == snap_think_start_id) {
-                if (think_reentries < kMaxThinkReentries) {
-                    think_phase = ThinkPhase::REASONING;
-                    n_reasoning_tokens++;
-                    think_reentries++;
-                }
-                continue;  // always strip <think> from content
-            }
-            if (token == snap_think_end_id) {
-                n_reasoning_tokens++;
-                continue;
-            }
-            // Strip text-level think tags from content piece
-            for (;;) {
-                auto p = piece.find("<think>");
-                if (p != std::string::npos) {
-                    piece.erase(p, 7);
-                    continue;
-                }
-                p = piece.find("</think>");
-                if (p != std::string::npos) {
-                    piece.erase(p, 8);
-                    continue;
-                }
-                break;
-            }
-            if (piece.empty())
-                continue;
+            piece = std::move(rs.content);
         }
 
         // CONTENT phase — with tool call tag detection
@@ -826,15 +693,14 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     if (harmony && !hm_buf.empty())
         hm_flush(/*force=*/true);
 
-    if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
-        utf8_buf += think_scan_buf;
-        think_scan_buf.clear();
-    }
-
-    // Flush remaining reasoning buffer (model ended while still thinking)
-    if (!reasoning_utf8_buf.empty()) {
-        emit_reasoning(reasoning_utf8_buf);
-        reasoning_utf8_buf.clear();
+    // Flush the splitter's held tail at stream end: buffered reasoning ->
+    // reasoning_content, any held/undecided content -> the content flush below.
+    if (think_active) {
+        auto rs = think_split.finish();
+        if (!rs.reasoning.empty())
+            emit_reasoning(rs.reasoning);
+        if (!rs.content.empty())
+            utf8_buf += rs.content;
     }
 
     // If the model exhausted tokens while still reasoning and never
@@ -845,8 +711,9 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // reasoning_content delivered, and the notice would be
     // misleading ("increase max_tokens" doesn't help when the model
     // chose to stop).
-    if (think_phase == ThinkPhase::REASONING && utf8_buf.empty() && pending_text.empty() &&
-        finish && std::strcmp(finish, "length") == 0) {
+    if (think_active && think_split.phase() == imp::server::ThinkPhase::REASONING &&
+        utf8_buf.empty() && pending_text.empty() && finish &&
+        std::strcmp(finish, "length") == 0) {
         std::string notice = "[Reasoning truncated — increase max_tokens for a complete answer]";
         sse_writer.write_content(notice, sink);
     }
