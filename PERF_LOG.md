@@ -188,3 +188,32 @@ Bounding the non-streaming decode loop for cancel-responsiveness costs ~0
 (`burst_rearm` makes relaunch nearly free). Determinism gate: in `deterministic`
 mode the loop stays unbounded → greedy byte-identical across fresh processes (the
 unbounded fully-on-device loop is the only greedy-reproducible decode path).
+
+---
+
+## 2026-06-25 — NVFP4-MoE decode occupancy/BW campaign → PHASE-1 STOP (ground truth stale, re-anchored)
+
+**Commit:** `aa05c518` (main, post #784 gemv split + #785 CI). **Model:** `/models/Qwen3-30B-A3B-NVFP4-Modelopt`, cell `nvfp4-moe | tg256`. **Decision: do NOT edit — the §0 dispatch ground truth is stale; the named in-scope targets are not on this model's decode hot path.** Per dispatch §1.2 (>20% deviation ⇒ STOP & re-anchor) and §4 anti-cheat (no forced micro-opts, no out-of-scope kernel touches).
+
+### Method
+Clean Release build (sm_120a). GPU free, warm (mem 13801 MHz, SM ~2775). Re-roofline of the one cell via `tools/roofline/roofline measure --models nvfp4-moe --shapes tg256` (run `aa05c518_20260625_020221`, ncu full kernel-replay). Warm tg256 baseline: **328.7 tok/s** (7 reps), pp512 26.1k tok/s.
+
+### Fresh ncu (refutes §0)
+| kernel (decode hot) | time% | GB/s (% of 1792) | occ% |
+|---|--:|--:|--:|
+| `paged_attention_splitk_fp8_pipeline_kernel<128>` | 17.9 | 16 (1%) | **29** |
+| `paged_attention_reduce_kernel` | 4.1 | 36 | 8 |
+| `gemv_nvfp4_moe_gate_up_mr<8>` | 13.2 | 893 (50%) | 82 |
+| `gemv_nvfp4_multirow_fp32<8>` | 12.3 | 1357 (76%) | 71 |
+| `gemv_nvfp4_moe_swiglu_mr<8>` | 12.3 | 480 (27%) | 85 |
+| `gemv_nvfp4_residual` | 6.9 | 578 | 42 |
+| `gemv_nvfp4_qkv_fused` | 6.0 | 732 | 47 |
+
+### Why the §0 limiters are refuted
+- **P1 (attn_decode 12% occ, `num_splits` too conservative) — REFUTED.** No nvfp4 attention kernel is launched at all for this model. Since the KV-fp8 auto-default for Qwen3 MoE, decode attention runs through `paged_attention_splitk_fp8_pipeline_kernel` (attention_paged_**fp8**.cu, OUT of the dispatch's editable scope) at **29% occ** with split-K already active (the reduce kernel is present). Editing `attention_paged_nvfp4.cu` / `compute_splitk_splits` cannot move this cell — that path is dead code here. (Grid math for the nvfp4 path would have given `num_splits=11` ⇒ 352 CTAs anyway; the 12% figure was a 1-block/SM register-bound reading of a kernel that no longer runs.)
+- **P2 (gemv_nvfp4 37% peak, not saturating, occupancy headroom) — REFUTED.** The gemv kernels run at **71–85% occ** and **480–1357 GB/s (27–76% peak)**; `multirow_fp32` already hits 76% of peak BW. There is no occupancy headroom and no single "663 GB/s @ 65% occ" kernel. The #784 split + prior multirow work moved this well past the §0 snapshot.
+
+### Remaining real lever (out of named scope — needs a re-scope decision)
+The least-saturated hot kernel is `gemv_nvfp4_moe_swiglu_mr` (12.3% time, **85% occ but only 27% peak BW** → compute/latency-bound, not occupancy- or BW-starved) in `src/quant/nvfp4_gemv_moe.cu`. The attention path, if pursued, is `attention_paged_fp8.cu`. Both are outside the dispatch's stated editable scope (`attention_paged_nvfp4.cu`, `gemv_nvfp4_kpar`). No edit made; awaiting a re-scoped dispatch.
+
+Roofline history: `tools/roofline/history/runs/aa05c518_20260625_020221.json`.
