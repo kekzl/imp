@@ -4,6 +4,22 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-06-25
+
+Patch release: fixes a server crash on native-NVFP4 MoE models that the v0.12.3
+agentic long-context defaults exposed.
+
+### Fixed
+- **Native-NVFP4 MoE server crash on the first request** (`[FATAL] gemm_nvfp4:
+  B.shape[1]=… must equal weight K=…`). The phase-2 weight-dispatch shim derived
+  the M>1 prefill GEMM's K from the weight handle's `shape[1]`, which is the
+  *packed* K/2 for prequant-loaded NVFP4 weights — so the dequant→cuBLAS fallback
+  aborted. K is now taken from the activation (the logical K by the GEMM contract).
+  The fallback was only reached because the v0.12.3 agentic KV-budget defaults can
+  starve the CUTLASS NVFP4 prefill workspace; native-NVFP4 models (e.g.
+  Qwen3-30B-A3B-NVFP4) on imp-server were affected. Regression-tested with a
+  packed-shape `WeightDispatchTest` case. (#790)
+
 ## [0.12.3] - 2026-06-25
 
 Agentic-serving and vision features, an NVFP4-MoE decode speedup, and a much
