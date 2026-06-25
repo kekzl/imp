@@ -23,6 +23,16 @@ static const char* get_model_path() {
     return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
 }
 
+// A path that doesn't end in .gguf is a SafeTensors directory (NVFP4 hero models
+// ship as dirs). Without this the battery hard-coded IMP_FORMAT_GGUF and could
+// not load any NVFP4 model — leaving the priority quant with zero degeneration
+// coverage (see the #790 NVFP4 prefill crash, which shipped undetected).
+static ImpModelFormat detect_format(const char* p) {
+    std::string s = p ? p : "";
+    return (s.size() >= 5 && s.substr(s.size() - 5) == ".gguf") ? IMP_FORMAT_GGUF
+                                                                : IMP_FORMAT_SAFETENSORS;
+}
+
 static bool model_exists() {
     FILE* f = fopen(get_model_path(), "r");
     if (f) {
@@ -122,7 +132,7 @@ protected:
     void SetUp() override {
         SKIP_IF_NO_MODEL();
 
-        ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(get_model_path(), detect_format(get_model_path()), &model_), IMP_SUCCESS);
 
         ImpConfig config = imp_config_default();
         config.max_seq_len = 2048;
