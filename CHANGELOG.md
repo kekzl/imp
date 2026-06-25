@@ -4,6 +4,47 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-06-25
+
+Agentic-serving and vision features, an NVFP4-MoE decode speedup, and a much
+faster CI. No model-output or quality regressions.
+
+### Added
+- **Agentic server hardening** (#770): per-request speculative-decode toggle,
+  inter-token-latency + cancellation metrics, prefix-cache safety under
+  concurrency, an Anthropic-style keep-alive ping, and an agent benchmark harness.
+- **Long-context KV-budget defaults for agentic workloads** (#771): the auto
+  `max_seq_len` cap and KV-cache fraction are tuned so NVFP4 models no longer
+  starve the KV cache while VRAM sits free.
+- **Per-request vision binding** (#774): images/embeddings travel on the request
+  and the worker encodes on admission, so vision requests batch with text instead
+  of pausing the engine.
+- **n-gram speculative decode is on by default** for dense models (gated off for
+  MoE) (#781).
+- **`parallel_tool_calls` is honored** on `/v1/chat/completions`: `false` emits at
+  most one tool call, on both the non-streaming and streaming paths (#782).
+
+### Changed
+- **NVFP4 MoE decode ~2.6% faster** (Qwen3-30B-A3B-NVFP4, tg256): the SwiGLU
+  down-projection precomputes `silu(gate)*up` once per element instead of once per
+  output row; greedy output is byte-identical (#787, #788).
+- **CI is much faster on PRs**: clang-tidy moved to its own non-required job
+  scoped to changed files, so the required `Build` check dropped from ~26 min to
+  ~4 min (#785); docs-only PRs skip the CUDA build (#780); the changed-files
+  filter no longer fails closed (#783).
+- **File-size gate** (`tools/check_filesize.py`, CI): flags oversized translation
+  units by recompile blast radius; the 12 largest god-files were split into focused
+  TUs with no functional change (#784).
+
+### Fixed
+- **Vision global image bind restored** for the C-API / imp-cli path (a #774
+  regression) (#776).
+- **Soundness & hardening** (#772): four HIGH-severity fixes — KV-cache
+  use-after-free on eviction, fail-fast on poisoned context, Anthropic `x-api-key`
+  auth, and a bounded decode-burst.
+- **NUL byte removed** from a `handlers.cpp` comment that made `grep`/`ugrep` treat
+  the most-edited server file as binary (#782).
+
 ## [0.12.2] - 2026-06-23
 
 Follow-up bug-fix release from a v0.12.1 acceptance re-test. Server/API polish
