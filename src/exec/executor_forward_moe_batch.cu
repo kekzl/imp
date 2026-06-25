@@ -830,8 +830,16 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         } else if (!non_gated_experts) {
             gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
                                          norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
-            gemv_nvfp4_moe_swiglu_decode(*ly.nvfp4_moe_down_ptr, expert_indices, gate_buf, up_buf,
-                                         down_buf, d, eff, /*x_stride=*/eff, top_k, stream);
+            // Compute the gated activation (silu(gate)*up) ONCE per element into act_buf,
+            // then a plain bandwidth-bound down GEMV — instead of gemv_nvfp4_moe_swiglu_decode,
+            // which recomputed the silu (exp/div, XU-bound) once per OUTPUT ROW (NR=8x
+            // redundant). nsys: the fused swiglu-down kernel was 15.5% of decode wall-clock,
+            // XU-bound at 85% occ / 27% peak BW; this matches the gpt-oss + mmvq paths above
+            // and turns the down projection into a memory-bound MoE GEMV.
+            apply_expert_activation(gate_buf, up_buf, act_buf, /*non_gated=*/false, top_k, eff,
+                                    compute_dtype_, cfg.ffn_activation, stream);
+            gemv_nvfp4_moe_decode(*ly.nvfp4_moe_down_ptr, expert_indices, act_buf, down_buf, d, eff,
+                                  /*x_stride=*/eff, top_k, stream);
         } else {
             gemv_nvfp4_moe_decode(*ly.nvfp4_moe_up_ptr, expert_indices, norm_ptr, up_buf, eff, d,
                                   /*x_stride=*/0, top_k, stream);
