@@ -71,12 +71,6 @@ void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A, const half* gate, cons
 void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices, const half* x,
                            half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream);
 
-// Fused SwiGLU + MoE GEMV for down projection: computes swiglu(gate,up) inline.
-// Eliminates the separate swiglu() kernel launch.
-void gemv_nvfp4_moe_swiglu_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices,
-                                  const half* gate, const half* up, half* y, int rows, int K, int x_stride,
-                                  int top_k, cudaStream_t stream);
-
 // Fused gate+up MoE GEMV: two weight matrices, shared input, separate outputs.
 void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate, const NvFP4MoEQuantResult& up,
                                   const int32_t* expert_indices, const half* x, half* y_gate, half* y_up,
