@@ -582,6 +582,18 @@ private:
     // Think token IDs (cached from chat template init, -1 if not a think model)
     int32_t think_start_id_ = -1;
     int32_t think_end_id_ = -1;
+
+    // Per-token "decodes to whitespace-only (or empty)" mask, built once for
+    // think models. Used by the post-</think> grace so a whitespace/newline
+    // token emitted right after the close does NOT count as real answer content
+    // and prematurely release the grace (was a 0-content-completion bug). Host
+    // vector + device mirror for the GPU conditional-graph loop; size == vocab.
+    std::vector<uint8_t> token_is_whitespace_;
+    uint8_t* d_token_is_whitespace_ = nullptr;
+    bool token_is_whitespace(int32_t token) const {
+        return token >= 0 && token < static_cast<int32_t>(token_is_whitespace_.size()) &&
+               token_is_whitespace_[token];
+    }
     void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
     void fill_sampling_params(const Request& req, InferenceState& state) const;
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);

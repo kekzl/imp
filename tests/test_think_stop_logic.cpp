@@ -280,3 +280,20 @@ TEST(GracePeriod, NoBlockWhenNeverThought) {
     EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/-1, /*output_size=*/2,
                                    /*content_after_think=*/false));
 }
+
+TEST(GracePeriod, WhitespacePieceIsNotContent) {
+    // THE post-#798 FIX: a "\n" / "\n\n" / "  " token after </think> must NOT
+    // count as answer content (else a stop right after it yields empty content).
+    EXPECT_TRUE(piece_is_whitespace("\n"));
+    EXPECT_TRUE(piece_is_whitespace("\n\n"));
+    EXPECT_TRUE(piece_is_whitespace("   "));
+    EXPECT_TRUE(piece_is_whitespace(" \t\r\n"));
+    EXPECT_TRUE(piece_is_whitespace(""));  // empty decode (e.g. some specials)
+}
+
+TEST(GracePeriod, RealTextPieceIsContent) {
+    EXPECT_FALSE(piece_is_whitespace("7"));
+    EXPECT_FALSE(piece_is_whitespace("Paris"));
+    EXPECT_FALSE(piece_is_whitespace(" red"));     // leading space, real word
+    EXPECT_FALSE(piece_is_whitespace("\n4"));      // newline + digit
+}

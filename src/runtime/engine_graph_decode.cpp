@@ -96,6 +96,8 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
         gcfg.think_end_id = think_end_id_;
         gcfg.initial_in_think = req.in_think_block;
         gcfg.think_grace_tokens = think_logic::kMinAnswerAfterThink;
+        gcfg.token_is_whitespace = d_token_is_whitespace_;
+        gcfg.vocab_size = static_cast<int>(token_is_whitespace_.size());
         if (req.think_budget > 0.0f) {
             // The loop's device-side counter starts at 0 every launch; with
             // bounded bursts (n-gram speculation think-phase) the request
