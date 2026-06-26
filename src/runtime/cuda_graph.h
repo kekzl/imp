@@ -148,6 +148,11 @@ public:
         // empty think block in ~3 tokens then EOS to a 0-content completion.
         // 0 = no think tracking in the loop (set >0 whenever think_end_id >= 0).
         int think_grace_tokens = 0;
+        // Device per-token "decodes to whitespace-only" mask (size vocab_size,
+        // nullptr = treat nothing as whitespace). A whitespace/newline token
+        // after </think> must not release the grace (post-#798 0-content fix).
+        const uint8_t* token_is_whitespace = nullptr;
+        int vocab_size = 0;
         bool ignore_eos = false;        // don't stop on EOS/stop tokens (benchmark mode)
         // Per-launch step cap read from device memory (0 = unbounded, i.e.
         // max_steps). Unlike max_steps it is NOT baked into the captured

@@ -71,6 +71,10 @@ Engine::~Engine() {
         memory_manager_.vram_allocator().free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
+    if (d_token_is_whitespace_) {
+        memory_manager_.vram_allocator().free(d_token_is_whitespace_);
+        d_token_is_whitespace_ = nullptr;
+    }
     if (d_kv_slot_buf_) {
         cudaFree(d_kv_slot_buf_);
         d_kv_slot_buf_ = nullptr;

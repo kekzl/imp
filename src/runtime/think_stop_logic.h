@@ -165,4 +165,14 @@ inline bool grace_blocks_stop(int think_exit_idx, int output_size, bool content_
     return tokens_since_exit < kMinAnswerAfterThink;
 }
 
+// Does a decoded token piece count as real answer content for the grace above?
+// A token whose decoded text is empty or pure whitespace (newlines/spaces the
+// model routinely emits right after </think>, e.g. "\n" / "\n\n") must NOT
+// release the grace — otherwise a model that closes think, emits a newline,
+// then stops yields a 0-content completion (the post-#798 regression). Only a
+// token with at least one non-whitespace byte is real content.
+inline bool piece_is_whitespace(const std::string& piece) {
+    return piece.find_first_not_of(" \t\n\r\f\v") == std::string::npos;
+}
+
 }  // namespace imp::think_logic

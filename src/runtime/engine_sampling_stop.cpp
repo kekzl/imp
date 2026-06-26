@@ -125,9 +125,13 @@ bool Engine::should_stop(Request& req, int32_t token) const {
                                            req.content_after_think))
             return false;
     } else if (req.think_exit_idx >= 0 &&
-               static_cast<int>(req.output_tokens.size()) > req.think_exit_idx) {
-        // A non-stop token after </think> is real answer content — release the
-        // grace so the model's next stop is honoured immediately.
+               static_cast<int>(req.output_tokens.size()) > req.think_exit_idx &&
+               !token_is_whitespace(token)) {
+        // A non-stop, non-whitespace token after </think> is real answer content
+        // — release the grace so the model's next stop is honoured immediately.
+        // Whitespace/newline tokens the model routinely emits right after the
+        // close must NOT release it, or a stop following that newline yields a
+        // 0-content completion (the post-#798 regression).
         req.content_after_think = true;
     }
     return is_stop_token(token);

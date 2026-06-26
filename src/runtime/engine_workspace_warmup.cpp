@@ -93,6 +93,25 @@ bool Engine::init_features() {
             if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
+                // Build the whitespace-token mask once (only needed by the
+                // post-</think> grace, so only for think models). A token that
+                // decodes to empty/all-whitespace must not count as answer
+                // content. Mirror to device for the conditional-graph loop.
+                token_is_whitespace_.assign(vocab, 0);
+                for (int32_t id = 0; id < vocab; ++id) {
+                    if (think_logic::piece_is_whitespace(ptok->decode_token(id)))
+                        token_is_whitespace_[id] = 1;
+                }
+                d_token_is_whitespace_ = static_cast<uint8_t*>(
+                    memory_manager_.vram_allocator().allocate(vocab * sizeof(uint8_t),
+                                                              "token_is_whitespace"));
+                if (d_token_is_whitespace_) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_is_whitespace_,
+                                                       token_is_whitespace_.data(),
+                                                       vocab * sizeof(uint8_t),
+                                                       cudaMemcpyHostToDevice, stream_));
+                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream_));
+                }
             }
         }
     }

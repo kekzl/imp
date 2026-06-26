@@ -492,6 +492,8 @@ __global__ void post_decode_step_kernel(
     int* __restrict__ d_in_think,         // [1] think block flag
     int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
     int* __restrict__ d_content_after_think,  // [1] real answer token seen since </think> (0/1)
+    const uint8_t* __restrict__ d_token_is_whitespace,  // [vocab] 1 = decodes to whitespace-only
+    int vocab_size,
     int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
     // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
     int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
@@ -543,7 +545,11 @@ __global__ void post_decode_step_kernel(
             if (token == d_stop_ids[i])
                 tok_is_stop = true;
         }
-        if (!tok_is_stop)
+        // Whitespace/newline tokens after </think> are not real answer content
+        // and must not release the grace (post-#798 0-content fix).
+        bool tok_is_ws = (d_token_is_whitespace && token >= 0 && token < vocab_size &&
+                          d_token_is_whitespace[token]);
+        if (!tok_is_stop && !tok_is_ws)
             *d_content_after_think = 1;
     }
 
@@ -931,6 +937,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      config_.think_end_id, config_.think_grace_tokens,
                                                      d_think_count_, d_in_think_, d_think_exit_step_,
                                                      d_content_after_think_,
+                                                     config_.token_is_whitespace, config_.vocab_size,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_,
                                                      d_step_limit_, handle_);
