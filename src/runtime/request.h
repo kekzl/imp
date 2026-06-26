@@ -100,6 +100,12 @@ struct Request {
     // or repeated. Reset to false at every think exit.
     bool content_after_think = false;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
+    // gpt-oss Harmony answer-headroom force: when reasoning hits the budget we
+    // can't just force <|end|> (the model re-opens the analysis channel) — we
+    // force the whole <|end|><|start|>assistant<|channel|>final<|message|>
+    // opener so the model commits to the final (answer) channel. Index into
+    // Engine::harmony_force_seq_ for the in-flight forced opener (-1 = idle).
+    int harmony_force_idx = -1;
     int prefill_offset = 0;     // Chunked prefill: tokens processed so far
     int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
     // Pin this request's full prompt blocks in the prefix cache at finish

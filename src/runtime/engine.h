@@ -582,6 +582,18 @@ private:
     // Think token IDs (cached from chat template init, -1 if not a think model)
     int32_t think_start_id_ = -1;
     int32_t think_end_id_ = -1;
+    // gpt-oss Harmony reasoning: the analysis channel carries chain-of-thought
+    // and closes with <|end|> (mapped to think_end_id_ above); there is no
+    // <think> opener. Set so the answer-headroom budget can force the analysis
+    // -> final channel switch instead of letting reasoning eat all of
+    // max_tokens and return an empty final channel (finish=length).
+    bool harmony_reasoning_ = false;
+    // Forced final-channel opener for the Harmony answer-headroom budget:
+    // <|end|><|start|>assistant<|channel|>final<|message|> as token ids. Empty
+    // unless harmony_reasoning_. Forcing just <|end|> is not enough — gpt-oss
+    // re-opens the analysis channel; forcing the whole opener commits it to the
+    // answer channel so the final content is non-empty under a tight budget.
+    std::vector<int32_t> harmony_force_seq_;
 
     // Per-token "decodes to whitespace-only (or empty)" mask, built once for
     // think models. Used by the post-</think> grace so a whitespace/newline
@@ -595,7 +607,7 @@ private:
                token_is_whitespace_[token];
     }
     void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
-    void fill_sampling_params(const Request& req, InferenceState& state) const;
+    void fill_sampling_params(Request& req, InferenceState& state) const;
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool

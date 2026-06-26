@@ -93,10 +93,37 @@ bool Engine::init_features() {
             if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
-                // Build the whitespace-token mask once (only needed by the
-                // post-</think> grace, so only for think models). A token that
-                // decodes to empty/all-whitespace must not count as answer
-                // content. Mirror to device for the conditional-graph loop.
+            } else if (chat_template_.family() == ChatTemplateFamily::HARMONY) {
+                // gpt-oss Harmony: reasoning lives in the analysis channel and
+                // closes with <|end|>; the model emits <|channel|>analysis
+                // <|message|> itself (no <think> opener, so `accept` is false).
+                // Map <|end|> to think_end so the answer-headroom budget can
+                // force the analysis -> final channel switch when reasoning
+                // would otherwise consume all of max_tokens and leave the final
+                // channel (the answer) empty (finish=length). think_start stays
+                // -1: analysis is the initial state, seeded via started_in_think.
+                int32_t he = ptok->find_token("<|end|>");
+                if (he >= 0) {
+                    think_start_id_ = -1;
+                    think_end_id_ = he;
+                    harmony_reasoning_ = true;
+                    // Forced final-channel opener: <|end|> closes analysis, then
+                    // <|start|>assistant<|channel|>final<|message|> commits the
+                    // model to the answer channel (forcing <|end|> alone lets it
+                    // re-open analysis). Encode the literal so the exact ids
+                    // (incl. role/channel-name pieces) match this tokenizer.
+                    harmony_force_seq_ =
+                        ptok->encode("<|end|><|start|>assistant<|channel|>final<|message|>");
+                    std::string seq;
+                    for (int32_t t : harmony_force_seq_) seq += std::to_string(t) + " ";
+                    IMP_LOG_INFO("Harmony reasoning: <|end|>=%d, force opener=[ %s]", he, seq.c_str());
+                }
+            }
+            // Build the whitespace-token mask once for any think model (the
+            // post-</think>/<|end|> grace needs it). A token that decodes to
+            // empty/all-whitespace must not count as answer content. Mirror to
+            // device for the conditional-graph loop.
+            if (think_end_id_ >= 0) {
                 token_is_whitespace_.assign(vocab, 0);
                 for (int32_t id = 0; id < vocab; ++id) {
                     if (think_logic::piece_is_whitespace(ptok->decode_token(id)))
