@@ -720,6 +720,16 @@ void Engine::add_request(std::shared_ptr<Request> req) {
                 req->in_think_block = true;
             }
         }
+        // gpt-oss Harmony generation starts in the analysis (reasoning) channel
+        // — the model emits <|channel|>analysis<|message|> as its first output,
+        // there is no <think> opener for the scan above to find. Seed the think
+        // state so the answer-headroom budget counts reasoning from the start
+        // and force-closes the analysis channel (<|end|>) before max_tokens is
+        // exhausted, instead of returning an empty final channel.
+        if (harmony_reasoning_) {
+            req->started_in_think = true;
+            req->in_think_block = true;
+        }
         scheduler_->add_request(std::move(req));
     }
 }

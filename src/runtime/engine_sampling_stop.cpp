@@ -137,7 +137,7 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     return is_stop_token(token);
 }
 
-void Engine::fill_sampling_params(const Request& req, InferenceState& state) const {
+void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     state.temperature = req.temperature;
     state.top_p = req.top_p;
     state.top_k = req.top_k;
@@ -181,10 +181,26 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     // budget never fires (model thinks until max_tokens, content stays empty).
     // See think_stop_logic.h for the pure recount logic.
     state.force_token = -1;
-    if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
-                                            req.output_tokens, think_start_id_,
-                                            req.started_in_think)) {
-        state.force_token = think_end_id_;
+    if (req.harmony_force_idx >= 0) {
+        // Mid-opener: keep forcing the Harmony final-channel sequence until it
+        // is fully emitted, then hand control back to the model (now committed
+        // to the answer channel).
+        if (req.harmony_force_idx < static_cast<int>(harmony_force_seq_.size())) {
+            state.force_token = harmony_force_seq_[req.harmony_force_idx];
+            req.harmony_force_idx++;
+        }
+        if (req.harmony_force_idx >= static_cast<int>(harmony_force_seq_.size()))
+            req.harmony_force_idx = -1;  // opener complete
+    } else if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
+                                                   req.output_tokens, think_start_id_,
+                                                   req.started_in_think)) {
+        if (harmony_reasoning_ && !harmony_force_seq_.empty()) {
+            // Start forcing the full <|end|>…<|message|> opener (see above).
+            state.force_token = harmony_force_seq_[0];
+            req.harmony_force_idx = 1;
+        } else {
+            state.force_token = think_end_id_;  // <think> models: single </think>
+        }
     }
 }
 
