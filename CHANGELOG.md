@@ -4,6 +4,35 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Adversarial degeneration prompt corpus** — 250 prompts across 8 categories
+  (repetition, think-leak, special-tokens, adherence, long-context, multi-turn,
+  multilingual, format) driven by a data-driven `degen_suite.py --corpus` runner,
+  replacing the previous five-prompt battery (#795).
+- **Task → skill routing table** at the top of `CLAUDE.md`: a fresh session maps a
+  task (build, kernel, benchmark, degeneration, quant, server, new arch, PR, audit,
+  docs) straight to the imp-specific skill that carries its playbook (#794).
+
+### Changed
+- **`DegenerationTest` loads SafeTensors/NVFP4 models**, not just GGUF, closing a
+  coherence-coverage gap on the priority quant (#792).
+
+### Removed
+- **graphify knowledge-graph integration** (the skill, `.graphifyignore`, the
+  generated-output ignore rules, and the `## graphify` section in `CLAUDE.md`) — it
+  bloated the repo without enough payoff for this codebase (#794).
+
+### Fixed
+- **Streaming reasoning leaked into the `content` channel** for reasoning models
+  (Qwen3.6-NVFP4 and others) while `reasoning_content` was also populated. The two
+  streaming handlers shared a private demux that flipped to content at the *first*
+  `</think>` and could not re-enter on a multi-token `<think>` (Qwen3.6 ships the
+  markers as multi-BPE added tokens). The logic is now a single shared
+  `StreamReasoningSplitter` that re-enters via text scan and holds back only a partial
+  marker. Also caps the think-budget answer reserve (`max(max_tokens·budget,
+  max_tokens − 256)`) so a model that finishes thinking within the window is no longer
+  force-cut, which had spilled continued reasoning into `content` (#793).
+
 ## [0.12.4] - 2026-06-25
 
 Patch release: fixes a server crash on native-NVFP4 MoE models that the v0.12.3
