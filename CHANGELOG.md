@@ -4,6 +4,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-06-26
+
+Patch release: stops streaming reasoning models from leaking chain-of-thought
+into the `content` channel (the streaming demux is now a single shared unit;
+the think-budget force-cut is mitigated, though a residual remains when
+`max_tokens` is too small for the model to finish thinking — increase
+`max_tokens` for reasoning models). Plus repo and test-coverage housekeeping.
+
 ### Added
 - **Adversarial degeneration prompt corpus** — 250 prompts across 8 categories
   (repetition, think-leak, special-tokens, adherence, long-context, multi-turn,
