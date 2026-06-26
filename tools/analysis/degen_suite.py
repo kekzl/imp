@@ -19,10 +19,20 @@ Categories (select with --only / --skip):
 
 Stdlib-only (urllib) — runs on the clean host, no venv, no container.
 
+There are two modes:
+  * default — the hand-coded category probes below (deep, server-protocol focused).
+  * --corpus — the large data-driven adversarial battery in degen_corpus.jsonl
+    (~250 prompts across the same failure classes; grow it by editing JSONL,
+    not Python). Each record declares its own prompt/messages, params, and the
+    checks to apply (no_loop, no_markers, no_think_tags, no_reasoning_opener,
+    contains, needle, max_words, json_parse, finish_set, vocab_div, stream_eq).
+
 Usage:
   python3 tools/analysis/degen_suite.py                       # localhost:8080
   python3 tools/analysis/degen_suite.py --url http://host:8081
   python3 tools/analysis/degen_suite.py --only think-leak,repetition
+  python3 tools/analysis/degen_suite.py --corpus              # full ~250-prompt battery
+  python3 tools/analysis/degen_suite.py --corpus --only adherence,long-context
   python3 tools/analysis/degen_suite.py --quick               # short probes
   python3 tools/analysis/degen_suite.py --json report.json
   python3 tools/analysis/degen_suite.py --skip-deterministic  # e.g. Qwen3.6
@@ -34,11 +44,15 @@ Exit code: 0 = all pass, 1 = at least one FAIL, 2 = server unreachable.
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
+
+DEFAULT_CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "degen_corpus.jsonl")
 
 # ---------------------------------------------------------------------------
 # Markers that must NEVER appear in user-visible content. Covers ChatML,
@@ -248,6 +262,31 @@ def find_markers(text):
 def reasoning_opener(text):
     head = text.strip().lower()[:80]
     return next((p for p in REASONING_OPENERS if head.startswith(p)), None)
+
+
+def parses_as_json(text):
+    """True if `text` (after stripping markdown fences / surrounding prose)
+    contains a parseable JSON value. Used by the corpus 'json_parse' check."""
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        s = s[4:] if s[:4].lower() == "json" else s
+        s = s.strip()
+    try:
+        json.loads(s)
+        return True
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fall back to the widest bracketed span (handles leading/trailing prose).
+    for open_c, close_c in (("{", "}"), ("[", "]")):
+        i, j = s.find(open_c), s.rfind(close_c)
+        if 0 <= i < j:
+            try:
+                json.loads(s[i:j + 1])
+                return True
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +545,101 @@ class Suite:
                     f"text={r['text'][:100]!r}")
 
 
+    # -- data-driven corpus -------------------------------------------------
+    # Runs the large adversarial prompt battery in tools/analysis/degen_corpus.jsonl.
+    # Each record declares its own prompt/messages, params, and the checks to
+    # apply — so the battery grows by editing JSONL, not Python.
+    def _eval_checks(self, rec, content, reasoning, finish, stream_content):
+        """Apply a record's declared checks to one response. Yields (ok, why)."""
+        checks = rec.get("checks", [])
+        expect = rec.get("expect", "")
+        text = content  # checks run on the USER-VISIBLE channel only
+        for c in checks:
+            if c == "not_empty":
+                yield bool(text.strip()), f"empty (content={text[:60]!r})"
+            elif c == "no_loop":
+                run, ng, ch = max_token_run(text), ngram_loop(text), char_loop(text)
+                yield (run <= 6 and not ng and not ch), \
+                    f"loop run={run} ngram={ng} char={ch}: {text[-120:]!r}"
+            elif c == "no_markers":
+                m = find_markers(text)
+                yield (not m), f"leaked markers {m}: {text[:80]!r}"
+            elif c == "finish_set":
+                yield (finish in ("stop", "length")), f"finish={finish}"
+            elif c == "vocab_div":
+                ur = unique_ratio(text)
+                yield (ur > 0.25), f"vocab ratio={ur:.2f}"
+            elif c == "no_think_tags":
+                bad = [t for t in ("<think>", "</think>") if t in text]
+                yield (not bad), f"think tags {bad} in content: {text[:80]!r}"
+            elif c == "no_reasoning_opener":
+                op = reasoning_opener(text)
+                yield (op is None), f"reasoning opener {op!r}: {text[:80]!r}"
+            elif c == "contains":
+                yield (expect.lower() in text.lower()), \
+                    f"missing {expect!r} (content={text[:100]!r})"
+            elif c == "needle":
+                yield (expect.lower() in text.lower()), \
+                    f"needle {expect!r} not recalled (content={text[:100]!r})"
+            elif c == "max_words":
+                lim = rec.get("limit", 3)
+                wc = len(text.split())
+                yield (wc <= lim), f"{wc} words > limit {lim}: {text[:80]!r}"
+            elif c == "json_parse":
+                yield parses_as_json(text), f"not valid JSON: {text[:100]!r}"
+            elif c == "stream_eq":
+                if self.skip_det:
+                    continue
+                yield (stream_content.strip() == text.strip()), \
+                    f"stream!=nonstream: {stream_content[:60]!r} vs {text[:60]!r}"
+
+    def run_corpus(self, records, only_cats=None):
+        for rec in records:
+            cat = rec.get("cat", "?")
+            if only_cats and cat not in only_cats:
+                continue
+            messages = rec.get("messages") or [
+                {"role": "user", "content": rec.get("prompt", "")}]
+            mt = int(rec.get("max_tokens", 256))
+            # think-leak truncation probes NEED their tiny budget; everything
+            # else gets enough room for a reasoning model to finish thinking.
+            if cat != "think-leak" and self.is_reasoning:
+                mt = max(mt, 800)
+            if self.quick and cat != "think-leak":
+                mt = min(mt, 256)
+            kw = {}
+            if "enable_thinking" in rec:
+                kw["enable_thinking"] = rec["enable_thinking"]
+            temp = float(rec.get("temperature", 0.0))
+            seed = int(rec.get("seed", 42))
+            need_stream = "stream_eq" in rec.get("checks", [])
+            try:
+                r = self.srv.chat(messages, max_tokens=mt, temperature=temp,
+                                  seed=seed, **kw)
+            except urllib.error.HTTPError as e:
+                self.record(cat, rec.get("id", "?"), False,
+                            f"HTTP {e.code}: {e.read()[:120].decode('utf-8','replace')}")
+                continue
+            except (urllib.error.URLError, OSError) as e:
+                self.record(cat, rec.get("id", "?"), False,
+                            f"connection lost: {e} (possible crash)")
+                continue
+            stream_content = ""
+            if need_stream:
+                try:
+                    stream_content = self.srv.chat_stream(
+                        messages, max_tokens=mt, temperature=temp, seed=seed,
+                        **kw)["content"]
+                except (urllib.error.URLError, OSError):
+                    pass
+            content = r["reasoning"] + " " + r["content"] if cat == "repetition" \
+                else r["content"]
+            fails = [why for ok, why in self._eval_checks(
+                rec, content, r["reasoning"], r["finish"], stream_content) if not ok]
+            self.record(cat, rec.get("id", "?"), not fails,
+                        " | ".join(fails)[:300])
+
+
 CATEGORIES = {
     "repetition": Suite.cat_repetition,
     "think-leak": Suite.cat_think_leak,
@@ -528,6 +662,11 @@ def main():
                     help="comma-separated categories to run")
     ap.add_argument("--skip", default=None,
                     help="comma-separated categories to skip")
+    ap.add_argument("--corpus", nargs="?", const=DEFAULT_CORPUS, default=None,
+                    metavar="PATH",
+                    help="run the large JSONL prompt battery instead of the "
+                         "hand-coded categories (default file: degen_corpus.jsonl). "
+                         "Filter its categories with --only.")
     ap.add_argument("--quick", action="store_true", help="shorter probes")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--json", dest="json_out", default=None,
@@ -573,17 +712,29 @@ def main():
         print("Server is up but cannot serve chat requests — check model state "
               "and docker logs.", file=sys.stderr)
         return 2
-    for cat in selected:
-        print(f"\n== {cat} ==")
+    if args.corpus:
         try:
-            CATEGORIES[cat](suite)
-        except urllib.error.HTTPError as e:
-            body = e.read()[:300].decode("utf-8", "replace")
-            suite.record(cat, "category aborted", False, f"HTTP {e.code}: {body}")
-        except (urllib.error.URLError, OSError) as e:
-            suite.record(cat, "category aborted", False,
-                         f"server connection lost: {e} — possible crash, "
-                         f"check docker logs / RestartCount")
+            with open(args.corpus, encoding="utf-8") as f:
+                records = [json.loads(ln) for ln in f if ln.strip()]
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Cannot load corpus {args.corpus}: {e}", file=sys.stderr)
+            return 2
+        only = set(args.only.split(",")) if args.only else None
+        shown = [r for r in records if not only or r.get("cat") in only]
+        print(f"\n== corpus: {len(shown)} prompts from {os.path.basename(args.corpus)} ==")
+        suite.run_corpus(records, only)
+    else:
+        for cat in selected:
+            print(f"\n== {cat} ==")
+            try:
+                CATEGORIES[cat](suite)
+            except urllib.error.HTTPError as e:
+                body = e.read()[:300].decode("utf-8", "replace")
+                suite.record(cat, "category aborted", False, f"HTTP {e.code}: {body}")
+            except (urllib.error.URLError, OSError) as e:
+                suite.record(cat, "category aborted", False,
+                             f"server connection lost: {e} — possible crash, "
+                             f"check docker logs / RestartCount")
 
     fails = [r for r in suite.results if r[2] == "FAIL"]
     print(f"\n{'='*60}")
