@@ -53,6 +53,7 @@ void Engine::track_think_state(Request& req, int32_t token) const {
     if (token == think_end_id_) {
         req.in_think_block = false;
         req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+        req.content_after_think = false;  // fresh post-think grace window
         return;
     }
 
@@ -83,6 +84,7 @@ void Engine::track_think_state(Request& req, int32_t token) const {
     req.think_text_tail = std::move(ts.think_text_tail);
     if (transitioned && was_in_think && !req.in_think_block) {
         req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+        req.content_after_think = false;  // fresh post-think grace window
     }
 }
 
@@ -103,26 +105,30 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         if (is_stop_token(token)) {
             req.in_think_block = false;
             req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+            req.content_after_think = false;  // fresh post-think grace window
             req.think_text_tail.clear();
         }
         return false;
     }
-    // After </think>: enforce a minimum answer budget when the model
-    // wants to stop. NVFP4 quantization noise on Qwen3.6 lets the model
-    // close an empty thinking block in ~3 tokens and then immediately
-    // emit <|im_end|>; even after surviving that, the post-</think>
-    // logits sometimes tilt toward stop again on the very first content
-    // token (observed: model writes "Ger" — start of "Gerne, ..." —
-    // then EOS). Counting content tokens AND stop tokens against the
-    // grace budget would mean a model that wrote real content past the
-    // budget then stopped naturally still hit the trap. Track stop
-    // tokens separately: if the last N consecutive emissions since
-    // </think> are all stops, accept the finish; if any content token
-    // appeared in between, reset the counter.
+    // After </think>: suppress a too-eager stop ONLY while no real answer
+    // content has been emitted yet. NVFP4 quantization noise on Qwen3.6 lets
+    // the model close an empty thinking block in ~3 tokens and then immediately
+    // emit <|im_end|> to a zero-content completion. But once a genuine answer
+    // token has appeared (content_after_think), honour the model's own stop
+    // instantly — otherwise a complete short answer ("VIOLET-2218", "Paris")
+    // gets padded or repeated until the raw-distance budget elapses. The
+    // budget remains a HARD CAP for the no-content case so generation is still
+    // bounded if the model only ever emits stops.
     if (req.think_exit_idx >= 0 && is_stop_token(token)) {
         if (think_logic::grace_blocks_stop(req.think_exit_idx,
-                                           static_cast<int>(req.output_tokens.size())))
+                                           static_cast<int>(req.output_tokens.size()),
+                                           req.content_after_think))
             return false;
+    } else if (req.think_exit_idx >= 0 &&
+               static_cast<int>(req.output_tokens.size()) > req.think_exit_idx) {
+        // A non-stop token after </think> is real answer content — release the
+        // grace so the model's next stop is honoured immediately.
+        req.content_after_think = true;
     }
     return is_stop_token(token);
 }

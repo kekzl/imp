@@ -249,19 +249,34 @@ TEST(TextThink, MarkerSurvivesWindowEviction) {
 // kMinAnswerAfterThink == 16: after the block closes, suppress stop until at
 // least 16 content tokens have been produced.
 
-TEST(GracePeriod, BlocksStopImmediatelyAfterExit) {
-    // think_exit_idx=10, output_size=11 -> 1 token since exit < 16 -> blocked.
-    EXPECT_TRUE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/11));
+TEST(GracePeriod, BlocksStopImmediatelyAfterExitWithNoContent) {
+    // Empty-think case: </think> at 10, EOS at 11, no content emitted yet -> 1
+    // token since exit < 16 -> blocked (force the model to produce something).
+    EXPECT_TRUE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/11,
+                                  /*content_after_think=*/false));
 }
 
-TEST(GracePeriod, AllowsStopAtBudgetBoundary) {
-    // Exactly 16 tokens since exit -> NOT blocked (>= boundary). 10 -> 26.
-    EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/26));
-    // 15 since exit is still blocked (just under).
-    EXPECT_TRUE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/25));
+TEST(GracePeriod, HonorsStopOnceContentSeen) {
+    // THE FIX: the model produced a real answer (content_after_think=true) and
+    // then emitted its stop token only 2 tokens after </think>. Previously the
+    // raw-distance grace blocked this and padded/repeated the answer; now the
+    // stop is honored the instant content exists. (A complete "Paris"/"4".)
+    EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/12,
+                                   /*content_after_think=*/true));
+}
+
+TEST(GracePeriod, HardCapReleasesEvenWithoutContent) {
+    // Even with NO content, the grace lifts after kMinAnswerAfterThink so a
+    // model that only emits stops still finishes (bounded). 10 -> 26 (==16).
+    EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/26,
+                                   /*content_after_think=*/false));
+    // 15 since exit, still no content -> blocked (just under the cap).
+    EXPECT_TRUE(grace_blocks_stop(/*think_exit_idx=*/10, /*output_size=*/25,
+                                  /*content_after_think=*/false));
 }
 
 TEST(GracePeriod, NoBlockWhenNeverThought) {
     // think_exit_idx < 0 means the request never entered/exited a think block.
-    EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/-1, /*output_size=*/2));
+    EXPECT_FALSE(grace_blocks_stop(/*think_exit_idx=*/-1, /*output_size=*/2,
+                                   /*content_after_think=*/false));
 }

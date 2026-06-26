@@ -94,6 +94,11 @@ struct Request {
     // sometimes closes an empty thinking block and would otherwise EOS to
     // a 0-content completion.
     int think_exit_idx = -1;
+    // Whether a real (non-stop) answer token has been emitted since the last
+    // </think>. The post-think grace releases the moment this is true, so a
+    // complete short answer stops on its own <|im_end|> instead of being padded
+    // or repeated. Reset to false at every think exit.
+    bool content_after_think = false;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
     int prefill_offset = 0;     // Chunked prefill: tokens processed so far
     int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
