@@ -4,6 +4,40 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-06-26
+
+Patch release: a focused fix chain for the post-`</think>` answer-headroom logic
+across all three reasoning formats — single-token `<think>` (Qwen3 dense),
+multi-token `</think>` (Qwen3.6 NVFP4), and gpt-oss Harmony channels. Short
+answers now stop cleanly instead of padding/repeating, and reasoning models no
+longer return empty content when `max_tokens` is tight (the residual called out
+in v0.12.5 is now resolved for gpt-oss). Validated on Qwen3-8B-Q8, Qwen3.6-35B-
+NVFP4, and gpt-oss-20b (250-prompt corpus per model).
+
+### Fixed
+- **Post-`</think>` grace is content-aware** — the grace that suppresses a
+  too-eager stop after the think block now releases the instant a real answer
+  token appears, so a complete short answer (`VIOLET-2218`, `Paris`, `4`) stops
+  on its own `<|im_end|>` instead of being padded or repeated to the
+  raw-distance budget. `kMinAnswerAfterThink` stays a hard cap only for the
+  empty-think (0-content) case. Wired through both the host per-step and the GPU
+  conditional-graph decode paths (#798).
+- **Whitespace tokens no longer release the grace** — the `\n`/`\n\n` a model
+  emits right after `</think>` must not count as answer content; otherwise a
+  stop following that newline produced a 0-content completion (reproducible
+  ~75% on Qwen3.6 for terse prompts). A per-token whitespace mask, built once
+  for think models and mirrored to the device, gates the content check on both
+  decode paths (#799).
+- **gpt-oss Harmony answer-headroom budget** — gpt-oss reasons in the Harmony
+  `analysis` channel (closed by `<|end|>`) and has no `<think>` token, so the
+  answer-headroom budget never armed and a tight `max_tokens` was consumed
+  entirely inside reasoning, returning `finish=length` with an empty final
+  channel. The budget now force-emits the whole final-channel opener
+  (`<|end|><|start|>assistant<|channel|>final<|message|>`) when reasoning
+  reaches the reserve limit — forcing `<|end|>` alone is not enough because the
+  model re-opens analysis — committing it to the answer channel. Corpus
+  empty-content count dropped from 18 to 2 (the rest are adversarial) (#800).
+
 ## [0.12.5] - 2026-06-26
 
 Patch release: stops streaming reasoning models from leaking chain-of-thought
