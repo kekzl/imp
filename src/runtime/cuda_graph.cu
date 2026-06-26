@@ -491,6 +491,7 @@ __global__ void post_decode_step_kernel(
     int* __restrict__ d_think_count,      // [1] reasoning token counter
     int* __restrict__ d_in_think,         // [1] think block flag
     int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
+    int* __restrict__ d_content_after_think,  // [1] real answer token seen since </think> (0/1)
     int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
     // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
     int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
@@ -523,9 +524,27 @@ __global__ void post_decode_step_kernel(
         } else if (token == think_end_id) {
             *d_in_think = 0;
             *d_think_exit_step = step;  // open the post-think grace window
+            if (d_content_after_think)
+                *d_content_after_think = 0;  // fresh grace window: no answer yet
         } else if (*d_in_think && think_budget_limit > 0) {
             (*d_think_count)++;
         }
+    }
+
+    // Post-</think> content detection: the first real answer token (non-stop,
+    // non-marker) emitted after the exit step releases the grace, so a complete
+    // short answer stops on its own EOS instead of being padded/repeated. Must
+    // run before the grace check below. step > exit_step skips the </think>
+    // token itself (set this same invocation).
+    if (track_think && d_content_after_think && d_think_exit_step && *d_think_exit_step >= 0 &&
+        step > *d_think_exit_step && token != think_start_id && token != think_end_id) {
+        bool tok_is_stop = (token == eos_id);
+        for (int i = 0; i < n_stop_ids; i++) {
+            if (token == d_stop_ids[i])
+                tok_is_stop = true;
+        }
+        if (!tok_is_stop)
+            *d_content_after_think = 1;
     }
 
     // Write token to ring buffer (visible to host via mapped memory)
@@ -560,8 +579,13 @@ __global__ void post_decode_step_kernel(
     // grace window after </think> closes (numerically-noisy NVFP4 quants can
     // close an empty block in ~3 tokens then EOS to a 0-content completion).
     bool in_think = (track_think && d_in_think && *d_in_think);
+    // Grace blocks the stop only while no real answer content has appeared yet
+    // (content_after_think == 0); the moment a genuine answer token is emitted,
+    // the model's own stop is honoured. think_grace_tokens stays a hard cap for
+    // the no-content case so generation is still bounded.
     bool grace = (think_grace_tokens > 0 && d_think_exit_step && *d_think_exit_step >= 0 &&
-                  (step - *d_think_exit_step) < think_grace_tokens);
+                  (step - *d_think_exit_step) < think_grace_tokens &&
+                  (!d_content_after_think || *d_content_after_think == 0));
     bool should_stop = (step + 1 >= eff_max);
     if (!in_think && !grace && !ignore_eos) {
         if (token == eos_id)
@@ -670,6 +694,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         err = cudaMalloc(&d_think_exit_step_, sizeof(int));
         if (err != cudaSuccess)
             goto fail;
+        err = cudaMalloc(&d_content_after_think_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
         int zero = 0;
         int neg_one = -1;
         int init_think = config_.initial_in_think ? 1 : 0;
@@ -686,6 +713,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         err = cudaMemcpyAsync(d_think_exit_step_, &neg_one, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("ConditionalRunner: think_exit_step init failed: %s", cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_content_after_think_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: content_after_think init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
     }
@@ -898,6 +930,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      d_think_limit_, config_.think_start_id,
                                                      config_.think_end_id, config_.think_grace_tokens,
                                                      d_think_count_, d_in_think_, d_think_exit_step_,
+                                                     d_content_after_think_,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_,
                                                      d_step_limit_, handle_);
@@ -999,7 +1032,8 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
     if (d_in_think_) {
         if (!up(d_in_think_, &think, sizeof(int), "in_think") ||
             !up(d_think_count_, &zero, sizeof(int), "think_count") ||
-            !up(d_think_exit_step_, &neg_one, sizeof(int), "think_exit"))
+            !up(d_think_exit_step_, &neg_one, sizeof(int), "think_exit") ||
+            !up(d_content_after_think_, &zero, sizeof(int), "content_after_think"))
             return false;
     }
     *h_step_counter_ = 0;
@@ -1106,6 +1140,10 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_think_exit_step_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_think_exit_step_));
         d_think_exit_step_ = nullptr;
+    }
+    if (d_content_after_think_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_content_after_think_));
+        d_content_after_think_ = nullptr;
     }
     if (d_penalty_ring_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_));

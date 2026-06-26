@@ -226,6 +226,7 @@ private:
     int* d_think_count_ = nullptr;      // [1] reasoning token counter
     int* d_in_think_ = nullptr;         // [1] currently inside <think> block
     int* d_think_exit_step_ = nullptr;  // [1] step at which </think> last closed (-1 = never)
+    int* d_content_after_think_ = nullptr;  // [1] real answer token seen since </think> (0/1)
 
     // Penalty token history: [prefix_len + max_steps] ring buffer for penalty computation.
     // prefix_len tokens are pre-populated from prior output; subsequent slots filled by

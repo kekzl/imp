@@ -144,15 +144,22 @@ struct TextThinkState {
 
 // --- Post-</think> grace period (should_stop) ---
 //
-// After the think block closes, suppress an early stop until at least
-// kMinAnswerAfterThink content tokens have been emitted: numerically-noisy
-// NVFP4 quants can close an empty thinking block in ~3 tokens and then EOS to a
-// zero-content completion. `think_exit_idx` is the output index at which think
-// last closed (-1 if never), `output_size` the current output length.
+// After the think block closes, a too-eager stop is suppressed ONLY while the
+// model has not yet produced any real answer content: numerically-noisy NVFP4
+// quants can close an empty thinking block in ~3 tokens and then EOS to a
+// zero-content completion. The grace releases the instant a real (non-stop)
+// token appears (`content_after_think`) — so a complete short answer like
+// "Paris" or "VIOLET-2218" stops cleanly on its own `<|im_end|>` instead of
+// being padded/repeated. `kMinAnswerAfterThink` is a HARD CAP: even with no
+// content, the grace lifts after that many tokens so a model that only emits
+// stops still finishes (bounded), it is not a minimum answer length.
+// `think_exit_idx` is the output index at which think last closed (-1 if never),
+// `output_size` the current output length, `content_after_think` whether a
+// non-stop token has been emitted since that exit.
 inline constexpr int kMinAnswerAfterThink = 16;
 
-inline bool grace_blocks_stop(int think_exit_idx, int output_size) {
-    if (think_exit_idx < 0)
+inline bool grace_blocks_stop(int think_exit_idx, int output_size, bool content_after_think) {
+    if (think_exit_idx < 0 || content_after_think)
         return false;
     int tokens_since_exit = output_size - think_exit_idx;
     return tokens_since_exit < kMinAnswerAfterThink;
