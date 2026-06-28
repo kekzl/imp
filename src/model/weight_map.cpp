@@ -177,8 +177,12 @@ std::string WeightMap::map_name(const std::string& name) const {
             }
         }
 
-        // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
-        if (parts.size() >= 7 && parts[3] == "mlp" && parts[4] == "shared_expert" && parts[6] == "weight") {
+        // Shared expert: mlp.shared_expert[s].{gate,up,down}_proj.weight
+        // DeepSeek-V2/V3 uses plural "shared_experts"; Qwen3/Nemotron use
+        // singular "shared_expert" after Nemotron name-translation. Accept both.
+        if (parts.size() >= 7 && parts[3] == "mlp" &&
+            (parts[4] == "shared_expert" || parts[4] == "shared_experts") &&
+            parts[6] == "weight") {
             if (parts[5] == "gate_proj")
                 return prefix + "w_gate_shared";
             if (parts[5] == "up_proj")
@@ -868,8 +872,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     }
                 }
             }
-            // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
-            else if (parts.size() >= 7 && parts[4] == "shared_expert" && parts[6] == "weight") {
+            // Shared expert: mlp.shared_expert[s].{gate,up,down}_proj.weight
+            // DeepSeek-V2/V3 uses plural "shared_experts"; Qwen3/Nemotron use
+            // singular "shared_expert". Accept both.
+            else if (parts.size() >= 7 &&
+                     (parts[4] == "shared_expert" || parts[4] == "shared_experts") &&
+                     parts[6] == "weight") {
                 const std::string& proj = parts[5];
                 if (proj == "gate_proj") {
                     layer.w_gate_shared = t;
@@ -883,8 +891,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 }
             }
             // Shared expert NVFP4 prequant scales (Qwen3.5/3.6 llm-compressor):
-            //   mlp.shared_expert.{proj}.{weight_scale,weight_scale_2,input_scale}
-            else if (parts.size() >= 7 && parts[4] == "shared_expert" &&
+            //   mlp.shared_expert[s].{proj}.{weight_scale,weight_scale_2,input_scale}
+            else if (parts.size() >= 7 &&
+                     (parts[4] == "shared_expert" || parts[4] == "shared_experts") &&
                      (parts[6] == "weight_scale" || parts[6] == "weight_scale_2" ||
                       parts[6] == "input_scale")) {
                 const std::string& proj = parts[5];
