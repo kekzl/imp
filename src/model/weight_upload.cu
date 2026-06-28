@@ -1077,6 +1077,12 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     UPLOAD_OR_FAIL(L.wk, L.wk.qtype, "wk", i, ctx);
     UPLOAD_OR_FAIL(L.wv, L.wv.qtype, "wv", i, ctx);
     UPLOAD_OR_FAIL(L.wo, L.wo.qtype, "wo", i, ctx);
+    // MLA (DeepSeek-V2/V3) latent-attention projections. UPLOAD_OR_FAIL is a
+    // no-op when tensor.data == nullptr (non-MLA layers) or already on device,
+    // so this is safe to call unconditionally for all architectures.
+    // kv_a_layernorm is a norm weight — uploaded in the QK-norm section below.
+    UPLOAD_OR_FAIL(L.kv_a_proj, L.kv_a_proj.qtype, "kv_a_proj", i, ctx);
+    UPLOAD_OR_FAIL(L.kv_b_proj, L.kv_b_proj.qtype, "kv_b_proj", i, ctx);
 
     // GPTQ fallback: if regular weight is missing but GPTQ tensors are present
     struct {
@@ -1124,6 +1130,17 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
         if (!upload_weight(L.attn_k_norm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true,
                            ctx.arch_norm_offset)) {
             IMP_LOG_ERROR("Failed to upload attn_k_norm for layer %d", i);
+            return false;
+        }
+    }
+    // MLA (DeepSeek-V2/V3) RMSNorm on the 512-dim latent after kv_a_proj.
+    // The rmsnorm kernel expects FP16 weights; upload with no offset (DeepSeek
+    // stores plain gamma, not a 1+W delta like Qwen3.5/3.6).
+    // No-op for non-MLA layers (kv_a_layernorm.data == nullptr).
+    if (L.kv_a_layernorm.data && !L.kv_a_layernorm.on_device) {
+        if (!upload_weight(L.kv_a_layernorm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
+                           true, 0.0f)) {
+            IMP_LOG_ERROR("Failed to upload kv_a_layernorm for layer %d", i);
             return false;
         }
     }
@@ -1893,6 +1910,43 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     return false;
                 }
             }
+        } else {
+            // Host-resident path for per-expert 2D BF16 tensors: convert BF16→FP16
+            // in pinned host memory. The legacy MoE GEMM path calls cuBLAS which
+            // rejects mixed FP16-activation × BF16-weight (NOT_SUPPORTED, status 15).
+            // Pinned FP16 copies are accessible via UVA and match the compute dtype.
+            // Only fires for unquantized per-expert BF16 (e.g. DeepSeek-V2 SafeTensors);
+            // quantized types (Q6_K/Q8_0/Q4_0) stay as raw bytes and go through the
+            // dequant-on-the-fly path — they don't hit cuBLAS directly.
+            auto convert_host_bf16 = [&](std::vector<Tensor>& expert_vec) {
+                for (Tensor& w : expert_vec) {
+                    if (!w.data || w.on_device || w.qtype != QType::BF16)
+                        continue;
+                    int64_t n_elem = w.numel();
+                    size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
+                    uint16_t* pinned = nullptr;
+                    if (cudaHostAlloc(reinterpret_cast<void**>(&pinned), bytes,
+                                      cudaHostAllocDefault) != cudaSuccess) {
+                        IMP_LOG_WARN(
+                            "Host expert BF16→FP16: cudaHostAlloc failed "
+                            "(%.1f MiB) — expert stays BF16, GEMM will fail",
+                            bytes / (1024.0 * 1024.0));
+                        continue;
+                    }
+                    const uint16_t* src = static_cast<const uint16_t*>(w.data);
+                    for (int64_t k = 0; k < n_elem; ++k) {
+                        uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
+                        float f;
+                        std::memcpy(&f, &bits, sizeof(float));
+                        pinned[k] = float_to_fp16(f);
+                    }
+                    ctx.host_pinned_allocs.push_back(pinned);
+                    w = Tensor(pinned, QType::F16, w.ndim, w.shape, /*on_device=*/false);
+                }
+            };
+            convert_host_bf16(L.expert_w_gate);
+            convert_host_bf16(L.expert_w_up);
+            convert_host_bf16(L.expert_w_down);
         }
     }
 
