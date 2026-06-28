@@ -648,6 +648,34 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                          cfg.kv_lora_rank, cfg.q_lora_rank,
                          cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.v_head_dim,
                          cfg.head_dim, cfg.mla_mscale);
+            // MLA + YaRN rope mscale correction.
+            //
+            // The rope_yarn kernel computes:
+            //   mscale_final = yarn_attn_factor * (1 + 0.1 * log(rope_freq_scale))
+            //
+            // HF DeepSeek-V2 applies to cos/sin:
+            //   mscale = yarn_get_mscale(factor, config.rope_scaling.mscale)
+            //           = 0.1 * mscale * log(factor) + 1
+            //
+            // With the default yarn_attn_factor=1.0, imp gives 1 + 0.1*log(factor)
+            // which ignores the config's mscale field.  Correct it by adjusting
+            // yarn_attn_factor so mscale_final matches HF.  mla_mscale is loaded
+            // from mscale_all_dim (preferred) or mscale; for V2-Lite both are 0.707.
+            //
+            // For V2-Lite (factor=40, mscale=0.707):
+            //   HF rope mscale = 0.1*0.707*ln(40)+1 = 1.261
+            //   imp default     = 0.1*1.0 *ln(40)+1 = 1.369
+            //   yarn_attn_factor = 1.261 / 1.369 = 0.9208
+            if (cfg.yarn_ext_factor > 0.0f && cfg.rope_freq_scale > 1.0f) {
+                const float log_scale = std::log(cfg.rope_freq_scale);
+                const float hf_mscale = 0.1f * cfg.mla_mscale * log_scale + 1.0f;
+                const float imp_mscale = 0.1f * log_scale + 1.0f;
+                cfg.yarn_attn_factor = hf_mscale / imp_mscale;
+                IMP_LOG_INFO("  MLA YaRN rope-mscale adjust: yarn_attn_factor=%.4f "
+                             "(hf_mscale=%.4f, attn_scale_multiplier=%.4f)",
+                             cfg.yarn_attn_factor, hf_mscale,
+                             hf_mscale * hf_mscale);
+            }
         }
     }
 
