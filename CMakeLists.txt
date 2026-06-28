@@ -181,6 +181,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_dispatch.cu
     src/compute/rope.cu
     src/compute/layernorm.cu
+    src/compute/mla_kv_assemble.cu
     src/compute/activation.cu
     src/compute/embedding.cu
     src/compute/sampling.cu
@@ -540,6 +541,7 @@ if(IMP_BUILD_TESTS)
         tests/test_rope.cu
         tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
+        tests/test_mla.cu
         tests/test_activation.cu
         tests/test_embedding.cu
         tests/test_gemm.cu

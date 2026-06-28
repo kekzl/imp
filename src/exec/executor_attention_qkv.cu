@@ -6,6 +6,108 @@
 // source list and must not be compiled on its own. The contents are byte-for-
 // byte the original inline block; see executor_attention.cu for surrounding
 // context and local variables in scope.
+        if (prof.attn_variant == AttnVariant::MLA) {
+            // MLA (DeepSeek-V2/V3) materialized two-step KV projection (Task 2.3).
+            //
+            // Math:
+            //   kv_a  = norm_out @ kv_a_proj^T        [n, kv_lora_rank + rope_dim]
+            //   latent = kv_a[:, :kv_lora_rank]        [n, kv_lora_rank]
+            //   k_rope = kv_a[:, kv_lora_rank:]         [n, rope_dim]  MQA-style shared
+            //   latent = rmsnorm(latent, kv_a_layernorm)
+            //   kv_b   = latent @ kv_b_proj^T           [n, n_heads*(nope_dim + v_head_dim)]
+            //   K[h]   = [pe(rope_dim) | nope(nope_dim)]  -- rope kernel hits first rope_dim dims
+            //   V[h]   = kv_b last v_head_dim dims
+            //
+            // RoPE layout choice (b): pe FIRST so the existing rope_forward kernel
+            // (which rotates the leading rope_dim dims of each head) applies unchanged.
+            // Q is also reordered from HF [nope | pe] to [pe | nope] to match K.
+            //
+            // Dispatch: gemm_via_handle_ for tier-aware weight lookup; rmsnorm for latent
+            // normalisation; mla_assemble_kv scatter kernel. Scratch via cudaMallocAsync.
+
+            // 1. Attention RMSNorm: norm_out = rmsnorm(hidden, attn_norm)
+            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+
+            const int kv_lora_rank   = cfg.kv_lora_rank;
+            const int rope_dim       = cfg.qk_rope_head_dim;
+            const int nope_dim       = cfg.qk_nope_head_dim;
+            const int v_head_dim_mla = cfg.v_head_dim;
+            const int kva_out        = kv_lora_rank + rope_dim;
+            const int kvb_out        = nh * (nope_dim + v_head_dim_mla);
+
+            // 2. Q projection + reorder [nope|pe] -> [pe|nope] in-place.
+            gemm_via_handle_(ly.wq_id, no, qv, ctx);
+            mla_reorder_q(static_cast<half*>(qv.data), n, nh, nope_dim, rope_dim, stream);
+
+            // 3. kv_a = norm_out @ kv_a_proj^T   [n, kva_out]
+            void* kv_a_buf = nullptr;
+            const size_t kv_a_bytes = static_cast<size_t>(n) * kva_out * sizeof(half);
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&kv_a_buf, kv_a_bytes, stream));
+            {
+                int64_t kva_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kva_out)};
+                Tensor kv_a(kv_a_buf, QType::F16, 2, kva_shape, true);
+                gemm_via_handle_(ly.kv_a_proj_id, no, kv_a, ctx);
+
+                // 4. Extract latent [n, kv_lora_rank] — first kv_lora_rank cols of kv_a.
+                void* latent_buf = nullptr;
+                const size_t latent_bytes = static_cast<size_t>(n) * kv_lora_rank * sizeof(half);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&latent_buf, latent_bytes, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+                    latent_buf,
+                    static_cast<size_t>(kv_lora_rank) * sizeof(half),
+                    kv_a_buf,
+                    static_cast<size_t>(kva_out) * sizeof(half),
+                    static_cast<size_t>(kv_lora_rank) * sizeof(half),
+                    static_cast<size_t>(n),
+                    cudaMemcpyDeviceToDevice, stream));
+
+                // 5. Extract k_rope [n, rope_dim] — last rope_dim cols of kv_a.
+                void* k_rope_buf = nullptr;
+                const size_t k_rope_bytes = static_cast<size_t>(n) * rope_dim * sizeof(half);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&k_rope_buf, k_rope_bytes, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+                    k_rope_buf,
+                    static_cast<size_t>(rope_dim) * sizeof(half),
+                    static_cast<const char*>(kv_a_buf) + static_cast<size_t>(kv_lora_rank) * sizeof(half),
+                    static_cast<size_t>(kva_out) * sizeof(half),
+                    static_cast<size_t>(rope_dim) * sizeof(half),
+                    static_cast<size_t>(n),
+                    cudaMemcpyDeviceToDevice, stream));
+
+                // 6. latent = rmsnorm(latent, kv_a_layernorm)
+                {
+                    int64_t lat_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kv_lora_rank)};
+                    Tensor lat(latent_buf, QType::F16, 2, lat_shape, true);
+                    rmsnorm(lat, ly.kv_a_layernorm, lat, eps, stream);
+                }
+
+                // 7. kv_b = latent @ kv_b_proj^T   [n, kvb_out]
+                void* kv_b_buf = nullptr;
+                const size_t kv_b_bytes = static_cast<size_t>(n) * kvb_out * sizeof(half);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&kv_b_buf, kv_b_bytes, stream));
+                {
+                    int64_t lat_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kv_lora_rank)};
+                    int64_t kvb_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kvb_out)};
+                    Tensor lat(latent_buf, QType::F16, 2, lat_shape, true);
+                    Tensor kvb(kv_b_buf,   QType::F16, 2, kvb_shape, true);
+                    gemm_via_handle_(ly.kv_b_proj_id, lat, kvb, ctx);
+                }
+
+                // 8. Scatter into K [pe|nope] and V.
+                //    K: [n, n_heads, rope_dim+nope_dim]   V: [n, n_heads, v_head_dim]
+                mla_assemble_kv(
+                    static_cast<const half*>(kv_b_buf),
+                    static_cast<const half*>(k_rope_buf),
+                    static_cast<half*>(kk.data),
+                    static_cast<half*>(vv.data),
+                    n, nh, nope_dim, v_head_dim_mla, rope_dim, stream);
+
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(kv_b_buf,   stream));
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(k_rope_buf, stream));
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(latent_buf, stream));
+            }
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(kv_a_buf, stream));
+        } else {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         // MXFP4 decode path: native MXFP4 GEMV with UE8M0 scales
         const WeightHandle* mxfp4_hwq = (ly.wq_id != kInvalidTensorID) ? &registry_.handle(ly.wq_id)
@@ -217,3 +319,4 @@
             if (const LoraWeights* w = lora_->get(layer, LoraProj::V))
                 lora_delta_(*w, no.data, vv.data, n, stream);
         }
+        } // end else (non-MLA path)
