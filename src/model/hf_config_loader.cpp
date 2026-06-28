@@ -634,11 +634,14 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             // non-RoPE dims plus qk_rope_head_dim RoPE dims.
             cfg.head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim;
             cfg.rope_dim = cfg.qk_rope_head_dim;
-            // YaRN mscale from rope_scaling object (nested field). Store raw
-            // value here; the yarn-adjusted attention scale is computed in Task 2.5.
+            // YaRN mscale from rope_scaling. Use mscale_all_dim (the value
+            // that HF applies to the softmax scale) with a fallback to mscale.
+            // In DeepSeek-V2-Lite both are 0.707; V3 may differ.
             const JValue* rs = jobj_find(eff, "rope_scaling");
             if (rs && rs->type == JType::OBJECT) {
                 jobj_get_float(*rs, "mscale", cfg.mla_mscale);
+                // Override with mscale_all_dim if present (preferred for softmax scale).
+                jobj_get_float(*rs, "mscale_all_dim", cfg.mla_mscale);
             }
             IMP_LOG_INFO("  MLA: kv_lora_rank=%d q_lora_rank=%d "
                          "qk_rope=%d qk_nope=%d v_head=%d head_dim=%d mla_mscale=%.4f",

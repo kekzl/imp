@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "model/model_arch.h"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -55,7 +56,10 @@ struct ModelConfig {
     int   qk_rope_head_dim  = 0;     // 64  — decoupled RoPE key dims
     int   qk_nope_head_dim  = 0;     // 128 — non-RoPE key dims
     int   v_head_dim        = 0;     // 128 — value head dim
-    float mla_mscale        = 1.0f;  // YaRN attention-scale multiplier (raw; Task 2.5 computes adjusted)
+    // YaRN mscale used for the softmax attention-scale adjustment.
+    // Stores rope_scaling.mscale_all_dim if present, else rope_scaling.mscale.
+    // For DeepSeek-V2-Lite both are 0.707; the distinction matters for V3.
+    float mla_mscale        = 1.0f;
     bool  is_mla() const { return kv_lora_rank > 0; }
     int   first_k_dense_replace = 0; // layers [0, k) use dense FFN even in a MoE model
     // NoPE attention (Nemotron-H family): attention layers use NO rotary
@@ -151,6 +155,21 @@ struct ModelConfig {
         } gemma4;
     } overrides;
 };
+
+// YaRN mscale attention-scale multiplier for MLA models (Task 2.5).
+//
+// DeepSeek-V2/V3 uses a YaRN-adjusted softmax scale:
+//   mscale_adj = 0.1 * mscale_all_dim * ln(factor) + 1.0   (factor = rope_freq_scale)
+//   attention_scale = (1 / sqrt(head_dim)) * mscale_adj^2
+//
+// This helper returns mscale_adj^2 when the config is an MLA model with
+// YaRN factor > 1, and 1.0f otherwise (leaving non-MLA models unaffected).
+inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
+    if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f) return 1.0f;
+    const float mscale_adj =
+        0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
+    return mscale_adj * mscale_adj;
+}
 
 // Forward declaration — full definition in quant/nvfp4_quant.h.
 // Used by nvfp4_moe_*_ptr borrowed pointers below.

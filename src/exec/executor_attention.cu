@@ -449,7 +449,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     //   Standard archs: 1/sqrt(head_dim).
     //   Gemma 4: 1.0 (confirmed by llama.cpp print_info: f_attn_scale = 1.0.
     //                 Q-norm and K-norm absorb the per-element scaling).
+    //   MLA (DeepSeek-V2/V3): multiply by YaRN mscale_adj^2 where
+    //     mscale_adj = 0.1 * mscale_all_dim * ln(yarn_factor) + 1.0.
+    //   For V2-Lite (mscale_all_dim=0.707, factor=40): adj≈1.261, adj^2≈1.590.
     float scale = (prof.is_gemma4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
+    if (cfg.is_mla()) scale *= mla_attention_scale_multiplier(cfg);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the

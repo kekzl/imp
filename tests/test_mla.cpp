@@ -34,6 +34,39 @@ using imp::WeightMap;
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// Task 2.5: YaRN mscale attention-scale multiplier
+// ---------------------------------------------------------------------------
+
+TEST(MLAConfig, YarnMscaleAttentionScaleNonMLA) {
+    // Default-constructed config: not MLA, multiplier must be exactly 1.0.
+    ModelConfig cfg;
+    EXPECT_FLOAT_EQ(imp::mla_attention_scale_multiplier(cfg), 1.0f);
+}
+
+TEST(MLAConfig, YarnMscaleAttentionScale) {
+    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
+                                            "/models/DeepSeek-V2-Lite");
+    if (!std::filesystem::exists(dir)) {
+        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
+                     << dir << " to run MLA mscale tests";
+    }
+
+    ModelConfig cfg;
+    bool ok = HFConfigLoader::load_config(dir, cfg);
+    ASSERT_TRUE(ok) << "Failed to load config from " << dir;
+    ASSERT_TRUE(cfg.is_mla());
+
+    // DeepSeek-V2-Lite: mscale_all_dim=0.707, factor=40.
+    // mscale_adj = 0.1 * 0.707 * ln(40) + 1.0 ≈ 1.26076
+    // multiplier  = mscale_adj^2 ≈ 1.5895
+    float mult = imp::mla_attention_scale_multiplier(cfg);
+    EXPECT_NEAR(mult, 1.261f * 1.261f, 1e-2f)
+        << "YaRN mscale multiplier mismatch (expected ~1.59)";
+}
+
+// ---------------------------------------------------------------------------
+
 TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
     std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
                                             "/models/DeepSeek-V2-Lite");
