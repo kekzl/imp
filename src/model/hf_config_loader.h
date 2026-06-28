@@ -76,6 +76,12 @@ struct HFConfigLoader {
         // injected by chat_template.jinja line 158 when no system message is
         // supplied).
         int use_default_system_prompt = -1;
+        // BOS/EOS token strings from tokenizer_config.json (may be plain string
+        // or AddedToken object). Empty if not present. Used to resolve the BOS/EOS
+        // token ID for models whose BOS string is not in the hardcoded detection
+        // list (e.g. DeepSeek's "<｜begin▁of▁sentence｜>").
+        std::string bos_token;
+        std::string eos_token;
     };
     static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
 

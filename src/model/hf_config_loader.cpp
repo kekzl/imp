@@ -895,13 +895,22 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir, Tokenize
     read_bool("add_prefix_space", out.add_prefix_space);
     read_bool("use_default_system_prompt", out.use_default_system_prompt);
 
+    // Read BOS/EOS token content strings — may be plain strings or AddedToken
+    // objects ({"__type": "AddedToken", "content": "...", ...}).
+    // DeepSeek models use AddedToken objects for their custom BOS/EOS strings.
+    if (const JValue* bos = jobj_find(root, "bos_token"))
+        out.bos_token = extract_token_content(*bos);
+    if (const JValue* eos = jobj_find(root, "eos_token"))
+        out.eos_token = extract_token_content(*eos);
+
     IMP_LOG_INFO(
         "tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s "
-        "use_default_system_prompt=%s",
+        "use_default_system_prompt=%s bos_token='%s' eos_token='%s'",
         out.add_bos_token < 0 ? "unset" : (out.add_bos_token ? "true" : "false"),
         out.add_eos_token < 0 ? "unset" : (out.add_eos_token ? "true" : "false"),
         out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"),
-        out.use_default_system_prompt < 0 ? "unset" : (out.use_default_system_prompt ? "true" : "false"));
+        out.use_default_system_prompt < 0 ? "unset" : (out.use_default_system_prompt ? "true" : "false"),
+        out.bos_token.c_str(), out.eos_token.c_str());
     return true;
 }
 
