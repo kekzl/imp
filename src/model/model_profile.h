@@ -47,7 +47,9 @@ struct ModelProfile {
     //   GEMMA4_SWA  — Gemma-4 per-layer SWA mask in swa_layers (local rope_theta).
     //   GPTOSS_SWA  — gpt-oss even=sliding/odd=full, same YaRN RoPE on both.
     //   NOPE        — no positional encoding at all (Nemotron-H attention).
-    enum class AttnVariant { STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE };
+    //   MLA         — Multi-head Latent Attention (DeepSeek-V2/V3): compressed
+    //                 KV projection; no standard RoPE on the latent path.
+    enum class AttnVariant { STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE, MLA };
     AttnVariant attn_variant = AttnVariant::STANDARD;
 };
 

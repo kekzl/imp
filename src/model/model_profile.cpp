@@ -40,12 +40,16 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
     p.is_llama4 = cfg.arch == ModelArch::LLAMA4;
 
-    // Attention variant. NoPE wins (it is mutually exclusive with the SWA
-    // patterns — Nemotron-H has neither arch SWA nor RoPE). The SWA variants gate
-    // on a populated swa_layers, exactly as the old inline checks did, so a
-    // gemma-4 build with empty swa_layers stays STANDARD and falls through to the
-    // sliding_window_pattern path in run_attention.
-    if (cfg.rope_attn_disabled)
+    // Attention variant. MLA and NoPE are mutually exclusive with the SWA
+    // patterns. MLA is checked first (DeepSeek-V2/V3 have neither SWA nor
+    // rope_attn_disabled). NoPE wins over SWA (Nemotron-H has no arch SWA).
+    // The SWA variants gate on a populated swa_layers, exactly as the old
+    // inline checks did, so a gemma-4 build with empty swa_layers stays
+    // STANDARD and falls through to the sliding_window_pattern path in
+    // run_attention.
+    if (cfg.is_mla())
+        p.attn_variant = ModelProfile::AttnVariant::MLA;
+    else if (cfg.rope_attn_disabled)
         p.attn_variant = ModelProfile::AttnVariant::NOPE;
     else if (p.is_gemma4 && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GEMMA4_SWA;
