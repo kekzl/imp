@@ -17,6 +17,7 @@
 #include "model/model.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
+#include "model/tensor_kind_matcher.h"
 #include "model/weight_map.h"
 #include "test_models.h"
 
@@ -146,6 +147,48 @@ TEST(MLAWeightMap, DeepSeekSharedExperts) {
               "layer.1.w_up_shared");
     EXPECT_EQ(wm.map_name("model.layers.1.mlp.shared_experts.down_proj.weight"),
               "layer.1.w_down_shared");
+}
+
+// ---------------------------------------------------------------------------
+// Task 2.2: MLA attention projection name mapping (WeightMap::map_name seam)
+//
+// Verifies that map_name() routes DeepSeek-V2 MLA self_attn tensor names to
+// the correct internal slot strings without loading any model weights.
+// ---------------------------------------------------------------------------
+
+TEST(MLAWeightMap, MLAAttentionProjectionNames) {
+    WeightMap wm(ModelArch::DEEPSEEK);
+    // kv_a_proj_with_mqa -> kv_a_proj (packed latent+rope, split happens at runtime)
+    EXPECT_EQ(wm.map_name("model.layers.1.self_attn.kv_a_proj_with_mqa.weight"),
+              "layer.1.kv_a_proj");
+    // kv_a_layernorm -> kv_a_norm (RMSNorm weight on the 512-dim latent)
+    EXPECT_EQ(wm.map_name("model.layers.1.self_attn.kv_a_layernorm.weight"),
+              "layer.1.kv_a_norm");
+    // kv_b_proj -> kv_b_proj (up-proj, output 16*(128+128)=4096)
+    EXPECT_EQ(wm.map_name("model.layers.1.self_attn.kv_b_proj.weight"),
+              "layer.1.kv_b_proj");
+    // q_proj and o_proj remain unchanged (wq/wo)
+    EXPECT_EQ(wm.map_name("model.layers.1.self_attn.q_proj.weight"),
+              "layer.1.wq");
+    EXPECT_EQ(wm.map_name("model.layers.1.self_attn.o_proj.weight"),
+              "layer.1.wo");
+}
+
+// ---------------------------------------------------------------------------
+// Task 2.2: TensorKindMatcher for MLA tensor names
+// ---------------------------------------------------------------------------
+
+TEST(MLATensorKindMatcher, MLAProjectionKinds) {
+    using imp::match_tensor_kind;
+    using imp::TensorKind;
+    // kv_a_proj_with_mqa is matched via .kv_a_proj. substring (after name remapping)
+    // In tensor_kind_matcher, we test the internal name form used by the matcher:
+    EXPECT_EQ(match_tensor_kind("model.layers.1.self_attn.kv_a_proj_with_mqa.weight"),
+              TensorKind::KV_A_PROJ);
+    EXPECT_EQ(match_tensor_kind("model.layers.1.self_attn.kv_a_layernorm.weight"),
+              TensorKind::KV_A_NORM);
+    EXPECT_EQ(match_tensor_kind("model.layers.1.self_attn.kv_b_proj.weight"),
+              TensorKind::KV_B_PROJ);
 }
 
 }  // namespace

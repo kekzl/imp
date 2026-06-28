@@ -103,6 +103,7 @@ std::string WeightMap::map_name(const std::string& name) const {
         std::string prefix = "layer." + parts[2] + ".";
 
         // Attention weights: self_attn.{q,k,v,o}_proj.weight
+        // Also MLA (DeepSeek-V2/V3): kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             if (parts[4] == "q_proj")
                 return prefix + "wq";
@@ -112,6 +113,12 @@ std::string WeightMap::map_name(const std::string& name) const {
                 return prefix + "wv";
             if (parts[4] == "o_proj")
                 return prefix + "wo";
+            if (parts[4] == "kv_a_proj_with_mqa")
+                return prefix + "kv_a_proj";
+            if (parts[4] == "kv_a_layernorm")
+                return prefix + "kv_a_norm";
+            if (parts[4] == "kv_b_proj")
+                return prefix + "kv_b_proj";
         }
 
         // Attention norm
@@ -512,6 +519,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         bool matched = false;
 
         // -- Attention: self_attn.{q,k,v,o}_proj.weight --
+        // Also MLA (DeepSeek-V2/V3): kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             const std::string& proj = parts[4];
             if (proj == "q_proj") {
@@ -525,6 +533,20 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 matched = true;
             } else if (proj == "o_proj") {
                 layer.wo = t;
+                matched = true;
+            } else if (proj == "kv_a_proj_with_mqa") {
+                // Packs latent(kv_lora_rank=512) + rope(qk_rope_head_dim=64) in one
+                // tensor. The split into latent vs rope happens at projection time
+                // (Task 2.3), not here.
+                layer.kv_a_proj = t;
+                matched = true;
+            } else if (proj == "kv_a_layernorm") {
+                // RMSNorm weight on the 512-dim latent. Norm weights are never
+                // quantized; leave as FP16/FP32.
+                layer.kv_a_layernorm = t;
+                matched = true;
+            } else if (proj == "kv_b_proj") {
+                layer.kv_b_proj = t;
                 matched = true;
             } else if (proj == "qkv_proj") {
                 // Fused QKV (Phi-4): [Q+K+V, K_packed] → split into wq, wk, wv.
@@ -690,10 +712,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         }
 
         // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
-        // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
+        // self_attn.{q,k,v,o,kv_a_proj_with_mqa,kv_b_proj}_proj.{weight_scale,...}
+        // Note: kv_a_layernorm is a norm weight (never quantized) — no scale routing.
         const std::string layer_key_prefix = "L" + std::to_string(layer_idx) + ".";
 
-        // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
+        // self_attn.{q,k,v,o,...}_proj.{weight_scale,weight_scale_2,input_scale}
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" &&
             (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
             const std::string& proj = parts[4];
@@ -707,6 +730,13 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 slot = "wv";
             else if (proj == "o_proj")
                 slot = "wo";
+            // MLA: kv_a_proj_with_mqa packs latent+rope; route to kv_a_proj slot.
+            else if (proj == "kv_a_proj_with_mqa")
+                slot = "kv_a_proj";
+            // MLA: kv_b_proj is the up-projection (quantizable).
+            else if (proj == "kv_b_proj")
+                slot = "kv_b_proj";
+            // kv_a_layernorm is a norm weight — never quantized, no scale routing.
             else if (proj == "qkv_proj") {
                 // Scalars (weight_scale_2, input_scale) are per-tensor → route to all
                 // three. weight_scale is per-group [Q+K+V, K/16]; slice it by output-row

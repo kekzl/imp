@@ -44,6 +44,14 @@ TensorKind match_tensor_kind(std::string_view name) {
             return TensorKind::QK_NORM_Q;
         if (contains(name, ".k_norm."))
             return TensorKind::QK_NORM_K;
+        // MLA (DeepSeek-V2/V3): kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj
+        // Check kv_a_proj_with_mqa before kv_a_proj to avoid prefix ambiguity.
+        if (contains(name, ".kv_a_proj_with_mqa.") || contains(name, ".kv_a_proj."))
+            return TensorKind::KV_A_PROJ;
+        if (contains(name, ".kv_a_layernorm."))
+            return TensorKind::KV_A_NORM;
+        if (contains(name, ".kv_b_proj."))
+            return TensorKind::KV_B_PROJ;
     }
     // model.layers.N.input_layernorm.weight / post_attention_layernorm.weight
     if (contains(name, ".input_layernorm."))
