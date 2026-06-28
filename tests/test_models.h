@@ -67,6 +67,11 @@ inline constexpr const char* kEnvMoeModel = "IMP_TEST_MOE_MODEL";
 inline constexpr const char* kEnvMmproj = "IMP_TEST_MMPROJ";
 inline constexpr const char* kEnvMmprojGemma4 = "IMP_TEST_MMPROJ_GEMMA4";
 
+// DeepSeek-V2/V3 directory for MLA config tests.
+// Expected: a HF model directory containing config.json.
+// Default: /models/DeepSeek-V2-Lite (Docker bind-mount path).
+inline constexpr const char* kEnvModelDeepSeek = "IMP_TEST_MODEL_DEEPSEEK";
+
 // --- Accessors ------------------------------------------------------------
 
 // Value of env var `name`, or "" if unset. Caller decides whether "" means

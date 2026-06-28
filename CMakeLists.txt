@@ -505,6 +505,7 @@ if(IMP_BUILD_TESTS)
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
         tests/test_vision_preprocess.cpp
+        tests/test_mla.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's

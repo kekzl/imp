@@ -48,6 +48,16 @@ struct ModelConfig {
     bool gdn_grouped_head_layout = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
+
+    // MLA (DeepSeek-V2/V3). kv_lora_rank > 0 selects the MLA path.
+    int   kv_lora_rank      = 0;     // 512 (V2-Lite) / 1024 (V3)
+    int   q_lora_rank       = 0;     // 0 = full Q projection (V2-Lite); >0 = Q down/up LoRA (V3)
+    int   qk_rope_head_dim  = 0;     // 64  — decoupled RoPE key dims
+    int   qk_nope_head_dim  = 0;     // 128 — non-RoPE key dims
+    int   v_head_dim        = 0;     // 128 — value head dim
+    float mla_mscale        = 1.0f;  // YaRN attention-scale multiplier (raw; Task 2.5 computes adjusted)
+    bool  is_mla() const { return kv_lora_rank > 0; }
+    int   first_k_dense_replace = 0; // layers [0, k) use dense FFN even in a MoE model
     // NoPE attention (Nemotron-H family): attention layers use NO rotary
     // embedding — position is carried by the recurrent (Mamba) layers.
     bool rope_attn_disabled = false;
