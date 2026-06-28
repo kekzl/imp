@@ -181,6 +181,17 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         // stores hd-wide K and hd-wide (padded) V uniformly — no asymmetric V
         // path is needed. Decode reads only v_head_dim per V head; the zero tail
         // is harmless. row_elems == nkv * hd for both K and V.
+        //
+        // MLA cache layout invariant: the compressed KV projection uses a single
+        // KV head (n_kv_heads==1) to store the shared latent per position. The
+        // fused write stores only nkv*hd elements per token from the workspace;
+        // for MLA this must be exactly one head's worth (nkv==1, hd==head_dim).
+        // Materialized per-head K/V live only in the workspace and are not cached
+        // individually — violating nkv==1 here would silently drop KV data.
+        IMP_CHECK(!cfg.is_mla() || nkv == 1,
+                  "MLA KV write: expected n_kv_heads=1 (compressed latent cache) "
+                  "but got nkv=%d — the fused write would silently discard %d heads",
+                  nkv, cache->n_kv_heads() - 1);
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
         dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V

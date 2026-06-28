@@ -372,7 +372,9 @@ void Workspace::compute_shared_sizes(int max_tokens) {
                 max_q_out = q_dim;
         }
     }
-    size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
+    // MLA: mla_assemble_kv materialises K/V for all n_heads (not n_kv_heads=1).
+    int kv_cols = (cfg.is_mla() ? nh : nkv) * hd;
+    size_t kv_raw = static_cast<size_t>(max_tokens) * kv_cols * es;
     attn_shared_size_ = align256(static_cast<size_t>(max_tokens) * nh * hd * es)    // q (de-interleaved)
                         + align256(2 * kv_raw)                                      // k+v contiguous
                         + align256(static_cast<size_t>(max_tokens) * nh * hd * es)  // attn_out
