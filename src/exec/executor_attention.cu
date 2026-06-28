@@ -470,11 +470,40 @@ after_attention:
         debug_tensor_stats("L0_step3_h_before_oproj", h, stream);
     }
 
-    // MLA: attention output is [n, nh * vhd] (vhd < hd). Narrow ao so the
-    // downstream Wo projection sees the correct input width. No data move needed —
-    // the kernel already wrote the result compactly into attn_out_.
+    // MLA: V head dim (vhd) is narrower than the QK head dim (hd). The o_proj
+    // expects an [n, nh * vhd] input. The two attention paths leave ao in
+    // different layouts:
+    //   - Decode (paged kernel): writes the result COMPACTLY as [n, nh*vhd]
+    //     directly into attn_out_ (the kernel knows v_head_dim). Only a shape
+    //     fixup is needed.
+    //   - Prefill (cuBLAS/FA2/FMHA): these kernels accumulate V at hd because
+    //     the materialized V was zero-padded to hd, so ao is [n, nh, hd] with
+    //     the real values in the first vhd dims of each head and zeros in the
+    //     tail. A per-head compaction [n, nh, hd] -> [n, nh, vhd] is required;
+    //     a naive shape narrow would reinterpret an hd-strided buffer as
+    //     vhd-compact (wrong — it would take the first nh*vhd contiguous
+    //     elements, mixing head boundaries).
     if (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd) {
-        const int64_t mla_ao_cols = static_cast<int64_t>(nh) * cfg.v_head_dim;
+        const int vhd = cfg.v_head_dim;
+        const int64_t mla_ao_cols = static_cast<int64_t>(nh) * vhd;
+        if (state.is_prefill) {
+            // Compact hd-strided -> vhd-compact via a scratch buffer (src/dst
+            // must not alias). Prefill is not CUDA-graph-captured, so the
+            // stream-ordered alloc is amortised in the pool (same pattern as the
+            // chunked-prefill gather above).
+            void* compact_buf = nullptr;
+            const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&compact_buf, bytes, stream));
+            mla_compact_attn_output(static_cast<const half*>(ao.data),
+                                    static_cast<half*>(compact_buf), n, nh, hd, vhd, stream);
+            // Copy compacted result back into attn_out_ (dst pitch < src pitch,
+            // separate-buffer source — no in-place hazard) and narrow the view.
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ao.data, compact_buf, bytes,
+                                               cudaMemcpyDeviceToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(compact_buf, stream));
+        }
+        // Both paths: narrow the view so o_proj sees nh*vhd. (Decode already
+        // wrote compact data; prefill just copied compact data into ao.)
         if (ao.shape[1] != mla_ao_cols) {
             ao.shape[1] = mla_ao_cols;
             ao.compute_strides();

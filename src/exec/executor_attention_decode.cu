@@ -109,7 +109,12 @@
         // Output is [batch, 1, n_heads, vhd] — narrower for MLA
         int64_t od[4] = {n_seq, 1, nh, vhd};
         Tensor q4 = qv.reshape(4, qd);
-        Tensor o4 = ao.reshape(4, od);
+        // attn_out_ is allocated for nh*hd; for MLA the live output is only
+        // nh*vhd (the paged kernel writes nh*vhd contiguously per token).
+        // reshape() enforces equal numel, so build the narrower view from the
+        // pointer directly when vhd != hd; otherwise reshape (identical layout).
+        Tensor o4 = (vhd != hd) ? Tensor(ao.data, ao.qtype, 4, od, /*on_device=*/true)
+                                : ao.reshape(4, od);
 
         KVCache* cache = state.kv_cache;
         const int kv_bs = cache->block_size();

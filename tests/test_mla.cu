@@ -585,5 +585,114 @@ TEST(MLAAttnOutput, VHeadDimWidth) {
     cudaFree(d_cl);
 }
 
+// ---------------------------------------------------------------------------
+// Test: MLAAttnOutput.PrefillCompaction
+//
+// Verifies the prefill V-output compaction path: the prefill attention kernels
+// accumulate V at head_dim (V is zero-padded to head_dim), producing an output
+// of [n, n_heads, head_dim] with real values in the first v_head_dim dims and
+// zeros in the tail. mla_compact_attn_output must compact this to
+// [n, n_heads, v_head_dim] correctly (per-head, not a naive contiguous slice).
+// ---------------------------------------------------------------------------
+TEST(MLAAttnOutput, PrefillCompaction) {
+    SKIP_IF_NO_CUDA();
+
+    static constexpr int n_tokens = 3;
+    static constexpr int n_heads  = 4;
+    static constexpr int hd       = 12;  // QK head dim (padded V width)
+    static constexpr int v_hd     = 8;   // real V head dim
+
+    // Build hd-strided source: head h, dim d -> value (h*100 + d) for d<v_hd,
+    // 7777 (junk that must be dropped) for d in [v_hd, hd).
+    const int src_elems = n_tokens * n_heads * hd;
+    const int dst_elems = n_tokens * n_heads * v_hd;
+    // Values kept < 2048 so FP16 represents each integer exactly (the kernel is
+    // a pure copy — any rounding here would be a test artifact, not a kernel bug).
+    auto src_val = [](int t, int h, int d) { return (float)(t * 200 + h * 40 + d); };
+    std::vector<float> h_src(src_elems);
+    for (int t = 0; t < n_tokens; t++)
+        for (int h = 0; h < n_heads; h++)
+            for (int d = 0; d < hd; d++) {
+                int idx = (t * n_heads + h) * hd + d;
+                h_src[idx] = (d < v_hd) ? src_val(t, h, d) : 7777.0f;
+            }
+
+    Tensor g_src = make_gpu_fp16(h_src, {n_tokens, n_heads, hd});
+    Tensor g_dst = alloc_gpu_fp16({n_tokens, n_heads, v_hd});
+
+    mla_compact_attn_output(static_cast<const half*>(g_src.data),
+                            static_cast<half*>(g_dst.data),
+                            n_tokens, n_heads, hd, v_hd, nullptr);
+    cudaDeviceSynchronize();
+
+    auto out = read_gpu_fp16(g_dst);
+    ASSERT_EQ((int)out.size(), dst_elems);
+
+    // Every compacted element must equal its source first-v_hd value; no 7777.
+    for (int t = 0; t < n_tokens; t++)
+        for (int h = 0; h < n_heads; h++)
+            for (int d = 0; d < v_hd; d++) {
+                int idx = (t * n_heads + h) * v_hd + d;
+                float expected = src_val(t, h, d);
+                EXPECT_NEAR(out[idx], expected, 0.5f)
+                    << "compaction mismatch at t=" << t << " h=" << h << " d=" << d;
+            }
+    for (int i = 0; i < dst_elems; i++)
+        EXPECT_LT(out[i], 7000.0f) << "junk leaked into compacted output at " << i;
+
+    free_gpu(g_src);
+    free_gpu(g_dst);
+}
+
+// ---------------------------------------------------------------------------
+// Test: MLAAttnOutput.PaddedVAssembleZeroesTail
+//
+// Verifies mla_assemble_kv with v_dst_head_dim > v_head_dim writes the real V
+// values into the first v_head_dim dims of each hd-wide head slot and zeroes the
+// tail. This is the over-allocation that lets prefill kernels accumulate V at hd.
+// ---------------------------------------------------------------------------
+TEST(MLAAttnOutput, PaddedVAssembleZeroesTail) {
+    SKIP_IF_NO_CUDA();
+
+    static constexpr int n        = 2;
+    static constexpr int n_heads  = 2;
+    static constexpr int nope     = 4;
+    static constexpr int v_hd     = 3;
+    static constexpr int rope     = 2;
+    static constexpr int hd       = nope + rope;  // 6 — padded V width
+    static constexpr int kvb_out  = n_heads * (nope + v_hd);
+
+    std::vector<float> h_kvb(n * kvb_out), h_rope(n * rope);
+    for (int i = 0; i < n * kvb_out; i++) h_kvb[i]  = (float)(i + 1);
+    for (int i = 0; i < n * rope; i++)    h_rope[i] = (float)(i + 1) * 0.5f;
+
+    Tensor g_kvb  = make_gpu_fp16(h_kvb,  {n, kvb_out});
+    Tensor g_rope = make_gpu_fp16(h_rope, {n, rope});
+    Tensor g_K    = alloc_gpu_fp16({n, n_heads, hd});
+    Tensor g_V    = alloc_gpu_fp16({n, n_heads, hd});  // padded to hd
+
+    mla_assemble_kv(static_cast<const half*>(g_kvb.data),
+                    static_cast<const half*>(g_rope.data),
+                    static_cast<half*>(g_K.data),
+                    static_cast<half*>(g_V.data),
+                    n, n_heads, nope, v_hd, rope, nullptr, /*v_dst_head_dim=*/hd);
+    cudaDeviceSynchronize();
+
+    auto V = read_gpu_fp16(g_V);
+    // Per head: first v_hd dims = kv_b[nope..nope+v_hd), tail [v_hd, hd) = 0.
+    for (int t = 0; t < n; t++)
+        for (int h = 0; h < n_heads; h++) {
+            const float* kv_b_h = h_kvb.data() + t * kvb_out + h * (nope + v_hd);
+            for (int d = 0; d < hd; d++) {
+                float got = V[(t * n_heads + h) * hd + d];
+                float expected = (d < v_hd) ? kv_b_h[nope + d] : 0.0f;
+                EXPECT_NEAR(got, expected, 1e-2f)
+                    << "padded V mismatch t=" << t << " h=" << h << " d=" << d;
+            }
+        }
+
+    free_gpu(g_kvb); free_gpu(g_rope); free_gpu(g_K); free_gpu(g_V);
+}
+
 }  // namespace
 }  // namespace imp

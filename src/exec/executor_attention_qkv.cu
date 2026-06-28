@@ -110,13 +110,21 @@
                 }
 
                 // 8. Scatter into K [pe|nope] and V.
-                //    K: [n, n_heads, rope_dim+nope_dim]   V: [n, n_heads, v_head_dim]
+                //    K: [n, n_heads, rope_dim+nope_dim]
+                //    V: [n, n_heads, hd]  — over-allocated to K's head_dim (hd =
+                //    rope_dim+nope_dim), real v_head_dim values first, tail zeroed.
+                //    Padding V to hd lets BOTH the prefill attention kernels
+                //    (cuBLAS/FA2/FMHA, which assume V shares K's head_dim) and the
+                //    paged-decode KV write see a uniform hd-wide V layout. The
+                //    zero tail contributes nothing to the P·V sum; the attention
+                //    output is later narrowed per-head to v_head_dim.
+                const int v_dst_hd = rope_dim + nope_dim;  // == hd
                 mla_assemble_kv(
                     static_cast<const half*>(kv_b_buf),
                     static_cast<const half*>(k_rope_buf),
                     static_cast<half*>(kk.data),
                     static_cast<half*>(vv.data),
-                    n, nh, nope_dim, v_head_dim_mla, rope_dim, stream);
+                    n, nh, nope_dim, v_head_dim_mla, rope_dim, stream, v_dst_hd);
 
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(kv_b_buf,   stream));
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(k_rope_buf, stream));
