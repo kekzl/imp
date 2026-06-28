@@ -28,6 +28,31 @@ namespace imp {
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();
 
+    // MLA (DeepSeek) persistent QKV scratch: pre-allocate once so the
+    // materialized two-step KV projection never calls cudaMallocAsync inside
+    // the CUDA-graph-captured decode region. Sized for max_tokens.
+    if (cfg.is_mla() && max_tokens_ > 0) {
+        const size_t T = static_cast<size_t>(max_tokens_);
+        const size_t kva_out = static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
+        const size_t kvb_out =
+            static_cast<size_t>(cfg.n_heads) * (cfg.qk_nope_head_dim + cfg.v_head_dim);
+        auto alloc = [&](void** p, size_t cols, const char* name) {
+            size_t sz = T * cols * sizeof(half);
+            cudaError_t e = cudaMalloc(p, sz);
+            if (e != cudaSuccess) {
+                IMP_LOG_ERROR("Failed to allocate MLA scratch %s (%.1f MiB): %s", name,
+                              sz / (1024.0 * 1024.0), cudaGetErrorString(e));
+                *p = nullptr;
+            }
+        };
+        alloc(&mla_kv_a_buf_, kva_out, "kv_a");
+        alloc(&mla_latent_buf_, static_cast<size_t>(cfg.kv_lora_rank), "latent");
+        alloc(&mla_k_rope_buf_, static_cast<size_t>(cfg.qk_rope_head_dim), "k_rope");
+        alloc(&mla_kv_b_buf_, kvb_out, "kv_b");
+        IMP_LOG_INFO("MLA QKV scratch: kv_a+latent+k_rope+kv_b for max_tokens=%d (graph-safe)",
+                     max_tokens_);
+    }
+
     // Dequant scratch buffer for on-the-fly weight dequantization. Every
     // consumer guards with dequant_gpu_supported(qtype) (GGUF block quants
     // only), so weights outside that set can never need the scratch — on

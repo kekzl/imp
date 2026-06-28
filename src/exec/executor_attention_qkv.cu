@@ -56,18 +56,17 @@
             mla_reorder_q(static_cast<half*>(qv.data), n, nh, nope_dim, rope_dim, stream);
 
             // 3. kv_a = norm_out @ kv_a_proj^T   [n, kva_out]
-            void* kv_a_buf = nullptr;
-            const size_t kv_a_bytes = static_cast<size_t>(n) * kva_out * sizeof(half);
-            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&kv_a_buf, kv_a_bytes, stream));
+            //    Scratch is pre-allocated (mla_*_buf_), NOT cudaMallocAsync'd here:
+            //    stream-ordered alloc/free is rejected inside CUDA-graph capture
+            //    (decode loop), which silently falls back to eager and degenerates.
+            void* kv_a_buf = mla_kv_a_buf_;
             {
                 int64_t kva_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kva_out)};
                 Tensor kv_a(kv_a_buf, QType::F16, 2, kva_shape, true);
                 gemm_via_handle_(ly.kv_a_proj_id, no, kv_a, ctx);
 
                 // 4. Extract latent [n, kv_lora_rank] — first kv_lora_rank cols of kv_a.
-                void* latent_buf = nullptr;
-                const size_t latent_bytes = static_cast<size_t>(n) * kv_lora_rank * sizeof(half);
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&latent_buf, latent_bytes, stream));
+                void* latent_buf = mla_latent_buf_;
                 IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
                     latent_buf,
                     static_cast<size_t>(kv_lora_rank) * sizeof(half),
@@ -78,9 +77,7 @@
                     cudaMemcpyDeviceToDevice, stream));
 
                 // 5. Extract k_rope [n, rope_dim] — last rope_dim cols of kv_a.
-                void* k_rope_buf = nullptr;
-                const size_t k_rope_bytes = static_cast<size_t>(n) * rope_dim * sizeof(half);
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&k_rope_buf, k_rope_bytes, stream));
+                void* k_rope_buf = mla_k_rope_buf_;
                 IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
                     k_rope_buf,
                     static_cast<size_t>(rope_dim) * sizeof(half),
@@ -98,9 +95,7 @@
                 }
 
                 // 7. kv_b = latent @ kv_b_proj^T   [n, kvb_out]
-                void* kv_b_buf = nullptr;
-                const size_t kv_b_bytes = static_cast<size_t>(n) * kvb_out * sizeof(half);
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&kv_b_buf, kv_b_bytes, stream));
+                void* kv_b_buf = mla_kv_b_buf_;
                 {
                     int64_t lat_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kv_lora_rank)};
                     int64_t kvb_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kvb_out)};
@@ -125,12 +120,8 @@
                     static_cast<half*>(kk.data),
                     static_cast<half*>(vv.data),
                     n, nh, nope_dim, v_head_dim_mla, rope_dim, stream, v_dst_hd);
-
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(kv_b_buf,   stream));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(k_rope_buf, stream));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(latent_buf, stream));
             }
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(kv_a_buf, stream));
+            // No cudaFree: mla_*_buf_ are persistent workspace (graph-safe).
         } else {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         // MXFP4 decode path: native MXFP4 GEMV with UE8M0 scales

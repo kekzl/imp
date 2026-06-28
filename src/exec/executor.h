@@ -410,6 +410,15 @@ private:
     void* nvfp4_dequant_ws_buf_ = nullptr;
     size_t nvfp4_dequant_ws_size_ = 0;
 
+    // MLA (DeepSeek) persistent QKV scratch — pre-allocated once (sized for
+    // max_tokens) so the materialized two-step KV projection never calls
+    // cudaMallocAsync inside the CUDA-graph-captured decode region (capture
+    // rejects stream-ordered alloc/free → silent eager fallback + degeneration).
+    void* mla_kv_a_buf_ = nullptr;    // [max_tokens, kv_lora_rank + qk_rope_head_dim]
+    void* mla_latent_buf_ = nullptr;  // [max_tokens, kv_lora_rank]
+    void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
+    void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
+
     // Set when allocate_nvfp4_dequant_workspace() could NOT pre-allocate the
     // M>1 dequant scratch (largest NVFP4 weight exceeds the cap, or alloc
     // failed). The fallback then lazy-cudaMallocs, which is illegal inside
