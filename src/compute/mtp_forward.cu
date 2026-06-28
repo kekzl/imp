@@ -181,10 +181,12 @@ __global__ void mtp_gated_v_broadcast_kernel(
     int gate_idx = h * (2 * head_dim) + head_dim + d;
     float g = __half2float(q_full[gate_idx]);
     // silu(g) = g * sigmoid(g)
-    float silu_g = g * (1.0f / (1.0f + expf(-g)));
+    // Qwen3-Next attn_output_gate: attn_out *= sigmoid(gate) (NOT silu).
+    // Ref: vLLM Qwen3NextAttention.forward — attn_output * torch.sigmoid(gate).
+    float gate_act = 1.0f / (1.0f + expf(-g));
 
     float v_val = __half2float(v[kv_h * head_dim + d]);
-    out[t] = __float2half(silu_g * v_val);
+    out[t] = __float2half(gate_act * v_val);
 }
 
 // Elementwise add: fc_out += attn_residual
@@ -300,9 +302,11 @@ __global__ void mtp_gate_attn_out_kernel(
     int d = t % head_dim;
     int gate_idx = h * (2 * head_dim) + head_dim + d;
     float g = __half2float(q_full[gate_idx]);
-    float silu_g = g * (1.0f / (1.0f + expf(-g)));
+    // Qwen3-Next attn_output_gate: attn_out *= sigmoid(gate) (NOT silu).
+    // Ref: vLLM Qwen3NextAttention.forward — attn_output * torch.sigmoid(gate).
+    float gate_act = 1.0f / (1.0f + expf(-g));
     float v = __half2float(attn_out[t]);
-    attn_out[t] = __float2half(silu_g * v);
+    attn_out[t] = __float2half(gate_act * v);
 }
 
 // Append k_row (one step's k_proj output, shape [num_kv_heads, head_dim])
