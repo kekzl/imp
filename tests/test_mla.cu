@@ -20,6 +20,7 @@
 #include <cuda_fp16.h>
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
+#include "compute/mla_kv_assemble.h"  // production mla_assemble_kv / mla_reorder_q
 #include "core/tensor.h"
 #include "test_cuda_skip.h"
 
@@ -194,99 +195,10 @@ static void ref_mla_kv(
     }
 }
 
-// ---------------------------------------------------------------------------
-// GPU scatter kernel: assemble K and V from kv_b + k_rope
-//
-// kv_b:   [n, n_heads*(nope_dim+v_head_dim)]  FP16
-// k_rope: [n, rope_dim]                       FP16   (shared across heads)
-// K_out:  [n, n_heads, head_dim]              FP16   layout [pe|nope]
-// V_out:  [n, n_heads, v_head_dim]            FP16
-//
-// Grid: (n_heads, n_tokens).  Block: max(nope_dim+rope_dim+v_head_dim, ... )
-// ---------------------------------------------------------------------------
-__global__ void mla_assemble_kv_kernel(
-        const __half* __restrict__ kv_b,   // [n, n_heads*(nope+v)]
-        const __half* __restrict__ k_rope, // [n, rope_dim]
-        __half* __restrict__ K_out,        // [n, n_heads, head_dim]  pe|nope
-        __half* __restrict__ V_out,        // [n, n_heads, v_head_dim]
-        int n_heads, int nope_dim, int v_head_dim, int rope_dim)
-{
-    const int head_dim = rope_dim + nope_dim;
-    const int kv_b_stride = n_heads * (nope_dim + v_head_dim);
-
-    const int h = blockIdx.x;
-    const int t = blockIdx.y;
-
-    const __half* kv_b_h  = kv_b + t*kv_b_stride + h*(nope_dim+v_head_dim);
-    const __half* rope_t  = k_rope + t*rope_dim;
-    __half* k_out_h = K_out + t*n_heads*head_dim + h*head_dim;
-    __half* v_out_h = V_out + t*n_heads*v_head_dim + h*v_head_dim;
-
-    // pe (rope) first
-    for (int j = threadIdx.x; j < rope_dim; j += blockDim.x)
-        k_out_h[j] = rope_t[j];
-
-    // nope next
-    for (int j = threadIdx.x; j < nope_dim; j += blockDim.x)
-        k_out_h[rope_dim + j] = kv_b_h[j];
-
-    // V
-    for (int j = threadIdx.x; j < v_head_dim; j += blockDim.x)
-        v_out_h[j] = kv_b_h[nope_dim + j];
-}
-
-// ---------------------------------------------------------------------------
-// GPU scatter kernel: reorder Q from [nope|pe] to [pe|nope] (in-place per head)
-// q_data: [n_tokens, n_heads, nope_dim+rope_dim]
-// ---------------------------------------------------------------------------
-__global__ void mla_reorder_q_kernel(
-        __half* __restrict__ q_data,
-        int n_heads, int nope_dim, int rope_dim)
-{
-    const int head_dim = nope_dim + rope_dim;
-    const int h = blockIdx.x;
-    const int t = blockIdx.y;
-
-    __half* q_head = q_data + t*n_heads*head_dim + h*head_dim;
-
-    // Temporarily store in shared memory
-    extern __shared__ __half smem[];
-    for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
-        smem[j] = q_head[j];
-    __syncthreads();
-
-    // Write back: pe = smem[nope_dim..head_dim), nope = smem[0..nope_dim)
-    for (int j = threadIdx.x; j < rope_dim; j += blockDim.x)
-        q_head[j]          = smem[nope_dim + j];
-    for (int j = threadIdx.x; j < nope_dim; j += blockDim.x)
-        q_head[rope_dim + j] = smem[j];
-}
-
-// Helper: expose the assemble kernel for use in executor
-// (declared extern so executor_attention_qkv.cu can call it)
-void mla_assemble_kv(const half* kv_b, const half* k_rope, half* K_out, half* V_out,
-                     int n_tokens, int n_heads, int nope_dim, int v_head_dim, int rope_dim,
-                     cudaStream_t stream) {
-    dim3 grid(n_heads, n_tokens);
-    int block = 64;
-    mla_assemble_kv_kernel<<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __half*>(kv_b),
-        reinterpret_cast<const __half*>(k_rope),
-        reinterpret_cast<__half*>(K_out),
-        reinterpret_cast<__half*>(V_out),
-        n_heads, nope_dim, v_head_dim, rope_dim);
-}
-
-void mla_reorder_q(half* q_data, int n_tokens, int n_heads, int nope_dim, int rope_dim,
-                   cudaStream_t stream) {
-    int head_dim = nope_dim + rope_dim;
-    dim3 grid(n_heads, n_tokens);
-    int block = 64;
-    size_t smem = head_dim * sizeof(__half);
-    mla_reorder_q_kernel<<<grid, block, smem, stream>>>(
-        reinterpret_cast<__half*>(q_data),
-        n_heads, nope_dim, rope_dim);
-}
+// NOTE: the GPU scatter kernels (mla_assemble_kv / mla_reorder_q) are the
+// PRODUCTION implementations from src/compute/mla_kv_assemble.cu, included via
+// compute/mla_kv_assemble.h. This test exercises the real kernels so a
+// regression in production code is caught — it does NOT define shadow copies.
 
 // ---------------------------------------------------------------------------
 // Full MLA projection on GPU using gemm() + rmsnorm() + scatter kernel

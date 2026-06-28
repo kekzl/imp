@@ -24,6 +24,22 @@
             //
             // Dispatch: gemm_via_handle_ for tier-aware weight lookup; rmsnorm for latent
             // normalisation; mla_assemble_kv scatter kernel. Scratch via cudaMallocAsync.
+            //
+            // LIMITATION: LoRA deltas are NOT applied on the MLA path. The
+            // non-MLA path (the `else` branch below) applies Q/K/V LoRA deltas
+            // after the projections, but MLA's Q-projection delta and the
+            // latent kv_a/kv_b projections have no LoRA wiring here. A LoRA
+            // adapter targeting a DeepSeek MLA model is therefore silently
+            // ignored. Emit a one-time warning so this isn't a silent surprise.
+            if (lora_ && lora_->has_any()) {
+                static bool mla_lora_warned = false;
+                if (!mla_lora_warned) {
+                    mla_lora_warned = true;
+                    IMP_LOG_WARN("LoRA: adapter is loaded but the MLA attention path "
+                                 "(DeepSeek-V2/V3) does not apply Q/kv_a/kv_b LoRA deltas "
+                                 "— adapter ignored for attention projections");
+                }
+            }
 
             // 1. Attention RMSNorm: norm_out = rmsnorm(hidden, attn_norm)
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
