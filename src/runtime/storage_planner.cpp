@@ -130,6 +130,11 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
         add_tensor(L.wk, TensorKind::WK, plan, next_id, total, hints);
         add_tensor(L.wv, TensorKind::WV, plan, next_id, total, hints);
         add_tensor(L.wo, TensorKind::WO, plan, next_id, total, hints);
+        // MLA (DeepSeek-V2/V3) latent projections. add_tensor skips null tensors,
+        // so non-MLA models (empty kv_a/kv_b fields) are no-ops here.
+        add_tensor(L.kv_a_proj, TensorKind::KV_A_PROJ, plan, next_id, total, hints);
+        add_tensor(L.kv_a_layernorm, TensorKind::KV_A_NORM, plan, next_id, total, hints);
+        add_tensor(L.kv_b_proj, TensorKind::KV_B_PROJ, plan, next_id, total, hints);
         add_tensor(L.w_gate, TensorKind::W_GATE, plan, next_id, total, hints);
         add_tensor(L.w_up, TensorKind::W_UP, plan, next_id, total, hints);
         add_tensor(L.w_down, TensorKind::W_DOWN, plan, next_id, total, hints);

@@ -105,6 +105,11 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         cache_weight(L.wk, L.wk.qtype, TensorKind::WK);
         cache_weight(L.wv, L.wv.qtype, TensorKind::WV);
         cache_weight(L.wo, L.wo.qtype, TensorKind::WO);
+        // MLA (DeepSeek-V2/V3) latent projections. cache_weight skips null
+        // tensors, so non-MLA models (empty kv_a/kv_b fields) are no-ops here.
+        cache_weight(L.kv_a_proj, L.kv_a_proj.qtype, TensorKind::KV_A_PROJ);
+        cache_weight(L.kv_a_layernorm, L.kv_a_layernorm.qtype, TensorKind::KV_A_NORM);
+        cache_weight(L.kv_b_proj, L.kv_b_proj.qtype, TensorKind::KV_B_PROJ);
     }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);

@@ -28,6 +28,13 @@ constexpr std::array<KindCapabilities, static_cast<size_t>(TensorKind::COUNT)> k
     t[(size_t)TensorKind::WV] = build(ALL_QUANT, StorageTier::FP8, true);
     t[(size_t)TensorKind::WO] = build(ALL_QUANT, StorageTier::NVFP4);
     t[(size_t)TensorKind::QKV_FUSED] = build(NO_MXFP4, StorageTier::FP8);
+    // MLA (DeepSeek-V2/V3) latent projections.
+    // kv_a_proj is precision-sensitive (latent down-proj) → no aggressive FP4 default.
+    t[(size_t)TensorKind::KV_A_PROJ] = build(NO_MXFP4, StorageTier::FP16);
+    // kv_a_layernorm is an RMSNorm weight → never quantized.
+    t[(size_t)TensorKind::KV_A_NORM] = build(FP32_ONLY, StorageTier::FP32);
+    // kv_b_proj is a standard up-proj → mirror WO.
+    t[(size_t)TensorKind::KV_B_PROJ] = build(ALL_QUANT, StorageTier::NVFP4);
     t[(size_t)TensorKind::W_GATE] = build(ALL_QUANT, StorageTier::NVFP4, true);
     t[(size_t)TensorKind::W_UP] = build(ALL_QUANT, StorageTier::NVFP4, true);
     t[(size_t)TensorKind::W_DOWN] = build(ALL_QUANT, StorageTier::NVFP4);
