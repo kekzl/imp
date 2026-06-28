@@ -3,6 +3,7 @@
 
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels_internal.cuh"
 #include "exec/executor_helpers.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
@@ -17,6 +18,45 @@
 #include <vector>
 
 namespace imp {
+
+// MLA V write: source V is compact [n_tokens, nkv * v_head_dim],
+// destination slots are hd-wide (over-allocated, kv_block_stride = kv_bs * nkv * hd).
+// Writes v_row_elems = nkv * v_head_dim elements per slot at the slot base address.
+// The remaining hd - v_head_dim elements per slot are left uninitialised (never read).
+__global__ __launch_bounds__(256)
+void write_kv_cache_mla_v_kernel(const half* __restrict__ v_in,
+                                  const int* __restrict__ positions,
+                                  const int* __restrict__ block_tables,
+                                  half* __restrict__ v_cache_base,
+                                  int kv_block_stride,   // kv_bs * nkv * hd  (pool stride in elements)
+                                  int slot_stride,       // nkv * hd            (slot stride in pool, elements)
+                                  int v_row_elems,       // nkv * v_head_dim   (src row width / copy width)
+                                  int block_size,
+                                  int n_tokens,
+                                  int max_blocks_per_seq,
+                                  int n_sequences) {
+    int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens)
+        return;
+
+    int pos = positions[token_idx];
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx,
+                                    max_blocks_per_seq, n_sequences, slot_in_block);
+    if (block_id < 0)
+        return;
+
+    // dst is at the slot base: write v_row_elems elements (compact source)
+    // into a slot_stride-wide slot (over-allocated with hd per head).
+    half* dst = v_cache_base + static_cast<int64_t>(block_id) * kv_block_stride +
+                static_cast<int64_t>(slot_in_block) * slot_stride;
+    const half* src = v_in + static_cast<int64_t>(token_idx) * v_row_elems;
+
+    // Scalar copy (v_row_elems = nkv * vhd, typically a multiple of 8)
+    for (int i = threadIdx.x; i < v_row_elems; i += blockDim.x) {
+        dst[i] = src[i];
+    }
+}
 
 void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream) {
     if (!state.kv_cache || !state.block_tables)
@@ -173,15 +213,42 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
             kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
     } else {
-        // Standard FP16 KV cache write path — fused K+V in single launch
+        // Standard FP16 KV cache write path.
+        // MLA: V has v_head_dim < head_dim. Write K with full hd, V with vhd
+        // (over-allocation: V slots are hd-sized but only vhd elements are valid).
+        // Non-MLA (vhd == hd): fused single launch as before.
+        const int vhd = (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd)
+                            ? cfg.v_head_dim : hd;
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
-        dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
-        write_kv_cache_fused_kernel<<<fused_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
+        if (vhd != hd) {
+            // MLA asymmetric write: K uses hd, V uses vhd
+            // K write: standard — uses row_elems = nkv * hd
+            dim3 k_grid(n);
+            write_kv_cache_kernel<<<k_grid, threads, 0, stream>>>(
+                static_cast<const half*>(kv.data), state.positions, state.block_tables,
+                static_cast<half*>(cache->k_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
+                state.max_blocks_per_seq, state.n_sequences);
+            // V write: asymmetric — src is compact [n, nkv*vhd], dst slot stride = nkv*hd
+            int v_row_elems = nkv * vhd;
+            int v_threads = std::min(v_row_elems, 256);
+            dim3 v_grid(n);
+            write_kv_cache_mla_v_kernel<<<v_grid, v_threads, 0, stream>>>(
+                static_cast<const half*>(vv.data), state.positions, state.block_tables,
+                static_cast<half*>(cache->v_ptr(kv_layer, 0)),
+                block_stride,   // pool block stride = kv_bs * nkv * hd (elements)
+                row_elems,      // slot stride = nkv * hd (elements)
+                v_row_elems,    // src row width = nkv * vhd (elements to copy)
+                kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+        } else {
+            // Non-MLA: fused K+V in single launch
+            dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
+            write_kv_cache_fused_kernel<<<fused_grid, threads, 0, stream>>>(
+                static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+                state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
+                state.max_blocks_per_seq, state.n_sequences);
+        }
     }
 
     // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────

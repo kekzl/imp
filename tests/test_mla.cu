@@ -21,6 +21,7 @@
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
 #include "compute/mla_kv_assemble.h"  // production mla_assemble_kv / mla_reorder_q
+#include "compute/attention_paged.h"  // paged_attention_decode with v_head_dim
 #include "core/tensor.h"
 #include "test_cuda_skip.h"
 
@@ -414,6 +415,174 @@ TEST(MLAProjection, RMSNormAppliedToLatent) {
     }
 
     free_gpu(g_in); free_gpu(g_out); free_gpu(g_w);
+}
+
+// ---------------------------------------------------------------------------
+// Test: MLAAttnOutput.VHeadDimWidth
+//
+// Verifies that paged_attention_decode with v_head_dim != head_dim (MLA asymmetric
+// QK/V dims) produces an output of width n_heads * v_head_dim, not n_heads * head_dim,
+// and that the V values are correctly accumulated.
+//
+// Geometry: qk_hd=12, v_hd=8, n_heads=2, n_kv_heads=2, block_size=4, n_ctx=2
+// V layout in cache: over-allocated at qk_hd=12 per slot; only first v_hd=8 are valid.
+// ---------------------------------------------------------------------------
+TEST(MLAAttnOutput, VHeadDimWidth) {
+    SKIP_IF_NO_CUDA();
+
+    // Small test geometry
+    static constexpr int qk_hd   = 12;   // QK head dim (head_dim in K cache slots)
+    static constexpr int v_hd    = 8;    // V head dim (output head dim)
+    static constexpr int n_heads = 2;
+    static constexpr int n_kv_heads = 2;
+    static constexpr int block_size = 4;
+    static constexpr int n_ctx   = 2;    // 2 context tokens (1 KV block)
+    static constexpr int batch   = 1;
+    static constexpr int n_blocks = 1;   // one KV block covers n_ctx tokens
+
+    // K cache: [n_blocks, block_size, n_kv_heads, qk_hd] — slots are qk_hd-wide
+    // V cache: [n_blocks, block_size, n_kv_heads, qk_hd] — over-allocated; only v_hd valid
+    // This mirrors the over-allocation approach: V slots are qk_hd-sized in the pool.
+    const int kv_slot_elems = n_kv_heads * qk_hd;            // elements per KV token slot
+    const int kv_block_elems = block_size * kv_slot_elems;   // elements per KV block
+    const int cache_elems = n_blocks * kv_block_elems;
+
+    // Allocate K/V caches on GPU
+    half* d_k_cache = nullptr;
+    half* d_v_cache = nullptr;
+    cudaMalloc(&d_k_cache, cache_elems * sizeof(half));
+    cudaMalloc(&d_v_cache, cache_elems * sizeof(half));
+    cudaMemset(d_k_cache, 0, cache_elems * sizeof(half));
+    cudaMemset(d_v_cache, 0, cache_elems * sizeof(half));
+
+    // Fill K: all-ones (12 elements per head per slot)
+    // Fill V: pattern — slot 0 head 0: [1,2,...,8, junk, junk, junk]
+    //                    slot 0 head 1: [10,20,...,80, junk, junk, junk]
+    //                    slot 1 head 0: [2,4,...,16, ...]
+    //                    slot 1 head 1: [20,40,...,160, ...]
+    // "junk" elements at positions v_hd..qk_hd-1 should NOT appear in output.
+    std::vector<half> h_k(cache_elems), h_v(cache_elems, __float2half(0.f));
+    for (int i = 0; i < cache_elems; i++)
+        h_k[i] = __float2half(1.0f);  // K = 1 everywhere (uniform attention weights)
+
+    // Layout: [block][slot][kv_head][qk_hd]
+    // For block=0, slot t, kv_head h, dim d:
+    //   index = t * kv_slot_elems + h * qk_hd + d
+    for (int t = 0; t < n_ctx; t++) {
+        for (int kh = 0; kh < n_kv_heads; kh++) {
+            float head_scale = (kh == 0) ? 1.0f : 10.0f;  // head 1 values are 10× bigger
+            for (int d = 0; d < v_hd; d++) {
+                // Valid V values: distinct per (t, kh, d)
+                float val = head_scale * (float)(d + 1) * (float)(t + 1);
+                h_v[t * kv_slot_elems + kh * qk_hd + d] = __float2half(val);
+            }
+            // Junk values at d = v_hd..qk_hd-1 (should be ignored by kernel)
+            for (int d = v_hd; d < qk_hd; d++) {
+                h_v[t * kv_slot_elems + kh * qk_hd + d] = __float2half(9999.0f);
+            }
+        }
+    }
+    cudaMemcpy(d_k_cache, h_k.data(), cache_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v_cache, h_v.data(), cache_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Q: [batch=1, 1, n_heads, qk_hd] — uniform query (all 1/qk_hd for unit dot)
+    const int q_elems = batch * n_heads * qk_hd;
+    std::vector<half> h_q(q_elems);
+    for (int i = 0; i < q_elems; i++)
+        h_q[i] = __float2half(1.0f);  // Q all-ones, scale=1/sqrt(qk_hd) applied below
+    half* d_q = nullptr;
+    cudaMalloc(&d_q, q_elems * sizeof(half));
+    cudaMemcpy(d_q, h_q.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    // O: [batch=1, 1, n_heads, v_hd] — the key assertion: width is v_hd, not qk_hd
+    const int o_elems = batch * n_heads * v_hd;
+    half* d_o = nullptr;
+    cudaMalloc(&d_o, o_elems * sizeof(half));
+    cudaMemset(d_o, 0, o_elems * sizeof(half));
+
+    // Block tables: block 0 for sequence 0
+    int h_bt[1] = {0};
+    int* d_bt = nullptr;
+    cudaMalloc(&d_bt, sizeof(int));
+    cudaMemcpy(d_bt, h_bt, sizeof(int), cudaMemcpyHostToDevice);
+
+    // Context lens: n_ctx = 2
+    int h_cl[1] = {n_ctx};
+    int* d_cl = nullptr;
+    cudaMalloc(&d_cl, sizeof(int));
+    cudaMemcpy(d_cl, h_cl, sizeof(int), cudaMemcpyHostToDevice);
+
+    // Build Tensor wrappers
+    // Q: [1, 1, n_heads, qk_hd]
+    int64_t q_shape[4] = {batch, 1, n_heads, qk_hd};
+    Tensor Q_t(d_q, QType::F16, 4, q_shape, true);
+
+    // K_cache / V_cache: [n_blocks, block_size, n_kv_heads, qk_hd]
+    int64_t kv_cache_shape[4] = {n_blocks, block_size, n_kv_heads, qk_hd};
+    Tensor K_c(d_k_cache, QType::F16, 4, kv_cache_shape, true);
+    Tensor V_c(d_v_cache, QType::F16, 4, kv_cache_shape, true);
+
+    // O: [1, 1, n_heads, v_hd]
+    int64_t o_shape[4] = {batch, 1, n_heads, v_hd};
+    Tensor O_t(d_o, QType::F16, 4, o_shape, true);
+
+    // Scale: 1/sqrt(qk_hd) makes each Q.K dot = qk_hd * 1 * (1/sqrt(qk_hd)) = sqrt(qk_hd)
+    float scale = 1.0f / sqrtf((float)qk_hd);
+
+    // Call paged_attention_decode with v_head_dim=v_hd
+    paged_attention_decode(Q_t, K_c, V_c, O_t,
+                           d_bt, d_cl,
+                           block_size, scale,
+                           /*max_context_len=*/n_ctx,
+                           /*sliding_window=*/0, /*softcap=*/0.0f,
+                           /*stream=*/nullptr,
+                           /*max_blocks_per_seq=*/1,
+                           /*n_sinks=*/0,
+                           /*attn_sinks=*/nullptr,
+                           /*v_head_dim=*/v_hd);
+    cudaDeviceSynchronize();
+
+    // Read output — should be [batch=1, n_heads=2, v_hd=8] = 16 floats
+    std::vector<half> h_o(o_elems);
+    cudaMemcpy(h_o.data(), d_o, o_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    // Assert output size: n_heads * v_hd = 16 (not 24 = n_heads * qk_hd)
+    ASSERT_EQ(o_elems, n_heads * v_hd)
+        << "Output width must be n_heads * v_hd (" << n_heads * v_hd
+        << "), got " << o_elems << " — expected MLA asymmetric dim";
+
+    // Compute expected output.
+    // With K=1, Q=1, scale=1/sqrt(qk_hd), all tokens get uniform softmax weight 1/n_ctx.
+    // output[head h, dim d] = (1/n_ctx) * sum_t(V[t, h, d])
+    //   head 0: val = (t+1)*(d+1), sum over t=0..1 = (d+1)*3, /2 = (d+1)*1.5
+    //   head 1: val = 10*(t+1)*(d+1), sum = 10*(d+1)*3, /2 = (d+1)*15
+    for (int h = 0; h < n_heads; h++) {
+        float head_scale = (h == 0) ? 1.0f : 10.0f;
+        for (int d = 0; d < v_hd; d++) {
+            float sum_v = 0.0f;
+            for (int t = 0; t < n_ctx; t++)
+                sum_v += head_scale * (float)(d + 1) * (float)(t + 1);
+            float expected = sum_v / (float)n_ctx;
+            float got = __half2float(h_o[h * v_hd + d]);
+            EXPECT_NEAR(got, expected, 0.1f)
+                << "head=" << h << " dim=" << d
+                << ": expected " << expected << " got " << got;
+        }
+    }
+
+    // Also assert that no junk values (9999) leaked into the output
+    for (int i = 0; i < o_elems; i++) {
+        float val = __half2float(h_o[i]);
+        EXPECT_LT(fabsf(val), 200.0f)
+            << "junk value leaked at output index " << i << ": " << val;
+    }
+
+    cudaFree(d_k_cache);
+    cudaFree(d_v_cache);
+    cudaFree(d_q);
+    cudaFree(d_o);
+    cudaFree(d_bt);
+    cudaFree(d_cl);
 }
 
 }  // namespace

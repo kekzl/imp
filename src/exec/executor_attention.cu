@@ -352,9 +352,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // know theta + 1/scale — no ramp blending, no attn_factor. Prefill
         // K would be YaRN-correct but every decode-written K plain-RoPE →
         // degeneration from token 2. Keep YaRN on the separate full path.
+        // MLA uses asymmetric K/V head dims (hd=192, vhd=128): the fused rope-KV
+        // write kernel doesn't support different K vs V dimensions, so disable it.
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
                                  state.kv_cache->qtype() == QType::F16 && prof.attn_variant != AttnVariant::NOPE &&
-                                 cfg.yarn_ext_factor <= 0.0f);
+                                 cfg.yarn_ext_factor <= 0.0f && !cfg.is_mla());
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -466,6 +468,17 @@ after_attention:
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step3_after_paged_attn", ao, stream);
         debug_tensor_stats("L0_step3_h_before_oproj", h, stream);
+    }
+
+    // MLA: attention output is [n, nh * vhd] (vhd < hd). Narrow ao so the
+    // downstream Wo projection sees the correct input width. No data move needed —
+    // the kernel already wrote the result compactly into attn_out_.
+    if (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd) {
+        const int64_t mla_ao_cols = static_cast<int64_t>(nh) * cfg.v_head_dim;
+        if (ao.shape[1] != mla_ao_cols) {
+            ao.shape[1] = mla_ao_cols;
+            ao.compute_strides();
+        }
     }
 
     // Qwen3.5 attention output gate: ao[i] *= sigmoid(gate[i])
