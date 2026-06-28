@@ -177,6 +177,11 @@ struct NvFP4PreQuantWeight {
 
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
+    // MLA (Multi-head Latent Attention) projections (DeepSeek-V2/V3).
+    // kv_a_proj: kv_a_proj_with_mqa — packed latent(512)+rope(64) down-projection.
+    // kv_a_layernorm: RMSNorm weight on the 512-dim latent (never quantized).
+    // kv_b_proj: up-projection, output 16*(128+128)=4096.
+    Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
     Tensor q_bias, k_bias, v_bias;         // Attention biases (Qwen2)
     Tensor o_bias;                         // Output-projection bias (gpt-oss)
     Tensor attn_sinks;                     // Per-head sink logits [n_heads] (gpt-oss)
@@ -230,6 +235,10 @@ struct TransformerLayer {
     TensorID wk_id = kInvalidTensorID;
     TensorID wv_id = kInvalidTensorID;
     TensorID wo_id = kInvalidTensorID;
+    // MLA WeightRegistry indices
+    TensorID kv_a_proj_id = kInvalidTensorID;
+    TensorID kv_a_norm_id = kInvalidTensorID;
+    TensorID kv_b_proj_id = kInvalidTensorID;
     TensorID w_gate_id = kInvalidTensorID;
     TensorID w_up_id = kInvalidTensorID;
     TensorID w_down_id = kInvalidTensorID;

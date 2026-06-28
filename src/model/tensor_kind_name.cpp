@@ -16,6 +16,12 @@ const char* tensor_kind_name(TensorKind k) {
             return "WO";
         case TensorKind::QKV_FUSED:
             return "QKV_FUSED";
+        case TensorKind::KV_A_PROJ:
+            return "KV_A_PROJ";
+        case TensorKind::KV_A_NORM:
+            return "KV_A_NORM";
+        case TensorKind::KV_B_PROJ:
+            return "KV_B_PROJ";
         case TensorKind::W_GATE:
             return "W_GATE";
         case TensorKind::W_UP:

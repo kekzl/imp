@@ -17,6 +17,11 @@ enum class TensorKind : uint8_t {
     WO,
     QKV_FUSED,
 
+    // MLA (Multi-head Latent Attention) projections (DeepSeek-V2/V3)
+    KV_A_PROJ,  // kv_a_proj_with_mqa: latent(512)+rope(64) down-projection
+    KV_A_NORM,  // kv_a_layernorm: RMSNorm on the 512-dim latent (never quantized)
+    KV_B_PROJ,  // kv_b_proj: up-projection, output 16*(128+128)=4096
+
     // FFN / expert projections
     W_GATE,
     W_UP,
