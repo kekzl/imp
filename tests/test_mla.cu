@@ -694,5 +694,228 @@ TEST(MLAAttnOutput, PaddedVAssembleZeroesTail) {
     free_gpu(g_kvb); free_gpu(g_rope); free_gpu(g_K); free_gpu(g_V);
 }
 
+// ---------------------------------------------------------------------------
+// Test: MLAAttnOutput.RealGeometryNkv16
+//
+// Exercises MLA Stage A (materialized) with the REAL DeepSeek-V2-Lite geometry:
+//   n_heads = n_kv_heads = 16, head_dim = 192, v_head_dim = 128
+//
+// This is the critical regression test: an nkv==1 assumption (e.g. from the
+// removed IMP_CHECK in executor_kv_write.cu) would have aborted on this model.
+// The test drives the end-to-end MLA kernel path that is actually called during
+// inference:
+//   1. mla_assemble_kv with v_dst_head_dim=192: V zero-padded to head_dim.
+//   2. paged_attention_decode with nkv=16, head_dim=192, v_head_dim=128:
+//      reads 128 V dims per head, outputs [batch, 1, 16, 128].
+//   3. mla_compact_attn_output (prefill path): compacts [n, 16, 192] → [n, 16, 128].
+//
+// Numeric correctness:
+//   - K = uniform (all-ones), Q = uniform: softmax weights are all 1/n_ctx.
+//   - V[t][h][d] = (h+1)*(d+1)*(t+1) for d < v_head_dim, 0 for tail.
+//   - Expected output[h][d] = (1/n_ctx) * sum_t(V[t][h][d])
+//                           = (h+1)*(d+1) * (n_ctx*(n_ctx+1)/2) / n_ctx
+// ---------------------------------------------------------------------------
+TEST(MLAAttnOutput, RealGeometryNkv16) {
+    SKIP_IF_NO_CUDA();
+
+    // Real DeepSeek-V2-Lite geometry
+    static constexpr int n_heads     = 16;   // n_heads == n_kv_heads in Stage A
+    static constexpr int n_kv_heads  = 16;
+    static constexpr int head_dim    = 192;  // rope_dim(64) + nope_dim(128)
+    static constexpr int v_head_dim  = 128;
+    static constexpr int nope_dim    = 128;
+    static constexpr int rope_dim    = 64;
+    static constexpr int block_size  = 16;
+    static constexpr int n_ctx       = 4;    // 4 context tokens
+    static constexpr int batch       = 1;
+    static constexpr int n_blocks    = 1;    // one KV block covers n_ctx tokens
+
+    // ---- Part 1: mla_assemble_kv with v_dst_head_dim=head_dim ---
+    // kv_b layout: [n_ctx, n_heads * (nope_dim + v_head_dim)]
+    const int kvb_stride = n_heads * (nope_dim + v_head_dim);  // 16 * 256 = 4096
+    std::vector<float> h_kvb(n_ctx * kvb_stride, 0.f);
+    std::vector<float> h_rope_in(n_ctx * rope_dim, 0.f);
+
+    // Set V values: V[t][h][d] = (h+1)*(d+1)*(t+1) for d < v_head_dim
+    // (nope dims set to 0.5 so K has non-trivial content but uniform dot with Q)
+    for (int t = 0; t < n_ctx; t++) {
+        for (int h = 0; h < n_heads; h++) {
+            float* base = h_kvb.data() + t * kvb_stride + h * (nope_dim + v_head_dim);
+            for (int d = 0; d < nope_dim; d++)
+                base[d] = 0.5f;  // nope (K)
+            for (int d = 0; d < v_head_dim; d++)
+                base[nope_dim + d] = (float)(h + 1) * (float)(d + 1) * (float)(t + 1);
+        }
+        // k_rope: 0 (RoPE not tested here — focus on V correctness)
+        for (int d = 0; d < rope_dim; d++)
+            h_rope_in[t * rope_dim + d] = 0.f;
+    }
+
+    Tensor g_kvb   = make_gpu_fp16(h_kvb,    {n_ctx, kvb_stride});
+    Tensor g_rope  = make_gpu_fp16(h_rope_in, {n_ctx, rope_dim});
+    Tensor g_K     = alloc_gpu_fp16({n_ctx, n_heads, head_dim});
+    Tensor g_V_pad = alloc_gpu_fp16({n_ctx, n_heads, head_dim});  // padded to head_dim
+
+    mla_assemble_kv(static_cast<const half*>(g_kvb.data),
+                    static_cast<const half*>(g_rope.data),
+                    static_cast<half*>(g_K.data),
+                    static_cast<half*>(g_V_pad.data),
+                    n_ctx, n_heads, nope_dim, v_head_dim, rope_dim,
+                    /*stream=*/nullptr, /*v_dst_head_dim=*/head_dim);
+    cudaDeviceSynchronize();
+
+    // Verify zero-padding in V: dims [v_head_dim, head_dim) must be 0.0
+    {
+        auto V_pad_host = read_gpu_fp16(g_V_pad);
+        for (int t = 0; t < n_ctx; t++) {
+            for (int h = 0; h < n_heads; h++) {
+                for (int d = v_head_dim; d < head_dim; d++) {
+                    float val = V_pad_host[(t * n_heads + h) * head_dim + d];
+                    EXPECT_EQ(val, 0.0f)
+                        << "V tail not zeroed at t=" << t << " h=" << h << " d=" << d;
+                }
+            }
+        }
+    }
+
+    // ---- Part 2: paged_attention_decode with nkv=16, hd=192, vhd=128 ---
+    // Build KV cache from assembled K/V (copy per-token into paged layout)
+    // Cache layout: [n_blocks, block_size, n_kv_heads, head_dim]
+    const int kv_block_elems = block_size * n_kv_heads * head_dim;
+    const int cache_total = n_blocks * kv_block_elems;
+    half* d_k_cache = nullptr;
+    half* d_v_cache = nullptr;
+    cudaMalloc(&d_k_cache, cache_total * sizeof(half));
+    cudaMalloc(&d_v_cache, cache_total * sizeof(half));
+    cudaMemset(d_k_cache, 0, cache_total * sizeof(half));
+    cudaMemset(d_v_cache, 0, cache_total * sizeof(half));
+
+    // Copy assembled K/V into paged cache slots for each token
+    auto K_host = read_gpu_fp16(g_K);
+    auto V_host = read_gpu_fp16(g_V_pad);
+    std::vector<half> k_cache_h(cache_total, __float2half(0.f));
+    std::vector<half> v_cache_h(cache_total, __float2half(0.f));
+    for (int t = 0; t < n_ctx; t++) {
+        for (int h = 0; h < n_kv_heads; h++) {
+            for (int d = 0; d < head_dim; d++) {
+                // paged layout: block[0], slot[t], kv_head[h], dim[d]
+                int paged_idx = t * n_kv_heads * head_dim + h * head_dim + d;
+                int src_idx   = (t * n_heads + h) * head_dim + d;
+                k_cache_h[paged_idx] = __float2half(K_host[src_idx]);
+                v_cache_h[paged_idx] = __float2half(V_host[src_idx]);
+            }
+        }
+    }
+    cudaMemcpy(d_k_cache, k_cache_h.data(), cache_total * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v_cache, v_cache_h.data(), cache_total * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Q: [batch=1, 1, n_heads, head_dim] — all zeros (K has nope=0.5, rope=0 → any
+    // uniform Q gives equal softmax weights via the scale factor)
+    // Use Q = all-ones for simplicity; with K nope=0.5 and rope=0 the dot products
+    // are equal across tokens (uniform attention).
+    const int q_elems = batch * n_heads * head_dim;
+    std::vector<half> h_q_dec(q_elems, __float2half(1.0f));
+    half* d_q_dec = nullptr;
+    cudaMalloc(&d_q_dec, q_elems * sizeof(half));
+    cudaMemcpy(d_q_dec, h_q_dec.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Output: [batch=1, 1, n_heads, v_head_dim] = 16*128 = 2048 halfs
+    const int o_elems = batch * n_heads * v_head_dim;
+    half* d_o_dec = nullptr;
+    cudaMalloc(&d_o_dec, o_elems * sizeof(half));
+    cudaMemset(d_o_dec, 0, o_elems * sizeof(half));
+
+    int h_bt[1] = {0};
+    int h_cl[1] = {n_ctx};
+    int* d_bt = nullptr;
+    int* d_cl = nullptr;
+    cudaMalloc(&d_bt, sizeof(int));
+    cudaMalloc(&d_cl, sizeof(int));
+    cudaMemcpy(d_bt, h_bt, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cl, h_cl, sizeof(int), cudaMemcpyHostToDevice);
+
+    int64_t q_shape[4]  = {batch, 1, n_heads, head_dim};
+    int64_t kv_shape[4] = {n_blocks, block_size, n_kv_heads, head_dim};
+    int64_t o_shape[4]  = {batch, 1, n_heads, v_head_dim};
+    Tensor Q_dec(d_q_dec, QType::F16, 4, q_shape, true);
+    Tensor K_c(d_k_cache, QType::F16, 4, kv_shape, true);
+    Tensor V_c(d_v_cache, QType::F16, 4, kv_shape, true);
+    Tensor O_dec(d_o_dec, QType::F16, 4, o_shape, true);
+
+    float scale = 1.0f / sqrtf((float)head_dim);
+    paged_attention_decode(Q_dec, K_c, V_c, O_dec,
+                           d_bt, d_cl,
+                           block_size, scale,
+                           /*max_context_len=*/n_ctx,
+                           /*sliding_window=*/0, /*softcap=*/0.0f,
+                           /*stream=*/nullptr,
+                           /*max_blocks_per_seq=*/1,
+                           /*n_sinks=*/0,
+                           /*attn_sinks=*/nullptr,
+                           /*v_head_dim=*/v_head_dim);
+    cudaDeviceSynchronize();
+
+    // Verify decode output dimensions and values
+    ASSERT_EQ(o_elems, n_heads * v_head_dim);
+
+    std::vector<half> h_o_dec(o_elems);
+    cudaMemcpy(h_o_dec.data(), d_o_dec, o_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    // With uniform softmax (equal K dots), output[h][d] = (1/n_ctx) * sum_t(V[t][h][d])
+    //   = (h+1)*(d+1) * (sum_t(t+1)) / n_ctx
+    //   = (h+1)*(d+1) * (n_ctx*(n_ctx+1)/2) / n_ctx
+    float t_avg = (float)(n_ctx + 1) / 2.0f;  // average of (1,2,...,n_ctx)
+    for (int h = 0; h < n_heads; h++) {
+        for (int d = 0; d < v_head_dim; d++) {
+            float expected = (float)(h + 1) * (float)(d + 1) * t_avg;
+            float got = __half2float(h_o_dec[h * v_head_dim + d]);
+            // FP16 tolerance scales with magnitude; clamp large values loosely
+            float tol = std::max(1.0f, 0.02f * fabsf(expected));
+            EXPECT_NEAR(got, expected, tol)
+                << "decode: head=" << h << " dim=" << d
+                << " expected=" << expected << " got=" << got;
+        }
+    }
+
+    // ---- Part 3: mla_compact_attn_output (prefill path) ---
+    // Simulate prefill attention output: [n_ctx, n_heads, head_dim] with real values
+    // in first v_head_dim dims and 0 in the tail (already assembled in g_V_pad).
+    // Use g_V_pad as the hd-strided "attention output" (correct shape for this test).
+    const int compact_elems = n_ctx * n_heads * v_head_dim;
+    half* d_compact = nullptr;
+    cudaMalloc(&d_compact, compact_elems * sizeof(half));
+    cudaMemset(d_compact, 0, compact_elems * sizeof(half));
+
+    mla_compact_attn_output(static_cast<const half*>(g_V_pad.data),
+                            d_compact,
+                            n_ctx, n_heads, head_dim, v_head_dim, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<half> h_compact(compact_elems);
+    cudaMemcpy(h_compact.data(), d_compact, compact_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    // Compact output must match the first v_head_dim dims of V_host per head
+    for (int t = 0; t < n_ctx; t++) {
+        for (int h = 0; h < n_heads; h++) {
+            for (int d = 0; d < v_head_dim; d++) {
+                int compact_idx = (t * n_heads + h) * v_head_dim + d;
+                int src_idx     = (t * n_heads + h) * head_dim + d;
+                float expected = V_host[src_idx];
+                float got = __half2float(h_compact[compact_idx]);
+                EXPECT_NEAR(got, expected, 0.02f * fabsf(expected) + 0.5f)
+                    << "compact: t=" << t << " h=" << h << " d=" << d
+                    << " expected=" << expected << " got=" << got;
+            }
+        }
+    }
+
+    // Cleanup
+    free_gpu(g_kvb); free_gpu(g_rope); free_gpu(g_K); free_gpu(g_V_pad);
+    cudaFree(d_k_cache); cudaFree(d_v_cache);
+    cudaFree(d_q_dec); cudaFree(d_o_dec);
+    cudaFree(d_bt); cudaFree(d_cl);
+    cudaFree(d_compact);
+}
+
 }  // namespace
 }  // namespace imp
