@@ -85,6 +85,50 @@ __global__ void mtp_argmax_kernel(const __half* __restrict__ logits, int vocab_s
     if (tid == 0) *out_idx = s_idx[0];
 }
 
+// Top-W over an FP16 vector [vocab_size]. Single CTA; top_w (≤ kMtpMaxTopW)
+// sequential argmax passes, masking previously selected indices. Writes the W
+// descending-logit indices to out_idx[0..top_w). W is tiny relative to the
+// lm_head GEMM that produced the logits, so the extra passes are cheap.
+__global__ void mtp_topk_kernel(const __half* __restrict__ logits, int vocab_size,
+                                int top_w, int* __restrict__ out_idx) {
+    constexpr int kThreads = 256;
+    __shared__ float s_val[kThreads];
+    __shared__ int   s_idx[kThreads];
+    __shared__ int   s_found[kMtpMaxTopW];
+
+    int tid = threadIdx.x;
+    for (int w = 0; w < top_w; ++w) {
+        float best_val = -1.0e38f;
+        int   best_idx = 0;
+        for (int i = tid; i < vocab_size; i += kThreads) {
+            bool taken = false;
+            for (int f = 0; f < w; ++f) {
+                if (s_found[f] == i) { taken = true; break; }
+            }
+            if (taken) continue;
+            float v = __half2float(logits[i]);
+            if (v > best_val) { best_val = v; best_idx = i; }
+        }
+        s_val[tid] = best_val;
+        s_idx[tid] = best_idx;
+        __syncthreads();
+        for (int off = kThreads / 2; off > 0; off >>= 1) {
+            if (tid < off) {
+                if (s_val[tid + off] > s_val[tid]) {
+                    s_val[tid] = s_val[tid + off];
+                    s_idx[tid] = s_idx[tid + off];
+                }
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            s_found[w]  = s_idx[0];
+            out_idx[w]  = s_idx[0];
+        }
+        __syncthreads();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MoE residual + shared-expert combine kernel
 // ---------------------------------------------------------------------------
@@ -351,6 +395,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_fc_out,     hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_h_final,    hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_logits,     vocab_size * sizeof(__half));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
 
     ws.hidden_dim   = hidden_dim;
     ws.n_experts    = n_experts;
@@ -426,6 +471,7 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_fc_out);
     frfn(ws.d_h_final);
     frfn(ws.d_logits);
+    if (ws.d_topk) { cudaFree(ws.d_topk); ws.d_topk = nullptr; }
     frfn(ws.d_post_norm);
     frfn(ws.d_router_logits);
     frfn(ws.d_expert_gate_up);
@@ -465,7 +511,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     MtpDraftWorkspace& ws,
                     int hidden_dim, int vocab_size,
                     int* out_token_id,
-                    cudaStream_t stream) {
+                    cudaStream_t stream,
+                    int* out_topk_ids, int top_w) {
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
@@ -915,7 +962,26 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
     }
 
-    // Step 8: argmax → device int → D2H to out_token_id.
+    // Step 8: argmax (or top-W) → device int → D2H.
+    const bool want_topk = (out_topk_ids != nullptr && top_w > 0);
+    if (want_topk) {
+        // Top-W path (Stage 0 tree-ceiling probe): reuse the pre-allocated
+        // ws.d_topk buffer. out_token_id is set to the argmax (top-0).
+        const int w = std::min(top_w, kMtpMaxTopW);
+        if (ws.d_topk == nullptr) {
+            IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
+            return false;
+        }
+        mtp_topk_kernel<<<1, 256, 0, stream>>>(
+            static_cast<const __half*>(ws.d_logits), vocab_size, w, ws.d_topk);
+        if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        cudaStreamSynchronize(stream);
+        *out_token_id = out_topk_ids[0];
+        return true;
+    }
+
     int* d_idx = nullptr;
     if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
         IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");

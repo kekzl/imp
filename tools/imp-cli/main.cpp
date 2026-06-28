@@ -813,6 +813,38 @@ int main(int argc, char** argv) {
                                 k, chain[k].matches, chain[k].total, 100.0f * chain[k].rate(), k);
                     }
                 }
+
+                // Stage 0 tree-ceiling table: per-depth top-w hit rate.
+                // depth d=k+1; width w=1..W. lookahead-0 (depth 1) is
+                // teacher-forced; depth ≥2 is self-chained (lower bound).
+                auto cw = engine->mtp_chain_accept_width();
+                constexpr int W = imp::Engine::kMtpMeasureW;
+                if (!cw.empty()) {
+                    fprintf(stderr, "\n-- MTP tree-ceiling probe (top-w hit rate per depth) --\n");
+                    fprintf(stderr, "depth   n  ");
+                    for (int w = 0; w < W; ++w) fprintf(stderr, "  top-%d", w + 1);
+                    fprintf(stderr, "   (depth1=teacher-forced, depth>=2=self-chained lower bound)\n");
+                    for (size_t k = 0; k < cw.size(); ++k) {
+                        if (cw[k].total == 0) continue;
+                        fprintf(stderr, "  %2zu %5d  ", k + 1, cw[k].total);
+                        for (int w = 0; w < W; ++w)
+                            fprintf(stderr, " %5.1f%%", 100.0f * cw[k].rate(w));
+                        fprintf(stderr, "\n");
+                    }
+                    // Derived expected accept length (tokens emitted per verify):
+                    // E[accept] = sum_{d>=1} prod_{j=1..d} p(j), with the bonus
+                    // token = +1. Linear uses top-1; tree uses top-w per depth.
+                    for (int w = 0; w < W; ++w) {
+                        double e = 0.0, prod = 1.0;
+                        for (size_t k = 0; k < cw.size(); ++k) {
+                            if (cw[k].total == 0) break;
+                            prod *= cw[k].rate(w);
+                            e += prod;
+                        }
+                        fprintf(stderr, "  E[accept] top-%d = %.3f draft tokens%s\n",
+                                w + 1, e, w == 0 ? " (linear baseline)" : "");
+                    }
+                }
             }
 
             // Benchmark using Engine::generate() (conditional graph loop) for comparison.
