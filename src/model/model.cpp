@@ -171,10 +171,14 @@ const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
 //             Llama checkpoints do not declare the FP8 hint, so honoring it for
 //             the LLAMA arch only affects Phi-4-style models whose checkpoint
 //             opts in via kv_cache_quant_algo=FP8.
+//   NEMOTRON_H_MOE (Nemotron-3-Nano-30B): FP8-KV mean PPL 4.2774 vs FP16 4.2774
+//             = ~0.00% over a 26.5k-token corpus (5 runs each), measured 2026-06-29.
+//             The earlier 2026-06-23 single A/B read +0.47%..+1.83%, but that was
+//             run-to-run noise: this MoE+Mamba2 hybrid is nondeterministic even in
+//             deterministic mode (cross-context GDN), and the ~0.9% spread per dtype
+//             swamps the dtype effect — the multi-run means coincide. Only 6/52
+//             layers carry a KV cache (the rest are SSM), so the FP8 surface is small.
 // Measured 2026-06-23 but NOT added (same gate):
-//   NEMOTRON_H_MOE (Nemotron-3-Nano-30B): FP8-KV PPL is run-to-run nondeterministic
-//     (Δ swung +0.47% .. +1.83% across two runs; MoE+Mamba2 hybrid) — inconclusive,
-//     stays FP16 (--kv-fp8 opt-in) until a stable multi-run mean is established.
 //   GEMMA4 (Gemma-4-26B-A4B-NVFP4): baseline PPL on this corpus is broken (~243),
 //     can't gate. QWEN36MOE (Qwen3.6-35B-A3B): quality fine (-0.97%) but the
 //     checkpoint does not declare the hint, so allowlisting is moot.
@@ -186,6 +190,7 @@ bool kv_fp8_hint_default_safe(ModelArch arch) {
         case ModelArch::QWEN3:
         case ModelArch::QWEN3_MOE:
         case ModelArch::LLAMA:
+        case ModelArch::NEMOTRON_H_MOE:
             return true;
         default:
             return false;
