@@ -30,12 +30,16 @@ The genuinely-open levers (most of the 06-12 campaign closed everything else —
   the only surviving idea for the last ~4% is **scaled fp8-KV storage with f16 compute** (halves KV
   traffic, 2× QK density via `m16n8k32`). Marginal — the competitive case is essentially won.
 
-- **kv-fp8 storage default-on** -- SHIPPED for Qwen3 dense + Qwen3 MoE. `kv_cache.dtype` now defaults to
-  `auto`, which honors a model author's `kv_cache_quant_algo=FP8` hint for arch families that pass the
-  long-context quality gate (`kv_fp8_hint_default_safe` — measured on a 3.9k-token context: Qwen3-14B PPL
-  +1.07%, Qwen3-30B-A3B neutral, both coherent; ~768 MiB KV VRAM saved). The −35% MoE tax was removed in
-  #682. **Remaining:** verify the other hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4)
-  and add them to the allowlist; they stay FP16 (or `--kv-fp8` opt-in) until measured.
+- **kv-fp8 storage default-on** -- SHIPPED for Qwen3 dense + Qwen3 MoE + Llama (Phi-4) + Nemotron-H MoE.
+  `kv_cache.dtype` now defaults to `auto`, which honors a model author's `kv_cache_quant_algo=FP8` hint for
+  arch families that pass the long-context quality gate (`kv_fp8_hint_default_safe` — Qwen3-14B PPL +1.07%,
+  Qwen3-30B-A3B neutral, Phi-4 +0.25%, Nemotron-3-Nano-30B ~0.00%, all coherent; ~768 MiB KV VRAM saved on
+  the dense-attention models). The −35% MoE tax was removed in #682. The pending hint-declaring families
+  were swept in #749 + 2026-06-29: **Nemotron-H MoE** is now in (its 2026-06-23 single A/B was run-to-run
+  noise — the MoE+Mamba2 hybrid is nondeterministic even in deterministic mode, so a 5-run mean was needed,
+  and FP16 vs FP8 means coincide). **Remaining (blocked, not actionable):** Qwen3.6-35B and Qwen3.5 don't
+  declare the FP8 hint (allowlisting is moot); Gemma-4's baseline PPL on the gate corpus is broken (~243),
+  so it can't be gated on this corpus. These stay FP16 (or `--kv-fp8` opt-in).
 
 The two items below are **retained for the record but evidence-refuted**, not active work:
 

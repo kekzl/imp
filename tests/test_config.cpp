@@ -40,13 +40,15 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
     EXPECT_TRUE(kv_fp8_hint_default_safe(ModelArch::QWEN3_MOE));
     // LLAMA: verified via Phi-4-reasoning-plus-NVFP4 (+0.25% PPL, PR #749).
     EXPECT_TRUE(kv_fp8_hint_default_safe(ModelArch::LLAMA));
+    // NEMOTRON_H_MOE: verified via Nemotron-3-Nano-30B — FP8 vs FP16 mean PPL
+    // ~0.00% over a 26.5k-token corpus, 5 runs each (the 2026-06-23 single A/B
+    // was run-to-run noise on this MoE+Mamba2 hybrid).
+    EXPECT_TRUE(kv_fp8_hint_default_safe(ModelArch::NEMOTRON_H_MOE));
     // Not yet verified on this box → must stay FP16 by default. GEMMA4 baseline
-    // PPL broken on the gate corpus; QWEN36_MOE quality fine but no hint declared;
-    // NEMOTRON_H_MOE FP8-KV PPL run-to-run nondeterministic (inconclusive).
+    // PPL broken on the gate corpus; QWEN36_MOE quality fine but no hint declared.
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GEMMA4));
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN35));
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::QWEN36_MOE));
-    EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::NEMOTRON_H_MOE));
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
