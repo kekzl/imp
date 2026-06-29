@@ -185,7 +185,8 @@ public:
     // One draft step. Public for Phase 5 smoke testing; production callers
     // should not invoke directly until Phase 4 wires this into the decode loop.
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
-                       int hidden_dim, int vocab_size, int* out_token_id);
+                       int hidden_dim, int vocab_size, int* out_token_id,
+                       int* out_topk_ids = nullptr, int top_w = 0);
 
     // Run MTP forward across all prompt positions to populate the MTP-side
     // KV cache before decode starts. Without this, MTP enters decode with an
@@ -223,6 +224,24 @@ public:
     // time. chain_accept_[0] == mtp_accuracy_ (next-step prediction).
     // chain_accept_[1] is the second draft (predicts 2 steps ahead); etc.
     std::vector<MtpAccuracy> mtp_chain_accept() const noexcept { return mtp_chain_accept_; }
+
+    // Stage 0 tree-ceiling probe: per-lookahead, per-width accept rate.
+    // matches[w] counts drafts where the true next token was within the MTP
+    // head's top-(w+1) candidates (cumulative: matches[0] ⊆ matches[1] ⊆ …).
+    // lookahead-0 is teacher-forced (MTP fed the real token + real main hidden);
+    // lookahead ≥1 is self-chained on MTP's own top-1 (a lower bound on the tree
+    // ceiling at depth, since a real tree would also branch on top-w parents).
+    static constexpr int kMtpMeasureW = 4;
+    struct MtpWidthAccuracy {
+        int matches[kMtpMeasureW] = {0, 0, 0, 0};
+        int total = 0;
+        float rate(int w) const {
+            return total > 0 ? static_cast<float>(matches[w]) / total : 0.0f;
+        }
+    };
+    std::vector<MtpWidthAccuracy> mtp_chain_accept_width() const noexcept {
+        return mtp_chain_accept_w_;
+    }
     void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
 
     // Accessors for C API
@@ -446,9 +465,11 @@ private:
         int prediction;
         int lookahead;
         int intended_position;
+        int topk[kMtpMeasureW] = {-1, -1, -1, -1};  // top-W candidates at draft time
     };
     std::vector<MtpChainEntry> mtp_pending_chain_;
     std::vector<MtpAccuracy> mtp_chain_accept_;
+    std::vector<MtpWidthAccuracy> mtp_chain_accept_w_;  // Stage 0 per-width table
 
     // ── n-gram (prompt-lookup) speculative decoding ─────────────────
     // Drafts come from suffix matches against the request's own context

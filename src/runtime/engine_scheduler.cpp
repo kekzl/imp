@@ -1360,6 +1360,18 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     if (it->prediction == next_token) {
                         mtp_chain_accept_[it->lookahead].matches++;
                     }
+                    // Stage 0 per-width: was the true next token within top-(w+1)?
+                    if (static_cast<int>(mtp_chain_accept_w_.size()) <= it->lookahead) {
+                        mtp_chain_accept_w_.resize(it->lookahead + 1);
+                    }
+                    auto& wa = mtp_chain_accept_w_[it->lookahead];
+                    wa.total++;
+                    int found_rank = kMtpMeasureW;  // sentinel: not in top-W
+                    for (int w = 0; w < kMtpMeasureW; ++w) {
+                        if (it->topk[w] == next_token) { found_rank = w; break; }
+                    }
+                    // Cumulative: a hit at rank r counts for all widths ≥ r.
+                    for (int w = found_rank; w < kMtpMeasureW; ++w) wa.matches[w]++;
                     it = mtp_pending_chain_.erase(it);
                 } else {
                     ++it;
@@ -1408,11 +1420,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             const void* chain_h_prev = h_for_mtp;
             for (int k = 0; k < K; ++k) {
                 int prediction = -1;
+                int topk[Engine::kMtpMeasureW] = {-1, -1, -1, -1};
                 if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size,
-                                    &prediction)) {
+                                    &prediction, topk, Engine::kMtpMeasureW)) {
                     break;
                 }
-                mtp_pending_chain_.push_back({prediction, k, cur_pos + 1 + k});
+                MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
+                for (int w = 0; w < Engine::kMtpMeasureW; ++w) entry.topk[w] = topk[w];
+                mtp_pending_chain_.push_back(entry);
                 // For k=0 only, also feed pending_prediction_ (legacy 1-step
                 // accuracy counter remains in sync with chain_accept_[0]).
                 if (k == 0) mtp_pending_prediction_ = prediction;
