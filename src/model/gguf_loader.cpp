@@ -39,6 +39,68 @@
 
 namespace imp {
 
+// Host IEEE-754 half / bfloat16 <-> float conversion for the gpt-oss residual-stream
+// 2^-4 rescale (see GPT_OSS block below). The old exponent-bit-subtract trick was
+// wrong for small block scales: an fp16 scale with biased exponent 0 (denormal) was
+// left UNSCALED (16x too large) and exponents 1..4 were flushed to zero — corrupting
+// Q8_0 weights that have many small-scale blocks (measured on the official mxfp4
+// gpt-oss attn_output: 91922/368640 blocks had exp==0; rescaled L2 was 4.92 vs the
+// correct 2.61, which cascaded to a ~20x layer-0 MoE blowup and garbage output). A
+// float-domain multiply is exact for normals and correct for denormals/underflow.
+namespace {
+inline float gguf_half_to_float(uint16_t h) {
+    uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    float v;
+    if (e == 0)
+        v = std::ldexp(static_cast<float>(m), -24);  // (m/1024) * 2^-14
+    else if (e == 0x1F)
+        v = m ? std::nanf("") : HUGE_VALF;
+    else
+        v = std::ldexp(1.0f + static_cast<float>(m) / 1024.0f, static_cast<int>(e) - 15);
+    return s ? -v : v;
+}
+inline uint16_t gguf_float_to_half(float x) {
+    uint32_t b;
+    std::memcpy(&b, &x, sizeof(b));
+    uint32_t sign = (b >> 16) & 0x8000u;
+    uint32_t ue = (b >> 23) & 0xFFu;
+    uint32_t mant = b & 0x7FFFFFu;
+    if (ue == 0xFF)
+        return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));  // inf/nan
+    int32_t e = static_cast<int32_t>(ue) - 127 + 15;
+    if (e >= 0x1F)
+        return static_cast<uint16_t>(sign | 0x7C00u);  // overflow -> inf
+    if (e <= 0) {                                      // denormal / underflow
+        if (e < -10)
+            return static_cast<uint16_t>(sign);  // -> +/-0
+        mant |= 0x800000u;
+        uint32_t shift = static_cast<uint32_t>(14 - e);
+        uint32_t h = mant >> shift;
+        if ((mant >> (shift - 1)) & 1u)
+            h++;  // round to nearest
+        return static_cast<uint16_t>(sign | h);
+    }
+    uint16_t h = static_cast<uint16_t>(sign | (static_cast<uint32_t>(e) << 10) | (mant >> 13));
+    if (mant & 0x1000u) {  // round to nearest even
+        if ((mant & 0x1FFFu) != 0x1000u || (h & 1u))
+            h++;
+    }
+    return h;
+}
+inline float gguf_bf16_to_float(uint16_t b) {
+    uint32_t bits = static_cast<uint32_t>(b) << 16;
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+inline uint16_t gguf_float_to_bf16(float x) {
+    uint32_t b;
+    std::memcpy(&b, &x, sizeof(b));
+    uint32_t r = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;  // round to nearest even
+    return static_cast<uint16_t>(r);
+}
+}  // namespace
+
 // Format tables (gguf_blck_size / gguf_type_size / gguf_row_size /
 // gguf_type_to_qtype / gguf_type_name), the BinaryReader / GGUFValue plumbing,
 // metadata-value decoding, tensor-info parsing, and tensor bounds checks live
@@ -870,12 +932,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
         }
 
-        // ×2^-4 helpers for each dtype a gpt-oss residual contributor (Wo,
-        // o_bias, expert down bias) can appear in across GGUF quants. Q8_0
-        // (Wo on the official mxfp4 GGUF) shifts each block's fp16 d; F16/BF16
-        // (Wo/biases on f16/bf16 GGUFs) shift the per-value exponent (lossless);
-        // F32 (biases) multiplies. All write into fresh host_owned_buffers_
-        // (the GGUF mmap is read-only).
+        // ×2^-4 helpers for each dtype a gpt-oss residual contributor (Wo, o_bias,
+        // expert down bias) can appear in across GGUF quants. All scale in the float
+        // domain (gguf_*_to_float * 0.0625, then back) — exact for normals, correct
+        // for denormals/underflow. (The earlier exponent-bit-subtract was wrong for
+        // small fp16 block scales — see the helper comment near the top of the file.)
+        // For Q8_0 only the per-block fp16 d is scaled; the int8 quants are untouched.
+        // All write into fresh host_owned_buffers_ (the GGUF mmap is read-only).
         auto scale_f32 = [&](Tensor& t) -> bool {
             int64_t n = t.numel();
             float* dst = static_cast<float*>(std::malloc(sizeof(float) * n));
@@ -888,25 +951,26 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             t.data = dst;
             return true;
         };
-        // exp_bits/exp_pos: F16 = 5 bits at 10; BF16 = 8 bits at 7. Subtract 4
-        // from the biased exponent; underflow (exp<=4) → signed zero.
-        auto scale_half_like = [&](Tensor& t, int exp_pos, int exp_mask) -> bool {
+        auto scale_f16 = [&](Tensor& t) -> bool {
             int64_t n = t.numel();
             uint16_t* dst = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * n));
             if (!dst)
                 return false;
             const uint16_t* src = static_cast<const uint16_t*>(t.data);
-            const uint16_t sub = static_cast<uint16_t>(4u << exp_pos);
-            for (int64_t i = 0; i < n; i++) {
-                uint16_t v = src[i];
-                int exp = (v >> exp_pos) & exp_mask;
-                if (exp == exp_mask || exp == 0)
-                    dst[i] = v;  // inf/nan/zero/subnormal
-                else if (exp <= 4)
-                    dst[i] = static_cast<uint16_t>(v & 0x8000u);
-                else
-                    dst[i] = static_cast<uint16_t>(v - sub);
-            }
+            for (int64_t i = 0; i < n; i++)
+                dst[i] = gguf_float_to_half(gguf_half_to_float(src[i]) * 0.0625f);
+            model->host_owned_buffers_.push_back(dst);
+            t.data = dst;
+            return true;
+        };
+        auto scale_bf16 = [&](Tensor& t) -> bool {
+            int64_t n = t.numel();
+            uint16_t* dst = static_cast<uint16_t*>(std::malloc(sizeof(uint16_t) * n));
+            if (!dst)
+                return false;
+            const uint16_t* src = static_cast<const uint16_t*>(t.data);
+            for (int64_t i = 0; i < n; i++)
+                dst[i] = gguf_float_to_bf16(gguf_bf16_to_float(src[i]) * 0.0625f);
             model->host_owned_buffers_.push_back(dst);
             t.data = dst;
             return true;
@@ -925,14 +989,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             std::memcpy(dst, t.data, bytes);
             for (int64_t b = 0; b < nblocks; b++) {
                 uint16_t* d = reinterpret_cast<uint16_t*>(dst + static_cast<size_t>(b) * 34);
-                uint16_t v = *d;
-                int exp = (v >> 10) & 0x1F;
-                if (exp == 0x1F || exp == 0)
-                    continue;
-                if (exp <= 4)
-                    *d = static_cast<uint16_t>(v & 0x8000u);
-                else
-                    *d = static_cast<uint16_t>(v - (4u << 10));
+                *d = gguf_float_to_half(gguf_half_to_float(*d) * 0.0625f);
             }
             model->host_owned_buffers_.push_back(dst);
             t.data = dst;
@@ -945,9 +1002,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 case QType::F32:
                     return scale_f32(t);
                 case QType::F16:
-                    return scale_half_like(t, 10, 0x1F);
+                    return scale_f16(t);
                 case QType::BF16:
-                    return scale_half_like(t, 7, 0xFF);
+                    return scale_bf16(t);
                 case QType::Q8_0:
                     return scale_q8_0(t);
                 default:
