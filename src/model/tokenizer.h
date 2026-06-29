@@ -31,6 +31,11 @@ public:
     void set_add_bos(bool add) { add_bos_ = add; }
     bool add_bos() const { return add_bos_; }
 
+    // Override the BOS token ID (default 1). Called by model loaders when the
+    // model's BOS token is not in the hardcoded detection list (e.g. DeepSeek's
+    // "<｜begin▁of▁sentence｜>" which maps to ID 100000).
+    void set_bos_id(int id) { bos_id_ = id; }
+
     // Control SentencePiece leading-space prefix (▁)
     void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
     bool add_space_prefix() const { return add_space_prefix_; }

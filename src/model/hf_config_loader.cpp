@@ -311,13 +311,25 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
 
     // MoE config
     if (!jobj_get_int(eff, "num_local_experts", cfg.n_experts)) {
-        jobj_get_int(eff, "num_experts", cfg.n_experts);
+        if (!jobj_get_int(eff, "num_experts", cfg.n_experts)) {
+            // DeepSeek-V2/V3: routed experts count (distinct from shared experts)
+            jobj_get_int(eff, "n_routed_experts", cfg.n_experts);
+        }
     }
     if (!jobj_get_int(eff, "num_experts_per_tok", cfg.n_experts_active)) {
         jobj_get_int(eff, "top_k_experts", cfg.n_experts_active);
     }
     if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
         jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
+    }
+    // Shared (always-active) experts alongside routed experts (DeepSeek-V2/V3,
+    // Nemotron-H). Parsed here for all architectures; the arch-specific blocks
+    // below may set additional fields.
+    {
+        int n_shared = 0;
+        if (jobj_get_int(eff, "n_shared_experts", n_shared) && n_shared > 0) {
+            cfg.n_experts_shared = n_shared;
+        }
     }
     // gpt-oss: no separate MoE intermediate key — intermediate_size IS the
     // per-expert FFN width (2880); there is no dense FFN at all.
@@ -607,21 +619,63 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         cfg.mlp_bias = (mlp_bias->num_val != 0.0) ? 1 : 0;
     }
 
-    // DeepSeek V2/V3 Multi-head Latent Attention (MLA) detection. Imp's
-    // DEEPSEEK forward path is standard MHA — feeding it an MLA checkpoint
-    // produces silently wrong outputs. The HF config fields `kv_lora_rank`
-    // and `q_lora_rank` are the unambiguous indicator.
+    // DeepSeek V2/V3 Multi-head Latent Attention (MLA) config.
+    // kv_lora_rank > 0 is the unambiguous MLA indicator. When present, override
+    // head_dim and rope_dim to match the decoupled-head layout.
     if (cfg.arch == ModelArch::DEEPSEEK) {
-        int kv_lora = 0, q_lora = 0;
-        jobj_get_int(eff, "kv_lora_rank", kv_lora);
-        jobj_get_int(eff, "q_lora_rank", q_lora);
-        if (kv_lora > 0 || q_lora > 0) {
-            IMP_LOG_WARN(
-                "DeepSeek-V2/V3 MLA detected (kv_lora_rank=%d q_lora_rank=%d) "
-                "but imp's DEEPSEEK path uses standard MHA. Inference will "
-                "produce incorrect outputs. MLA support is a separate audit "
-                "item (#17).",
-                kv_lora, q_lora);
+        jobj_get_int(eff, "kv_lora_rank",        cfg.kv_lora_rank);
+        jobj_get_int(eff, "q_lora_rank",         cfg.q_lora_rank);     // absent/null -> stays 0
+        jobj_get_int(eff, "qk_rope_head_dim",    cfg.qk_rope_head_dim);
+        jobj_get_int(eff, "qk_nope_head_dim",    cfg.qk_nope_head_dim);
+        jobj_get_int(eff, "v_head_dim",          cfg.v_head_dim);
+        jobj_get_int(eff, "first_k_dense_replace", cfg.first_k_dense_replace);
+        if (cfg.is_mla()) {
+            // Decoupled-head layout: each attention head has qk_nope_head_dim
+            // non-RoPE dims plus qk_rope_head_dim RoPE dims.
+            cfg.head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim;
+            cfg.rope_dim = cfg.qk_rope_head_dim;
+            // YaRN mscale from rope_scaling. Use mscale_all_dim (the value
+            // that HF applies to the softmax scale) with a fallback to mscale.
+            // In DeepSeek-V2-Lite both are 0.707; V3 may differ.
+            const JValue* rs = jobj_find(eff, "rope_scaling");
+            if (rs && rs->type == JType::OBJECT) {
+                jobj_get_float(*rs, "mscale", cfg.mla_mscale);
+                // Override with mscale_all_dim if present (preferred for softmax scale).
+                jobj_get_float(*rs, "mscale_all_dim", cfg.mla_mscale);
+            }
+            IMP_LOG_INFO("  MLA: kv_lora_rank=%d q_lora_rank=%d "
+                         "qk_rope=%d qk_nope=%d v_head=%d head_dim=%d mla_mscale=%.4f",
+                         cfg.kv_lora_rank, cfg.q_lora_rank,
+                         cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.v_head_dim,
+                         cfg.head_dim, cfg.mla_mscale);
+            // MLA + YaRN rope mscale correction.
+            //
+            // The rope_yarn kernel computes:
+            //   mscale_final = yarn_attn_factor * (1 + 0.1 * log(rope_freq_scale))
+            //
+            // HF DeepSeek-V2 applies to cos/sin:
+            //   mscale = yarn_get_mscale(factor, config.rope_scaling.mscale)
+            //           = 0.1 * mscale * log(factor) + 1
+            //
+            // With the default yarn_attn_factor=1.0, imp gives 1 + 0.1*log(factor)
+            // which ignores the config's mscale field.  Correct it by adjusting
+            // yarn_attn_factor so mscale_final matches HF.  mla_mscale is loaded
+            // from mscale_all_dim (preferred) or mscale; for V2-Lite both are 0.707.
+            //
+            // For V2-Lite (factor=40, mscale=0.707):
+            //   HF rope mscale = 0.1*0.707*ln(40)+1 = 1.261
+            //   imp default     = 0.1*1.0 *ln(40)+1 = 1.369
+            //   yarn_attn_factor = 1.261 / 1.369 = 0.9208
+            if (cfg.yarn_ext_factor > 0.0f && cfg.rope_freq_scale > 1.0f) {
+                const float log_scale = std::log(cfg.rope_freq_scale);
+                const float hf_mscale = 0.1f * cfg.mla_mscale * log_scale + 1.0f;
+                const float imp_mscale = 0.1f * log_scale + 1.0f;
+                cfg.yarn_attn_factor = hf_mscale / imp_mscale;
+                IMP_LOG_INFO("  MLA YaRN rope-mscale adjust: yarn_attn_factor=%.4f "
+                             "(hf_mscale=%.4f, attn_scale_multiplier=%.4f)",
+                             cfg.yarn_attn_factor, hf_mscale,
+                             hf_mscale * hf_mscale);
+            }
         }
     }
 
@@ -869,13 +923,22 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir, Tokenize
     read_bool("add_prefix_space", out.add_prefix_space);
     read_bool("use_default_system_prompt", out.use_default_system_prompt);
 
+    // Read BOS/EOS token content strings — may be plain strings or AddedToken
+    // objects ({"__type": "AddedToken", "content": "...", ...}).
+    // DeepSeek models use AddedToken objects for their custom BOS/EOS strings.
+    if (const JValue* bos = jobj_find(root, "bos_token"))
+        out.bos_token = extract_token_content(*bos);
+    if (const JValue* eos = jobj_find(root, "eos_token"))
+        out.eos_token = extract_token_content(*eos);
+
     IMP_LOG_INFO(
         "tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s "
-        "use_default_system_prompt=%s",
+        "use_default_system_prompt=%s bos_token='%s' eos_token='%s'",
         out.add_bos_token < 0 ? "unset" : (out.add_bos_token ? "true" : "false"),
         out.add_eos_token < 0 ? "unset" : (out.add_eos_token ? "true" : "false"),
         out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"),
-        out.use_default_system_prompt < 0 ? "unset" : (out.use_default_system_prompt ? "true" : "false"));
+        out.use_default_system_prompt < 0 ? "unset" : (out.use_default_system_prompt ? "true" : "false"),
+        out.bos_token.c_str(), out.eos_token.c_str());
     return true;
 }
 

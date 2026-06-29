@@ -452,10 +452,13 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
 
 // Generic non-templated fallback for arbitrary head_dim (e.g. tests with head_dim=8).
 // Uses strided lane mapping with bounds checks. No vectorization.
+// v_head_dim: when non-zero and != head_dim, read only v_head_dim elements from V
+// (V slots are head_dim-sized; only first v_head_dim are valid). Output O is
+// [batch, n_heads, v_head_dim]. For standard models pass v_head_dim == head_dim.
 __global__ void paged_attention_decode_kernel_generic(
     const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache,
     half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
-    int batch_size, int n_heads, int n_kv_heads, int head_dim, int block_size, float scale,
+    int batch_size, int n_heads, int n_kv_heads, int head_dim, int v_head_dim, int block_size, float scale,
     int max_context_len, int max_num_blocks, int sliding_window, int n_sinks, float softcap) {
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -468,7 +471,10 @@ __global__ void paged_attention_decode_kernel_generic(
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
 
+    // elems_per_thread covers QK dot-product dimension (head_dim)
     const int elems_per_thread = (head_dim + WARP_SIZE - 1) / WARP_SIZE;
+    // v_elems_per_thread covers V accumulation dimension (v_head_dim <= head_dim)
+    const int v_elems_per_thread = (v_head_dim + WARP_SIZE - 1) / WARP_SIZE;
 
     // Load Q into registers (strided mapping with bounds check)
     const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * head_dim + (int64_t)head_idx * head_dim;
@@ -479,13 +485,14 @@ __global__ void paged_attention_decode_kernel_generic(
     }
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    // KV block stride uses head_dim (V slots are head_dim-sized even for MLA)
     const int kv_block_stride = block_size * n_kv_heads * head_dim;
     const int kv_slot_stride = n_kv_heads * head_dim;
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
     float o_reg[16];  // max head_dim=512 → 16 elems/lane
-    for (int i = 0; i < elems_per_thread; i++)
+    for (int i = 0; i < v_elems_per_thread; i++)
         o_reg[i] = 0.0f;
 
     // NOTE: n_sinks is threaded into the kernel signature for API parity but
@@ -537,10 +544,11 @@ __global__ void paged_attention_decode_kernel_generic(
             float rescale, w_new;
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
+            // V slot is head_dim-wide; read only v_head_dim elements (MLA over-allocation)
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
-            for (int i = 0; i < elems_per_thread; i++) {
+            for (int i = 0; i < v_elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
-                if (d < head_dim)
+                if (d < v_head_dim)
                     o_reg[i] = rescale * o_reg[i] + w_new * __half2float(ldcs_half(&V_tok[d]));
             }
         }
@@ -549,16 +557,17 @@ __global__ void paged_attention_decode_kernel_generic(
     extern __shared__ char smem[];
     float* warp_max = reinterpret_cast<float*>(smem);
     float* warp_l = warp_max + NUM_WARPS;
+    // Reduction buffer for O uses v_head_dim (not head_dim) — output is narrower
     float* warp_o = warp_l + NUM_WARPS;
 
     if (lane_id == 0) {
         warp_max[warp_id] = m_w;
         warp_l[warp_id] = l_w;
     }
-    for (int i = 0; i < elems_per_thread; i++) {
+    for (int i = 0; i < v_elems_per_thread; i++) {
         int d = lane_id + i * WARP_SIZE;
-        if (d < head_dim)
-            warp_o[warp_id * head_dim + d] = o_reg[i];
+        if (d < v_head_dim)
+            warp_o[warp_id * v_head_dim + d] = o_reg[i];
     }
     __syncthreads();
 
@@ -571,18 +580,19 @@ __global__ void paged_attention_decode_kernel_generic(
         for (int w = 0; w < NUM_WARPS; w++)
             global_l += expf(warp_max[w] - global_max) * warp_l[w];
 
-        for (int i = 0; i < elems_per_thread; i++) {
+        for (int i = 0; i < v_elems_per_thread; i++) {
             int d = lane_id + i * WARP_SIZE;
-            if (d < head_dim) {
+            if (d < v_head_dim) {
                 float o_val = 0.0f;
                 for (int w = 0; w < NUM_WARPS; w++) {
                     float weight = expf(warp_max[w] - global_max) * warp_l[w];
-                    o_val += weight * warp_o[w * head_dim + d];
+                    o_val += weight * warp_o[w * v_head_dim + d];
                 }
                 if (global_l > 0.0f)
                     o_val /= global_l;
 
-                int out_idx = batch_idx * n_heads * head_dim + head_idx * head_dim + d;
+                // Output index uses v_head_dim (not head_dim) for MLA
+                int out_idx = batch_idx * n_heads * v_head_dim + head_idx * v_head_dim + d;
                 stcs_half(&O[out_idx], __float2half(o_val));
             }
         }
@@ -1310,26 +1320,34 @@ __global__ void paged_attention_cluster_kernel(const half* __restrict__ Q, const
 void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                             const int* block_tables, const int* context_lens, int block_size, float scale,
                             int max_context_len, int sliding_window, float softcap, cudaStream_t stream,
-                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks, int v_head_dim) {
     const half* sinks_h = static_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
     const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
+    // Effective V head dim: 0 or equal to head_dim means symmetric (non-MLA)
+    const int vhd = (v_head_dim > 0 && v_head_dim != head_dim) ? v_head_dim : head_dim;
 
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    // Shared memory: warp_max[NW] + warp_l[NW] + warp_o[NW * head_dim]
+    // Shared memory: warp_max[NW] + warp_l[NW] + warp_o[NW * vhd]
+    // For MLA (vhd < head_dim), O accumulation uses vhd — smem shrinks accordingly.
     size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                        NUM_WARPS * head_dim * sizeof(float);
+                        NUM_WARPS * vhd * sizeof(float);
 
     // ---- Decide whether to use split-K ----
     // Split-K improves SM utilization when n_heads * batch_size is small
     // relative to the GPU SM count. This handles both GQA and MHA models —
     // the split-K kernel maps kv_head = head_idx / (n_heads / n_kv_heads).
+    //
+    // MLA (vhd != head_dim): split-K kernels are templated on standard head_dims
+    // (64/96/128/256/512) and don't support asymmetric V dims. Force num_splits=1
+    // so the generic kernel handles MLA correctly.
     int total_blocks_nosplit = batch_size * n_heads;
     int num_splits = 1;
+    const bool is_mla_asymmetric = (vhd != head_dim);
 
     // Flash-decode style split-K: parallelize KV sequence across multiple CTAs.
     // Each split processes a chunk of KV blocks independently with per-warp
@@ -1340,7 +1358,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     // aggressive splitting gives 2-3× speedup on long contexts (>1K tokens).
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     static int num_sms = kpar_n_sms();  // cached SM count query
-    if (num_ctx_blocks >= 4 && s_splitk_scratch != nullptr) {
+    if (!is_mla_asymmetric && num_ctx_blocks >= 4 && s_splitk_scratch != nullptr) {
         // Flash-decode heuristic: split when SMs are underutilized AND
         // each split gets enough KV blocks to amortize the merge overhead.
         // The Phase 2 merge kernel costs ~5µs — need ≥4 KV blocks/split to break even.
@@ -1597,12 +1615,13 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 LAUNCH_MHA(512);
                 break;
             default:
-                // Generic non-templated fallback for non-standard head_dim (e.g. tests)
+                // Generic non-templated fallback for non-standard head_dim (e.g. tests or MLA)
+                // Pass vhd so the kernel reads only v_head_dim elements from each V slot.
                 paged_attention_decode_kernel_generic<<<grid, block, smem_bytes, stream>>>(
                     reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
                     reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
-                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale,
-                    max_context_len, max_num_blocks, sliding_window, n_sinks, softcap);
+                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, vhd, block_size,
+                    scale, max_context_len, max_num_blocks, sliding_window, n_sinks, softcap);
                 break;
         }
 #undef LAUNCH_MHA

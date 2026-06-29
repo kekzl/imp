@@ -1271,6 +1271,33 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             if (tflags.use_default_system_prompt >= 0) {
                 model->tokenizer_->set_use_default_system_prompt(tflags.use_default_system_prompt != 0);
             }
+            // Resolve BOS/EOS token IDs from the token content strings.
+            // This handles models like DeepSeek whose BOS token string
+            // ("<｜begin▁of▁sentence｜>") is not in the hardcoded detection
+            // list in tokenizer.cpp — they land in added_tokens and are
+            // already in the vocabulary; we just need to wire up the ID.
+            if (!tflags.bos_token.empty()) {
+                int32_t bid = model->tokenizer_->find_token(tflags.bos_token);
+                if (bid >= 0) {
+                    model->tokenizer_->set_bos_id(bid);
+                    IMP_LOG_INFO("tokenizer_config.json: resolved bos_token '%s' -> id %d",
+                                 tflags.bos_token.c_str(), bid);
+                } else {
+                    IMP_LOG_WARN("tokenizer_config.json: bos_token '%s' not found in vocab",
+                                 tflags.bos_token.c_str());
+                }
+            }
+            if (!tflags.eos_token.empty()) {
+                int32_t eid = model->tokenizer_->find_token(tflags.eos_token);
+                if (eid >= 0) {
+                    model->tokenizer_->add_eos_id(eid);
+                    IMP_LOG_INFO("tokenizer_config.json: resolved eos_token '%s' -> id %d",
+                                 tflags.eos_token.c_str(), eid);
+                } else {
+                    IMP_LOG_WARN("tokenizer_config.json: eos_token '%s' not found in vocab",
+                                 tflags.eos_token.c_str());
+                }
+            }
         }
     }
 

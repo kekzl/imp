@@ -100,11 +100,21 @@
 
         // Paged attention: Q shape depends on batch size
         int n_seq = state.n_sequences;
+        // For MLA: V head dim may be narrower than Q/K head dim.
+        // vhd == hd for all non-MLA models (v_head_dim == 0 or == head_dim).
+        const int vhd = (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd)
+                            ? cfg.v_head_dim : hd;
         // For decode, n_tokens == n_sequences (one token per seq)
         int64_t qd[4] = {n_seq, 1, nh, hd};
-        int64_t od[4] = {n_seq, 1, nh, hd};
+        // Output is [batch, 1, n_heads, vhd] — narrower for MLA
+        int64_t od[4] = {n_seq, 1, nh, vhd};
         Tensor q4 = qv.reshape(4, qd);
-        Tensor o4 = ao.reshape(4, od);
+        // attn_out_ is allocated for nh*hd; for MLA the live output is only
+        // nh*vhd (the paged kernel writes nh*vhd contiguously per token).
+        // reshape() enforces equal numel, so build the narrower view from the
+        // pointer directly when vhd != hd; otherwise reshape (identical layout).
+        Tensor o4 = (vhd != hd) ? Tensor(ao.data, ao.qtype, 4, od, /*on_device=*/true)
+                                : ao.reshape(4, od);
 
         KVCache* cache = state.kv_cache;
         const int kv_bs = cache->block_size();
@@ -235,7 +245,7 @@
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode(q4, k_c, v_c, o4, state.block_tables, state.context_lens, kv_bs, scale,
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                   stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
+                                   stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks, vhd);
         }
         if (attn_sinks && cache_dtype != QType::F16) {
             static bool warned_sinks_kv = false;

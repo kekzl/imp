@@ -32,6 +32,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/hadamard.h"
+#include "compute/mla_kv_assemble.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -351,9 +352,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // know theta + 1/scale — no ramp blending, no attn_factor. Prefill
         // K would be YaRN-correct but every decode-written K plain-RoPE →
         // degeneration from token 2. Keep YaRN on the separate full path.
+        // MLA uses asymmetric K/V head dims (hd=192, vhd=128): the fused rope-KV
+        // write kernel doesn't support different K vs V dimensions, so disable it.
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
                                  state.kv_cache->qtype() == QType::F16 && prof.attn_variant != AttnVariant::NOPE &&
-                                 cfg.yarn_ext_factor <= 0.0f);
+                                 cfg.yarn_ext_factor <= 0.0f && !cfg.is_mla());
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -446,7 +449,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     //   Standard archs: 1/sqrt(head_dim).
     //   Gemma 4: 1.0 (confirmed by llama.cpp print_info: f_attn_scale = 1.0.
     //                 Q-norm and K-norm absorb the per-element scaling).
+    //   MLA (DeepSeek-V2/V3): multiply by YaRN mscale_adj^2 where
+    //     mscale_adj = 0.1 * mscale_all_dim * ln(yarn_factor) + 1.0.
+    //   For V2-Lite (mscale_all_dim=0.707, factor=40): adj≈1.261, adj^2≈1.590.
     float scale = (prof.is_gemma4) ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
+    if (cfg.is_mla()) scale *= mla_attention_scale_multiplier(cfg);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the
@@ -465,6 +472,46 @@ after_attention:
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step3_after_paged_attn", ao, stream);
         debug_tensor_stats("L0_step3_h_before_oproj", h, stream);
+    }
+
+    // MLA: V head dim (vhd) is narrower than the QK head dim (hd). The o_proj
+    // expects an [n, nh * vhd] input. The two attention paths leave ao in
+    // different layouts:
+    //   - Decode (paged kernel): writes the result COMPACTLY as [n, nh*vhd]
+    //     directly into attn_out_ (the kernel knows v_head_dim). Only a shape
+    //     fixup is needed.
+    //   - Prefill (cuBLAS/FA2/FMHA): these kernels accumulate V at hd because
+    //     the materialized V was zero-padded to hd, so ao is [n, nh, hd] with
+    //     the real values in the first vhd dims of each head and zeros in the
+    //     tail. A per-head compaction [n, nh, hd] -> [n, nh, vhd] is required;
+    //     a naive shape narrow would reinterpret an hd-strided buffer as
+    //     vhd-compact (wrong — it would take the first nh*vhd contiguous
+    //     elements, mixing head boundaries).
+    if (cfg.is_mla() && cfg.v_head_dim > 0 && cfg.v_head_dim != hd) {
+        const int vhd = cfg.v_head_dim;
+        const int64_t mla_ao_cols = static_cast<int64_t>(nh) * vhd;
+        if (state.is_prefill) {
+            // Compact hd-strided -> vhd-compact via a scratch buffer (src/dst
+            // must not alias). Prefill is not CUDA-graph-captured, so the
+            // stream-ordered alloc is amortised in the pool (same pattern as the
+            // chunked-prefill gather above).
+            void* compact_buf = nullptr;
+            const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&compact_buf, bytes, stream));
+            mla_compact_attn_output(static_cast<const half*>(ao.data),
+                                    static_cast<half*>(compact_buf), n, nh, hd, vhd, stream);
+            // Copy compacted result back into attn_out_ (dst pitch < src pitch,
+            // separate-buffer source — no in-place hazard) and narrow the view.
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ao.data, compact_buf, bytes,
+                                               cudaMemcpyDeviceToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(compact_buf, stream));
+        }
+        // Both paths: narrow the view so o_proj sees nh*vhd. (Decode already
+        // wrote compact data; prefill just copied compact data into ao.)
+        if (ao.shape[1] != mla_ao_cols) {
+            ao.shape[1] = mla_ao_cols;
+            ao.compute_strides();
+        }
     }
 
     // Qwen3.5 attention output gate: ao[i] *= sigmoid(gate[i])

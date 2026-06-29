@@ -200,7 +200,15 @@ bool Engine::init_weights() {
     // MXFP4 → garbage) and disable CUDA graphs.
     if (mcfg.n_experts > 0 && !model_->profile().is_gpt_oss) {
         for (int i = 0; i < mcfg.n_layers; i++) {
-            if (model_->layer(i).expert_up_packed.data && !model_->layer(i).expert_up_packed.on_device) {
+            const auto& L = model_->layer(i);
+            // Packed-tensor path (most MoE archs) OR per-expert 2D views
+            // (DeepSeek-V2 SafeTensors builds no expert_*_packed — only
+            // expert_w_up[e]). Either being host-resident means the decode
+            // MoE uses the D2H-sync host path, which is NOT graph-capturable.
+            bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
+            bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data &&
+                             !L.expert_w_up[0].on_device;
+            if (packed_host || view_host) {
                 experts_on_host_ = true;
                 break;
             }

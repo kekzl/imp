@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "model/model_arch.h"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -48,6 +49,19 @@ struct ModelConfig {
     bool gdn_grouped_head_layout = false;
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
+
+    // MLA (DeepSeek-V2/V3). kv_lora_rank > 0 selects the MLA path.
+    int   kv_lora_rank      = 0;     // 512 (V2-Lite) / 1024 (V3)
+    int   q_lora_rank       = 0;     // 0 = full Q projection (V2-Lite); >0 = Q down/up LoRA (V3)
+    int   qk_rope_head_dim  = 0;     // 64  — decoupled RoPE key dims
+    int   qk_nope_head_dim  = 0;     // 128 — non-RoPE key dims
+    int   v_head_dim        = 0;     // 128 — value head dim
+    // YaRN mscale used for the softmax attention-scale adjustment.
+    // Stores rope_scaling.mscale_all_dim if present, else rope_scaling.mscale.
+    // For DeepSeek-V2-Lite both are 0.707; the distinction matters for V3.
+    float mla_mscale        = 1.0f;
+    bool  is_mla() const { return kv_lora_rank > 0; }
+    int   first_k_dense_replace = 0; // layers [0, k) use dense FFN even in a MoE model
     // NoPE attention (Nemotron-H family): attention layers use NO rotary
     // embedding — position is carried by the recurrent (Mamba) layers.
     bool rope_attn_disabled = false;
@@ -142,6 +156,21 @@ struct ModelConfig {
     } overrides;
 };
 
+// YaRN mscale attention-scale multiplier for MLA models (Task 2.5).
+//
+// DeepSeek-V2/V3 uses a YaRN-adjusted softmax scale:
+//   mscale_adj = 0.1 * mscale_all_dim * ln(factor) + 1.0   (factor = rope_freq_scale)
+//   attention_scale = (1 / sqrt(head_dim)) * mscale_adj^2
+//
+// This helper returns mscale_adj^2 when the config is an MLA model with
+// YaRN factor > 1, and 1.0f otherwise (leaving non-MLA models unaffected).
+inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
+    if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f) return 1.0f;
+    const float mscale_adj =
+        0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
+    return mscale_adj * mscale_adj;
+}
+
 // Forward declaration — full definition in quant/nvfp4_quant.h.
 // Used by nvfp4_moe_*_ptr borrowed pointers below.
 struct NvFP4MoEQuantResult;
@@ -167,6 +196,11 @@ struct NvFP4PreQuantWeight {
 
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
+    // MLA (Multi-head Latent Attention) projections (DeepSeek-V2/V3).
+    // kv_a_proj: kv_a_proj_with_mqa — packed latent(512)+rope(64) down-projection.
+    // kv_a_layernorm: RMSNorm weight on the 512-dim latent (never quantized).
+    // kv_b_proj: up-projection, output 16*(128+128)=4096.
+    Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
     Tensor q_bias, k_bias, v_bias;         // Attention biases (Qwen2)
     Tensor o_bias;                         // Output-projection bias (gpt-oss)
     Tensor attn_sinks;                     // Per-head sink logits [n_heads] (gpt-oss)
@@ -220,6 +254,10 @@ struct TransformerLayer {
     TensorID wk_id = kInvalidTensorID;
     TensorID wv_id = kInvalidTensorID;
     TensorID wo_id = kInvalidTensorID;
+    // MLA WeightRegistry indices
+    TensorID kv_a_proj_id = kInvalidTensorID;
+    TensorID kv_a_norm_id = kInvalidTensorID;
+    TensorID kv_b_proj_id = kInvalidTensorID;
     TensorID w_gate_id = kInvalidTensorID;
     TensorID w_up_id = kInvalidTensorID;
     TensorID w_down_id = kInvalidTensorID;

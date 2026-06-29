@@ -173,7 +173,14 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
             kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
     } else {
-        // Standard FP16 KV cache write path — fused K+V in single launch
+        // Standard FP16 KV cache write path — fused K+V in single launch.
+        //
+        // MLA note: the V workspace (v_) is over-allocated to head_dim (hd) per
+        // head by mla_assemble_kv (real v_head_dim values first, tail zeroed), so
+        // V already shares K's hd-wide layout here. The fused write therefore
+        // stores hd-wide K and hd-wide (padded) V uniformly — no asymmetric V
+        // path is needed. Decode reads only v_head_dim per V head; the zero tail
+        // is harmless. row_elems == nkv * hd for both K and V.
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
         dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V

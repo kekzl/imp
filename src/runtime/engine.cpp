@@ -506,8 +506,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         switch (mp.attn_variant) {
             case ModelProfile::AttnVariant::GEMMA4_SWA: av = "gemma4_swa"; break;
             case ModelProfile::AttnVariant::GPTOSS_SWA: av = "gptoss_swa"; break;
-            case ModelProfile::AttnVariant::NOPE: av = "nope"; break;
-            case ModelProfile::AttnVariant::STANDARD: av = "standard"; break;
+            case ModelProfile::AttnVariant::NOPE:       av = "nope";       break;
+            case ModelProfile::AttnVariant::MLA:        av = "mla";        break;
+            case ModelProfile::AttnVariant::STANDARD:   av = "standard";   break;
         }
         IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s",
                      mp.is_moe, mp.is_gdn, mp.is_ssm, mp.is_hybrid, mp.is_dense, av);

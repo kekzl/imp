@@ -28,9 +28,12 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
                                align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     // K and V are contiguous (no alignment gap) to enable strided batched GEMM.
     // v_.data == k_.data + kv_raw exactly, so output_stride = kv_raw / es.
+    // MLA: mla_assemble_kv materialises K/V for all n_heads (not just n_kv_heads=1),
+    // so size the workspace to n_heads * head_dim to avoid overflow.
     {
-        size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
-        int64_t kv_shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(nkv * hd)};
+        int kv_cols = cfg.is_mla() ? (nh * hd) : (nkv * hd);
+        size_t kv_raw = static_cast<size_t>(max_tokens) * kv_cols * es;
+        int64_t kv_shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(kv_cols)};
         k_ = Tensor(ptr, compute_dtype_, 2, kv_shape, true);
         v_ = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
         ptr += align256(2 * kv_raw);

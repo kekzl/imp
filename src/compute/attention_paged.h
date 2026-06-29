@@ -18,11 +18,16 @@ namespace imp {
 // attn_sinks (gpt-oss, #547): per-head learned sink logits [n_heads] FP16 —
 //          virtual extra softmax column (denominator += exp(sink - max),
 //          column dropped). Unrelated to the positional n_sinks above.
+// v_head_dim: 0 = same as head_dim (standard path). For MLA with asymmetric
+// QK (head_dim=192) vs V (v_head_dim=128), pass v_head_dim=128 to read only
+// v_head_dim elements from each V slot and write O as [batch, 1, n_heads, v_head_dim].
+// V slots are allocated with head_dim-sized strides (over-allocation); the kernel
+// reads only v_head_dim elements. Non-MLA models: leave at 0.
 void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                             const int* block_tables, const int* context_lens, int block_size, float scale,
                             int max_context_len, int sliding_window = 0, float softcap = 0.0f,
                             cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0,
-                            const void* attn_sinks = nullptr);
+                            const void* attn_sinks = nullptr, int v_head_dim = 0);
 
 // Set split-K scratch buffer for paged attention. Must be called before
 // paged_attention_decode if split-K is desired. The scratch buffer holds

@@ -125,7 +125,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::LLAMA, "llama", kApiLlama, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::MISTRAL, "mistral", kApiMistral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::MIXTRAL, "mixtral", kApiMixtral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::DEEPSEEK, "deepseek", kApiDeepseek, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    // rope=0 (interleaved): DeepSeek-V2/V3 apply_rotary_pos_emb deinterleaves
+    // q_pe/k_pe (view[d/2,2].transpose) before NeoX rotate_half, so the effective
+    // decoupled-RoPE rotation is on interleaved pairs (2i,2i+1), NOT NeoX (i,i+d/2).
+    {ModelArch::DEEPSEEK, "deepseek", kApiDeepseek, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::NEMOTRON_H_MOE, "nemotron_h_moe", kApiNemotronHMoe, -1, 0, 2, -1, true, false, 0.6f, 0.95f,
      0},
     {ModelArch::QWEN3, "qwen3", kApiQwen3, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
