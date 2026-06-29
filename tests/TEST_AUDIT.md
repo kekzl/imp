@@ -1,8 +1,8 @@
 # Test Suite Audit & Refactor Plan — Re-Audit 2026-06-06
 
-Commit base: `7a94d81f` (post-#574) · Predecessor: [`docs/TEST_AUDIT.md`](../docs/TEST_AUDIT.md)
+Commit base: `7a94d81f` (post-#574) · Predecessor: `docs/TEST_AUDIT.md`
 (2026-06-04, Phase-1 gap analysis; its top-10 program was implemented via PRs
-#527–#539). This document is the **delta re-audit** after PRs #538–#574
+#527–#539; archived 2026-06-29 → [`docs/archive/README.md`](../docs/archive/README.md), full text in git history). This document is the **delta re-audit** after PRs #538–#574
 (gpt-oss, LoRA, IQ4, chunked-NLL rework, CUTLASS grouped GEMM, issue sweep)
 plus the dimensions not covered by the 06-04 audit (perf variance,
 stale/dead, runtime/split).

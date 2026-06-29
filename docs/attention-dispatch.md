@@ -82,4 +82,4 @@ cuBLAS path passes `cfg.attn_logit_softcap` through `attention_cublas_prefill`. 
 
 ## Known wounds
 
-- **1 GiB cuBLAS S-matrix workspace** (`executor_workspace_buffers.cu`). Caps maximum context length. Phase 5 Track E (tiled streaming softmax) deferred as ~10-15-day perf-sensitive work. Reopens when a regression specifically attributes to the workspace cap.
+- **~384 MiB cuBLAS S-matrix workspace** (default `attention.attn_scores_mib`, `executor_workspace_buffers.cu`). Caps maximum context length for the legacy hd≠128 cuBLAS fallback (FA2 is the primary hd=128 path since #687). Phase 5 Track E (the six-variant tiled streaming softmax) was **closed**, not deferred — code removed in PR #358. Reopens only if a regression specifically attributes to the workspace cap.

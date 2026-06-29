@@ -104,8 +104,12 @@ implementation plan and (often) a findings memo:
 - **Refuted / parked:** TurboQuant phases 1–2 (microbench + NIAH → retired);
   Q4_K_M INT8-IMMA **phase 3 refuted on the real model** (phase-2B ceiling reached —
   the dense path loses to cuBLAS; the MoE-prefill win shipped separately); MTP
-  phase 2.2/3.5/5.5 + wiring (parked — see `docs/audit` / memory: "MTP no bug,
-  genuine ~25-30%, parked").
+  phase 2.2/3.5/5.5 + wiring (parked). **Update (#804):** the "MTP no bug,
+  genuine ~25-30% acceptance" verdict was superseded — there *was* a bug (the
+  attn-output gate used silu instead of sigmoid); fixing it lifts acceptance to
+  85%+ on Qwen3.6. Spec-decode *generation* via the head stays parked for a
+  different reason (GDN-hybrid recurrent state through verify + net-negative
+  economics — needs a non-recurrent MTP model).
 
 ## 2026-06-20 consolidation — superseded audits, closed specs, diagnostic memos
 
@@ -139,14 +143,17 @@ the live `audit/` memos, or shipped PRs. Originals removed; full text in git his
   cleanup; **completed** PR #404.
 
 **Superseded toolchain snapshot:**
-- `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey, superseded by
-  the canonical `docs/ptx-status-2026-05-29-cuda133-sm120a.md` (13.3 is the build toolchain).
+- `ptx-status-2026-05-29-cuda132-sm120a.md` — CUDA 13.2 PTX-acceptance survey. (Its successor
+  `docs/ptx-status-2026-05-29-cuda133-sm120a.md` was also archived on 2026-06-29 — see below.)
 
 **Completed design specs + plans (`superpowers/`) — work shipped, refactor program closed (#404):**
 The component rationale now lives in the headers themselves (`quant_pipeline.h`, `workspace.h`,
 `engine_internal.h`, `pre_dequant_internal.h`, `memory_manager.h`, `tensor_kind_table.h`), which
-point here. Forward-looking, *not-yet-implemented* specs (DeepSeek MLA, the Q4_K MMQ kernel) stay
-live under `superpowers/specs/`.
+point here. DeepSeek MLA shipped (#802/#803, see the 2026-06-29 entry below) and was consolidated
+here; the only spec still live under `superpowers/specs/` is the Q4_K MMQ kernel design — kept not
+as future work but as the **refutation record** cited by [`../roadmap.md`](../roadmap.md) (the
+forge experiment built the in-SMEM Q4_K MMQ + FP16 HMMA kernel and ncu-proved it ties, not beats,
+cuBLAS).
 - `specs/2026-05-20-architecture-refactor-roadmap-design.md` — Phase 1–5 refactor master roadmap;
   program **closed** (#404), Phases 3/4/5-TrackC landed across exec/runtime/memory.
 - `specs/2026-05-24-phase5-pr1-plan-driven-cache.md` + `specs/2026-05-24-q4k-vs-llamacpp-mmq-analysis.md`
@@ -158,6 +165,42 @@ live under `superpowers/specs/`.
 - `specs/2026-06-08-header-decongestion-design.md` + `plans/2026-06-08-header-decongestion.md` — D2 header split, shipped #630.
 - `specs/2026-06-08-workspace-component-design.md` + `plans/2026-06-08-workspace-component.md` — D2 Workspace extraction, shipped #631.
 
+## 2026-06-29 consolidation — DeepSeek MLA (shipped)
+
+The MLA architecture spec + implementation plan, kept live under `superpowers/` while MLA was
+forward-looking, were consolidated here once the work shipped. Originals removed; full text in git
+history.
+
+- `superpowers/specs/2026-05-28-mla-deepseeek-architecture-design.md` — MLA (Multi-head Latent
+  Attention) architecture design for DeepSeek-V2/V3: latent-vector KV for ~93% KV-cache reduction.
+- `superpowers/plans/2026-06-28-mla-deepseek-v2.md` — two-stage implementation plan: **Stage A**
+  (materialized — reconstruct full K/V from the latent at projection time, reusing every existing
+  attention/paged-KV/RoPE kernel) and **Stage B / Phase 3** (absorbed — store only the 512-dim
+  latent + 64-dim decoupled-RoPE key, paged-latent attention kernel).
+
+**Outcome:** both stages shipped — Stage A materialized (#802), Phase 3 absorbed latent-KV-cache
+decode (#803, opt-in). First MLA arch in imp; validated on DeepSeek-V2-Lite (PPL 6.06 vs HF 5.07).
+Current state lives in [`../supported-models.md`](../supported-models.md), [`../roadmap.md`](../roadmap.md),
+and the `src/compute/mla_*.{cu,h}` headers.
+
+## 2026-06-29 consolidation — frozen/superseded snapshots
+
+Three dated one-off snapshots whose conclusions are now embedded in code, newer audits, or shipped
+PRs. Originals removed; full text in git history.
+
+- `audit/performance_agent_readiness_2026_05_31.md` — perf-agent-readiness audit. Its own Executive
+  Summary declared the central premise dead ("'1258 tok/s, 20× behind vLLM' no longer holds"), its
+  only lever (A1) is annotated DONE (#525), and its "~18% materialized attention" finding was
+  re-measured to 0.0% on hd=128. Superseded by `audit/prefill_gap_2026_06_07.md` +
+  `audit/roofline_2026_06_07.md` (both still live).
+- `ptx-status-2026-05-29-cuda133-sm120a.md` — sm_120a ptxas-acceptance survey. Frozen 494-line
+  machine-generated snapshot; the filename said `cuda133` but the captured toolkit header was
+  `V13.2.78` (compute_120f). Re-run the survey on the real 13.3 toolchain if a fresh PTX-acceptance
+  matrix is needed.
+- `TEST_AUDIT.md` (was `docs/TEST_AUDIT.md`) — Test-Trustworthiness Phase-1 gap analysis (2026-06-04).
+  Superseded by the 2026-06-06 re-audit (`tests/TEST_AUDIT.md`) and the coverage-hardening work
+  (PR #717, server-test stage, CTest unit/gpu split). Kept the newer `tests/TEST_AUDIT.md` live.
+
 ---
 
-*Consolidated 2026-06-13 (housekeeping) and 2026-06-20. Originals live in git history.*
+*Consolidated 2026-06-13 (housekeeping), 2026-06-20, and 2026-06-29. Originals live in git history.*

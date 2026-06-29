@@ -8,16 +8,37 @@ measured, not estimated. No file other than this one was modified.
 
 > **Supersedes the prior `AUDIT.md`** (a test-coverage-only deliverable dated 2026-06-15; recoverable via
 > git history). Its verified conclusions and its two open bugs (F1/F2) are folded into §5 (Testing). The
-> full prior methodology also lives in `docs/TEST_AUDIT.md`.
+> full prior methodology lived in `docs/TEST_AUDIT.md` (archived 2026-06-29 → `docs/archive/README.md`; full text in git history).
 
 **Codebase size (measured):** 105,547 lines across `src/` + `include/` (151 `.h`, 115 `.cu`, 50 `.cpp`,
 6 `.cuh`). Layers under `src/`: core · memory · model · quant · compute · exec · runtime · lora · vision · api.
 
-**Headline:** the repo is **healthy and production-grade** — no blockers, build green, ~574 tests. The real
-gaps are in **CI enforcement** (no format/tidy gate; GPU correctness + perf gates are dark because there is
-no GPU runner), **build-system polish** (global flags instead of target-scoped; no presets; no package
-export), and a few **hygiene nits** (a stale hard-coded version string in tracked markdown; CLAUDE.md is
-gitignored; no `.clang-tidy`). Severity legend: **blocker / high / med / low**; effort **S/M/L**.
+**Headline:** the repo is **healthy and production-grade** — no blockers, build green, ~574 tests. As of
+the 2026-06-29 re-verification the only genuinely-open structural gap is **CI hardware** (GPU correctness +
+perf gates are dark because there is no self-hosted GPU runner — CI3/T1/BM1), plus minor build-system polish
+(no `install(EXPORT)`/package-config — B3). The Phase-1 backlog of format/tidy gates, CMakePresets,
+`.clang-tidy`, the `imp.conf`/`CLAUDE.md`/`AGENTS.md` hygiene nits, and the version-string finding are **all
+resolved** — see the Status block below. Severity legend: **blocker / high / med / low**; effort **S/M/L**.
+
+---
+
+## Status — Phase-1 findings resolved (2026-06-29)
+
+Re-verified against `main`; the findings below are **CLOSED** (the dated tables further down are kept as the
+original 2026-06-17/06-24 record, not corrected in place):
+
+- **B2** — `CMakePresets.json` present (`default`/`ci`/`debug`/`relwithdebinfo`).
+- **TL1 / CI2** — `.clang-tidy` present **and** a clang-tidy gate runs in `.github/workflows/ci.yml`.
+- **CI1** — format-check gate runs in `.github/workflows/ci.yml`.
+- **DOC1** — root `CLAUDE.md` is tracked, not gitignored (`git check-ignore CLAUDE.md` → not ignored).
+- **DOC2** — `AGENTS.md` present and tracked.
+- **G2** — `imp.conf` is gitignored (only `imp.conf.example` is the tracked template).
+- **G1** — `BENCHMARKS.md:6` is no longer a hardcoded version string (now "authoritative version; tagged
+  releases snapshot a SHA"). The `shipping-prs` skill's `current: vX.Y.Z` line is a separate skill file and
+  still worth a refresh, but is out of repo-doc scope.
+
+**Still genuinely open:** CI3/T1/BM1 (no self-hosted GPU runner → GPU correctness + perf gates dark) and B3
+(no package-config / `install(EXPORT)`).
 
 ---
 
@@ -121,7 +142,7 @@ tool-call + Bearer-auth unit tests, the 3-stage gate.
 | **T3** | **Open bug F2** — Qwen3.5-4B GGUF tokenizer diverged from an HF golden (13/20 byte-exact, contractions/whitespace) but is **unconfirmed/confounded** (pretokenizer vs model-version vs test-parser) | Needs a clean repro (proper JSON golden parser + confirmed-identical HF/GGUF pair) before filing. The entire prior cross-engine PPL gap (#657) was exactly this blind spot. | med | M |
 | **T4** | Tokenizer HF-parity + byte-exact chat-template goldens remain **env-gated / not committed** for most families (`test_tokenizer_compat.cpp` skips unless `IMP_TEST_MODEL` set, ≥80% bar) | Committing per-family goldens + a generator closes the highest-blast-radius dark spot. Infra-bound (needs a shipped tokenizer or HF in CI). | med | M |
 
-*Detail: prior `AUDIT.md` (git history) + `docs/TEST_AUDIT.md` + `tests/README.md`.*
+*Detail: prior `AUDIT.md` (git history) + `docs/TEST_AUDIT.md` (archived → git history) + `tests/README.md`.*
 
 ---
 

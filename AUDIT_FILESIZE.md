@@ -2,7 +2,7 @@
 
 Append-only log of file-size audits for imp. Each run is a dated section; the gate
 that enforces these thresholds is `tools/check_filesize.py` (config:
-`tools/filesize_thresholds.toml`). See also docs/AGENTS.md / CLAUDE.md
+`tools/filesize_thresholds.toml`). See also AGENTS.md / CLAUDE.md
 "File Layout & Size".
 
 ---

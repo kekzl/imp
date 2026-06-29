@@ -14,9 +14,9 @@
 
 Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
-**Last refreshed**: decode table 2026-06-06 (sourced from the SHA-anchored
-[`BENCHMARKS.md`](../BENCHMARKS.md): zoo re-bench 2026-05-30 commit `bebafd5`,
-Q8_0 baseline refresh 2026-06-04, PR #540). Prefill + KV-cache tables below are
+**Last refreshed**: decode numbers are owned by the SHA-anchored
+[`BENCHMARKS.md`](../BENCHMARKS.md) (see Decode Throughput below — no table is
+duplicated here). Prefill + KV-cache tables below are
 **historical** (2026-05-27 era, CUDA 13.2.1) — prefill varies up to 2.6×
 across container restarts and is not maintained as a comparison table.
 llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
@@ -25,23 +25,16 @@ llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
 ## Decode Throughput
 
-| Model | Params | Quant | Metric | tok/s | Notes |
-|-------|-------:|-------|--------|------:|------|
-| Qwen3-8B | 8.2B | Q8_0 | tg128 | **268** | CI baseline (`tests/perf_baseline.json`, #540) |
-| Qwen3-14B | 14B | Q6_K | tg128 @ctx2048 | **158** | north-star model |
-| Qwen3-8B-cortecs | 8.2B | NVFP4 | tg256 | **277** | SafeTensors |
-| Qwen3-14B | 14B | NVFP4 | tg256 | **168** | SafeTensors |
-| Qwen3-30B-A3B | 30B (3B active) | NVFP4 | tg256 | **307** | SafeTensors Modelopt |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | tg256 | **307** | SafeTensors |
-| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | tg256 | **245** | SafeTensors Modelopt |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | tg128 | **259** | GGUF |
-| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | tg256 | **259** | SafeTensors |
-| Nemotron-3-Nano-30B-A3B | 30B (3B active) | NVFP4 | tg256 | **126** | hybrid Mamba2+MoE+attention, arch-limited |
+The per-model decode table is **not duplicated here** — it drifts. The canonical,
+SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA · exact
+command) live in [`BENCHMARKS.md`](../BENCHMARKS.md), and the CI gate is
+`tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`). Heroes for
+orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 · NVFP4 MoE
+tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 257).
 
-All NVFP4 rows: 2026-05-30, commit `bebafd5`, 10 reps, isolated + clock-warmed
-(see `BENCHMARKS.md` for exact commands). Decode measured with CUDA Graphs ON.
-Healthy-host sanity check: ~2850 MHz SM / 13801 MHz mem / ~500 W during the
-bench — decode can read 8–15% low on depressed-host days (issue #526).
+Decode is measured with CUDA Graphs ON, 10 reps, isolated + clock-warmed. Healthy-host
+sanity check: ~2850 MHz SM / 13801 MHz mem / ~500 W during the bench — decode can read
+8–15% low on depressed-host days (issue #526).
 
 ## Prefill Throughput (pp512) — historical (2026-05-27)
 

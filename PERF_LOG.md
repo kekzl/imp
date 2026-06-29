@@ -166,7 +166,7 @@ request reports `cached=4512/4524` (shared, not recomputed).
 Model: Qwen3-Coder-30B-A3B NVFP4, CUDA 13.3, `imp-cli --bench`, 7 reps/run, 2 cold
 restarts. Decode tg256 is the gate signal (prefill pp512 carries the ±2.6× cuBLAS
 restart variance). GPU verified free + warm-clocked. Full ledger: AUDIT.md (pass 2),
-AUDIT_REPORT.md.
+docs/audit/AUDIT_REPORT.md.
 
 ### Phase-0 baseline → post-fix (all soundness fixes)
 | shape | baseline | post-fix | gate (3% band) |
