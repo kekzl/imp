@@ -38,6 +38,7 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
         {"Gemma4ForCausalLM", ModelArch::GEMMA4},
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
+        {"Gemma4UnifiedForConditionalGeneration", ModelArch::GEMMA4},  // multimodal unified (text_config nested)
         {"GptOssForCausalLM", ModelArch::GPT_OSS},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
@@ -110,6 +111,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"gemma2", "Gemma2ForCausalLM"},
                 {"gemma3", "Gemma3ForCausalLM"},
                 {"gemma4", "Gemma4ForCausalLM"},
+                {"gemma4_unified", "Gemma4ForCausalLM"},
                 {"llama4", "Llama4ForCausalLM"},
                 {"deepseek_v2", "DeepseekV2ForCausalLM"},
                 {"deepseek_v3", "DeepseekV3ForCausalLM"},
