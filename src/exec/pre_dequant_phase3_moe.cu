@@ -682,17 +682,26 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         size_t freed_bytes = 0;
         for (int e = 0; e < ne; ++e) {
             auto& w = experts[e];
+            // Only free BASE allocations (1:1 with cudaMallocAsync). Fused-projection
+            // experts (e.g. Qwen3.6-35B-A3B gate_up) carry OFFSET scale pointers into a
+            // shared buffer; an unguarded cudaFree on an offset returns "invalid
+            // argument" (8415x error flood on Qwen3.6-35B-A3B-NVFP4 — non-fatal but a
+            // small leak + log spam). Mirror the line-528 / Phase-4b drop-source guard.
             if (w.data) {
-                mut_model->release_gpu_allocation(w.data);
-                IMP_CUDA_CHECK_LOG(cudaFree(w.data));
-                freed_bytes += expert_packed_bytes;
+                if (mut_model->is_base_gpu_allocation(w.data)) {
+                    mut_model->release_gpu_allocation(w.data);
+                    IMP_CUDA_CHECK_LOG(cudaFree(w.data));
+                    freed_bytes += expert_packed_bytes;
+                }
                 w.data = nullptr;
                 w.on_device = false;
             }
             if (w.scales) {
-                mut_model->release_gpu_allocation(w.scales);
-                IMP_CUDA_CHECK_LOG(cudaFree(w.scales));
-                freed_bytes += expert_ms_bytes;
+                if (mut_model->is_base_gpu_allocation(w.scales)) {
+                    mut_model->release_gpu_allocation(w.scales);
+                    IMP_CUDA_CHECK_LOG(cudaFree(w.scales));
+                    freed_bytes += expert_ms_bytes;
+                }
                 w.scales = nullptr;
             }
         }
