@@ -18,17 +18,23 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 
 **Shipped PR #455.** Auto-enables StreamingLLM when KV cache >90% full. Graceful degradation: sink tokens + sliding window, middle blocks freed. Agent sessions effectively unlimited.
 
-## Open performance work
+## Performance work — closed
 
-The genuinely-open levers (most of the 06-12 campaign closed everything else — see "Investigated and shelved"):
+The competitive performance frontier is exhausted: every lever the 06-12 campaign left open has
+since shipped or been refuted by measurement. Both items below are now closed; the section is kept
+for the record (see also "Investigated and shelved"):
 
-- **NVFP4 prefill vs vLLM — mostly closed by #687.** Making FP16-QK FA2 the primary hd=128 prefill
+- **NVFP4 prefill vs vLLM — CLOSED.** Making FP16-QK FA2 the primary hd=128 prefill
   (re-measured 2026-06-13, commit `290a163a`) lifted pp4096 +21–24%: **MoE pp4096 is now +4% ahead of
-  vLLM**, MoE pp2048 +27%, dense pp2048 ~tie. The **lone surviving gap is dense pp4096 at ~1.04×**
-  (24.2k vs 25.3k). FA2 is instruction-mix-bound near its practical ceiling and the bounded kernel levers
-  (Cross-Tile pipeline, Grouped-GEMM tile axis, chunk-4096, occupancy/2-CTA, fp8-QK) are all refuted;
-  the only surviving idea for the last ~4% is **scaled fp8-KV storage with f16 compute** (halves KV
-  traffic, 2× QK density via `m16n8k32`). Marginal — the competitive case is essentially won.
+  vLLM**, MoE pp2048 +27%, dense pp2048 ~tie. The **lone residual gap is dense pp4096 at ~1.04×**
+  (24.2k vs 25.3k), and that gap is now **structural, not a lever.** Every bounded kernel idea is
+  refuted: Cross-Tile pipeline, Grouped-GEMM tile axis, chunk-4096, occupancy/2-CTA, and fp8-QK
+  (quality-refuted, #511/#681). The last candidate — scaled fp8-KV storage with f16 compute — was
+  **refuted by measurement 2026-06-16** (ncu+nsys spike on Qwen3-14B-NVFP4): at pp4096 FA2 is at ~5%
+  DRAM (tensor-pipe/latency-bound, not bandwidth-bound), so halving KV read bytes targets a near-idle
+  unit; the `paged_kv_gather_fp8_to_fp16` it would remove is 0.3% of kernel time; and the real
+  dominant cost is the NVFP4 GEMMs (~59%), a separately-refuted structural ceiling. The competitive
+  case is won — dense pp4096 ~4% is left as a structural ceiling, not active work.
 
 - **kv-fp8 storage default-on** -- SHIPPED for Qwen3 dense + Qwen3 MoE + Llama (Phi-4) + Nemotron-H MoE.
   `kv_cache.dtype` now defaults to `auto`, which honors a model author's `kv_cache_quant_algo=FP8` hint for
