@@ -22,6 +22,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   *generation* via this head remains parked — the GDN-hybrid MTP model carries
   irreversible recurrent state through verify and the economics are net-negative;
   it needs a non-recurrent MTP model.)
+- **gpt-oss GGUF 2^-4 residual rescale** — the official Q8_0-dense
+  `gpt-oss-20b-mxfp4.gguf` produced garbage (PPL 2739, degenerate decode) while
+  the bf16-dense GGUF and SafeTensors were fine. The gpt-oss residual-stream
+  rescale (Wo + biases) applied ×2^-4 by subtracting 4 from the fp16/bf16 biased
+  exponent — wrong for small scales: denormal scales (biased exp 0) were left
+  unscaled (16× too large) and exponents 1..4 were flushed to zero. On the
+  official file the attention `wo` had 91922/368640 blocks with exp==0, inflating
+  its L2 to 4.92 vs the correct 2.61, which cascaded into a ~20× layer-0 MoE
+  blowup and wrong expert routing. Now scaled in the float domain (exact for
+  normals, correct for denormals/underflow): Q8_0 PPL 2739 → 4.65, matching the
+  bf16/HF reference, decode coherent (#808). A CPU unit test sweeps all 65536
+  fp16 bit patterns to guard the rescale in CI (#809).
 
 ## [0.12.6] - 2026-06-26
 
