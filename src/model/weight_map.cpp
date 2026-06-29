@@ -358,6 +358,14 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++skipped;
                 continue;
             }
+            // Gemma-4 unified multimodal: audio/vision embedders ship under
+            // model.embed_{audio,vision}.* (not under language_model/vision_tower).
+            // Not part of the text LM — skip.
+            if (name.compare(0, 18, "model.embed_audio.") == 0 ||
+                name.compare(0, 19, "model.embed_vision.") == 0) {
+                ++skipped;
+                continue;
+            }
             if (name.compare(0, 4, "mtp.") == 0 ||
                 name.compare(0, 10, "model.mtp.") == 0) {
                 ++skipped;
