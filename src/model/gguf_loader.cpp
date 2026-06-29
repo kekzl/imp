@@ -17,6 +17,7 @@
 
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
+#include "model/gguf_half.h"
 #include "model/loader_assign.h"
 #include "model/model_arch.h"
 #include "model/tensor_kind_matcher.h"
@@ -39,67 +40,8 @@
 
 namespace imp {
 
-// Host IEEE-754 half / bfloat16 <-> float conversion for the gpt-oss residual-stream
-// 2^-4 rescale (see GPT_OSS block below). The old exponent-bit-subtract trick was
-// wrong for small block scales: an fp16 scale with biased exponent 0 (denormal) was
-// left UNSCALED (16x too large) and exponents 1..4 were flushed to zero — corrupting
-// Q8_0 weights that have many small-scale blocks (measured on the official mxfp4
-// gpt-oss attn_output: 91922/368640 blocks had exp==0; rescaled L2 was 4.92 vs the
-// correct 2.61, which cascaded to a ~20x layer-0 MoE blowup and garbage output). A
-// float-domain multiply is exact for normals and correct for denormals/underflow.
-namespace {
-inline float gguf_half_to_float(uint16_t h) {
-    uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
-    float v;
-    if (e == 0)
-        v = std::ldexp(static_cast<float>(m), -24);  // (m/1024) * 2^-14
-    else if (e == 0x1F)
-        v = m ? std::nanf("") : HUGE_VALF;
-    else
-        v = std::ldexp(1.0f + static_cast<float>(m) / 1024.0f, static_cast<int>(e) - 15);
-    return s ? -v : v;
-}
-inline uint16_t gguf_float_to_half(float x) {
-    uint32_t b;
-    std::memcpy(&b, &x, sizeof(b));
-    uint32_t sign = (b >> 16) & 0x8000u;
-    uint32_t ue = (b >> 23) & 0xFFu;
-    uint32_t mant = b & 0x7FFFFFu;
-    if (ue == 0xFF)
-        return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));  // inf/nan
-    int32_t e = static_cast<int32_t>(ue) - 127 + 15;
-    if (e >= 0x1F)
-        return static_cast<uint16_t>(sign | 0x7C00u);  // overflow -> inf
-    if (e <= 0) {                                      // denormal / underflow
-        if (e < -10)
-            return static_cast<uint16_t>(sign);  // -> +/-0
-        mant |= 0x800000u;
-        uint32_t shift = static_cast<uint32_t>(14 - e);
-        uint32_t h = mant >> shift;
-        if ((mant >> (shift - 1)) & 1u)
-            h++;  // round to nearest
-        return static_cast<uint16_t>(sign | h);
-    }
-    uint16_t h = static_cast<uint16_t>(sign | (static_cast<uint32_t>(e) << 10) | (mant >> 13));
-    if (mant & 0x1000u) {  // round to nearest even
-        if ((mant & 0x1FFFu) != 0x1000u || (h & 1u))
-            h++;
-    }
-    return h;
-}
-inline float gguf_bf16_to_float(uint16_t b) {
-    uint32_t bits = static_cast<uint32_t>(b) << 16;
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
-inline uint16_t gguf_float_to_bf16(float x) {
-    uint32_t b;
-    std::memcpy(&b, &x, sizeof(b));
-    uint32_t r = (b + 0x7FFFu + ((b >> 16) & 1u)) >> 16;  // round to nearest even
-    return static_cast<uint16_t>(r);
-}
-}  // namespace
+// Host half/bf16 <-> float helpers for the gpt-oss 2^-4 residual rescale moved to
+// model/gguf_half.h so they can be unit-tested on the CPU (see test_gguf_half.cpp).
 
 // Format tables (gguf_blck_size / gguf_type_size / gguf_row_size /
 // gguf_type_to_qtype / gguf_type_name), the BinaryReader / GGUFValue plumbing,
