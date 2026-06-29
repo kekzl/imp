@@ -216,6 +216,15 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             return &L.ssm_in;
         if (slot == "ssm_out")
             return &L.ssm_out;
+        // GDN (Qwen3.5 linear_attn) NVFP4 projections: gdn_gate runs native
+        // NVFP4 (registered in Phase 0b); gdn_alpha/gdn_beta are FP16_ONLY and
+        // get dequant→FP16 below after promotion.
+        if (slot == "gdn_gate")
+            return &L.gdn_gate;
+        if (slot == "gdn_alpha")
+            return &L.gdn_alpha;
+        if (slot == "gdn_beta")
+            return &L.gdn_beta;
         return nullptr;
     };
 
@@ -276,6 +285,50 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         if (n_qkv_split > 0 || n_gateup_split > 0)
             IMP_LOG_INFO("Fused projection scale split: %d QKV + %d gate_up layers",
                          n_qkv_split, n_gateup_split);
+    }
+
+    // GDN alpha/beta (Qwen3.5 linear_attn.in_proj_a/in_proj_b) are FP16_ONLY:
+    // the delta-rule decay / learning-rate projections are precision-sensitive
+    // and the GDN GEMM expects FP16. If the checkpoint stored them NVFP4,
+    // promote() above set qtype=NVFP4; dequant them back to FP16 here (before
+    // plan_storage runs, so it tiers them FP16). ssm_in/ssm_out/gdn_gate stay
+    // native NVFP4 (registered in Phase 0b, gemv_nvfp4 — same as Nemotron-H).
+    {
+        int n_gdn_dequant = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            auto& L = mut_model->layers_[i];
+            for (Tensor* w : {&L.gdn_alpha, &L.gdn_beta}) {
+                if (w->qtype != QType::NVFP4 || !w->data || !w->scales)
+                    continue;
+                int64_t N = w->shape[0];
+                int64_t K = w->shape[1] * 2;  // packed K/2 → logical K
+                NvFP4QuantResult q;
+                q.packed_data = w->data;
+                q.micro_scales = w->scales;
+                q.tensor_scale = w->tensor_scale;
+                q.N = N;
+                q.K = K;
+                q.owned = false;
+                void* fp16buf = nullptr;
+                if (cudaMallocAsync(&fp16buf, static_cast<size_t>(N) * K * 2, stream) != cudaSuccess) {
+                    IMP_LOG_WARN("GDN NVFP4→FP16 dequant: alloc failed (layer %d) — leaving NVFP4", i);
+                    continue;
+                }
+                dequantize_nvfp4_to_fp16(q, fp16buf, stream);
+                // Old FP4 data + borrowed micro_scales are tiny (N≈n_heads); leave
+                // them resident rather than risk a use-after-free on the async stream.
+                w->data = fp16buf;
+                w->qtype = QType::F16;
+                w->scales = nullptr;
+                w->tensor_scale = 1.0f;
+                w->shape[1] = K;
+                w->compute_strides();
+                n_gdn_dequant++;
+            }
+        }
+        if (n_gdn_dequant > 0)
+            IMP_LOG_INFO("GDN NVFP4 alpha/beta: dequantized %d FP16_ONLY projections to FP16",
+                         n_gdn_dequant);
     }
 
     // Drop the scratch — its data pointers (weight_scale, weight_scale_2,
@@ -408,6 +461,7 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
             register_prequant(L.w_down_shared);
             register_prequant(L.ssm_in);
             register_prequant(L.ssm_out);
+            register_prequant(L.gdn_gate);  // Qwen3.5 GDN output gate — native NVFP4
             for (const auto& ew : L.expert_w_gate) register_prequant(ew);
             for (const auto& ew : L.expert_w_up) register_prequant(ew);
             for (const auto& ew : L.expert_w_down) register_prequant(ew);

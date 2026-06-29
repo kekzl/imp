@@ -1132,6 +1132,27 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 } else if (kind == "bias" && proj == "conv1d") {
                     layer.ssm_conv1d_b = t;
                     matched = true;
+                } else if (kind == "weight_scale" || kind == "weight_scale_2" ||
+                           kind == "input_scale") {
+                    // NVFP4-quantized GDN (linear_attn) projection scales. Route to
+                    // nvfp4_scratch_ so Phase-0 promote() attaches them. in_proj_a/b
+                    // (gdn_alpha/beta) are FP16_ONLY → dequant→FP16 at load; the rest
+                    // (ssm_in/ssm_out/gdn_gate) run native NVFP4 like Nemotron-H Mamba2.
+                    const char* slot = nullptr;
+                    if (proj == "in_proj_qkv")
+                        slot = "ssm_in";
+                    else if (proj == "in_proj_a")
+                        slot = "gdn_alpha";
+                    else if (proj == "in_proj_b")
+                        slot = "gdn_beta";
+                    else if (proj == "in_proj_z")
+                        slot = "gdn_gate";
+                    else if (proj == "out_proj")
+                        slot = "ssm_out";
+                    if (slot) {
+                        route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
+                        matched = true;
+                    }
                 }
             }
         }
