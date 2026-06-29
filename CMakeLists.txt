@@ -182,6 +182,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/rope.cu
     src/compute/layernorm.cu
     src/compute/mla_kv_assemble.cu
+    src/compute/mla_absorb.cu
     src/compute/activation.cu
     src/compute/embedding.cu
     src/compute/sampling.cu

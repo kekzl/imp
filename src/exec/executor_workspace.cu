@@ -111,6 +111,10 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     if (max_tokens_ <= 0) {
         max_tokens_ = 4096;
     }
+    // Full sequence-length capacity for the MLA absorbed latent KV cache
+    // (Phase 3). Unlike max_tokens_ (per-forward, capped at 4096), this is the
+    // max cached context the latent cache must hold.
+    mla_absorb_max_seq_ = (effective_seq_len > 0) ? effective_seq_len : 4096;
 
     // Cap max_tokens for hybrid MoE+SSM/GDN models to bound workspace VRAM.
     // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB VRAM at the

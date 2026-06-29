@@ -51,6 +51,55 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         alloc(&mla_kv_b_buf_, kvb_out, "kv_b");
         IMP_LOG_INFO("MLA QKV scratch: kv_a+latent+k_rope+kv_b for max_tokens=%d (graph-safe)",
                      max_tokens_);
+
+        // Phase 3: absorbed-decode latent KV cache. Opt-in via attention.mla_absorb.
+        // Requires every layer's kv_b_proj to be FP16 (the absorbed path slices
+        // W_UK/W_UV directly from it); skip + warn otherwise so the materialized
+        // default stays unaffected.
+        if (runtime_config().attention.mla_absorb && mla_absorb_max_seq_ > 0) {
+            bool all_fp16 = true;
+            for (int li = 0; li < cfg.n_layers; li++) {
+                const auto& L = model_->layer(li);
+                if (L.kv_b_proj.data == nullptr || L.kv_b_proj.qtype != QType::F16) {
+                    all_fp16 = false;
+                    break;
+                }
+            }
+            if (!all_fp16) {
+                IMP_LOG_WARN("attention.mla_absorb: kv_b_proj is not FP16 on all layers — "
+                             "absorbed decode disabled, using materialized MLA path.");
+            } else {
+                const size_t row_w =
+                    static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
+                mla_absorb_layer_stride_ = static_cast<size_t>(mla_absorb_max_seq_) * row_w;
+                size_t cache_bytes =
+                    static_cast<size_t>(cfg.n_layers) * mla_absorb_layer_stride_ * sizeof(half);
+                size_t scores_bytes =
+                    static_cast<size_t>(cfg.n_heads) * mla_absorb_max_seq_ * sizeof(float);
+                cudaError_t e1 = cudaMalloc(&mla_absorb_cache_, cache_bytes);
+                cudaError_t e2 = cudaMalloc(&mla_absorb_scores_, scores_bytes);
+                if (e1 != cudaSuccess || e2 != cudaSuccess) {
+                    IMP_LOG_ERROR("attention.mla_absorb: latent cache alloc failed (%.1f MiB) — "
+                                  "falling back to materialized.",
+                                  cache_bytes / (1024.0 * 1024.0));
+                    if (mla_absorb_cache_) { cudaFree(mla_absorb_cache_); mla_absorb_cache_ = nullptr; }
+                    if (mla_absorb_scores_) { cudaFree(mla_absorb_scores_); mla_absorb_scores_ = nullptr; }
+                } else {
+                    // VRAM comparison vs the materialized per-token KV footprint.
+                    const size_t mat_per_tok =
+                        static_cast<size_t>(cfg.n_heads) *
+                        ((cfg.qk_rope_head_dim + cfg.qk_nope_head_dim) /*K hd*/ +
+                         (cfg.qk_rope_head_dim + cfg.qk_nope_head_dim) /*V padded to hd*/);
+                    const size_t lat_per_tok = row_w;
+                    IMP_LOG_INFO("MLA absorbed latent cache: %.1f MiB (n_layers=%d, max_seq=%d, "
+                                 "row=%zu halfs). Per-token: latent %zu vs materialized %zu halfs "
+                                 "(%.1fx smaller).",
+                                 cache_bytes / (1024.0 * 1024.0), cfg.n_layers, mla_absorb_max_seq_,
+                                 row_w, lat_per_tok, mat_per_tok,
+                                 static_cast<double>(mat_per_tok) / static_cast<double>(lat_per_tok));
+                }
+            }
+        }
     }
 
     // Dequant scratch buffer for on-the-fly weight dequantization. Every
@@ -1158,6 +1207,14 @@ void GraphExecutor::free_buffers() {
         free_cutlass_nvfp4_weight(lm_head_cutlass_);
         lm_head_cutlass_ = {};
         lm_head_cutlass_ready_ = false;
+    }
+    if (mla_absorb_cache_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(mla_absorb_cache_));
+        mla_absorb_cache_ = nullptr;
+    }
+    if (mla_absorb_scores_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(mla_absorb_scores_));
+        mla_absorb_scores_ = nullptr;
     }
     if (d_sample_result_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_sample_result_));

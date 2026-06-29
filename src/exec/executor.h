@@ -419,6 +419,16 @@ private:
     void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
     void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
 
+    // MLA absorbed-decode latent KV cache (Phase 3, opt-in attention.mla_absorb).
+    // Per-layer slice = [max_seq, kv_lora_rank + qk_rope_head_dim] FP16; cols
+    // [0:kv_lora_rank] = RMSNorm'd latent, [kv_lora_rank:] = post-RoPE decoupled
+    // key. Allocated only when mla_absorb is set, the model is_mla(), and every
+    // layer's kv_b_proj is FP16. Single-sequence only.
+    void* mla_absorb_cache_ = nullptr;        // [n_layers, max_seq, kv_lora+rope]
+    float* mla_absorb_scores_ = nullptr;      // [n_heads, max_seq] decode scratch
+    size_t mla_absorb_layer_stride_ = 0;      // halfs per layer = max_seq*(kv_lora+rope)
+    int mla_absorb_max_seq_ = 0;
+
     // Set when allocate_nvfp4_dequant_workspace() could NOT pre-allocate the
     // M>1 dequant scratch (largest NVFP4 weight exceeds the cap, or alloc
     // failed). The fallback then lazy-cudaMallocs, which is illegal inside

@@ -185,6 +185,15 @@ struct RuntimeConfig {
         // ~48 GiB FP16 fallback to ~8-12 GiB.
         std::string mxfp4_fp16_cache_policy = "legacy";
         bool force_cublas_decode = false;
+        // MLA absorbed-decode latent KV cache (DeepSeek-V2/V3, Phase 3). When
+        // off (default) the materialized Stage A path runs (full per-head K/V
+        // reconstructed at projection time + standard paged attention). When on,
+        // decode stores only the compressed latent + decoupled RoPE key and runs
+        // the mathematically-equivalent absorbed attention (~9x smaller per-token
+        // KV footprint). Prefill stays materialized; the latent cache is
+        // populated during prefill/decode. Single-sequence only (falls back to
+        // materialized otherwise). Env: none.
+        bool mla_absorb = false;
         bool no_qknorm_fused = false;
         bool splitk_pipe = true;
         bool gate_concat = false;
