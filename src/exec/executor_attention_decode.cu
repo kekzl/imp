@@ -6,6 +6,26 @@
 // list and must not be compiled on its own. The contents are byte-for-byte the
 // original inline block; see executor_attention.cu for surrounding context and
 // local variables in scope (including the `after_attention` label).
+        // MLA absorbed decode (Phase 3, opt-in attention.mla_absorb): the
+        // current token's latent + decoupled key were just written into the
+        // per-layer latent cache (above, before the prefill/decode branch). Run
+        // the mathematically-equivalent absorbed attention directly from the
+        // latent cache — no full per-head K/V materialization, no paged cache
+        // read. Single-token decode (n==1) only; multi-token (spec) decode falls
+        // through to the materialized paged path.
+        if (mla_absorb_active && n == 1) {
+            half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
+                                static_cast<size_t>(layer) * mla_absorb_layer_stride_;
+            // ao is [n, nh*hd]; the absorbed kernel writes nh*v_head_dim compact
+            // (same layout the paged decode kernel produces), narrowed downstream.
+            mla_absorbed_decode(static_cast<const half*>(qv.data),
+                                static_cast<const half*>(ly.kv_b_proj.data), cache_layer,
+                                static_cast<half*>(ao.data), mla_absorb_scores_, state.context_lens,
+                                nh, hd, cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.kv_lora_rank,
+                                cfg.v_head_dim, mla_absorb_max_seq_, scale, stream);
+            goto after_attention;
+        }
+
         // Decode: write new token's K/V to cache first
         if (rope_k_deferred) {
             // Fused: apply RoPE to K during KV cache write (saves 1 kernel launch)

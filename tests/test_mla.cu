@@ -21,6 +21,7 @@
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
 #include "compute/mla_kv_assemble.h"  // production mla_assemble_kv / mla_reorder_q
+#include "compute/mla_absorb.h"       // production mla_absorbed_decode (Phase 3)
 #include "compute/attention_paged.h"  // paged_attention_decode with v_head_dim
 #include "core/tensor.h"
 #include "test_cuda_skip.h"
@@ -915,6 +916,127 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
     cudaFree(d_q_dec); cudaFree(d_o_dec);
     cudaFree(d_bt); cudaFree(d_cl);
     cudaFree(d_compact);
+}
+
+// ---------------------------------------------------------------------------
+// Test: MLAAbsorb.MatchesMaterializedReference
+//
+// Phase 3 equivalence gate. The absorbed decode (mla_absorbed_decode) must
+// produce the SAME attention output as the materialized formulation, since it
+// is a mathematically-equivalent reformulation:
+//   materialized: k_nope[t] = latent[t] @ W_UK^T; v[t] = latent[t] @ W_UV^T;
+//                 score[t] = scale*(q_nope.k_nope[t] + q_pe.k_rope[t]);
+//                 out = softmax(score) . v
+//   absorbed:     q_abs = q_nope @ W_UK; score[t] = scale*(q_abs.latent[t] +
+//                 q_pe.k_rope[t]); ctx = softmax(score).latent; out = ctx @ W_UV^T
+// We compute the materialized reference on the CPU (fp32) and compare to the
+// GPU absorbed kernel (cosine similarity > 0.999 per head).
+// ---------------------------------------------------------------------------
+TEST(MLAAbsorb, MatchesMaterializedReference) {
+    SKIP_IF_NO_CUDA();
+
+    static constexpr int nh       = 2;
+    static constexpr int kv_lora  = 16;
+    static constexpr int rope_dim = 8;
+    static constexpr int nope_dim = 16;
+    static constexpr int v_hd     = 16;
+    static constexpr int hd       = rope_dim + nope_dim;       // 24
+    static constexpr int head_out = nope_dim + v_hd;           // 32 kv_b rows/head
+    static constexpr int ctx      = 5;
+    static constexpr int max_seq  = 8;
+    const float scale = 1.0f / std::sqrt((float)hd);
+
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
+    auto rand_vec = [&](int n) { std::vector<float> v(n); for (auto& x : v) x = dist(rng); return v; };
+
+    // q: [nh, hd] = [pe(rope_dim)|nope(nope_dim)]
+    std::vector<float> h_q = rand_vec(nh * hd);
+    // kv_b: [nh*head_out, kv_lora] row-major (W_UK rows then W_UV rows per head)
+    std::vector<float> h_kvb = rand_vec(nh * head_out * kv_lora);
+    // latent cache: [max_seq, kv_lora + rope_dim] — only first ctx rows valid
+    const int width = kv_lora + rope_dim;
+    std::vector<float> h_cache(max_seq * width, 0.0f);
+    {
+        std::vector<float> tmp = rand_vec(ctx * width);
+        for (int i = 0; i < ctx * width; i++) h_cache[i] = tmp[i];
+    }
+
+    // ---- CPU materialized reference ----
+    std::vector<float> ref(nh * v_hd, 0.0f);
+    for (int h = 0; h < nh; h++) {
+        const float* WUK = h_kvb.data() + (size_t)h * head_out * kv_lora;            // [nope, kv_lora]
+        const float* WUV = h_kvb.data() + ((size_t)h * head_out + nope_dim) * kv_lora; // [v, kv_lora]
+        const float* q_pe = h_q.data() + (size_t)h * hd;
+        const float* q_nope = q_pe + rope_dim;
+        std::vector<float> scores(ctx);
+        for (int t = 0; t < ctx; t++) {
+            const float* lat = h_cache.data() + (size_t)t * width;
+            const float* kr = lat + kv_lora;
+            // k_nope[t][j] = sum_c lat[c]*WUK[j][c]; score += q_nope[j]*k_nope[t][j]
+            float s = 0.0f;
+            for (int j = 0; j < nope_dim; j++) {
+                float kn = 0.0f;
+                for (int c = 0; c < kv_lora; c++) kn += lat[c] * WUK[(size_t)j * kv_lora + c];
+                s += q_nope[j] * kn;
+            }
+            for (int i = 0; i < rope_dim; i++) s += q_pe[i] * kr[i];
+            scores[t] = s * scale;
+        }
+        float mx = scores[0];
+        for (int t = 1; t < ctx; t++) mx = std::max(mx, scores[t]);
+        float sum = 0.0f;
+        for (int t = 0; t < ctx; t++) { scores[t] = std::exp(scores[t] - mx); sum += scores[t]; }
+        for (int t = 0; t < ctx; t++) scores[t] /= sum;
+        // out[d] = sum_t p[t] * v[t][d]; v[t][d] = sum_c lat[c]*WUV[d][c]
+        for (int d = 0; d < v_hd; d++) {
+            float acc = 0.0f;
+            for (int t = 0; t < ctx; t++) {
+                const float* lat = h_cache.data() + (size_t)t * width;
+                float vd = 0.0f;
+                for (int c = 0; c < kv_lora; c++) vd += lat[c] * WUV[(size_t)d * kv_lora + c];
+                acc += scores[t] * vd;
+            }
+            ref[h * v_hd + d] = acc;
+        }
+    }
+
+    // ---- GPU absorbed kernel ----
+    Tensor g_q     = make_gpu_fp16(h_q, {nh, hd});
+    Tensor g_kvb   = make_gpu_fp16(h_kvb, {nh * head_out, kv_lora});
+    Tensor g_cache = make_gpu_fp16(h_cache, {max_seq, width});
+    Tensor g_out   = alloc_gpu_fp16({nh, v_hd});
+    float* d_scores = nullptr;
+    cudaMalloc(&d_scores, (size_t)nh * max_seq * sizeof(float));
+    int* d_cl = nullptr;
+    cudaMalloc(&d_cl, sizeof(int));
+    int h_cl = ctx;
+    cudaMemcpy(d_cl, &h_cl, sizeof(int), cudaMemcpyHostToDevice);
+
+    mla_absorbed_decode(static_cast<const half*>(g_q.data), static_cast<const half*>(g_kvb.data),
+                        static_cast<const half*>(g_cache.data), static_cast<half*>(g_out.data),
+                        d_scores, d_cl, nh, hd, rope_dim, nope_dim, kv_lora, v_hd, max_seq, scale,
+                        nullptr);
+    cudaDeviceSynchronize();
+
+    auto got = read_gpu_fp16(g_out);
+    ASSERT_EQ((int)got.size(), nh * v_hd);
+
+    // Per-head cosine similarity > 0.999.
+    for (int h = 0; h < nh; h++) {
+        double dot = 0, na = 0, nb = 0;
+        for (int d = 0; d < v_hd; d++) {
+            float a = got[h * v_hd + d];
+            float b = ref[h * v_hd + d];
+            dot += (double)a * b; na += (double)a * a; nb += (double)b * b;
+        }
+        double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
+        EXPECT_GT(cos, 0.999) << "absorbed vs materialized cosine too low for head " << h
+                              << " (cos=" << cos << ")";
+    }
+
+    free_gpu(g_q); free_gpu(g_kvb); free_gpu(g_cache); free_gpu(g_out);
+    cudaFree(d_scores); cudaFree(d_cl);
 }
 
 }  // namespace

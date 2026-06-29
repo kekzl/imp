@@ -71,6 +71,7 @@ roots = ["src", "tools", "tests"]
 "src/model/safetensors_loader.cpp" = "(c) 1147 code LOC — one loader: header validation + tensor assign + arch inference"
 "src/runtime/engine_scheduler.cpp" = "(c) 1074 code LOC — one scheduler: prefill/decode scheduling + chunked exec + perplexity capture"
 "src/model/weight_map.cpp" = "(c) 966 code LOC — one mapping module: weight-name parse + layer-index + arch inference"
+"src/model/hf_config_loader.cpp" = "(tu) 810 code LOC — central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow"
 "src/runtime/cuda_graph.cu" = "(c) 863 code LOC — one module: graph capture/mode-resolve + PDL edges + barrier insert + replay"
 "src/memory/kv_cache_manager.cpp" = "(c) 852 code LOC — one manager: block alloc + residual pool + prefix cache + eviction"
 "tests/test_quant_integration.cu" = "(c) 1442 code LOC — 24 tests, all exercising the quant_gemm/dequant unit — one test target"

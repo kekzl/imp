@@ -33,6 +33,7 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/hadamard.h"
 #include "compute/mla_kv_assemble.h"
+#include "compute/mla_absorb.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -460,6 +461,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // FP16 paged decode kernels understand them — prefill routing below
     // forces the cuBLAS path whenever sinks are present.
     const void* attn_sinks = (prof.is_gpt_oss) ? ly.attn_sinks.data : nullptr;
+
+    // MLA absorbed-decode (Phase 3, opt-in). Populate the per-layer latent cache
+    // with this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH
+    // prefill and decode (so the cache is warm before the first decode step).
+    // Single-sequence only; the absorbed decode below reads this cache.
+    const bool mla_absorb_active =
+        runtime_config().attention.mla_absorb && cfg.is_mla() && mla_absorb_cache_ != nullptr &&
+        state.n_sequences == 1;
+    if (mla_absorb_active) {
+        half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
+                            static_cast<size_t>(layer) * mla_absorb_layer_stride_;
+        mla_latent_cache_write(static_cast<const half*>(mla_latent_buf_),
+                               static_cast<const half*>(kk.data), cache_layer, state.positions, n, nh,
+                               hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
+    }
 
     if (state.is_prefill) {
 #include "exec/executor_attention_prefill.cu"

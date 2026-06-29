@@ -142,6 +142,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
     S("attention.mxfp4_fp16_cache_policy", cfg.attention.mxfp4_fp16_cache_policy);
     B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);
+    B("attention.mla_absorb", cfg.attention.mla_absorb);
     B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
     B("attention.splitk_pipe", cfg.attention.splitk_pipe);
     B("attention.gate_concat", cfg.attention.gate_concat);
