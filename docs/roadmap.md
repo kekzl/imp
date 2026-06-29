@@ -45,7 +45,7 @@ The two items below are **retained for the record but evidence-refuted**, not ac
 
 ## Architecture support
 
-- **MLA (DeepSeek-V2/V3)** -- latent-vector KV for 64x compression. Design spec: [`specs/2026-05-28-mla-deepseeek-architecture-design.md`](superpowers/specs/2026-05-28-mla-deepseeek-architecture-design.md). Blocked on no local MLA model. Estimated 3-4 weeks.
+- **MLA (DeepSeek-V2/V3)** -- latent-vector KV for ~93% KV-cache reduction. **Shipped** (#802 Stage A materialized, #803 Phase 3 absorbed latent-KV-cache decode, opt-in). First MLA arch in imp; validated on DeepSeek-V2-Lite (see [`supported-models.md`](supported-models.md)). The design spec + implementation plan were consolidated into [`archive/README.md`](archive/README.md) on completion. Remaining MLA family (V3 / GLM / Kimi / Ling) reuses this path; not yet staged locally.
 
 ## Tooling watch -- CUDA Tile for C++ (re-evaluate on 13.3)
 

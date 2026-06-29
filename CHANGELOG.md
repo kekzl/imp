@@ -4,6 +4,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **DeepSeek-V2 Multi-head Latent Attention (MLA)** — first MLA architecture in
+  imp. Stage A (materialized): the full K/V is reconstructed from the latent at
+  projection time so every existing attention / paged-KV / RoPE kernel is reused
+  unchanged, correctness-first and verifiable against HF (#802). Phase 3 (opt-in):
+  absorbed latent-KV-cache decode that stores only the 512-dim latent + 64-dim
+  decoupled-RoPE key in the cache for the long-context VRAM win (#803). Validated
+  on DeepSeek-V2-Lite (28 GB, experts host-offloaded on 32 GB → graphs disabled);
+  see `docs/supported-models.md`.
+
+### Fixed
+- **MTP draft head — sigmoid (not silu) attn-output gate** — the multi-token-
+  prediction attention-output gate used silu where the head expects sigmoid,
+  which crippled draft quality. Correcting the gate lifts K=1 acceptance from
+  ~10% to 85%+ on Qwen3.6, un-blocking the MTP draft head (#804). (Spec-decode
+  *generation* via this head remains parked — the GDN-hybrid MTP model carries
+  irreversible recurrent state through verify and the economics are net-negative;
+  it needs a non-recurrent MTP model.)
+
 ## [0.12.6] - 2026-06-26
 
 Patch release: a focused fix chain for the post-`</think>` answer-headroom logic

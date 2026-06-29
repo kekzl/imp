@@ -71,7 +71,8 @@ benchmark numbers):
 
 | Model | State (2026-06-06) |
 |---|---|
-| DeepSeek-R1-Distill-7B/14B | Never benched locally. Arch is Qwen2/Llama (covered); the DEEPSEEK arch path itself uses standard MHA → real MLA checkpoints (V2/V3/R1) are unsupported. |
+| DeepSeek-R1-Distill-7B/14B | Never benched locally. Arch is Qwen2/Llama (covered). |
+| DeepSeek-V2-Lite (MLA) | **Supported** — first Multi-head Latent Attention arch (#802 materialized Stage A, #803 absorbed latent-KV decode, opt-in). Validated locally at bf16 (28 GB, experts host-offloaded → graphs disabled); PPL 6.06 vs HF 5.07. Real V2/V3/R1 MLA checkpoints now load via this path. |
 | Gemma-3 27B | 12B Q4_K_M + 4B-VL validated locally; 27B never staged. |
 | Phi-4 14B | NVFP4 (reasoning-plus) validated locally; GGUF Q6_K never staged. |
 | Mixtral 8x7B | Arch in the enum, chat-template test only; never staged. |
@@ -105,7 +106,7 @@ Concrete technical commitments — these are means, not ends, but progress on th
 ### Latency
 - **CUDA Graphs everywhere on decode** — already done, never regress.
 - **PDL (Programmatic Dependent Launch)** — keep aggressive.
-- ~~TurboDraft (L2-resident speculative decoder)~~ — **dead end at current precision** (MTP diagnosis 2026-05-30, authoritative): the implementation is correct (PyTorch-reference parity), but the real K=1 acceptance of ~25-30% on the NVFP4 head is below draft overhead — no net win. Spec-decode returns to the table only with a higher-precision MTP head or a trained draft model (multi-week, not committed).
+- ~~TurboDraft (L2-resident speculative decoder)~~ — **parked.** The "~25-30% K=1 acceptance" from the 2026-05-30 diagnosis was a kernel bug, not a precision wall: the MTP attn-output gate used silu where the head expects sigmoid; correcting it (#804) lifts acceptance to 85%+ on Qwen3.6. Spec-decode *generation* via this head is still parked for a different reason — the GDN-hybrid MTP model carries irreversible recurrent state through verify and the economics are net-negative. It returns to the table only with a **non-recurrent** MTP model or a trained draft model (multi-week, not committed).
 - **No host syncs on the decode hot path.** Ever. CI gates this.
 
 ### Surface
@@ -178,4 +179,4 @@ Measurement methodology (always cold-median, never single-shot): 5 independent `
 Current: **157.71 tok/s default flags** (May 23 2026, cold-median methodology — 5 trials × 5 reps × 15 s cooldown, σ = 0.16 tok/s across samples; same code as the May 22 measurement, just less cuBLAS-algo-cache-state noise). The 150 milestone is hit by default with margin.
 Previous: 150.1 tok/s (May 22 2026, single-shot, post PRs #362 + #364 + #367). 121.4 tok/s (May 2026, +25.5% vs llama.cpp c830f99).
 Next milestone: **175 tok/s** — requires multi-week kernel-fusion work, not tuning. The roofline sweep (2026-05-30) showed decode is 87% NVFP4 GEMVs running at 66-70% HBM with a 4-bit-dequant co-limit (L1TEX 91%); occupancy raises and KPAR/MR rerouting are measured dead ends, and the LM_HEAD quantization unlock already shipped (#479/#483). The previously listed "FP8 prefill cache coverage" lever **does not exist on this hardware** — FP8 prefill is cuBLAS `NOT_SUPPORTED` on sm_120 (realignment 2026-06-06, #550).
-Stretch: 200 tok/s would need speculative decoding, which is currently a measured dead end (MTP diagnosis 2026-05-30: ~25-30% acceptance below draft overhead; no MTP head for Qwen3-14B; draft-model integration is multi-week, not committed).
+Stretch: 200 tok/s would need speculative decoding, currently parked: the Qwen3.6 MTP head now accepts at 85%+ after the sigmoid-gate fix (#804), but spec-decode *generation* dead-ends on the GDN-hybrid model's irreversible recurrent state through verify (net-negative economics) — it needs a non-recurrent MTP model; there is still no MTP head for Qwen3-14B, and draft-model integration is multi-week, not committed.

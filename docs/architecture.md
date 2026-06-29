@@ -55,7 +55,7 @@ distinct private methods on `Engine`:
 | Compute max sequence length | `init_compute_max_seq_len_` | VRAM budget → max context (`src/runtime/vram_budget.cpp`) |
 | Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant orchestrated by `src/exec/executor_pre_dequant.cu` (calls per-phase TUs `pre_dequant_phase*.cu`: `pre_dequant_phase0_nvfp4_loader.cu`, `pre_dequant_phase1_fp16_cache.cu`, `pre_dequant_phase2_fp8_cache.cu`, `pre_dequant_phase3_nvfp4_decode.cu`, `pre_dequant_phase3c_mxfp4.cu`, `pre_dequant_phase4_tensor_registry.cu`, `phase4b` drop-source + VRAM reclamation, `phase4c` second-pass FP8 using reclaimed VRAM) |
 | Init KV cache | `init_kv_cache` | Paged blocks (block_size=16); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
-| Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~1 GiB — see Known limitations), FP8 activation scratch, split-K attn scratch |
+| Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~384 MiB default `attention.attn_scores_mib` — see Known limitations), FP8 activation scratch, split-K attn scratch |
 | Warm up | `warmup()` | Captures CUDA graph for decode (`src/runtime/cuda_graph.cu`) |
 
 The Engine façade (`engine.cpp`, ~570 LOC) delegates to 6 per-subsystem
@@ -78,27 +78,29 @@ After the last layer of the last chunk: final RMSNorm + LM head → logits.
 
 ### Attention dispatcher (the central choice)
 
-`executor_attention.cu` decides which attention kernel to call. The
-post-Phase-2 prefill gate is a two-branch switch:
+`executor_attention_prefill.cu` decides which attention kernel to call. Since #687
+the prefill gate is **FA2-first**:
 
 ```
-const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
-                           n <= attn_scores_.shape[1];
-const bool non_gemma4_sliding = !force_cublas_attn && sliding_active;
+const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
+const bool s_matrix_fits      = attn_scores_buf_ != nullptr && n <= attn_scores_.shape[1];
+const bool prefer_fmha        = !force_cublas_attn && n >= fmha_prefill_threshold;
 
-if (s_matrix_fits && !non_gemma4_sliding)
-    attention_cublas_prefill(...);
+if (!force_cublas_attn && try_fa2_fp16qk_prefill(...))      // hd==128: O(n) memory, no S-matrix
+    /* handled by FA2 f16-QK */;
+else if (s_matrix_fits && !prefer_fmha)
+    attention_cublas_prefill(...);                          // legacy materialized fallback
 else
-    attention_prefill_dispatch(...);   // FMHA fallback
+    attention_prefill_dispatch(...);                        // per-dtype FMHA family
 ```
 
-When the S-matrix workspace can hold `[nh, n, n]` AND the layer is
-either non-sliding or is Gemma-4 (which uses the cuBLAS sliding mask
-via chunked prefill), prefill goes through `attention_cublas_prefill`:
-cuBLAS QK^T → ~1 GiB S-matrix buffer → causal softmax → cuBLAS PV.
-Otherwise it falls through to `attention_prefill_dispatch`
-(`attention_dispatch.cu:30`), which selects among the per-dtype FMHA
-kernels.
+The FP16-QK FA2 kernel is the primary hd=128 path at every length (at-or-above the
+materialized cuBLAS path: ~parity pp512, +24% pp1024, +52% pp2048) and needs no
+S-matrix. `attention_cublas_prefill` (cuBLAS QK^T → ~384 MiB S-matrix → causal
+softmax → cuBLAS PV) stays the fallback for the configs FA2 declines — `hd != 128`
+(e.g. Gemma hd=256) and `force_cublas_attn` (learned sinks / per-layer shapes).
+Everything else falls through to `attention_prefill_dispatch`, which selects among
+the per-dtype FMHA kernels. Full coverage matrix: [`attention-dispatch.md`](attention-dispatch.md).
 
 `force_cublas_attn` is set per-layer for Gemma-4 hd=512 global layers
 where FMHA OOMs the 100 KiB smem cap.
@@ -128,7 +130,7 @@ Per token:
    `src/compute/sampling.{h,cu}` (`sample_greedy`, `sample_topk_topp`,
    `sample_mirostat_v2`, `apply_typical_p`).
 7. **Stop check** — EOS, max_tokens, stop strings.
-8. **(Optional) MTP spec-decode draft** — `src/runtime/mtp_forward.cu`.
+8. **(Optional) MTP spec-decode draft** — `src/compute/mtp_forward.cu`.
 
 ## Subsystems referenced across phases
 
@@ -142,7 +144,7 @@ Per token:
 
 ## Known limitations
 
-- **The cuBLAS attention path allocates ~1 GiB of S-matrix workspace**, which caps maximum context length; a tiled streaming softmax or FMHA-default-switch would eliminate this.
+- **The cuBLAS attention path allocates ~384 MiB of S-matrix workspace** (default `attention.attn_scores_mib`), which caps maximum context length for that legacy path; since #687 FA2 is the primary hd=128 prefill kernel (S-matrix skipped), so this only applies to the hd≠128 cuBLAS fallback (e.g. Gemma hd=256).
 - **`RuntimeConfig::current()` is a global singleton** rather than per-Engine, preventing true multi-engine use in a single process.
 
 ## Re-rendering the diagram
