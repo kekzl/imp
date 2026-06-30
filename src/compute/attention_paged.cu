@@ -1557,14 +1557,33 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             dim3 grid(batch_size, n_kv_heads);
             dim3 block(gqa_threads);
 
-            // Opt-in to extended shared memory for large head_dim (e.g., 256)
+            // Opt-in to extended shared memory for large head_dim. Gemma-4 has a
+            // dual geometry: sliding layers use hd=256 (gqa_smem ~32 KiB, no
+            // opt-in), but GLOBAL layers use hd=512 (gqa_smem ~64 KiB, opt-in
+            // REQUIRED). The opt-in cap is PER (kernel, current dynamic-smem
+            // value): `paged_attention_gqa_kernel` is a single non-templated
+            // function reused across every model/head_dim in the process, so a
+            // one-shot `static bool` guard would freeze the cap at whatever the
+            // first >48 KiB caller needed and starve a later larger request.
+            // Re-arm it for the largest value seen instead. cudaFuncSetAttribute
+            // is idempotent and cheap; a stale error from it (e.g. left by a
+            // previously-loaded model's func-attribute call in the same process)
+            // would otherwise make THIS launch return cudaErrorInvalidValue and
+            // bail to garbage, so set it every time the requested smem grows and
+            // drain any error it leaves.
             if (gqa_smem > 48 * 1024) {
-                static bool smem_set = false;
-                if (!smem_set) {
-                    cudaFuncSetAttribute(paged_attention_gqa_kernel,
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         static_cast<int>(gqa_smem));
-                    smem_set = true;
+                static size_t s_gqa_smem_optin = 0;
+                if (gqa_smem > s_gqa_smem_optin) {
+                    cudaError_t fa_ = cudaFuncSetAttribute(paged_attention_gqa_kernel,
+                                                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                           static_cast<int>(gqa_smem));
+                    if (fa_ == cudaSuccess) {
+                        s_gqa_smem_optin = gqa_smem;
+                    } else {
+                        IMP_LOG_WARN("paged_attention_gqa: smem opt-in (%zu B) failed: %s — clearing",
+                                     gqa_smem, cudaGetErrorString(fa_));
+                        (void)cudaGetLastError();
+                    }
                 }
             }
 

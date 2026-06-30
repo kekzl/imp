@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-30
+
 ### Added
 - **DeepSeek-V2 Multi-head Latent Attention (MLA)** — first MLA architecture in
   imp. Stage A (materialized): the full K/V is reconstructed from the latent at
@@ -13,8 +15,42 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   decoupled-RoPE key in the cache for the long-context VRAM win (#803). Validated
   on DeepSeek-V2-Lite (28 GB, experts host-offloaded on 32 GB → graphs disabled);
   see `docs/supported-models.md`.
+- **`gemma4_unified` multimodal Gemma-4 checkpoints** — the unified
+  text+vision+audio packaging (`model_type: gemma4_unified`,
+  `Gemma4UnifiedForConditionalGeneration`, LM weights under
+  `model.language_model.*`, e.g. the dense **Gemma-4-12B-NVFP4**) is now mapped to
+  the Gemma-4 arch instead of falling back to the llama path and crashing. The
+  text tower is a standard dense Gemma-4; the `model.language_model.` prefix-strip,
+  vision/audio-tower skip, and nested `text_config`/`rope_parameters` parsing
+  already existed and fire once the arch resolves (#814).
+- **NVFP4-quantized GDN (`linear_attn`) projections** — load the quantized
+  linear-attention projections for NVFP4 hybrid checkpoints (Qwen3.6-27B-NVFP4-MTP)
+  so the GDN path is coherent instead of garbage (#812).
+- **SafeTensors/NVFP4 prompt-test battery coverage** — `validate_safetensors.py`
+  now sweeps one model per (architecture, NVFP4 source-format) cell (dense Qwen3,
+  Phi-4, Gemma-4 dense, Qwen3.6+MTP, both Nemotron variants), not just a handful of
+  MoE checkpoints; all loadable archs come back engine-healthy (#815).
 
 ### Fixed
+- **Gemma-4 garbled after a GDN/SSM model in the same process — GQA paged-decode
+  shared-memory opt-in.** Gemma-4's global attention layers use `head_dim=512`
+  (sliding layers use 256), whose FP16 paged-decode GQA kernel needs ~64 KiB
+  dynamic shared memory and therefore a `cudaFuncSetAttribute` opt-in. That opt-in
+  sat behind a one-shot `static bool` guard on a kernel shared by every
+  model/head_dim in the process, so after a GDN model (`head_dim=128`) loaded
+  first the 64 KiB launch was issued without a valid opt-in →
+  `cudaErrorInvalidValue` every decode step on every global layer → degenerate
+  output. Re-armed as a high-water-mark opt-in (set on growth, result-checked,
+  error-drained). GDN→Gemma-4 in one process now passes the full e2e suite. (A
+  zero-production-impact, multi-model-per-process interaction; one model per
+  process — server/CLI — was never affected.)
+- **Cross-model CUDA-error-leak hardening** — a failed best-effort L2
+  access-policy-window (`cudaStreamSetAttribute`) recorded a sticky per-context
+  error that could outlive the engine and trip the next model's
+  `cudaGetLastError()`-guarded kernels. Drain after every L2-hint set, reset the
+  persisting-L2 reservation per model load, and drain at engine teardown so no
+  per-context error crosses a model boundary (#815).
+- **NVFP4 MoE expert-scale `cudaFree` guard against offset pointers** (#813).
 - **MTP draft head — sigmoid (not silu) attn-output gate** — the multi-token-
   prediction attention-output gate used silu where the head expects sigmoid,
   which crippled draft quality. Correcting the gate lifts K=1 acceptance from
