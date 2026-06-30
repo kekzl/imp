@@ -85,7 +85,11 @@ static inline void set_l2_streaming(cudaStream_t stream, const void* ptr, size_t
     attr.accessPolicyWindow.hitRatio = 0.0f;
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyStreaming;
     attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+    // Best-effort L2 streaming hint: never let a failed set leave a sticky
+    // per-context error that poisons subsequent compute kernels (see the
+    // matching drain in executor_attention_internal.h set_kv_l2_persist).
+    if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) != cudaSuccess)
+        (void)cudaGetLastError();
 }
 
 static inline void clear_l2_policy(cudaStream_t stream) {
@@ -93,7 +97,8 @@ static inline void clear_l2_policy(cudaStream_t stream) {
         return;
     cudaStreamAttrValue attr = {};
     attr.accessPolicyWindow.num_bytes = 0;
-    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+    if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) != cudaSuccess)
+        (void)cudaGetLastError();
 }
 
 }  // namespace imp

@@ -64,13 +64,24 @@ def _model_entry(name: str, *, extra_args: list[str] | None = None,
     }
 
 
+# One model per (architecture, NVFP4 source-format) cell so the SafeTensors
+# battery actually sweeps the arch matrix, not just a handful of MoE checkpoints.
+# Absent models skip cleanly (host_path missing); >32GB models OOM-skip at boot.
 MODELS = [
-    _model_entry("Mistral-Small-3.2-24B-Instruct-2506-NVFP4"),
-    _model_entry("Gemma-4-26B-A4B-it-NVFP4"),
-    _model_entry("Qwen3.6-35B-A3B-NVFP4"),
-    _model_entry("Qwen3-Coder-30B-A3B-Instruct-FP4"),
-    _model_entry("Qwen3-30B-A3B-NVFP4-Modelopt"),
-    _model_entry("Nemotron-3-Nano-30B-A3B-NVFP4"),
+    # --- MoE / large (original set) ---
+    _model_entry("Mistral-Small-3.2-24B-Instruct-2506-NVFP4"),  # MISTRAL  (absent → skip)
+    _model_entry("Gemma-4-26B-A4B-it-NVFP4"),                   # GEMMA4 MoE (compressed-tensors)
+    _model_entry("Qwen3.6-35B-A3B-NVFP4"),                      # QWEN36_MOE (GDN hybrid, compressed-tensors)
+    _model_entry("Qwen3-Coder-30B-A3B-Instruct-FP4"),          # QWEN3_MOE (modelopt)
+    _model_entry("Qwen3-30B-A3B-NVFP4-Modelopt"),              # QWEN3_MOE (modelopt)
+    _model_entry("Nemotron-3-Nano-30B-A3B-NVFP4"),            # NEMOTRON_H_MOE (Mamba2+Attn+MoE hybrid)
+    # --- arch-coverage extension (dense / smaller NVFP4, all fit in 32GB) ---
+    _model_entry("Qwen3-8B-NVFP4-cortecs"),                    # QWEN3 dense (compressed-tensors)
+    _model_entry("Qwen3-14B-NVFP4"),                           # QWEN3 dense (modelopt)
+    _model_entry("Phi-4-reasoning-plus-NVFP4"),               # LLAMA/Phi3 path (modelopt)
+    _model_entry("Gemma-4-12B-NVFP4"),                         # GEMMA4 dense (modelopt) — SWA + softcap
+    _model_entry("Qwen3.6-27B-Text-NVFP4-MTP"),               # QWEN35 dense + MTP (modelopt)
+    _model_entry("Nemotron-Labs-3-Elastic-30B-A3B-NVFP4"),   # NEMOTRON_H_MOE (elastic variant)
 ]
 
 

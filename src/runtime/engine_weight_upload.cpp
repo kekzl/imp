@@ -77,12 +77,20 @@ bool Engine::init_weights() {
         }
     }
 
-    // Reserve L2 persisting cache for decode GEMV
+    // Reserve L2 persisting cache for decode GEMV. cudaLimitPersistingL2CacheSize
+    // is a per-primary-context device limit that survives Engine teardown, so a
+    // previously-loaded model in this process leaves its reservation (and any
+    // persisting cache lines) behind. Reset the persisting lines first so this
+    // model starts from a clean L2 persistence state — otherwise the next
+    // per-forward access-policy-window set can return cudaErrorInvalidValue and
+    // poison the stream (cross-model GDN→Gemma-4 garbage repro).
     {
         cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, 0);
         size_t max_persist = prop.persistingL2CacheMaxSize;
         if (max_persist > 0) {
+            cudaCtxResetPersistingL2Cache();
+            (void)cudaGetLastError();
             size_t reserve = max_persist * 3 / 4;
             cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, reserve);
             IMP_LOG_INFO("L2 persisting cache: reserved %zu MB / %zu MB total", reserve >> 20,

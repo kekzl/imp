@@ -138,7 +138,16 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
     attr.accessPolicyWindow.hitRatio = ratio;
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+    // L2 persistence is a best-effort perf hint. A failed set (e.g. num_bytes vs
+    // the per-context persisting-L2 reservation left in a different state by a
+    // previously-loaded model in this process) returns cudaErrorInvalidValue,
+    // which the runtime records as a STICKY per-context error — it then poisons
+    // every subsequent kernel in this forward (the CUTLASS/MoE GEMMs bail on a
+    // pending error → degenerate garbage). Drain it immediately so a perf hint
+    // can never corrupt correctness. (Cross-model repro: a GDN/SSM model loaded
+    // before this one garbled the output until this drain was added.)
+    if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) != cudaSuccess)
+        (void)cudaGetLastError();
 }
 
 // Alias for the shared clear_l2_policy helper (back-compat name for call sites).
