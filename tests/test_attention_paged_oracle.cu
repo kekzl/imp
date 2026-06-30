@@ -40,6 +40,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
 #include "core/tensor.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -681,6 +682,75 @@ TYPED_TEST(PagedOracle, HD128_Sweep) {
         // MHA 8q/8kv — the no-GQA path (each q-head its own kv-head).
         this->run_shape("mha8x8", kv_len, 8, 8, 128);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Split-K → single-split fallback (the F1 robustness fix). When the split-K
+// Phase-1 launch fails (a kernel whose dynamic smem exceeds the 48 KiB default
+// without an opt-in, or device state left by another model in-process), the
+// decode falls back to the single-split GQA/MHA path instead of running the
+// reduce over never-written partials → garbage. The real trigger is config- and
+// head-dim-specific, so a test hook forces the fallback on a clean launch; the
+// forced path must match BOTH the fp64 reference and the normal split-K result
+// at a long context where split-K is active.
+// ---------------------------------------------------------------------------
+TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // kv_len=1024, GQA 32q/8kv, hd=128 → num_ctx_blocks=64 → split-K active.
+    const int kv_len = 1024, n_heads = 32, n_kv_heads = 8, head_dim = 128;
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const size_t q_elems = (size_t)n_heads * head_dim;
+    const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
+
+    const uint32_t seed = 0xFA11u;
+    std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+    lcg_fill(Qh, seed + 1, 2.0f);
+    lcg_fill(Kh, seed + 2, 2.0f);
+    lcg_fill(Vh, seed + 3, 1.0f);
+
+    std::vector<double> ref;
+    ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
+
+    std::vector<int> bt(num_blocks);
+    for (int i = 0; i < num_blocks; i++)
+        bt[i] = i;
+    int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+    int ctx = kv_len;
+    int* d_ctx = (int*)up(&ctx, sizeof(int));
+    void* d_q = up(Qh.data(), q_elems * sizeof(half));
+    void* d_o = nullptr;
+    cudaMalloc(&d_o, q_elems * sizeof(half));
+
+    PathCtx c{stream, kv_len,  n_heads, n_kv_heads, head_dim, num_blocks,
+              scale,  q_elems, &Kh,     &Vh,        &ref,
+              f16_tensor(d_q, {1, 1, n_heads, head_dim}), d_o, d_bt, d_ctx};
+
+    // 1. Normal split-K path.
+    process_diag_set_force_splitk_fallback(false);
+    ErrStats e_splitk = PathF16::run(c);
+    EXPECT_EQ(e_splitk.nan_count, 0);
+    EXPECT_LT(e_splitk.max_rel, 1e-2f) << "split-K vs fp64: " << e_splitk.str();
+
+    // 2. Forced single-split fallback — must also match the fp64 reference.
+    process_diag_set_force_splitk_fallback(true);
+    ErrStats e_fb = PathF16::run(c);
+    process_diag_set_force_splitk_fallback(false);
+    EXPECT_EQ(e_fb.nan_count, 0) << "fallback produced non-finite output";
+    EXPECT_LT(e_fb.max_rel, 1e-2f) << "split-K fallback vs fp64: " << e_fb.str();
+
+    // 3. Fallback and split-K both compute true attention — they must agree.
+    EXPECT_NEAR(e_fb.max_rel, e_splitk.max_rel, 5e-3f)
+        << "fallback (" << e_fb.str() << ") diverged from split-K (" << e_splitk.str() << ")";
+    printf("[splitk-fallback] split-K %s | fallback %s\n", e_splitk.str().c_str(), e_fb.str().c_str());
+
+    cudaFree(d_q);
+    cudaFree(d_o);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaStreamDestroy(stream);
 }
 
 }  // namespace

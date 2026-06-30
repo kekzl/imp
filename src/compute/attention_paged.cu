@@ -1396,6 +1396,12 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // Split-K path: Phase 1 + Phase 2 (handles both GQA and MHA)
         float* partial = static_cast<float*>(s_splitk_scratch);
 
+        // Clear any inherited error so the post-Phase-1 check below reflects only
+        // THIS launch — letting us fall back to the single-split GQA/MHA path
+        // (correctness-equivalent, just no split-K parallelism) instead of
+        // emitting garbage if the split-K kernel launch fails.
+        (void)cudaGetLastError();
+
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
@@ -1472,13 +1478,35 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
 #undef LAUNCH_SPLITK
         }
 
-        // Phase 2: reduce partials
-        dim3 grid2(batch_size, n_heads);
-        dim3 block2(128);
+        // Did the split-K Phase-1 launch succeed? If not (e.g. a kernel whose
+        // dynamic smem exceeds the 48 KiB default without an opt-in, or device
+        // state left by another model in this process), drain the error and fall
+        // back to the single-split GQA/MHA path below — correctness-equivalent,
+        // just without split-K parallelism — instead of running the reduce over
+        // never-written partials and emitting garbage.
+        cudaError_t e_splitk = cudaGetLastError();
+        // process_diag_force_splitk_fallback() is a test-only hook: it forces the
+        // fallback on a clean launch so the path can be verified against the
+        // split-K result (Phase 1 wrote only `partial`, never O, so skipping
+        // Phase 2 and re-dispatching writes O exactly once).
+        if (e_splitk != cudaSuccess || process_diag_force_splitk_fallback()) {
+            if (e_splitk != cudaSuccess)
+                IMP_LOG_WARN("paged_attention_decode: split-K launch failed (%s) "
+                             "[head_dim=%d num_splits=%d] — falling back to single-split GQA/MHA",
+                             cudaGetErrorString(e_splitk), head_dim, num_splits);
+            num_splits = 1;  // re-dispatch below
+        } else {
+            // Phase 2: reduce partials
+            dim3 grid2(batch_size, n_heads);
+            dim3 block2(128);
+            paged_attention_reduce_kernel<<<grid2, block2, 0, stream>>>(
+                partial, reinterpret_cast<half*>(O.data), n_heads, head_dim, num_splits, sinks_h);
+        }
+    }
 
-        paged_attention_reduce_kernel<<<grid2, block2, 0, stream>>>(partial, reinterpret_cast<half*>(O.data),
-                                                                    n_heads, head_dim, num_splits, sinks_h);
-    } else if (n_q_per_kv > 1) {
+    // GQA / MHA dispatch — runs when split-K was never selected (num_splits==1)
+    // or was selected but its launch failed and we reset num_splits=1 above.
+    if (num_splits == 1 && n_q_per_kv > 1) {
         // GQA path: try cluster kernel first, then fall back to cooperative GQA
         bool used_cluster = false;
 
@@ -1506,8 +1534,10 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 cluster_grid, cluster_block, cluster_smem, stream, attrs,
                 /*cluster_x=*/static_cast<unsigned int>(n_q_per_kv));
 
+            cudaError_t cl_launch = cudaSuccess;
 #define LAUNCH_CLUSTER(HD)                                                                                 \
-    cudaLaunchKernelEx(&config, paged_attention_cluster_kernel<HD>, reinterpret_cast<const half*>(Q.data), \
+    cl_launch = cudaLaunchKernelEx(&config, paged_attention_cluster_kernel<HD>,                            \
+                       reinterpret_cast<const half*>(Q.data),                                              \
                        reinterpret_cast<const half*>(K_cache.data),                                        \
                        reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),       \
                        block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale,     \
@@ -1539,6 +1569,17 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                     break;
             }
 #undef LAUNCH_CLUSTER
+            // If the cluster launch was rejected (e.g. cluster_smem exceeds the
+            // opt-in cap for this head_dim, or an unsupported cluster config),
+            // drain and fall back to the cooperative GQA kernel below instead of
+            // leaving O unwritten → garbage.
+            if (used_cluster && cl_launch != cudaSuccess) {
+                IMP_LOG_WARN("paged_attention_decode: cluster launch failed (%s) "
+                             "[head_dim=%d n_q_per_kv=%d] — falling back to cooperative GQA",
+                             cudaGetErrorString(cl_launch), head_dim, n_q_per_kv);
+                (void)cudaGetLastError();
+                used_cluster = false;
+            }
         }
 
         if (!used_cluster && n_q_per_kv <= MAX_Q_PER_KV) {
@@ -1596,7 +1637,10 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
             goto mha_fallback;
         }
-    } else {
+    } else if (num_splits == 1) {
+        // num_splits==1 guard: without it this MHA branch would also run after a
+        // SUCCESSFUL split-K (num_splits>1, where the GQA `if` above is false),
+        // double-dispatching attention over the same O.
     mha_fallback:
         if (sinks_h) {
             static bool warned_sinks_mha = false;

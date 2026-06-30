@@ -32,6 +32,7 @@ struct ProcessDiag {
     bool attention_fa2_f16acc = false;
     bool attention_fa2_pv_f16acc = false;
     bool attention_fp8_qk_scaled = false;
+    bool force_splitk_fallback = false;  // test hook
     std::string attention_mxfp4_mode = "auto";
 
     // FFN
@@ -117,6 +118,8 @@ void process_diag_set_fa2_f16acc(bool v) { slot().attention_fa2_f16acc = v; }
 void process_diag_set_fa2_pv_f16acc(bool v) { slot().attention_fa2_pv_f16acc = v; }
 bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
 void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
+bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
+void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }

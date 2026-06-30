@@ -65,6 +65,11 @@ void process_diag_set_fa2_f16acc(bool v);
 void process_diag_set_fa2_pv_f16acc(bool v);
 bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
 void process_diag_set_fp8_qk_scaled(bool v);
+// test hook: force the paged-decode split-K path onto its single-split GQA/MHA
+// fallback even on a clean launch, so the fallback can be verified against the
+// split-K result without provoking a real cudaErrorInvalidValue. Default off.
+bool process_diag_force_splitk_fallback();
+void process_diag_set_force_splitk_fallback(bool v);
 // "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
 // only enables MXFP4 attention when mode == "always".
 const std::string& process_diag_attention_mxfp4_mode();
