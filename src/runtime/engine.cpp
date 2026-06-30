@@ -39,6 +39,22 @@ namespace imp {
 // can share them.
 
 Engine::~Engine() {
+    // Cross-model CUDA-error-leak guard. The CUDA error state is per primary
+    // context, NOT per Engine, so a pending ("sticky") error left by this
+    // model's workload survives imp_context_free / imp_model_free and is then
+    // observed by the NEXT model loaded in the same process. That next model's
+    // first cudaGetLastError()-guarded kernel — notably the NVFP4 CUTLASS GEMM
+    // (gemm_cutlass_sm120.cu: "Flush any prior async errors") — bails to a
+    // silent false return, producing degenerate garbage instead of running.
+    // Observed repro: a GDN/SSM model (Qwen3.5) loaded before a Gemma-4 NVFP4
+    // model garbled Gemma-4 ("own own else else"), while a dense or MoE
+    // predecessor did not. Drain it here so it cannot cross the model boundary.
+    if (cudaError_t leaked = cudaGetLastError(); leaked != cudaSuccess) {
+        IMP_LOG_WARN("Engine teardown: cleared a leaked CUDA error (%s) so it cannot "
+                     "corrupt the next model loaded in this process",
+                     cudaGetErrorString(leaked));
+    }
+
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table
     // (captures the device-used peak reached during the workload).
     MemAccount::instance().sampler_stop();
