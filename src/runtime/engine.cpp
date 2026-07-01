@@ -425,11 +425,40 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
-    constraints_.reset();
+    if (req->constraints)
+        constraints_return_(std::move(req->constraints));
     // Server visibility: the engine outlives requests, so cumulative
     // speculation telemetry is logged per request end (no-op when idle).
     if (spec_ngram_enabled_(*req))
         log_spec_stats_();
+}
+
+std::shared_ptr<ConstraintManager> Engine::constraints_checkout_(const std::string& json_schema) {
+    // Prefer a pooled manager that already classified this schema.
+    if (!json_schema.empty()) {
+        for (auto it = constraint_pool_.begin(); it != constraint_pool_.end(); ++it) {
+            if ((*it)->cached_schema() == json_schema) {
+                auto cm = std::move(*it);
+                constraint_pool_.erase(it);
+                return cm;
+            }
+        }
+    }
+    if (!constraint_pool_.empty()) {
+        auto cm = std::move(constraint_pool_.back());
+        constraint_pool_.pop_back();
+        return cm;
+    }
+    return std::make_shared<ConstraintManager>();
+}
+
+void Engine::constraints_return_(std::shared_ptr<ConstraintManager> cm) {
+    if (!cm)
+        return;
+    cm->reset();
+    constexpr size_t kMaxConstraintPool = 8;
+    if (constraint_pool_.size() < kMaxConstraintPool)
+        constraint_pool_.push_back(std::move(cm));
 }
 
 // =====================================================================

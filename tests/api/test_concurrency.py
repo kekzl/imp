@@ -127,3 +127,68 @@ class TestConcurrentRequests:
             assert status == 200, f"Stream {i} failed: status={status}"
             assert len(content) > 0, f"Stream {i} produced empty content"
             assert has_done, f"Stream {i} missing [DONE] sentinel"
+
+
+class TestConstrainedUnderConcurrency:
+    def test_json_schema_enforced_while_sharing_decode_batch(self, model):
+        """A json_schema request that decodes concurrently with other requests
+        must still return schema-valid JSON.
+
+        Regression test for the engine-global ConstraintManager: the schema
+        mask was only attached when the decode batch had exactly one sequence,
+        so a constrained request sharing a batch decoded UNCONSTRAINED, and any
+        concurrent prefill/finish reset the FSM mid-generation.
+        """
+        import time
+
+        # enum keeps the answer short so the object closes well within
+        # max_tokens (an unbounded string lets chatty models ramble into the
+        # budget, which truncates the JSON on any engine).
+        schema = {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string", "enum": ["yes", "no"]},
+                "confidence": {"type": "number"},
+            },
+            "required": ["answer", "confidence"],
+        }
+
+        def schema_request():
+            with httpx.Client(base_url=conftest.BASE_URL, timeout=120.0) as c:
+                return c.post("/v1/chat/completions", json={
+                    "model": model,
+                    "messages": [{"role": "user",
+                                  "content": "Answer as JSON: is water wet?"}],
+                    "max_tokens": 96,
+                    "temperature": 0,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {"name": "ans", "schema": schema},
+                    },
+                })
+
+        def filler_request(i):
+            with httpx.Client(base_url=conftest.BASE_URL, timeout=120.0) as c:
+                return c.post("/v1/chat/completions", json={
+                    "model": model,
+                    "messages": [{"role": "user",
+                                  "content": f"Write {i + 3} sentences about rivers."}],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                    "seed": i,
+                })
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            fillers = [pool.submit(filler_request, i) for i in range(3)]
+            time.sleep(0.3)  # let fillers reach decode so the schema request joins batch>1
+            schema_result = pool.submit(schema_request).result()
+            filler_results = [f.result() for f in fillers]
+
+        for i, fr in enumerate(filler_results):
+            assert fr.status_code == 200, f"filler {i} failed: {fr.text}"
+        assert schema_result.status_code == 200, schema_result.text
+
+        content = schema_result.json()["choices"][0]["message"]["content"]
+        obj = json.loads(content)  # must parse — unconstrained output usually doesn't
+        assert "answer" in obj, f"schema violated: {content!r}"
+        assert "confidence" in obj, f"schema violated: {content!r}"

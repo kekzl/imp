@@ -51,6 +51,11 @@ public:
     bool has_json() const noexcept { return active_json_; }
     bool has_schema() const noexcept { return active_schema_; }
 
+    // Schema string of the cached (initialized) schema constrainer — lets the
+    // engine's manager pool prefer an instance that already classified this
+    // schema over re-classifying the vocab.
+    const std::string& cached_schema() const noexcept { return cached_schema_string_; }
+
 private:
     std::unique_ptr<JsonConstrainer> json_constrainer_;
     std::unique_ptr<SchemaConstrainer> schema_constrainer_;

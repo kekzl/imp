@@ -401,7 +401,15 @@ private:
 
     // ── Extracted subsystems ─────────────────────────────────────────
     VisionPipeline vision_;
-    ConstraintManager constraints_;
+    // Constraint FSM state lives per-request (Request::constraints) — a
+    // single engine-global manager let any concurrent prefill/finish clobber
+    // another request's FSM and dropped enforcement at decode batch>1. The
+    // pool recycles idle managers so repeat requests with the same
+    // json_schema reuse the classified-token tables instead of re-classifying
+    // ~151K vocab tokens per request.
+    std::vector<std::shared_ptr<ConstraintManager>> constraint_pool_;
+    std::shared_ptr<ConstraintManager> constraints_checkout_(const std::string& json_schema);
+    void constraints_return_(std::shared_ptr<ConstraintManager> cm);
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
     void* prefill_pool_ = nullptr;

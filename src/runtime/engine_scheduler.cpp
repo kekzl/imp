@@ -635,15 +635,24 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
     fill_sampling_params(*req, state);
 
-    // Constraints via ConstraintManager
+    // Constraints via the per-request ConstraintManager. The old engine-global
+    // manager was re-prepared here for EVERY prefill (constrained or not),
+    // which clobbered the FSM of any concurrently decoding constrained
+    // request. Prepare once on first need; later chunks reuse the state.
     // thinking_open = req->in_think_block: if the prompt already closed the
     // <think> block (e.g. /no_think emits an empty <think></think> in the
     // prompt), no </think> is ever generated — the preamble gate must enforce
     // immediately instead of absorbing prose until the budget.
-    constraints_.prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
-                         req->tpl_family, /*thinking_open=*/req->in_think_block);
-    state.json_constrainer = constraints_.json_constrainer();
-    state.schema_constrainer = constraints_.schema_constrainer();
+    if ((req->json_mode || !req->json_schema.empty()) && !req->constraints) {
+        req->constraints = constraints_checkout_(req->json_schema);
+        req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(),
+                                  req->has_tools, req->tpl_family,
+                                  /*thinking_open=*/req->in_think_block);
+    }
+    if (req->constraints) {
+        state.json_constrainer = req->constraints->json_constrainer();
+        state.schema_constrainer = req->constraints->schema_constrainer();
+    }
 
     // Penalties
     upload_penalties(*req, state, pf_stream);
@@ -842,7 +851,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
 
         // Update constraint FSM
-        constraints_.update(next_token);
+        if (req->constraints)
+            req->constraints->update(next_token);
 
         if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
             finish_request(req);
@@ -1129,18 +1139,23 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             needs_schema_mode = true;
     }
 
-    // Schema/JSON constraints for decode (reuse state from prefill)
-    if (needs_schema_mode && valid_decode.size() == 1 && !valid_decode[0]->json_schema.empty()) {
-        if (constraints_.has_schema()) {
-            state.schema_constrainer = constraints_.schema_constrainer();
+    // Schema/JSON constraints for decode. Lazily create the per-request
+    // manager if needed (decode might be the first step with json_mode).
+    // The single-sequence state carries the request's constrainers (the
+    // graph-loop / constrained-pipeline launch paths read them from state);
+    // batched decode attaches them per row in sample_per_request, so
+    // constraints stay enforced at batch>1 (previously they were silently
+    // dropped whenever a constrained request shared a decode batch).
+    for (auto& r : valid_decode) {
+        if ((r->json_mode || !r->json_schema.empty()) && !r->constraints) {
+            r->constraints = constraints_checkout_(r->json_schema);
+            r->constraints->prepare(r->json_mode, r->json_schema, model_->tokenizer(), r->has_tools,
+                                    r->tpl_family, /*thinking_open=*/r->in_think_block);
         }
     }
-    if (needs_json_mode && valid_decode.size() == 1 && valid_decode[0]->json_mode) {
-        // Lazily init if needed (decode might be first step with json_mode)
-        if (!constraints_.has_json() && !constraints_.has_schema()) {
-            constraints_.prepare(true, "", model_->tokenizer());
-        }
-        state.json_constrainer = constraints_.json_constrainer();
+    if (valid_decode.size() == 1 && valid_decode[0]->constraints) {
+        state.schema_constrainer = valid_decode[0]->constraints->schema_constrainer();
+        state.json_constrainer = valid_decode[0]->constraints->json_constrainer();
     }
 }
 
@@ -1236,6 +1251,17 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     per_state.penalty_tokens = d_penalty_tokens_;
                     per_state.n_penalty_tokens = static_cast<int>(rn);
                 }
+            }
+            // Per-row constraint masks: keeps json_schema/json_mode enforced
+            // when the request shares a decode batch (the batch-level state
+            // carries no constrainers at n>1; sample_single_from_logits
+            // applies the mask to this row's logits before sampling).
+            if (req->constraints) {
+                per_state.schema_constrainer = req->constraints->schema_constrainer();
+                per_state.json_constrainer = req->constraints->json_constrainer();
+            } else {
+                per_state.schema_constrainer = nullptr;
+                per_state.json_constrainer = nullptr;
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
@@ -1510,11 +1536,15 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                       req->context_len(), req->context_len() - 1, next_token,
                       tok->decode_token(next_token).c_str());
 
+        // Advance the FSM before finish_request — finishing returns the
+        // request's ConstraintManager to the engine pool.
+        if (req->constraints)
+            req->constraints->update(next_token);
+
         if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
             finish_request(req);
         }
 
-        constraints_.update(next_token);
         kv_manager_->touch(req->id);
     }
 
@@ -1623,8 +1653,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
         const bool pipeline_compatible =
             dreq->logit_bias.empty() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
-            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f &&
-            !mtp_spec_decode_enabled() && constraints_.is_active();
+            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_spec_decode_enabled() &&
+            dreq->constraints && dreq->constraints->is_active();
         if (pipeline_compatible && dreq->status == RequestStatus::DECODING && !dreq->output_tokens.empty()) {
             try_launch_constrained_pipeline(dreq, dec_stream);
         }
