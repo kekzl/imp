@@ -173,20 +173,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (top_logprobs > 20)
         top_logprobs = 20;
 
-    // Parse stop sequences
+    // Parse stop sequences (same 16-entry cap as the chat parser).
     std::vector<std::string> stop_sequences;
-    if (body.contains("stop") && !body["stop"].is_null()) {
-        if (body["stop"].is_string()) {
-            stop_sequences.push_back(body["stop"].get<std::string>());
-        } else if (body["stop"].is_array()) {
-            for (const auto& s : body["stop"]) {
-                if (s.is_string()) {
-                    stop_sequences.push_back(s.get<std::string>());
-                    if (stop_sequences.size() >= 4)
-                        break;
-                }
-            }
-        }
+    if (parse_stop_field(body, 16, stop_sequences)) {
+        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first 16\n",
+                body["stop"].size());
     }
     size_t max_stop_len = 0;
     for (const auto& s : stop_sequences)
@@ -374,6 +365,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 };
 
                 auto request_start_c = std::chrono::steady_clock::now();
+                auto last_keepalive_c = request_start_c;
                 for (;;) {
                     // #757: the is_last token sets `finish` then falls through
                     // to think-stripping, which `continue`s on every swallowed
@@ -405,6 +397,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                     TokenEvent evt{};
                     if (!server_req->pop_token(evt)) {
+                        // SSE comment keepalive while waiting (long prefill /
+                        // queueing) — ignored by SSE parsers, keeps proxies
+                        // and SDK idle-timeouts from killing the connection.
+                        auto now = std::chrono::steady_clock::now();
+                        if (now - last_keepalive_c > std::chrono::seconds(10)) {
+                            last_keepalive_c = now;
+                            static constexpr char kKeepalive[] = ": keepalive\n\n";
+                            sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                        }
                         continue;
                     }
 

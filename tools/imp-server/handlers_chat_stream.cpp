@@ -256,6 +256,16 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // Read next token from the batching engine (with timeout)
         TokenEvent evt{};
         if (!server_req->pop_token(evt)) {
+            // No token ready yet (long prefill / queued behind other work).
+            // Emit an SSE comment as keepalive every ~10s so reverse proxies
+            // and SDK idle-timeouts don't kill the connection; comment lines
+            // are spec-compliant and ignored by SSE parsers.
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_keepalive > std::chrono::seconds(10)) {
+                last_keepalive = now;
+                static constexpr char kKeepalive[] = ": keepalive\n\n";
+                sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+            }
             continue;  // timeout — loop back to check disconnect/timeout
         }
 

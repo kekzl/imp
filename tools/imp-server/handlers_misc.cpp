@@ -43,11 +43,13 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
-    // Snapshot model pointer under lock
+    // Snapshot model pointer (+ context size) under lock
     ImpModel snap_model;
+    int snap_max_seq_len = 0;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         snap_model = state.model;
+        snap_max_seq_len = state.max_seq_len;
     }
     if (!snap_model) {
         res.status = 503;
@@ -56,9 +58,13 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
-    std::vector<int32_t> tokens(32768);
+    // Size the token buffer from the model's context (min 256k): agentic
+    // prompts run 10k-200k tokens; the previous fixed 32768 silently failed
+    // above that.
+    const int tok_cap = std::max(snap_max_seq_len, 262144);
+    std::vector<int32_t> tokens(tok_cap);
     int n_tokens = 0;
-    ImpError err = imp_tokenize(snap_model, content.c_str(), tokens.data(), &n_tokens, 32768);
+    ImpError err = imp_tokenize(snap_model, content.c_str(), tokens.data(), &n_tokens, tok_cap);
     if (err != IMP_SUCCESS) {
         res.status = 500;
         json error = {{"error",
@@ -367,10 +373,12 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
         const auto& text = inputs[input_idx];
 
-        // Tokenize
-        std::vector<int32_t> tokens(32768);
+        // Tokenize (buffer sized from the model context, min 256k — the
+        // embed_cap check below rejects over-long inputs AFTER counting).
+        const int tok_cap = std::max(state.max_seq_len, 262144);
+        std::vector<int32_t> tokens(tok_cap);
         int n_tokens = 0;
-        ImpError err = imp_tokenize(state.model, text.c_str(), tokens.data(), &n_tokens, 32768);
+        ImpError err = imp_tokenize(state.model, text.c_str(), tokens.data(), &n_tokens, tok_cap);
         if (err != IMP_SUCCESS) {
             res.status = 500;
             json error = {{"error",

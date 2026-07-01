@@ -132,7 +132,10 @@ bool parse_chat_request_params(
     // sampling (validation harness, perf tests) can pass 1.0 explicitly.
     ctx.params.top_p = body.value("top_p", 0.95f);
     ctx.params.top_k = body.value("top_k", 40);
-    ctx.params.max_tokens = body.value("max_tokens", state.default_max_tokens);
+    // "max_completion_tokens" (current OpenAI SDKs) takes precedence over the
+    // deprecated "max_tokens"; without this, SDK requests silently ran with
+    // the server default.
+    ctx.params.max_tokens = parse_max_tokens_field(body, state.default_max_tokens);
     ctx.params.seed = body.value("seed", -1);
     ctx.params.stream = body.value("stream", false);
     ctx.params.n_completions = body.value("n", 1);
@@ -164,19 +167,14 @@ bool parse_chat_request_params(
     ctx.params.mirostat_eta = body.value("mirostat_eta", 0.1f);
     ctx.params.think_budget = body.value("think_budget", state.default_think_budget);
 
-    // Parse stop sequences (string or array of up to 4 strings)
-    if (body.contains("stop") && !body["stop"].is_null()) {
-        if (body["stop"].is_string()) {
-            ctx.params.stop_sequences.push_back(body["stop"].get<std::string>());
-        } else if (body["stop"].is_array()) {
-            for (const auto& s : body["stop"]) {
-                if (s.is_string()) {
-                    ctx.params.stop_sequences.push_back(s.get<std::string>());
-                    if (ctx.params.stop_sequences.size() >= 4)
-                        break;
-                }
-            }
-        }
+    // Parse stop sequences (string or array). OpenAI caps at 4 but Anthropic
+    // /v1/messages does not, and its stop_sequences convert through this
+    // parser — allow up to 16 and warn when truncating (the stop-scan
+    // machinery handles arbitrary lists; max_stop_len derives from the vector).
+    constexpr size_t kMaxStopSequences = 16;
+    if (parse_stop_field(body, kMaxStopSequences, ctx.params.stop_sequences)) {
+        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first %zu\n",
+                body["stop"].size(), kMaxStopSequences);
     }
     ctx.params.max_stop_len = 0;
     for (const auto& s : ctx.params.stop_sequences)
