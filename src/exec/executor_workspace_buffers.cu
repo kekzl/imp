@@ -1237,6 +1237,62 @@ void GraphExecutor::free_buffers() {
     initialized_ = false;
 }
 
+bool GraphExecutor::attn_shapes_uniform() const {
+    const auto& cfg = model_->config();
+    auto uniform = [](const std::vector<int>& v) {
+        int ref = 0;
+        for (int x : v) {
+            if (x <= 0)
+                continue;  // zeros mark non-attention layers (GDN/Mamba2 hybrids)
+            if (ref == 0)
+                ref = x;
+            else if (x != ref)
+                return false;
+        }
+        return true;
+    };
+    return uniform(cfg.head_dim_per_layer) && uniform(cfg.n_kv_heads_per_layer);
+}
+
+int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {
+    const int s_cap = attn_scores_cap();
+    // No S-matrix allocated: the chunked path is served by the O(n) FA2/FMHA
+    // family (fa2_serves_all_prefill) — no capacity constraint applies here.
+    if (s_cap <= 0 || desired <= 0)
+        return desired;
+    const auto& cfg = model_->config();
+    const bool sinks = model_->profile().is_gpt_oss;
+    const bool uniform = attn_shapes_uniform();
+    const auto& att = runtime_config().attention;
+    // Uniform attention head_dim (first nonzero per-layer value, else global).
+    int hd_u = cfg.head_dim > 0 ? cfg.head_dim
+                                : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+    for (int x : cfg.head_dim_per_layer) {
+        if (x > 0) {
+            hd_u = x;
+            break;
+        }
+    }
+    // Mirrors the chunked dispatch in executor_attention_prefill.cu:
+    // FP16-QK FA2 serves every hd=128 chunk with no S-matrix.
+    if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")
+        return desired;
+    // The tiled FMHA dispatch serves chunks whose ctx_len crosses the
+    // threshold (and any chunk the S-matrix cannot hold) with no S-matrix.
+    if (uniform && !sinks && att.fmha_prefill_threshold > 0 &&
+        offset + desired >= att.fmha_prefill_threshold)
+        return desired;
+    // cuBLAS serves this chunk: n × (offset + n) ≤ s_cap² and n ≤ s_cap.
+    // Solve the quadratic for n; floor to a KV-block multiple.
+    const double cap2 = static_cast<double>(s_cap) * s_cap;
+    const double disc = static_cast<double>(offset) * offset + 4.0 * cap2;
+    int n_max = static_cast<int>((std::sqrt(disc) - offset) / 2.0);
+    n_max = std::min(n_max, s_cap);
+    if (kv_bs > 0)
+        n_max = (n_max / kv_bs) * kv_bs;
+    return std::min(desired, n_max);
+}
+
 // pre_dequant_weights() is in executor_pre_dequant.cu
 // configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),
 // use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
