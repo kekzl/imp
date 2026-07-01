@@ -229,6 +229,22 @@ public:
         return attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
     }
 
+    // Attention shapes are uniform when the per-layer shape arrays are absent
+    // or carry a single distinct nonzero value (GDN/Mamba2 hybrids fill zeros
+    // for non-attention layers). Uniform models can be served by the O(n)
+    // FA2/FMHA chunked-prefill family; only truly heterogeneous shapes
+    // (Gemma-4 dual head_dim 256/512) require the rectangular cuBLAS path.
+    bool attn_shapes_uniform() const;
+
+    // Largest prefill chunk starting at `offset` that the chunked-attention
+    // dispatch can serve without overflowing the cuBLAS S-matrix (constraint:
+    // n × (offset + n) ≤ s_cap² and n ≤ s_cap), floored to a kv_bs multiple.
+    // Chunks served by the O(n) FA2/FMHA paths need no S-matrix and return
+    // `desired` unchanged. Returns 0 when even a kv_bs-sized chunk cannot be
+    // served (caller must reject the request instead of letting the kernel
+    // capacity guard abort).
+    int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
+
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }

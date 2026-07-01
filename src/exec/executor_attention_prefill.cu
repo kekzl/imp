@@ -38,16 +38,17 @@
             int kv_layer = get_kv_layer(kv_layer_map_, layer);
             int kv_bs = cache->block_size();
             int ctx_len = q_offset + n;
-            // Of the three chunked branches below, ONLY cuBLAS consumes attn_scores_.
+            // Of the chunked branches below, ONLY cuBLAS consumes attn_scores_.
             // FP16-QK FA2 (hd=128) and the tiled FMHA dispatch are O(n) and need no
-            // S-matrix, so the capacity guard applies only when neither will serve
-            // this chunk — otherwise a deliberately skipped S-matrix on a fa2-served
-            // hd=128 model (executor_workspace_buffers.cu) would wrongly abort here.
-            const bool chunk_fa2_serves = !per_layer_shapes && !attn_sinks && hd == 128 &&
+            // S-matrix. Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on
+            // non-attention layers, one distinct nonzero value) are served by the
+            // O(n) family too — only truly heterogeneous shapes (Gemma-4 dual
+            // head_dim 256/512) and learned sinks (gpt-oss) require cuBLAS.
+            const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
+            const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && hd == 128 &&
                                           runtime_config().attention.fa2_fp16qk != "never";
-            const bool chunked_use_fmha = !per_layer_shapes &&  // Gemma-4 hd=512 stays cuBLAS
-                                          (runtime_config().attention.fmha_prefill_threshold > 0 &&
-                                           ctx_len >= runtime_config().attention.fmha_prefill_threshold);
+            // Tiled FMHA correctness domain: uniform shapes, no learned sinks.
+            const bool chunk_fmha_ok = shapes_uniform && !attn_sinks;
             // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked cuBLAS stores
             // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The
             // capacity constraint is `n * ctx_len <= s_cap²`, NOT `ctx_len <= s_cap`
@@ -60,8 +61,15 @@
             int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
             int64_t fp16_elems_needed = static_cast<int64_t>(n) * ctx_len;
             int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
-            if (!chunk_fa2_serves && !(chunked_use_fmha && !attn_sinks) &&
-                (s_cap == 0 || fp16_elems_needed > fp16_elems_avail || n > s_cap)) {
+            const bool smatrix_fits =
+                s_cap > 0 && n <= s_cap && fp16_elems_needed <= fp16_elems_avail;
+            const bool prefer_fmha = chunk_fmha_ok &&
+                                     runtime_config().attention.fmha_prefill_threshold > 0 &&
+                                     ctx_len >= runtime_config().attention.fmha_prefill_threshold;
+            if (!chunk_fa2_serves && !chunk_fmha_ok && !smatrix_fits) {
+                // Sinks/heterogeneous shapes can ONLY be served by cuBLAS — the
+                // engine clamps chunk sizes (max_safe_prefill_chunk) and rejects
+                // unservable prompts upfront, so this is defense-in-depth.
                 IMP_LOG_ERROR(
                     "chunked_prefill: attn_scores_ capacity %d×%d=%lld too small for "
                     "n=%d × ctx_len=%d = %lld at L%d — engine should have prevented this",
@@ -139,8 +147,8 @@
             // gated behind the S-matrix-capacity threshold where it has
             // history in production. fp8-attention quality above the
             // threshold is tracked separately (see issue #511).
-            // (chunk_fa2_serves / chunked_use_fmha computed above, before the
-            // S-matrix capacity guard.)
+            // (chunk_fa2_serves / prefer_fmha / smatrix_fits computed above,
+            // with the S-matrix capacity guard.)
 
             // Chunked attention routing (#548): prefer the FP16-QK FA2 kernel
             // at EVERY ctx_len, not only below the threshold. It is O(n)
@@ -154,34 +162,24 @@
             // raw e4m3 Q/K conversion read teacher-forced PPL 549 vs 16.6 on
             // gemma-3-12b when it served these chunks). cuBLAS below the
             // threshold.
-            if (!per_layer_shapes && !attn_sinks &&
+            if (chunk_fa2_serves &&
                 try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        q_offset, stream)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
-            } else if (chunked_use_fmha && !attn_sinks) {
-                // FMHA: no S-matrix needed, O(n) memory. Reshape to 4D for dispatch.
-                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
-                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                Tensor q4 = qv.reshape(4, q4s);
-                Tensor k4 = k_full_t.reshape(4, kv4s);
-                Tensor v4 = v_full_t.reshape(4, kv4s);
-                Tensor o4 = ao.reshape(4, o4s);
-                attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
-            } else if (attn_scores_buf_) {
-                // cuBLAS: needs S-matrix for [n × ctx_len]; also the only chunked
-                // path that honors learned sinks (attn_sinks → gpt-oss).
+            } else if (smatrix_fits && !prefer_fmha) {
+                // cuBLAS: reference path below the FMHA threshold; also the only
+                // chunked path that honors learned sinks (attn_sinks → gpt-oss)
+                // and heterogeneous per-layer shapes (Gemma-4).
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window, attn_sinks);
             } else {
-                // Safety net: the S-matrix was skipped (hd=128 fa2-served model) but
-                // fa2 unexpectedly declined this chunk and it is below the FMHA
-                // threshold — fall back to the O(n) tiled dispatch rather than
-                // dereferencing a null attn_scores_. Unreachable with attn_sinks:
-                // sink models (gpt-oss, hd=64) always keep the S-matrix.
+                // Tiled FMHA dispatch: no S-matrix needed, O(n) memory. Serves
+                // uniform-shape chunks above the FMHA threshold, any chunk the
+                // S-matrix cannot hold, and fa2-declined chunks on models whose
+                // S-matrix was deliberately skipped (guarded unservable above:
+                // sinks/heterogeneous shapes never reach this branch).
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
                 int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};

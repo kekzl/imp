@@ -421,6 +421,14 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                 req->prefill_offset = offset;
                 chunk_len = total_input - offset;
                 is_last_chunk = true;
+                // Re-apply the offset-aware S-matrix clamp: the caller computed
+                // effective_chunk for the pre-skip offset, and a cuBLAS-served
+                // chunk at the new (larger) offset may need to be smaller
+                // (n × ctx_len ≤ s_cap²). The upfront servability check in
+                // step_prefill_one guarantees ≥ kv_bs fits at any offset.
+                int max_chunk = executor_->max_safe_prefill_chunk(offset, effective_chunk, kv_bs);
+                if (max_chunk > 0 && max_chunk < effective_chunk)
+                    effective_chunk = max_chunk;
                 if (chunk_len > effective_chunk) {
                     chunk_len = effective_chunk;
                     is_last_chunk = false;
@@ -567,21 +575,34 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         return;
     }
 
-    // Clamp effective_chunk so n × ctx_len ≤ s_cap² where s_cap is the
-    // attn_scores_ workspace dimension. Worst case is the final chunk where
-    // ctx_len ≈ total_input. Without this, long prompts on hybrid models
-    // (Qwen3.5/3.6 GDN, Nemotron-H) hit "attn_scores_ capacity too small"
-    // abort in executor_attention.cu — see chunked_prefill_attn_scores_capacity_bug.
+    // Clamp effective_chunk so the chunked-attention S-matrix cannot overflow
+    // (cuBLAS stores an [nh, n, ctx_len] score matrix; n × ctx_len ≤ s_cap²).
+    // max_safe_prefill_chunk mirrors the executor dispatch and only clamps
+    // chunks that will actually land on cuBLAS (learned sinks → gpt-oss,
+    // heterogeneous shapes → Gemma-4); chunks served by the O(n) FA2/FMHA
+    // family pass through unclamped. The clamp is offset-aware: early chunks
+    // stay large and only late chunks shrink (previously EVERY chunk was
+    // clamped to the final-chunk worst case cap²/total_input — e.g. 32-token
+    // chunks across an entire 128k prompt on hd=256 hybrids).
     if (executor_) {
-        int s_cap = executor_->attn_scores_cap();
-        if (s_cap > 0 && total_input > 0) {
-            int64_t cap2 = static_cast<int64_t>(s_cap) * s_cap;
-            int max_chunk_for_buf = static_cast<int>(cap2 / total_input);
-            max_chunk_for_buf = (max_chunk_for_buf / kv_bs) * kv_bs;
-            if (max_chunk_for_buf > 0 && effective_chunk > max_chunk_for_buf) {
-                effective_chunk = max_chunk_for_buf;
+        if (offset == 0 && total_input > kv_bs) {
+            // Upfront servability check: if even a kv_bs-sized final chunk
+            // cannot fit the S-matrix, reject cleanly instead of letting the
+            // kernel capacity guard abort the process mid-prefill.
+            int last_off = ((total_input - 1) / kv_bs) * kv_bs;
+            if (executor_->max_safe_prefill_chunk(last_off, kv_bs, kv_bs) < kv_bs) {
+                IMP_LOG_ERROR(
+                    "Prompt (%d tokens) exceeds the chunked-attention workspace for this model "
+                    "(S-matrix cap %d; learned-sink/heterogeneous attention requires cuBLAS) — "
+                    "cancelling request %d. Reduce the prompt or raise attention.attn_scores_mib.",
+                    total_input, executor_->attn_scores_cap(), req->id);
+                req->status = RequestStatus::CANCELLED;
+                return;
             }
         }
+        int max_chunk = executor_->max_safe_prefill_chunk(offset, effective_chunk, kv_bs);
+        if (max_chunk > 0 && effective_chunk > max_chunk)
+            effective_chunk = max_chunk;
     }
 
     // Determine chunk boundaries
