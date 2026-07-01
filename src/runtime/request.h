@@ -131,6 +131,11 @@ struct Request {
     // JSON mode
     bool json_mode = false;   // Constrain output to valid JSON
     std::string json_schema;  // JSON Schema string (empty = disabled)
+    // Per-request constraint FSM (JsonConstrainer/SchemaConstrainer wrapper).
+    // Owned by the request so concurrent prefills/finishes of OTHER requests
+    // cannot clobber the state, and batched decode can mask per row. Checked
+    // out of Engine::constraint_pool_ on first need, returned at finish.
+    std::shared_ptr<class ConstraintManager> constraints;
 
     // Tool-call coordination: when true and (json_mode || !json_schema.empty()),
     // the preamble gate enters tool-aware mode so the schema/JSON FSM mask

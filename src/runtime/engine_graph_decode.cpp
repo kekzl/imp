@@ -391,9 +391,9 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.frequency_penalty = req->frequency_penalty;
     st.presence_penalty = req->presence_penalty;
     st.repeat_last_n = req->repeat_last_n;
-    // Constraint hooks — the engine-level manager was prepared at admission.
-    st.schema_constrainer = constraints_.schema_constrainer();
-    st.json_constrainer = constraints_.json_constrainer();
+    // Constraint hooks — the request's manager was prepared at admission.
+    st.schema_constrainer = req->constraints ? req->constraints->schema_constrainer() : nullptr;
+    st.json_constrainer = req->constraints ? req->constraints->json_constrainer() : nullptr;
 
     p.runner.set_decode_fn([this](cudaStream_t s) { executor_->forward_logits(cpipe_.state, cpipe_.logits, s); });
 
@@ -461,7 +461,8 @@ int Engine::step_constrained_pipeline() {
     req->output_tokens.push_back(token);
     p.produced++;
     track_think_state(*req, token);
-    constraints_.update(token);
+    if (req->constraints)
+        req->constraints->update(token);
     kv_manager_->touch(req->id);
 
     bool done = should_stop(*req, token) ||

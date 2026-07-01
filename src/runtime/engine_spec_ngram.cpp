@@ -360,7 +360,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         emitted++;
         const bool hard_stop = should_stop(*req, tokj) ||
                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
-        constraints_.update(tokj);
+        // Per-request FSM; must advance before finish_request returns the
+        // manager to the pool. (Spec gates exclude json/schema requests, so
+        // this is normally null — kept for parity with the eager path.)
+        if (req->constraints)
+            req->constraints->update(tokj);
         if (hard_stop) {
             finish_request(req);
             break;
