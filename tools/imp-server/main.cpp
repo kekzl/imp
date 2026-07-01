@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
             if (!api_key_matches(auth, xkey, state.api_key)) {
                 res.status = 401;
                 json err;
-                if (req.path == "/v1/messages") {
+                if (req.path.rfind("/v1/messages", 0) == 0) {
                     err = {{"type", "error"},
                            {"error", {{"type", "authentication_error"}, {"message", "Invalid API key"}}}};
                 } else {
@@ -208,6 +208,12 @@ int main(int argc, char** argv) {
     // native incremental SSE streaming (real per-token, not synthetic replay).
     svr.Post("/v1/messages", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res, state);
+    });
+
+    // Anthropic token counting (Claude Code uses it for context tracking /
+    // auto-compaction). Tokenizes exactly like a real request, no generation.
+    svr.Post("/v1/messages/count_tokens", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_count_tokens(req, res, state);
     });
 
     svr.Post("/v1/embeddings", [&state](const httplib::Request& req, httplib::Response& res) {
@@ -275,6 +281,7 @@ int main(int argc, char** argv) {
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/completions\n");
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
+    printf("  POST   /v1/messages/count_tokens\n");
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");

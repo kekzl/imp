@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 #include "model/gguf_loader.h"
+#include "model/model_arch.h"
+
+#include <stdexcept>
+#include <string>
 
 #include <cstdio>
 #include <cstring>
@@ -143,6 +147,67 @@ TEST(GgufLoaderTest, LargeMetadataCount) {
 
     auto model = load_gguf(path);
     EXPECT_EQ(model, nullptr);
+
+    unlink(path.c_str());
+}
+
+
+// ---------------------------------------------------------------------------
+// #818: encoder-only architectures must be rejected at load, not fall through
+// to the generic-decoder path (which "loads", reports healthy, and IMAs on the
+// first /v1/embeddings request, poisoning the CUDA context).
+// ---------------------------------------------------------------------------
+
+TEST(GgufLoaderTest, EncoderOnlyArchDetection) {
+    // llama.cpp GGUF arch ids for the BERT-family encoders.
+    EXPECT_TRUE(is_encoder_only_arch("bert"));
+    EXPECT_TRUE(is_encoder_only_arch("nomic-bert"));
+    EXPECT_TRUE(is_encoder_only_arch("nomic-bert-moe"));
+    EXPECT_TRUE(is_encoder_only_arch("jina-bert-v2"));
+    EXPECT_TRUE(is_encoder_only_arch("jina-bert-v3"));
+    EXPECT_TRUE(is_encoder_only_arch("modern-bert"));
+    EXPECT_TRUE(is_encoder_only_arch("roberta"));
+    EXPECT_TRUE(is_encoder_only_arch("t5encoder"));
+    EXPECT_TRUE(is_encoder_only_arch("e5"));
+    EXPECT_TRUE(is_encoder_only_arch("bge"));
+    // Decoder archs must never be rejected.
+    EXPECT_FALSE(is_encoder_only_arch("llama"));
+    EXPECT_FALSE(is_encoder_only_arch("qwen3"));
+    EXPECT_FALSE(is_encoder_only_arch("qwen3moe"));
+    EXPECT_FALSE(is_encoder_only_arch("gemma4"));
+    EXPECT_FALSE(is_encoder_only_arch("gpt_oss"));
+    EXPECT_FALSE(is_encoder_only_arch("nemotron_h_moe"));
+    EXPECT_FALSE(is_encoder_only_arch("generic-unknown"));
+}
+
+TEST(GgufLoaderTest, EncoderArchGgufRejectedAtLoad) {
+    // Minimal valid GGUF v3 with general.architecture = "nomic-bert" and no
+    // tensors. The loader must throw a clear error (translated to ImpError at
+    // the C-API boundary) instead of mapping the arch to the generic decoder.
+    auto append_str = [](std::vector<uint8_t>& buf, const std::string& s) {
+        uint64_t len = s.size();
+        const uint8_t* lp = reinterpret_cast<const uint8_t*>(&len);
+        buf.insert(buf.end(), lp, lp + 8);
+        buf.insert(buf.end(), s.begin(), s.end());
+    };
+    auto data = make_gguf_header(GGUF_MAGIC, 3, /*n_tensors=*/0, /*n_kv=*/1);
+    append_str(data, "general.architecture");
+    uint32_t t_string = 8;  // GGUFValueType::STRING
+    const uint8_t* tp = reinterpret_cast<const uint8_t*>(&t_string);
+    data.insert(data.end(), tp, tp + 4);
+    append_str(data, "nomic-bert");
+
+    std::string path = write_temp_gguf(data);
+    ASSERT_FALSE(path.empty());
+
+    try {
+        auto model = load_gguf(path);
+        FAIL() << "expected load_gguf to throw for encoder-only arch, got "
+               << (model ? "a model" : "nullptr");
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("encoder-only"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("nomic-bert"), std::string::npos) << e.what();
+    }
 
     unlink(path.c_str());
 }

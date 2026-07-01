@@ -501,3 +501,37 @@ std::string sse_completion_chunk(const std::string& id, int64_t created, const s
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }
+
+int parse_max_tokens_field(const json& body, int def) {
+    int v = def;
+    if (body.contains("max_tokens") && body["max_tokens"].is_number())
+        v = body["max_tokens"].get<int>();
+    // Current OpenAI SDKs send "max_completion_tokens" (max_tokens is
+    // deprecated on chat/completions) — honor it with precedence.
+    if (body.contains("max_completion_tokens") && body["max_completion_tokens"].is_number())
+        v = body["max_completion_tokens"].get<int>();
+    return v;
+}
+
+bool parse_stop_field(const json& body, size_t cap, std::vector<std::string>& out) {
+    if (!body.contains("stop") || body["stop"].is_null())
+        return false;
+    const json& stop = body["stop"];
+    if (stop.is_string()) {
+        out.push_back(stop.get<std::string>());
+        return false;
+    }
+    if (!stop.is_array())
+        return false;
+    bool truncated = false;
+    for (const auto& s : stop) {
+        if (!s.is_string())
+            continue;
+        if (out.size() >= cap) {
+            truncated = true;
+            break;
+        }
+        out.push_back(s.get<std::string>());
+    }
+    return truncated;
+}

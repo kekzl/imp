@@ -1,6 +1,7 @@
 #include "tool_call.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 
@@ -69,7 +70,7 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 //   ...
 //   </function>
 // Strings round-trip as strings; bare numerics get coerced to JSON numbers.
-static bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
+bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     size_t fn = body.find("<function=");
     if (fn == std::string::npos)
         return false;
@@ -464,6 +465,34 @@ bool parse_gemma_value(const std::string& s, size_t& p, json& out) {
 
 }  // namespace
 
+// Single Gemma-4 tool-call body: "call:NAME{key:value,...}" (markers already
+// stripped). Shared by the non-streaming parser below and the streaming paths.
+bool parse_gemma_tool_call_body(const std::string& body_in, ParsedToolCall& tc) {
+    size_t bs = body_in.find_first_not_of("\n\r\t ");
+    if (bs == std::string::npos)
+        return false;
+    std::string body = body_in.substr(bs);
+
+    if (body.compare(0, 5, "call:") != 0)
+        return false;
+    size_t brace = body.find('{', 5);
+    if (brace == std::string::npos)
+        return false;
+
+    std::string name = body.substr(5, brace - 5);
+    auto ne = name.find_last_not_of("\n\r\t ");
+    name = (ne != std::string::npos) ? name.substr(0, ne + 1) : std::string();
+    if (name.empty())
+        return false;
+
+    size_t bp = brace;
+    json args;
+    bool ok = parse_gemma_object(body, bp, args);
+    tc.name = std::move(name);
+    tc.arguments = ok ? dump_safe(args) : "{}";
+    return true;
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
     const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;
@@ -495,41 +524,11 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
         if (end == std::string::npos)
             break;
 
-        std::string body = text.substr(start, end - start);
-        size_t bs = body.find_first_not_of("\n\r\t ");
-        if (bs == std::string::npos) {
-            pos = end + close_len;
-            continue;
-        }
-        body = body.substr(bs);
-
-        // Expect "call:NAME{...}"
-        if (body.compare(0, 5, "call:") != 0) {
-            pos = end + close_len;
-            continue;
-        }
-        size_t brace = body.find('{', 5);
-        if (brace == std::string::npos) {
-            pos = end + close_len;
-            continue;
-        }
-
-        std::string name = body.substr(5, brace - 5);
-        auto ne = name.find_last_not_of("\n\r\t ");
-        if (ne != std::string::npos)
-            name = name.substr(0, ne + 1);
-
-        // Parse the {...} args block as a Gemma object.
-        size_t bp = brace;
-        json args;
-        bool ok = parse_gemma_object(body, bp, args);
-        if (!ok || !name.empty()) {
-            ParsedToolCall tc;
+        // Expect "call:NAME{...}" — shared single-call body parser.
+        ParsedToolCall tc;
+        if (parse_gemma_tool_call_body(text.substr(start, end - start), tc)) {
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
-            tc.name = std::move(name);
-            tc.arguments = ok ? dump_safe(args) : "{}";
-            if (!tc.name.empty())
-                calls.push_back(std::move(tc));
+            calls.push_back(std::move(tc));
         }
 
         pos = end + close_len;
@@ -546,6 +545,124 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(imp::ChatTe
     if (family == imp::ChatTemplateFamily::GEMMA)
         return parse_tool_calls_gemma(text, next_tool_call_id);
     return parse_tool_calls_chatml(text, next_tool_call_id);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming tag scanner + body parser (used by StreamToolCallFilter).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// True iff some suffix of buf is a proper prefix of marker m — i.e. more
+// bytes could still complete the marker. Used for the streaming holdback.
+bool suffix_is_marker_prefix(const std::string& buf, const char* m, size_t mlen) {
+    size_t maxk = std::min(buf.size(), mlen - 1);
+    for (size_t k = maxk; k >= 1; --k) {
+        if (std::memcmp(buf.data() + buf.size() - k, m, k) == 0)
+            return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family) {
+    ToolTagScan r;
+
+    if (family == imp::ChatTemplateFamily::LLAMA3) {
+        constexpr const char* kFn = "<function=";
+        constexpr size_t kFnLen = 10;
+        size_t fn_pos = buf.find(kFn);
+        if (fn_pos != std::string::npos) {
+            size_t gt = buf.find('>', fn_pos + kFnLen);
+            if (gt == std::string::npos) {
+                r.kind = ToolTagScan::Kind::PARTIAL;  // still waiting for '>'
+                return r;
+            }
+            r.kind = ToolTagScan::Kind::OPEN;
+            r.content_len = fn_pos;
+            r.body_start = gt + 1;
+            r.close_tag = "</function>";
+            r.fn_name = buf.substr(fn_pos + kFnLen, gt - (fn_pos + kFnLen));
+            return r;
+        }
+        r.kind = suffix_is_marker_prefix(buf, kFn, kFnLen) ? ToolTagScan::Kind::PARTIAL
+                                                           : ToolTagScan::Kind::NONE;
+        return r;
+    }
+
+    // ChatML "<tool_call>" for all non-Llama3 families; the GEMMA family
+    // additionally recognises the native pipe-delimited "<|tool_call>".
+    constexpr const char* kChatml = "<tool_call>";
+    constexpr size_t kChatmlLen = 11;
+    constexpr const char* kGemma = "<|tool_call>";
+    constexpr size_t kGemmaLen = 12;
+    const bool gemma = (family == imp::ChatTemplateFamily::GEMMA);
+
+    size_t chatml_pos = buf.find(kChatml);
+    size_t gemma_pos = gemma ? buf.find(kGemma) : std::string::npos;
+    if (chatml_pos != std::string::npos || gemma_pos != std::string::npos) {
+        r.kind = ToolTagScan::Kind::OPEN;
+        if (gemma_pos != std::string::npos &&
+            (chatml_pos == std::string::npos || gemma_pos < chatml_pos)) {
+            r.content_len = gemma_pos;
+            r.body_start = gemma_pos + kGemmaLen;
+            r.close_tag = "<tool_call|>";
+            r.gemma_body = true;
+        } else {
+            r.content_len = chatml_pos;
+            r.body_start = chatml_pos + kChatmlLen;
+            r.close_tag = "</tool_call>";
+        }
+        return r;
+    }
+
+    if (suffix_is_marker_prefix(buf, kChatml, kChatmlLen) ||
+        (gemma && suffix_is_marker_prefix(buf, kGemma, kGemmaLen))) {
+        r.kind = ToolTagScan::Kind::PARTIAL;
+        return r;
+    }
+    r.kind = ToolTagScan::Kind::NONE;
+    return r;
+}
+
+bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std::string& fn_name,
+                            ParsedToolCall& tc) {
+    if (gemma_body)
+        return parse_gemma_tool_call_body(body, tc);
+
+    if (!fn_name.empty()) {
+        // Llama3: name came from the open tag, the body is the bare JSON args.
+        try {
+            json j = json::parse(body);
+            tc.name = fn_name;
+            tc.arguments = dump_safe(j);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // ChatML: classic JSON body first ...
+    try {
+        json j = json::parse(body);
+        tc.name = j.value("name", "");
+        if (j.contains("arguments")) {
+            tc.arguments = dump_safe(j["arguments"]);
+        } else {
+            json args = j;
+            args.erase("name");
+            tc.arguments = dump_safe(args);
+        }
+        if (!tc.name.empty())
+            return true;
+    } catch (...) {
+        // fall through to the Qwen3.6 XML layout
+    }
+    // ... then Qwen3.6's <function=NAME><parameter=K>V</parameter> layout.
+    if (body.find("<function=") != std::string::npos && parse_qwen36_xml_call(body, tc))
+        return true;
+    return false;
 }
 
 // JSON value -> Gemma's format_argument() output (with escape_keys=False

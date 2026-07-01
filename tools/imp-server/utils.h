@@ -76,6 +76,15 @@ ChannelSegments split_channel_segments(const std::string& text);
 // control markup and role names are stripped. Each segment is trimmed.
 ChannelSegments split_harmony_channels(const std::string& text);
 
+// Effective max output tokens for an OpenAI-shaped body: current OpenAI SDKs
+// send "max_completion_tokens" (max_tokens is deprecated on chat/completions);
+// it takes precedence over "max_tokens". `def` when neither is present.
+int parse_max_tokens_field(const json& body, int def);
+
+// Parse the OpenAI "stop" field (string or array of strings) into `out`,
+// keeping at most `cap` entries. Returns true iff entries were dropped.
+bool parse_stop_field(const json& body, size_t cap, std::vector<std::string>& out);
+
 std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
                       const char* finish_reason, const json& logprobs = nullptr);
 

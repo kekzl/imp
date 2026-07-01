@@ -486,6 +486,18 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         }
     }
 
+    if (body.contains("max_completion_tokens") && !body["max_completion_tokens"].is_null()) {
+        int mt = body["max_completion_tokens"].get<int>();
+        if (mt < 1) {
+            res.status = 400;
+            json err = {{"error",
+                         {{"message", "\"max_completion_tokens\" must be at least 1"},
+                          {"type", "invalid_request_error"}}}};
+            res.set_content(dump_safe(err), "application/json");
+            return false;
+        }
+    }
+
     if (body.contains("n")) {
         int n = body["n"].get<int>();
         if (n < 1 || n > 4) {

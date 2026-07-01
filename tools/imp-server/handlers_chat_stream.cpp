@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "utils.h"
 #include "tool_call.h"
+#include "tool_stream_filter.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -123,13 +124,12 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     std::string pending_text;
     bool text_stop_matched = false;
 
-    // Tool call detection state machine for streaming
-    enum class ToolPhase { CONTENT, TAG_SCANNING, TOOL_CALL_BODY };
-    ToolPhase tool_phase = ToolPhase::CONTENT;
-    std::string tool_tag_buf;    // buffer for partial tag match
-    std::string tool_body_buf;   // buffer for tool call body
-    std::string tool_close_tag;  // expected closing tag
-    std::string tool_fn_name;    // Llama3: extracted function name from open tag
+    // Streaming tool-call demux (tool_stream_filter.h) — pure state machine
+    // shared with the Anthropic path. Detects ChatML/Llama3/Gemma-4 open
+    // markers, holds back potential-tag text, parses completed bodies (JSON,
+    // Qwen3.6 XML fallback, Gemma call:NAME{...}) and restores unparseable
+    // ones to the content stream instead of dropping them.
+    imp::server::StreamToolCallFilter tool_filter(tpl_family);
     std::vector<ParsedToolCall> stream_tool_calls;
     bool tool_calls_emitted = false;
     // The full accumulated output (only used when has_tools, for fallback)
@@ -203,7 +203,28 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         return ok;
     };
 
+    // Flush held content buffers before emitting a tool-call (or directly
+    // emitted text) SSE frame, so stream order is preserved. A complete stop
+    // match cannot be pending here: the normal emission path checks after
+    // every append with the same holdback decision.
+    auto flush_buffered_content = [&]() -> bool {
+        if (stop_sequences.empty()) {
+            size_t complete = utf8_complete_len(utf8_buf);
+            if (complete > 0) {
+                if (!sse_writer.write_content(utf8_buf.data(), complete, sink))
+                    return false;
+                utf8_buf.erase(0, complete);
+            }
+        } else if (!pending_text.empty()) {
+            auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
+            if (!flush_text(d.flush_len))
+                return false;
+        }
+        return true;
+    };
+
     auto request_start = std::chrono::steady_clock::now();
+    auto last_keepalive = request_start;
     for (;;) {
         // Terminate as soon as a finish reason has been recorded. The is_last
         // token sets `finish` and then falls through to the per-token
@@ -235,6 +256,16 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // Read next token from the batching engine (with timeout)
         TokenEvent evt{};
         if (!server_req->pop_token(evt)) {
+            // No token ready yet (long prefill / queued behind other work).
+            // Emit an SSE comment as keepalive every ~10s so reverse proxies
+            // and SDK idle-timeouts don't kill the connection; comment lines
+            // are spec-compliant and ignored by SSE parsers.
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_keepalive > std::chrono::seconds(10)) {
+                last_keepalive = now;
+                static constexpr char kKeepalive[] = ": keepalive\n\n";
+                sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+            }
             continue;  // timeout — loop back to check disconnect/timeout
         }
 
@@ -371,261 +402,74 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             piece = std::move(rs.content);
         }
 
-        // CONTENT phase — with tool call tag detection
-        if (has_tools)
+        // Streaming tool-call demux (only when tools are present): the filter
+        // returns the user-visible content and any completed tool calls, in
+        // stream order. Content before/between calls is emitted directly
+        // (matching the previous inline machine); trailing content after the
+        // last call falls through to the normal emission path below.
+        if (has_tools) {
             full_output += piece;
-
-        // Tool call state machine (only active when tools are present)
-        if (has_tools && tool_phase == ToolPhase::TOOL_CALL_BODY) {
-            tool_body_buf += piece;
-            // Check for close tag
-            auto close_pos = tool_body_buf.find(tool_close_tag);
-            if (close_pos != std::string::npos) {
-                std::string body = tool_body_buf.substr(0, close_pos);
-                auto bs = body.find_first_not_of("\n\r\t ");
-                auto be = body.find_last_not_of("\n\r\t ");
-                if (bs != std::string::npos && be != std::string::npos)
-                    body = body.substr(bs, be - bs + 1);
-
-                // Parse and emit tool call
-                try {
-                    json j = json::parse(body);
-                    ParsedToolCall tc;
-                    tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
-                    if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
-                        tc.name = tool_fn_name;
-                        tc.arguments = dump_safe(j);
+            auto segs = tool_filter.feed(std::move(piece));
+            piece.clear();
+            for (size_t si = 0; si < segs.size(); ++si) {
+                auto& seg = segs[si];
+                if (!seg.is_call) {
+                    if (si + 1 == segs.size()) {
+                        piece = std::move(seg.text);  // trailing content
                     } else {
-                        tc.name = j.value("name", "");
-                        if (j.contains("arguments")) {
-                            tc.arguments = dump_safe(j["arguments"]);
-                        } else {
-                            json args = j;
-                            args.erase("name");
-                            tc.arguments = dump_safe(args);
-                        }
+                        if (!flush_buffered_content())
+                            return false;
+                        json cd = {{"content", seg.text}};
+                        std::string sse = sse_chunk(comp_id, created, snap_model_name, cd, nullptr);
+                        sink.write(sse.data(), sse.size());
                     }
-                    // parallel_tool_calls=false: stream at most one tool call.
-                    if (!tc.name.empty() &&
-                        (ctx.params.parallel_tool_calls || stream_tool_calls.empty())) {
-                        int idx = static_cast<int>(stream_tool_calls.size());
-                        // Emit name chunk
-                        json name_delta = {
-                            {"tool_calls",
-                             json::array(
-                                 {{{"index", idx},
+                    continue;
+                }
+                // parallel_tool_calls=false: stream at most one tool call.
+                if (!ctx.params.parallel_tool_calls && !stream_tool_calls.empty())
+                    continue;
+                ParsedToolCall tc = std::move(seg.call);
+                tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                if (!flush_buffered_content())
+                    return false;
+                int idx = static_cast<int>(stream_tool_calls.size());
+                // Emit name chunk
+                json name_delta = {
+                    {"tool_calls",
+                     json::array({{{"index", idx},
                                    {"id", tc.id},
                                    {"type", "function"},
                                    {"function", {{"name", tc.name}, {"arguments", ""}}}}})}};
-                        std::string sse = sse_chunk(comp_id, created, snap_model_name, name_delta,
-                                                    nullptr);
-                        sink.write(sse.data(), sse.size());
+                std::string sse = sse_chunk(comp_id, created, snap_model_name, name_delta, nullptr);
+                sink.write(sse.data(), sse.size());
 
-                        // Emit arguments incrementally as partial-JSON deltas
-                        // (Task 6) so OpenAI streaming clients see the tool
-                        // arguments grow rather than land in one block.
-                        constexpr size_t kArgChunk = 48;
-                        const std::string& full_args = tc.arguments;
-                        if (full_args.empty()) {
-                            json args_delta = {
-                                {"tool_calls",
-                                 json::array({{{"index", idx},
-                                               {"function", {{"arguments", ""}}}}})}};
-                            sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
-                            sink.write(sse.data(), sse.size());
-                        }
-                        for (size_t aoff = 0; aoff < full_args.size(); aoff += kArgChunk) {
-                            size_t an = std::min(kArgChunk, full_args.size() - aoff);
-                            json args_delta = {
-                                {"tool_calls",
-                                 json::array(
-                                     {{{"index", idx},
+                // Emit arguments incrementally as partial-JSON deltas (Task 6)
+                // so OpenAI streaming clients see the tool arguments grow
+                // rather than land in one block.
+                constexpr size_t kArgChunk = 48;
+                const std::string& full_args = tc.arguments;
+                if (full_args.empty()) {
+                    json args_delta = {
+                        {"tool_calls",
+                         json::array({{{"index", idx}, {"function", {{"arguments", ""}}}}})}};
+                    sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
+                    sink.write(sse.data(), sse.size());
+                }
+                for (size_t aoff = 0; aoff < full_args.size(); aoff += kArgChunk) {
+                    size_t an = std::min(kArgChunk, full_args.size() - aoff);
+                    json args_delta = {
+                        {"tool_calls",
+                         json::array({{{"index", idx},
                                        {"function", {{"arguments", full_args.substr(aoff, an)}}}}})}};
-                            sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
-                            sink.write(sse.data(), sse.size());
-                        }
-
-                        stream_tool_calls.push_back(std::move(tc));
-                        tool_calls_emitted = true;
-                    }
-                } catch (...) {
-                    // Malformed JSON — skip
+                    sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
+                    sink.write(sse.data(), sse.size());
                 }
 
-                // Check for more content after close tag
-                std::string after = tool_body_buf.substr(close_pos + tool_close_tag.size());
-                tool_body_buf.clear();
-                tool_phase = ToolPhase::CONTENT;
-                // If there's remaining text, it might contain more tool calls
-                if (!after.empty()) {
-                    auto ws = after.find_first_not_of("\n\r\t ");
-                    if (ws != std::string::npos) {
-                        piece = after.substr(ws);
-                        // Fall through to CONTENT handling below
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            } else {
-                continue;  // Still collecting body
+                stream_tool_calls.push_back(std::move(tc));
+                tool_calls_emitted = true;
             }
-        }
-
-        if (has_tools && tool_phase == ToolPhase::TAG_SCANNING) {
-            tool_tag_buf += piece;
-            // ChatML: check for <tool_call>
-            if (tpl_family != imp::ChatTemplateFamily::LLAMA3) {
-                if (tool_tag_buf.size() >= 11) {  // len("<tool_call>")
-                    if (tool_tag_buf.find("<tool_call>") != std::string::npos) {
-                        auto pos = tool_tag_buf.find("<tool_call>");
-                        // Flush content before the tag
-                        std::string before = tool_tag_buf.substr(0, pos);
-                        if (!before.empty()) {
-                            json cd = {{"content", before}};
-                            std::string sse = sse_chunk(comp_id, created, snap_model_name, cd,
-                                                        nullptr);
-                            sink.write(sse.data(), sse.size());
-                        }
-                        tool_body_buf = tool_tag_buf.substr(pos + 11);
-                        tool_close_tag = "</tool_call>";
-                        tool_tag_buf.clear();
-                        tool_phase = ToolPhase::TOOL_CALL_BODY;
-                        continue;
-                    }
-                    // Check if it's definitely not a tool_call tag
-                    if (tool_tag_buf.find("<tool_call") == std::string::npos &&
-                        tool_tag_buf.find("<tool_c") == std::string::npos &&
-                        tool_tag_buf.find("<tool_") == std::string::npos &&
-                        tool_tag_buf.find("<tool") == std::string::npos &&
-                        tool_tag_buf.find("<too") == std::string::npos &&
-                        tool_tag_buf.find("<to") == std::string::npos &&
-                        tool_tag_buf.find("<t") == std::string::npos) {
-                        // Not a tool tag — flush as content
-                        piece = tool_tag_buf;
-                        tool_tag_buf.clear();
-                        tool_phase = ToolPhase::CONTENT;
-                        // Fall through to content emission
-                    } else {
-                        continue;  // Still scanning
-                    }
-                } else {
-                    // Check partial match
-                    const char* tc_tag = "<tool_call>";
-                    bool could_match = true;
-                    for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 11; ci++) {
-                        if (tool_tag_buf[ci] != tc_tag[ci]) {
-                            could_match = false;
-                            break;
-                        }
-                    }
-                    if (!could_match) {
-                        piece = tool_tag_buf;
-                        tool_tag_buf.clear();
-                        tool_phase = ToolPhase::CONTENT;
-                    } else {
-                        continue;  // Still matching prefix
-                    }
-                }
-            } else {
-                // Llama3: check for <function=
-                if (tool_tag_buf.size() >= 10) {  // len("<function=")
-                    auto fn_pos = tool_tag_buf.find("<function=");
-                    if (fn_pos != std::string::npos) {
-                        auto gt = tool_tag_buf.find('>', fn_pos + 10);
-                        if (gt != std::string::npos) {
-                            std::string before = tool_tag_buf.substr(0, fn_pos);
-                            if (!before.empty()) {
-                                json cd = {{"content", before}};
-                                std::string sse = sse_chunk(comp_id, created, snap_model_name, cd,
-                                                            nullptr);
-                                sink.write(sse.data(), sse.size());
-                            }
-                            tool_fn_name = tool_tag_buf.substr(fn_pos + 10, gt - (fn_pos + 10));
-                            tool_body_buf = tool_tag_buf.substr(gt + 1);
-                            tool_close_tag = "</function>";
-                            tool_tag_buf.clear();
-                            tool_phase = ToolPhase::TOOL_CALL_BODY;
-                            continue;
-                        } else {
-                            continue;  // Still scanning for >
-                        }
-                    }
-                    // Check prefix match
-                    const char* fn_tag = "<function=";
-                    bool could_match = true;
-                    for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 10; ci++) {
-                        if (tool_tag_buf[ci] != fn_tag[ci]) {
-                            could_match = false;
-                            break;
-                        }
-                    }
-                    if (!could_match) {
-                        piece = tool_tag_buf;
-                        tool_tag_buf.clear();
-                        tool_phase = ToolPhase::CONTENT;
-                    } else {
-                        continue;
-                    }
-                } else {
-                    const char* fn_tag = "<function=";
-                    bool could_match = true;
-                    for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 10; ci++) {
-                        if (tool_tag_buf[ci] != fn_tag[ci]) {
-                            could_match = false;
-                            break;
-                        }
-                    }
-                    if (!could_match) {
-                        piece = tool_tag_buf;
-                        tool_tag_buf.clear();
-                        tool_phase = ToolPhase::CONTENT;
-                    } else {
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // In CONTENT phase, check for start of tool call tag
-        if (has_tools && tool_phase == ToolPhase::CONTENT) {
-            // Look for < that might start a tool call tag
-            size_t lt_pos = piece.find('<');
-            if (lt_pos != std::string::npos) {
-                // Emit everything before the <
-                if (lt_pos > 0) {
-                    std::string before = piece.substr(0, lt_pos);
-                    if (stop_sequences.empty()) {
-                        utf8_buf += before;
-                    } else {
-                        pending_text += before;
-                    }
-                }
-                // Start tag scanning with the < and everything after
-                tool_tag_buf = piece.substr(lt_pos);
-                tool_phase = ToolPhase::TAG_SCANNING;
-                // Flush any buffered content before entering tag scan
-                if (stop_sequences.empty() && !utf8_buf.empty()) {
-                    size_t complete = utf8_complete_len(utf8_buf);
-                    if (complete > 0) {
-                        if (!sse_writer.write_content(utf8_buf.data(), complete, sink))
-                            return false;
-                        utf8_buf.erase(0, complete);
-                    }
-                } else if (!stop_sequences.empty()) {
-                    auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
-                                                            stop_sequences);
-                    if (!flush_text(d.flush_len))
-                        return false;
-                    if (d.complete_match) {
-                        text_stop_matched = true;
-                        finish = "stop";
-                        break;
-                    }
-                }
+            if (piece.empty())
                 continue;
-            }
         }
 
         // Normal content emission (no tool tag detected)
@@ -718,14 +562,10 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         sse_writer.write_content(notice, sink);
     }
 
-    // Handle incomplete tool call at end (max_tokens hit while in tag)
-    if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
-        // Partial tool call — emit as content, finish_reason stays "length"
-        std::string leftover;
-        if (!tool_tag_buf.empty())
-            leftover += tool_tag_buf;
-        if (!tool_body_buf.empty())
-            leftover += tool_body_buf;
+    // Handle incomplete tool call at end (max_tokens hit while in tag/body):
+    // release the held raw text as content, finish_reason stays "length".
+    if (has_tools && tool_filter.mid_tool() && !tool_calls_emitted) {
+        std::string leftover = tool_filter.finish();
         if (!leftover.empty()) {
             utf8_buf += leftover;
         }

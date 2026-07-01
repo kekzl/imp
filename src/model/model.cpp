@@ -267,6 +267,17 @@ ModelArch parse_model_arch(const std::string& s) {
     return (it != registry.end()) ? it->second : ModelArch::GENERIC;
 }
 
+bool is_encoder_only_arch(const std::string& s) {
+    // llama.cpp GGUF arch ids for BERT-style encoders: "bert", "nomic-bert",
+    // "nomic-bert-moe", "jina-bert-v2"/"-v3", "modern-bert", "roberta-bert" —
+    // bge/e5 checkpoints ship one of these. Substring match covers the family
+    // (no decoder arch string contains "bert").
+    if (s.find("bert") != std::string::npos)
+        return true;
+    // Encoder-only T5 + defensive aliases for embedding-model names.
+    return s == "t5encoder" || s == "roberta" || s == "e5" || s == "bge";
+}
+
 void apply_arch_defaults(ModelConfig& cfg) {
     const auto& e = lookup_arch(cfg.arch);
     if (e.rope_neox >= 0)

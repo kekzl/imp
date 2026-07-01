@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -280,6 +281,17 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     auto it_arch = metadata.find("general.architecture");
     std::string arch_str = (it_arch != metadata.end()) ? it_arch->second.str_val : "llama";
     cfg.arch = parse_model_arch(arch_str);
+
+    // #818: encoder-only models (BERT-family embedders like nomic-bert) would
+    // fall through to the generic-decoder path, load "successfully", report
+    // healthy, and then hit a CUDA illegal memory access on the first request
+    // (causal-LM prefill + sampling on a model with no LM head), poisoning the
+    // CUDA context for the whole process. Fail loudly at load instead.
+    if (is_encoder_only_arch(arch_str)) {
+        throw std::runtime_error("encoder-only architecture '" + arch_str +
+                                 "' is not supported (imp runs causal decoder LMs; "
+                                 "embedding encoders need pooling support)");
+    }
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));
 

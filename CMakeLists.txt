@@ -522,6 +522,7 @@ if(IMP_BUILD_TESTS)
             tests/test_anthropic_transform.cpp
             tests/test_sse_stream_utils.cpp
             tests/test_tool_call.cpp
+            tests/test_tool_stream_filter.cpp
             tests/test_server_auth.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)

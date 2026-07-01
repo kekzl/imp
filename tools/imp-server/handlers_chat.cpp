@@ -173,20 +173,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (top_logprobs > 20)
         top_logprobs = 20;
 
-    // Parse stop sequences
+    // Parse stop sequences (same 16-entry cap as the chat parser).
     std::vector<std::string> stop_sequences;
-    if (body.contains("stop") && !body["stop"].is_null()) {
-        if (body["stop"].is_string()) {
-            stop_sequences.push_back(body["stop"].get<std::string>());
-        } else if (body["stop"].is_array()) {
-            for (const auto& s : body["stop"]) {
-                if (s.is_string()) {
-                    stop_sequences.push_back(s.get<std::string>());
-                    if (stop_sequences.size() >= 4)
-                        break;
-                }
-            }
-        }
+    if (parse_stop_field(body, 16, stop_sequences)) {
+        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first 16\n",
+                body["stop"].size());
     }
     size_t max_stop_len = 0;
     for (const auto& s : stop_sequences)
@@ -374,6 +365,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 };
 
                 auto request_start_c = std::chrono::steady_clock::now();
+                auto last_keepalive_c = request_start_c;
                 for (;;) {
                     // #757: the is_last token sets `finish` then falls through
                     // to think-stripping, which `continue`s on every swallowed
@@ -405,6 +397,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                     TokenEvent evt{};
                     if (!server_req->pop_token(evt)) {
+                        // SSE comment keepalive while waiting (long prefill /
+                        // queueing) — ignored by SSE parsers, keeps proxies
+                        // and SDK idle-timeouts from killing the connection.
+                        auto now = std::chrono::steady_clock::now();
+                        if (now - last_keepalive_c > std::chrono::seconds(10)) {
+                            last_keepalive_c = now;
+                            static constexpr char kKeepalive[] = ": keepalive\n\n";
+                            sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                        }
                         continue;
                     }
 
@@ -900,4 +901,81 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // returned earlier with a native incremental SSE stream).
     res.status = 200;
     res.set_content(dump_safe(anth_response), "application/json");
+}
+
+// POST /v1/messages/count_tokens — Anthropic token-counting endpoint. Claude
+// Code calls it for context tracking / auto-compaction. Runs the exact chain a
+// real request would take (anthropic_to_openai_body -> common param parse ->
+// state snapshot + chat-template tokenize, including tool defs and the think
+// prefix) WITHOUT submitting to the engine, and returns {"input_tokens": N}.
+void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    namespace anth = imp_server::anthropic;
+
+    auto send_anthropic_error = [&](int status, const char* type, const std::string& message) {
+        res.status = status;
+        json err = {{"type", "error"}, {"error", {{"type", type}, {"message", message}}}};
+        res.set_content(dump_safe(err), "application/json");
+    };
+
+    json anth_body;
+    try {
+        anth_body = json::parse(req.body);
+    } catch (const std::exception& e) {
+        send_anthropic_error(400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
+        return;
+    }
+    if (!anth_body.is_object()) {
+        send_anthropic_error(400, "invalid_request_error", "Request body must be a JSON object");
+        return;
+    }
+
+    json oai_body;
+    try {
+        oai_body = anth::anthropic_to_openai_body(anth_body);
+    } catch (const std::exception& e) {
+        send_anthropic_error(400, "invalid_request_error",
+                             std::string("Failed to transform Anthropic body: ") + e.what());
+        return;
+    }
+
+    // Reuse the chat parsing + tokenize chain via a shim request; the inner
+    // handlers write OpenAI-shaped errors into shim_res, re-wrapped below.
+    httplib::Request shim_req = req;
+    shim_req.body = dump_safe(oai_body);
+    shim_req.headers.erase("Content-Length");
+    shim_req.headers.erase("content-length");
+
+    ChatRequestContext ctx;
+    httplib::Response shim_res;
+    g_in_anthropic_shim = true;  // suppress inner request-log entries
+    bool ok = parse_chat_request_params(shim_req, shim_res, state, ctx) &&
+              snapshot_state_and_tokenize_(shim_res, state, ctx);
+    g_in_anthropic_shim = false;
+
+    if (!ok) {
+        // Tokenization itself may have succeeded with only a post-tokenize
+        // limit check failing (context window / --max-input-tokens). Counting
+        // is exactly what such callers need — report the count anyway.
+        if (ctx.snap.n_prompt_tokens > 0) {
+            res.status = 200;
+            res.set_content(dump_safe(json{{"input_tokens", ctx.snap.n_prompt_tokens}}),
+                            "application/json");
+            return;
+        }
+        res.status = shim_res.status >= 400 ? shim_res.status : 400;
+        json parsed;
+        try {
+            parsed = json::parse(shim_res.body);
+        } catch (...) {
+            parsed = {{"error", {{"message", shim_res.body}, {"type", "invalid_request_error"}}}};
+        }
+        json out = {{"type", "error"},
+                    {"error", parsed.value("error", json{{"type", "invalid_request_error"},
+                                                         {"message", "bad request"}})}};
+        res.set_content(dump_safe(out), "application/json");
+        return;
+    }
+
+    res.status = 200;
+    res.set_content(dump_safe(json{{"input_tokens", ctx.snap.n_prompt_tokens}}), "application/json");
 }
