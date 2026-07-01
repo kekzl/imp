@@ -34,6 +34,8 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 namespace imp {
@@ -97,9 +99,42 @@ int Engine::step_async_graph_resume() {
     if (async_graph_runner_.is_setup() && async_graph_req_) {
         auto& req = async_graph_req_;
 
-        if (async_pending_tokens_.empty() && async_pending_cursor_ == 0) {
+        // Incremental harvest (#754): poll the mapped ring buffer instead of
+        // blocking until the whole burst retires, so tokens reach the caller
+        // (server SSE / imp_decode_step) as the device loop produces them.
+        // The old cudaStreamSynchronize surfaced a burst's tokens only when
+        // it finished — which is why streaming requests had to be excluded
+        // from the loop entirely (every token arrived in burst-sized groups).
+        // The micro-poll waits for AT LEAST one new token per step() so the
+        // imp_decode_step zero-token retry bound (8) never trips; the device
+        // loop runs ahead regardless — this only throttles the host to the
+        // same per-token cadence as eager decode.
+        if (async_pending_cursor_ >= static_cast<int>(async_pending_tokens_.size()) &&
+            async_graph_runner_.launch_in_flight()) {
             cudaStream_t dec_stream = decode_stream();
-            async_pending_tokens_ = async_graph_runner_.wait_and_get_tokens(dec_stream);
+            // Safety valve: a graph that errors out never reaches the stop
+            // kernel and thus never publishes done — fall back to a blocking
+            // sync (which surfaces the error) instead of polling forever.
+            // 30 s dwarfs any legitimate inter-token gap (decode ≤ ~100 ms).
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            while (async_graph_runner_.poll_new_tokens(async_pending_tokens_) == 0) {
+                if (async_graph_runner_.try_finish_burst(dec_stream)) {
+                    // Burst retired between polls — drain the tail and stop.
+                    async_graph_runner_.poll_new_tokens(async_pending_tokens_);
+                    break;
+                }
+                if (std::chrono::steady_clock::now() > deadline) {
+                    IMP_LOG_ERROR("AsyncGraphLoop: no token for 30 s and no done flag — "
+                                  "forcing blocking burst finish");
+                    async_graph_runner_.finish_burst_blocking(dec_stream);
+                    async_graph_runner_.poll_new_tokens(async_pending_tokens_);
+                    break;
+                }
+                // Burst still running, no new token yet (decode steps are
+                // ~3-7 ms; polling every 200 µs keeps SSE latency negligible
+                // without spinning a core).
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
         }
 
         int32_t token = -1;
@@ -1621,40 +1656,36 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                                        : spec_effective_miss_burst_(*dreq);
                 if (spec_limit < 0) spec_limit = 0;
             }
-            // #754: an UNBOUNDED loop (spec_limit == 0) generates the whole
-            // remaining sequence on-device and only surfaces its tokens to the
-            // host when the burst finishes — for a streaming request that means
-            // every token lands in the client at generation end (TTFT == full
-            // latency). Keep streaming requests on per-step decode so SSE is
-            // real per-token. Bounded (speculation) bursts still stream in
-            // groups via the per-burst sync, so they stay enabled.
-            const bool stream_unbounded = dreq->stream && spec_limit == 0;
-            if (!stream_unbounded) {
-                // F-A2: a NON-streaming request with speculation off would run
-                // the UNBOUNDED on-device loop (spec_limit == 0) all the way to
-                // max_tokens while the host blocks — is_cancelled()/timeout are
-                // only polled between bursts, so a client disconnect couldn't
-                // interrupt it and burned a full generation. Bound it to
-                // runtime.decode_burst so the worker regains control to re-poll
-                // cancellation; output is identical (same decode, chunked +
-                // relaunched, exactly like the speculation burst path).
-                // Speculation keeps its own miss_burst limit; <=0 restores the
-                // old unbounded behavior.
-                int launch_limit = spec_limit;
-                // Bound only in the default (non-deterministic) serving mode.
-                // The fully-on-device unbounded loop is the one decode path that
-                // is greedy bit-reproducible run-to-run (no host re-entry);
-                // chunking it would make non-streaming greedy output
-                // non-reproducible, breaking the determinism.md eval guarantee.
-                // Deterministic mode runs to completion and never needs
-                // mid-burst cancellation, so keep it unbounded there. In
-                // production the model is already non-deterministic, so bounding
-                // costs no reproducibility and buys cancel responsiveness.
-                if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
-                    !runtime_config_.runtime.deterministic)
-                    launch_limit = runtime_config_.runtime.decode_burst;
-                try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
-            }
+            // #754 RESOLVED: streaming requests run the loop too, since
+            // step_async_graph_resume now polls the mapped ring buffer and
+            // surfaces tokens per-step while the burst is still running —
+            // SSE stays real per-token (previously the blocking per-burst
+            // sync delivered tokens only in burst-sized groups, so streaming
+            // had to stay on per-step decode and paid the +27-45% loop win).
+            //
+            // F-A2: a request with speculation off would run the UNBOUNDED
+            // on-device loop (spec_limit == 0) all the way to max_tokens —
+            // is_cancelled()/timeout are only polled between bursts, so a
+            // client disconnect couldn't interrupt it and burned a full
+            // generation. Bound it to runtime.decode_burst so the worker
+            // regains control to re-poll cancellation; output is identical
+            // (same decode, chunked + relaunched, exactly like the
+            // speculation burst path). Speculation keeps its own miss_burst
+            // limit; <=0 restores the old unbounded behavior.
+            int launch_limit = spec_limit;
+            // Bound only in the default (non-deterministic) serving mode.
+            // The fully-on-device unbounded loop is the one decode path that
+            // is greedy bit-reproducible run-to-run (no host re-entry);
+            // chunking it would make non-streaming greedy output
+            // non-reproducible, breaking the determinism.md eval guarantee.
+            // Deterministic mode runs to completion and never needs
+            // mid-burst cancellation, so keep it unbounded there. In
+            // production the model is already non-deterministic, so bounding
+            // costs no reproducibility and buys cancel responsiveness.
+            if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
+                !runtime_config_.runtime.deterministic)
+                launch_limit = runtime_config_.runtime.decode_burst;
+            try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }
     }
 

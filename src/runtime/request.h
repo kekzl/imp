@@ -114,13 +114,12 @@ struct Request {
     bool pin_kv_prefix = false;
 
     // SSE streaming request: the client consumes tokens as they are produced.
-    // The async conditional graph loop (GPU-autonomous multi-token decode) only
-    // surfaces its tokens to the host after the whole burst completes — on this
-    // platform the mapped-pinned ring buffer is not reliably host-visible
-    // mid-flight — so a streamed request would receive every token at
-    // generation end (TTFT == full latency, #754). Streaming requests therefore
-    // stay on per-step decode (one token per step) for real per-token delivery;
-    // non-streaming requests keep the faster autonomous loop.
+    // Streaming runs the async conditional graph loop like everything else:
+    // step_async_graph_resume polls the mapped ring buffer (device publishes
+    // each token behind a __threadfence_system + separate poll counter) and
+    // surfaces tokens per step while the burst is in flight (#754 resolved —
+    // the old blocking per-burst sync delivered tokens only in burst-sized
+    // groups, which is why streaming used to stay on per-step decode).
     bool stream = false;
 
     // Logprobs
