@@ -163,12 +163,15 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     // Recurrent state (SSM/GDN) advances on every forwarded token and cannot
     // be rewound on draft rejection.
     if (ssm_state_ || gdn_state_) return false;
-    // MoE decode is carried by the async conditional-graph loop (+27-36%, the
-    // MoE-decode foundation). The eager spec-verify path disables that loop and
-    // regresses MoE -11..-73% even at ~99% draft acceptance (perf hunt
-    // 2026-06-18) — the host must see every token to draft+accept. Net-negative
-    // for MoE as-is, so gate it off and stay on the loop (dense keeps the win).
-    if (model_->profile().is_moe) return false;
+    // MoE speculation engages only for native-NVFP4 experts: the batched
+    // verify forward reads the NVFP4 expert cache directly and nets +49-81%
+    // on draft-rich code-edit (Qwen3-Coder-30B-FP4, 2026-07-02) with a -3-7%
+    // draft-poor floor (miss_burst hybrid). GGUF-MoE verify re-dequants every
+    // activated expert per step and measured -22% — those stay on the async
+    // conditional-graph loop (as does everything when speculative.moe=false).
+    if (model_->profile().is_moe &&
+        !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
+        return false;
     if (mtp_spec_decode_enabled()) return false;
     if (!supports_chunked_prefill_()) return false;
     return true;

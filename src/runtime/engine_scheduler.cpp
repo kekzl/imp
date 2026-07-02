@@ -1001,12 +1001,14 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                 IMP_LOG_INFO(
                     "spec-ngram: gates failed (temp=%.2f top_k=%d rep_pen=%.2f freq=%.2f "
                     "pres=%.2f dry=%.2f mirostat=%d bias=%zu logprobs=%d json=%d schema=%d "
-                    "think_budget=%.2f ssm=%d gdn=%d moe=%d mtp=%d chunked_prefill=%d)",
+                    "think_budget=%.2f ssm=%d gdn=%d moe=%d moe_nvfp4=%d spec_moe=%d mtp=%d "
+                    "chunked_prefill=%d)",
                     r.temperature, r.top_k, r.repetition_penalty, r.frequency_penalty,
                     r.presence_penalty, r.dry_multiplier, r.mirostat, r.logit_bias.size(),
                     (int)r.logprobs, (int)r.json_mode, (int)!r.json_schema.empty(), r.think_budget,
                     (int)(ssm_state_ != nullptr), (int)(gdn_state_ != nullptr),
-                    (int)model_->profile().is_moe, (int)mtp_spec_decode_enabled(),
+                    (int)model_->profile().is_moe, (int)model_->profile().moe_experts_nvfp4,
+                    (int)runtime_config_.speculative.moe, (int)mtp_spec_decode_enabled(),
                     (int)supports_chunked_prefill_());
             }
         }

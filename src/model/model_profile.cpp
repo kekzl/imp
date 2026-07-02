@@ -28,6 +28,10 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
         if (L.wq.data != nullptr)
             any_attn = true;
     }
+    // NVFP4-prequant checkpoints get the contiguous native NVFP4 expert cache
+    // (pre_dequant_phase3_moe.cu keys the cache build on this same flag), so
+    // batched multi-token MoE forwards read quantized weights directly.
+    p.moe_experts_nvfp4 = p.is_moe && cfg.is_nvfp4_prequant;
     p.is_gdn = any_gdn;
     p.is_ssm = any_ssm;
     p.has_pure_ssm = any_pure_ssm;

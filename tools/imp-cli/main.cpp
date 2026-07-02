@@ -22,6 +22,18 @@ int main(int argc, char** argv) {
     // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
     // RuntimeConfig::install() process-wide singleton).
     imp::RuntimeConfig runtime_cfg = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
+    // Benchmark mode measures raw engine decode: MoE speculation would fold
+    // draft-acceptance luck + grouped-GEMM restart variance into the gated
+    // tg signal (dense spec stays as-is — measured neutral on the bench
+    // prompt). An explicit --set speculative.moe=… still wins.
+    if (args.bench) {
+        bool user_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("speculative.moe", 0) == 0)
+                user_set = true;
+        if (!user_set)
+            runtime_cfg.speculative.moe = false;
+    }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)
     // before set_pending_runtime_config() consumes the value.

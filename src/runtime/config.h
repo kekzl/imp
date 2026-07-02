@@ -477,11 +477,22 @@ struct RuntimeConfig {
     // tg128 -15% draft-poor downside no longer reproduces (-0.2%/-0.9% on
     // dense Q8/NVFP4, 2026-06-16) — hence default-ON. spec_ngram_gates_ok_
     // confines engagement to batch-1 / greedy / no-penalty-window / no-json /
-    // no-logprobs / non-recurrent / NON-MoE requests; everything else falls
-    // back cleanly, so default-on is a no-op for sampled chat, tool/JSON
-    // calls, concurrent batches, and MoE (which the async loop carries).
+    // no-logprobs / non-recurrent requests (MoE additionally requires
+    // native-NVFP4 experts, see `moe` below); everything else falls back
+    // cleanly, so default-on is a no-op for sampled chat, tool/JSON calls,
+    // concurrent batches, and GGUF-MoE (which the async loop carries).
     struct Speculative {
         bool ngram = true;  // prompt-lookup speculation, default-on (batch-1, greedy, dense)
+        // Speculation on MoE models with NATIVE-NVFP4 experts (the gate
+        // additionally requires profile().moe_experts_nvfp4). Measured on
+        // Qwen3-Coder-30B-FP4 (2026-07-02): code-edit +49-81% (93% accept,
+        // 15.9 tok/verify), draft-poor code-gen -3-7% (miss_burst hybrid
+        // bounds the downside). GGUF-MoE verify re-dequants every activated
+        // expert per step (-22% measured) and never engages regardless of
+        // this flag. imp-cli --bench pins this false so the canonical
+        // perf-baseline decode signal stays raw (verify inherits grouped-GEMM
+        // restart variance).
+        bool moe = true;
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
         // Longer suffix matches trade draft frequency for precision — and
         // precision wins decisively: min_match 6 vs 3 measured +16% on
