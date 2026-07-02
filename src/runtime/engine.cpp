@@ -443,6 +443,7 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
     req->recurrent_restore.reset();  // release the snapshot buffer for recycling
+    spec_suffix_idx_.erase(req->id);
     if (req->constraints)
         constraints_return_(std::move(req->constraints));
     // Server visibility: the engine outlives requests, so cumulative

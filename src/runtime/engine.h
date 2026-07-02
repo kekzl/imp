@@ -10,6 +10,7 @@
 #include "vision/vision_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
+#include "runtime/suffix_draft.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
@@ -524,6 +525,11 @@ private:
     bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
     void free_spec_buffers_();
     void log_spec_stats_() const;
+    // Per-request suffix index (speculative.suffix): lazily built over
+    // input ++ prediction, extended with output tokens as they land.
+    // Erased when the request finishes.
+    SuffixDraftIndex& spec_suffix_index_(const Request& req);
+    std::unordered_map<int, SuffixDraftIndex> spec_suffix_idx_;
     // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
