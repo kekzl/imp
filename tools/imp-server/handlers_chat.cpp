@@ -50,6 +50,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
         req->spec_ngram_override = ctx.params.spec_ngram_override;
+        req->prediction_tokens = ctx.snap.prediction_tokens;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
