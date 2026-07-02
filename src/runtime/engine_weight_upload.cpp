@@ -155,6 +155,13 @@ bool Engine::init_weights() {
                                    sizeof(float) +
                                static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
                                    dtype_size(config_.ssm_state_dtype));
+            // Recurrent-snapshot store (hybrid prefix caching): its buffers
+            // are pre-allocated eagerly at KV-cache init, so the offload
+            // decision must leave room for them.
+            if (config_.use_prefix_caching || runtime_config_.server.prefix_cache) {
+                expert_reserve +=
+                    static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_mb, 0)) << 20;
+            }
         }
 
         size_t safety = 256ULL * 1024 * 1024;  // base safety

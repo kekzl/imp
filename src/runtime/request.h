@@ -118,6 +118,11 @@ struct Request {
     int harmony_force_idx = -1;
     int prefill_offset = 0;     // Chunked prefill: tokens processed so far
     int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
+    // Hybrid (SSM/GDN) prefix caching: snapshot of the recurrent state at
+    // exactly `cached_tokens` tokens, set at admission when the prompt prefix
+    // matches a stored snapshot. Restored into the request's recurrent slot
+    // on the first prefill chunk instead of zeroing (engine_sampling_stop).
+    std::shared_ptr<const struct RecurrentSnapshotEntry> recurrent_restore;
     // Pin this request's full prompt blocks in the prefix cache at finish
     // (Anthropic cache_control / OpenAI-route cache_prompt). Pinned blocks
     // survive eviction until the pin budget recycles them (FIFO).

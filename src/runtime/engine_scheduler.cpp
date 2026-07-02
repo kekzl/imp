@@ -31,6 +31,7 @@
 #include "compute/layernorm.h"
 #include "core/logging.h"
 
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -665,6 +666,17 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         is_last_chunk = false;
     }
 
+    // Recurrent-state snapshot boundary (hybrid prefix caching): end a chunk
+    // exactly at the largest block-aligned prompt position so the state there
+    // can be captured — the snapshot is only restorable where reused KV
+    // blocks cover the whole prefix, and only full blocks are cacheable. The
+    // extra tail chunk is at most block_size-1 tokens.
+    const int snap_end = hybrid_snapshot_end_(*req);
+    if (snap_end > offset && snap_end < offset + chunk_len) {
+        chunk_len = snap_end - offset;
+        is_last_chunk = false;
+    }
+
     int ctx_len = offset + chunk_len;
     (void)executor_->resize_workspace(chunk_len, pf_stream);
 
@@ -733,8 +745,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // Recurrent state (SSM/GDN)
     // Reset on the first chunk of a new request so previous-request state
     // doesn't leak in.  Subsequent chunks must NOT reset — the recurrent
-    // state built during earlier chunks must carry forward.
-    fill_recurrent_state(*req, state, /*reset=*/(offset == 0), pf_stream);
+    // state built during earlier chunks must carry forward. The first chunk
+    // starts at cached_tokens (> 0 on a prefix-cache hit, where "reset"
+    // restores the matching recurrent snapshot instead of zeroing).
+    fill_recurrent_state(*req, state, /*reset=*/(offset == req->cached_tokens), pf_stream);
 
     // Vision embeddings on first chunk.
     if (req->vision_emb && offset == 0) {
@@ -771,8 +785,14 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // couldn't be pre-allocated (largest weight > cap) — illegal under CUDA
         // graph capture (cublasLt status 14 → cascading "previous error during
         // capture"). Run prefill eager for those models (Qwen3.6-35B pp>=4096).
+        // The recurrent-snapshot boundary chunk has a request-dependent odd
+        // shape (prompt mod chunk size) — capturing it churns the prefill
+        // graph every request AND the odd-M cuBLAS call can lazily allocate
+        // workspace, which is illegal under capture (cublasLt status 14 →
+        // cascading capture failure, observed on GGUF mxfp4 GDN). Run eager.
+        const bool ends_at_snapshot = (snap_end > 0 && offset + chunk_len == snap_end);
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
-                                 !executor_->nvfp4_dequant_uncapturable();
+                                 !ends_at_snapshot && !executor_->nvfp4_dequant_uncapturable();
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
             if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {
@@ -806,6 +826,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         req->prefill_offset = offset + chunk_len;
         IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d", req->id, offset, offset + chunk_len,
                       total_input);
+        // The chunk ended exactly at the snapshot boundary — capture the
+        // recurrent state now, before the next chunk advances it.
+        if (snap_end > 0 && req->prefill_offset == snap_end)
+            maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
     } else {
         // Last chunk: forward + sample
         int32_t next_token;
@@ -869,6 +893,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
             }
         }
+
+        // Block-aligned prompt: the snapshot boundary coincides with the last
+        // chunk's end — capture after the forward (the sampling above only
+        // reads logits, never the recurrent state).
+        if (snap_end == total_input)
+            maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
 
         if (req->mirostat == 2)
             req->mirostat_mu = state.mirostat_mu;
@@ -1014,8 +1044,56 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         }
     }
 
-    // SSM/GDN: limit decode batch to 1 sequence
+    // SSM/GDN: the recurrent scan kernels are single-sequence, so decode one
+    // sequence per step. The old resize(1) kept the OLDEST active request
+    // every step — concurrent sessions serialized head-of-line (the first
+    // request ran to completion before the second produced a token). Rotate
+    // the slice holder round-robin every hybrid_decode_quantum tokens
+    // instead; the decode graphs re-capture for the new sequence's state
+    // slot on rotation (~10-20 ms), which the quantum amortizes.
+    hybrid_decode_waiting_ = false;
     if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
+        const int quantum = runtime_config_.runtime.hybrid_decode_quantum;
+        if (quantum > 0) {
+            int cur = -1;
+            for (size_t i = 0; i < decode_batch.size(); ++i) {
+                if (decode_batch[i]->id == hybrid_active_req_) {
+                    cur = static_cast<int>(i);
+                    break;
+                }
+            }
+            bool rotate = (cur < 0) || (static_cast<int>(decode_batch[cur]->output_tokens.size()) -
+                                            hybrid_slice_start_ >=
+                                        quantum);
+            if (rotate) {
+                // Next request in cyclic id order after the current holder —
+                // ids are monotonically increasing, so this is admission
+                // round-robin.
+                int next = 0;
+                int best_id = INT_MAX, best_wrap_id = INT_MAX;
+                int next_wrap = 0;
+                for (size_t i = 0; i < decode_batch.size(); ++i) {
+                    int id = decode_batch[i]->id;
+                    if (id > hybrid_active_req_ && id < best_id) {
+                        best_id = id;
+                        next = static_cast<int>(i);
+                    }
+                    if (id < best_wrap_id) {
+                        best_wrap_id = id;
+                        next_wrap = static_cast<int>(i);
+                    }
+                }
+                cur = (best_id != INT_MAX) ? next : next_wrap;
+                hybrid_active_req_ = decode_batch[cur]->id;
+                hybrid_slice_start_ = static_cast<int>(decode_batch[cur]->output_tokens.size());
+            }
+            if (cur > 0)
+                std::swap(decode_batch[0], decode_batch[cur]);
+            // Others are waiting: bound the async graph-loop burst to the
+            // slice remainder (step_decode_process_outputs) so rotation
+            // actually gets a chance to run.
+            hybrid_decode_waiting_ = true;
+        }
         decode_batch.resize(1);
     }
 
@@ -1383,6 +1461,20 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = bucketed_max_blocks;
         }
+        // Recurrent (SSM/GDN) state pointers are baked into the capture as
+        // kernel params. A replay for a request in a DIFFERENT state slot
+        // would read/write the previous sequence's state — possible whenever
+        // request lifetimes overlap (the next request acquired its slot while
+        // the previous one was live) and every time the hybrid decode slice
+        // rotates. Same-topology re-capture via graph-exec update.
+        if (ssm_state_ && gpu_batch.n_sequences == 1) {
+            auto slot_it = recurrent_slot_of_.find(valid_decode[0]->id);
+            const int slot = (slot_it != recurrent_slot_of_.end()) ? slot_it->second : -1;
+            if (slot != decode_graph_recurrent_slot_) {
+                graph_runner.invalidate_for_update();
+                decode_graph_recurrent_slot_ = slot;
+            }
+        }
         // Graph captures ONLY forward_logits — sampling runs eager after
         Tensor logits_out;
         graph_runner.set_decode_fn(
@@ -1718,6 +1810,17 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 constexpr int kBusyBurst = 16;
                 if (launch_limit == 0 || launch_limit > kBusyBurst)
                     launch_limit = kBusyBurst;
+            }
+            // Hybrid decode fairness: other recurrent sequences are waiting
+            // for the slice — bound the burst to the slice remainder so the
+            // round-robin rotation in step_decode actually runs.
+            if (!runtime_config_.runtime.deterministic && hybrid_decode_waiting_) {
+                const int quantum = runtime_config_.runtime.hybrid_decode_quantum;
+                int slice_left = quantum - (static_cast<int>(dreq->output_tokens.size()) -
+                                            hybrid_slice_start_);
+                slice_left = std::max(1, slice_left);
+                if (launch_limit == 0 || launch_limit > slice_left)
+                    launch_limit = slice_left;
             }
             try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }

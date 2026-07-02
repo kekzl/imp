@@ -120,6 +120,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
     I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
+    I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
 
     // [kv_cache]
     S("kv_cache.dtype", cfg.kv_cache.dtype);
@@ -216,6 +217,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [server]
     B("server.prefix_cache", cfg.server.prefix_cache);
     I("server.prefix_pin_budget_pct", cfg.server.prefix_pin_budget_pct);
+    I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     B("server.green_contexts", cfg.server.green_contexts);
 
     // [bench]

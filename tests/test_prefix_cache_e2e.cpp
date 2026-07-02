@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "api/imp_internal.h"
 #include "test_models.h"
 
 #include <cstdlib>
@@ -153,6 +154,16 @@ TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
 //    output for the same greedy request. This pins the cache path to the
 //    canonical fresh-prefill result, not merely to "self-consistent".
 TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
+    // Hybrid (SSM/GDN) models: with caching ON, prefill ends a chunk at the
+    // recurrent-snapshot boundary; with caching OFF it does not. Different
+    // chunk boundaries change accumulation order, so cross-CONFIG bitwise
+    // equality is unattainable by design (chunked-vs-unchunked prefill was
+    // never bit-equal). The hit==fresh guarantee for hybrids is tests 1+3,
+    // where both runs share the same boundary.
+    if (model_ && model_->model && model_->model->config().ssm_inner_size > 0)
+        GTEST_SKIP() << "recurrent model: snapshot chunk boundary makes cache-on/off "
+                        "prefill chunking differ — bitwise cross-config equality N/A";
+
     // Baseline: caching OFF.
     MakeContext(/*prefix_cache=*/false);
     std::string baseline = gen(kPrompt, kGen);

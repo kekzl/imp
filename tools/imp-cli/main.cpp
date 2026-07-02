@@ -33,6 +33,16 @@ int main(int argc, char** argv) {
                 user_set = true;
         if (!user_set)
             runtime_cfg.speculative.moe = false;
+        // Recurrent snapshots (hybrid prefix caching) are dead weight in the
+        // single-shot bench but their eager buffers shift the MoE expert
+        // offload budget — pin them off so hybrid GGUF baselines are
+        // unaffected. An explicit --set server.recurrent_snapshot_mb=… wins.
+        bool snap_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("server.recurrent_snapshot_mb", 0) == 0)
+                snap_set = true;
+        if (!snap_set)
+            runtime_cfg.server.recurrent_snapshot_mb = 0;
     }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)
