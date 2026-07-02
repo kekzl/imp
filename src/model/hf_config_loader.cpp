@@ -77,6 +77,15 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     // Architecture detection: prefer "architectures" array, fall back to "model_type"
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty()) {
+        // Encoder-only (BERT/RoBERTa/embedding) models have no causal LM head and
+        // need pooling — the GGUF loader already rejects them at load; the
+        // SafeTensors/HF path must too, or a `NomicBertModel` falls through to
+        // the generic decoder and hits a CUDA IMA on the first request (#818).
+        if (is_encoder_only_arch(archs->arr[0].str_val)) {
+            throw std::runtime_error("encoder-only architecture '" + archs->arr[0].str_val +
+                                     "' is not supported (imp runs causal decoder LMs; "
+                                     "embedding encoders need pooling support)");
+        }
         cfg.arch = map_architecture(archs->arr[0].str_val);
         if (archs->arr.size() > 1) {
             std::string dropped;
@@ -93,6 +102,13 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         // Fallback: map model_type string to arch
         std::string model_type;
         if (jobj_get_string(root, "model_type", model_type)) {
+            // Same encoder-only reject on the model_type path (e.g. a config with
+            // only `"model_type": "nomic_bert"` and no `architectures` array).
+            if (is_encoder_only_arch(model_type)) {
+                throw std::runtime_error("encoder-only model_type '" + model_type +
+                                         "' is not supported (imp runs causal decoder LMs; "
+                                         "embedding encoders need pooling support)");
+            }
             // Common model_type values → architecture class names
             static const std::unordered_map<std::string, std::string> type_to_class = {
                 {"llama", "LlamaForCausalLM"},

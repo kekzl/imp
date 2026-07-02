@@ -524,6 +524,21 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!model)
         return false;
 
+    // A previous engine on this same model handle freed the model's source
+    // weight tensors to reclaim VRAM (Phase-4b drop); their .data pointers are
+    // dangling now, so rebuilding this engine's weight caches would read freed
+    // memory and poison the CUDA context with an illegal access (#830). Reject
+    // up front with a clear error. Reload the model for a second engine. (Dense
+    // models that never drop sources are unaffected — create/free/create works.)
+    if (model->sources_consumed()) {
+        IMP_LOG_ERROR(
+            "Engine::init: this model handle was already bound to an engine whose "
+            "weight caches consumed (freed) the model's source tensors — a second "
+            "engine cannot be built on it. Reload the model (imp_model_load) to "
+            "create another engine.");
+        return false;
+    }
+
     model_ = std::move(model);
     config_ = config;
 

@@ -366,6 +366,11 @@ if (mx_native > 0) {
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     wcache_->cutlass_mxfp4_bytes += mx_native_bytes;
     wcache_->use_mxfp4 = true;
+    // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the
+    // model's source buffers — a second engine on this model handle cannot
+    // re-run the unpack (it would read the already-compacted layout as raw
+    // blocks → illegal access, #830). Engine::init rejects it up front.
+    const_cast<Model*>(model_)->mark_sources_consumed();
     IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)", mx_native,
                  mx_native_bytes / (1024.0 * 1024.0));
 

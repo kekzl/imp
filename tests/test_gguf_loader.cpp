@@ -170,8 +170,21 @@ TEST(GgufLoaderTest, EncoderOnlyArchDetection) {
     EXPECT_TRUE(is_encoder_only_arch("t5encoder"));
     EXPECT_TRUE(is_encoder_only_arch("e5"));
     EXPECT_TRUE(is_encoder_only_arch("bge"));
-    // Decoder archs must never be rejected.
+    // HuggingFace config.json `architectures` class names (CamelCase) — the
+    // SafeTensors/HF path feeds these, and a case-sensitive find("bert") used
+    // to miss them, letting NomicBertModel fall through to the decoder (#818).
+    EXPECT_TRUE(is_encoder_only_arch("BertModel"));
+    EXPECT_TRUE(is_encoder_only_arch("NomicBertModel"));
+    EXPECT_TRUE(is_encoder_only_arch("BertForMaskedLM"));
+    EXPECT_TRUE(is_encoder_only_arch("RobertaModel"));
+    EXPECT_TRUE(is_encoder_only_arch("XLMRobertaModel"));
+    EXPECT_TRUE(is_encoder_only_arch("MPNetModel"));
+    EXPECT_TRUE(is_encoder_only_arch("nomic_bert"));  // model_type form
+    // Decoder archs must never be rejected (neither GGUF id nor HF class name).
     EXPECT_FALSE(is_encoder_only_arch("llama"));
+    EXPECT_FALSE(is_encoder_only_arch("LlamaForCausalLM"));
+    EXPECT_FALSE(is_encoder_only_arch("Qwen3ForCausalLM"));
+    EXPECT_FALSE(is_encoder_only_arch("Gemma4ForCausalLM"));
     EXPECT_FALSE(is_encoder_only_arch("qwen3"));
     EXPECT_FALSE(is_encoder_only_arch("qwen3moe"));
     EXPECT_FALSE(is_encoder_only_arch("gemma4"));

@@ -51,6 +51,23 @@ public:
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
 
+    // True once the executor's pre-dequant consumed source weights in a way a
+    // rebuild cannot survive:
+    //  - freed source tensors to reclaim VRAM (Phase-3 MoE expert-source drop,
+    //    Phase-4b redundant-source drop — both via release_gpu_allocation(),
+    //    which sets this): their .data pointers are dangling afterwards;
+    //  - destructively converted sources in place (Phase-3c MXFP4 unpack
+    //    compacts the GGUF raw blocks within the SAME buffer) or re-pointed
+    //    model tensors at executor-owned cache memory (Phase-3c gdn_alpha/beta
+    //    FP16 replace) — sets this explicitly via mark_sources_consumed().
+    // Either way a SECOND engine on the same model handle would read freed or
+    // already-transformed memory and poison the CUDA context with an illegal
+    // access (#830) — Engine::init rejects it up front. Reload the model for a
+    // fresh engine. Models whose sources stay intact (e.g. dense Q8_0) leave
+    // this false and support create/free/create on one handle.
+    void mark_sources_consumed() { sources_consumed_ = true; }
+    bool sources_consumed() const { return sources_consumed_; }
+
     // Remove a pointer from gpu_allocations_ tracking (does not free).
     void release_gpu_allocation(void* ptr);
 
@@ -96,6 +113,7 @@ public:
     std::vector<std::pair<void*, size_t>> split_mmaps_;  // additional shard mmaps
 
     bool gpu_weights_ready_ = false;
+    bool sources_consumed_ = false;  // Phase-4b freed source tensors (#830)
     std::vector<void*> gpu_allocations_;
     std::vector<void*> host_pinned_;         // mmap regions pinned via cudaHostRegister
     std::vector<void*> host_pinned_allocs_;  // cudaHostAlloc'd expert buffers (WSL2 DMA path)
