@@ -245,6 +245,26 @@ bool parse_chat_request_params(
     if (body.contains("speculative") && body["speculative"].is_boolean())
         ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
 
+    // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
+    // string | [{"type":"text","text":...}...]}}. The text is a draft hint —
+    // it never changes the output, only speeds up verify-accept — so unknown
+    // shapes are ignored rather than rejected.
+    if (body.contains("prediction") && body["prediction"].is_object()) {
+        const auto& pred = body["prediction"];
+        if (pred.value("type", "content") == "content" && pred.contains("content")) {
+            const auto& content = pred["content"];
+            if (content.is_string()) {
+                ctx.params.prediction_text = content.get<std::string>();
+            } else if (content.is_array()) {
+                for (const auto& part : content) {
+                    if (part.is_object() && part.value("type", "text") == "text" &&
+                        part.contains("text") && part["text"].is_string())
+                        ctx.params.prediction_text += part["text"].get<std::string>();
+                }
+            }
+        }
+    }
+
     // Parse tool calling parameters
     ctx.params.tools = body.value("tools", json::array());
     ctx.params.tool_choice = body.value("tool_choice", json("auto"));
@@ -629,6 +649,17 @@ bool snapshot_state_and_tokenize_(
 
     ctx.snap.n_prompt_tokens = static_cast<int>(ctx.snap.tokens.size());
 
+    // Predicted Outputs: tokenize the prediction text while we hold the
+    // tokenizer. Plain encode (no template, no specials) — these tokens only
+    // seed the n-gram draft corpus, they are never forwarded. Clamped to the
+    // model context so a hostile prediction can't blow up the host-side scan.
+    if (!ctx.params.prediction_text.empty()) {
+        ctx.snap.prediction_tokens = ctx.snap.tok->encode(ctx.params.prediction_text);
+        if (ctx.snap.max_seq_len > 0 &&
+            ctx.snap.prediction_tokens.size() > static_cast<size_t>(ctx.snap.max_seq_len))
+            ctx.snap.prediction_tokens.resize(ctx.snap.max_seq_len);
+    }
+
     // Server-side input-token limit (--max-input-tokens). Reject before
     // prefill so an oversized prompt never reaches the engine.
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
@@ -714,6 +745,7 @@ void nonstream_chat_response_(
         req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
         req->pin_kv_prefix = ctx.params.cache_prompt;
         req->spec_ngram_override = ctx.params.spec_ngram_override;
+        req->prediction_tokens = ctx.snap.prediction_tokens;
         req->min_p = ctx.params.min_p;
         req->typical_p = ctx.params.typical_p;
         req->repetition_penalty = ctx.params.repetition_penalty;
@@ -1033,6 +1065,14 @@ void nonstream_chat_response_(
             details["cache_creation_tokens"] = creation;
         usage["prompt_tokens_details"] = std::move(details);
         state.metrics.tokens_cached_total += imp_req->cached_tokens;
+    }
+    // Predicted Outputs accounting (only when the request carried a
+    // prediction): accepted/rejected draft tokens whose draft came from the
+    // prediction region of the n-gram corpus.
+    if (imp_req && !imp_req->prediction_tokens.empty()) {
+        usage["completion_tokens_details"] = {
+            {"accepted_prediction_tokens", imp_req->pred_accepted},
+            {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
 
     json response = {{"id", comp_id},      {"object", "chat.completion"},

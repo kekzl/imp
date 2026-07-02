@@ -178,16 +178,27 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const auto& scfg = runtime_config_.speculative;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
-    // Build the draft from the request's own token history.
+    // Build the draft from the request's own token history. Predicted-output
+    // tokens (OpenAI `prediction`, never forwarded through the model) sit
+    // between prompt and output so the current output suffix stays the tail:
+    // a completion that tracks the prediction finds max_match-length matches
+    // in the prediction region every verify step.
     std::vector<int32_t> history;
-    history.reserve(req->input_tokens.size() + req->output_tokens.size());
+    history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +
+                    req->output_tokens.size());
     history.insert(history.end(), req->input_tokens.begin(), req->input_tokens.end());
+    history.insert(history.end(), req->prediction_tokens.begin(), req->prediction_tokens.end());
     history.insert(history.end(), req->output_tokens.begin(), req->output_tokens.end());
     const int hist_n = static_cast<int>(history.size());
+    const int pred_begin = static_cast<int>(req->input_tokens.size());
+    const int pred_end = pred_begin + static_cast<int>(req->prediction_tokens.size());
 
     const int k = std::max(1, scfg.k);
-    std::vector<int32_t> draft =
-        ngram_draft(history.data(), hist_n, k, std::max(1, scfg.min_match), scfg.max_match);
+    int draft_start = -1;
+    std::vector<int32_t> draft = ngram_draft(history.data(), hist_n, k,
+                                             std::max(1, scfg.min_match), scfg.max_match,
+                                             &draft_start);
+    const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
     if (draft.empty()) {
         spec_stats_.miss_steps++;
         if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 &&
@@ -400,6 +411,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     req->spec_verifies++;
     req->spec_drafted += K;
     req->spec_accepted += matched;
+    if (draft_from_prediction) {
+        req->pred_accepted += matched;
+        req->pred_rejected += K - matched;
+    }
     const bool acceptance_poor =
         req->spec_verifies >= 8 &&
         req->spec_accepted * 100 < req->spec_drafted * 15;

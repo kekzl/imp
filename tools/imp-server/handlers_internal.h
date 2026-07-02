@@ -48,6 +48,11 @@ struct ChatRequestParams {
     // "speculative" (bool). Lets code-gen calls opt into speculation while
     // short tool-arg generations skip it on the same server.
     int spec_ngram_override = -1;
+    // OpenAI Predicted Outputs: concatenated text of the "prediction" body
+    // field ({"type":"content","content": string | [{"type":"text","text"}]}).
+    // Tokenized later in the snapshot stage (needs the tokenizer) and fed to
+    // the n-gram draft corpus. Empty = no prediction.
+    std::string prediction_text;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
     std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
@@ -90,6 +95,9 @@ struct ChatStateSnapshot {
     bool enable_thinking = false, suppress_thinking = false;
     std::vector<int32_t> tokens;
     int n_prompt_tokens = 0;
+    // Tokenized Predicted-Outputs text (params.prediction_text) — encoded here
+    // because the tokenizer only exists inside the snapshot stage.
+    std::vector<int32_t> prediction_tokens;
 };
 
 // Top-level context bundling params + snap + transients.

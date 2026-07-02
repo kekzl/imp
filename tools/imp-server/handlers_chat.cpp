@@ -294,6 +294,18 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
     if (body.contains("speculative") && body["speculative"].is_boolean())
         imp_req->spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+    // Predicted Outputs (string-content form) on the completions route: the
+    // prediction only seeds the n-gram draft corpus, output is unchanged.
+    if (body.contains("prediction") && body["prediction"].is_object()) {
+        const auto& pred = body["prediction"];
+        if (pred.value("type", "content") == "content" && pred.contains("content") &&
+            pred["content"].is_string()) {
+            imp_req->prediction_tokens = snap_tok->encode(pred["content"].get<std::string>());
+            if (snap_max_seq_len > 0 &&
+                imp_req->prediction_tokens.size() > static_cast<size_t>(snap_max_seq_len))
+                imp_req->prediction_tokens.resize(snap_max_seq_len);
+        }
+    }
     // Stream requests stay on per-step decode for real per-token SSE (#754).
     imp_req->stream = stream;
     imp_req->status = imp::RequestStatus::PENDING;

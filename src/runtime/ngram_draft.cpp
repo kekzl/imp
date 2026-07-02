@@ -4,7 +4,10 @@
 
 namespace imp {
 
-std::vector<int32_t> ngram_draft(const int32_t* hist, int n, int k, int min_match, int max_match) {
+std::vector<int32_t> ngram_draft(const int32_t* hist, int n, int k, int min_match, int max_match,
+                                 int* draft_start) {
+    if (draft_start)
+        *draft_start = -1;
     if (hist == nullptr || k <= 0 || min_match < 1 || n < min_match + 1)
         return {};
     if (max_match < min_match)
@@ -40,6 +43,8 @@ std::vector<int32_t> ngram_draft(const int32_t* hist, int n, int k, int min_matc
     int take = std::min(k, avail);
     if (take <= 0)
         return {};
+    if (draft_start)
+        *draft_start = best_end;
     return std::vector<int32_t>(hist + best_end, hist + best_end + take);
 }
 

@@ -97,3 +97,74 @@ def test_models_endpoint(client):
     body = r.json()
     assert body["object"] == "list"
     assert isinstance(body["data"], list)
+
+
+class TestPredictedOutputs:
+    def test_prediction_param_accepted_and_ignored_shape(self, client, model):
+        """The prediction param must never change the response shape — it is
+        a draft hint. Works against mock (param silently ignored) and real."""
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 16,
+            "temperature": 0,
+            "prediction": {"type": "content", "content": "Hello! How can I help?"},
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["object"] == "chat.completion"
+        assert len(body["choices"][0]["message"]["content"]) > 0
+
+    def test_prediction_speeds_code_edit_and_reports_usage(self, client, model, is_mock):
+        """A code-edit request whose prediction matches the expected output
+        must (a) return the same text as without prediction, and (b) report
+        accepted_prediction_tokens > 0 in completion_tokens_details."""
+        if is_mock:
+            pytest.skip("mock server does not implement speculative decoding")
+
+        code = "\n".join(
+            f"def func_{i}(x):\n    return x + {i}\n" for i in range(20)
+        )
+        prompt = (
+            "Below is a Python file. Output the COMPLETE file again, changing "
+            "ONLY func_0 to return x - 0 instead. No explanations.\n\n" + code
+        )
+        # The prediction is the near-verbatim expected output.
+        prediction = code.replace("return x + 0", "return x - 0")
+        base = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 600,
+            "temperature": 0,
+        }
+        r_plain = client.post("/v1/chat/completions", json=base)
+        r_pred = client.post("/v1/chat/completions", json={
+            **base,
+            "prediction": {"type": "content", "content": prediction},
+        })
+        assert r_plain.status_code == 200 and r_pred.status_code == 200
+        plain = r_plain.json()
+        pred = r_pred.json()
+        # Output must be unchanged by the prediction (greedy verify semantics).
+        assert plain["choices"][0]["message"]["content"] == \
+            pred["choices"][0]["message"]["content"]
+        details = pred["usage"].get("completion_tokens_details", {})
+        assert "accepted_prediction_tokens" in details
+        assert "rejected_prediction_tokens" in details
+        # On a near-verbatim prediction, at least some drafts must have been
+        # sourced from the prediction region and accepted.
+        assert details["accepted_prediction_tokens"] > 0
+
+    def test_prediction_content_parts_array(self, client, model):
+        """The array-of-parts content form must parse."""
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Count to three."}],
+            "max_tokens": 16,
+            "temperature": 0,
+            "prediction": {"type": "content", "content": [
+                {"type": "text", "text": "One, two,"},
+                {"type": "text", "text": " three."},
+            ]},
+        })
+        assert r.status_code == 200
