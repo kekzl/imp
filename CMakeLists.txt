@@ -438,11 +438,13 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/anthropic.cpp
+        tools/imp-server/responses.cpp
         tools/imp-server/handlers.cpp
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/handlers_messages.cpp
+        tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
         tools/imp-server/batching_engine.cpp
     )
@@ -519,9 +521,11 @@ if(IMP_BUILD_TESTS)
         # reasoning/channel splits in tools/imp-server/utils.cpp (issue #557).
         target_sources(test-core PRIVATE
             tools/imp-server/anthropic.cpp
+            tools/imp-server/responses.cpp
             tools/imp-server/utils.cpp
             tools/imp-server/tool_call.cpp
             tests/test_anthropic_transform.cpp
+            tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp
             tests/test_tool_call.cpp
             tests/test_tool_stream_filter.cpp

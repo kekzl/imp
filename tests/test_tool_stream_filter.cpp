@@ -31,24 +31,47 @@ namespace {
 
 struct Collected {
     std::string content;
-    std::vector<ParsedToolCall> calls;
-    std::string leftover;  // filter.finish() at stream end
+    std::vector<ParsedToolCall> calls;  // buffered CALLs + streamed CALL_ENDs, in order
+    std::string leftover;               // filter.finish() at stream end
+
+    // Incremental-streaming bookkeeping (JSON layouts):
+    int n_streamed_calls = 0;           // CALL_BEGIN count
+    int n_arg_deltas = 0;               // CALL_ARGS_DELTA count
+    std::string open_deltas;            // deltas of the currently-open call
+    std::vector<std::string> delta_concats;  // per streamed call: concat(deltas)
 };
 
 Collected feed_chunks(ChatTemplateFamily fam, const std::string& input,
                       const std::vector<size_t>& chunk_sizes) {
     StreamToolCallFilter filter(fam);
     Collected out;
+    using Kind = StreamToolCallFilter::Segment::Kind;
     size_t pos = 0, ci = 0;
     while (pos < input.size()) {
         size_t n = chunk_sizes.empty() ? 1 : chunk_sizes[ci++ % chunk_sizes.size()];
         n = std::min(n, input.size() - pos);
         auto segs = filter.feed(input.substr(pos, n));
         for (auto& seg : segs) {
-            if (seg.is_call)
-                out.calls.push_back(std::move(seg.call));
-            else
-                out.content += seg.text;
+            switch (seg.kind) {
+                case Kind::TEXT:
+                    out.content += seg.text;
+                    break;
+                case Kind::CALL:
+                    out.calls.push_back(std::move(seg.call));
+                    break;
+                case Kind::CALL_BEGIN:
+                    out.n_streamed_calls++;
+                    out.open_deltas.clear();
+                    break;
+                case Kind::CALL_ARGS_DELTA:
+                    out.n_arg_deltas++;
+                    out.open_deltas += seg.text;
+                    break;
+                case Kind::CALL_END:
+                    out.delta_concats.push_back(out.open_deltas);
+                    out.calls.push_back(std::move(seg.call));
+                    break;
+            }
         }
         pos += n;
     }
@@ -142,7 +165,137 @@ TEST(ToolStreamFilterChatML, JsonBodyChunked) {
         json args = json::parse(r.calls[0].arguments);
         EXPECT_EQ(args["x"], 1);
         EXPECT_EQ(r.content, "Sure.\n");
+        // JSON layout streams incrementally: BEGIN + deltas whose
+        // concatenation IS the final arguments string, chunking-invariant.
+        EXPECT_EQ(r.n_streamed_calls, 1) << "chunk=" << chunk;
+        ASSERT_EQ(r.delta_concats.size(), 1u);
+        EXPECT_EQ(r.delta_concats[0], r.calls[0].arguments);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental argument streaming (the 20-60s zero-bytes fix): the arguments
+// of a JSON-layout call must flow out WHILE the body arrives, not after the
+// close tag.
+// ---------------------------------------------------------------------------
+
+TEST(ToolStreamFilterChatML, ArgsStreamBeforeCloseTag) {
+    // Feed everything except the close tag: the name and (most of) the
+    // arguments must already have been emitted.
+    std::string args_json =
+        "{\"path\": \"/src/main.cpp\", \"content\": \"int main() { return 0; } // "
+        "a reasonably long payload so multiple deltas confirm before the tail\"}";
+    std::string body = "<tool_call>{\"name\": \"edit_file\", \"arguments\": " + args_json + "}";
+    StreamToolCallFilter filter(ChatTemplateFamily::CHATML);
+    using Kind = StreamToolCallFilter::Segment::Kind;
+    bool begun = false;
+    std::string streamed;
+    for (char c : body) {
+        for (auto& seg : filter.feed(std::string(1, c))) {
+            if (seg.kind == Kind::CALL_BEGIN) {
+                begun = true;
+                EXPECT_EQ(seg.call.name, "edit_file");
+            } else if (seg.kind == Kind::CALL_ARGS_DELTA) {
+                streamed += seg.text;
+            }
+        }
+    }
+    EXPECT_TRUE(begun) << "CALL_BEGIN must fire before the close tag";
+    EXPECT_TRUE(filter.call_open());
+    // Everything except the close-tag-straddle holdback (≤ close-tag length)
+    // must already be on the wire before the close marker arrives.
+    EXPECT_GE(streamed.size() + 12, args_json.size());
+    EXPECT_EQ(args_json.compare(0, streamed.size(), streamed), 0)
+        << "streamed bytes must be a prefix of the arguments";
+    // The close tag disambiguates the held tail and completes the call.
+    auto segs = filter.feed("</tool_call>");
+    ASSERT_FALSE(segs.empty());
+    for (size_t i = 0; i + 1 < segs.size(); ++i) {
+        EXPECT_EQ(segs[i].kind, Kind::CALL_ARGS_DELTA);
+        streamed += segs[i].text;
+    }
+    EXPECT_EQ(segs.back().kind, Kind::CALL_END);
+    EXPECT_EQ(streamed, args_json);
+    EXPECT_EQ(segs.back().call.arguments, args_json);
+    EXPECT_FALSE(filter.call_open());
+}
+
+TEST(ToolStreamFilterChatML, StreamedArgsHandleStringsEscapesAndAngles) {
+    // Strings containing '<', escaped quotes, and nested structures must not
+    // confuse the nesting tracker or the close-tag holdback.
+    std::string args_json =
+        "{\"html\": \"<div class=\\\"x\\\">a < b</div>\", "
+        "\"nested\": {\"arr\": [1, {\"k\": \"}]\"}]}}";
+    std::string input =
+        "<tool_call>{\"name\": \"render\", \"arguments\": " + args_json + "}</tool_call>";
+    for (size_t chunk : {size_t(1), size_t(7), input.size()}) {
+        auto r = feed_chunks(ChatTemplateFamily::CHATML, input, {chunk});
+        ASSERT_EQ(r.calls.size(), 1u) << "chunk=" << chunk;
+        EXPECT_EQ(r.calls[0].name, "render");
+        EXPECT_EQ(r.calls[0].arguments, args_json);
+        ASSERT_EQ(r.delta_concats.size(), 1u);
+        EXPECT_EQ(r.delta_concats[0], args_json);
+        EXPECT_NO_THROW(json::parse(r.calls[0].arguments)) << "chunk=" << chunk;
+        EXPECT_EQ(r.content, "");
+    }
+}
+
+TEST(ToolStreamFilterChatML, StringEncodedArgumentsFallBackToBuffered) {
+    // "arguments" as a JSON-encoded STRING is not streamable as raw bytes
+    // (the client expects the decoded object text) — must take the buffered
+    // CALL path, whose parser normalizes it.
+    std::string input =
+        "<tool_call>{\"name\": \"s\", \"arguments\": \"{\\\"x\\\": 2}\"}</tool_call>";
+    auto r = feed_char_by_char(ChatTemplateFamily::CHATML, input);
+    EXPECT_EQ(r.n_streamed_calls, 0);
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_EQ(r.calls[0].name, "s");
+    // The buffered parser's arguments normalization is pre-existing behavior
+    // (string-encoded args may stay in string form) — only the routing to the
+    // buffered path is under test here. Whatever form: it must decode to x=2.
+    json args = json::parse(r.calls[0].arguments);
+    if (args.is_string())
+        args = json::parse(args.get<std::string>());
+    EXPECT_EQ(args["x"], 2);
+}
+
+TEST(ToolStreamFilterChatML, StreamedCutoffKeepsEmittedDeltas) {
+    // Stream ends mid-arguments after CALL_BEGIN: nothing restorable —
+    // finish() must be empty, call_open() true, streamed_arguments() has the
+    // emitted prefix.
+    std::string input =
+        "<tool_call>{\"name\": \"f\", \"arguments\": {\"a\": "
+        "\"a-long-enough-value-to-clear-the-close-tag-straddle-holdback";
+    StreamToolCallFilter filter(ChatTemplateFamily::CHATML);
+    using Kind = StreamToolCallFilter::Segment::Kind;
+    std::string streamed;
+    bool begun = false;
+    for (char c : input) {
+        for (auto& seg : filter.feed(std::string(1, c))) {
+            if (seg.kind == Kind::CALL_BEGIN)
+                begun = true;
+            if (seg.kind == Kind::CALL_ARGS_DELTA)
+                streamed += seg.text;
+        }
+    }
+    EXPECT_TRUE(begun);
+    EXPECT_TRUE(filter.call_open());
+    EXPECT_EQ(filter.finish(), "");
+    EXPECT_EQ(filter.streamed_arguments(), streamed);
+    EXPECT_FALSE(streamed.empty());
+}
+
+TEST(ToolStreamFilterLlama3, ArgsStreamIncrementally) {
+    std::string args_json = "{\"query\": \"a longer search string for deltas\"}";
+    std::string input = "go <function=search>" + args_json + "</function>";
+    auto r = feed_char_by_char(ChatTemplateFamily::LLAMA3, input);
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_EQ(r.calls[0].name, "search");
+    EXPECT_EQ(r.calls[0].arguments, args_json);
+    EXPECT_EQ(r.n_streamed_calls, 1);
+    ASSERT_EQ(r.delta_concats.size(), 1u);
+    EXPECT_EQ(r.delta_concats[0], args_json);
+    EXPECT_EQ(r.content, "go ");
 }
 
 TEST(ToolStreamFilterChatML, Qwen36XmlFallback) {

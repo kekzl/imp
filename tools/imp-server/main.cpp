@@ -128,7 +128,8 @@ int main(int argc, char** argv) {
             return httplib::Server::HandlerResponse::Unhandled;
 
         // Rate limiting (per-IP, inference endpoints only)
-        if (state.rate_limit > 0 && (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
+        if (state.rate_limit > 0 && (req.path == "/v1/chat/completions" || req.path == "/v1/completions" ||
+                                     req.path == "/v1/responses")) {
             std::string ip = req.get_header_value("X-Forwarded-For");
             if (ip.empty())
                 ip = req.remote_addr;
@@ -142,7 +143,8 @@ int main(int argc, char** argv) {
 
         // Max concurrent requests
         if (state.max_concurrent > 0 &&
-            (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
+            (req.path == "/v1/chat/completions" || req.path == "/v1/completions" ||
+             req.path == "/v1/responses")) {
             int queue = 0;
             {
                 std::lock_guard<std::timed_mutex> lock(state.mtx);
@@ -198,6 +200,10 @@ int main(int argc, char** argv) {
 
     svr.Post("/v1/chat/completions", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_chat_completions(req, res, state);
+    });
+
+    svr.Post("/v1/responses", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_responses(req, res, state);
     });
 
     svr.Post("/v1/completions", [&state](const httplib::Request& req, httplib::Response& res) {
@@ -279,6 +285,7 @@ int main(int argc, char** argv) {
     printf("  GET    /health\n");
     printf("  GET    /v1/models\n");
     printf("  POST   /v1/chat/completions\n");
+    printf("  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)\n");
     printf("  POST   /v1/completions\n");
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/messages/count_tokens\n");

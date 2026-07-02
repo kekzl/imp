@@ -193,33 +193,40 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return emit_thinking(chunk);
         return emit_text(chunk);
     };
-    // Open a tool_use block and stream its arguments as chunked
-    // input_json_delta events (Task 6: incremental arg deltas).
-    auto emit_tool_use = [&](const ParsedToolCall& tc) -> bool {
+    // Open a tool_use block (content_block_start). Arguments follow as
+    // input_json_delta events — incrementally for streamed (JSON-layout)
+    // calls, chunked-after-the-fact for buffered ones.
+    auto open_tool_use_block = [&](const ParsedToolCall& tc) -> bool {
         if (!stop_block())
             return false;
         ++block_index;
         open_block = AnthBlock::TOOL_USE;
         namespace anth = imp_server::anthropic;
-        if (!out.emit("content_block_start",
-                      json{{"type", "content_block_start"},
-                           {"index", block_index},
-                           {"content_block",
-                            {{"type", "tool_use"},
-                             {"id", anth::tool_call_id_to_anthropic(tc.id)},
-                             {"name", tc.name},
-                             {"input", json::object()}}}}))
+        return out.emit("content_block_start",
+                        json{{"type", "content_block_start"},
+                             {"index", block_index},
+                             {"content_block",
+                              {{"type", "tool_use"},
+                               {"id", anth::tool_call_id_to_anthropic(tc.id)},
+                               {"name", tc.name},
+                               {"input", json::object()}}}});
+    };
+    auto emit_tool_args_delta = [&](const std::string& partial) -> bool {
+        return out.emit("content_block_delta",
+                        json{{"type", "content_block_delta"},
+                             {"index", block_index},
+                             {"delta",
+                              {{"type", "input_json_delta"}, {"partial_json", partial}}}});
+    };
+    // Buffered call path: open block + chunked arg deltas + close.
+    auto emit_tool_use = [&](const ParsedToolCall& tc) -> bool {
+        if (!open_tool_use_block(tc))
             return false;
         const std::string& args = tc.arguments;
         constexpr size_t kChunk = 48;
         for (size_t off = 0; off < args.size(); off += kChunk) {
             size_t n = std::min(kChunk, args.size() - off);
-            if (!out.emit("content_block_delta",
-                          json{{"type", "content_block_delta"},
-                               {"index", block_index},
-                               {"delta",
-                                {{"type", "input_json_delta"},
-                                 {"partial_json", args.substr(off, n)}}}}))
+            if (!emit_tool_args_delta(args.substr(off, n)))
                 return false;
         }
         return stop_block();
@@ -440,9 +447,10 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         if (has_tools) {
             auto segs = tool_filter.feed(std::move(piece));
             piece.clear();
+            using SegKind = imp::server::StreamToolCallFilter::Segment::Kind;
             for (size_t si = 0; si < segs.size(); ++si) {
                 auto& seg = segs[si];
-                if (!seg.is_call) {
+                if (seg.kind == SegKind::TEXT) {
                     if (si + 1 == segs.size()) {
                         piece = std::move(seg.text);  // trailing content
                     } else {
@@ -453,6 +461,40 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
                     }
                     continue;
                 }
+                if (seg.kind == SegKind::CALL_BEGIN) {
+                    // Streamed call: open the tool_use block now; the
+                    // argument bytes follow as input_json_delta events while
+                    // the model is still generating them.
+                    ParsedToolCall tc = std::move(seg.call);
+                    tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                    if (!flush_buffered_content())
+                        return false;
+                    if (!open_tool_use_block(tc))
+                        return false;
+                    stream_tool_calls.push_back(std::move(tc));
+                    tool_calls_emitted = true;
+                    continue;
+                }
+                if (seg.kind == SegKind::CALL_ARGS_DELTA) {
+                    if (!emit_tool_args_delta(seg.text))
+                        return false;
+                    continue;
+                }
+                if (seg.kind == SegKind::CALL_END) {
+                    if (!stream_tool_calls.empty()) {
+                        stream_tool_calls.back().arguments = std::move(seg.call.arguments);
+                        validate_tool_call(stream_tool_calls.back(), ctx.params.tools);
+                        if (!stream_tool_calls.back().valid) {
+                            fprintf(stderr, "[%s] tool-call arg validation failed: %s: %s\n",
+                                    msg_id.c_str(), stream_tool_calls.back().name.c_str(),
+                                    stream_tool_calls.back().error.c_str());
+                        }
+                    }
+                    if (!stop_block())
+                        return false;
+                    continue;
+                }
+                // SegKind::CALL — buffered call (non-JSON layouts).
                 ParsedToolCall tc = std::move(seg.call);
                 tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
                 validate_tool_call(tc, ctx.params.tools);

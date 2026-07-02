@@ -196,6 +196,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 // over handle_chat_completions; streaming requests drive the real per-token
 // batching-engine loop and emit native Anthropic SSE events incrementally.
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// POST /v1/responses — OpenAI Responses API (Agents SDK / Codex dialect);
+// reuses the chat-completions path via the transform shim (responses.h).
+void handle_responses(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic /v1/messages/count_tokens: same body transform + tokenize chain as
 // handle_messages, but never submits to the engine; returns {"input_tokens":N}.
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state);
