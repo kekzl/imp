@@ -14,6 +14,12 @@ namespace imp {
 // Tie-breaking: longer match wins; among equal lengths the most recent
 // occurrence wins (recency tracks the model's local phrasing better than
 // distant repeats).
-std::vector<int32_t> ngram_draft(const int32_t* hist, int n, int k, int min_match, int max_match);
+//
+// draft_start (optional): receives the history index of the first returned
+// draft token (i.e. one past the matched n-gram), or -1 when no draft was
+// produced. Lets the caller classify the draft's source region (prompt /
+// prediction / prior output) for accept accounting.
+std::vector<int32_t> ngram_draft(const int32_t* hist, int n, int k, int min_match, int max_match,
+                                 int* draft_start = nullptr);
 
 }  // namespace imp

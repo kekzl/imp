@@ -76,6 +76,16 @@ struct Request {
     // request opt into speculation while a short tool-arg generation skips it
     // (and vice-versa) on the same server. Resolved via Engine::spec_ngram_enabled_.
     int spec_ngram_override = -1;
+    // OpenAI Predicted Outputs: client-supplied predicted completion tokens.
+    // Never forwarded through the model — they only extend the n-gram draft
+    // search corpus (input + prediction + output), so a response that tracks
+    // the prediction gets max_match-length drafts every verify step. Verify
+    // semantics are unchanged: output stays a faithful greedy decode.
+    std::vector<int32_t> prediction_tokens;
+    // Accept accounting for usage.completion_tokens_details — counts only
+    // verify steps whose draft was sourced from the prediction region.
+    long long pred_accepted = 0;
+    long long pred_rejected = 0;
     bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
     // Generation began inside an injected <think> prefix (the opener lives in
     // the PROMPT, not the output) — seeds the think-budget recount loop and

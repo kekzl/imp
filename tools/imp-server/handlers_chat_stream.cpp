@@ -608,6 +608,13 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (n_reasoning_tokens > 0) {
             usage["completion_tokens_details"] = {{"reasoning_tokens", n_reasoning_tokens}};
         }
+        // Predicted Outputs accounting (mirrors the non-streaming path).
+        if (active_req && !active_req->prediction_tokens.empty()) {
+            usage["completion_tokens_details"]["accepted_prediction_tokens"] =
+                active_req->pred_accepted;
+            usage["completion_tokens_details"]["rejected_prediction_tokens"] =
+                active_req->pred_rejected;
+        }
         json usage_obj = {{"id", comp_id},
                           {"object", "chat.completion.chunk"},
                           {"created", created},
