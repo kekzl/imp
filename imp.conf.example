@@ -270,11 +270,17 @@ mmproj               = ""
 # n-gram (prompt-lookup) speculative decoding: drafts come from suffix
 # matches against the request's own prompt+output — no draft model. Greedy
 # verify accepts the longest matching prefix, so output stays a faithful
-# greedy decode. Batch-1, greedy sampling, dense-attention models only
-# (MoE/recurrent gate off automatically — the async decode loop carries them);
+# greedy decode. Batch-1, greedy sampling, non-recurrent models only
+# (SSM/GDN hybrids gate off automatically — their state cannot rewind);
 # disables the async decode graph loop while on. Wins on repetition-heavy
 # (agent/code/RAG) workloads; ~neutral on free-form prose. Default-ON.
 ngram                = true
+# Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
+# code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
+# batched verify re-dequants every activated expert per step, measured -22%)
+# and stays on the async decode loop. imp-cli --bench pins this off to keep
+# the gated tg baseline a raw-decode signal.
+moe                  = true
 # Draft tokens proposed per verify step (verify cost is ~flat in k).
 k                    = 16
 # Shortest / longest suffix n-gram match searched. Longer min_match =
