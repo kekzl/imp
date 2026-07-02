@@ -206,6 +206,22 @@ public:
     // Appends new tokens to out_tokens. Returns count of new tokens.
     int poll_new_tokens(std::vector<int32_t>& out_tokens);
 
+    // Non-blocking burst-completion check: returns true once the device loop
+    // published its done flag (the kernel stop path is the only loop exit),
+    // then drains the graph epilogue and clears the launched flag. A stream
+    // error is surfaced like wait_and_get_tokens (F-A17) and still ends the
+    // burst — tokens already read through poll_new_tokens stand.
+    // Deliberately NOT cudaStreamQuery-based: the query reports the stream
+    // idle while a conditional WHILE graph is still iterating.
+    bool try_finish_burst(cudaStream_t stream);
+
+    // Blocking fallback when the device loop stops making progress without
+    // publishing done (graph error paths): sync the stream, end the burst.
+    void finish_burst_blocking(cudaStream_t stream);
+
+    // A conditional-loop burst is currently running on the device.
+    bool launch_in_flight() const { return launched_; }
+
     // Get number of steps completed so far (non-blocking).
     int steps_completed() const;
 
@@ -245,6 +261,17 @@ private:
     int32_t* d_ring_buffer_ = nullptr;      // device pointer to same ring buffer
     int* h_step_counter_ = nullptr;         // host pointer to step counter mirror
     int* d_step_counter_mapped_ = nullptr;  // device pointer to mapped step counter
+    // Burst-done flag, published by post_decode_step_kernel's stop path (the
+    // only WHILE-loop exit). cudaStreamQuery reports the stream idle while a
+    // conditional WHILE graph is still iterating on this platform, so the
+    // host must not use it to decide teardown.
+    int* h_burst_done_ = nullptr;           // host pointer to done flag
+    int* d_burst_done_mapped_ = nullptr;    // device pointer to same flag
+    // Dedicated scratch for forward_decode_async's per-iteration D2H token
+    // copy. This used to alias h_step_counter_ — harmless when tokens were
+    // only harvested after a full-burst sync, but a polling host could read
+    // the transient token id as the step counter and over-read the ring.
+    int32_t* h_decode_scratch_ = nullptr;
 
     Config config_;
     int last_read_step_ = 0;
