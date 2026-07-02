@@ -4,6 +4,49 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-02
+
+Multi-server-per-GPU (hard VRAM budget) + load/teardown robustness.
+
+### Added
+- **Hard per-process VRAM budget** — `--vram-budget <mb>` (imp-server + imp-cli),
+  `[runtime] vram_budget_mb` in imp.conf, and the previously-inert C-API
+  `ImpConfig.vram_budget_mb`: every sizing decision (weight caches, KV clamp,
+  expert offload, workspaces, upload gates — all 19 sites) sees a virtual GPU
+  of the given size, so multiple imp-server processes can share one card.
+  Baseline-delta semantics: a co-tenant's pre-existing usage never counts
+  against this process's budget; concurrent neighbour allocations shrink the
+  view conservatively. Verified with two simultaneously-started servers
+  (9000 + 8000 MiB budgets) serving concurrently at 15.9 GiB device total.
+  Best-effort cap — leave ~1 GiB real headroom between the sum of budgets and
+  the card. Default 0 = uncapped passthrough (#838).
+
+### Fixed
+- **Model unload leaked weights-sized VRAM** (~8.3 GiB per Qwen3-8B-Q8_0
+  cycle): weights are `cudaMallocAsync`-allocated but were freed with plain
+  `cudaFree`, which returns success WITHOUT returning the blocks to the async
+  mempool on this stack — the pool double-booked old + new weights on reload
+  and `cudaMemPoolTrimTo` could reclaim nothing. Freed with `cudaFreeAsync`
+  everywhere (Model teardown + the Phase-3 MoE expert-source drops, whose
+  "freed" VRAM was phantom for the same reason). The reload test now probes
+  actual re-allocatability (WSL2/WDDM under-reports reclaimed pages in
+  `cudaMemGetInfo`) (#834, #837).
+- **Encoder-only models are rejected at load on the SafeTensors/HF path too**
+  — `is_encoder_only_arch` was case-sensitive, so HF `config.json` class names
+  (`NomicBertModel`, `BertModel`, `XLMRobertaModel`, …) slipped past the
+  GGUF-only reject and ran a BERT encoder through the causal-LM prefill +
+  sampler → CUDA illegal memory access on the first `/v1/embeddings` request.
+  Both HF-config paths (`architectures` array + `model_type` fallback) now
+  fail loudly at load (#818, #835).
+- **Second engine on the same loaded model handle no longer IMAs** — for GGUF
+  MXFP4 GDN models the first engine's pre-dequant consumes the model sources
+  destructively (in-place MXFP4 raw-block compaction; GDN FP16 fallback
+  re-points model tensors at executor-owned memory), so a create→free→create
+  cycle rebuilt caches from dangling memory and poisoned the CUDA context.
+  `Engine::init` now rejects a second engine on a consumed model with a clear
+  "reload the model" error; models whose sources stay intact (dense Q8_0)
+  keep supporting create/free/create on one handle (#830, #835).
+
 ## [0.15.0] - 2026-07-02
 
 Hybrid (SSM/GDN) agentic serving: prefix caching + concurrent-decode fairness.
