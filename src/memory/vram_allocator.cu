@@ -1,4 +1,5 @@
 #include "memory/vram_allocator.h"
+#include "memory/vram_query.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -13,9 +14,8 @@ VRAMAllocator::~VRAMAllocator() {
 
 bool VRAMAllocator::init(float headroom_fraction) {
     size_t free_mem = 0;
-    cudaError_t err = cudaMemGetInfo(&free_mem, &total_);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("VRAMAllocator: cudaMemGetInfo failed: %s", cudaGetErrorString(err));
+    if (!vram_budget_mem_get_info(&free_mem, &total_)) {
+        IMP_LOG_ERROR("VRAMAllocator: cudaMemGetInfo failed");
         return false;
     }
 
@@ -37,7 +37,7 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
         // the 10% headroom is too conservative. Critical allocations (workspace,
         // SSM state, dequant scratch) should still succeed if CUDA has memory.
         size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         if (free_mem >= bytes + (64 << 20)) {  // 64 MiB minimum safety
             IMP_LOG_WARN(
                 "VRAMAllocator: %s (%.2f MiB) exceeds headroom, "
@@ -104,7 +104,7 @@ bool VRAMAllocator::can_allocate(size_t bytes) const {
     // Check against actual free VRAM (not just our tracking)
     // to account for external allocations (driver, other processes).
     size_t free_mem = 0, total = 0;
-    cudaMemGetInfo(&free_mem, &total);
+    vram_budget_mem_get_info(&free_mem, &total);
 
     return free_mem >= bytes + headroom_;
 }
@@ -114,7 +114,7 @@ size_t VRAMAllocator::available() const {
         return 0;
 
     size_t free_mem = 0, total = 0;
-    cudaMemGetInfo(&free_mem, &total);
+    vram_budget_mem_get_info(&free_mem, &total);
 
     return (free_mem > headroom_) ? (free_mem - headroom_) : 0;
 }

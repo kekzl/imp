@@ -221,6 +221,12 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
         args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
     config.max_batch_size = overrides.value("max_batch_size", batch_cli_or_conf);
 
+    // Hard per-process VRAM cap for multi-server-per-GPU deployments.
+    // Precedence: --vram-budget CLI flag > [runtime] vram_budget_mb from
+    // imp.conf (the engine bridges the imp.conf key itself when this is 0).
+    if (args.vram_budget_mb > 0)
+        config.vram_budget_mb = args.vram_budget_mb;
+
     config.gpu_layers = args.gpu_layers;
     if (args.ssm_fp16)
         config.ssm_state_dtype = IMP_DTYPE_FP16;

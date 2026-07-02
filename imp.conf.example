@@ -58,6 +58,14 @@ hybrid_decode_quantum = 128
 warmup               = false
 # Override the model's max_seq_len (0 = use the model default).
 max_seq_len          = 0
+# Hard VRAM budget for this process in MiB (0 = uncapped). Every sizing
+# decision (weight caches, KV clamp, expert offload, workspaces, upload
+# gates) sees a virtual GPU of this size — run multiple imp-server
+# processes on one card by giving each a slice. Best-effort cap: leave
+# ~1 GiB real headroom between the sum of budgets and the card (small
+# fixed buffers + cuBLAS internals sit outside the gates). CLI flag
+# --vram-budget overrides.
+vram_budget_mb       = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
 # Naked FP16 path with FP8/NVFP4/graphs/warmup all forced off.

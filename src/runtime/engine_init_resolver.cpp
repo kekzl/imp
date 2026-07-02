@@ -12,6 +12,7 @@
 #include "runtime/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "memory/vram_query.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -177,7 +178,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         int auto_batch = tier;
         size_t free_vram = 0, total_vram = 0;
         size_t headroom = 0;
-        if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess && free_vram > 0) {
+        if (vram_budget_mem_get_info(&free_vram, &total_vram) && free_vram > 0) {
             constexpr int kRefCtxTokens = 4096;  // per-slot serving context floor
             constexpr int kMaxAutoBatch = 32;
             constexpr double kKvHeadroomFrac = 0.6;  // rest: workspaces + long-ctx + safety
@@ -475,7 +476,7 @@ void Engine::init_compute_max_seq_len_() {
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         size_t free_vram = 0, total_vram = 0;
-        cudaMemGetInfo(&free_vram, &total_vram);
+        vram_budget_mem_get_info(&free_vram, &total_vram);
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
         // n_kv_heads_per_layer with zeros for non-attention layers — those don't

@@ -2,6 +2,7 @@
 #include "runtime/engine.h"  // EngineConfig full definition
 #include "runtime/storage_planner.h"
 #include "core/logging.h"
+#include "memory/vram_query.h"
 #include <algorithm>
 #include <cuda_runtime.h>
 
@@ -46,7 +47,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t total_vram = 0;
     {
         size_t f;
-        cudaMemGetInfo(&f, &total_vram);
+        vram_budget_mem_get_info(&f, &total_vram);
     }
     if (config.use_nvfp4_decode != 2) {
         budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);

@@ -6,6 +6,7 @@
 #include "model/chat_template.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
+#include "memory/vram_query.h"
 
 #include <cstring>
 #include <algorithm>
@@ -31,7 +32,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
 
     {
         size_t f = 0, t = 0;
-        cudaMemGetInfo(&f, &t);
+        vram_budget_mem_get_info(&f, &t);
         if (f < 256ULL * 1024 * 1024)
             return 0;
     }

@@ -16,6 +16,7 @@ struct CliArgs {
     std::string perplexity_file;  // --perplexity <file>: teacher-forced PPL over the file's text
     int max_tokens = 256;
     int max_seq_len = 0;    // --max-seq-len: KV context ceiling (0 = auto from VRAM)
+    int vram_budget_mb = 0; // --vram-budget: hard per-process VRAM cap in MiB (0 = uncapped)
     int min_kv_tokens = 0;  // --min-kv-tokens: floor KV capacity (0 = auto)
     float temperature = 0.7f;
     float top_p = 0.9f;
