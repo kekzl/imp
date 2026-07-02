@@ -3,20 +3,33 @@
 // Streaming tool-call demux shared by the OpenAI (handlers_chat_stream.cpp)
 // and Anthropic (handlers_messages.cpp) SSE paths. Pure text-level state
 // machine (same pattern as reasoning_split.h): feed decoded token pieces in,
-// get back the user-visible content plus any completed tool calls, in order.
+// get back the user-visible content plus tool calls, in order.
 //
 // Dialects (see scan_tool_tag / parse_stream_tool_body in tool_call.h):
 //   ChatML  <tool_call>{json}</tool_call>          (JSON, Qwen3.6 XML fallback)
 //   Llama3  <function=NAME>{json}</function>
 //   Gemma-4 <|tool_call>call:NAME{...}<tool_call|> (plus the ChatML fallback)
 //
-// Unparseable bodies are restored to the content stream verbatim instead of
-// being silently dropped; text that is provably not a tag is released without
-// re-scanning (the previous in-handler machines could hold content forever
-// once a bare '<' appeared in prose).
+// INCREMENTAL ARGUMENT STREAMING: for the JSON layouts (ChatML body starting
+// with '{', and Llama3 where the body IS the arguments object) the filter
+// emits CALL_BEGIN as soon as the function name and the start of the
+// arguments value are known, then CALL_ARGS_DELTA segments carrying the RAW
+// argument bytes as they arrive (JSON-nesting tracked), and CALL_END at the
+// close marker. Previously the whole body was buffered until the close tag —
+// a large code-edit tool call produced 20-60 s of zero SSE bytes. The
+// non-JSON layouts (Qwen3.6 XML fallback, Gemma-4 grammar) still buffer and
+// emit a single CALL segment: their wire format has to be transformed to
+// JSON, which needs the complete body.
+//
+// Unparseable buffered bodies are restored to the content stream verbatim
+// instead of being silently dropped. Once CALL_BEGIN has been emitted the
+// raw-restore option is gone (deltas are already on the wire) — that is why
+// CALL_BEGIN waits for a parsed name AND a '{'/'[' arguments value: a model
+// that got that far virtually always completes the call.
 
 #include "tool_call.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,13 +40,20 @@ class StreamToolCallFilter {
 public:
     explicit StreamToolCallFilter(imp::ChatTemplateFamily family) : family_(family) {}
 
-    // One step of output, in stream order: zero or more segments, each either
-    // plain content text or a completed tool call (tc.id is NOT assigned —
-    // the caller owns the id counter).
+    // One step of output, in stream order. tc.id is NOT assigned — the caller
+    // owns the id counter (assign it on CALL / CALL_BEGIN).
     struct Segment {
-        bool is_call = false;
-        std::string text;    // content segment (is_call == false)
-        ParsedToolCall call; // completed call (is_call == true)
+        enum class Kind {
+            TEXT,             // plain content (text)
+            CALL,             // complete buffered call (call) — non-JSON layouts
+            CALL_BEGIN,       // streamed call opened (call.name set, arguments empty)
+            CALL_ARGS_DELTA,  // raw argument bytes for the open call (text)
+            CALL_END,         // streamed call closed (call complete; arguments =
+                              //   concatenation of all deltas)
+        };
+        Kind kind = Kind::TEXT;
+        std::string text;
+        ParsedToolCall call;
     };
     using Result = std::vector<Segment>;
 
@@ -87,31 +107,48 @@ public:
                     fn_name_ = std::move(scan.fn_name);
                     gemma_body_ = scan.gemma_body;
                     tag_buf_.clear();
+                    reset_streaming_();
                     phase_ = Phase::BODY;
                     break;  // the close marker may already be in body_buf_
                 }
                 case Phase::BODY: {
                     body_buf_ += piece;
                     piece.clear();
+
+                    // Incremental path: try to open + stream the arguments of
+                    // a JSON-layout call while the body is still arriving.
+                    if (!gemma_body_ && stream_state_ != StreamState::REJECTED)
+                        pump_streaming_(r);
+
                     size_t close_pos = body_buf_.find(close_tag_);
                     if (close_pos == std::string::npos)
                         return r;  // still collecting the body
 
-                    std::string body = body_buf_.substr(0, close_pos);
-                    auto bs = body.find_first_not_of("\n\r\t ");
-                    auto be = body.find_last_not_of("\n\r\t ");
-                    body = (bs == std::string::npos) ? std::string()
-                                                     : body.substr(bs, be - bs + 1);
-
-                    Segment seg;
-                    if (parse_stream_tool_body(body, gemma_body_, fn_name_, seg.call)) {
-                        seg.is_call = true;
-                        r.push_back(std::move(seg));
+                    if (stream_state_ == StreamState::ARGS ||
+                        stream_state_ == StreamState::TAIL) {
+                        // Streamed call: close it out (any confirmed bytes up
+                        // to the close marker were already emitted by
+                        // pump_streaming_'s close-tag-aware limit).
+                        finish_streaming_(r, close_pos);
                     } else {
-                        // Neither JSON nor a known fallback layout — restore
-                        // the raw text (markers included) instead of dropping.
-                        append_text(r, open_text_ +
-                                           body_buf_.substr(0, close_pos + close_tag_.size()));
+                        // Buffered call (non-JSON layout, or the JSON value
+                        // never materialized): parse the complete body.
+                        std::string body = body_buf_.substr(0, close_pos);
+                        auto bs = body.find_first_not_of("\n\r\t ");
+                        auto be = body.find_last_not_of("\n\r\t ");
+                        body = (bs == std::string::npos) ? std::string()
+                                                         : body.substr(bs, be - bs + 1);
+
+                        Segment seg;
+                        if (parse_stream_tool_body(body, gemma_body_, fn_name_, seg.call)) {
+                            seg.kind = Segment::Kind::CALL;
+                            r.push_back(std::move(seg));
+                        } else {
+                            // Neither JSON nor a known fallback layout — restore
+                            // the raw text (markers included) instead of dropping.
+                            append_text(r, open_text_ +
+                                               body_buf_.substr(0, close_pos + close_tag_.size()));
+                        }
                     }
 
                     piece = body_buf_.substr(close_pos + close_tag_.size());
@@ -119,6 +156,7 @@ public:
                     open_text_.clear();
                     fn_name_.clear();
                     gemma_body_ = false;
+                    reset_streaming_();
                     phase_ = Phase::CONTENT;
                     trim_ws_ = true;  // drop cosmetic ws after the close marker
                     if (piece.empty())
@@ -129,24 +167,241 @@ public:
         }
     }
 
-    // Stream ended mid-tag/mid-body: the held raw bytes (incomplete tool call).
-    std::string finish() const { return tag_buf_ + open_text_ + body_buf_; }
+    // Stream ended mid-tag/mid-body: the held raw bytes (incomplete tool
+    // call). For a call whose arguments were already streamed (CALL_BEGIN
+    // emitted) nothing is restorable — the caller should close out the open
+    // call instead (see call_open()).
+    std::string finish() const {
+        if (call_open())
+            return std::string();
+        return tag_buf_ + open_text_ + body_buf_;
+    }
 
     // True while text is being held as a potential/partial tool call.
     bool mid_tool() const { return phase_ != Phase::CONTENT; }
 
+    // True when a streamed call is open (CALL_BEGIN emitted, CALL_END not
+    // yet). On end-of-stream the caller must close the call/block itself;
+    // streamed_arguments() is everything emitted so far.
+    bool call_open() const {
+        return phase_ == Phase::BODY &&
+               (stream_state_ == StreamState::ARGS || stream_state_ == StreamState::TAIL);
+    }
+    const std::string& streamed_arguments() const { return streamed_args_; }
+
 private:
     enum class Phase { CONTENT, TAG, BODY };
+
+    // Incremental-argument sub-state within BODY:
+    //   PROBE    — parsing the body prefix for the function name + the start
+    //              of a '{'/'[' arguments value (nothing emitted yet)
+    //   ARGS     — CALL_BEGIN emitted; streaming raw argument bytes,
+    //              JSON-nesting tracked
+    //   TAIL     — arguments value closed; swallowing the cosmetic remainder
+    //              (the ChatML "}" wrapper close / whitespace) until close tag
+    //   REJECTED — body is not a streamable JSON layout; buffer like before
+    enum class StreamState { PROBE, ARGS, TAIL, REJECTED };
 
     static void append_text(Result& r, std::string text) {
         if (text.empty())
             return;
-        if (!r.empty() && !r.back().is_call) {
+        if (!r.empty() && r.back().kind == Segment::Kind::TEXT) {
             r.back().text += text;
             return;
         }
         Segment seg;
         seg.text = std::move(text);
+        r.push_back(std::move(seg));
+    }
+
+    void reset_streaming_() {
+        stream_state_ = StreamState::PROBE;
+        args_emitted_ = 0;
+        args_end_ = std::string::npos;
+        depth_ = 0;
+        in_string_ = false;
+        escaped_ = false;
+        streamed_name_.clear();
+        streamed_args_.clear();
+    }
+
+    // Advance the incremental scanner over body_buf_. Emits CALL_BEGIN once
+    // the name + arguments-value start are known, then CALL_ARGS_DELTA for
+    // every confirmed argument byte. Never streams at/past a (potential)
+    // close-marker occurrence: the tracker's limit stops at the first
+    // close_tag_ match and withholds a possible straddling prefix at the
+    // buffer tail, so behaviour stays identical to the buffered path when the
+    // marker appears mid-body (chunking-invariant).
+    void pump_streaming_(Result& r) {
+        if (stream_state_ == StreamState::PROBE) {
+            size_t args_start = 0;
+            if (!try_open_streaming_(args_start))
+                return;
+            Segment seg;
+            seg.kind = Segment::Kind::CALL_BEGIN;
+            seg.call.name = streamed_name_;
+            seg.call.valid = true;
+            r.push_back(std::move(seg));
+            stream_state_ = StreamState::ARGS;
+            args_emitted_ = args_start;
+        }
+        if (stream_state_ == StreamState::ARGS) {
+            // Confirmed-safe limit: stop at the close marker if present;
+            // otherwise withhold a tail that could be the start of one.
+            size_t limit = body_buf_.size();
+            size_t cp = body_buf_.find(close_tag_, args_emitted_);
+            if (cp != std::string::npos) {
+                limit = cp;
+            } else if (!close_tag_.empty()) {
+                size_t hold = close_tag_.size() - 1;
+                limit = (limit > args_emitted_ + hold) ? (limit - hold) : args_emitted_;
+            }
+            size_t i = args_emitted_;
+            for (; i < limit && args_end_ == std::string::npos; ++i) {
+                char c = body_buf_[i];
+                if (in_string_) {
+                    if (escaped_)
+                        escaped_ = false;
+                    else if (c == '\\')
+                        escaped_ = true;
+                    else if (c == '"')
+                        in_string_ = false;
+                    continue;
+                }
+                if (c == '"')
+                    in_string_ = true;
+                else if (c == '{' || c == '[')
+                    depth_++;
+                else if (c == '}' || c == ']') {
+                    depth_--;
+                    if (depth_ == 0)
+                        args_end_ = i + 1;  // one past the value end
+                }
+            }
+            size_t upto = (args_end_ != std::string::npos) ? args_end_ : i;
+            if (upto > args_emitted_) {
+                Segment seg;
+                seg.kind = Segment::Kind::CALL_ARGS_DELTA;
+                seg.text = body_buf_.substr(args_emitted_, upto - args_emitted_);
+                streamed_args_ += seg.text;
+                r.push_back(std::move(seg));
+                args_emitted_ = upto;
+            }
+            if (args_end_ != std::string::npos)
+                stream_state_ = StreamState::TAIL;
+        }
+        // TAIL: nothing to emit — the remainder up to the close tag is the
+        // cosmetic JSON-wrapper close (ChatML) / whitespace.
+    }
+
+    // PROBE: decide whether this body is a streamable JSON layout and locate
+    // the arguments value. Llama3: the whole body is the arguments object
+    // (name came from the open tag). ChatML: {"name": "...", "arguments": <v>.
+    // Returns true once streaming can begin (sets args_start); sets
+    // stream_state_ = REJECTED when the layout is provably not streamable
+    // (the buffered path then handles it at close, exactly like before).
+    bool try_open_streaming_(size_t& args_start) {
+        size_t first = body_buf_.find_first_not_of("\n\r\t ");
+        if (first == std::string::npos)
+            return false;  // still whitespace — keep probing
+        if (!fn_name_.empty()) {
+            // Llama3: body must be the arguments object itself.
+            if (body_buf_[first] != '{' && body_buf_[first] != '[') {
+                stream_state_ = StreamState::REJECTED;
+                return false;
+            }
+            streamed_name_ = fn_name_;
+            args_start = first;
+            return true;
+        }
+        // ChatML JSON: expect {"name": "...", ..., "arguments": <value>. The
+        // Qwen3.6 XML fallback starts with '<' — reject to the buffered path.
+        if (body_buf_[first] != '{') {
+            stream_state_ = StreamState::REJECTED;
+            return false;
+        }
+        size_t pos = first + 1;
+        std::string name;
+        if (!scan_json_key_string_(pos, "name", name))
+            return false;  // need more bytes (or REJECTED was set)
+        size_t apos = body_buf_.find("\"arguments\"", pos);
+        if (apos == std::string::npos) {
+            // The key may still arrive; but a long stretch past the name
+            // without it means this is not the expected layout.
+            if (body_buf_.size() > pos + 256)
+                stream_state_ = StreamState::REJECTED;
+            return false;
+        }
+        size_t vpos = body_buf_.find_first_not_of("\n\r\t :", apos + 11);
+        if (vpos == std::string::npos)
+            return false;  // value not arrived yet
+        if (body_buf_[vpos] != '{' && body_buf_[vpos] != '[') {
+            // String-encoded or scalar arguments — not streamable as raw
+            // bytes (the client expects the decoded JSON object text).
+            stream_state_ = StreamState::REJECTED;
+            return false;
+        }
+        streamed_name_ = std::move(name);
+        args_start = vpos;
+        return true;
+    }
+
+    // Scan `"key" \s*:\s* "value"` at/after `pos` (skipping leading ws). On
+    // success advances pos past the value and returns the decoded value.
+    // Returns false when more bytes are needed; sets REJECTED on a definite
+    // mismatch.
+    bool scan_json_key_string_(size_t& pos, const char* key, std::string& out) {
+        size_t p = body_buf_.find_first_not_of("\n\r\t ", pos);
+        if (p == std::string::npos)
+            return false;
+        std::string want = std::string("\"") + key + "\"";
+        size_t avail = body_buf_.size() - p;
+        size_t cmp_len = std::min(want.size(), avail);
+        if (body_buf_.compare(p, cmp_len, want, 0, cmp_len) != 0) {
+            stream_state_ = StreamState::REJECTED;
+            return false;
+        }
+        if (avail < want.size())
+            return false;  // prefix matches so far — need more bytes
+        p = body_buf_.find_first_not_of("\n\r\t :", p + want.size());
+        if (p == std::string::npos)
+            return false;
+        if (body_buf_[p] != '"') {
+            stream_state_ = StreamState::REJECTED;
+            return false;
+        }
+        std::string val;
+        size_t q = p + 1;
+        bool esc = false;
+        for (; q < body_buf_.size(); ++q) {
+            char c = body_buf_[q];
+            if (esc) {
+                val += c;  // good enough for a function name (no \uXXXX needed)
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                out = std::move(val);
+                pos = q + 1;
+                return true;
+            } else {
+                val += c;
+            }
+        }
+        return false;  // string not terminated yet
+    }
+
+    // Close marker found while a streamed call is open: CALL_END with the
+    // accumulated arguments (pump_streaming_'s limit already emitted every
+    // confirmed byte before the marker). If the JSON value never closed
+    // before the marker (model cut the object short), close with what was
+    // streamed — the deltas are already on the wire.
+    void finish_streaming_(Result& r, size_t /*close_pos*/) {
+        Segment seg;
+        seg.kind = Segment::Kind::CALL_END;
+        seg.call.name = streamed_name_;
+        seg.call.arguments = streamed_args_.empty() ? std::string("{}") : streamed_args_;
+        seg.call.valid = true;
         r.push_back(std::move(seg));
     }
 
@@ -159,6 +414,16 @@ private:
     std::string fn_name_;    // BODY, Llama3: name from the open tag
     bool gemma_body_ = false;
     bool trim_ws_ = false;   // CONTENT: skip leading ws (right after a call)
+
+    // Incremental-argument streaming state (BODY sub-state).
+    StreamState stream_state_ = StreamState::PROBE;
+    size_t args_emitted_ = 0;              // body_buf_ index streamed so far
+    size_t args_end_ = std::string::npos;  // one past the value end, once closed
+    int depth_ = 0;
+    bool in_string_ = false;
+    bool escaped_ = false;
+    std::string streamed_name_;
+    std::string streamed_args_;
 };
 
 }  // namespace imp::server

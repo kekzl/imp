@@ -22,6 +22,7 @@ Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template aut
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI | SSE streaming, tools, json_schema |
 | `POST /v1/completions` | OpenAI legacy | raw text |
+| `POST /v1/responses` | OpenAI Responses | Agents SDK / Codex dialect; stateless shim over the chat path (`responses.cpp`); native SSE events incl. incremental `function_call_arguments.delta` |
 | `POST /v1/messages` | **Anthropic** | thinking, tool use, `cache_control`, **real per-token SSE** (`main.cpp:192` — old "synthetic replay" info is obsolete) |
 | `POST /v1/embeddings` | OpenAI | embedding vectors |
 | `GET /v1/models` | both | **strict semantics since PR #507**: only the loaded model is listed; a foreign `model` field → 404 `model_not_found`; switching models = restart (auto-swap was removed after a reload SIGSEGV) |

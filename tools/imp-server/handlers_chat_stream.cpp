@@ -132,6 +132,9 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     imp::server::StreamToolCallFilter tool_filter(tpl_family);
     std::vector<ParsedToolCall> stream_tool_calls;
     bool tool_calls_emitted = false;
+    // parallel_tool_calls=false: a second streamed call was opened by the
+    // filter but is being suppressed (skip its deltas/END too).
+    bool stream_call_suppressed = false;
     // The full accumulated output (only used when has_tools, for fallback)
     std::string full_output;
 
@@ -411,9 +414,10 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             full_output += piece;
             auto segs = tool_filter.feed(std::move(piece));
             piece.clear();
+            using SegKind = imp::server::StreamToolCallFilter::Segment::Kind;
             for (size_t si = 0; si < segs.size(); ++si) {
                 auto& seg = segs[si];
-                if (!seg.is_call) {
+                if (seg.kind == SegKind::TEXT) {
                     if (si + 1 == segs.size()) {
                         piece = std::move(seg.text);  // trailing content
                     } else {
@@ -426,14 +430,67 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     continue;
                 }
                 // parallel_tool_calls=false: stream at most one tool call.
-                if (!ctx.params.parallel_tool_calls && !stream_tool_calls.empty())
+                // (For a streamed call the gate fires at CALL_BEGIN, so the
+                // later deltas/END of a suppressed call are skipped too.)
+                if (!ctx.params.parallel_tool_calls &&
+                    ((seg.kind == SegKind::CALL && !stream_tool_calls.empty()) ||
+                     (seg.kind == SegKind::CALL_BEGIN && !stream_tool_calls.empty()) ||
+                     (seg.kind != SegKind::CALL && stream_call_suppressed))) {
+                    if (seg.kind == SegKind::CALL_BEGIN)
+                        stream_call_suppressed = true;
+                    if (seg.kind == SegKind::CALL_END)
+                        stream_call_suppressed = false;
                     continue;
+                }
+
+                if (seg.kind == SegKind::CALL_BEGIN) {
+                    // Streamed call opens: emit the name chunk now; the
+                    // argument bytes follow as CALL_ARGS_DELTA segments while
+                    // the model is still generating them (previously the
+                    // whole body was buffered until the close tag — 20-60 s
+                    // of zero SSE bytes on a big code edit).
+                    ParsedToolCall tc = std::move(seg.call);
+                    tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                    if (!flush_buffered_content())
+                        return false;
+                    int idx = static_cast<int>(stream_tool_calls.size());
+                    json name_delta = {
+                        {"tool_calls",
+                         json::array({{{"index", idx},
+                                       {"id", tc.id},
+                                       {"type", "function"},
+                                       {"function", {{"name", tc.name}, {"arguments", ""}}}}})}};
+                    std::string sse = sse_chunk(comp_id, created, snap_model_name, name_delta, nullptr);
+                    sink.write(sse.data(), sse.size());
+                    stream_tool_calls.push_back(std::move(tc));
+                    tool_calls_emitted = true;
+                    continue;
+                }
+                if (seg.kind == SegKind::CALL_ARGS_DELTA) {
+                    int idx = static_cast<int>(stream_tool_calls.size()) - 1;
+                    json args_delta = {
+                        {"tool_calls",
+                         json::array({{{"index", idx},
+                                       {"function", {{"arguments", seg.text}}}}})}};
+                    std::string sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
+                    sink.write(sse.data(), sse.size());
+                    continue;
+                }
+                if (seg.kind == SegKind::CALL_END) {
+                    // Deltas already on the wire — record the full arguments
+                    // for bookkeeping (request log / finish handling).
+                    if (!stream_tool_calls.empty())
+                        stream_tool_calls.back().arguments = std::move(seg.call.arguments);
+                    continue;
+                }
+
+                // SegKind::CALL — buffered call (non-JSON layouts): emit the
+                // name chunk + arguments in bounded deltas, as before.
                 ParsedToolCall tc = std::move(seg.call);
                 tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
                 if (!flush_buffered_content())
                     return false;
                 int idx = static_cast<int>(stream_tool_calls.size());
-                // Emit name chunk
                 json name_delta = {
                     {"tool_calls",
                      json::array({{{"index", idx},
@@ -443,9 +500,6 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 std::string sse = sse_chunk(comp_id, created, snap_model_name, name_delta, nullptr);
                 sink.write(sse.data(), sse.size());
 
-                // Emit arguments incrementally as partial-JSON deltas (Task 6)
-                // so OpenAI streaming clients see the tool arguments grow
-                // rather than land in one block.
                 constexpr size_t kArgChunk = 48;
                 const std::string& full_args = tc.arguments;
                 if (full_args.empty()) {
@@ -569,6 +623,13 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (!leftover.empty()) {
             utf8_buf += leftover;
         }
+    }
+    // A STREAMED call cut off mid-arguments: its name chunk + deltas are
+    // already on the wire (nothing restorable) — record what was streamed
+    // for bookkeeping; the client sees finish_reason=length below.
+    if (has_tools && tool_filter.call_open() && !stream_tool_calls.empty() &&
+        stream_tool_calls.back().arguments.empty()) {
+        stream_tool_calls.back().arguments = tool_filter.streamed_arguments();
     }
 
     // Flush any remaining UTF-8 buffer (only if no tool calls were emitted)

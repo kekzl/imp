@@ -1,7 +1,11 @@
 """Tests for tool/function calling in /v1/chat/completions."""
 
+import json
+
 import httpx
 import pytest
+
+import conftest
 
 from conftest import parse_sse
 
@@ -147,3 +151,52 @@ class TestToolCalling:
             payload = json.loads(content)
             assert "answer" in payload
             assert isinstance(payload["answer"], str)
+
+
+class TestStreamingToolCalls:
+    def test_arguments_stream_incrementally(self, model, is_mock):
+        """Streaming tool calls: the name chunk opens the call, then
+        `tool_calls[].function.arguments` deltas whose concatenation is valid
+        JSON. On JSON tool dialects (ChatML/Llama3) the deltas arrive WHILE
+        the model generates (many deltas); buffered dialects (Qwen3.6 XML,
+        Gemma) emit bounded chunks after the close tag — both are valid, but
+        there must never be a single giant delta AND the concat must parse."""
+        if is_mock:
+            pytest.skip("mock server does not implement streaming tool calls")
+        import httpx as _httpx
+        name = None
+        deltas = []
+        finish = None
+        with _httpx.Client(base_url=conftest.BASE_URL, timeout=180.0) as c:
+            with c.stream("POST", "/v1/chat/completions", json={
+                "model": model,
+                "messages": [{"role": "user",
+                              "content": "Call write_file to create /tmp/x.txt with a short poem. /no_think"}],
+                "tools": [{"type": "function",
+                           "function": {"name": "write_file",
+                                        "parameters": {"type": "object",
+                                                       "properties": {"path": {"type": "string"},
+                                                                      "content": {"type": "string"}},
+                                                       "required": ["path", "content"]}}}],
+                "max_tokens": 300, "temperature": 0, "stream": True,
+            }) as r:
+                assert r.status_code == 200
+                for line in r.iter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    d = json.loads(line[len("data: "):])
+                    for ch in d.get("choices", []):
+                        fin = ch.get("finish_reason")
+                        if fin:
+                            finish = fin
+                        for tc in ch.get("delta", {}).get("tool_calls", []) or []:
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                name = fn["name"]
+                            if fn.get("arguments"):
+                                deltas.append(fn["arguments"])
+        assert name == "write_file"
+        assert finish == "tool_calls"
+        assert deltas, "no argument deltas streamed"
+        args = json.loads("".join(deltas))
+        assert "path" in args and "content" in args
