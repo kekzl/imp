@@ -3,6 +3,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <unordered_map>
@@ -67,6 +68,12 @@ void Model::release_gpu_allocation(void* ptr) {
     auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
     if (it != gpu_allocations_.end()) {
         gpu_allocations_.erase(it);
+        // Every caller releases a source weight tensor it is about to cudaFree
+        // (Phase-3 MoE expert-source drop, Phase-4b redundant-source drop). Once
+        // a source is freed the model can no longer rebuild caches for a SECOND
+        // engine on this handle — mark it so Engine::init rejects that cleanly
+        // instead of reading freed memory and poisoning the CUDA context (#830).
+        sources_consumed_ = true;
     }
 }
 
@@ -268,14 +275,23 @@ ModelArch parse_model_arch(const std::string& s) {
 }
 
 bool is_encoder_only_arch(const std::string& s) {
-    // llama.cpp GGUF arch ids for BERT-style encoders: "bert", "nomic-bert",
-    // "nomic-bert-moe", "jina-bert-v2"/"-v3", "modern-bert", "roberta-bert" —
-    // bge/e5 checkpoints ship one of these. Substring match covers the family
-    // (no decoder arch string contains "bert").
-    if (s.find("bert") != std::string::npos)
+    // Matches BOTH naming conventions: llama.cpp GGUF arch ids (lowercase,
+    // e.g. "nomic-bert", "jina-bert-v2", "roberta") AND HuggingFace config.json
+    // `architectures` class names (CamelCase, e.g. "NomicBertModel",
+    // "BertModel", "XLMRobertaModel", "MPNetModel"). The GGUF path fed lowercase
+    // ids; the SafeTensors/HF path feeds CamelCase, so a case-sensitive
+    // find("bert") missed "NomicBertModel" and let it fall through to the
+    // generic decoder → CUDA IMA on the first request (#818). Lowercase first.
+    std::string l;
+    l.reserve(s.size());
+    for (char c : s)
+        l += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // No causal-decoder arch name (GGUF id or HF class) contains any of these.
+    if (l.find("bert") != std::string::npos || l.find("roberta") != std::string::npos ||
+        l.find("mpnet") != std::string::npos)
         return true;
-    // Encoder-only T5 + defensive aliases for embedding-model names.
-    return s == "t5encoder" || s == "roberta" || s == "e5" || s == "bge";
+    // Encoder-only T5 + embedding-family aliases (exact ids).
+    return l == "t5encoder" || l == "e5" || l == "bge";
 }
 
 void apply_arch_defaults(ModelConfig& cfg) {

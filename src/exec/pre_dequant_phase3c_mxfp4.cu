@@ -120,6 +120,11 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                             if (it != wcache_->fp16.end() && qt == QType::MXFP4) {
                                 w = it->second;
                                 qt = QType::F16;
+                                // The model tensor now points at EXECUTOR-owned
+                                // cache memory (fp16_bulk_data) — a second
+                                // engine on this handle would read it dangling
+                                // after this executor's teardown (#830).
+                                const_cast<Model*>(model_)->mark_sources_consumed();
                             }
                         };
                         replace(L.gdn_alpha, L.gdn_alpha.qtype);
@@ -169,6 +174,13 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             // SAME buffer. No separate data allocation, no free needed.
             // The raw buffer tail (scale bytes) is wasted (~6% overhead) but
             // avoids the 50% peak VRAM spike of out-of-place unpack.
+            //
+            // The compaction is DESTRUCTIVE: the model's source buffers no
+            // longer hold GGUF raw MXFP4 blocks, so a second engine on this
+            // model handle cannot re-run this unpack (it would read the
+            // already-compacted layout as raw blocks → illegal access, #830).
+            // Mark the model so Engine::init rejects a second engine cleanly.
+            const_cast<Model*>(model_)->mark_sources_consumed();
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             {
                 cudaError_t e = cudaGetLastError();

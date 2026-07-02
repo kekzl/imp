@@ -597,6 +597,9 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         try_mark(mut_model->tok_emb_, mut_model->tok_emb_id);
 
     if (marked_count > 0) {
+        // Source tensors are now freed (their .data is dangling). release_gpu_-
+        // allocation() above already flagged the model as sources-consumed so a
+        // second engine on this handle is rejected up front (#830).
         IMP_LOG_INFO(
             "Phase-4b drop-source: %s %zu sources (%.2f MiB). "
             "Skipped %zu sources (%.2f MiB) that are offsets into shared "

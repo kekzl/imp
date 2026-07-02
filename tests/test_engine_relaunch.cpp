@@ -23,6 +23,7 @@
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "api/imp_internal.h"
 #include "test_models.h"
 
 #include <cuda_runtime.h>
@@ -113,5 +114,86 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
 
     // Re-init after inference: before the prewarm stream-rebind fix this
     // segfaulted (dangling stream on the global attention-cuBLAS handle).
+    run_one_cycle(get_model_path());
+}
+
+// #830: a SECOND engine on the SAME model handle (load once, create/free/create
+// context) must not CUDA-IMA. Some models free their source weight tensors for
+// VRAM during the first engine's pre-dequant (Phase-4b), leaving dangling
+// pointers a second build would read. The engine now rejects that up front
+// (clean error), while models that never drop sources (dense Q8_0) still support
+// create/free/create. Either outcome is acceptable here — the invariant is "no
+// illegal access / no crash", and the process stays usable afterward.
+TEST(EngineRelaunchTest, SecondEngineOnSameModelHandleNeverIMAs) {
+    SKIP_IF_NO_MODEL();
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    // Lifecycle diagnostic (#830): dump the model's key tensor pointers/qtypes
+    // at each phase so a mutation by engine #1 (which engine #2 then reads as
+    // dangling) shows up as a diff in the test log.
+    auto dump_state = [&](const char* tag) {
+        imp::Model* m = model->model.get();
+        fprintf(stderr,
+                "[TENSORDUMP %s] tok_emb{d=%p q=%d sc=%p dev=%d} out_proj{d=%p q=%d sc=%p} "
+                "allocs=%zu consumed=%d\n",
+                tag, m->tok_emb_.data, (int)m->tok_emb_.qtype, m->tok_emb_.scales,
+                (int)m->tok_emb_.on_device, m->out_proj_.data, (int)m->out_proj_.qtype,
+                m->out_proj_.scales, m->gpu_allocations_.size(), (int)m->sources_consumed());
+        for (int i = 0; i < 2 && i < m->n_layers(); ++i) {
+            const auto& L = m->layer(i);
+            fprintf(stderr,
+                    "[TENSORDUMP %s] L%d wq{d=%p q=%d sc=%p} w_gate{d=%p q=%d sc=%p} "
+                    "w_up{d=%p q=%d} ssm_in{d=%p q=%d sc=%p} ssm_out{d=%p q=%d}\n",
+                    tag, i, L.wq.data, (int)L.wq.qtype, L.wq.scales, L.w_gate.data,
+                    (int)L.w_gate.qtype, L.w_gate.scales, L.w_up.data, (int)L.w_up.qtype,
+                    L.ssm_in.data, (int)L.ssm_in.qtype, L.ssm_in.scales, L.ssm_out.data,
+                    (int)L.ssm_out.qtype);
+        }
+    };
+    dump_state("post-load");
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 1024;
+    config.max_batch_size = 1;
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.seed = 42;
+    params.max_tokens = 8;
+    params.temperature = 0.7f;
+    params.apply_chat_template = 1;
+
+    // First engine on the handle: create, generate, free.
+    ImpContext ctx1 = nullptr;
+    ASSERT_EQ(imp_context_create(model, &config, &ctx1), IMP_SUCCESS);
+    dump_state("post-ctx1-init");
+    char buf1[1024] = {};
+    size_t n1 = 0;
+    EXPECT_EQ(imp_generate(ctx1, "Say hi.", &params, buf1, sizeof(buf1), &n1), IMP_SUCCESS);
+    EXPECT_GT(n1, 0u);
+    imp_context_free(ctx1);
+    dump_state("post-ctx1-free");
+
+    // Second engine on the SAME handle. Must return cleanly — success or a
+    // plain error — never an illegal memory access.
+    ImpContext ctx2 = nullptr;
+    ImpError err = imp_context_create(model, &config, &ctx2);
+    if (err == IMP_SUCCESS) {
+        // Accepted (sources not dropped) → it must actually work.
+        ASSERT_NE(ctx2, nullptr);
+        char buf2[1024] = {};
+        size_t n2 = 0;
+        EXPECT_EQ(imp_generate(ctx2, "Say hi.", &params, buf2, sizeof(buf2), &n2), IMP_SUCCESS);
+        EXPECT_GT(n2, 0u);
+        imp_context_free(ctx2);
+    } else {
+        // Rejected (sources consumed) → clean error, no context handed out.
+        EXPECT_EQ(ctx2, nullptr);
+    }
+
+    // The process must still be usable: a freshly LOADED model works regardless
+    // of which branch above ran (proves the CUDA context was not poisoned).
+    imp_model_free(model);
     run_one_cycle(get_model_path());
 }
