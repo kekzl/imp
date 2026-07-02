@@ -500,6 +500,7 @@ __global__ void post_decode_step_kernel(
     int penalty_prefix_len,
     int* __restrict__ d_penalty_count,  // [1] total penalty token count
     const int* __restrict__ d_step_limit,  // [1] per-launch cap (0 = max_steps)
+    int* __restrict__ d_burst_done,     // [1] mapped done flag (host-visible)
     cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
@@ -630,6 +631,14 @@ __global__ void post_decode_step_kernel(
                 step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
         }
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
+        // Publish burst completion to the host. This is the ONLY loop exit,
+        // so the polling host (try_finish_burst) keys teardown off this flag
+        // — cudaStreamQuery reports the stream idle while the conditional
+        // WHILE graph is still iterating on this platform, so it must not be
+        // trusted. The fence orders the flag after this step's ring/counter
+        // writes above.
+        __threadfence_system();
+        *d_burst_done = 1;
     }
 }
 
@@ -778,6 +787,17 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         err = cudaHostGetDevicePointer(&d_step_counter_mapped_, h_step_counter_, 0);
         if (err != cudaSuccess)
             goto fail;
+
+        err = cudaHostAlloc(&h_burst_done_, sizeof(int), cudaHostAllocMapped);
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaHostGetDevicePointer(&d_burst_done_mapped_, h_burst_done_, 0);
+        if (err != cudaSuccess)
+            goto fail;
+
+        err = cudaHostAlloc(&h_decode_scratch_, sizeof(int32_t), cudaHostAllocMapped);
+        if (err != cudaSuccess)
+            goto fail;
     }
 
     // ---- Initialize device state ----
@@ -792,6 +812,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         int init_ctx = config_.initial_context_len;
         int init_step = 0;
         *h_step_counter_ = 0;
+        *h_burst_done_ = 0;
         memset(h_ring_buffer_, 0, config_.max_steps * sizeof(int32_t));
 
         err = cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t), cudaMemcpyHostToDevice, stream);
@@ -925,8 +946,11 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         //     Writes sampled token to d_token_id_. The h_mapped parameter receives
         //     a D2H copy each iteration (harmless scratch write; the real ring buffer
         //     write is in post_decode_step_kernel below).
-        executor->forward_decode_async(body_state, d_token_id_, reinterpret_cast<int32_t*>(h_step_counter_),
-                                       stream);
+        // NOTE: the h_mapped scratch must NOT alias h_step_counter_ — the
+        // polling harvest (poll_new_tokens) reads the counter concurrently,
+        // and this per-iteration D2H token copy would transiently overwrite
+        // it with a token id, making the host over-read the ring.
+        executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_, stream);
 
         // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
         post_decode_step_kernel<<<1, 1, 0, stream>>>(d_token_id_, d_ring_buffer_, d_step_counter_mapped_,
@@ -940,7 +964,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      config_.token_is_whitespace, config_.vocab_size,
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_,
-                                                     d_step_limit_, handle_);
+                                                     d_step_limit_, d_burst_done_mapped_, handle_);
 
         // 5c. End capture
         cudaGraph_t captured_body = nullptr;
@@ -1044,6 +1068,7 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
             return false;
     }
     *h_step_counter_ = 0;
+    *h_burst_done_ = 0;
     last_read_step_ = 0;
     return true;
 }
@@ -1089,6 +1114,41 @@ int CudaGraphConditionalRunner::poll_new_tokens(std::vector<int32_t>& out_tokens
 
 int CudaGraphConditionalRunner::steps_completed() const {
     return h_step_counter_ ? __atomic_load_n(h_step_counter_, __ATOMIC_ACQUIRE) : 0;
+}
+
+bool CudaGraphConditionalRunner::try_finish_burst(cudaStream_t stream) {
+    if (!launched_)
+        return true;
+    // Key off the device-published done flag, NOT cudaStreamQuery — the query
+    // reports the stream idle while the conditional WHILE graph is still
+    // iterating (observed on WSL2/sm_120), and tearing the loop's buffers
+    // down on that signal corrupts generation. The kernel's stop path is the
+    // only loop exit and publishes the flag behind a system fence.
+    if (!h_burst_done_ || __atomic_load_n(h_burst_done_, __ATOMIC_ACQUIRE) == 0)
+        return false;
+    // Loop broke — drain the graph epilogue (near-instant) and surface errors
+    // with the same contract as wait_and_get_tokens (F-A17).
+    cudaError_t sync_err = cudaStreamSynchronize(stream);
+    launched_ = false;
+    if (sync_err != cudaSuccess) {
+        IMP_LOG_ERROR("AsyncGraphLoop: burst failed (%s) — no further tokens from this burst",
+                      cudaGetErrorString(sync_err));
+    }
+    return true;
+}
+
+void CudaGraphConditionalRunner::finish_burst_blocking(cudaStream_t stream) {
+    if (!launched_)
+        return;
+    // Fallback for a device loop that stopped making progress without
+    // publishing the done flag (graph error paths never reach the stop
+    // kernel) — block until the stream drains and surface the error.
+    cudaError_t sync_err = cudaStreamSynchronize(stream);
+    launched_ = false;
+    if (sync_err != cudaSuccess) {
+        IMP_LOG_ERROR("AsyncGraphLoop: blocking burst finish failed (%s)",
+                      cudaGetErrorString(sync_err));
+    }
 }
 
 void CudaGraphConditionalRunner::cleanup() {
@@ -1172,6 +1232,15 @@ void CudaGraphConditionalRunner::cleanup() {
         h_step_counter_ = nullptr;
     }
     d_step_counter_mapped_ = nullptr;
+    if (h_burst_done_) {
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_burst_done_));
+        h_burst_done_ = nullptr;
+    }
+    d_burst_done_mapped_ = nullptr;
+    if (h_decode_scratch_) {
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_decode_scratch_));
+        h_decode_scratch_ = nullptr;
+    }
 
     // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
     // Keeps long-running sessions from holding stale graph reservations.
