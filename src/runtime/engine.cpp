@@ -412,7 +412,23 @@ size_t Engine::effective_free_vram() const {
 void Engine::finish_request(std::shared_ptr<Request>& req) {
     req->status = RequestStatus::FINISHED;
     if (kv_manager_->prefix_caching_enabled()) {
-        kv_manager_->register_block_hashes(req->id, req->input_tokens);
+        // Register input AND generated tokens — minus the final sampled
+        // token, which was never forwarded (its KV entry does not exist; the
+        // spec-verify bonus token has the same property). The next agent turn
+        // re-sends the assistant reply verbatim (tool-call JSON, code edits),
+        // and its KV is live in the block table right now: hashing it turns
+        // the whole previous turn into a prefix-cache hit instead of
+        // re-prefilling the reply from scratch.
+        if (req->output_tokens.size() > 1) {
+            std::vector<int32_t> forwarded;
+            forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - 1);
+            forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
+            forwarded.insert(forwarded.end(), req->output_tokens.begin(),
+                             req->output_tokens.end() - 1);
+            kv_manager_->register_block_hashes(req->id, forwarded);
+        } else {
+            kv_manager_->register_block_hashes(req->id, req->input_tokens);
+        }
         // cache_control / cache_prompt: protect the prompt's full blocks
         // from eviction (must happen before free_sequence — pinning needs
         // the live block table).

@@ -365,6 +365,23 @@ void Engine::step_prefill(cudaStream_t stream) {
             effective_chunk = (effective_chunk / bs) * bs;
     }
 
+    // Decode-aware chunking: prefill and decode share one CUDA stream, so
+    // every chunk forward inserts its full latency (~40-80 ms at 2048)
+    // between two decode steps of every concurrently DECODING session. Cap
+    // the chunk while decoders are active so their inter-token latency stays
+    // bounded during another session's ingest; the full chunk (and its
+    // better weight-traffic amortization) returns as soon as nobody decodes.
+    const int decode_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
+    if (decode_cap > 0 && !sched_decode_batch_.empty() && effective_chunk > decode_cap) {
+        int capped = decode_cap;
+        if (kv_manager_) {
+            int bs = kv_manager_->kv_cache()->block_size();
+            if (capped > bs)
+                capped = (capped / bs) * bs;
+        }
+        effective_chunk = capped;
+    }
+
     for (auto& req : sched_prefill_batch_) {
         step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
