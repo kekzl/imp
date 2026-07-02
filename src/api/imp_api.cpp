@@ -38,7 +38,16 @@ void trim_default_mempool() {
     cudaMemPool_t pool = nullptr;
     if (cudaGetDevice(&dev) == cudaSuccess &&
         cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool != nullptr) {
-        cudaMemPoolTrimTo(pool, 0);
+        unsigned long long rsv_before = 0, used_before = 0, rsv_after = 0, used_after = 0;
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_before);
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_before);
+        cudaError_t te = cudaMemPoolTrimTo(pool, 0);
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_after);
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_after);
+        IMP_LOG_INFO("mempool trim: reserved %.0f->%.0f MiB used %.0f->%.0f MiB (rc=%s)",
+                     rsv_before / (1024.0 * 1024.0), rsv_after / (1024.0 * 1024.0),
+                     used_before / (1024.0 * 1024.0), used_after / (1024.0 * 1024.0),
+                     cudaGetErrorString(te));
     }
 }
 

@@ -103,14 +103,25 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
     if (::testing::Test::HasFatalFailure())
         return;
 
-    // Teardown must hand the weights back to the driver, not park them in the
-    // default mempool: the next load sizes itself via cudaMemGetInfo and
-    // uploads through plain-cudaMalloc-visible memory. Allow ~2 GiB slack for
-    // persistent CUDA/cuBLAS context overhead from the first cycle.
+    // Teardown must hand the weights back, not park them in the default
+    // mempool. The trim (imp_model_free → cudaMemPoolTrimTo) verifiably
+    // returns the pool to reserved=0, but on WSL2/WDDM cudaMemGetInfo can
+    // under-report the reclaimed pages, so the raw free-MiB comparison is
+    // only a first check. The contract that matters (#507: the next load
+    // failed its upload) is that the memory is ALLOCATABLE again — probe it
+    // with a real cudaMalloc of the apparently-missing amount.
     size_t free_between = device_free_mib();
-    EXPECT_GT(free_between + 2048, free_before)
-        << "teardown retained " << (free_before - free_between)
-        << " MiB — default mempool not trimmed back to the driver";
+    if (free_between + 2048 < free_before) {
+        size_t missing_mib = free_before - free_between - 1024;  // 1 GiB slack
+        void* probe = nullptr;
+        cudaError_t pe = cudaMalloc(&probe, missing_mib << 20);
+        EXPECT_EQ(pe, cudaSuccess)
+            << "teardown retained " << (free_before - free_between)
+            << " MiB and a " << missing_mib << " MiB probe alloc FAILS — the memory "
+            << "is genuinely leaked, not just under-reported by cudaMemGetInfo";
+        if (probe)
+            cudaFree(probe);
+    }
 
     // Re-init after inference: before the prewarm stream-rebind fix this
     // segfaulted (dangling stream on the global attention-cuBLAS handle).

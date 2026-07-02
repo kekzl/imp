@@ -16,12 +16,39 @@ namespace imp {
 
 Model::~Model() {
     // Free all GPU-side weight buffers (allocated via cudaMallocAsync).
+    //
+    // #834: these MUST be freed with cudaFreeAsync, not cudaFree. On this
+    // stack (CUDA 13.3 / WSL2) cudaFree on a stream-ordered allocation
+    // returns cudaSuccess but does NOT return the block to the async mempool
+    // — the pool's used counter keeps counting it, cudaMemPoolTrimTo can
+    // reclaim nothing, and every model unload leaks weights-sized VRAM
+    // (~8.3 GiB per Qwen3-8B-Q8_0 cycle; the reload test's cycle-2 audit
+    // showed pool used=16600 MiB > reserved=8320 MiB). cudaFreeAsync on the
+    // legacy stream + a sync retires the frees so the trim in
+    // imp_model_free/imp_context_free actually hands the memory back.
+    //
     // At program exit the CUDA runtime may tear down the default mempool
-    // before this destructor runs, making cudaFree return cudaErrorInvalidValue.
-    // Silently ignore — the driver reclaims all device memory on context destroy.
+    // before this destructor runs, making the frees return an error.
+    // Silently ignore — the driver reclaims all device memory on context
+    // destroy.
+    int free_fail = 0;
+    cudaError_t first_err = cudaSuccess;
     for (void* ptr : gpu_allocations_) {
-        if (ptr)
-            (void)cudaFree(ptr);
+        if (ptr) {
+            cudaError_t e = cudaFreeAsync(ptr, nullptr);
+            if (e != cudaSuccess) {
+                if (free_fail == 0)
+                    first_err = e;
+                free_fail++;
+            }
+        }
+    }
+    if (!gpu_allocations_.empty())
+        (void)cudaStreamSynchronize(nullptr);  // retire the frees for the pool
+    if (free_fail > 0) {
+        IMP_LOG_WARN("Model teardown: %d/%zu weight frees failed (first: %s)", free_fail,
+                     gpu_allocations_.size(), cudaGetErrorString(first_err));
+        (void)cudaGetLastError();  // clear sticky error (e.g. process-exit teardown)
     }
     gpu_allocations_.clear();
 
