@@ -4,6 +4,47 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-02
+
+Hybrid (SSM/GDN) agentic serving: prefix caching + concurrent-decode fairness.
+
+### Added
+- **Prefix caching for hybrid (SSM/GDN) models via recurrent-state snapshots**
+  — reused KV blocks alone cannot skip prefill on a recurrent model (the state
+  at the skip boundary would be zero), so the engine now snapshots the
+  per-sequence SSM/GDN state slab once per prefill at the largest block-aligned
+  prompt position (keyed by the same chained KV block hash as the block cache)
+  and restores it on a prefix hit, capping KV reuse at that boundary. Multi-turn
+  requests prefill only the delta instead of the whole history: Qwen3.6-35B-A3B-
+  NVFP4 per-turn TTFT goes from 1.6→6.7 s (linear in history) to a flat 1.4–1.9 s
+  (**3.5× at ~10k tokens of history**, growing with context); Nemotron-3-Nano
+  (pure SSM) stays flat at ~0.22 s. `usage.prompt_tokens_details.cached_tokens`
+  (and Anthropic `cache_read_input_tokens`) now report hybrid cache hits. New
+  `server.recurrent_snapshot_mb` budget (default 256 MiB, pre-allocated at engine
+  init and accounted in the expert-offload reserve; `imp-cli --bench` pins it to
+  0 so hybrid GGUF baselines are unaffected) (#831).
+
+### Changed
+- **Hybrid concurrent decode is now fair (round-robin) instead of head-of-line.**
+  The SSM/GDN recurrent scan kernels are single-sequence, so concurrent sessions
+  time-slice the decode; previously the batch-1 clamp kept the oldest request
+  every step, so a second session produced its first token only after the first
+  request finished (measured: 6.6 s of starvation on two concurrent 400-token
+  Qwen3.6-35B streams). The slice now rotates every `runtime.hybrid_decode_quantum`
+  tokens (default 128), with async graph-loop bursts bounded to the slice
+  remainder. `0` restores the old behavior (#831).
+
+### Fixed
+- **Prefix-cache reuse no longer counts a chain hole as a reused prefix** (dense
+  and hybrid). LRU eviction can drop an early block of a cached chain while later
+  blocks survive; reuse now stops at the first non-cached block, so the caller
+  never skips prefill over a hole with uncomputed KV (#831).
+- **Decode graph pool invalidates when the recurrent state slot changes.** The
+  captured decode graph bakes the SSM/GDN state pointers of one slot; overlapping
+  request lifetimes (and the new decode rotation) could replay a graph against a
+  different sequence's state. The pool now re-captures (graph-exec update) on slot
+  change (#831).
+
 ## [0.14.0] - 2026-07-02
 
 Agentic-serving batch: multi-turn correctness + speculation + throughput.
