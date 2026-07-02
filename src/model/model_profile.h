@@ -24,6 +24,10 @@ struct ModelProfile {
                                // e.g. Nemotron-H) — these disable CUDA graphs
     bool is_hybrid = false;    // recurrent (gdn/ssm) AND attention layers coexist
     bool is_dense = true;      // !is_moe
+    bool moe_experts_nvfp4 = false;  // MoE + NVFP4-prequant checkpoint: experts
+                                     // get the contiguous native NVFP4 cache, so
+                                     // batched verify/prefill reads quantized
+                                     // weights directly (no per-chunk dequant)
 
     // --- architecture identity (mirrors ModelConfig::arch) ---
     // The hot path (executor_attention / executor_forward_moe / …) keys many
