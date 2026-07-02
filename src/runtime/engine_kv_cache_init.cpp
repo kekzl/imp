@@ -171,26 +171,24 @@ bool Engine::init_kv_cache() {
     }
 
     if (config_.use_prefix_caching) {
-        if (mcfg.ssm_inner_size > 0) {
-            IMP_LOG_WARN(
-                "Prefix caching disabled for recurrent model — "
-                "SSM/GDN state requires full sequential prefill");
-        } else {
-            kv_manager_->set_prefix_caching_enabled(true);
-            // cache_control/cache_prompt pin budget: percent of the pool,
-            // floor of 1 block when enabled at all.
-            int pin_pct = std::min(std::max(config_.prefix_pin_budget_pct, 0), 100);
-            int pin_budget =
-                pin_pct > 0 ? std::max(1, kv_manager_->kv_cache()->total_blocks() * pin_pct / 100) : 0;
-            kv_manager_->set_pin_budget_blocks(pin_budget);
-            IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
-            if (!config_.prefix_cache_path.empty()) {
-                int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path,
-                                                              model_fingerprint_(), stream_);
-                if (restored > 0)
-                    IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored,
-                                 config_.prefix_cache_path.c_str());
-            }
+        kv_manager_->set_prefix_caching_enabled(true);
+        // cache_control/cache_prompt pin budget: percent of the pool,
+        // floor of 1 block when enabled at all.
+        int pin_pct = std::min(std::max(config_.prefix_pin_budget_pct, 0), 100);
+        int pin_budget =
+            pin_pct > 0 ? std::max(1, kv_manager_->kv_cache()->total_blocks() * pin_pct / 100) : 0;
+        kv_manager_->set_pin_budget_blocks(pin_budget);
+        IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
+        // Persistent cache is dense-only: restored KV blocks are only usable
+        // for hybrids together with a recurrent-state snapshot, and snapshots
+        // are not persisted. (For hybrids the recurrent-snapshot store below
+        // must also come up, or caching is turned back off.)
+        if (mcfg.ssm_inner_size == 0 && !config_.prefix_cache_path.empty()) {
+            int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path,
+                                                          model_fingerprint_(), stream_);
+            if (restored > 0)
+                IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored,
+                             config_.prefix_cache_path.c_str());
         }
     }
 
@@ -215,6 +213,33 @@ bool Engine::init_kv_cache() {
                                   mcfg.ssm_state_size, config_.ssm_state_dtype, &memory_manager_.vram_allocator())) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
+            }
+        }
+
+        // Recurrent-state snapshots: KV block reuse alone cannot skip prefill
+        // for a recurrent model (the state at the skip boundary would be
+        // zero), so hybrid prefix caching needs the snapshot store. Without
+        // it, turn prefix caching back off — retaining hashed blocks that can
+        // never be reused just churns the pool.
+        if (kv_manager_->prefix_caching_enabled()) {
+            int budget_mb = runtime_config_.server.recurrent_snapshot_mb;
+            if (ssm_state_ && budget_mb > 0) {
+                recurrent_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
+                recurrent_snapshots_->init(ssm_state_->per_seq_bytes(),
+                                           static_cast<size_t>(budget_mb) << 20);
+                if (recurrent_snapshots_->enabled()) {
+                    scheduler_->set_prefix_reuse_limit(
+                        [this](Request& r) { return hybrid_prefix_reuse_limit_(r); });
+                } else {
+                    recurrent_snapshots_.reset();
+                }
+            }
+            if (!recurrent_snapshots_) {
+                kv_manager_->set_prefix_caching_enabled(false);
+                IMP_LOG_INFO(
+                    "Prefix caching disabled for recurrent model (snapshot store off — "
+                    "server.recurrent_snapshot_mb=%d)",
+                    budget_mb);
             }
         }
     }

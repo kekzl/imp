@@ -22,6 +22,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <span>
 #include <string>
 
 namespace imp {
@@ -285,14 +286,104 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
     if (ssm_state_) {
         state.ssm_state = ssm_state_.get();
         state.ssm_seq_id = slot;
-        if (reset)
-            ssm_state_->reset_sequence(slot, stream);
+        if (reset) {
+            // Prefix-cache hit with a matching recurrent snapshot: restore
+            // the state at exactly req.cached_tokens instead of zeroing —
+            // prefill then continues from the snapshot boundary. All snapshot
+            // copies run on the prefill stream, so save/restore/recycle
+            // ordering is the stream order.
+            if (req.recurrent_restore && req.recurrent_restore->data &&
+                recurrent_snapshots_ &&
+                recurrent_snapshots_->entry_bytes() == ssm_state_->per_seq_bytes()) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                    ssm_state_->seq_base(slot), req.recurrent_restore->data,
+                    ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+                IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d)",
+                              req.recurrent_restore->n_tokens, req.id, slot);
+            } else {
+                ssm_state_->reset_sequence(slot, stream);
+            }
+        }
     }
     if (gdn_state_) {
         state.gdn_state = gdn_state_.get();
         state.gdn_seq_id = slot;
         if (reset)
             gdn_state_->reset_sequence(slot, stream);
+    }
+}
+
+// ─── Recurrent-state snapshots (hybrid prefix caching) ──────────────────
+//
+// Dense models reuse prefix KV at block granularity; recurrent (SSM/GDN)
+// state is cumulative, so prefill can only be skipped up to a position where
+// the exact state was snapshotted. The engine saves one snapshot per prefill
+// at the largest block-aligned prompt position (step_prefill_one ends a chunk
+// there), keyed by the chained KV block hash. On admission the scheduler asks
+// hybrid_prefix_reuse_limit_ for the longest restorable prefix and caps KV
+// block reuse to it — blocks past the snapshot are freshly allocated, so the
+// continuation prefill never re-writes blocks shared with other sequences.
+
+int Engine::hybrid_prefix_reuse_limit_(Request& req) {
+    req.recurrent_restore.reset();
+    if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
+        return 0;
+    // Restoring means starting prefill at offset > 0 — a chunked continuation.
+    if (!supports_chunked_prefill_())
+        return 0;
+    // Vision prompts: image content is not represented in the token ids the
+    // hash covers — never match snapshots across them.
+    if (req.vision_emb || req.image || vision_.has_input())
+        return 0;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    const int total = static_cast<int>(req.input_tokens.size());
+    std::vector<size_t> hashes;
+    int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
+    // At least one token must remain to forward (the model needs logits).
+    int max_b = std::min(cached, (total - 1) / bs);
+    for (int b = max_b; b >= 1; --b) {
+        auto entry = recurrent_snapshots_->find(hashes[b - 1]);
+        if (entry && entry->n_tokens == b * bs) {
+            req.recurrent_restore = std::move(entry);
+            return b;
+        }
+    }
+    return 0;
+}
+
+int Engine::hybrid_snapshot_end_(const Request& req) const {
+    if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
+        return 0;
+    if (!supports_chunked_prefill_())
+        return 0;
+    if (req.vision_emb || req.image || vision_.has_input())
+        return 0;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    return (static_cast<int>(req.input_tokens.size()) / bs) * bs;
+}
+
+void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
+    if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_ || snap_end <= 0)
+        return;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    size_t key = 0;
+    for (int b = 0; b < snap_end / bs; ++b) {
+        key = KVCacheManager::compute_block_hash(
+            std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
+    }
+    if (recurrent_snapshots_->contains(key))
+        return;  // identical prefix already snapshotted (e.g. it was just restored)
+    auto it = recurrent_slot_of_.find(req.id);
+    if (it == recurrent_slot_of_.end())
+        return;
+    if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream)) {
+        // The copy must complete before anything else mutates the slot. Later
+        // prefill chunks run on this same stream (ordered); the first DECODE
+        // step may run on a different stream (green contexts), so make the
+        // last-chunk save visible before returning. One sync per prefill.
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        IMP_LOG_DEBUG("RecurrentSnapshot: saved %d-token state for req %d (%d/%d slots)", snap_end,
+                      req.id, recurrent_snapshots_->size(), recurrent_snapshots_->capacity());
     }
 }
 

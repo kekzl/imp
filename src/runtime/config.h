@@ -100,6 +100,15 @@ struct RuntimeConfig {
         // latency-critical multi-tenant serving, 0 to disable (full chunk).
         // The full chunk returns as soon as nobody is decoding.
         int prefill_chunk_decode_cap = 1024;
+        // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
+        // single-sequence, so concurrent sessions time-slice the decode.
+        // This is the slice length in tokens — after it, the engine rotates
+        // to the next DECODING request (round-robin). Rotation re-captures
+        // the decode graphs for the new sequence's state slot (~10-20 ms),
+        // so smaller values buy latency fairness at capture overhead
+        // (128 ≈ 1-2% at typical hybrid decode rates). 0 restores the old
+        // head-of-line behavior (first request runs to completion).
+        int hybrid_decode_quantum = 128;
     } runtime;
 
     struct KVCache {
@@ -449,10 +458,21 @@ struct RuntimeConfig {
         // C-API embedders are unaffected — they drive EngineConfig directly
         // (off-by-default there). The engine ORs this into
         // EngineConfig.use_prefix_caching at init. PrefixCacheE2ETest is the
-        // ship gate; auto-disabled for SSM/GDN.
+        // ship gate. For hybrid (SSM/GDN) models it additionally requires the
+        // recurrent snapshot store below.
         bool prefix_cache = true;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
+        // Device budget (MiB) for recurrent-state snapshots — what makes
+        // prefix caching work on hybrid (SSM/GDN) models: KV blocks alone
+        // cannot skip prefill there, the recurrent state at the skip boundary
+        // must be restored too. One snapshot = one per-sequence state slab
+        // (~64 MiB for Qwen3.6-35B), saved per prefill, LRU-evicted. Buffers
+        // are pre-allocated at engine init (free VRAM is ~0 at serving time
+        // by design) and accounted in the expert-offload reserve. imp-cli
+        // --bench pins this to 0 (baseline semantics unchanged).
+        // 0 disables snapshots AND hybrid prefix caching (dense unaffected).
+        int recurrent_snapshot_mb = 256;
         // Green Contexts / prefill-decode overlap streams in the server engine.
         // OFF by default (suspected memSyncDomain race on sm_120 fallback
         // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.

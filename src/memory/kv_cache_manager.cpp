@@ -416,7 +416,30 @@ bool KVCacheManager::can_allocate(int num_blocks) const {
 
 // ─── Content-addressed prefix caching ────────────────────────────────
 
-int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens) {
+int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens,
+                                                 std::vector<size_t>& chain_hashes) const {
+    chain_hashes.clear();
+    const int num_tokens = static_cast<int>(tokens.size());
+    const int full_blocks = num_tokens / cache_->block_size();
+    int cached = 0;
+    bool chain_intact = true;
+    size_t parent_hash = 0;
+    for (int b = 0; b < full_blocks; ++b) {
+        size_t h = compute_block_hash(
+            tokens.subspan(static_cast<size_t>(b) * cache_->block_size(), cache_->block_size()),
+            parent_hash);
+        chain_hashes.push_back(h);
+        parent_hash = h;
+        if (chain_intact && block_hash_to_id_.find(h) != block_hash_to_id_.end())
+            cached = b + 1;
+        else
+            chain_intact = false;
+    }
+    return cached;
+}
+
+int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
+                                                int max_reuse_blocks) {
     const int num_tokens = static_cast<int>(tokens.size());
     if (num_tokens <= 0)
         return 0;
@@ -439,6 +462,12 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
     auto& hashes = seq_block_hashes_[seq_id];
     int reused_blocks = 0;
     size_t parent_hash = 0;
+    // Reuse must form a contiguous prefix: once a block misses (or the
+    // caller's cap is reached), later hash hits must NOT be shared — the
+    // caller skips prefill for reused*block_size tokens, so a hole would
+    // leave uncomputed KV inside the "skipped" range (possible when LRU
+    // eviction removed an early block while later chain blocks survive).
+    bool reuse_open = true;
 
     for (int b = 0; b < total_blocks; ++b) {
         int block_start = b * cache_->block_size();
@@ -447,11 +476,14 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
         // Only full blocks are cacheable.
         bool is_full_block = (block_tokens == cache_->block_size());
 
+        if (max_reuse_blocks >= 0 && b >= max_reuse_blocks)
+            reuse_open = false;
+
         if (prefix_caching_enabled_ && is_full_block) {
             size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens), parent_hash);
 
             // Check if this block already exists in the hash table.
-            auto hit = block_hash_to_id_.find(block_hash);
+            auto hit = reuse_open ? block_hash_to_id_.find(block_hash) : block_hash_to_id_.end();
             if (hit != block_hash_to_id_.end()) {
                 int cached_block = hit->second;
 
@@ -477,7 +509,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 continue;
             }
 
-            // No cache hit — allocate a fresh block and register it.
+            // No cache hit (or reuse closed) — allocate a fresh block.
+            reuse_open = false;
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
                 // Rollback everything we allocated/shared in this call.

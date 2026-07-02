@@ -44,6 +44,13 @@ max_batch_size       = 0
 # paths are unaffected. 0 = legacy unbounded behavior. Ignored when
 # deterministic = true (the unbounded loop stays for bit-reproducible evals).
 decode_burst         = 128
+# Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
+# sequence, so concurrent sessions time-slice the decode. Slice length in
+# tokens; after it the engine rotates round-robin to the next decoding
+# request. Rotation re-captures the decode graphs (~10-20 ms), which the
+# slice amortizes (~1-2% at 128). 0 = old head-of-line behavior (the first
+# request runs to completion before the next produces a token).
+hybrid_decode_quantum = 128
 # Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
 # Off by default — opt in for prod rollouts where first-request TTFT
 # matters. In dev / CI / one-shot runs the warmup is pure overhead and can
@@ -246,13 +253,20 @@ mtp_no_rope          = false
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system
 # prompts, multi-turn history). Read by the engine and ORed into the live
 # config at init; PrefixCacheE2ETest guards hit==fresh equality.
-# Auto-disabled for recurrent (SSM/GDN) models. (Library/C-API embedders
-# that do not load imp.conf default to OFF.)
+# (Library/C-API embedders that do not load imp.conf default to OFF.)
 prefix_cache         = true
 # Cap on KV blocks pinned by Anthropic cache_control / "cache_prompt"
 # requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
 # requests are ignored.
 prefix_pin_budget_pct = 25
+# Device budget (MiB) for recurrent-state snapshots — what makes prefix
+# caching work on hybrid (SSM/GDN) models: reused KV blocks alone cannot
+# skip prefill there, the recurrent state at the skip boundary must be
+# restored too. One snapshot = one per-sequence state slab (~64 MiB on
+# Qwen3.6-35B), saved once per prefill, LRU-evicted; buffers pre-allocated
+# at engine init. imp-cli --bench pins this to 0. 0 disables snapshots and
+# with them hybrid prefix caching (dense models unaffected).
+recurrent_snapshot_mb = 256
 # Green Contexts / prefill-decode overlap streams in the server engine.
 # Opt-in (off by default): suspected memSyncDomain race on sm_120 fallback
 # streams (gemma-3-12b IMA). Set true to enable.

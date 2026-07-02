@@ -60,8 +60,10 @@ Engine::~Engine() {
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
 
-    // Save prefix cache to disk before shutdown
-    if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled()) {
+    // Save prefix cache to disk before shutdown (dense only — hybrid reuse
+    // needs recurrent snapshots, which are device-resident and not persisted)
+    if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled() &&
+        !ssm_state_) {
         kv_manager_->save_prefix_cache(config_.prefix_cache_path, model_fingerprint_(), stream_);
     }
 
@@ -441,6 +443,7 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
+    req->recurrent_restore.reset();  // release the snapshot buffer for recycling
     if (req->constraints)
         constraints_return_(std::move(req->constraints));
     // Server visibility: the engine outlives requests, so cumulative

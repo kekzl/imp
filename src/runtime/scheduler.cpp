@@ -68,10 +68,33 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 }
                 // Reserve blocks, using prefix caching when enabled.
                 if (kv_manager_->prefix_caching_enabled()) {
-                    int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+                    // Hybrid models cap reuse at the recurrent-snapshot
+                    // boundary (and attach the snapshot to the request).
+                    int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;
+                    int reused =
+                        kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse);
                     if (reused < 0) {
                         ++it;
                         continue;
+                    }
+                    if (max_reuse >= 0 && reused != max_reuse) {
+                        // Defensive: the snapshot boundary was probed against
+                        // the cache a moment ago, so this should not happen.
+                        // The restore position no longer matches the reused
+                        // KV prefix — release everything (a full prefill must
+                        // not re-write blocks still shared with other seqs)
+                        // and fall back to plain allocation.
+                        IMP_LOG_WARN(
+                            "Scheduler: hybrid prefix reuse mismatch (reused=%d, snapshot=%d "
+                            "blocks) — full prefill for req %d",
+                            reused, max_reuse, req->id);
+                        req->recurrent_restore.reset();
+                        kv_manager_->free_sequence(req->id);
+                        if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
+                            ++it;
+                            continue;
+                        }
+                        reused = 0;
                     }
                     // Skip prefill for tokens covered by reused blocks.
                     if (reused > 0) {

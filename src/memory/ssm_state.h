@@ -32,6 +32,13 @@ public:
     // Zero-initialize all state for a sequence (on new request).
     void reset_sequence(int seq_id, cudaStream_t stream);
 
+    // Base pointer / size of one sequence's full state slab (all layers,
+    // conv + h contiguous) — the unit copied by recurrent-state snapshots.
+    void* seq_base(int seq_id) {
+        return static_cast<char*>(pool_) + static_cast<size_t>(seq_id) * per_seq_bytes_;
+    }
+    size_t per_seq_bytes() const { return per_seq_bytes_; }
+
     int max_sequences() const { return max_sequences_; }
     int n_ssm_layers() const { return n_ssm_layers_; }
     QType h_dtype() const { return h_dtype_; }

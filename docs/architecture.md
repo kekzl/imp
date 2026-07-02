@@ -137,6 +137,11 @@ Per token:
 - **Memory** — `src/memory/vram_allocator.cu`, `src/memory/kv_cache.cu`,
   `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cu`,
   `src/runtime/vram_budget.cpp`, `src/runtime/storage_planner.cpp`.
+  Prefix caching (content-addressed KV block reuse) works on hybrid SSM/GDN
+  models via `src/memory/recurrent_snapshot_store.cpp`: one recurrent-state
+  slab per prefill is snapshotted at the largest block-aligned prompt
+  position and restored on a prefix hit — KV blocks alone cannot skip
+  prefill for a recurrent model.
 - **Kernels** — `src/compute/` (attention, GEMM, RMSNorm, RoPE, SwiGLU,
   softmax, sampling) and `src/quant/` (dequant, FP8 quant, NVFP4 quant).
 - **Public C API** — `include/imp/{imp,types,error,config}.h`,

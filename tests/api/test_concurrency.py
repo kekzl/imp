@@ -129,6 +129,66 @@ class TestConcurrentRequests:
             assert has_done, f"Stream {i} missing [DONE] sentinel"
 
 
+class TestDecodeFairness:
+    def test_second_stream_progresses_before_first_finishes(self, model, is_mock):
+        """Two long concurrent streams must interleave: the second request has
+        to produce its first token BEFORE the first request finishes.
+
+        Dense models decode batched, so this holds trivially. Hybrid (SSM/GDN)
+        models decode one sequence per step — before the quantum rotation
+        (runtime.hybrid_decode_quantum) the head request ran to completion
+        while the second starved (FIFO head-of-line). This is the regression
+        test for that rotation.
+        """
+        if is_mock:
+            pytest.skip("mock server responds instantly — no decode to interleave")
+
+        import threading
+        import time
+
+        events = []  # (timestamp, stream_id, kind)
+        events_lock = threading.Lock()
+
+        def stream_request(i):
+            first_token_seen = False
+            with httpx.Client(base_url=conftest.BASE_URL, timeout=300.0) as c:
+                with c.stream("POST", "/v1/chat/completions", json={
+                    "model": model,
+                    "messages": [{"role": "user",
+                                  "content": f"Write a long story about journey {i}."}],
+                    "max_tokens": 400,
+                    "temperature": 0,
+                    "seed": i,
+                    "stream": True,
+                }) as r:
+                    assert r.status_code == 200
+                    for line in r.iter_lines():
+                        if not line.startswith("data: ") or line == "data: [DONE]":
+                            continue
+                        chunk = json.loads(line[len("data: "):])
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        if delta.get("content") and not first_token_seen:
+                            first_token_seen = True
+                            with events_lock:
+                                events.append((time.monotonic(), i, "first_token"))
+            with events_lock:
+                events.append((time.monotonic(), i, "finished"))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            f0 = pool.submit(stream_request, 0)
+            time.sleep(0.5)  # let request 0 reach decode before 1 arrives
+            f1 = pool.submit(stream_request, 1)
+            f0.result()
+            f1.result()
+
+        by_kind = {(sid, kind): t for t, sid, kind in events}
+        assert (1, "first_token") in by_kind, "second stream never produced a token"
+        assert by_kind[(1, "first_token")] < by_kind[(0, "finished")], (
+            "second stream got its first token only after the first request "
+            "finished — hybrid decode is serializing head-of-line (rotation broken)"
+        )
+
+
 class TestConstrainedUnderConcurrency:
     def test_json_schema_enforced_while_sharing_decode_batch(self, model, is_mock):
         """A json_schema request that decodes concurrently with other requests

@@ -84,8 +84,22 @@ public:
     // Returns the number of prefix blocks that were reused (i.e., the
     // number of blocks whose KV data is already computed). The caller
     // should skip prefill for the first `result * kKVBlockSize` tokens.
+    // Reuse stops at the first non-cached block (a hole after an evicted
+    // block must not count — skipped tokens need a contiguous KV prefix).
+    // `max_reuse_blocks` caps reuse (-1 = unlimited); hybrid models pass
+    // the recurrent-snapshot boundary so prefill never re-writes shared
+    // blocks beyond the restorable state position.
     // Returns -1 on allocation failure.
-    [[nodiscard]] int allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens);
+    [[nodiscard]] int allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
+                                                  int max_reuse_blocks = -1);
+
+    // Read-only probe: length (in blocks) of the longest fully-cached
+    // contiguous block prefix for `tokens`, without allocating anything.
+    // Fills `chain_hashes` with the chained hash of every FULL block of
+    // `tokens` (independent of cache state). Used by the hybrid recurrent-
+    // snapshot lookup to pick a restore boundary before allocation.
+    int longest_cached_prefix_blocks(std::span<const int32_t> tokens,
+                                     std::vector<size_t>& chain_hashes) const;
 
     // Register the block hashes for a sequence after prefill completes.
     // This must be called so that future sequences can match against

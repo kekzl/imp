@@ -14,6 +14,7 @@
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
 #include "memory/gdn_state.h"
+#include "memory/recurrent_snapshot_store.h"
 #include "memory/layer_offload.h"
 #include "memory/memory_manager.h"
 #include "memory/vram_allocator.h"
@@ -129,6 +130,13 @@ public:
 
     // Reset SSM state for a sequence (call on context_reset for hybrid models)
     void reset_ssm_state(int seq_id);
+
+    // Drop all recurrent-state snapshots (call on context_reset alongside the
+    // prefix-cache block eviction — stale snapshots must not match new data)
+    void clear_recurrent_snapshots() {
+        if (recurrent_snapshots_)
+            recurrent_snapshots_->clear();
+    }
 
     // Invalidate all cached CUDA graphs (call on context_reset to ensure
     // deterministic output — stale graph captures can produce different results)
@@ -393,6 +401,22 @@ private:
     std::vector<int> free_recurrent_slots_;           // available slot ids
     std::unordered_map<int, int> recurrent_slot_of_;  // req.id -> slot
     bool recurrent_slots_initialized_ = false;
+    // Recurrent-state snapshots (hybrid prefix caching): LRU store of
+    // per-sequence SSM/GDN state slabs keyed by the chained KV block hash of
+    // the block-aligned prompt prefix they cover. Saved once per prefill,
+    // restored at admission so multi-turn requests skip re-prefilling the
+    // shared history (see docs — dense models need KV blocks only; hybrids
+    // additionally need the recurrent state at the skip boundary).
+    std::unique_ptr<RecurrentSnapshotStore> recurrent_snapshots_;
+    // Hybrid decode fairness: round-robin rotation state for the batch-1
+    // recurrent decode (quantum-based; see step_decode).
+    int hybrid_active_req_ = -1;    // request id currently holding the decode slice
+    int hybrid_slice_start_ = 0;    // its output_tokens.size() at slice start
+    bool hybrid_decode_waiting_ = false;  // other hybrid requests wait this step
+    // Recurrent slot whose state pointers the decode graph pool captured.
+    // A replay for a request in a DIFFERENT slot would read/write the wrong
+    // sequence's state — invalidate (graph-exec update) on slot change.
+    int decode_graph_recurrent_slot_ = -1;
     bool has_pure_ssm_layers_ = false;  // true if model has Mamba2 SSM layers (not GDN)
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
@@ -640,6 +664,11 @@ private:
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
+    // Recurrent-state snapshots (hybrid prefix caching, engine_sampling_stop.cpp):
+    // admission hook (longest restorable prefix, in blocks) + save/position helpers.
+    int hybrid_prefix_reuse_limit_(Request& req);
+    int hybrid_snapshot_end_(const Request& req) const;  // block-aligned save position, 0 = none
+    void maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────

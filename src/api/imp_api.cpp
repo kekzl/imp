@@ -961,6 +961,8 @@ ImpError imp_context_reset(ImpContext ctx) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
         // Evict all cached blocks to prevent prefix cache hits with stale data
         while (ctx->engine->kv_manager()->evict_cached_block()) {}
+        // Drop recurrent-state snapshots for the same reason (hybrid models)
+        ctx->engine->clear_recurrent_snapshots();
         // Reset SSM state for hybrid models (Mamba2)
         ctx->engine->reset_ssm_state(ctx->active_request->id);
         ctx->active_request->status = imp::RequestStatus::CANCELLED;

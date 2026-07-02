@@ -323,5 +323,94 @@ TEST(PrefixEquivTest, NonAlignedPrefixReusesFullBlocksOnly) {
     mgr->free_sequence(1);
 }
 
+// ── (8) chain hole must not count as reused prefix ────────────────────────
+// LRU eviction removes cached blocks front-first, so an EARLY block of a
+// cached chain can be gone while LATER chain blocks survive. Reuse must stop
+// at the first miss: counting later hits would make the caller skip prefill
+// across a hole with uncomputed KV (silent garbage attention reads).
+TEST(PrefixEquivTest, ChainHoleStopsReuse) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    std::vector<int32_t> tokens(48);  // 3 full blocks
+    std::iota(tokens.begin(), tokens.end(), 42);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+    mgr->register_block_hashes(0, tokens);
+    mgr->free_sequence(0);
+    ASSERT_EQ(mgr->num_cached_blocks(), 3);
+
+    // Evict exactly ONE cached block — LRU head = block 0 of the chain
+    // (free_sequence pushes blocks to the cached-LRU in table order).
+    ASSERT_TRUE(mgr->evict_cached_block());
+    ASSERT_EQ(mgr->num_cached_blocks(), 2);
+
+    // Blocks 1 and 2 of the chain still sit in the hash table, but the
+    // prefix is broken at block 0 — nothing may be reused.
+    int reused = mgr->allocate_blocks_with_prefix(1, tokens);
+    EXPECT_EQ(reused, 0) << "hole in the chain counted as reused prefix — "
+                            "caller would skip prefill over uncomputed KV";
+    mgr->free_sequence(1);
+}
+
+// ── (9) max_reuse_blocks caps reuse (hybrid snapshot boundary) ────────────
+// Hybrid models can only skip prefill up to the recurrent-snapshot position;
+// blocks past the cap must be freshly allocated (never shared), because the
+// continuation prefill will WRITE them.
+TEST(PrefixEquivTest, MaxReuseBlocksCapsSharing) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+    KVCache* c = mgr->kv_cache();
+
+    std::vector<int32_t> tokens(48);  // 3 full blocks
+    std::iota(tokens.begin(), tokens.end(), 7000);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+    const std::vector<int> blocks_a = mgr->block_table(0);
+    mgr->register_block_hashes(0, tokens);
+    mgr->free_sequence(0);
+
+    int reused = mgr->allocate_blocks_with_prefix(1, tokens, /*max_reuse_blocks=*/1);
+    EXPECT_EQ(reused, 1);
+    const std::vector<int>& blocks_b = mgr->block_table(1);
+    ASSERT_EQ(blocks_b.size(), 3u);
+    EXPECT_EQ(blocks_b[0], blocks_a[0]) << "block below the cap must be the shared cached block";
+    // Blocks past the cap are fresh allocations the continuation prefill may
+    // write — they must not alias the cached chain blocks.
+    EXPECT_NE(blocks_b[1], blocks_a[1]);
+    EXPECT_NE(blocks_b[2], blocks_a[2]);
+    EXPECT_EQ(c->ref_count(blocks_b[1]), 1);
+    mgr->free_sequence(1);
+}
+
+// ── (10) longest_cached_prefix_blocks probe ───────────────────────────────
+// Read-only probe used by the hybrid snapshot lookup: reports the contiguous
+// cached chain length without allocating, and fills the per-block chain
+// hashes for all full blocks.
+TEST(PrefixEquivTest, LongestCachedPrefixProbe) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    std::vector<int32_t> tokens(40);  // 2 full blocks + partial
+    std::iota(tokens.begin(), tokens.end(), 123);
+
+    std::vector<size_t> hashes;
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, hashes), 0);
+    EXPECT_EQ(hashes.size(), 2u) << "hashes cover all FULL blocks regardless of cache state";
+
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+    mgr->register_block_hashes(0, tokens);
+    mgr->free_sequence(0);
+
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, hashes), 2);
+    // Probe must not have allocated anything.
+    EXPECT_EQ(mgr->num_cached_blocks(), 2);
+
+    // Break the chain at block 0 → probe reports 0 despite block 1 cached.
+    ASSERT_TRUE(mgr->evict_cached_block());
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, hashes), 0);
+}
+
 }  // namespace
 }  // namespace imp
