@@ -176,6 +176,96 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             "allocation; planner output diagnostic only (5.1.5).",
             plan.projected_vram_bytes / (1024.0 * 1024.0), plan.entries.size(),
             nvfp4_estimate / (1024.0 * 1024.0), cutlass_sf_estimate / (1024.0 * 1024.0));
+
+        // Native NVFP4 checkpoints: the GGUF-oriented count above sees the
+        // source as non-beneficial and yields 0, but phase 3 still needs
+        // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache
+        // (~elems/16 across ALL NVFP4 weights incl. experts — model qtypes
+        // are still wire dtypes here, so sum it from the PLAN, which is
+        // source-aware), (b) the transient per-(layer,proj) MoE contiguous-
+        // copy slab, and (c) the free-VRAM reserves phases 0-3 re-derive for
+        // themselves (max(total/10, 256 MiB)) plus executor workspaces that
+        // allocate between KV init and phase 3. With the estimate at 0 the
+        // KV clamp below ate ALL post-weight VRAM at auto max_batch_size and
+        // both caches got zero budget — Qwen3-Coder-30B-FP4 @45k served
+        // 31.8 tok/s / 1265 ms TTFT instead of 314.7 / 106 (both caches are
+        // free-VRAM-driven at phase 3, so reserving room here is the fix).
+        if (mcfg.is_nvfp4_prequant) {
+            // Both the count above AND the plan classify by source qtype,
+            // which at budget time is still the wire dtype (NVFP4-ness lives
+            // in the nvfp4_scratch_ sidecars until phase 0 promotes it) — so
+            // scan the projection tensors directly, no qtype filter: on an
+            // NVFP4-prequant checkpoint these are exactly the quantized set.
+            size_t sf_bytes = 0;
+            size_t max_moe_slab = 0;
+            // Wire shapes store the PACKED byte dim (K/2 for e2m1 pairs), so
+            // logical elems = 2 × shape product — verified against the built
+            // caches: Coder-30B SfAtom 1800.55 MiB vs 914 unscaled, 14B
+            // 833.87 vs 440 (both exactly 2×).
+            auto count_native = [&](const Tensor& w) {
+                if (!w.data || w.ndim < 2 || w.shape[1] % 16 != 0)
+                    return;
+                size_t elems = 2;
+                for (int d = 0; d < w.ndim; d++)
+                    elems *= static_cast<size_t>(w.shape[d]);
+                sf_bytes += elems / 16 + 256;  // + per-entry SfAtom align slack
+                if (w.ndim >= 3)  // packed experts: transient copy per (layer,proj)
+                    max_moe_slab = std::max(max_moe_slab, elems / 2 + elems / 16);
+            };
+            auto count_native_vec = [&](const std::vector<Tensor>& ws) {
+                size_t elems = 0;
+                for (const auto& w : ws) {
+                    if (!w.data || w.ndim < 2)
+                        continue;
+                    size_t e = 2;
+                    for (int d = 0; d < w.ndim; d++)
+                        e *= static_cast<size_t>(w.shape[d]);
+                    elems += e;
+                }
+                if (!elems)
+                    return;
+                sf_bytes += elems / 16 + 256 * ws.size();
+                max_moe_slab = std::max(max_moe_slab, elems / 2 + elems / 16);
+            };
+            count_native(model.output_proj());
+            for (int i = 0; i < mcfg.n_layers; i++) {
+                const auto& L = model.layer(i);
+                count_native(L.wq);
+                count_native(L.wk);
+                count_native(L.wv);
+                count_native(L.wo);
+                count_native(L.w_gate);
+                count_native(L.w_up);
+                count_native(L.w_down);
+                count_native(L.w_gate_shared);
+                count_native(L.w_up_shared);
+                count_native(L.w_down_shared);
+                if (L.expert_gate_packed.data)
+                    count_native(L.expert_gate_packed);
+                else
+                    count_native_vec(L.expert_w_gate);
+                if (L.expert_up_packed.data)
+                    count_native(L.expert_up_packed);
+                else
+                    count_native_vec(L.expert_w_up);
+                if (L.expert_down_packed.data)
+                    count_native(L.expert_down_packed);
+                else
+                    count_native_vec(L.expert_w_down);
+            }
+            size_t phase3_reserve =
+                std::max(total_vram / 10, static_cast<size_t>(256ULL * 1024 * 1024)) +
+                1024ULL * 1024 * 1024;
+            size_t native_need = sf_bytes + max_moe_slab + phase3_reserve;
+            if (native_need > cutlass_sf_estimate) {
+                IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
+                             "(sf=%.1f, moe_slab=%.1f, phase3+workspaces=%.1f)",
+                             native_need / (1024.0 * 1024.0), sf_bytes / (1024.0 * 1024.0),
+                             max_moe_slab / (1024.0 * 1024.0),
+                             phase3_reserve / (1024.0 * 1024.0));
+                cutlass_sf_estimate = native_need;
+            }
+        }
     }
 
     // --- 6. Allocate based on strategy ---
