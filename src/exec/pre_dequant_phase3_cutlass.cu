@@ -5,6 +5,7 @@
 // for shared declarations.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
@@ -40,7 +41,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t
     if (wcache_->nvfp4_decode_mode == 2) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         size_t free_mem = 0, total_mem = 0;
-        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         // Intentionally NOT using dctx.safety_reserve here: populating
         // cutlass_nvfp4 in mode 2 destabilised CUDA-graph capture on
         // Qwen3-14B Q6_K (bimodal 97 vs 145 tok/s decode across trials).
@@ -469,7 +470,7 @@ if (mx_native > 0) {
         // Refuse the alloc instead of paging — keeps the failure mode
         // legible.
         size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
         bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                               fp16_total + kRuntimeHeadroom > free_mem);

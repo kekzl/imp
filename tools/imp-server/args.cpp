@@ -36,6 +36,8 @@ void print_server_usage(const char* prog) {
             "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
             "  --api-key <key>       Require Bearer token authentication\n"
             "  --reasoning-format <f> deepseek (default) or none\n"
+            "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
+            "                        the GPU only had this much (multi-server on one GPU)\n"
             "  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)\n"
             "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
             "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
@@ -127,6 +129,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.api_key = argv[++i];
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
+        } else if (std::strcmp(arg, "--vram-budget") == 0 && i + 1 < argc) {
+            args.vram_budget_mb = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
             args.think_budget = std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--max-concurrent") == 0 && i + 1 < argc) {

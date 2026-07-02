@@ -40,6 +40,14 @@ struct RuntimeConfig {
         std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
         bool warmup = false;               // opt-in for prod rollout; off in dev/CI
         int max_seq_len = 0;               // 0 = use model default
+        // Hard VRAM budget for THIS process (MiB, 0 = uncapped). Every sizing
+        // decision (weight caches, KV clamp, expert offload, workspaces,
+        // upload gates) sees a virtual GPU of this size, so multiple
+        // imp-server processes can share one card without overcommitting it.
+        // Best-effort: leave ~1 GiB real headroom between the sum of budgets
+        // and the card (small fixed buffers + cuBLAS internals sit outside).
+        // CLI flag --vram-budget / C-API ImpConfig.vram_budget_mb override.
+        int vram_budget_mb = 0;
         bool no_pdl = false;
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture

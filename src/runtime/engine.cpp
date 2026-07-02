@@ -11,6 +11,7 @@
 #include "compute/mtp_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
+#include "memory/vram_query.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/ffn_sparsity_probe.h"
@@ -399,15 +400,13 @@ bool Engine::lora_set(int id) {
 }
 
 size_t Engine::effective_free_vram() const {
-    size_t free_mem = 0, total_mem = 0;
-    if (cudaMemGetInfo(&free_mem, &total_mem) != cudaSuccess) {
+    // Budget-aware view (installed in init from config_.vram_budget_mb).
+    // The old inline formula counted GLOBAL device usage against the budget,
+    // which mis-charged a co-tenant server's memory to this process;
+    // vram_query uses the process baseline delta instead.
+    size_t free_mem = 0;
+    if (!vram_budget_mem_get_info(&free_mem, nullptr))
         return 0;
-    }
-    if (config_.vram_budget_mb > 0) {
-        size_t budget = config_.vram_budget_mb * 1024ULL * 1024;
-        size_t used = total_mem - free_mem;
-        free_mem = (budget > used) ? (budget - used) : 0;
-    }
     return free_mem;
 }
 
@@ -567,6 +566,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
     if (config_.mmproj_path.empty())
         config_.mmproj_path = runtime_config_.paths.mmproj;
+    if (config_.vram_budget_mb == 0 && runtime_config_.runtime.vram_budget_mb > 0)
+        config_.vram_budget_mb = static_cast<size_t>(runtime_config_.runtime.vram_budget_mb);
+
+    // Install the process-wide VRAM budget view BEFORE any sizing runs —
+    // every cudaMemGetInfo-based decision below (weight upload gates, cache
+    // budgets, KV clamp, workspaces) reads through vram_budget_mem_get_info.
+    vram_budget_install(config_.vram_budget_mb);
 
     // The deterministic kernel gate lives in process_diag (compute kernels
     // read process_diag_deterministic_gemm()), but process_diag_install()

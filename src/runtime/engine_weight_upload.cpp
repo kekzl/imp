@@ -13,6 +13,7 @@
 #include "runtime/config.h"
 #include "core/cuda_raii.h"
 #include "core/logging.h"
+#include "memory/vram_query.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -133,7 +134,7 @@ bool Engine::init_weights() {
                         kv_block_bytes;
         {
             size_t total_vram = 0, f = 0;
-            cudaMemGetInfo(&f, &total_vram);
+            vram_budget_mem_get_info(&f, &total_vram);
             // For large MoE models (128 experts), prefer fitting all experts on GPU
             // over reserving huge KV cache. All-GPU experts enable the decode fast
             // path (dp4a GEMV, no D2H sync) and CUDA graph capture.

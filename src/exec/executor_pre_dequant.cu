@@ -8,6 +8,7 @@
 // below.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
@@ -45,7 +46,7 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // This preserves the existing per-phase budget tracking while the VRAMBudget
     // struct controls strategy-level decisions (which phases to skip).
     size_t free_vram = 0, total_vram = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_vram, &total_vram));
+    vram_budget_mem_get_info(&free_vram, &total_vram);
     // Reserve at least 10% of total VRAM as headroom to avoid shared/system
     // memory fallback on WSL2 (not visible via nvidia-smi).
     size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);

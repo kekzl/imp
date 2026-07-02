@@ -40,6 +40,7 @@ struct ServerArgs {
     std::string models_dir;                     // --models-dir: scan for .gguf files
     std::string api_key;                        // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
+    int vram_budget_mb = 0;  // --vram-budget: hard per-process VRAM cap in MiB (0 = uncapped)
     float think_budget =
         0.5f;  // --think-budget: fraction of max_tokens for reasoning (1.0=unlimited, 0=disabled).
                // 0.5 matches docs/usage.md and guarantees answer headroom — at 1.0 a

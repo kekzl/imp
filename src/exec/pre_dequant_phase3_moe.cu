@@ -6,6 +6,7 @@
 // for shared declarations.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
@@ -242,7 +243,7 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     // Cache MoE expert weights — done after FP16 free so mode 2 has full budget
     if (wcache_->nvfp4_decode_mode == 2) {
         size_t free_mem = 0, total_mem = 0;
-        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         // Reserve VRAM so the KV cache (sized after this in init_kv_cache)
         // can fit `min_kv_tokens` (default 16K) + workspaces. Computed from
         // the model's actual attention layout — the previous 1 GiB constant

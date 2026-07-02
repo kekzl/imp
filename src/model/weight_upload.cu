@@ -1,4 +1,5 @@
 #include "model/model.h"
+#include "memory/vram_query.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
@@ -48,7 +49,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
     }
     // Fallback: per-tensor check (used outside upload passes)
     size_t free_mem = 0, total_mem = 0;
-    cudaMemGetInfo(&free_mem, &total_mem);
+    vram_budget_mem_get_info(&free_mem, &total_mem);
     if (size + reserve > free_mem) {
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
@@ -1517,7 +1518,7 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
         return;
 
     size_t free_mem = 0, total_mem = 0;
-    cudaMemGetInfo(&free_mem, &total_mem);
+    vram_budget_mem_get_info(&free_mem, &total_mem);
 
     // Auto-pick default: use 10% (aggressive) if ALL experts would fit with
     // that overhead, else 30% (conservative). This saves users from a
@@ -1993,7 +1994,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // Cache VRAM state to avoid per-tensor cudaMemGetInfo calls
     {
         size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         g_cached_free_mem = free_mem;
         g_total_allocated = 0;
         IMP_LOG_DEBUG("VRAM at upload start: %.2f GiB free / %.2f GiB total",

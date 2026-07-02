@@ -122,6 +122,8 @@ int main(int argc, char** argv) {
     // max_seq_len: 0 = auto-detect in engine (from model metadata + VRAM)
     if (args.max_seq_len > 0)
         config.max_seq_len = args.max_seq_len;
+    if (args.vram_budget_mb > 0)
+        config.vram_budget_mb = args.vram_budget_mb;
     if (args.min_kv_tokens > 0)
         config.min_kv_tokens = args.min_kv_tokens;
     config.gpu_layers = args.gpu_layers;

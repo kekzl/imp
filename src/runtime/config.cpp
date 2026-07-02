@@ -121,6 +121,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
+    I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
 
     // [kv_cache]
     S("kv_cache.dtype", cfg.kv_cache.dtype);

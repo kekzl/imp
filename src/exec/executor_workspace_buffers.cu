@@ -3,6 +3,7 @@
 // MoE workspace, FP8 activation, CUTLASS NVFP4/MXFP4 activation buffers.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
@@ -439,7 +440,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
                 size_t free_mem = 0, total_mem = 0;
-                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+                vram_budget_mem_get_info(&free_mem, &total_mem);
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 budget = static_cast<size_t>(budget * 0.15);  // 15% of available
@@ -494,7 +495,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // floor → long-prompt hang. Leaving ≥ 1 GiB free here covers
             // vram_budget reserve (~768 MiB) plus a useful KV cache.
             size_t free_now = 0, total_now = 0;
-            cudaMemGetInfo(&free_now, &total_now);
+            vram_budget_mem_get_info(&free_now, &total_now);
             constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
             size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
 
@@ -535,7 +536,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                                  static_cast<size_t>(cfg.n_experts_active) *
                                  static_cast<size_t>(d) * sizeof(float);
                 size_t free_bytes = 0, total_bytes = 0;
-                cudaMemGetInfo(&free_bytes, &total_bytes);
+                vram_budget_mem_get_info(&free_bytes, &total_bytes);
                 constexpr size_t kReserve = 256ULL * 1024 * 1024;
                 if (fp32_sz > 0 && free_bytes > fp32_sz + kReserve) {
                     moe_.fp32_down_buf = vram_alloc(vram_alloc_, fp32_sz, "moe_fp32_down");

@@ -14,6 +14,7 @@
 // See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
@@ -403,7 +404,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         // Check actual free VRAM against the per-call safety reserve computed
         // in pre_dequant_phase3_nvfp4_decode_ (see dctx.safety_reserve).
         size_t free_mem = 0, total_mem = 0;
-        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+        vram_budget_mem_get_info(&free_mem, &total_mem);
         size_t nvfp4_safety = std::max(dctx.safety_reserve, static_cast<size_t>(1024 * 1024));
         if (free_mem < nvfp4_bytes + nvfp4_safety) {
             IMP_LOG_INFO(
@@ -605,7 +606,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
                              static_cast<size_t>(rows) * cols / 16 + 4;
 
         size_t free_mem2 = 0, total_mem2 = 0;
-        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem2, &total_mem2));
+        vram_budget_mem_get_info(&free_mem2, &total_mem2);
         size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
         if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
             break;

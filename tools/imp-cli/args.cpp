@@ -18,6 +18,8 @@ void print_usage(const char* prog) {
             "  --prompt <text>       Input prompt for generation\n"
             "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
             "  --max-seq-len <n>     KV context ceiling in tokens (default: auto from VRAM)\n"
+            "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
+            "                        the GPU only had this much (multi-server on one GPU)\n"
             "  --min-kv-tokens <n>   Minimum KV capacity in tokens (default: auto)\n"
             "  --temperature <f>     Sampling temperature (default: 0.7)\n"
             "  --top-p <f>           Top-p (nucleus) sampling (default: 0.9)\n"
@@ -114,6 +116,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.max_tokens_set = true;
         } else if (std::strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
             args.max_seq_len = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--vram-budget") == 0 && i + 1 < argc) {
+            args.vram_budget_mb = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--min-kv-tokens") == 0 && i + 1 < argc) {
             args.min_kv_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {

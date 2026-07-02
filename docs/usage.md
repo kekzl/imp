@@ -110,6 +110,21 @@ dtype after model-specific overrides (e.g. Gemma-4 → FP16 KV via the
 `engine.cpp:547` carve-out). `--min-kv-tokens` overrides the defensive
 80% cap and trades FP16 weight-cache capacity for more context.
 
+`--vram-budget <mb>` (also `[runtime] vram_budget_mb` in imp.conf) hard-caps
+this process's VRAM: every sizing decision — weight caches, KV clamp, expert
+offload, workspaces, upload gates — sees a virtual GPU of that size, so
+multiple imp-server processes can share one card:
+
+```bash
+imp-server --model Qwen3-4B-Instruct-2507-Q8_0.gguf --port 8080 --vram-budget 9000 &
+imp-server --model Llama-3.2-3B-Instruct-Q8_0.gguf  --port 8081 --vram-budget 8000 &
+```
+
+Best-effort cap: small fixed buffers and cuBLAS internals sit outside the
+sizing gates, so leave ~1 GiB of real headroom between the sum of budgets
+and the card. A model whose weights don't fit the budget fails cleanly at
+load instead of starving the neighbour.
+
 <details>
 <summary>Full CLI options</summary>
 
@@ -129,6 +144,7 @@ Generation:
   --max-tokens <n>          Max tokens to generate (default: 256)
   --max-seq-len <n>         KV context ceiling in tokens (default: auto)
   --min-kv-tokens <n>       Minimum KV capacity in tokens (default: auto)
+  --vram-budget <mb>        Hard per-process VRAM cap in MiB (default: 0 = uncapped)
   --interactive             Interactive chat mode
   --stop <str>              Stop sequence (repeatable, up to 4)
   --chat-template <t>       auto|none|chatml|llama2|llama3|nemotron|gemma|deepseek_r1|phi
