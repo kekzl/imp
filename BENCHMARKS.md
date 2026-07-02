@@ -141,6 +141,34 @@ Command: `imp-server --model Qwen3-14B-NVFP4 --max-batch 16`, then 16 concurrent
 is the CUTLASS M=16 NVFP4 GEMMs (~57 %, the real per-layer projection compute,
 already batched and largely launch-hidden under CUDA Graphs).
 
+## Multi-turn TTFT (hybrid prefix caching, #831 / v0.15.0)
+
+Agentic chat re-sends the full conversation every turn, so on a recurrent
+(SSM/GDN) model — where prefix caching was disabled before #831 — per-turn TTFT
+grew linearly with history (full re-prefill each turn). Recurrent-state
+snapshots make it prefill only the delta. Server-level numbers (SSE, so they
+carry the ±5–10 % host day-to-day decode variance, issue #526); TTFT = wall time
+to the first streamed token. Setup: `imp-server --model Qwen3.6-35B-A3B-NVFP4
+--set runtime.max_seq_len=12288`, 6-turn growing-history replay (~2 k tokens
+added per turn), `max_tokens` 60, `temperature` 0, streaming. Both columns same
+host/day (2026-07-02, CUDA 13.3); `v0.14.0` = `2316f2fd`, `v0.15.0` = `e80a26a4`.
+
+| Turn | History | v0.14.0 TTFT | v0.15.0 TTFT | `cached_tokens` |
+|---|---|---:|---:|---:|
+| 1 | fresh | 1.62 s | 1.89 s | — |
+| 2 | ~2 k | 2.85 s | 1.41 s | 2 016 |
+| 3 | ~4 k | 3.08 s | 1.55 s | 4 064 |
+| 4 | ~6 k | 4.31 s | 1.40 s | 6 080 |
+| 5 | ~8 k | 5.68 s | 1.51 s | 8 128 |
+| 6 | ~10 k | 6.70 s | **1.94 s** | 10 176 |
+
+v0.14.0 grows linearly with history; v0.15.0 stays flat (**3.5× at ~10 k tokens**,
+gap widening with context). `usage.prompt_tokens_details.cached_tokens` (and
+Anthropic `cache_read_input_tokens`) report the hybrid hits. Nemotron-3-Nano-30B
+(pure SSM, CUDA graphs off) holds a flat ~0.22 s TTFT across the same replay
+(turn 1: 0.34 s). Snapshot store on the 35B: 4 × 63.8 MiB slots (default
+`server.recurrent_snapshot_mb` = 256).
+
 ## Output-quality gate
 
 Throughput numbers say nothing about correctness — that lesson is paid for
