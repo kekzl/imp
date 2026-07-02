@@ -1702,6 +1702,21 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
                 !runtime_config_.runtime.deterministic)
                 launch_limit = runtime_config_.runtime.decode_burst;
+            // Admission-aware burst: while another request is waiting (still
+            // pending admission or mid-prefill), Engine::step short-circuits
+            // to the resume path for the whole burst — the waiting request's
+            // prefill only advances between bursts, inflating its TTFT by
+            // ~0.5-1 s per 128-token burst. Shorten the burst so scheduling
+            // work interleaves every few tokens; the full burst returns when
+            // nothing is waiting. Deterministic mode is exempt (same
+            // reasoning as decode_burst above — reproducible evals are
+            // single-stream, nothing ever waits).
+            if (!runtime_config_.runtime.deterministic &&
+                (scheduler_->has_pending() || !sched_prefill_batch_.empty())) {
+                constexpr int kBusyBurst = 16;
+                if (launch_limit == 0 || launch_limit > kBusyBurst)
+                    launch_limit = kBusyBurst;
+            }
             try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }
     }
