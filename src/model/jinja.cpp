@@ -2597,9 +2597,23 @@ Template::~Template() = default;
 Template::Template(Template&&) noexcept = default;
 Template& Template::operator=(Template&&) noexcept = default;
 
-bool Template::parse(const std::string& source) {
+bool Template::parse(const std::string& source_in) {
     error_.clear();
     nodes_.clear();
+
+    // Match Jinja2's keep_trailing_newline=False default — the setting HF
+    // transformers and vLLM use when applying chat templates: strip a single
+    // trailing newline from the template source. Without this, a template file
+    // that ends in a newline (Qwen3-Coder's chat_template.jinja ends
+    // "{%- endif %}\n") renders "<|im_start|>assistant\n\n"; that extra blank
+    // line makes the model emit an immediate EOS (empty completion) on
+    // borderline multi-turn contexts. Templates without a trailing newline
+    // (Qwen3 / Modelopt) are unaffected. Strips one \n, \r\n, or \r.
+    std::string source = source_in;
+    if (source.size() >= 2 && source[source.size() - 2] == '\r' && source.back() == '\n')
+        source.erase(source.size() - 2);
+    else if (!source.empty() && (source.back() == '\n' || source.back() == '\r'))
+        source.pop_back();
 
     detail::Lexer lexer(source);
     auto tokens = lexer.tokenize();

@@ -73,6 +73,28 @@ TEST(JinjaTest, VariableSubstitution) {
     EXPECT_EQ(tpl.render({{"name", Value(std::string("World"))}}), "Hello, World!");
 }
 
+// keep_trailing_newline=False (Jinja2/HF/vLLM default): a single trailing
+// newline in the template source is stripped. A Qwen3-Coder chat template ends
+// "...assistant\n' }}\n{%- endif %}\n"; without this, the generation prompt
+// renders "<|im_start|>assistant\n\n" and the model emits an immediate EOS.
+TEST(JinjaTest, StripsSingleTrailingNewline) {
+    Template a;
+    ASSERT_TRUE(a.parse("{{- 'assistant\\n' }}\n"));  // template file ends in a newline
+    EXPECT_EQ(a.render({}), "assistant\n");            // trailing template newline stripped
+
+    Template b;
+    ASSERT_TRUE(b.parse("{{- 'assistant\\n' }}"));  // no trailing newline in source
+    EXPECT_EQ(b.render({}), "assistant\n");
+
+    Template crlf;
+    ASSERT_TRUE(crlf.parse("X\r\n"));  // strips \r\n as one newline
+    EXPECT_EQ(crlf.render({}), "X");
+
+    Template two;
+    ASSERT_TRUE(two.parse("X\n\n"));  // only ONE trailing newline stripped
+    EXPECT_EQ(two.render({}), "X\n");
+}
+
 TEST(JinjaTest, ExpressionConcat) {
     Template tpl;
     ASSERT_TRUE(tpl.parse("{{ 'a' + 'b' + 'c' }}"));
