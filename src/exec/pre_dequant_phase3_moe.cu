@@ -527,7 +527,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                                                static_cast<size_t>(e) * e_ms;
                                 if (old_sc && mut_model->is_base_gpu_allocation(old_sc)) {
                                     mut_model->release_gpu_allocation(old_sc);
-                                    IMP_CUDA_CHECK_LOG(cudaFree(old_sc));
+                                    // cudaFreeAsync, NOT cudaFree: on this stack a
+                                    // sync free of a stream-ordered allocation
+                                    // returns success without returning the block
+                                    // to the async mempool (#834) — the "freed"
+                                    // VRAM would be phantom.
+                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(old_sc, stream));
                                     freed += e_ms;
                                 }
                                 w.scales = new_sc;
@@ -687,10 +692,15 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             // shared buffer; an unguarded cudaFree on an offset returns "invalid
             // argument" (8415x error flood on Qwen3.6-35B-A3B-NVFP4 — non-fatal but a
             // small leak + log spam). Mirror the line-528 / Phase-4b drop-source guard.
+            // cudaFreeAsync, NOT cudaFree (#834): a sync free of a stream-
+            // ordered allocation returns success without returning the block
+            // to the async mempool on this stack — the freed_bytes would be
+            // phantom. Stream-ordered on `stream` also sequences the frees
+            // behind the copies above without a device sync.
             if (w.data) {
                 if (mut_model->is_base_gpu_allocation(w.data)) {
                     mut_model->release_gpu_allocation(w.data);
-                    IMP_CUDA_CHECK_LOG(cudaFree(w.data));
+                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(w.data, stream));
                     freed_bytes += expert_packed_bytes;
                 }
                 w.data = nullptr;
@@ -699,7 +709,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             if (w.scales) {
                 if (mut_model->is_base_gpu_allocation(w.scales)) {
                     mut_model->release_gpu_allocation(w.scales);
-                    IMP_CUDA_CHECK_LOG(cudaFree(w.scales));
+                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(w.scales, stream));
                     freed_bytes += expert_ms_bytes;
                 }
                 w.scales = nullptr;
