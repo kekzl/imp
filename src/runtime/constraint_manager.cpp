@@ -89,8 +89,15 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     // every request on a think-capable tokenizer an 8192-token unmasked
     // preamble — a non-thinking json_mode request never emits </think>, so the
     // grammar never engaged and the output was unconstrained garbage.
-    //   - has_tools: 64-token slack so short verbal preambles ("Sure! ")
-    //     don't squeeze out the tool-tag opener.
+    //   - has_tools: 512-token slack. Think-capable models with thinking
+    //     suppressed (json/tools requests) deliberate in PLAIN TEXT before
+    //     opening the tool tag — Qwen3-8B spends 60-130 tokens of prose
+    //     deciding to call get_weather. The old 64-token slack (sized for
+    //     "Sure! "-style preambles) expired mid-sentence, and the schema
+    //     mask then forced a contentless `{"answer":""}` INSTEAD of the
+    //     tool call the model was about to make (#840). 512 covers real
+    //     deliberation while still bounding a model that never produces
+    //     structure.
     //   - no tools: 0 — the old 8-token "markdown fence" slack let the model
     //     open ```json fences that then leaked into content around otherwise
     //     perfect JSON. With the mask active from token 1 the model starts
@@ -99,7 +106,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     if (thinking_open && think_close >= 0) {
         preamble_budget = 8192;
     } else if (has_tools) {
-        preamble_budget = 64;
+        preamble_budget = 512;
     } else {
         preamble_budget = 0;
     }
