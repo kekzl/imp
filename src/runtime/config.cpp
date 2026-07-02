@@ -254,6 +254,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.ngram", cfg.speculative.ngram);
     B("speculative.moe", cfg.speculative.moe);
     I("speculative.k", cfg.speculative.k);
+    B("speculative.suffix", cfg.speculative.suffix);
+    I("speculative.suffix_k_max", cfg.speculative.suffix_k_max);
     I("speculative.min_match", cfg.speculative.min_match);
     I("speculative.max_match", cfg.speculative.max_match);
     I("speculative.give_up_after", cfg.speculative.give_up_after);

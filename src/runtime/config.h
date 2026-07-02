@@ -522,6 +522,15 @@ struct RuntimeConfig {
         // restart variance).
         bool moe = true;
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
+        // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
+        // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
+        // backward scan per verify step) with frequency-voted continuations
+        // across all occurrences, and adaptive draft length — a draft backed
+        // by multiple agreeing occurrences or a maximal-length (max_match)
+        // context match extends past `k` up to `suffix_k_max`. false =
+        // legacy single-most-recent scan.
+        bool suffix = true;
+        int suffix_k_max = 64;
         // Longer suffix matches trade draft frequency for precision — and
         // precision wins decisively: min_match 6 vs 3 measured +16% on
         // code-edit (50% acceptance) while cutting the structured-content

@@ -265,6 +265,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/ngram_draft.cpp
+    src/runtime/suffix_draft.cpp
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -508,6 +509,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         tests/test_ngram_draft.cpp
+        tests/test_suffix_draft.cpp
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp

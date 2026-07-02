@@ -305,6 +305,14 @@ ngram                = true
 moe                  = true
 # Draft tokens proposed per verify step (verify cost is ~flat in k).
 k                    = 16
+# Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
+# matching instead of a per-step backward scan, continuations picked by
+# frequency vote across all occurrences, and adaptive draft length — a
+# draft backed by multiple agreeing occurrences (or a maximal-length
+# context match, e.g. the `prediction` region) extends past k up to
+# suffix_k_max. false = legacy single-most-recent scan.
+suffix               = true
+suffix_k_max         = 64
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).

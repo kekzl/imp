@@ -33,6 +33,16 @@ int main(int argc, char** argv) {
                 user_set = true;
         if (!user_set)
             runtime_cfg.speculative.moe = false;
+        // The suffix drafter is decidedly NOT bench-neutral (frequency-voted
+        // adaptive drafts hit +170% tg128 on the bench prompt) — pin it to
+        // the legacy scan so tests/perf_baseline.json keeps its raw-decode
+        // semantics. An explicit --set speculative.suffix=… still wins.
+        bool suffix_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("speculative.suffix=", 0) == 0)
+                suffix_set = true;
+        if (!suffix_set)
+            runtime_cfg.speculative.suffix = false;
         // Recurrent snapshots (hybrid prefix caching) are dead weight in the
         // single-shot bench but their eager buffers shift the MoE expert
         // offload budget — pin them off so hybrid GGUF baselines are

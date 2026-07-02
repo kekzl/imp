@@ -3,7 +3,10 @@
 // =============================================================================
 //
 // Drafts come from suffix matches against the request's own prompt+output
-// tokens (ngram_draft) — no draft model, no MTP head. The verify step replays
+// tokens — no draft model, no MTP head. Two matchers: the suffix index
+// (SuffixDraftIndex, speculative.suffix, default) with frequency-voted
+// continuations and adaptive draft length, or the legacy single-most-recent
+// backward scan (ngram_draft). The verify step replays
 // [t0, d1..dK] as a teacher-forced continuation chunk through the standard
 // chunked-prefill forward (KV written in place), applies the tier-aware LM
 // head to every chunk position (executor greedy_argmax_all) and accepts the
@@ -27,6 +30,7 @@
 #include "runtime/engine.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
+#include "runtime/suffix_draft.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -177,6 +181,20 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     return true;
 }
 
+SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
+    auto it = spec_suffix_idx_.find(req.id);
+    if (it == spec_suffix_idx_.end()) {
+        const auto& scfg = runtime_config_.speculative;
+        it = spec_suffix_idx_
+                 .emplace(req.id, SuffixDraftIndex(std::max(1, scfg.min_match), scfg.max_match))
+                 .first;
+        it->second.append(req.input_tokens.data(), static_cast<int>(req.input_tokens.size()));
+        it->second.append(req.prediction_tokens.data(),
+                          static_cast<int>(req.prediction_tokens.size()));
+    }
+    return it->second;
+}
+
 bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream) {
     const auto& scfg = runtime_config_.speculative;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -186,21 +204,32 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // between prompt and output so the current output suffix stays the tail:
     // a completion that tracks the prediction finds max_match-length matches
     // in the prediction region every verify step.
-    std::vector<int32_t> history;
-    history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +
-                    req->output_tokens.size());
-    history.insert(history.end(), req->input_tokens.begin(), req->input_tokens.end());
-    history.insert(history.end(), req->prediction_tokens.begin(), req->prediction_tokens.end());
-    history.insert(history.end(), req->output_tokens.begin(), req->output_tokens.end());
-    const int hist_n = static_cast<int>(history.size());
     const int pred_begin = static_cast<int>(req->input_tokens.size());
     const int pred_end = pred_begin + static_cast<int>(req->prediction_tokens.size());
 
     const int k = std::max(1, scfg.k);
     int draft_start = -1;
-    std::vector<int32_t> draft = ngram_draft(history.data(), hist_n, k,
-                                             std::max(1, scfg.min_match), scfg.max_match,
-                                             &draft_start);
+    std::vector<int32_t> draft;
+    if (scfg.suffix) {
+        // Suffix index: input ++ prediction indexed at first use, output
+        // tokens appended incrementally (every emit path lands in
+        // output_tokens, so loop-burst tokens are picked up here too).
+        SuffixDraftIndex& idx = spec_suffix_index_(*req);
+        const int out_indexed = idx.size() - pred_end;
+        idx.append(req->output_tokens.data() + out_indexed,
+                   static_cast<int>(req->output_tokens.size()) - out_indexed);
+        draft = idx.draft(k, std::max(k, scfg.suffix_k_max), &draft_start);
+    } else {
+        std::vector<int32_t> history;
+        history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +
+                        req->output_tokens.size());
+        history.insert(history.end(), req->input_tokens.begin(), req->input_tokens.end());
+        history.insert(history.end(), req->prediction_tokens.begin(),
+                       req->prediction_tokens.end());
+        history.insert(history.end(), req->output_tokens.begin(), req->output_tokens.end());
+        draft = ngram_draft(history.data(), static_cast<int>(history.size()), k,
+                            std::max(1, scfg.min_match), scfg.max_match, &draft_start);
+    }
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
     if (draft.empty()) {
         spec_stats_.miss_steps++;
