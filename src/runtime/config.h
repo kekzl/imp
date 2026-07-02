@@ -91,6 +91,15 @@ struct RuntimeConfig {
         // the only greedy-bit-reproducible decode path, and evals run to
         // completion (no mid-burst cancel needed), so determinism wins there.
         int decode_burst = 128;
+        // Cap the prefill chunk while other sequences are DECODING: prefill
+        // and decode share one stream, so every chunk forward inserts its
+        // full latency between two of their decode steps. Measured (Qwen3-8B
+        // Q8, 7.2k-token ingest against one active decoder): 2048 → decoder
+        // p95 inter-token 164 ms; 1024 → 94 ms at +27% ingest TTFT; 512 →
+        // 65 ms at +85%. 1024 is the default compromise; set 512 for
+        // latency-critical multi-tenant serving, 0 to disable (full chunk).
+        // The full chunk returns as soon as nobody is decoding.
+        int prefill_chunk_decode_cap = 1024;
     } runtime;
 
     struct KVCache {

@@ -400,6 +400,23 @@ void Engine::step_prefill(cudaStream_t stream) {
             effective_chunk = (effective_chunk / bs) * bs;
     }
 
+    // Decode-aware chunking: prefill and decode share one CUDA stream, so
+    // every chunk forward inserts its full latency (~40-80 ms at 2048)
+    // between two decode steps of every concurrently DECODING session. Cap
+    // the chunk while decoders are active so their inter-token latency stays
+    // bounded during another session's ingest; the full chunk (and its
+    // better weight-traffic amortization) returns as soon as nobody decodes.
+    const int decode_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
+    if (decode_cap > 0 && !sched_decode_batch_.empty() && effective_chunk > decode_cap) {
+        int capped = decode_cap;
+        if (kv_manager_) {
+            int bs = kv_manager_->kv_cache()->block_size();
+            if (capped > bs)
+                capped = (capped / bs) * bs;
+        }
+        effective_chunk = capped;
+    }
+
     for (auto& req : sched_prefill_batch_) {
         step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
@@ -1685,6 +1702,21 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
                 !runtime_config_.runtime.deterministic)
                 launch_limit = runtime_config_.runtime.decode_burst;
+            // Admission-aware burst: while another request is waiting (still
+            // pending admission or mid-prefill), Engine::step short-circuits
+            // to the resume path for the whole burst — the waiting request's
+            // prefill only advances between bursts, inflating its TTFT by
+            // ~0.5-1 s per 128-token burst. Shorten the burst so scheduling
+            // work interleaves every few tokens; the full burst returns when
+            // nothing is waiting. Deterministic mode is exempt (same
+            // reasoning as decode_burst above — reproducible evals are
+            // single-stream, nothing ever waits).
+            if (!runtime_config_.runtime.deterministic &&
+                (scheduler_->has_pending() || !sched_prefill_batch_.empty())) {
+                constexpr int kBusyBurst = 16;
+                if (launch_limit == 0 || launch_limit > kBusyBurst)
+                    launch_limit = kBusyBurst;
+            }
             try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }
     }

@@ -130,7 +130,7 @@ class TestConcurrentRequests:
 
 
 class TestConstrainedUnderConcurrency:
-    def test_json_schema_enforced_while_sharing_decode_batch(self, model):
+    def test_json_schema_enforced_while_sharing_decode_batch(self, model, is_mock):
         """A json_schema request that decodes concurrently with other requests
         must still return schema-valid JSON.
 
@@ -139,6 +139,8 @@ class TestConstrainedUnderConcurrency:
         so a constrained request sharing a batch decoded UNCONSTRAINED, and any
         concurrent prefill/finish reset the FSM mid-generation.
         """
+        if is_mock:
+            pytest.skip("mock server does not implement constrained decoding")
         import time
 
         # enum keeps the answer short so the object closes well within

@@ -119,6 +119,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
     I("runtime.decode_burst", cfg.runtime.decode_burst);
+    I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
 
     // [kv_cache]
     S("kv_cache.dtype", cfg.kv_cache.dtype);
