@@ -41,23 +41,68 @@ TOOL_DEFS = (
     "conventions, produce minimal diffs, never fabricate paths or APIs. "
 )
 
-CODE_SNIPPET = """\
-def process_batch_{i}(items, config):
-    \"\"\"Process a batch of items with retry and backoff.\"\"\"
-    results = []
-    for attempt in range(config.max_retries):
+# A menu of structurally DISTINCT function bodies. Each snippet also gets a
+# per-(turn, index) unique name, so no two 16-token windows collide across
+# turns — repetitive content would trigger prefix-cache block reuse on
+# non-identical prefixes and zero out the response (a pathological-input edge
+# case, not a real agent workload). Growing-prefix cache reuse is still
+# exercised: turn i's prompt shares its first i turns verbatim with turn i-1.
+CODE_SNIPPETS = [
+    """def {name}(items, cfg):
+    out = []
+    for attempt in range(cfg.max_retries):
         try:
-            for item in items:
-                validated = validate_schema(item, config.schema_{i})
-                transformed = apply_transform(validated, config.rules)
-                results.append(persist(transformed, config.target_{i}))
-            return results
-        except TransientError as exc:
-            backoff = config.base_delay * (2 ** attempt)
-            log.warning("batch %d attempt %d failed: %s", {i}, attempt, exc)
-            time.sleep(backoff)
-    raise BatchFailed({i}, len(items))
-"""
+            for it in items:
+                v = validate_schema(it, cfg.schema)
+                out.append(persist(apply_transform(v, cfg.rules), cfg.target))
+            return out
+        except TransientError as e:
+            time.sleep(cfg.base_delay * (2 ** attempt))
+    raise BatchFailed(len(items))
+""",
+    """def {name}(graph, start):
+    seen, stack, order = set(), [start], []
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        order.append(node)
+        stack.extend(reversed(graph.neighbors(node)))
+    return order
+""",
+    """def {name}(text, window):
+    counts, best, lo = {{}}, 0, 0
+    for hi, ch in enumerate(text):
+        counts[ch] = counts.get(ch, 0) + 1
+        while len(counts) > window:
+            counts[text[lo]] -= 1
+            if counts[text[lo]] == 0:
+                del counts[text[lo]]
+            lo += 1
+        best = max(best, hi - lo + 1)
+    return best
+""",
+    """async def {name}(session, urls, limit):
+    sem = asyncio.Semaphore(limit)
+    async def fetch(u):
+        async with sem, session.get(u) as r:
+            return await r.json()
+    return await asyncio.gather(*(fetch(u) for u in urls))
+""",
+    """def {name}(matrix):
+    rows, cols = len(matrix), len(matrix[0])
+    for r in range(rows):
+        for c in range(r + 1, cols):
+            matrix[r][c], matrix[c][r] = matrix[c][r], matrix[r][c]
+    for row in matrix:
+        row.reverse()
+    return matrix
+""",
+]
+
+_NAMES = ["retry_batch", "walk_dag", "longest_span", "fan_out_fetch", "rotate_inplace",
+          "coalesce", "reindex", "shard_route", "backfill", "reconcile"]
 
 
 def build_system(repeat: int) -> str:
@@ -65,7 +110,12 @@ def build_system(repeat: int) -> str:
 
 
 def build_user_turn(i: int, snippet_reps: int) -> str:
-    code = "".join(CODE_SNIPPET.replace("{i}", str(i * 100 + j)) for j in range(snippet_reps))
+    parts = []
+    for j in range(snippet_reps):
+        tmpl = CODE_SNIPPETS[(i + j) % len(CODE_SNIPPETS)]
+        name = f"{_NAMES[(i * 3 + j) % len(_NAMES)]}_{i}_{j}"
+        parts.append(tmpl.format(name=name))
+    code = "\n".join(parts)
     return (
         f"Review chunk {i} of the module below. Point out the single most "
         f"important issue and show the corrected function.\n\n```python\n{code}```"
