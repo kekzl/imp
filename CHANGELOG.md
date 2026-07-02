@@ -4,6 +4,73 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-02
+
+Agentic-serving batch: multi-turn correctness + speculation + throughput.
+
+### Added
+- **OpenAI Predicted Outputs (`prediction`)** — client-supplied predicted
+  completion text is tokenized into the n-gram speculative-decode draft corpus
+  (never forwarded through the model, so output stays a faithful greedy decode),
+  giving guaranteed drafts for code-edit / rewrite workloads.
+  `usage.completion_tokens_details.{accepted,rejected}_prediction_tokens` is
+  reported on the non-streaming and streaming chat routes; `/v1/completions`
+  accepts the string form (#825).
+- **Streaming through the conditional-graph decode loop** — streaming requests
+  now poll the mapped ring buffer per token instead of taking a per-step host
+  round-trip, so SSE delivers each token as the device burst runs (Q8 max inter-
+  token gap 197→17 ms, MoE 28→7.6 ms) on the same fast async loop as everything
+  else (#822).
+- **Agentic API-compliance batch** — streaming tool-call dialects (Gemma-4
+  `<|tool_call>`, Qwen3.6 XML) via a shared stream filter, `/v1/messages/count_tokens`,
+  OpenAI SSE keepalives, `max_completion_tokens`, stop-cap 4→16, and a clean
+  encoder-only-arch (nomic-bert) load reject (#818, #820).
+- **`tools/multiturn_bench.py`** — agentic multi-turn replay benchmark (growing
+  conversation prefix, per-turn TTFT/decode via SSE, prefix-cache visibility),
+  OpenAI-compatible so it runs unchanged against vLLM/llama.cpp (#826, #827).
+
+### Performance
+- **n-gram speculation on native-NVFP4 MoE** — the `is_moe` speculation gate is
+  relaxed for native-NVFP4 experts (`speculative.moe`, default on; GGUF-MoE stays
+  on the async loop where verify re-dequantizes experts): Qwen3-Coder-30B-A3B-FP4
+  code-edit **+49-81%** (93% draft acceptance), Modelopt-30B +29%. `imp-cli
+  --bench` pins it off so the gated decode baseline stays a raw signal (#824).
+- **Serving latency** — decode-aware prefill chunk cap while a decoder is active
+  (`runtime.prefill_chunk_decode_cap`, default 1024), admission-aware decode
+  bursts so a waiter's prefill isn't starved between bursts, and cross-turn output
+  KV reuse. All no-ops for single-stream; greedy byte-identical (#823).
+
+### Fixed
+- **Qwen3-Coder-30B multi-turn empty output** — imp's Jinja engine did not strip
+  the template file's single trailing newline (unlike Jinja2's
+  `keep_trailing_newline=False` that HF/vLLM use). Qwen3-Coder's
+  `chat_template.jinja` ends in a newline, so imp rendered the generation prompt
+  as `<|im_start|>assistant\n\n`; the extra blank line made the model emit an
+  immediate EOS on borderline multi-turn contexts (turns came back empty,
+  non-deterministically). `Template::parse()` now strips one trailing
+  `\n`/`\r\n`/`\r`. Templates without a trailing newline (Qwen3/Modelopt) were
+  unaffected (#828).
+- **Native-NVFP4 VRAM budget starved the weight caches** — the budget estimated
+  0 bytes for native-NVFP4 checkpoints (qtypes are still wire dtypes at budget
+  time), so the KV hard-clamp took all post-weight VRAM and the CUTLASS SfAtom SF
+  cache (1.8 GiB on Coder-30B) never built, dropping to dequant fallbacks. Now
+  reserved before the KV clamp: **Qwen3-Coder-30B-FP4 server 31.8→300 tok/s**, and
+  dense Qwen3-14B-NVFP4 (silently halved by the same bug, masked by CLI batch=1)
+  106→209 tok/s (#826).
+- **json_schema not enforced under concurrency** — the engine-global
+  `ConstraintManager` had per-request state holes (attach gated on batch size 1,
+  every-prefill clobber, any-finish reset). Constraint state is now per-request
+  with an engine pool; a concurrent schema request that previously invented keys
+  is now enforced (#821).
+- **Long-context chunked-prefill abort / 32-token chunks** — the engine clamped
+  every prefill chunk to `cap²/total` (32-token chunks at 128k on hd≠128) and
+  aborted gpt-oss when the clamp hit 0. Offset-aware `max_safe_prefill_chunk()`
+  (only when cuBLAS serves) plus `attn_shapes_uniform()` lets uniform-per-layer
+  GDN/Mamba hybrids use the O(n) chunked attention paths: **Qwen3.6-35B pp10k +80%,
+  Nemotron +115%, gpt-oss pp40k +69%, Gemma-4 +35%**, PPL parity ≤1% (#819).
+- **Paged-decode split-K / cluster launch failure** — falls back to single-split
+  GQA/MHA instead of erroring (#817).
+
 ## [0.13.0] - 2026-06-30
 
 ### Added
