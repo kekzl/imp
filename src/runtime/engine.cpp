@@ -346,6 +346,10 @@ void Engine::invalidate_graphs() {
     // conditional runner.
     if (cpipe_.active)
         teardown_constrained_pipeline(/*synchronize=*/true);
+
+    // Captured verify-chunk graphs (#847) baked the forward as well (incl.
+    // any active LoRA kernels/pointers) — recapture costs two verify steps.
+    free_spec_graphs_();
 }
 
 int Engine::lora_load(const std::string& path) {

@@ -256,6 +256,22 @@ public:
     // capacity guard abort).
     int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
 
+    // Graph-captured verify chunk (#847). The chunked continuation forward is
+    // replayable (InferenceState::ctx_capacity mode) only when the FP16-QK FA2
+    // kernel serves EVERY attention layer with device-read lengths: uniform
+    // hd=128 shapes, no learned sinks, no MLA, no LongRoPE (host branch on
+    // max_context_len selects the freq table), fa2_fp16qk not disabled.
+    bool chunk_capture_supported() const;
+    // Persistent K/V scratch for the replayable chunked continuation
+    // ([ctx_capacity, nkv, hd] FP16 each) — replaces the per-layer
+    // cudaMallocAsync whose size would bake the growing ctx_len into the
+    // graph. Idempotent; returns false on allocation failure.
+    [[nodiscard]] bool ensure_chunk_capture_scratch(int ctx_capacity);
+    // Bumped whenever the shared forward workspace is reallocated. A captured
+    // verify graph holds raw pointers into it — the engine invalidates its
+    // graphs when this changes.
+    uint64_t workspace_generation() const { return ws_.generation(); }
+
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }
@@ -403,6 +419,13 @@ private:
     void* attn_scores_buf_ = nullptr;
     size_t attn_scores_buf_size_ = 0;
     Tensor attn_scores_;  // 3D tensor view into attn_scores_buf_
+
+    // Persistent K/V scratch for the graph-captured verify chunk (#847),
+    // sized by ensure_chunk_capture_scratch. chunk_capture_ctx_ is the
+    // ctx_capacity the buffers cover (0 = unallocated).
+    half* chunk_capture_k_ = nullptr;
+    half* chunk_capture_v_ = nullptr;
+    int chunk_capture_ctx_ = 0;
 
     // Dense FFN phase tensors (views into shared_workspace_, set by configure_ffn_workspace)
     Tensor gate_out_;    // [max_tokens, d_ff]

@@ -1232,6 +1232,15 @@ void GraphExecutor::free_buffers() {
     }
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
+    if (chunk_capture_k_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
+        chunk_capture_k_ = nullptr;
+    }
+    if (chunk_capture_v_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_v_));
+        chunk_capture_v_ = nullptr;
+    }
+    chunk_capture_ctx_ = 0;
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();
@@ -1292,6 +1301,75 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     if (kv_bs > 0)
         n_max = (n_max / kv_bs) * kv_bs;
     return std::min(desired, n_max);
+}
+
+bool GraphExecutor::chunk_capture_supported() const {
+    const auto& cfg = model_->config();
+    if (cfg.is_mla())
+        return false;  // absorbed-decode latent cache writes are host-parameterized
+    if (model_->profile().is_gpt_oss)
+        return false;  // learned sinks — cuBLAS-only chunked attention
+    if (longrope_short_freqs_ != nullptr)
+        return false;  // host branch on max_context_len picks the freq table
+    if (!attn_shapes_uniform())
+        return false;
+    int hd_u = cfg.head_dim > 0 ? cfg.head_dim
+                                : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+    for (int x : cfg.head_dim_per_layer) {
+        if (x > 0) {
+            hd_u = x;
+            break;
+        }
+    }
+    if (hd_u != 128)
+        return false;  // FP16-QK FA2 is the only device-length chunked kernel
+    if (runtime_config().attention.fa2_fp16qk == "never")
+        return false;
+    return true;
+}
+
+bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
+    if (ctx_capacity <= 0)
+        return false;
+    if (chunk_capture_k_ && chunk_capture_ctx_ >= ctx_capacity)
+        return true;
+    const auto& cfg = model_->config();
+    // Size for the largest per-layer shape (uniform under the eligibility
+    // gate, but the max keeps the scratch safe regardless).
+    int nkv_u = 0;
+    for (int x : cfg.n_kv_heads_per_layer) nkv_u = std::max(nkv_u, x);
+    if (nkv_u <= 0) nkv_u = cfg.n_kv_heads;
+    int hd_u = 0;
+    for (int x : cfg.head_dim_per_layer) hd_u = std::max(hd_u, x);
+    if (hd_u <= 0)
+        hd_u = cfg.head_dim > 0 ? cfg.head_dim
+                                : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+    if (nkv_u <= 0 || hd_u <= 0)
+        return false;
+    const size_t bytes = static_cast<size_t>(ctx_capacity) * nkv_u * hd_u * sizeof(half);
+    if (chunk_capture_k_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
+        chunk_capture_k_ = nullptr;
+    }
+    if (chunk_capture_v_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_v_));
+        chunk_capture_v_ = nullptr;
+    }
+    chunk_capture_ctx_ = 0;
+    if (cudaMalloc(&chunk_capture_k_, bytes) != cudaSuccess ||
+        cudaMalloc(&chunk_capture_v_, bytes) != cudaSuccess) {
+        IMP_LOG_WARN("chunk-capture scratch alloc failed (2x %.1f MiB) — captured verify disabled",
+                     bytes / (1024.0 * 1024.0));
+        if (chunk_capture_k_) {
+            IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
+            chunk_capture_k_ = nullptr;
+        }
+        return false;
+    }
+    chunk_capture_ctx_ = ctx_capacity;
+    IMP_LOG_INFO("chunk-capture K/V scratch: 2x %.1f MiB (ctx_capacity=%d, nkv=%d, hd=%d)",
+                 bytes / (1024.0 * 1024.0), ctx_capacity, nkv_u, hd_u);
+    return true;
 }
 
 // pre_dequant_weights() is in executor_pre_dequant.cu

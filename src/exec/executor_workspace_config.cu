@@ -155,6 +155,7 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         if (shared_workspace_) {
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(shared_workspace_, stream));
         }
+        generation_++;  // arena moves — captured verify graphs must invalidate
         cudaError_t err = cudaMallocAsync(&shared_workspace_, new_shared, stream);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes: %s", new_shared,

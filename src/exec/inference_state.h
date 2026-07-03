@@ -156,6 +156,16 @@ struct InferenceState {
     // When true, use per-row Q8_1 GEMV for LM head instead of batched FP8 GEMM.
     // Avoids FP8 per-tensor quantization artifacts in batched verification.
     bool per_row_lm_head = false;
+
+    // Graph-captured verify chunk (#847). When ctx_capacity > 0 the chunked
+    // continuation attention path becomes replayable across context growth:
+    // gather grids and the KV scratch are sized for ctx_capacity, and the
+    // kernels read the REAL lengths from device (context_lens[0] for the
+    // total, d_past_len for the already-cached prefix) instead of baking
+    // max_context_len / prefill_offset. Requires n_sequences == 1 and an
+    // FA2-served attention config (GraphExecutor::chunk_capture_supported).
+    int ctx_capacity = 0;
+    const int* d_past_len = nullptr;  // device int == prefill_offset
 };
 
 }  // namespace imp

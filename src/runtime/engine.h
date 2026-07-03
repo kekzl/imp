@@ -23,8 +23,10 @@
 #include "core/cuda_raii.h"
 #include <memory>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <string>
+#include <cstdint>
 #include <cuda_runtime.h>
 
 #include "lora/lora_adapter.h"
@@ -587,6 +589,44 @@ private:
     // graph launch when possible, eagerly otherwise.
     void spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
                                      cudaStream_t stream);
+    // ── Graph-captured verify chunk (#847), engine_spec_capture.cpp ──
+    // One cached cudaGraphExec_t per padded chunk length (bucket); replayed
+    // every verify step after per-step device-buffer refresh. The chunk
+    // forward reads all growing lengths from device (InferenceState
+    // ctx_capacity mode), so a graph stays valid across context growth.
+    struct SpecVerifyGraph {
+        cudaGraphExec_t exec = nullptr;
+        int eager_uses = 0;  // first use per slot runs eager (algo warmup)
+    };
+    // Keyed by (padded chunk length, ctx tier). The tier (power of two the
+    // context is rounded up to) sizes the gather grids — a graph baked for
+    // the full 32k capacity spends ~3x the gather time at short contexts, so
+    // graphs re-capture when the context outgrows their tier (rare,
+    // amortized over thousands of verify steps).
+    std::map<std::pair<int, int>, SpecVerifyGraph> spec_graphs_;
+    int spec_capture_ctx_tier_(int ctx_padded) const;
+    int* d_spec_past_len_ = nullptr;  // device int: p0 (cached-prefix length)
+    int spec_capture_ctx_cap_ = -1;   // resolved capacity; -1 = unresolved, 0 = disabled
+    uint64_t spec_capture_ws_gen_ = 0;
+    int spec_capture_failures_ = 0;
+    bool spec_capture_doomed_ = false;
+    // True when this verify step may use the captured path: config on, not
+    // doomed, non-hybrid, no MoE offload, executor-supported attention
+    // config, padded context within the resolved capacity. Resolves the
+    // capacity + allocates the executor scratch on first eligible use.
+    bool spec_capture_ready_(int ctx_padded);
+    // Round the real chunk length up to its capture bucket.
+    int spec_capture_bucket_(int chunk_len) const;
+    int spec_capture_bucket_max_() const;
+    // Launch the cached graph for state.n_tokens (or warm up / capture one).
+    // Returns true when the forward ran (graph replay or captured+launched);
+    // false → caller runs the eager forward itself (warmup use, capture
+    // failure, launch failure). Sets spec_capture_doomed_ after repeated
+    // failures — the caller must then clear the state's capture fields
+    // before its eager forward (a doom inside the forward means the capture
+    // path itself threw).
+    bool spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream);
+    void free_spec_graphs_();
     // Effective n-gram speculation state for a request: honors the per-request
     // tri-state override (Request::spec_ngram_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {

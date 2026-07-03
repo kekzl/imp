@@ -270,6 +270,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.burst_rearm", cfg.speculative.burst_rearm);
     B("speculative.hybrid", cfg.speculative.hybrid);
     I("speculative.mtp_k", cfg.speculative.mtp_k);
+    B("speculative.capture", cfg.speculative.capture);
+    I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 
     if (!matched)
         IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());

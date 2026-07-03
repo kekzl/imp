@@ -263,6 +263,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_spec_ngram.cpp
+    src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/ngram_draft.cpp

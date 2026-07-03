@@ -1278,7 +1278,8 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset,
-                                      const float* __restrict__ d_amax = nullptr) {
+                                      const float* __restrict__ d_amax = nullptr,
+                                      const int* __restrict__ d_kv_len = nullptr) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1297,6 +1298,15 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     const int batch_idx = batch_head / n_heads;
     const int head_idx = batch_head % n_heads;
     const int kv_head = head_idx / (n_heads / n_kv_heads);
+
+    // Graph-captured verify (#847): the real KV length lives on device and the
+    // baked seq_kv is only the buffer capacity (single-sequence chunks, so the
+    // batch stride it feeds is inert). q_offset follows from the chunked
+    // continuation invariant seq_kv == q_offset + seq_q.
+    if (d_kv_len != nullptr) {
+        seq_kv = __ldg(d_kv_len);
+        q_offset = seq_kv - seq_q;
+    }
 
     const int lane = threadIdx.x;     // 0..31
     const int warp_id = threadIdx.y;  // 0..7  → this warp's row tile
@@ -1809,9 +1819,11 @@ static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool
 
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
-                            bool fp16_qk) {
+                            bool fp16_qk, const int* d_kv_len) {
     if (Q.qtype != QType::F16)
         return false;
+    if (d_kv_len != nullptr && !fp16_qk)
+        return false;  // device-length replay is wired for the f16-QK path only
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -1940,7 +1952,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                                         reinterpret_cast<const half*>(V.data),
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
                                         n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
-                                        fp8_scaled ? s_d_amax : nullptr);
+                                        fp8_scaled ? s_d_amax : nullptr, d_kv_len);
     return true;
 }
 

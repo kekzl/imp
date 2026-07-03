@@ -16,12 +16,18 @@ namespace imp {
 //
 // NOTE: __ldcs is a streaming hint — KV bytes don't pollute L2, matching
 // paged_attention_decode_fp8 / decode_int8 / decode behavior.
+//
+// d_n_past (all kernels): optional DEVICE override of the n_past bound. When
+// set, the host n_past only sized the (oversized) grid and the real token
+// count is read from device — the graph-captured verify path (#847) replays
+// a baked grid while the context grows between replays.
 
 static constexpr int TOKENS_PER_BLOCK = 8;
 
 __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* __restrict__ src,
                                             const int* __restrict__ block_table, int n_past,
-                                            int block_size, int nkv, int hd) {
+                                            int block_size, int nkv, int hd,
+                                            const int* __restrict__ d_n_past) {
     const int block_group = blockIdx.x;     // group of TOKENS_PER_BLOCK tokens
     const int kv_head = blockIdx.y;
     const int tid = threadIdx.x;
@@ -29,6 +35,8 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
     const int token_in_block = tid / threads_per_token;
     const int d_lane = tid % threads_per_token;
 
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
     const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
     if (pos >= n_past)
         return;
@@ -57,7 +65,8 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
                                                     const __nv_fp8_e4m3* __restrict__ src,
                                                     const int* __restrict__ block_table,
                                                     float kv_scale, int n_past, int block_size,
-                                                    int nkv, int hd) {
+                                                    int nkv, int hd,
+                                                    const int* __restrict__ d_n_past) {
     const int block_group = blockIdx.x;
     const int kv_head = blockIdx.y;
     const int tid = threadIdx.x;
@@ -65,6 +74,8 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
     const int token_in_block = tid / threads_per_token;
     const int d_lane = tid % threads_per_token;
 
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
     const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
     if (pos >= n_past)
         return;
@@ -92,26 +103,28 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
 }
 
 void paged_kv_gather_fp16(half* dst, const half* src, const int* block_table, int n_past,
-                          int block_size, int nkv, int hd, cudaStream_t stream) {
+                          int block_size, int nkv, int hd, cudaStream_t stream,
+                          const int* d_n_past) {
     if (n_past <= 0 || nkv <= 0 || hd <= 0)
         return;
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;  // 8 tokens × 32 lanes; works for hd up to 256 with stride-32, OK for hd=512 too
     paged_kv_gather_fp16_kernel<<<grid, threads, 0, stream>>>(dst, src, block_table, n_past,
-                                                              block_size, nkv, hd);
+                                                              block_size, nkv, hd, d_n_past);
 }
 
 void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int* block_table,
                                  float kv_scale, int n_past, int block_size, int nkv, int hd,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, const int* d_n_past) {
     if (n_past <= 0 || nkv <= 0 || hd <= 0)
         return;
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
     paged_kv_gather_fp8_to_fp16_kernel<<<grid, threads, 0, stream>>>(dst, src, block_table, kv_scale,
-                                                                      n_past, block_size, nkv, hd);
+                                                                      n_past, block_size, nkv, hd,
+                                                                      d_n_past);
 }
 
 // NVFP4 → FP16 dequant gather. Same TOKENS_PER_BLOCK / threads_per_token grid
@@ -124,7 +137,8 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
     const uint8_t* __restrict__ src_packed,    // [block, slot, nkv, hd/2]
     const uint8_t* __restrict__ src_scales,    // [block, slot, nkv, hd/16] UE4M3
     const int* __restrict__ block_table,
-    int n_past, int block_size, int nkv, int hd) {
+    int n_past, int block_size, int nkv, int hd,
+    const int* __restrict__ d_n_past) {
     constexpr int kGroup = 16;
 
     const int block_group = blockIdx.x;
@@ -134,6 +148,8 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
     const int token_in_block = tid / threads_per_token;
     const int d_lane = tid % threads_per_token;
 
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
     const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
     if (pos >= n_past)
         return;
@@ -179,14 +195,14 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
 void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
                                    const uint8_t* src_scales, const int* block_table,
                                    int n_past, int block_size, int nkv, int hd,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, const int* d_n_past) {
     if (n_past <= 0 || nkv <= 0 || hd <= 0)
         return;
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
     paged_kv_gather_nvfp4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd);
+        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +214,8 @@ __global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
     const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
     const uint8_t* __restrict__ src_scales,  // [block, slot, nkv, hd/16] UE8M0
     const int* __restrict__ block_table,
-    int n_past, int block_size, int nkv, int hd) {
+    int n_past, int block_size, int nkv, int hd,
+    const int* __restrict__ d_n_past) {
     constexpr int kGroup = 16;
 
     const int block_group = blockIdx.x;
@@ -208,6 +225,8 @@ __global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
     const int token_in_block = tid / threads_per_token;
     const int d_lane = tid % threads_per_token;
 
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
     const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
     if (pos >= n_past)
         return;
@@ -251,14 +270,14 @@ __global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
 void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
                                        const uint8_t* src_scales, const int* block_table,
                                        int n_past, int block_size, int nkv, int hd,
-                                       cudaStream_t stream) {
+                                       cudaStream_t stream, const int* d_n_past) {
     if (n_past <= 0 || nkv <= 0 || hd <= 0)
         return;
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
     paged_kv_gather_mxfp4_kv_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd);
+        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
 }
 
 // INT4 → FP16 dequant gather. Symmetric 4-bit, per-head FP16 scale.
@@ -270,7 +289,8 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
     const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
     const half* __restrict__ src_scales,     // [block, slot, nkv]
     const int* __restrict__ block_table,
-    int n_past, int block_size, int nkv, int hd) {
+    int n_past, int block_size, int nkv, int hd,
+    const int* __restrict__ d_n_past) {
     const int block_group = blockIdx.x;
     const int kv_head = blockIdx.y;
     const int tid = threadIdx.x;
@@ -278,6 +298,8 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
     const int token_in_block = tid / threads_per_token;
     const int d_lane = tid % threads_per_token;
 
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
     const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
     if (pos >= n_past)
         return;
@@ -317,14 +339,33 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
 void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
                                   const half* src_scales, const int* block_table,
                                   int n_past, int block_size, int nkv, int hd,
-                                  cudaStream_t stream) {
+                                  cudaStream_t stream, const int* d_n_past) {
     if (n_past <= 0 || nkv <= 0 || hd <= 0)
         return;
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
     paged_kv_gather_int4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd);
+        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+}
+
+// Chunk append at device-computed row offset (see kv_gather.h). n ≤ ~65 rows,
+// row_elems = nkv*hd — a single thread block per row keeps this trivial.
+__global__ void kv_chunk_append_fp16_kernel(half* __restrict__ dst, const half* __restrict__ src,
+                                            const int* __restrict__ d_past_len, int row_elems) {
+    const int row = blockIdx.x;
+    const int past = __ldg(d_past_len);
+    half* dst_row = dst + ((size_t)past + row) * row_elems;
+    const half* src_row = src + (size_t)row * row_elems;
+    for (int e = threadIdx.x; e < row_elems; e += blockDim.x)
+        dst_row[e] = src_row[e];
+}
+
+void kv_chunk_append_fp16(half* dst, const half* src, const int* d_past_len, int n,
+                          int row_elems, cudaStream_t stream) {
+    if (n <= 0 || row_elems <= 0)
+        return;
+    kv_chunk_append_fp16_kernel<<<n, 256, 0, stream>>>(dst, src, d_past_len, row_elems);
 }
 
 }  // namespace imp

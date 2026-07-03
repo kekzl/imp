@@ -10,6 +10,13 @@ namespace imp {
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
 
+// Graph-captured verify (#847): allow cuBLASLt calls to record into an active
+// stream capture. Default off — cold-shape Lt calls fail with status 14 under
+// capture on sm_120 (heuristic/workspace paths); the verify capturer warms
+// every shape eagerly first and toggles this around its capture.
+void gemm_set_lt_capture_allowed(bool allowed);
+bool gemm_lt_capture_allowed();
+
 // Destroy cached cuBLASLt descriptors. Call at shutdown (e.g. Engine destructor).
 void gemm_cleanup();
 

@@ -576,6 +576,23 @@ struct RuntimeConfig {
         // match (draft-poor prose — 78-94% depth-1 accept on Qwen3.6-35B-A3B,
         // PR #804). imp-cli equivalent: --mtp-spec-decode <k>.
         int mtp_k = 0;
+        // Graph-captured verify chunk (#847): cache one CUDA graph per
+        // draft-length bucket and replay it each verify step — the chunk
+        // metadata and KV lengths are read from device buffers, so the graph
+        // survives context growth. Removes the eager launch-pacing tax
+        // (~1800 launches/verify cycle). Drafts are padded up to the bucket
+        // length (extra rows are causally invisible to the real rows and
+        // their KV is rolled back with the rejected drafts). Engages only
+        // where the FP16-QK FA2 kernel serves the chunk (uniform hd=128, no
+        // sinks/MLA/LongRoPE) on non-hybrid models; anything else stays
+        // eager. Any capture failure falls back to the eager verify and
+        // disables capture for the process after repeated failures.
+        bool capture = true;
+        // Context capacity the captured gather grids and the persistent K/V
+        // scratch are sized for (2 x ctx_cap x nkv x hd x 2B VRAM, e.g. 2x
+        // 32 MiB at 32k for nkv=4/hd=128). Verify steps whose context
+        // exceeds this run eager. Clamped to the model's max_seq_len.
+        int capture_ctx_cap = 32768;
     } speculative;
 
     // Constrained decoding (json_mode / json_schema).

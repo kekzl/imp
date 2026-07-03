@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include <stdexcept>
 #include "lora/lora_adapter.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"

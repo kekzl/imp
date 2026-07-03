@@ -342,6 +342,17 @@ hybrid               = true
 # MTP chains fill verify steps where the suffix matcher has no draft.
 # imp-cli equivalent: --mtp-spec-decode <k>.
 mtp_k                = 0
+# Graph-captured verify (#847): cache one CUDA graph per draft-length bucket
+# and replay it each verify step (all growing lengths are read from device
+# buffers), removing the eager launch-pacing tax. Engages only where the
+# FP16-QK FA2 kernel serves the chunk (uniform hd=128, no sinks/MLA/LongRoPE)
+# on non-hybrid models; capture failures fall back to the eager verify.
+# imp-cli --bench pins this false (raw-decode baseline semantics).
+capture              = true
+# Context capacity the captured grids and the persistent K/V scratch cover
+# (2 x cap x nkv x hd x 2B VRAM); verify steps beyond it run eager. Clamped
+# to the model's max_seq_len.
+capture_ctx_cap      = 32768
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM
