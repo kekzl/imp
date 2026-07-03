@@ -130,7 +130,17 @@ Per token:
    `src/compute/sampling.{h,cu}` (`sample_greedy`, `sample_topk_topp`,
    `sample_mirostat_v2`, `apply_typical_p`).
 7. **Stop check** — EOS, max_tokens, stop strings.
-8. **(Optional) MTP spec-decode draft** — `src/compute/mtp_forward.cu`.
+8. **(Optional) speculative decoding** — batch-1 greedy requests verify
+   drafts as teacher-forced continuation chunks
+   (`src/runtime/engine_spec_ngram.cpp`). Draft sources: the suffix index /
+   n-gram matcher (`src/runtime/suffix_draft.{h,cpp}`,
+   `src/runtime/ngram_draft.h`), and — opt-in — the trained MTP head
+   (`src/runtime/engine_spec_mtp.cpp`, forward in
+   `src/compute/mtp_forward.cu`). Hybrid (SSM/GDN) models participate via a
+   recurrent-state slab snapshot around the verify chunk (a partial
+   acceptance restores the slab and re-forwards the accepted prefix);
+   `speculative.hybrid` in `imp.conf` gates it, imp-cli `--bench` pins it
+   off.
 
 ## Subsystems referenced across phases
 

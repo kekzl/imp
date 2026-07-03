@@ -63,7 +63,7 @@ void print_usage(const char* prog) {
             "deepseek_r1, phi\n"
             "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = single-chunk, default: per-arch)\n"
             "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
-            "  --mtp-spec-decode <k> Enable MTP spec-decode with draft length k (requires model_mtp.safetensors)\n"
+            "  --mtp-spec-decode <k> MTP drafting for the verify loop, chain length k (sidecar or embedded mtp.* head)\n"
             "  --decode-nvfp4        Force mode 1 (additive: FP8 prefill + NVFP4 decode caches).\n"
             "                        Auto-default for dense Q*_K (6-8 bit GGUF) on sm_120 since\n"
             "                        PR #367 — +4 % decode vs mode 2 at -9 % prefill on\n"

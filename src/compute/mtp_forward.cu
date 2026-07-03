@@ -434,20 +434,12 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     }
 
     // Phase 2.2 MoE buffers (only if n_experts > 0)
-    if (ok && n_experts > 0 && top_k > 0 && expert_d_ff > 0) {
-        ok &= alloc(&ws.d_post_norm,       hidden_dim * sizeof(__half));
+    const bool has_moe = n_experts > 0 && top_k > 0 && expert_d_ff > 0;
+    if (ok && has_moe) {
         ok &= alloc(&ws.d_router_logits,   n_experts * sizeof(__half));
         ok &= alloc(&ws.d_expert_gate_up,  2 * expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_act,      expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_outputs,  top_k * hidden_dim * sizeof(__half));
-        ok &= alloc(&ws.d_moe_out,         hidden_dim * sizeof(__half));
-
-        if (shared_d_ff > 0) {
-            ok &= alloc(&ws.d_shared_gate, shared_d_ff * sizeof(__half));
-            ok &= alloc(&ws.d_shared_up,   shared_d_ff * sizeof(__half));
-            ok &= alloc(&ws.d_shared_act,  shared_d_ff * sizeof(__half));
-            ok &= alloc(&ws.d_shared_out,  hidden_dim * sizeof(__half));
-        }
 
         // Routing pool (max 1 token for M=1 decode).
         ws.routing_buf.allocate(/*max_tokens=*/1, /*max_experts=*/n_experts, /*top_k=*/top_k);
@@ -459,6 +451,19 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
             ok &= (cudaHostAlloc(reinterpret_cast<void**>(&ws.h_expert_weights),
                                   top_k * sizeof(float), cudaHostAllocDefault) == cudaSuccess);
         }
+    }
+    // MLP scratch shared by both variants: the MoE shared expert AND the
+    // dense MTP MLP (Qwen3.6 dense checkpoints embed a plain SwiGLU MLP,
+    // mapped onto the shared_expert fields — no router, no sigmoid gate).
+    if (ok && (has_moe || shared_d_ff > 0)) {
+        ok &= alloc(&ws.d_post_norm, hidden_dim * sizeof(__half));
+        ok &= alloc(&ws.d_moe_out,   hidden_dim * sizeof(__half));
+    }
+    if (ok && shared_d_ff > 0) {
+        ok &= alloc(&ws.d_shared_gate, shared_d_ff * sizeof(__half));
+        ok &= alloc(&ws.d_shared_up,   shared_d_ff * sizeof(__half));
+        ok &= alloc(&ws.d_shared_act,  shared_d_ff * sizeof(__half));
+        ok &= alloc(&ws.d_shared_out,  hidden_dim * sizeof(__half));
     }
 
     if (!ok) mtp_workspace_free(ws);
@@ -521,7 +526,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
     }
-    if (!d_h_prev || !out_token_id) return false;
+    if (!d_h_prev) return false;  // out_token_id == nullptr → feed-only step
     if (!ws.d_emb_norm || !ws.d_h_norm || !ws.d_fc_in || !ws.d_fc_out ||
         !ws.d_h_final || !ws.d_logits) {
         IMP_LOG_ERROR("mtp_draft_step: workspace not allocated");
@@ -780,12 +785,20 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         (void)mtp.k_norm;
     }
 
-    // 5.B — MoE (Phase 2.2.MoE, this commit): full 256-expert top-8 MoE
-    //   forward + shared-expert with sigmoid gating. Uses the existing
-    //   imp::moe_gate_topk_fused / swiglu / shared_expert_gate_scale
-    //   primitives.
-    if (ws.n_experts > 0 && ws.top_k > 0 && ws.expert_d_ff > 0 &&
-        mtp.router.data != nullptr) {
+    // 5.B — MLP block. Two checkpoint variants:
+    //   MoE (Qwen3.6-35B sidecar): 256-expert top-8 MoE + shared expert with
+    //     sigmoid gating (imp::moe_gate_topk_fused / swiglu /
+    //     shared_expert_gate_scale primitives).
+    //   Dense (Qwen3.6-27B embedded head): a plain SwiGLU MLP — loaded onto
+    //     the shared_expert fields, no router, no sigmoid gate. Runs as
+    //     "residual + shared path" with the expert stage skipped.
+    const bool mtp_has_moe = ws.n_experts > 0 && ws.top_k > 0 && ws.expert_d_ff > 0 &&
+                             mtp.router.data != nullptr;
+    const bool mtp_has_dense_mlp = !mtp_has_moe && ws.shared_d_ff > 0 &&
+                                   mtp.shared_expert_gate_proj.data != nullptr &&
+                                   mtp.shared_expert_up_proj.data != nullptr &&
+                                   mtp.shared_expert_down_proj.data != nullptr;
+    if (mtp_has_moe || mtp_has_dense_mlp) {
         const int hd = hidden_dim;
         const int d_ff_e = ws.expert_d_ff;
         const int d_ff_s = ws.shared_d_ff;
@@ -800,6 +813,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             imp::rmsnorm(fc_out_view, mtp.post_attention_layernorm, pn_view, 1e-6f, stream);
         }
 
+        if (mtp_has_moe) {
         // 5.B.2 — Router + top-k. moe_gate_topk_fused: router @ post_norm,
         //         softmax, top-k. Writes into ws.routing_buf.
         MoeRoutingResult routing{};
@@ -881,12 +895,19 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             /*d_model=*/       hd,
             /*top_k=*/         top_k,
             stream);
+        } else {
+            // Dense variant: no experts — the accumulator starts as the pure
+            // residual and the "shared" path below IS the MLP.
+            cudaMemcpyAsync(ws.d_moe_out, ws.d_fc_out, hd * sizeof(__half),
+                            cudaMemcpyDeviceToDevice, stream);
+        }
 
-        // 5.B.6 — Shared expert (if present): silu(gate_proj·x) * (up_proj·x),
-        //         scale by sigmoid(shared_expert_gate_inp · x), then add to
-        //         moe_out (which already includes the attention residual).
+        // 5.B.6 — Shared expert / dense MLP: silu(gate_proj·x) * (up_proj·x),
+        //         optionally scaled by sigmoid(shared_expert_gate · x) (MoE
+        //         checkpoints only), added to moe_out (which already includes
+        //         the attention residual).
         if (d_ff_s > 0 && mtp.shared_expert_gate_proj.data && mtp.shared_expert_up_proj.data &&
-            mtp.shared_expert_down_proj.data && mtp.shared_expert_gate.data) {
+            mtp.shared_expert_down_proj.data) {
             // shared_gate = shared_expert_gate_proj @ post_norm  → [d_ff_s]
             {
                 int64_t in_shape[2]  = {1, hd};
@@ -920,15 +941,18 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 imp::gemm(in_view, mtp.shared_expert_down_proj, out_view, 1.0f, 0.0f, stream);
             }
             // Apply sigmoid(shared_expert_gate · post_norm) scalar to shared_out
-            // in-place via the existing fused kernel.
-            imp::shared_expert_gate_scale(
-                /*x=*/ ws.d_post_norm,
-                /*W=*/ mtp.shared_expert_gate.data,
-                /*y_inout=*/ ws.d_shared_out,
-                /*n=*/ 1,
-                /*d_model=*/ hd,
-                /*d=*/ hd,
-                stream);
+            // in-place via the existing fused kernel. MoE checkpoints only —
+            // the dense-MLP variant has no gate tensor and is unscaled.
+            if (mtp.shared_expert_gate.data != nullptr) {
+                imp::shared_expert_gate_scale(
+                    /*x=*/ ws.d_post_norm,
+                    /*W=*/ mtp.shared_expert_gate.data,
+                    /*y_inout=*/ ws.d_shared_out,
+                    /*n=*/ 1,
+                    /*d_model=*/ hd,
+                    /*d=*/ hd,
+                    stream);
+            }
 
             // moe_out += shared_out → write back into d_fc_out for downstream
             {
@@ -956,6 +980,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         Tensor h_final_view(ws.d_h_final, QType::F16, 2, hd1_shape, true);
         imp::rmsnorm(fc_out_view, mtp.final_norm, h_final_view, 1e-6f, stream);
     }
+
+    // Feed-only step (prefill / verify catch-up): the KV append above is the
+    // whole point — skip the lm_head GEMV, argmax and stream sync.
+    if (out_token_id == nullptr)
+        return true;
 
     // Step 7: logits = lm_head @ h_final
     {

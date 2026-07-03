@@ -823,6 +823,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
         }
 
+        // MTP: feed this chunk's (token, hidden) pairs while the executor's
+        // hidden_ buffer still holds it (feed-only forwards, no lm_head).
+        if (mtp_spec_decode_enabled())
+            mtp_prefill_feed_chunk(*req, offset, chunk_len, /*next_token=*/-1);
+
         req->prefill_offset = offset + chunk_len;
         IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d", req->id, offset, offset + chunk_len,
                       total_input);
@@ -936,22 +941,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]", (int)req->output_tokens.size(),
                       req->context_len(), next_token, tok->decode_token(next_token).c_str());
 
-        // MTP prefill: populate MTP KV cache with all prompt position hidden
-        // states so the head enters decode with the same context as the main
-        // model. Only the LAST chunk (where we have the complete tail of the
-        // prompt in executor's hidden_ buffer) and only the non-chunked path
-        // for now (chunked prefill would need per-chunk capture). Cost: ~n
-        // extra MTP forwards, one-time per session.
-        if (mtp_spec_decode_enabled() && offset == 0 && req->prefill_offset == 0) {
-            // executor's hidden_ buffer holds [chunk_len, d_model] FP16 right
-            // after forward_logits; that matches the whole prompt when
-            // offset==0 and is_last_chunk==true.
-            const int n_prompt = chunk_len;
-            imp::Tensor h_view = executor_->view_hidden(n_prompt);
-            if (h_view.data != nullptr) {
-                mtp_prefill_prompt(req->input_tokens.data(), h_view.data, n_prompt);
-            }
-        }
+        // MTP: feed the last chunk's (token, hidden) pairs — earlier chunks
+        // were fed inside the chunked-prefill branch above; the final pair
+        // uses the just-sampled next_token and seeds the pending draft chain.
+        if (mtp_spec_decode_enabled())
+            mtp_prefill_feed_chunk(*req, offset, chunk_len, next_token);
 
         // Update constraint FSM
         if (req->constraints)
@@ -1572,8 +1566,19 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             }
         }
 
+        // Verify-consumer sync gate (#847): the chain feed below appends a
+        // (next_token, h) pair at ws->mtp_pos — valid only while the cache
+        // exactly covers the pre-step context. After an async-loop burst
+        // (device-side tokens, no host hiddens) the cache is stale — skip
+        // feeding so it never desynchronizes silently.
+        auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        const bool mtp_synced = ws_gate != nullptr && mtp_bound_req_ == valid_decode[0]->id &&
+                                ws_gate->mtp_pos == cur_pos &&
+                                (ws_gate->max_seq_len <= 0 ||
+                                 ws_gate->mtp_pos + std::max(1, mtp_spec_k_) <
+                                     ws_gate->max_seq_len);
         Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
-        if (h_view.data != nullptr) {
+        if (h_view.data != nullptr && mtp_synced) {
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
 
@@ -1611,6 +1616,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             const int mtp_pos_before = ws->mtp_pos;
             int chain_prev_tok = next_token;
             const void* chain_h_prev = h_for_mtp;
+            std::vector<int32_t> chain_preds;
+            chain_preds.reserve(K);
             for (int k = 0; k < K; ++k) {
                 int prediction = -1;
                 int topk[Engine::kMtpMeasureW] = {-1, -1, -1, -1};
@@ -1621,6 +1628,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
                 for (int w = 0; w < Engine::kMtpMeasureW; ++w) entry.topk[w] = topk[w];
                 mtp_pending_chain_.push_back(entry);
+                chain_preds.push_back(prediction);
                 // For k=0 only, also feed pending_prediction_ (legacy 1-step
                 // accuracy counter remains in sync with chain_accept_[0]).
                 if (k == 0) mtp_pending_prediction_ = prediction;
@@ -1632,6 +1640,16 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // The first chained step (k=0) IS the real "next step" prediction
             // and matches what would have been drafted in K=1 mode — keep it.
             ws->mtp_pos = std::min(ws->mtp_pos, mtp_pos_before + 1);
+            // Verify-consumer bookkeeping (#847): the kept pair covers
+            // next_token; the chain IS the draft for the next verify step.
+            mtp_history_.push_back(next_token);
+            if (!chain_preds.empty()) {
+                mtp_pending_draft_ = std::move(chain_preds);
+                mtp_draft_ctx_ = static_cast<int>(mtp_history_.size());
+            } else {
+                mtp_pending_draft_.clear();
+                mtp_draft_ctx_ = -1;
+            }
         } else {
             mtp_pending_prediction_ = -1;
         }

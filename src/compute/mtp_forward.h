@@ -149,7 +149,13 @@ struct MtpDraftWorkspace {
 //   - stream
 //
 // Output:
-//   - *out_token_id   : drafted next token id (D2H copy of argmax)
+//   - *out_token_id   : drafted next token id (D2H copy of argmax). Pass
+//                       nullptr to skip the lm_head GEMV + argmax + stream
+//                       sync entirely — a cache-feed-only step (prefill /
+//                       verify catch-up positions whose prediction is never
+//                       consumed). The lm_head read (~1 GiB FP16 on Qwen3.6's
+//                       248k vocab) dominates per-step cost, so feed-only
+//                       steps are ~an order of magnitude cheaper.
 //   - out_topk_ids    : optional [top_w] host buffer; when non-null and
 //                       top_w>0, receives the top-W candidate ids in
 //                       descending-logit order (out_topk_ids[0] == *out_token_id).

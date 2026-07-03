@@ -153,10 +153,21 @@ bool Engine::enable_mtp_spec_decode(int k) {
     }
     const int hidden_dim   = model_->config_.d_model;
     const int vocab_size   = model_->config_.vocab_size;
-    const int n_experts    = model_->config_.n_experts;
-    const int top_k        = model_->config_.n_experts_active;
-    const int expert_d_ff  = model_->config_.expert_d_ff;
-    const int shared_d_ff  = model_->config_.expert_shared_d_ff;
+    // MLP dims come from the HEAD tensors, not the main-model config: the
+    // dense 27B checkpoint pairs a MoE-free MTP head with a plain SwiGLU MLP
+    // (mapped onto the shared_expert fields), and the 35B head's expert d_ff
+    // differs from the main model's.
+    const auto& head       = *model_->mtp_;
+    const bool head_moe    = head.router.data != nullptr &&
+                             head.experts_gate_up_packed.data != nullptr;
+    const int n_experts    = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
+    const int top_k        = head_moe ? model_->config_.n_experts_active : 0;
+    const int expert_d_ff  = head_moe
+                                 ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
+                                 : 0;
+    const int shared_d_ff  = head.shared_expert_gate_proj.data != nullptr
+                                 ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
+                                 : 0;
 
     // MTP attention dims: derived from the MTP head's q_proj / v_proj shapes
     // because the MTP attention head config differs from the main model
@@ -238,52 +249,9 @@ bool Engine::enable_mtp_spec_decode(int k) {
     return true;
 }
 
-bool Engine::mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n) {
-    if (mtp_ws_storage_ == nullptr) return false;
-    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded) return false;
-    if (n <= 0 || prompt_tokens == nullptr || d_hidden == nullptr) return false;
-
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
-    if (ws->mtp_pos > 0) {
-        IMP_LOG_WARN("mtp_prefill_prompt: cache already populated (pos=%d); skipping", ws->mtp_pos);
-        return false;
-    }
-
-    const int hidden_dim = model_->config_.d_model;
-    const int vocab_size = model_->config_.vocab_size;
-    const __half* hidden = static_cast<const __half*>(d_hidden);
-
-    // For each prompt position i in [0, n): run MTP forward with prev_token =
-    // prompt_tokens[i] and d_h_prev = hidden[i]. Each call appends one row to
-    // the MTP KV cache and advances mtp_pos. The last position's prediction
-    // (i.e., what MTP thinks comes AFTER the prompt) becomes the pending
-    // prediction for accuracy measurement on the first decode step.
-    int last_prediction = -1;
-    for (int i = 0; i < n; ++i) {
-        const void* h_i = hidden + static_cast<int64_t>(i) * hidden_dim;
-        int prediction = -1;
-        bool ok = imp::mtp_draft_step(
-            prompt_tokens[i],
-            h_i,
-            *model_->mtp_,
-            model_->tok_emb_,
-            model_->out_proj_,
-            *ws,
-            hidden_dim, vocab_size,
-            &prediction,
-            decode_stream());
-        if (!ok) {
-            IMP_LOG_WARN("mtp_prefill_prompt: forward failed at position %d/%d — abandoning", i, n);
-            return false;
-        }
-        last_prediction = prediction;
-    }
-
-    mtp_pending_prediction_ = last_prediction;
-    IMP_LOG_INFO("MTP prefill: %d prompt positions cached (mtp_pos=%d), pending prediction=%d",
-                 n, ws->mtp_pos, last_prediction);
-    return true;
-}
+// (mtp_prefill_prompt was replaced by the per-chunk mtp_prefill_feed_chunk
+// in engine_spec_mtp.cpp — chunked-prefill capable, DeepSeek-aligned pairing,
+// feed-only forwards without the lm_head GEMV.)
 
 void Engine::mtp_accuracy_reset() noexcept {
     mtp_accuracy_ = {};
@@ -291,6 +259,12 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_pending_chain_.clear();
     mtp_chain_accept_.clear();
     mtp_chain_accept_w_.clear();
+    mtp_bound_req_ = -1;
+    mtp_history_.clear();
+    mtp_pending_draft_.clear();
+    mtp_draft_ctx_ = -1;
+    mtp_econ_verifies_ = 0;
+    mtp_econ_emitted_ = 0;
     if (mtp_ws_storage_) {
         auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
         imp::mtp_kv_reset(*ws);

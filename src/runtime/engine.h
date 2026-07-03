@@ -197,23 +197,17 @@ public:
                        int hidden_dim, int vocab_size, int* out_token_id,
                        int* out_topk_ids = nullptr, int top_w = 0);
 
-    // Run MTP forward across all prompt positions to populate the MTP-side
-    // KV cache before decode starts. Without this, MTP enters decode with an
-    // empty KV cache while the main model has the entire prompt context —
-    // a fundamental asymmetry that caps achievable accept rate.
-    //
-    // Inputs:
-    //   prompt_tokens : the full prompt token ids (host array of length n)
-    //   d_hidden      : device buffer [n, hidden_dim] FP16 — main-model hidden
-    //                   states for every prompt position (executor's hidden_
-    //                   buffer right after the prefill forward).
-    //   n             : number of prompt tokens
-    // Side effects:
-    //   - Advances ws.mtp_pos from 0 to n.
-    //   - Stores the LAST position's MTP prediction in mtp_pending_prediction_
-    //     so that the first decode step's accuracy is measured correctly.
-    // Returns false if MTP is disabled or any forward fails (best-effort).
-    bool mtp_prefill_prompt(const int32_t* prompt_tokens, const void* d_hidden, int n);
+    // Feed one prefill chunk's (token, hidden) pairs into the MTP-side KV
+    // cache so the head enters decode with the same context as the main
+    // model. Called per chunk right after the chunk forward (the executor's
+    // hidden_ buffer holds exactly this chunk). Pairs follow the DeepSeek MTP
+    // convention (emb(t_{i+1}), h_i); the final pair of the LAST chunk uses
+    // the just-sampled next_token and also seeds the pending draft chain.
+    // Handles bind/reuse across requests (longest-common-prefix truncation of
+    // the previously fed history) and unbinds on any gap it cannot cover.
+    // Best-effort: failure just disables MTP drafting for this request.
+    void mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_len,
+                                int next_token /* -1 on non-last chunks */);
 
     // Phase 3.5 telemetry: tracks "what fraction of decode-step next-tokens
     // would the MTP head have correctly predicted from the previous step?"
@@ -539,6 +533,46 @@ private:
     std::vector<MtpAccuracy> mtp_chain_accept_;
     std::vector<MtpWidthAccuracy> mtp_chain_accept_w_;  // Stage 0 per-width table
 
+    // ── MTP verify consumer (#847) — implemented in engine_spec_mtp.cpp ──
+    // The MTP head is a draft SOURCE for step_spec_verify_: when the
+    // suffix/ngram matcher has no draft, the pending MTP chain fills the
+    // verify chunk. The single MTP workspace tracks ONE request at a time
+    // (batch-1 gate, same as the verify loop itself).
+    //
+    // Sync invariant: ws->mtp_pos == req->context_len() - 1 — pair i is
+    // (emb(t_{i+1}), h_i), so after P pairs the head is ready to draft the
+    // token after t_P. mtp_history_ holds the covered tokens t_0..t_P
+    // (size == mtp_pos + 1) and lets a follow-up request resume the cache
+    // over a shared prefix (multi-turn) via longest-common-prefix match.
+    int mtp_bound_req_ = -1;
+    std::vector<int32_t> mtp_history_;
+    std::vector<int32_t> mtp_pending_draft_;  // chain drafted for mtp_draft_ctx_
+    int mtp_draft_ctx_ = -1;                  // context_len the draft targets
+    // True when the request's context advanced without MTP pairs (async-loop
+    // burst, chunked-prefill gap) — drafting stays off for the request.
+    bool mtp_stale_logged_ = false;
+    // Economics guard: an MTP-filled verify step costs ~2x a loop step
+    // (eager chunk) plus K chain forwards with full lm_head GEMVs plus the
+    // hybrid partial-accept replay — the classic acceptance_poor gate (<15%)
+    // never fires at MTP's 44-90% accept even when the step economics lose
+    // outright (measured -58..-77% tg on Qwen3.6-27B draft-poor prose).
+    // Track emitted-per-MTP-verify and doom MTP drafting for the request
+    // when the average can't beat the break-even.
+    int mtp_econ_verifies_ = 0;
+    long long mtp_econ_emitted_ = 0;
+    // Consume the pending MTP chain as the verify draft for req (empty when
+    // MTP is off / unbound / stale / KV-cap reached).
+    std::vector<int32_t> mtp_take_draft_(const Request& req);
+    // After a verify step: feed the emitted tokens' (token, hidden-row)
+    // pairs, then chain-draft the next mtp_spec_k_ tokens for the next
+    // verify step. Must run BEFORE the hybrid partial-accept re-forward
+    // (it reads this chunk's hidden rows).
+    void mtp_post_verify_update_(const Request& req, int emitted);
+    // Shared helper: run pair catch-up + chain draft from host token list.
+    bool mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows,
+                         int n_pairs, bool chain_after);
+    void mtp_unbind_(const char* why);
+
     // ── n-gram (prompt-lookup) speculative decoding ─────────────────
     // Drafts come from suffix matches against the request's own context
     // (runtime_config_.speculative); the verify step replays them as a
@@ -574,6 +608,14 @@ private:
     int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
     int spec_chunk_cap_ = 0;
     int spec_block_table_cap_ = 0;
+    // Hybrid (SSM/GDN) verify: device scratch holding the committed
+    // recurrent-state slab across the speculative chunk forward (the chunk
+    // advances state through rejected draft positions; on partial acceptance
+    // the slab is restored and the accepted prefix re-forwarded).
+    void* spec_state_scratch_ = nullptr;
+    size_t spec_state_scratch_bytes_ = 0;
+    bool ensure_spec_state_scratch_();
+    int recurrent_slot_for_(int req_id) const;
     // Session telemetry (logged when a request finishes).
     struct SpecStats {
         long long verify_steps = 0;  // verify forwards run

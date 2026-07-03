@@ -333,6 +333,15 @@ miss_burst           = 8
 # Re-arm an existing conditional decode graph on a draft miss instead of a
 # fresh capture (both share the same first-forward semantics since #692).
 burst_rearm          = true
+# Speculation on hybrid (GDN/SSM) models: the committed recurrent-state slab
+# is snapshotted around the verify chunk; a partial acceptance restores it and
+# re-forwards the accepted prefix. imp-cli --bench pins this false.
+hybrid               = true
+# MTP-head chain-draft length (models shipping model_mtp.safetensors, e.g.
+# Qwen3.6). 0 = off. When > 0 the server loads the head (~1.6 GiB VRAM) and
+# MTP chains fill verify steps where the suffix matcher has no draft.
+# imp-cli equivalent: --mtp-spec-decode <k>.
+mtp_k                = 0
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM

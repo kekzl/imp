@@ -556,9 +556,14 @@ struct ShardInfo {
     size_t mmap_size = 0;
 };
 
+// mtp_out (optional): when non-null, `mtp.*` / `model.mtp.*` tensors — which
+// translate_name otherwise SKIPs — are collected there under their raw
+// `mtp.*` name (the `model.` prefix stripped). Dense Qwen3.6 checkpoints
+// embed the MTP head in the main shard instead of a sidecar.
 static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map,
                        ShardInfo& shard, bool llm_compressor_format,
-                       imp::llm_compressor::TranslationCounters& counters) {
+                       imp::llm_compressor::TranslationCounters& counters,
+                       std::unordered_map<std::string, Tensor>* mtp_out = nullptr) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         IMP_LOG_ERROR("Failed to open: %s", path.c_str());
@@ -640,11 +645,23 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             continue;
 
         // Translate llm-compressor names → modelopt names if applicable.
+        bool divert_to_mtp = false;
         if (llm_compressor_format) {
             auto translated = imp::llm_compressor::translate_name(tensor_name, counters);
-            if (translated.action == imp::llm_compressor::NameTranslation::SKIP)
-                continue;
-            tensor_name = std::move(translated.out_name);
+            if (translated.action == imp::llm_compressor::NameTranslation::SKIP) {
+                // Embedded MTP head: keep the tensor, but route it to the
+                // separate MTP map under its raw mtp.* name.
+                if (mtp_out != nullptr) {
+                    if (tensor_name.rfind("model.mtp.", 0) == 0)
+                        tensor_name = tensor_name.substr(6);  // strip "model."
+                    if (tensor_name.rfind("mtp.", 0) == 0)
+                        divert_to_mtp = true;
+                }
+                if (!divert_to_mtp)
+                    continue;
+            } else {
+                tensor_name = std::move(translated.out_name);
+            }
         }
 
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
@@ -713,7 +730,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 
         void* tensor_ptr = tensor_data_base + offset_start;
         Tensor t(tensor_ptr, dtype, ndim, shape, /*on_device=*/false);
-        tensor_map.emplace(tensor_name, t);
+        (divert_to_mtp ? *mtp_out : tensor_map).emplace(tensor_name, t);
 
         IMP_LOG_DEBUG("Tensor: %s dtype=%s shape=[%ld%s%s%s%s] offsets=[%lu,%lu]", tensor_name.c_str(),
                       dtype_val->str_val.c_str(), (long)shape[0], ndim > 1 ? "," : "",
@@ -877,13 +894,18 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                                  probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
-    // Try loading tensors
+    // Try loading tensors. embedded_mtp_map collects `mtp.*` tensors that
+    // dense Qwen3.6 checkpoints embed in the main shard (no sidecar); only
+    // populated when the caller asked for the MTP head.
     bool loaded = false;
+    std::unordered_map<std::string, Tensor> embedded_mtp_map;
+    auto* mtp_collect = load_mtp_head ? &embedded_mtp_map : nullptr;
 
     if (!single_file.empty()) {
         // Single file mode
         ShardInfo shard;
-        loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, tcounters);
+        loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, tcounters,
+                            mtp_collect);
         if (loaded)
             shards.push_back(shard);
     } else {
@@ -896,7 +918,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             std::string st_path = model_dir + "/model.safetensors";
             if (fs::exists(st_path)) {
                 ShardInfo shard;
-                loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, tcounters);
+                loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, tcounters,
+                                    mtp_collect);
                 if (loaded)
                     shards.push_back(shard);
             }
@@ -931,74 +954,98 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     std::optional<imp::MtpHead> mtp_local;
     std::unordered_map<std::string, Tensor> mtp_tensor_map;
     ShardInfo mtp_shard{};
+
+    // Dispatch a raw mtp.* tensor map to MtpHead fields. Two MLP variants:
+    //   MoE (Qwen3.6-35B): router + packed experts + gated shared expert.
+    //   Dense (Qwen3.6-27B embedded head): plain SwiGLU gate/up/down —
+    //     mapped onto the shared_expert fields (router/experts stay empty;
+    //     mtp_forward runs it as "residual + shared path", no sigmoid gate).
+    auto dispatch_mtp = [](std::unordered_map<std::string, Tensor>& tm, const std::string& src,
+                           size_t bytes) -> imp::MtpHead {
+        imp::MtpHead head;
+        head.info.path       = src;
+        head.info.file_bytes = bytes;
+        head.info.n_tensors  = static_cast<int>(tm.size());
+        auto take = [&](const char* key, Tensor& dst) -> bool {
+            auto it = tm.find(key);
+            if (it == tm.end()) return false;
+            dst = it->second;
+            return true;
+        };
+        bool ok = true;
+        ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
+        ok &= take("mtp.pre_fc_norm_hidden.weight",    head.pre_fc_norm_hidden);
+        ok &= take("mtp.fc.weight",                    head.fc);
+        ok &= take("mtp.layers.0.input_layernorm.weight",          head.input_layernorm);
+        ok &= take("mtp.layers.0.post_attention_layernorm.weight", head.post_attention_layernorm);
+        ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
+        ok &= take("mtp.layers.0.self_attn.k_proj.weight", head.k_proj);
+        ok &= take("mtp.layers.0.self_attn.v_proj.weight", head.v_proj);
+        ok &= take("mtp.layers.0.self_attn.o_proj.weight", head.o_proj);
+        ok &= take("mtp.layers.0.self_attn.q_norm.weight", head.q_norm);
+        ok &= take("mtp.layers.0.self_attn.k_norm.weight", head.k_norm);
+        ok &= take("mtp.norm.weight", head.final_norm);
+
+        const bool moe =
+            take("mtp.layers.0.mlp.gate.weight", head.router) &&
+            take("mtp.layers.0.mlp.experts.gate_up_proj", head.experts_gate_up_packed) &&
+            take("mtp.layers.0.mlp.experts.down_proj", head.experts_down_packed) &&
+            take("mtp.layers.0.mlp.shared_expert.gate_proj.weight", head.shared_expert_gate_proj) &&
+            take("mtp.layers.0.mlp.shared_expert.up_proj.weight", head.shared_expert_up_proj) &&
+            take("mtp.layers.0.mlp.shared_expert.down_proj.weight", head.shared_expert_down_proj) &&
+            take("mtp.layers.0.mlp.shared_expert_gate.weight", head.shared_expert_gate);
+        const bool dense =
+            !moe &&
+            take("mtp.layers.0.mlp.gate_proj.weight", head.shared_expert_gate_proj) &&
+            take("mtp.layers.0.mlp.up_proj.weight", head.shared_expert_up_proj) &&
+            take("mtp.layers.0.mlp.down_proj.weight", head.shared_expert_down_proj);
+        ok &= (moe || dense);
+
+        head.loaded = ok;
+        if (ok) {
+            IMP_LOG_INFO("MTP head loaded: %s (%d tensors, %s MLP, BF16)", src.c_str(),
+                         head.info.n_tensors, moe ? "MoE" : "dense");
+        } else {
+            IMP_LOG_WARN("MTP head detected at %s but some expected tensors were missing; "
+                         "spec-decode disabled for this model", src.c_str());
+        }
+        return head;
+    };
+
     if (load_mtp_head && !model_dir.empty()) {
         std::string mtp_path = model_dir + "/model_mtp.safetensors";
         std::error_code ec;
         auto sz = fs::file_size(mtp_path, ec);
         if (!ec && sz > 0) {
-            // Load the file as a standalone shard. llm_compressor_format=false
-            // so translate_name() is NOT applied — MTP tensor names need to
-            // stay literal for dispatch.
+            // Sidecar variant. Load the file as a standalone shard.
+            // llm_compressor_format=false so translate_name() is NOT applied —
+            // MTP tensor names need to stay literal for dispatch.
             imp::llm_compressor::TranslationCounters mtp_counters{};
             bool mtp_loaded = load_shard(mtp_path, mtp_tensor_map, mtp_shard,
                                           /*llm_compressor_format=*/false, mtp_counters);
             if (mtp_loaded) {
-                imp::MtpHead head;
-                head.info.path       = mtp_path;
-                head.info.file_bytes = static_cast<size_t>(sz);
-                head.info.n_tensors  = static_cast<int>(mtp_tensor_map.size());
-
-                // Dispatch tensors to named fields. Returns true when assigned.
-                auto take = [&](const char* key, Tensor& dst) -> bool {
-                    auto it = mtp_tensor_map.find(key);
-                    if (it == mtp_tensor_map.end()) return false;
-                    dst = it->second;
-                    return true;
-                };
-
-                bool ok = true;
-                ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
-                ok &= take("mtp.pre_fc_norm_hidden.weight",    head.pre_fc_norm_hidden);
-                ok &= take("mtp.fc.weight",                    head.fc);
-                ok &= take("mtp.layers.0.input_layernorm.weight",
-                           head.input_layernorm);
-                ok &= take("mtp.layers.0.post_attention_layernorm.weight",
-                           head.post_attention_layernorm);
-                ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
-                ok &= take("mtp.layers.0.self_attn.k_proj.weight", head.k_proj);
-                ok &= take("mtp.layers.0.self_attn.v_proj.weight", head.v_proj);
-                ok &= take("mtp.layers.0.self_attn.o_proj.weight", head.o_proj);
-                ok &= take("mtp.layers.0.self_attn.q_norm.weight", head.q_norm);
-                ok &= take("mtp.layers.0.self_attn.k_norm.weight", head.k_norm);
-                ok &= take("mtp.layers.0.mlp.gate.weight", head.router);
-                ok &= take("mtp.layers.0.mlp.experts.gate_up_proj",
-                           head.experts_gate_up_packed);
-                ok &= take("mtp.layers.0.mlp.experts.down_proj",
-                           head.experts_down_packed);
-                ok &= take("mtp.layers.0.mlp.shared_expert.gate_proj.weight",
-                           head.shared_expert_gate_proj);
-                ok &= take("mtp.layers.0.mlp.shared_expert.up_proj.weight",
-                           head.shared_expert_up_proj);
-                ok &= take("mtp.layers.0.mlp.shared_expert.down_proj.weight",
-                           head.shared_expert_down_proj);
-                ok &= take("mtp.layers.0.mlp.shared_expert_gate.weight",
-                           head.shared_expert_gate);
-                ok &= take("mtp.norm.weight", head.final_norm);
-
-                head.loaded = ok;
-                if (ok) {
-                    IMP_LOG_INFO("MTP head loaded: %s (%.2f GiB, %d tensors, BF16)",
-                                 mtp_path.c_str(),
-                                 static_cast<double>(sz) / (1024.0 * 1024.0 * 1024.0),
-                                 head.info.n_tensors);
-                } else {
-                    IMP_LOG_WARN("MTP head detected at %s but some expected tensors were "
-                                 "missing; spec-decode disabled for this model",
-                                 mtp_path.c_str());
-                }
-                mtp_local = std::move(head);
+                mtp_local = dispatch_mtp(mtp_tensor_map, mtp_path, static_cast<size_t>(sz));
             } else {
                 IMP_LOG_WARN("MTP head file %s present but failed to load", mtp_path.c_str());
+            }
+        } else {
+            // Embedded variant. llm-compressor checkpoints had their mtp.*
+            // tensors diverted into embedded_mtp_map during load_shard
+            // (translate_name SKIPs them); Model-Optimizer checkpoints keep
+            // them in the main tensor_map (weight_map skips them later) —
+            // harvest from there.
+            if (embedded_mtp_map.empty()) {
+                for (const auto& kv : tensor_map) {
+                    if (kv.first.rfind("mtp.", 0) == 0)
+                        embedded_mtp_map.emplace(kv.first, kv.second);
+                    else if (kv.first.rfind("model.mtp.", 0) == 0)
+                        embedded_mtp_map.emplace(kv.first.substr(6), kv.second);
+                }
+            }
+            if (!embedded_mtp_map.empty()) {
+                size_t bytes = 0;
+                for (const auto& kv : embedded_mtp_map) bytes += kv.second.nbytes();
+                mtp_local = dispatch_mtp(embedded_mtp_map, path + " (embedded mtp.*)", bytes);
             }
         }
     }

@@ -560,6 +560,22 @@ struct RuntimeConfig {
         // CudaGraphConditionalRunner::setup) — rearm and fresh capture now
         // share the same first-forward semantics.
         bool burst_rearm = true;
+        // Speculation on hybrid (GDN/SSM) models. The verify chunk advances
+        // recurrent state through rejected draft positions, so the committed
+        // per-sequence state slab is snapshotted before the chunk; a fully
+        // accepted draft pays only that copy (~60 MiB D2D on Qwen3.6-35B),
+        // a partial acceptance restores the slab and re-forwards the
+        // accepted prefix (one extra chunk forward, amortized over the
+        // accepted tokens). imp-cli --bench pins this false (same
+        // baseline-semantics rule as the moe/suffix pins).
+        bool hybrid = true;
+        // MTP-head chain-draft length for the verify loop (models shipping a
+        // trained MTP head, e.g. Qwen3.6 model_mtp.safetensors). 0 = off.
+        // When >0 the server loads the head (~1.6 GiB VRAM) and enables MTP;
+        // drafts fill verify steps where the suffix/ngram matcher has no
+        // match (draft-poor prose — 78-94% depth-1 accept on Qwen3.6-35B-A3B,
+        // PR #804). imp-cli equivalent: --mtp-spec-decode <k>.
+        int mtp_k = 0;
     } speculative;
 
     // Constrained decoding (json_mode / json_schema).
