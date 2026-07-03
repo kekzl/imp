@@ -1383,16 +1383,14 @@ bool GraphExecutor::chunk_capture_supported() const {
             const auto& ly = model_->layer(i);
             const bool gated = !(ly.expert_gate_packed.data == nullptr &&
                                  (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
-            // Non-gated experts (RELU² — Nemotron-H): the device-args grouped
-            // GEMM passes every static check here, records cleanly, and the
-            // captured graph still dies with `misaligned address` on launch
-            // (repro: Nemotron-3-Nano verify capture; the gated Qwen3-Coder /
-            // Modelopt graphs are clean). Root cause in the non-gated
-            // device-args replay is open — keep it eager until then.
-            if (!gated)
+            // Require the per-layer da_cache: without it dispatch_device
+            // falls back to per-call H2D from stack vectors, which is not
+            // graph-capturable (#860; the fallback also guards itself).
+            if (i >= static_cast<int>(moe_.per_layer_da_cache.size()) ||
+                !moe_.per_layer_da_cache[i].ready)
                 return false;
             if (!covers(ly.expert_up_ids) || !covers(ly.expert_down_ids) ||
-                !covers(ly.expert_gate_ids))
+                (gated && !covers(ly.expert_gate_ids)))
                 return false;
         }
     }

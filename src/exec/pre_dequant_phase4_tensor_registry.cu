@@ -14,6 +14,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -428,11 +429,22 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         int built_layers = 0;
         int host_resident_layers = 0;  // intentionally not built (force_host or budget offload)
         std::vector<int> failed_layers;
+        // The loader pre-sizes the expert id vectors on EVERY layer of a
+        // hybrid model (SSM/attention layers carry all-invalid ids), so
+        // "has expert ids" must mean "has at least one VALID id" — the
+        // empty()-based checks misclassified all 29 Nemotron-H non-MoE
+        // layers as MoE-eligible (tripping the QW8 abort) and left the
+        // non-gated gate projection permanently "present but failed".
+        auto any_valid_id = [](const std::vector<TensorID>& ids) {
+            return std::any_of(ids.begin(), ids.end(),
+                               [](TensorID id) { return id != kInvalidTensorID; });
+        };
         for (int li = 0; li < n_layers; ++li) {
             const auto& L = model_->layer(li);
             auto& c = moe_->per_layer_da_cache[li];
-            const bool moe_layer = !L.expert_up_ids.empty() || !L.expert_down_ids.empty() ||
-                                   !L.expert_gate_ids.empty();
+            const bool moe_layer = any_valid_id(L.expert_up_ids) ||
+                                   any_valid_id(L.expert_down_ids) ||
+                                   any_valid_id(L.expert_gate_ids);
             if (!moe_layer) {
                 // Pure dense layer in a hybrid model (e.g. attention-only layer
                 // alongside MoE layers). Not eligible for the da_cache; skip
@@ -457,16 +469,20 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 continue;
             }
             ++eligible_layers;
-            bool g_ok = !L.expert_gate_ids.empty() &&
+            // Non-gated experts (RELU² — Nemotron-H) have no gate projection:
+            // gate ids are absent (empty or all-invalid). The empty()-only
+            // check left c.ready=false on every Nemotron-H layer, silently
+            // forcing the per-call H2D fallback dispatch (and, under graph
+            // capture, a memcpy node reading a dead stack buffer — #860).
+            const bool gate_absent = !any_valid_id(L.expert_gate_ids);
+            bool g_ok = !gate_absent &&
                         build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
                                    c.d_gate_SFB_ptrs, c.d_gate_alpha);
             bool u_ok = build_proj(L.expert_up_ids, c.d_up_B_ptrs,
                                    c.d_up_SFB_ptrs, c.d_up_alpha);
             bool d_ok = build_proj(L.expert_down_ids, c.d_down_B_ptrs,
                                    c.d_down_SFB_ptrs, c.d_down_alpha);
-            // For non-gated experts (e.g. Gemma-4 SwiGLU absorbing W_gate),
-            // expert_gate_ids may be empty by design — accept up+down only.
-            c.ready = (g_ok || L.expert_gate_ids.empty()) && u_ok && d_ok;
+            c.ready = (g_ok || gate_absent) && u_ok && d_ok;
             if (c.ready) {
                 ++built_layers;
                 any_built = true;
