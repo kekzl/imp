@@ -647,6 +647,11 @@ struct RuntimeConfig {
         // semantics. Distinct from nvfp4_force_dequant, which dequantizes
         // the already-NVFP4-quantized cache and so keeps NVFP4 values.
         bool no_nvfp4_decode_cache = false;
+        // #847 graph-captured-verify feasibility probe: stream-capture every
+        // spec verify chunk forward, instantiate + launch the graph (falls
+        // back to the eager forward on any failure). Logs per-attempt
+        // outcomes — a capturability census, not a perf path.
+        bool spec_capture_probe = false;
         // Log shape + per-candidate algoId/tileId + chosen algo for every
         // benchmark_and_select_algo call. Legacy env: IMP_LOG_GEMM_ALGO.
         bool log_gemm_algo = false;

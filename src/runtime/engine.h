@@ -582,6 +582,11 @@ private:
     // Returns true when it handled this decode step (tokens emitted);
     // false → caller falls through to the normal decode path.
     bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
+    // #847 capturability census for the verify chunk forward (see
+    // diagnostics.spec_capture_probe). Runs the forward via stream capture +
+    // graph launch when possible, eagerly otherwise.
+    void spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
+                                     cudaStream_t stream);
     // Effective n-gram speculation state for a request: honors the per-request
     // tri-state override (Request::spec_ngram_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {

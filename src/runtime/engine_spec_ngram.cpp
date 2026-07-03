@@ -430,7 +430,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     Tensor logits_out;
-    executor_->forward_logits(state, logits_out, stream);
+    if (runtime_config().diagnostics.spec_capture_probe) {
+        spec_capture_probe_forward_(state, logits_out, stream);
+    } else {
+        executor_->forward_logits(state, logits_out, stream);
+    }
 
     // Penalty history (production parity: output_tokens, unbounded window).
     const bool penalties = req->repetition_penalty != 1.0f ||
@@ -597,6 +601,73 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     return true;
+}
+
+
+// =============================================================================
+// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe)
+// =============================================================================
+// Stream-captures the chunk forward, instantiates and launches the graph once,
+// then destroys it. Any failure (capture-illegal call inside the forward,
+// instantiate error — the cuBLASLt status-14 class) falls back to the eager
+// forward, so the verify step always completes. Capture+instantiate every
+// chunk is NOT a perf path; this only answers "is the verify forward
+// capturable, and from which chunk on" per model class.
+void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
+                                         cudaStream_t stream) {
+    static long probes = 0, launched = 0;
+    probes++;
+    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[spec-capture-probe] begin capture failed: %s", cudaGetErrorString(err));
+        cudaGetLastError();
+        executor_->forward_logits(state, logits_out, stream);
+        return;
+    }
+    bool forward_threw = false;
+    const char* what = "";
+    try {
+        executor_->forward_logits(state, logits_out, stream);
+    } catch (const std::exception& e) {
+        forward_threw = true;
+        what = e.what();
+    } catch (...) {
+        forward_threw = true;
+        what = "(non-std exception)";
+    }
+    cudaGraph_t graph = nullptr;
+    err = cudaStreamEndCapture(stream, &graph);
+    bool ran = false;
+    if (!forward_threw && err == cudaSuccess && graph != nullptr) {
+        cudaGraphExec_t exec = nullptr;
+        err = cudaGraphInstantiate(&exec, graph, 0);
+        if (err == cudaSuccess) {
+            err = cudaGraphLaunch(exec, stream);
+            if (err == cudaSuccess) {
+                ran = true;
+                launched++;
+            } else {
+                IMP_LOG_WARN("[spec-capture-probe] graph launch failed: %s",
+                             cudaGetErrorString(err));
+            }
+            cudaGraphExecDestroy(exec);
+        } else {
+            IMP_LOG_WARN("[spec-capture-probe] instantiate failed: %s", cudaGetErrorString(err));
+        }
+    } else {
+        IMP_LOG_WARN("[spec-capture-probe] capture failed: %s%s%s",
+                     err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
+                     forward_threw ? " forward exception: " : "", forward_threw ? what : "");
+    }
+    if (graph != nullptr)
+        cudaGraphDestroy(graph);
+    cudaGetLastError();
+    IMP_LOG_INFO("[spec-capture-probe] chunk n_tokens=%d %s (launched %ld/%ld)", state.n_tokens,
+                 ran ? "CAPTURED+LAUNCHED" : "eager fallback", launched, probes);
+    if (!ran) {
+        // Nothing executed during a failed capture — run the forward for real.
+        executor_->forward_logits(state, logits_out, stream);
+    }
 }
 
 }  // namespace imp
