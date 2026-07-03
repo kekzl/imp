@@ -201,6 +201,13 @@ void ConstraintManager::update(int32_t token) {
     }
 }
 
+int ConstraintManager::forced_text(std::string& out, int max_chars) const {
+    if (active_schema_ && schema_constrainer_)
+        return schema_constrainer_->forced_text(out, max_chars);
+    out.clear();
+    return 0;
+}
+
 void ConstraintManager::reset() {
     if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->reset();

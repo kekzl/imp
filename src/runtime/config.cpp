@@ -246,6 +246,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
     S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 
+    // [constrained]
+    B("constrained.jump_ahead", cfg.constrained.jump_ahead);
+    I("constrained.jump_min_run", cfg.constrained.jump_min_run);
+
     // [ffn]
     B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
     F("ffn.sparsity_threshold", cfg.ffn.sparsity_threshold);

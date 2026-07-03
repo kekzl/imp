@@ -381,6 +381,17 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     });
 }
 
+void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t stream) {
+    if (!initialized_ || n_rows <= 0 || d_out == nullptr)
+        return;
+    const size_t V = static_cast<size_t>(model_->config().vocab_size);
+    for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_out + static_cast<size_t>(row0) * V, lg.data,
+                                           static_cast<size_t>(csz) * V * sizeof(float),
+                                           cudaMemcpyDeviceToDevice, stream));
+    });
+}
+
 double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {
     if (!initialized_ || n < 2) {
         IMP_LOG_ERROR("perplexity_nll: not initialized or n < 2 (n=%d)", n);
