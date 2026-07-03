@@ -136,7 +136,15 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // Logits buffer only needs to hold tokens that require LM head projection:
     // - Prefill: 1 (last token only)
     // - Decode:  n_sequences (one per batch slot)
-    max_logit_tokens_ = std::max(max_batch_size, 1);
+    // - Eval/verify (spec-decode greedy verify, --perplexity): chunk rows are
+    //   processed through this buffer in batches of max_logit_tokens_. Floor 8:
+    //   at batch=1 the buffer was [1, vocab], which serialized the verify LM
+    //   head into one full-weight GEMV per row (a 65-row verify chunk re-read
+    //   the LM head 65x — 7.2 of 30 ms/cycle on Qwen3-Coder-30B). With >=4
+    //   rows the batched-M GEMV reuses each weight read across MR=4 rows;
+    //   8 halves the outer-loop iterations for ~5 MB of logits (+split-K
+    //   scratch scales with this too, ~1 MB/row).
+    max_logit_tokens_ = std::max({max_batch_size, 8, 1});
 
     // Wire the scratch-arena component with the live context it sizes against
     // (pointers to GraphExecutor members so e.g. has_gdn_ is read live — still
