@@ -365,6 +365,42 @@ void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
     launch_gemv_dp4a_fp32<Q3_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8, y, M, K, stream);
 }
 
+void gemv_dp4a_fp32_batched(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, int n_act, int act_stride_blocks,
+                            cudaStream_t stream) {
+    const uint8_t* w = static_cast<const uint8_t*>(W);
+    switch (qtype) {
+        case QType::Q6_K:
+            launch_gemv_dp4a_fp32_batched<Q6_K_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        case QType::Q4_0:
+            launch_gemv_dp4a_fp32_batched<Q4_0_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        case QType::Q4_K:
+            launch_gemv_dp4a_fp32_batched<Q4_K_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        case QType::Q5_K:
+            launch_gemv_dp4a_fp32_batched<Q5_K_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        case QType::Q2_K:
+            launch_gemv_dp4a_fp32_batched<Q2_K_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        case QType::Q3_K:
+            launch_gemv_dp4a_fp32_batched<Q3_K_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+        default:
+            launch_gemv_dp4a_fp32_batched<Q8_0_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                       stream);
+            break;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // QKV fused wrappers (7 functions, one per quant type)
 // ---------------------------------------------------------------------------
