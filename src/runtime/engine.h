@@ -416,6 +416,7 @@ private:
         int n = 0;
         int32_t* d_tokens = nullptr;
         double* d_nll = nullptr;
+        int32_t* d_match = nullptr;  // per-pos greedy-argmax == next-token
     } ppl_capture_;
 
     // ── Model-specific state ─────────────────────────────────────────

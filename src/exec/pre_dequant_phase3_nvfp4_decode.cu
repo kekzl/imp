@@ -286,6 +286,11 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     size_t& remaining_budget, cudaStream_t stream) {
     if (wcache_->nvfp4_decode_mode <= 0)
         return;
+    if (runtime_config().diagnostics.no_nvfp4_decode_cache) {
+        IMP_LOG_INFO("NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "
+                     "decode runs on source-precision paths");
+        return;
+    }
 
     Nvfp4DecodeContext dctx;
     dctx.mode_str = (wcache_->nvfp4_decode_mode == 1) ? "additive" : "only";

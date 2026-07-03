@@ -335,6 +335,14 @@ bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
     IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens,
                                   static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice));
     IMP_CUDA_CHECK_LOG(cudaMemset(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double)));
+    // Greedy-agreement probe rides along for free (fused into the NLL max
+    // pass); allocation failure just disables it.
+    if (cudaMalloc(&ppl_capture_.d_match, static_cast<size_t>(n) * sizeof(int32_t)) == cudaSuccess) {
+        IMP_CUDA_CHECK_LOG(
+            cudaMemset(ppl_capture_.d_match, 0, static_cast<size_t>(n) * sizeof(int32_t)));
+    } else {
+        ppl_capture_.d_match = nullptr;
+    }
     ppl_capture_.n = n;
     ppl_capture_.active = true;
     return true;
@@ -352,6 +360,17 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     std::vector<double> h_nll_pos(static_cast<size_t>(n), 0.0);
     IMP_CUDA_CHECK_LOG(cudaMemcpy(h_nll_pos.data(), ppl_capture_.d_nll,
                                   static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToHost));
+    long match_sum = -1;
+    if (ppl_capture_.d_match) {
+        std::vector<int32_t> h_match(static_cast<size_t>(n), 0);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_match.data(), ppl_capture_.d_match,
+                                      static_cast<size_t>(n) * sizeof(int32_t),
+                                      cudaMemcpyDeviceToHost));
+        match_sum = 0;
+        for (int i = 0; i < n - 1; ++i)
+            match_sum += h_match[i];
+        cudaFree(ppl_capture_.d_match);
+    }
     cudaFree(ppl_capture_.d_tokens);
     cudaFree(ppl_capture_.d_nll);
     ppl_capture_ = PplCapture{};
@@ -374,6 +393,9 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         h_nll += h_nll_pos[i];
     double ppl = std::exp(h_nll / static_cast<double>(n - 1));
     IMP_LOG_INFO("perplexity_nll: n=%d  mean_nll=%.4f  PPL=%.4f", n, h_nll / (n - 1), ppl);
+    if (match_sum >= 0)
+        IMP_LOG_INFO("greedy top1 match: %ld/%d (%.2f%%)", match_sum, n - 1,
+                     100.0 * static_cast<double>(match_sum) / static_cast<double>(n - 1));
     if (out_ppl)
         *out_ppl = ppl;
     return true;
@@ -816,7 +838,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // holds exactly this chunk and nothing reads logits_ afterwards.
         if (ppl_capture_.active) {
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset,
-                                              chunk_len, ppl_capture_.d_nll, pf_stream);
+                                              chunk_len, ppl_capture_.d_nll, pf_stream,
+                                              ppl_capture_.d_match);
         }
 
         if (!pf_pool_used) {
@@ -931,7 +954,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // slices the last token for the production LM head).
         if (ppl_capture_.active) {
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset,
-                                              chunk_len, ppl_capture_.d_nll, pf_stream);
+                                              chunk_len, ppl_capture_.d_nll, pf_stream,
+                                              ppl_capture_.d_match);
         }
 
         req->output_tokens.push_back(next_token);
