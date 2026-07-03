@@ -77,61 +77,99 @@
                     layer);
                 std::abort();
             }
+            // Graph-captured verify replay mode (#847): kernels must not bake
+            // the growing q_offset/ctx_len — grids and the persistent KV
+            // scratch are sized for ctx_capacity and the real lengths are read
+            // from device (d_past_len for the gather bound and append offset,
+            // context_lens[0] for the attention KV length).
+            const bool cap_replay = state.ctx_capacity > 0 && state.d_past_len != nullptr;
+            if (cap_replay &&
+                (!chunk_fa2_serves || ctx_len > state.ctx_capacity || state.n_sequences != 1 ||
+                 chunk_capture_k_ == nullptr || chunk_capture_ctx_ < state.ctx_capacity)) {
+                // The engine gates capture on chunk_capture_supported() and
+                // pre-allocates the scratch — reaching here is a wiring bug.
+                // Throwing fails the capture (or the eager warmup) cleanly and
+                // the engine dooms capture for this model.
+                throw std::runtime_error("chunked_prefill: capture-replay preconditions violated");
+            }
+            const int gather_cap = cap_replay ? state.ctx_capacity : q_offset;
+            const int* d_past = cap_replay ? state.d_past_len : nullptr;
             size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
 
             half* k_full = nullptr;
             half* v_full = nullptr;
-            cudaMallocAsync(&k_full, full_bytes, stream);
-            cudaMallocAsync(&v_full, full_bytes, stream);
+            if (cap_replay) {
+                k_full = chunk_capture_k_;
+                v_full = chunk_capture_v_;
+            } else {
+                cudaMallocAsync(&k_full, full_bytes, stream);
+                cudaMallocAsync(&v_full, full_bytes, stream);
+            }
 
             // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
             if (kvt == QType::F16) {
                 paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
-                                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                     state.block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
                 paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
-                                     state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                     state.block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
             } else if (kvt == QType::FP8_E4M3) {
                 float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
                                      ? kv_scales_[kv_layer]
                                      : 1.0f;
                 paged_kv_gather_fp8_to_fp16(k_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                                            state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+                                            state.block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            stream, d_past);
                 paged_kv_gather_fp8_to_fp16(v_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-                                            state.block_tables, kv_scale, q_offset, kv_bs, nkv, hd, stream);
+                                            state.block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            stream, d_past);
             } else if (kvt == QType::NVFP4) {
                 paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                              state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                              state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              d_past);
                 paged_kv_gather_nvfp4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                              state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                              state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              d_past);
             } else if (kvt == QType::MXFP4_KV) {
                 paged_kv_gather_mxfp4_kv_to_fp16(k_full,
                                                  static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                                 state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                                 state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 d_past);
                 paged_kv_gather_mxfp4_kv_to_fp16(v_full,
                                                  static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                                 state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                                 state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 d_past);
             } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
                 paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                             state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             d_past);
                 paged_kv_gather_int4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, q_offset, kv_bs, nkv, hd, stream);
+                                             state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             d_past);
             }
 
             // Append current chunk's K/V at offset q_offset.
-            cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
-                            (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
-                            (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+            if (cap_replay) {
+                kv_chunk_append_fp16(k_full, static_cast<const half*>(kk.data), state.d_past_len, n,
+                                     nkv * hd, stream);
+                kv_chunk_append_fp16(v_full, static_cast<const half*>(vv.data), state.d_past_len, n,
+                                     nkv * hd, stream);
+            } else {
+                cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
+                                (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+                cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
+                                (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+            }
 
-            int64_t kv_full_shape[2] = {(int64_t)ctx_len, (int64_t)(nkv * hd)};
+            int64_t kv_full_shape[2] = {(int64_t)(cap_replay ? state.ctx_capacity : ctx_len),
+                                        (int64_t)(nkv * hd)};
             Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
 
@@ -162,7 +200,18 @@
             // raw e4m3 Q/K conversion read teacher-forced PPL 549 vs 16.6 on
             // gemma-3-12b when it served these chunks). cuBLAS below the
             // threshold.
-            if (chunk_fa2_serves &&
+            if (cap_replay) {
+                // Replay mode is FA2-only: the S-matrix/FMHA fallbacks size and
+                // bound work from the baked ctx_len. A decline here means the
+                // engine-side eligibility check and the kernel disagree — fail
+                // the capture rather than record a stale-length fallback.
+                if (!try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n,
+                                            state.ctx_capacity, nh, nkv, hd, scale,
+                                            layer_sliding_window, cfg.attn_logit_softcap, q_offset,
+                                            stream, state.context_lens)) {
+                    throw std::runtime_error("chunked_prefill: FA2 declined a capture-replay chunk");
+                }
+            } else if (chunk_fa2_serves &&
                 try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        q_offset, stream)) {
@@ -191,8 +240,10 @@
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
             }
 
-            cudaFreeAsync(k_full, stream);
-            cudaFreeAsync(v_full, stream);
+            if (!cap_replay) {
+                cudaFreeAsync(k_full, stream);
+                cudaFreeAsync(v_full, stream);
+            }
 
             // Persist current chunk's K/V (same as non-chunked path)
             write_kv_cache(layer, state, stream);

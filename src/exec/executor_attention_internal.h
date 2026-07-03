@@ -33,7 +33,7 @@ namespace imp {
 static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, const Tensor& k,
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, const int* d_kv_len = nullptr) {
     if (rcfg.attention.fa2_fp16qk == "never" || hd != 128)
         return false;
     // Chunk CONTINUATION (q_offset > 0, queries attend gathered past KV) is
@@ -60,7 +60,7 @@ static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, c
     Tensor v4 = v.reshape(4, kv4s);
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
-                                  q_offset, /*fp16_qk=*/true);
+                                  q_offset, /*fp16_qk=*/true, d_kv_len);
 }
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).

@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include <atomic>
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "compute/gemm_internal.cuh"
 #include "core/logging.h"
@@ -27,6 +28,16 @@
     } while (0)
 
 namespace imp {
+
+// #847 graph-captured verify: see gemm.h. Single engine thread writes it;
+// relaxed atomic keeps tsan honest without cost.
+static std::atomic<bool> g_lt_capture_allowed{false};
+void gemm_set_lt_capture_allowed(bool allowed) {
+    g_lt_capture_allowed.store(allowed, std::memory_order_relaxed);
+}
+bool gemm_lt_capture_allowed() {
+    return g_lt_capture_allowed.load(std::memory_order_relaxed);
+}
 
 // warp_reduce_sum / kGemvThreads / kGemvWarps / gemv_blocks live in
 // gemm_internal.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
@@ -500,9 +511,17 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
 
     // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR
     // (status 14) under stream capture on sm_120 — heuristic + workspace
-    // allocation paths aren't graph-safe. Route FP16×FP16→FP16 GEMMs to the
-    // hand-tuned sm_120 WMMA kernel when the stream is in capture mode.
-    if (A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F16) {
+    // allocation paths aren't graph-safe on a COLD shape. Route FP16×FP16→FP16
+    // GEMMs to the hand-tuned sm_120 WMMA kernel when the stream is in capture
+    // mode — unless the capturer opted in via gemm_set_lt_capture_allowed():
+    // the graph-captured verify chunk (#847) warms every shape eagerly before
+    // capturing, so Lt's heuristic cache and handle workspace are populated
+    // and the call records cleanly (the WMMA fallback measured ~5x slower than
+    // Lt's nvjet kernels on the verify GEMMs — 167 ms/1400 tok on Q8-8B). A
+    // residual status-14 fails that one capture; the engine falls back to the
+    // eager verify and disables capture after repeated failures.
+    if (A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F16 &&
+        !gemm_lt_capture_allowed()) {
         cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
         if (cudaStreamIsCapturing(stream, &cap_status) == cudaSuccess &&
             cap_status == cudaStreamCaptureStatusActive) {

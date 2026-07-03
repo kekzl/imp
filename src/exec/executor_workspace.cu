@@ -500,6 +500,7 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
     if (max_shared == 0)
         return true;  // no workspace needed
 
+    generation_++;  // fresh arena — any prior baked pointers are dead
     shared_workspace_ = vram_alloc(vram_alloc_, max_shared, "shared_workspace");
     if (!shared_workspace_) {
         // Shared workspace is critical for GEMV scratch buffers. Fall back to
@@ -536,6 +537,7 @@ void Workspace::free_buffers() {
     if (shared_workspace_) {
         vram_free(vram_alloc_, shared_workspace_);
         shared_workspace_ = nullptr;
+        generation_++;
     }
     shared_workspace_size_ = 0;
     if (persistent_workspace_) {

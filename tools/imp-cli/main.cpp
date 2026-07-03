@@ -62,6 +62,15 @@ int main(int argc, char** argv) {
                 hybrid_set = true;
         if (!hybrid_set)
             runtime_cfg.speculative.hybrid = false;
+        // Graph-captured verify (#847) changes verify-step timing (and pads
+        // chunks) — keep the canonical baseline on the eager verify path.
+        // An explicit --set speculative.capture=… still wins.
+        bool capture_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("speculative.capture", 0) == 0)
+                capture_set = true;
+        if (!capture_set)
+            runtime_cfg.speculative.capture = false;
     }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)

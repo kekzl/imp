@@ -46,8 +46,15 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 // score noise — safe below fmha_prefill_threshold where the fp8 variants
 // compound per-layer noise into prompt-blind output (#511/#512). Bq=64 only
 // (f16 Q tile at Bq=128 exceeds the sm_120 smem opt-in).
+//
+// d_kv_len: optional DEVICE int overriding the KV length. When set, K.shape[1]
+// only carries the buffer CAPACITY (batch stride, prefetch upper bound) and
+// the kernel reads the real seq_kv from device, deriving q_offset as
+// seq_kv - seq_q (chunked continuation invariant). Grid dims depend only on
+// seq_q, so a captured graph replays correctly as the context grows between
+// replays (#847 graph-captured verify). fp16_qk path only.
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                            int q_offset = 0, bool fp16_qk = false);
+                            int q_offset = 0, bool fp16_qk = false, const int* d_kv_len = nullptr);
 
 }  // namespace imp

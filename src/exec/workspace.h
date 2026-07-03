@@ -4,6 +4,7 @@
 #include "core/qtype.h"
 #include <cuda_runtime.h>
 #include <cstddef>
+#include <cstdint>
 
 namespace imp {
 
@@ -72,6 +73,10 @@ public:
     int shared_max_tokens() const { return shared_workspace_max_tokens_; }
     int active() const { return active_workspace_; }
     bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
+    // Bumped whenever shared_workspace_ is (re)allocated or freed — consumers
+    // holding raw pointers into the arena (captured verify graphs, #847) use
+    // this to detect that their baked addresses died.
+    uint64_t generation() const { return generation_; }
 
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
@@ -122,6 +127,7 @@ private:
     void* shared_workspace_ = nullptr;
     size_t shared_workspace_size_ = 0;
     int shared_workspace_max_tokens_ = 0;
+    uint64_t generation_ = 1;  // see generation()
 
     // Pre-computed phase sizes (for max_tokens_).
     size_t attn_shared_size_ = 0;

@@ -1,0 +1,275 @@
+// =============================================================================
+// engine_spec_capture.cpp — graph-captured verify chunk (#847)
+// =============================================================================
+//
+// The eager verify forward pays ~1800 kernel launches per cycle in host
+// launch pacing (~8 ms on Qwen3-Coder-30B after the #854 LM-head batching).
+// This module captures the chunk forward into one CUDA graph per padded
+// chunk length ("bucket") and replays it every verify step.
+//
+// Replay across context growth is the hard part: the chunked-continuation
+// attention path historically baked q_offset/ctx_len into gather grids,
+// scratch sizes and FA2 kernel arguments. In capture mode (InferenceState::
+// ctx_capacity > 0) those kernels read the REAL lengths from device instead
+// (context_lens[0] and d_past_len), grids and the persistent K/V scratch are
+// sized once for ctx_capacity, and everything that varies per step lives in
+// device buffers the engine refreshes via H2D before each replay
+// (d_spec_tokens_/positions_/block_table_/context_len_/past_len_).
+//
+// Bucketing: drafts are padded up to {9, 17, 33, k_max+1} tokens with copies
+// of t0. Padded rows sit at positions AFTER every real row, so causal masking
+// makes them invisible to the real rows; their KV entries are dropped by the
+// same rollback that drops rejected drafts. The verify consumes argmax rows
+// [0, real_chunk_len) only.
+//
+// Safety: the first use of a bucket runs eager through the SAME capture-mode
+// code path (cuBLASLt/CUTLASS algo warmup — census PR #855 showed only the
+// first chunk per shape fails capture); the second use captures. Any capture
+// or launch failure falls back to the eager forward, and repeated failures
+// doom capture for the process (the census crash class — e.g. a forward that
+// syncs on host — would otherwise retry forever). Graphs hold raw pointers
+// into the executor workspace and the engine's spec staging buffers; both
+// invalidate the graph cache when they move (workspace_generation, and
+// free_spec_buffers_ → free_spec_graphs_).
+// =============================================================================
+
+#include "compute/gemm.h"
+#include "core/logging.h"
+#include "exec/executor.h"
+#include "runtime/engine.h"
+
+#include <cuda_runtime.h>
+#include <algorithm>
+
+namespace imp {
+
+int Engine::spec_capture_bucket_max_() const {
+    const auto& scfg = runtime_config_.speculative;
+    int k_max = std::max(1, scfg.k);
+    if (scfg.suffix)
+        k_max = std::max(k_max, scfg.suffix_k_max);
+    if (mtp_spec_decode_enabled())
+        k_max = std::max(k_max, mtp_spec_decode_k());
+    return k_max + 1;
+}
+
+// Context tier: power of two >= ctx (floor 4096), clamped to the resolved
+// capacity. Sizes the baked gather grids close to the real context.
+int Engine::spec_capture_ctx_tier_(int ctx_padded) const {
+    int tier = 4096;
+    while (tier < ctx_padded)
+        tier <<= 1;
+    return std::min(tier, std::max(spec_capture_ctx_cap_, ctx_padded));
+}
+
+int Engine::spec_capture_bucket_(int chunk_len) const {
+    const int cap = std::max(chunk_len, spec_capture_bucket_max_());
+    for (int b : {9, 17, 33}) {
+        if (chunk_len <= b && b <= cap)
+            return b;
+    }
+    return cap;
+}
+
+bool Engine::spec_capture_ready_(int ctx_padded) {
+    const auto& scfg = runtime_config_.speculative;
+    if (!scfg.capture || spec_capture_doomed_)
+        return false;
+    // The census probe owns the forward when enabled (capture+destroy per
+    // chunk, diagnostics only).
+    if (runtime_config_.diagnostics.spec_capture_probe)
+        return false;
+    // Hybrids: census showed the recurrent chunk path consumes a D2H result
+    // under capture that never executed (misaligned-address context poison).
+    // MoE host-offload syncs on the host per layer.
+    if (ssm_state_ || gdn_state_ || offload_mgr_)
+        return false;
+    // BitDecoding residual KV advances ring state on the host per forward.
+    if (kv_manager_ && kv_manager_->residual_enabled())
+        return false;
+    if (!executor_)
+        return false;
+    if (spec_capture_ctx_cap_ < 0) {  // resolve once per engine
+        spec_capture_ctx_cap_ = 0;
+        if (executor_->chunk_capture_supported()) {
+            int cap = scfg.capture_ctx_cap;
+            if (config_.max_seq_len > 0)
+                cap = std::min(cap, config_.max_seq_len);
+            if (cap > 0 && executor_->ensure_chunk_capture_scratch(cap))
+                spec_capture_ctx_cap_ = cap;
+        }
+        IMP_LOG_INFO("[spec-capture] %s (ctx_cap=%d)",
+                     spec_capture_ctx_cap_ > 0 ? "enabled" : "not applicable for this model",
+                     spec_capture_ctx_cap_);
+    }
+    return spec_capture_ctx_cap_ > 0 && ctx_padded <= spec_capture_ctx_cap_;
+}
+
+void Engine::free_spec_graphs_() {
+    for (auto& [len, g] : spec_graphs_) {
+        if (g.exec)
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(g.exec));
+    }
+    spec_graphs_.clear();
+}
+
+bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
+                                    cudaStream_t stream) {
+    // The graphs bake workspace pointers — invalidate when the arena moved.
+    const uint64_t ws_gen = executor_->workspace_generation();
+    if (ws_gen != spec_capture_ws_gen_) {
+        if (!spec_graphs_.empty()) {
+            IMP_LOG_INFO("[spec-capture] workspace reallocated — dropping %zu cached graphs",
+                         spec_graphs_.size());
+            free_spec_graphs_();
+        }
+        spec_capture_ws_gen_ = ws_gen;
+    }
+
+    auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity}];
+    if (slot.exec) {
+        cudaError_t err = cudaGraphLaunch(slot.exec, stream);
+        if (err == cudaSuccess)
+            return true;
+        IMP_LOG_WARN("[spec-capture] graph launch failed (%s) — dropping graph cache",
+                     cudaGetErrorString(err));
+        cudaGetLastError();
+        free_spec_graphs_();
+        return false;  // caller runs the eager forward
+    }
+    if (slot.eager_uses++ == 0)
+        return false;  // warmup: caller runs eager through the capture-mode path
+
+    auto doom_check = [this](const char* why) {
+        if (++spec_capture_failures_ >= 2) {
+            spec_capture_doomed_ = true;
+            IMP_LOG_WARN("[spec-capture] disabled after repeated failures (%s)", why);
+        }
+    };
+
+    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[spec-capture] begin capture failed: %s", cudaGetErrorString(err));
+        cudaGetLastError();
+        doom_check("begin capture");
+        return false;
+    }
+    // Let cuBLASLt record into the capture instead of the ~5x-slower WMMA
+    // fallback (GGUF verify GEMMs) — every shape ran eagerly in the warmup
+    // use, so Lt's algo cache and static workspace are warm. See gemm.cu.
+    gemm_set_lt_capture_allowed(true);
+    bool forward_threw = false;
+    std::string what;
+    try {
+        executor_->forward_logits(state, logits_out, stream);
+    } catch (const std::exception& e) {
+        forward_threw = true;
+        what = e.what();
+    } catch (...) {
+        forward_threw = true;
+        what = "(non-std exception)";
+    }
+    gemm_set_lt_capture_allowed(false);
+    cudaGraph_t graph = nullptr;
+    err = cudaStreamEndCapture(stream, &graph);
+    if (forward_threw || err != cudaSuccess || graph == nullptr) {
+        IMP_LOG_WARN("[spec-capture] capture failed: %s%s%s",
+                     err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
+                     forward_threw ? " — " : "", forward_threw ? what.c_str() : "");
+        if (graph)
+            cudaGraphDestroy(graph);
+        cudaGetLastError();
+        doom_check("capture");
+        return false;
+    }
+    cudaGraphExec_t exec = nullptr;
+    err = cudaGraphInstantiate(&exec, graph, 0);
+    cudaGraphDestroy(graph);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[spec-capture] instantiate failed: %s", cudaGetErrorString(err));
+        cudaGetLastError();
+        doom_check("instantiate");
+        return false;
+    }
+    err = cudaGraphLaunch(exec, stream);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[spec-capture] first launch failed: %s", cudaGetErrorString(err));
+        cudaGetLastError();
+        cudaGraphExecDestroy(exec);
+        doom_check("first launch");
+        return false;
+    }
+    slot.exec = exec;
+    spec_capture_failures_ = 0;
+    IMP_LOG_INFO("[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d)",
+                 state.n_tokens, state.ctx_capacity);
+    return true;
+}
+
+// =============================================================================
+// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe)
+// =============================================================================
+// Stream-captures the chunk forward, instantiates and launches the graph once,
+// then destroys it. Any failure (capture-illegal call inside the forward,
+// instantiate error — the cuBLASLt status-14 class) falls back to the eager
+// forward, so the verify step always completes. Capture+instantiate every
+// chunk is NOT a perf path; this only answers "is the verify forward
+// capturable, and from which chunk on" per model class.
+void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
+                                         cudaStream_t stream) {
+    static long probes = 0, launched = 0;
+    probes++;
+    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("[spec-capture-probe] begin capture failed: %s", cudaGetErrorString(err));
+        cudaGetLastError();
+        executor_->forward_logits(state, logits_out, stream);
+        return;
+    }
+    bool forward_threw = false;
+    const char* what = "";
+    try {
+        executor_->forward_logits(state, logits_out, stream);
+    } catch (const std::exception& e) {
+        forward_threw = true;
+        what = e.what();
+    } catch (...) {
+        forward_threw = true;
+        what = "(non-std exception)";
+    }
+    cudaGraph_t graph = nullptr;
+    err = cudaStreamEndCapture(stream, &graph);
+    bool ran = false;
+    if (!forward_threw && err == cudaSuccess && graph != nullptr) {
+        cudaGraphExec_t exec = nullptr;
+        err = cudaGraphInstantiate(&exec, graph, 0);
+        if (err == cudaSuccess) {
+            err = cudaGraphLaunch(exec, stream);
+            if (err == cudaSuccess) {
+                ran = true;
+                launched++;
+            } else {
+                IMP_LOG_WARN("[spec-capture-probe] graph launch failed: %s",
+                             cudaGetErrorString(err));
+            }
+            cudaGraphExecDestroy(exec);
+        } else {
+            IMP_LOG_WARN("[spec-capture-probe] instantiate failed: %s", cudaGetErrorString(err));
+        }
+    } else {
+        IMP_LOG_WARN("[spec-capture-probe] capture failed: %s%s%s",
+                     err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
+                     forward_threw ? " forward exception: " : "", forward_threw ? what : "");
+    }
+    if (graph != nullptr)
+        cudaGraphDestroy(graph);
+    cudaGetLastError();
+    IMP_LOG_INFO("[spec-capture-probe] chunk n_tokens=%d %s (launched %ld/%ld)", state.n_tokens,
+                 ran ? "CAPTURED+LAUNCHED" : "eager fallback", launched, probes);
+    if (!ran) {
+        // Nothing executed during a failed capture — run the forward for real.
+        executor_->forward_logits(state, logits_out, stream);
+    }
+}
+
+}  // namespace imp

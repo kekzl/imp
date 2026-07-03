@@ -56,6 +56,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               cudaMalloc(&d_spec_positions_, chunk_cap * sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_block_table_, max_blocks * sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_context_len_, sizeof(int)) == cudaSuccess &&
+              cudaMalloc(&d_spec_past_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
               cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess;
     if (!ok) {
@@ -113,6 +114,8 @@ int Engine::recurrent_slot_for_(int req_id) const {
 }
 
 void Engine::free_spec_buffers_() {
+    // Captured verify graphs bake these buffer pointers — drop them first.
+    free_spec_graphs_();
     if (spec_state_scratch_) {
         IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
         spec_state_scratch_ = nullptr;
@@ -122,12 +125,14 @@ void Engine::free_spec_buffers_() {
     if (d_spec_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_positions_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
     if (d_spec_context_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_context_len_));
+    if (d_spec_past_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_past_len_));
     if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
     if (h_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_argmax_));
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
     d_spec_context_len_ = nullptr;
+    d_spec_past_len_ = nullptr;
     d_spec_argmax_ = nullptr;
     h_spec_argmax_ = nullptr;
     spec_chunk_cap_ = 0;
@@ -331,7 +336,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
     const int chunk_len = K + 1;
-    const int ctx_len = p0 + chunk_len;  // context including the full chunk
+    // Graph-captured verify (#847): pad the chunk up to its bucket length so
+    // one cached graph serves every draft length in the bucket. Pad rows
+    // (copies of t0 at positions after every real row) are causally invisible
+    // to the real rows; their KV entries fall to the same rollback that drops
+    // rejected drafts, and the argmax window below stays [0, chunk_len).
+    const bool capture_on = spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
+    const int chunk_pad = capture_on ? spec_capture_bucket_(chunk_len) : chunk_len;
+    const int ctx_len = p0 + chunk_pad;  // context including the full (padded) chunk
 
     const int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
 
@@ -355,19 +367,28 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     // Staging capacity follows the REAL table size — the async graph loop
     // pre-allocates blocks for the whole remaining generation, so the table
-    // is usually much larger than this chunk needs.
-    if (!ensure_spec_buffers_(std::max(chunk_len, scfg.k + 1), n_blocks + 16)) {
+    // is usually much larger than this chunk needs. Captured graphs bake the
+    // staging pointers, so size for the largest bucket up front (a later
+    // realloc would silently invalidate every cached graph).
+    const int chunk_cap =
+        std::max({chunk_pad, scfg.k + 1, capture_on ? spec_capture_bucket_max_() : 0});
+    const int table_cap = capture_on
+                              ? std::max(n_blocks + 16,
+                                         (spec_capture_ctx_cap_ + kv_bs - 1) / kv_bs + 16)
+                              : n_blocks + 16;
+    if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
         spec_stats_.miss_steps++;
         return false;
     }
 
     // Upload chunk metadata.
     std::vector<int32_t> h_tokens;
-    h_tokens.reserve(chunk_len);
+    h_tokens.reserve(chunk_pad);
     h_tokens.push_back(t0);
     h_tokens.insert(h_tokens.end(), draft.begin(), draft.begin() + K);
-    std::vector<int> h_positions(chunk_len);
-    for (int i = 0; i < chunk_len; ++i) h_positions[i] = p0 + i;
+    h_tokens.resize(chunk_pad, t0);  // bucket padding
+    std::vector<int> h_positions(chunk_pad);
+    for (int i = 0; i < chunk_pad; ++i) h_positions[i] = p0 + i;
 
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -376,18 +397,24 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         return true;
     };
-    if (!check(cudaMemcpyAsync(d_spec_tokens_, h_tokens.data(), chunk_len * sizeof(int32_t),
+    if (!check(cudaMemcpyAsync(d_spec_tokens_, h_tokens.data(), chunk_pad * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream), "tokens H2D") ||
-        !check(cudaMemcpyAsync(d_spec_positions_, h_positions.data(), chunk_len * sizeof(int),
+        !check(cudaMemcpyAsync(d_spec_positions_, h_positions.data(), chunk_pad * sizeof(int),
                                cudaMemcpyHostToDevice, stream), "positions H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
                                cudaMemcpyHostToDevice, stream), "block table H2D") ||
         !check(cudaMemcpyAsync(d_spec_context_len_, &ctx_len, sizeof(int), cudaMemcpyHostToDevice,
-                               stream), "context len H2D"))
+                               stream), "context len H2D") ||
+        (capture_on &&
+         !check(cudaMemcpyAsync(d_spec_past_len_, &p0, sizeof(int), cudaMemcpyHostToDevice,
+                                stream), "past len H2D")))
         return false;
 
     // Forward the chunk through the standard continuation-prefill path.
-    if (!executor_->resize_workspace(chunk_len, stream)) {
+    // Capture mode pins the workspace layout to the largest bucket so every
+    // bucket's graph bakes the same activation-tensor carve.
+    if (!executor_->resize_workspace(
+            capture_on ? std::max(chunk_pad, spec_capture_bucket_max_()) : chunk_len, stream)) {
         spec_stats_.miss_steps++;
         return false;
     }
@@ -396,7 +423,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     InferenceState state;
     state.token_ids = d_spec_tokens_;
     state.positions = d_spec_positions_;
-    state.n_tokens = chunk_len;
+    state.n_tokens = chunk_pad;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = d_spec_block_table_;
     state.context_lens = d_spec_context_len_;
@@ -407,6 +434,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     state.prefill_offset = p0;
     state.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled()) state.kv_seq_id = req->id;
+    if (capture_on) {
+        // The tier (not the full capacity) sizes the baked gather grids; the
+        // executor scratch covers the full capacity, so any tier fits it.
+        state.ctx_capacity = spec_capture_ctx_tier_(ctx_len);
+        state.d_past_len = d_spec_past_len_;
+    }
 
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
     // slab — the chunk forward advances it through rejected draft positions.
@@ -432,6 +465,18 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     Tensor logits_out;
     if (runtime_config().diagnostics.spec_capture_probe) {
         spec_capture_probe_forward_(state, logits_out, stream);
+    } else if (capture_on) {
+        if (!spec_captured_forward_(state, logits_out, stream)) {
+            // Warmup use, or capture/launch failed (nothing executed) — run
+            // eagerly. A doomed capture means the capture-mode path itself
+            // threw; strip the capture fields so the eager forward takes the
+            // plain host-length chunk path (the padded chunk stays valid).
+            if (spec_capture_doomed_) {
+                state.ctx_capacity = 0;
+                state.d_past_len = nullptr;
+            }
+            executor_->forward_logits(state, logits_out, stream);
+        }
     } else {
         executor_->forward_logits(state, logits_out, stream);
     }
@@ -603,71 +648,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     return true;
 }
 
-
-// =============================================================================
-// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe)
-// =============================================================================
-// Stream-captures the chunk forward, instantiates and launches the graph once,
-// then destroys it. Any failure (capture-illegal call inside the forward,
-// instantiate error — the cuBLASLt status-14 class) falls back to the eager
-// forward, so the verify step always completes. Capture+instantiate every
-// chunk is NOT a perf path; this only answers "is the verify forward
-// capturable, and from which chunk on" per model class.
-void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
-                                         cudaStream_t stream) {
-    static long probes = 0, launched = 0;
-    probes++;
-    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("[spec-capture-probe] begin capture failed: %s", cudaGetErrorString(err));
-        cudaGetLastError();
-        executor_->forward_logits(state, logits_out, stream);
-        return;
-    }
-    bool forward_threw = false;
-    const char* what = "";
-    try {
-        executor_->forward_logits(state, logits_out, stream);
-    } catch (const std::exception& e) {
-        forward_threw = true;
-        what = e.what();
-    } catch (...) {
-        forward_threw = true;
-        what = "(non-std exception)";
-    }
-    cudaGraph_t graph = nullptr;
-    err = cudaStreamEndCapture(stream, &graph);
-    bool ran = false;
-    if (!forward_threw && err == cudaSuccess && graph != nullptr) {
-        cudaGraphExec_t exec = nullptr;
-        err = cudaGraphInstantiate(&exec, graph, 0);
-        if (err == cudaSuccess) {
-            err = cudaGraphLaunch(exec, stream);
-            if (err == cudaSuccess) {
-                ran = true;
-                launched++;
-            } else {
-                IMP_LOG_WARN("[spec-capture-probe] graph launch failed: %s",
-                             cudaGetErrorString(err));
-            }
-            cudaGraphExecDestroy(exec);
-        } else {
-            IMP_LOG_WARN("[spec-capture-probe] instantiate failed: %s", cudaGetErrorString(err));
-        }
-    } else {
-        IMP_LOG_WARN("[spec-capture-probe] capture failed: %s%s%s",
-                     err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
-                     forward_threw ? " forward exception: " : "", forward_threw ? what : "");
-    }
-    if (graph != nullptr)
-        cudaGraphDestroy(graph);
-    cudaGetLastError();
-    IMP_LOG_INFO("[spec-capture-probe] chunk n_tokens=%d %s (launched %ld/%ld)", state.n_tokens,
-                 ran ? "CAPTURED+LAUNCHED" : "eager fallback", launched, probes);
-    if (!ran) {
-        // Nothing executed during a failed capture — run the forward for real.
-        executor_->forward_logits(state, logits_out, stream);
-    }
-}
+// spec_capture_probe_forward_ (diagnostics census) and the production
+// graph-captured verify (#847) live in engine_spec_capture.cpp.
 
 }  // namespace imp
