@@ -936,11 +936,20 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     // bytes). MoE caches contribute per-expert weights (callers slice one
     // expert at a time into a synthetic NvFP4QuantResult before invoking
     // gemm_nvfp4 — see executor_forward_moe.cu).
-    size_t max_bytes = 0;
-    auto consider = [&max_bytes](int64_t N, int64_t K) {
+    // Weights above kCap don't get a workspace (an NVFP4 LM head would be
+    // ~1.5 GiB) — track the covered maximum separately so ONE oversized
+    // tensor no longer disables the workspace for every other weight (the
+    // all-or-nothing skip left Nemotron with no workspace at all, which is
+    // what made its verify-chunk capture fail: #855 census crash class).
+    constexpr size_t kCap = 512ULL * 1024 * 1024;  // 512 MiB
+    size_t max_bytes = 0;         // largest dequant target overall
+    size_t covered_bytes = 0;     // largest target we will actually cover
+    auto consider = [&](int64_t N, int64_t K) {
         size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
         if (bytes > max_bytes)
             max_bytes = bytes;
+        if (bytes <= kCap && bytes > covered_bytes)
+            covered_bytes = bytes;
     };
     for (const auto& [ptr, qr] : wcache_.nvfp4)
         consider(qr.N, qr.K);
@@ -995,38 +1004,39 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
         return true;
     }
 
-    // Sanity cap: skip workspace alloc for huge weights (e.g. NVFP4 LM head
-    // would be ~1.5 GiB for Qwen3.6-class models). The fallback continues
-    // to use lazy cudaMalloc on non-captured streams; graph capture will
-    // fail-loud via the cudaStreamIsCapturing guard.
-    constexpr size_t kCap = 512ULL * 1024 * 1024;  // 512 MiB
+    // Weights beyond the workspace stay on the lazy-cudaMalloc fallback on
+    // non-captured streams; hitting one of them under capture now throws
+    // (gemm_nvfp4) and the capture fails cleanly.
     if (max_bytes > kCap) {
         IMP_LOG_WARN(
-            "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap, "
-            "skipping pre-alloc — prefill graph capture disabled (M>1 fallback runs eager).",
-            max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0));
+            "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap "
+            "(covered: %.2f MiB) — prefill graph capture disabled (a captured M>1 fallback "
+            "on the oversized weight fails loud).",
+            max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0),
+            covered_bytes / (1024.0 * 1024.0));
         nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
-        return false;
     }
+    if (covered_bytes == 0)
+        return !nvfp4_dequant_uncapturable_;
 
-    nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, max_bytes, "nvfp4_dequant");
+    nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, covered_bytes, "nvfp4_dequant");
     if (!nvfp4_dequant_ws_buf_) {
         IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes) — prefill graph "
                      "capture disabled (M>1 fallback runs eager).",
-                     max_bytes);
+                     covered_bytes);
         nvfp4_dequant_ws_size_ = 0;
         nvfp4_dequant_uncapturable_ = true;
         return false;
     }
-    nvfp4_dequant_ws_size_ = max_bytes;
+    nvfp4_dequant_ws_size_ = covered_bytes;
     set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_, nvfp4_dequant_ws_size_);
     IMP_LOG_INFO(
         "gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback; "
         "covers dense=%zu, moe=%zu, cutlass=%zu cache entries + per-layer "
         "SafeTensors NVFP4 expert tensors)",
-        max_bytes / (1024.0 * 1024.0), wcache_.nvfp4.size(), wcache_.nvfp4_moe.size(),
+        covered_bytes / (1024.0 * 1024.0), wcache_.nvfp4.size(), wcache_.nvfp4_moe.size(),
         wcache_.cutlass_nvfp4.size());
-    return true;
+    return !nvfp4_dequant_uncapturable_;
 }
 
 void GraphExecutor::release_moe_batch_buf() {
