@@ -335,8 +335,12 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     // Auto-detect format from path
     ImpModelFormat format = imp::is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
 
-    // Load model
-    ImpError err = imp_model_load(path.c_str(), format, &state.model);
+    // Load model. speculative.mtp_k > 0 opts into loading the MTP draft-head
+    // sidecar (~1.6 GiB VRAM; SafeTensors models shipping
+    // model_mtp.safetensors) so MTP drafting can be enabled below.
+    const int mtp_k = state.runtime_config.speculative.mtp_k;
+    ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
+                                     &state.model);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to load model: ") + imp_error_string(err);
         state.model = nullptr;
@@ -356,6 +360,16 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         imp_model_free(state.model);
         state.model = nullptr;
         return msg;
+    }
+
+    // MTP drafting for the verify loop (speculative.mtp_k). Best-effort: a
+    // model without a loadable head just runs without MTP drafts.
+    if (mtp_k > 0) {
+        ImpError mtp_err = imp_enable_mtp_spec_decode(state.ctx, mtp_k);
+        if (mtp_err != IMP_SUCCESS)
+            fprintf(stderr, "Warning: speculative.mtp_k=%d requested but MTP enable failed (%s); "
+                            "continuing without MTP drafts\n",
+                    mtp_k, imp_error_string(mtp_err));
     }
 
     // Extract model name from path. Strip trailing separators first so a

@@ -4,6 +4,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Speculative decoding on hybrid (GDN/SSM) models** — `speculative.hybrid`
+  (default on; imp-cli `--bench` pins it off): the verify chunk snapshots the
+  committed recurrent-state slab and, on partial acceptance, restores it and
+  re-forwards the accepted prefix, so suffix/n-gram speculation now engages on
+  Qwen3.5/3.6 and Nemotron-H hybrids. Measured (greedy, temp 0): Nemotron-3-
+  Nano-30B code-edit +60% tg, Qwen3.6-35B code-edit +18%, Qwen3.6-27B
+  prompt-echo prose +156%; draft-poor prompts are unchanged (miss-burst
+  hybrid). Token-lossless verified on Qwen3.5-4B (#847 enabler).
+- **MTP verify activation** (#847) — the trained MTP head now feeds the
+  verify loop as a draft source when the suffix matcher has no match
+  (`--mtp-spec-decode <k>` / `speculative.mtp_k`, default off). Loads both
+  sidecar MoE heads (Qwen3.6-35B `model_mtp.safetensors`) and embedded dense
+  heads (Qwen3.6-27B `mtp.*` in the main shard, new). Chunked-prefill-capable
+  MTP cache feed with DeepSeek-aligned pairing and feed-only forwards (no
+  lm_head), multi-turn prefix resume, and an economics guard that dooms MTP
+  drafting per request when average emitted/verify cannot beat the async
+  loop (measured: accept 44-91% but net-negative on current verify
+  economics — see #847 for follow-ups).
+
 ## [0.16.0] - 2026-07-02
 
 Multi-server-per-GPU (hard VRAM budget) + load/teardown robustness.

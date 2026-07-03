@@ -53,6 +53,15 @@ int main(int argc, char** argv) {
                 snap_set = true;
         if (!snap_set)
             runtime_cfg.server.recurrent_snapshot_mb = 0;
+        // Hybrid (GDN/SSM) verify would fold draft-acceptance luck into the
+        // gated tg signal exactly like the moe pin above — keep the
+        // canonical baseline raw-decode. An explicit --set wins.
+        bool hybrid_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("speculative.hybrid", 0) == 0)
+                hybrid_set = true;
+        if (!hybrid_set)
+            runtime_cfg.speculative.hybrid = false;
     }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)

@@ -17,10 +17,20 @@
 //
 // Phase 1 scope (gated in spec_ngram_gates_ok_): batch-1, greedy sampling,
 // no penalties / logit_bias / DRY / mirostat, no logprobs, no json/schema
-// constraints, no think budget, no recurrent state (SSM/GDN cannot rewind),
-// chunked-prefill-capable archs only. The verify loop runs eager — the async
-// conditional graph loop stays off while speculation is enabled (the host
-// must see every token to draft the next step).
+// constraints, no think budget, chunked-prefill-capable archs only. The
+// verify loop runs eager — the async conditional graph loop stays off while
+// speculation is enabled (the host must see every token to draft the next
+// step).
+//
+// Hybrid (SSM/GDN) models (speculative.hybrid): the chunk forward advances
+// recurrent state through rejected draft positions, so the committed
+// per-sequence state slab is copied to scratch before the chunk; a full
+// acceptance keeps the advanced state as-is (it covers exactly the forwarded
+// tokens), a partial acceptance restores the slab and re-forwards the
+// accepted prefix (~one extra chunk forward, amortized over the accepted
+// tokens). Draft sources: the suffix/ngram matcher first; when it has no
+// match and an MTP head is enabled (--mtp-spec-decode / speculative.mtp_k),
+// the pending MTP chain fills the chunk (engine_spec_mtp.cpp).
 // =============================================================================
 
 #include "compute/json_constrain.h"
@@ -72,7 +82,42 @@ void Engine::log_spec_stats_() const {
                      : 0.0);
 }
 
+// Hybrid verify: scratch slab holding the committed recurrent state across
+// the speculative chunk forward. Sized once (per_seq_bytes is fixed after
+// init); freed with the other spec buffers.
+bool Engine::ensure_spec_state_scratch_() {
+    if (!ssm_state_) return false;
+    const size_t bytes = ssm_state_->per_seq_bytes();
+    if (spec_state_scratch_ && spec_state_scratch_bytes_ >= bytes) return true;
+    if (spec_state_scratch_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
+        spec_state_scratch_ = nullptr;
+        spec_state_scratch_bytes_ = 0;
+    }
+    if (cudaMalloc(&spec_state_scratch_, bytes) != cudaSuccess) {
+        IMP_LOG_WARN("spec-hybrid: state scratch alloc failed (%zu bytes) — "
+                     "speculation disabled this step", bytes);
+        return false;
+    }
+    spec_state_scratch_bytes_ = bytes;
+    return true;
+}
+
+// Mirror of fill_recurrent_state's slot resolution (decode requests own a
+// slot acquired at prefill; the modulo fallback matches its legacy path).
+int Engine::recurrent_slot_for_(int req_id) const {
+    auto it = recurrent_slot_of_.find(req_id);
+    if (it != recurrent_slot_of_.end()) return it->second;
+    const int cap = ssm_state_ ? ssm_state_->max_sequences() : 0;
+    return cap > 0 ? req_id % cap : 0;
+}
+
 void Engine::free_spec_buffers_() {
+    if (spec_state_scratch_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
+        spec_state_scratch_ = nullptr;
+        spec_state_scratch_bytes_ = 0;
+    }
     if (d_spec_tokens_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_tokens_));
     if (d_spec_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_positions_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
@@ -164,9 +209,12 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     // handle the budget device-side.
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) return false;
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return false;
-    // Recurrent state (SSM/GDN) advances on every forwarded token and cannot
-    // be rewound on draft rejection.
-    if (ssm_state_ || gdn_state_) return false;
+    // Recurrent state (SSM/GDN) advances on every forwarded token. The
+    // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
+    // per-sequence slab for snapshot/restore; the legacy GGUF-era GDNState
+    // pool has no slab accessor and stays excluded.
+    if (gdn_state_) return false;
+    if (ssm_state_ && !runtime_config_.speculative.hybrid) return false;
     // MoE speculation engages only for native-NVFP4 experts: the batched
     // verify forward reads the NVFP4 expert cache directly and nets +49-81%
     // on draft-rich code-edit (Qwen3-Coder-30B-FP4, 2026-07-02) with a -3-7%
@@ -176,7 +224,6 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
         return false;
-    if (mtp_spec_decode_enabled()) return false;
     if (!supports_chunked_prefill_()) return false;
     return true;
 }
@@ -231,6 +278,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                             std::max(1, scfg.min_match), scfg.max_match, &draft_start);
     }
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
+    // MTP fallback: when the matcher has no draft, the pending MTP chain
+    // (drafted at the end of the previous verify step / prefill tail) fills
+    // the chunk — the trained head drafts where suffix matching cannot
+    // (78-94% depth-1 accept on Qwen3.6, PR #804). Subject to the economics
+    // guard below: high accept alone does not pay for the eager chunk +
+    // chain lm_head GEMVs + hybrid replay.
+    bool draft_from_mtp = false;
+    if (draft.empty() && mtp_spec_decode_enabled()) {
+        draft = mtp_take_draft_(*req);
+        draft_from_mtp = !draft.empty();
+    }
     if (draft.empty()) {
         spec_stats_.miss_steps++;
         if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 &&
@@ -350,6 +408,27 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     state.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled()) state.kv_seq_id = req->id;
 
+    // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
+    // slab — the chunk forward advances it through rejected draft positions.
+    const bool hybrid = ssm_state_ != nullptr;
+    int rec_slot = -1;
+    if (hybrid) {
+        if (!ensure_spec_state_scratch_()) {
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
+        }
+        rec_slot = recurrent_slot_for_(req->id);
+        if (!check(cudaMemcpyAsync(spec_state_scratch_, ssm_state_->seq_base(rec_slot),
+                                   ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream),
+                   "state snapshot D2D")) {
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
+        }
+        fill_recurrent_state(*req, state, /*reset=*/false, stream);
+    }
+
     Tensor logits_out;
     executor_->forward_logits(state, logits_out, stream);
 
@@ -363,7 +442,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         upload_penalties(*req, pstate, stream);
         if (pstate.penalty_tokens == nullptr) {
             // Upload failed — an unpenalized verify would diverge from the
-            // eager path; fall back to the normal step.
+            // eager path; fall back to the normal step. The chunk forward
+            // already ran: restore the committed hybrid state.
+            if (hybrid)
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                    ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                    ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
             kv_manager_->rollback(req->id, p0);
             spec_stats_.miss_steps++;
             return false;
@@ -376,10 +460,20 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist,
                                  d_spec_tokens_ + 1, req->repetition_penalty,
                                  req->frequency_penalty, req->presence_penalty);
-    if (!check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, chunk_len * sizeof(int32_t),
-                               cudaMemcpyDeviceToHost, stream), "argmax D2H"))
+    const bool argmax_ok =
+        check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, chunk_len * sizeof(int32_t),
+                              cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
+        check(cudaStreamSynchronize(stream), "verify sync");
+    if (!argmax_ok) {
+        // No tokens were emitted; leave the request exactly as before the
+        // step (the chunk forward advanced hybrid state — restore it).
+        if (hybrid)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                                               ssm_state_->per_seq_bytes(),
+                                               cudaMemcpyDeviceToDevice, stream));
+        kv_manager_->rollback(req->id, p0);
         return false;
-    if (!check(cudaStreamSynchronize(stream), "verify sync")) return false;
+    }
 
     if (getenv("IMP_SPEC_TRACE")) {
         std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
@@ -420,8 +514,33 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
     kv_manager_->touch(req->id);
 
+    // MTP bookkeeping runs BEFORE the hybrid re-forward below — it consumes
+    // this chunk's hidden rows, which the re-forward overwrites.
+    if (mtp_spec_decode_enabled())
+        mtp_post_verify_update_(*req, emitted);
+
     // Drop KV for rejected draft positions: keep t0 + matched drafts.
     kv_manager_->rollback(req->id, p0 + 1 + matched);
+
+    // Hybrid, partial acceptance: the in-place state advanced through
+    // rejected draft positions — restore the committed slab and re-advance
+    // it over the accepted prefix ([t0, d1..d_matched] is still staged in
+    // d_spec_tokens_). Full acceptance keeps the advanced state (it covers
+    // exactly the forwarded tokens); finished requests skip (the slot is
+    // released and nothing reads the state again). The replay rewrites the
+    // kept KV rows with identical values.
+    if (hybrid && matched < K && req->status != RequestStatus::FINISHED) {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                                           ssm_state_->per_seq_bytes(),
+                                           cudaMemcpyDeviceToDevice, stream));
+        const int replay_ctx = p0 + 1 + matched;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_context_len_, &replay_ctx, sizeof(int),
+                                           cudaMemcpyHostToDevice, stream));
+        state.n_tokens = matched + 1;
+        state.max_context_len = replay_ctx;
+        Tensor replay_logits;
+        executor_->forward_logits(state, replay_logits, stream);
+    }
 
     spec_stats_.verify_steps++;
     spec_stats_.drafted += K;
@@ -446,6 +565,20 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     if (draft_from_prediction) {
         req->pred_accepted += matched;
         req->pred_rejected += K - matched;
+    }
+    // MTP economics: an MTP-filled verify must emit enough tokens to beat
+    // the async loop it displaces (eager chunk ≈ 2x a loop step, plus the
+    // chain's full-vocab lm_head GEMVs, plus the hybrid partial-accept
+    // replay). Below ~4 emitted/verify the step loses outright — doom MTP
+    // drafting for this request; the suffix matcher and miss bursts carry on.
+    if (draft_from_mtp) {
+        mtp_econ_verifies_++;
+        mtp_econ_emitted_ += emitted;
+        constexpr int kMtpEconSample = 8;        // fair sample before judging
+        constexpr int kMtpEconMinEmitx10 = 40;   // avg emitted/verify >= 4.0
+        if (mtp_econ_verifies_ >= kMtpEconSample &&
+            mtp_econ_emitted_ * 10 < static_cast<long long>(mtp_econ_verifies_) * kMtpEconMinEmitx10)
+            mtp_unbind_("uneconomic: avg emitted/verify below break-even");
     }
     const bool acceptance_poor =
         req->spec_verifies >= 8 &&
