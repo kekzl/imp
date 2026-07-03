@@ -201,6 +201,11 @@ bool device_args_done = false;
                 if (!d_B || !d_SFB || !d_a) {
                     // Pre-cache miss — fall back to per-call H2D
                     // into the workspace caches from Step 1.
+                    // NOT graph-capturable: the memcpy sources are stack
+                    // vectors, so a recorded node would read a dead stack
+                    // address on every replay (#860 — nondeterministic
+                    // garbage B pointers, misaligned-address graph launches).
+                    moe_host_args_capture_guard(stream);
                     std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
                     std::vector<float> h_alpha(ne);
                     for (int e = 0; e < ne; ++e) {
