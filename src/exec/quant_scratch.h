@@ -43,9 +43,13 @@ struct QuantScratch {
     size_t mxfp4_workspace_size = 0;
 
     // --- dp4a (MMVQ) scratch for quantized input vector (M=1 decode) ---
+    // Sized q8_1_rows x q8_1_max_blocks: production decode uses row 0 only;
+    // the spec-verify batched LM head (#847 lever 2) quantizes up to
+    // q8_1_rows chunk rows at stride q8_1_max_blocks.
     void* q8_1_buf = nullptr;  // block_q8_1 array
     float* d8_buf = nullptr;   // float scale array
-    int q8_1_max_blocks = 0;   // max K/32
+    int q8_1_max_blocks = 0;   // max K/32 (per-row stride)
+    int q8_1_rows = 1;
 
     // --- dp4a prefill scratch for M>1 dense GEMM (Q4_K/Q5_K) ---
     // Sized for max_tokens * max_k/32 blocks. Eliminates the FP16 weight

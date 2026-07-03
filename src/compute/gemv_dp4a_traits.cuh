@@ -1059,6 +1059,142 @@ static void launch_gemv_dp4a_fp32(const uint8_t* W, const block_q8_1* q8_1, cons
 }
 
 // ============================================================================
+// Template kernel #2b: FP32 output, batched activations (spec-verify LM head,
+// #847 lever 2). MR activation rows share ONE pass over W — the per-row loop
+// re-read the full vocab x d_model LM head once per chunk row (0.44 ms/row on
+// Qwen3-8B Q8_0, the dominant term of the GGUF verify cycle after #856).
+// Each warp owns one weight row (the LM-head N is the vocab — the grid never
+// underfills, so the N_ROWS/kpar heuristics of kernel #2 don't apply) and
+// accumulates MR dot products against activation rows staged in smem.
+// All current DequantTraits have kNeedsQ8Sum == false; static-assert guards
+// the smem layout if that ever changes.
+// ============================================================================
+
+template <typename QT, int MR>
+__global__ void gemv_dp4a_fp32_batched_kernel(const uint8_t* __restrict__ W,
+                                              const block_q8_1* __restrict__ q8_1,
+                                              const float* __restrict__ d8, float* __restrict__ y,
+                                              int M, int K, int n_act, int act_stride_blocks) {
+    static_assert(!QT::kNeedsQ8Sum, "batched fp32 GEMV smem layout has no q8 sum plane");
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;  // weight row
+
+    const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;
+    const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
+
+    extern __shared__ char smem_q8[];
+    const int qs_ints_per_row = total_q8 * kSmemQ8Stride;
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_qs + (size_t)qs_ints_per_row * MR);
+
+    for (int r = 0; r < MR && r < n_act; ++r) {
+        const block_q8_1* q8r = q8_1 + (size_t)r * act_stride_blocks;
+        for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
+            int blk = i >> 3, w = i & 7;
+            int val;
+            memcpy(&val, q8r[blk].qs + w * 4, 4);
+            smem_qs[r * qs_ints_per_row + blk * kSmemQ8Stride + w] = val;
+        }
+        for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
+            smem_d[r * total_q8 + i] = d8[(size_t)r * act_stride_blocks + i];
+    }
+    __syncthreads();
+
+    if (row >= M)
+        return;
+
+    float sum[MR];
+#pragma unroll
+    for (int r = 0; r < MR; r++)
+        sum[r] = 0.0f;
+
+    for (int b = lane; b < total_q8; b += 32) {
+        const int wb = b / QT::kQ8PerWeight;
+        const int sub = b % QT::kQ8PerWeight;
+        const uint8_t* bp = W + (size_t)row * row_bytes + (size_t)wb * QT::kBlockBytes;
+#pragma unroll
+        for (int r = 0; r < MR; r++) {
+            if (r >= n_act)
+                break;
+            int xi[8];
+            memcpy(xi, smem_qs + r * qs_ints_per_row + b * kSmemQ8Stride, 32);
+            sum[r] += QT::dp4a_block(bp, sub, xi, smem_d[r * total_q8 + b], 0.0f);
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < MR; r++) {
+        for (int off = 16; off > 0; off >>= 1)
+            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
+        if (lane == 0 && r < n_act)
+            y[(size_t)r * M + row] = sum[r];
+    }
+}
+
+// Launch helper: picks the largest MR in {8,4,2} whose activation staging fits
+// the smem opt-in budget, and loops over the activation rows in MR chunks.
+// n_act == 1 should route through launch_gemv_dp4a_fp32 instead (kpar/NR
+// heuristics); this launcher still handles it correctly as a tail case.
+template <typename QT>
+static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
+                                          float* y, int M, int K, int n_act, int act_stride_blocks,
+                                          cudaStream_t stream) {
+    const int threads_per_block = 256;
+    const int warps_per_block = threads_per_block / 32;
+    const int blocks = (M + warps_per_block - 1) / warps_per_block;
+    const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;
+    const size_t per_row = (size_t)total_q8 * (kSmemQ8Stride * 4 + 4);
+
+    static int s_max_smem = 0;
+    if (s_max_smem == 0) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&s_max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        if (s_max_smem <= 0)
+            s_max_smem = 48 * 1024;
+    }
+    if (per_row * 2 > (size_t)s_max_smem) {
+        // K too large to stage even two activation rows — per-row fallback.
+        for (int r = 0; r < n_act; ++r)
+            launch_gemv_dp4a_fp32<QT>(W, q8_1 + (size_t)r * act_stride_blocks,
+                                      d8 + (size_t)r * act_stride_blocks, y + (size_t)r * M, M, K,
+                                      stream);
+        return;
+    }
+
+    auto run = [&](auto mr_tag, int r0, int rn) {
+        constexpr int MR = decltype(mr_tag)::value;
+        const size_t smem = per_row * MR;
+        if (smem > 48 * 1024)
+            cudaFuncSetAttribute(gemv_dp4a_fp32_batched_kernel<QT, MR>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        pdl::launch(gemv_dp4a_fp32_batched_kernel<QT, MR>, dim3(blocks), dim3(threads_per_block), smem,
+                    stream, W, q8_1 + (size_t)r0 * act_stride_blocks, d8 + (size_t)r0 * act_stride_blocks,
+                    y + (size_t)r0 * M, M, K, rn, act_stride_blocks);
+    };
+
+    int r0 = 0;
+    while (r0 < n_act) {
+        const int rem = n_act - r0;
+        if (rem >= 5 && per_row * 8 <= (size_t)s_max_smem) {
+            run(std::integral_constant<int, 8>{}, r0, rem < 8 ? rem : 8);
+            r0 += rem < 8 ? rem : 8;
+        } else if (rem >= 3 && per_row * 4 <= (size_t)s_max_smem) {
+            run(std::integral_constant<int, 4>{}, r0, rem < 4 ? rem : 4);
+            r0 += rem < 4 ? rem : 4;
+        } else if (rem >= 2 && per_row * 2 <= (size_t)s_max_smem) {
+            run(std::integral_constant<int, 2>{}, r0, 2);
+            r0 += 2;
+        } else {
+            run(std::integral_constant<int, 2>{}, r0, 1);  // tail row (MR=2 template, n_act=1)
+            r0 += 1;
+        }
+    }
+}
+
+// ============================================================================
 // Template kernel #3: QKV Fused (replaces 5 hand-written kernels)
 // ============================================================================
 

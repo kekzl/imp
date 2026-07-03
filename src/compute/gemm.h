@@ -311,4 +311,12 @@ void gemv_q2_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
 void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
                          cudaStream_t stream = nullptr);
 
+// Batched-activation variant for the spec-verify LM head (#847 lever 2):
+// n_act pre-quantized activation rows (row r at q8_1/d8 + r*act_stride_blocks)
+// share one pass over W; logits land at y + r*M. Falls back to the per-row
+// GEMV when a quant type has no dp4a traits or the rows don't fit smem.
+void gemv_dp4a_fp32_batched(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, int n_act, int act_stride_blocks,
+                            cudaStream_t stream = nullptr);
+
 }  // namespace imp

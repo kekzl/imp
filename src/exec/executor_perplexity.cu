@@ -20,6 +20,7 @@
 
 #include "exec/executor.h"
 #include "exec/executor_gemv_helpers.h"
+#include "compute/gemm.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
@@ -27,6 +28,7 @@
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
+#include <algorithm>
 
 #include <cuda_runtime.h>
 #include <cfloat>
@@ -193,18 +195,40 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
                                          static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model,
                                          csz, stream);
         } else if (use_dp4a_lm) {
-            // Per-row: fused RMSNorm→Q8_1 quantize + dp4a GEMV (the q8_1
-            // scratch holds exactly one row — same as production decode).
+            // Fused RMSNorm→Q8_1 quantize per row, then ONE batched dp4a GEMV
+            // whose weight pass is shared across the rows (#847 lever 2). The
+            // per-row loop re-read the full LM head once per chunk row
+            // (0.44 ms/row on Qwen3-8B Q8_0 — the dominant GGUF verify term
+            // after #856). Falls back to per-row when the multi-row scratch
+            // is unavailable (q8_1_rows == 1) or the batch is a single row.
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            for (int r = 0; r < csz; ++r) {
-                Tensor h_row = hc.slice(r, r + 1);
-                Tensor lg_row = lg.slice(r, r + 1);
-                rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
-                                      static_cast<const half*>(model_->output_norm().data), q8,
-                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
-                                      norm_w_off_);
-                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
-                                   static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
+            const int stride = qscratch_.q8_1_max_blocks;
+            if (csz > 1 && qscratch_.q8_1_rows >= 2) {
+                for (int r0 = 0; r0 < csz; r0 += qscratch_.q8_1_rows) {
+                    const int rn = std::min(qscratch_.q8_1_rows, csz - r0);
+                    for (int r = 0; r < rn; ++r) {
+                        Tensor h_row = hc.slice(r0 + r, r0 + r + 1);
+                        rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
+                                              static_cast<const half*>(model_->output_norm().data),
+                                              q8 + (size_t)r * stride, qscratch_.d8_buf + (size_t)r * stride,
+                                              nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                    }
+                    gemv_dp4a_fp32_batched(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                           static_cast<float*>(lg.data) + (size_t)r0 * cfg.vocab_size,
+                                           cfg.vocab_size, cfg.d_model, rn, stride, stream);
+                }
+            } else {
+                for (int r = 0; r < csz; ++r) {
+                    Tensor h_row = hc.slice(r, r + 1);
+                    Tensor lg_row = lg.slice(r, r + 1);
+                    rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
+                                          static_cast<const half*>(model_->output_norm().data), q8,
+                                          qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                          norm_w_off_);
+                    dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                       static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model,
+                                       stream);
+                }
             }
         } else {
             Tensor noc = view_tokens(norm_out_, csz);      // [csz, d]

@@ -183,8 +183,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int max_blocks = std::max(max_k / 32, max_moe_down_blocks);
         if (max_blocks > 0) {
             qscratch_.q8_1_max_blocks = max_blocks;
-            size_t q8_1_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * sizeof(block_q8_1);
-            size_t d8_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * sizeof(float);
+            // Rows: the batched verify LM head quantizes one chunk batch
+            // (max_logit_tokens_, floor 8) at a time; cap the multiplier so
+            // large-batch servers don't inflate this K-sized scratch.
+            qscratch_.q8_1_rows = std::min(std::max(max_logit_tokens_, 8), 16);
+            size_t q8_1_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * qscratch_.q8_1_rows *
+                             sizeof(block_q8_1);
+            size_t d8_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * qscratch_.q8_1_rows *
+                           sizeof(float);
             cudaError_t err1 = cudaMalloc(&qscratch_.q8_1_buf, q8_1_sz);
             cudaError_t err2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_buf), d8_sz);
             if (err1 != cudaSuccess || err2 != cudaSuccess) {
