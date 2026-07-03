@@ -213,6 +213,42 @@ TEST(SchemaConstrainTest, PrematureObjectCloseRejected) {
     EXPECT_FALSE(a[5]) << "'{}' combined token must be rejected — required 'code' unmet";
 }
 
+// #850: a backslash inside an object KEY was accepted and silently dropped
+// (no phase change, no buffer append), so the NEXT char matched the property
+// prefix while the emitted text carried the escape — `{"\number_x":5}`-style
+// schema-invalid keys observed live on Qwen3-8B json_schema. Property names
+// are matched on raw chars (escape sequences were never decoded), so no
+// legal key needs an escape: reject `\` in keys outright, single-char and
+// smuggled inside a multi-char token alike.
+TEST(SchemaConstrainTest, BackslashInKeyRejected) {
+    SKIP_IF_NO_CUDA();
+    //                                 0       1      2      3    4     5    6     7      8
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", "\\", "\"\\n", "um"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"num":{"type":"string"}},"required":["num"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+
+    // At OBJECT_OPEN: a combined token opening the key with an escape
+    // (`"\n`) must be masked; the bare quote stays legal.
+    sc.update(3);  // "{" -> OBJECT_OPEN
+    auto open = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(open[4]) << "bare '\"' must open the key";
+    EXPECT_FALSE(open[7]) << "'\"\\n' must be masked — escape smuggled into the key";
+
+    // Inside OBJECT_KEY: the bare backslash must be masked; real key
+    // prefixes stay legal.
+    sc.update(4);  // '"' -> OBJECT_KEY
+    auto key = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(key[5]) << "'n' is a valid prefix of 'num'";
+    EXPECT_FALSE(key[6]) << "'\\' must be masked inside a key (#850)";
+    EXPECT_FALSE(key[8]) << "'um' is not a valid prefix of 'num'";
+}
+
 // After the last property's value, a comma would dangle (no key can follow) —
 // it must be masked, leaving only the closing brace. Prevents `{"a":"x",}`.
 TEST(SchemaConstrainTest, TrailingCommaRejected) {

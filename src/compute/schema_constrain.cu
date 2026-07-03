@@ -759,8 +759,13 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 f.phase = SchemaPhase::OBJECT_AFTER_KEY;
                 return true;
             }
+            // No escapes in keys (#850): accepting '\' and dropping it let
+            // the NEXT char match the property prefix while the emitted
+            // text carried the escape — `{"\number_x":5}` passed the mask.
+            // Property names are matched on raw chars (escapes were never
+            // decoded), so no legal key needs one.
             if (c == '\\')
-                return true;  // key escape (rare)
+                return false;
             if (!f.node || !is_valid_key_prefix(f.node, f.key_buffer + c, f.emitted_keys))
                 return false;
             f.key_buffer += c;
