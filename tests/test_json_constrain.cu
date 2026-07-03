@@ -6,6 +6,7 @@
 #include "compute/json_schema.h"
 #include "compute/schema_constrain.h"
 #include "model/tokenizer.h"
+#include "runtime/constraint_manager.h"
 
 #include <string>
 #include <cfloat>
@@ -1105,6 +1106,169 @@ TEST(SchemaConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     for (int i = tok_vocab; i < model_vocab; i++) {
         EXPECT_FLOAT_EQ(h[i], -FLT_MAX) << "padding id " << i << " leaked through the schema mask";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Jump-ahead (#844): forced_text — the characters every schema-legal
+// continuation must spell next. Pure probe: never advances the FSM.
+// ---------------------------------------------------------------------------
+
+//                                                0        1      2      3    4     5    6    7    8    9    10   11   12
+static const std::vector<std::string> kForcedToks = {
+    "<unk>", "<s>", "</s>", "{", "\"", "c", "o", "d", "e", ":", "}", "x", "y"};
+
+// In-place init (SchemaConstrainer owns raw device buffers — not movable).
+static void init_forced_sc(Tokenizer& tok, SchemaConstrainer& sc, const char* schema_json) {
+    std::vector<float> scores(kForcedToks.size(), 0.0f);
+    tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    auto schema = parse_json_schema(schema_json);
+    ASSERT_TRUE(schema != nullptr);
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+}
+
+static constexpr const char* kCodeStringSchema =
+    R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})";
+
+TEST(SchemaForcedTextTest, EmitsSchemaSkeleton) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc, kCodeStringSchema);
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":\"")
+        << "the forced text must cover the full schema skeleton up to the free string";
+
+    // Pure probe: the FSM must be untouched — probing again yields the same.
+    std::string again;
+    sc.forced_text(again, 96);
+    EXPECT_EQ(again, text);
+}
+
+TEST(SchemaForcedTextTest, AdvancesWithFsmState) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc, kCodeStringSchema);
+
+    // Walk { " c — the probe must continue from mid-key.
+    for (int t : {3, 4, 5})
+        sc.update(t);
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "ode\":\"");
+}
+
+TEST(SchemaForcedTextTest, HonorsMaxChars) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc, kCodeStringSchema);
+
+    std::string text;
+    EXPECT_EQ(sc.forced_text(text, 3), 3);
+    EXPECT_EQ(text, "{\"c");
+}
+
+TEST(SchemaForcedTextTest, CompletesFullyDeterminedDocument) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    // Single-value enum: the ENTIRE document {"code":"x"} is forced.
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc,
+        R"({"type":"object","properties":{"code":{"enum":["x"]}},"required":["code"]})");
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":\"x\"}")
+        << "a fully-determined document must be forced to completion (EOS stays a masked step)";
+}
+
+TEST(SchemaForcedTextTest, StopsAtEnumChoiceAfterCommonPrefix) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc,
+        R"({"type":"object","properties":{"code":{"enum":["xxo","xxc"]}},"required":["code"]})");
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":\"xx")
+        << "the common enum prefix is forced; the walk stops where values diverge";
+}
+
+TEST(SchemaForcedTextTest, StopsAtKeyChoice) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc,
+        R"({"type":"object","properties":{"cx":{"type":"string"},"ox":{"type":"string"}},"required":["cx","ox"]})");
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"") << "two candidate keys: the quote is forced, the first key char is not";
+}
+
+TEST(SchemaForcedTextTest, BooleanValueStopsAtChoice) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc,
+        R"({"type":"object","properties":{"code":{"type":"boolean"}},"required":["code"]})");
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":") << "true/false is a real choice — the walk stops at the value";
+}
+
+TEST(SchemaForcedTextTest, NullLiteralForcedThroughClose) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc,
+        R"({"type":"object","properties":{"code":{"type":"null"}},"required":["code"]})");
+
+    std::string text;
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":null}") << "a null literal (and the final close) is fully forced";
+}
+
+TEST(SchemaForcedTextTest, PreambleGateBlocksForcing) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    SchemaConstrainer sc;
+    init_forced_sc(tok, sc, kCodeStringSchema);
+    const int32_t think_close = 12;  // stand-in close token ('y', unused by the schema walk)
+    sc.set_preamble(think_close, /*max_tokens=*/8192, /*thinking_open=*/true);
+
+    std::string text;
+    EXPECT_EQ(sc.forced_text(text, 96), 0) << "no forcing while the preamble gate is active";
+
+    sc.update(think_close);  // </think> — gate exits to OFF, FSM enforcing
+    EXPECT_GT(sc.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":\"");
+}
+
+TEST(SchemaForcedTextTest, ConstraintManagerRouting) {
+    SKIP_IF_NO_CUDA();
+    Tokenizer tok;
+    std::vector<float> scores(kForcedToks.size(), 0.0f);
+    tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2);
+
+    // json_mode has no schema skeleton — must return 0.
+    ConstraintManager jm;
+    jm.prepare(/*json_mode=*/true, "", &tok);
+    ASSERT_TRUE(jm.has_json());
+    std::string text;
+    EXPECT_EQ(jm.forced_text(text, 96), 0);
+
+    // json_schema routes through to SchemaConstrainer::forced_text.
+    ConstraintManager sm;
+    sm.prepare(/*json_mode=*/false, kCodeStringSchema, &tok);
+    ASSERT_TRUE(sm.has_schema());
+    EXPECT_GT(sm.forced_text(text, 96), 0);
+    EXPECT_EQ(text, "{\"code\":\"");
 }
 
 }  // namespace

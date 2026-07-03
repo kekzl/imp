@@ -126,6 +126,14 @@ public:
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
                            float freq_pen = 0.0f, float pres_pen = 0.0f);
 
+    // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
+    // ([n_rows, vocab_size] fp32) — same batched re-projection as
+    // greedy_argmax_all, but copying the rows out instead of reducing them.
+    // The constrained-pipeline jump-ahead (#844) consumes them across later
+    // ticks, one masked sample per row. Call while the workspace that ran
+    // the chunk forward is still active. Enqueues on `stream` only.
+    void project_logits_all(int n_rows, float* d_out, cudaStream_t stream);
+
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
     std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
                                             cudaStream_t stream = nullptr);

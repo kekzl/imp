@@ -334,6 +334,22 @@ miss_burst           = 8
 # fresh capture (both share the same first-forward semantics since #692).
 burst_rearm          = true
 
+[constrained]
+# Jump-ahead over schema-forced spans (#844): when the json_schema FSM
+# forces the next characters (skeleton keys/punctuation), one speculative
+# chunk forward drafts their canonical tokenization and materializes the
+# per-position logits; subsequent tokens are sampled from those rows with
+# no forward per token. Output is exact for greedy AND sampling (each row
+# is the true logits given the accepted prefix); a diverging token just
+# re-enters normal pipelining at the cost of the one chunk forward.
+# Opt-in: on Qwen3-8B the model's context-dependent tokenization splits
+# miss the canonical draft often enough that wasted chunk forwards cost
+# more than the consumed rows save (measured -3-5%, Q8 + NVFP4).
+jump_ahead           = false
+# Minimum draft length (tokens) worth the speculative chunk; shorter
+# forced spans stay on the per-token pipeline.
+jump_min_run         = 4
+
 [ffn]
 # SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
 # intermediate rows per threshold; no skipping (~1 µs/layer/token when on).

@@ -43,6 +43,12 @@ public:
     // Update FSM state after sampling a token.
     void update(int32_t token);
 
+    // Jump-ahead (#844), schema only (json_mode has no schema skeleton to
+    // force): the characters every legal continuation must spell next (see
+    // SchemaConstrainer::forced_text). Pure probe — never advances the FSM.
+    // Returns 0 for json_mode.
+    int forced_text(std::string& out, int max_chars) const;
+
     // Reset FSM state (call when request finishes).
     void reset();
 

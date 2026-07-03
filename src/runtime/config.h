@@ -562,6 +562,29 @@ struct RuntimeConfig {
         bool burst_rearm = true;
     } speculative;
 
+    // Constrained decoding (json_mode / json_schema).
+    struct Constrained {
+        // Jump-ahead over schema-forced spans (#844): when the schema FSM
+        // forces the next CHARACTERS (skeleton keys/punctuation — the text
+        // is forced even though its tokenization is not), one speculative
+        // chunk forward drafts the canonical tokenization and materializes
+        // per-position logits rows; subsequent tokens are then sampled from
+        // those rows without running forwards. Exact for greedy AND
+        // sampling — each row is the true logits given the accepted prefix;
+        // a token that diverges from the draft re-enters normal pipelining
+        // (one wasted chunk forward, nothing else). OPT-IN: measured net
+        // -3-5% on Qwen3-8B (Q8 + NVFP4, 2026-07-03) — the model picks
+        // context-dependent tokenization splits the canonical draft misses,
+        // so wasted chunks outweigh consumed rows. Also note the chunk path
+        // is not bit-identical to per-token decode (prefill vs decode
+        // kernels), so free-text AFTER a consumed span can diverge from a
+        // jump-off run (same cross-path property as spec-ngram verify).
+        bool jump_ahead = false;
+        // Minimum draft length (tokens) worth the speculative chunk;
+        // shorter forced spans stay on the per-token pipeline.
+        int jump_min_run = 4;
+    } constrained;
+
     struct FFN {
         // SwiGLU/GeGLU sparsity probe (instrumentation-only — no skipping).
         // When enabled, every dense-FFN decode step runs a reduce kernel

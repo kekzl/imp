@@ -482,6 +482,124 @@ void SchemaConstrainer::update(int32_t token) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Jump-ahead (#844): forced-continuation text probe
+// ---------------------------------------------------------------------------
+
+int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
+    out.clear();
+    // No forcing during the preamble (the mask is inactive there) or once
+    // the root value completed (the final EOS stays a normal masked step).
+    if (!initialized_ || preamble_.active() || stack_.empty())
+        return 0;
+
+    // Walk a cloned frame stack. Per state, derive a SUPERSET of the legal
+    // next chars from the phase (small: structural chars, matching property
+    // / enum next-chars, the literal target) and test each candidate via
+    // sim_advance — the grammar's single source of truth, so required-key
+    // gating, trailing-comma bans and enum/key prefix narrowing all apply.
+    // Exactly one legal candidate → the char is forced; append and advance
+    // the clone. Phases whose legal-char set is open-ended (free string
+    // content, escapes, numbers, patterns) stop the walk — never force
+    // there.
+    std::vector<SchemaFrame> stk = stack_;
+    while (static_cast<int>(out.size()) < max_chars && !stk.empty()) {
+        const SchemaFrame& f = stk.back();
+        std::string cands;
+        switch (f.phase) {
+            case SchemaPhase::VALUE_START: {
+                if (!f.node)
+                    return static_cast<int>(out.size());
+                switch (f.node->type) {
+                    case SchemaType::OBJECT: cands = "{"; break;
+                    case SchemaType::ARRAY: cands = "["; break;
+                    case SchemaType::STRING: cands = "\""; break;  // opening quote; interior is free
+                    case SchemaType::ENUM: cands = "\""; break;
+                    case SchemaType::NULL_TYPE: cands = "n"; break;
+                    case SchemaType::BOOLEAN: cands = "tf"; break;  // two legal starts — stops below
+                    default:
+                        // number/integer/anyOf/unknown: first char is a real choice
+                        return static_cast<int>(out.size());
+                }
+                break;
+            }
+            case SchemaPhase::OBJECT_OPEN:
+                cands = "\"}";  // sim_advance rejects '}' while required keys are unmet
+                break;
+            case SchemaPhase::OBJECT_KEY: {
+                // Next chars of unemitted properties matching the buffer;
+                // '"' closes iff the buffer is a complete key (sim decides).
+                // Without a node the key is unconstrained (any string char
+                // is legal) — the candidate set below would not be a
+                // superset, so never force there.
+                if (!f.node)
+                    return static_cast<int>(out.size());
+                cands = "\"";
+                for (const auto& [name, prop] : f.node->properties) {
+                    (void)prop;
+                    if (f.emitted_keys.count(name))
+                        continue;
+                    if (name.size() > f.key_buffer.size() &&
+                        name.compare(0, f.key_buffer.size(), f.key_buffer) == 0)
+                        cands += name[f.key_buffer.size()];
+                }
+                break;
+            }
+            case SchemaPhase::OBJECT_AFTER_KEY:
+            case SchemaPhase::OBJECT_COLON:
+                cands = ":";
+                break;
+            case SchemaPhase::OBJECT_AFTER_VALUE:
+                cands = ",}";  // ',' illegal when no key can follow; '}' while required unmet
+                break;
+            case SchemaPhase::ARRAY_AFTER_ITEM:
+                cands = ",]";  // min/maxItems can force either
+                break;
+            case SchemaPhase::ENUM_VALUE: {
+                // Next chars of enum values matching the buffer; '"' iff a
+                // matching value is already complete.
+                if (!f.node)
+                    return static_cast<int>(out.size());
+                for (const auto& v : f.node->enum_values) {
+                    if (v.size() < f.enum_buffer.size() ||
+                        v.compare(0, f.enum_buffer.size(), f.enum_buffer) != 0)
+                        continue;
+                    cands += v.size() == f.enum_buffer.size() ? '"' : v[f.enum_buffer.size()];
+                }
+                break;
+            }
+            case SchemaPhase::LITERAL_VALUE:
+                if (f.literal_pos < static_cast<int>(f.literal_target.size()))
+                    cands = f.literal_target[f.literal_pos];
+                break;
+            default:
+                // ARRAY_OPEN (item-start vs ']' choice), STRING_VALUE /
+                // STRING_PATTERN / STRING_ESCAPE (open-ended), NUMBER_VALUE
+                // (digit choices), DONE.
+                return static_cast<int>(out.size());
+        }
+
+        char forced = 0;
+        int legal = 0;
+        std::string seen;
+        for (char c : cands) {
+            if (seen.find(c) != std::string::npos)
+                continue;
+            seen += c;
+            std::vector<SchemaFrame> probe = stk;
+            if (sim_advance(probe, c)) {
+                forced = c;
+                if (++legal > 1)
+                    break;
+            }
+        }
+        if (legal != 1 || !sim_advance(stk, forced))
+            break;
+        out.push_back(forced);
+    }
+    return static_cast<int>(out.size());
+}
+
 // After a value frame pops, advance the parent frame's phase. Shared by the
 // transition simulator below.
 static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {

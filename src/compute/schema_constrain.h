@@ -87,18 +87,17 @@ public:
     // Update state with sampled token.
     void update(int32_t token);
 
-    // Jump-ahead (#844): token id if the current FSM state admits exactly
-    // one legal next token (the masked sampler would emit it regardless of
-    // logits), else -1. Host-only — same mask logic as apply_mask, counting
-    // to 2 with early exit instead of uploading.
-    int32_t forced_next_token();
-
-    // Collect up to max_n forced tokens, ADVANCING the FSM for each — the
-    // caller must emit every returned token (or finish the request; a
-    // finished request resets the manager anyway). Stops at the first
-    // non-forced state or when the root value completes (the final EOS
-    // stays a normal masked step). Returns the run length.
-    int forced_run(std::vector<int32_t>& out, int max_n);
+    // Jump-ahead (#844): appends to `out` the characters every schema-legal
+    // continuation must spell next (the schema skeleton — braces, quotes,
+    // single-candidate keys, colons, literals, unambiguous enum prefixes).
+    // Pure probe: never advances the FSM. Returns the char count.
+    //
+    // CHAR level, not token level: on a real BPE vocab a "forced" state
+    // almost always admits several tokens spelling the same forced text
+    // (':' vs ':"' vs ':{"'), so exactly-one-legal-token forcing never
+    // fires. The caller drafts the canonical tokenization of this text and
+    // verifies by sampling (see the constrained-pipeline jump-ahead).
+    int forced_text(std::string& out, int max_chars) const;
 
     // Reset for a new generation with the same schema.
     void reset();

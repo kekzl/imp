@@ -363,9 +363,17 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     }
 
     // Decode workspace (mirrors step_decode_forward's single-seq path).
+    // Without a dedicated decode workspace (no green contexts on sm_120),
+    // jump-ahead chunks (#844) share THIS workspace with the captured
+    // graph — pre-size it for the largest chunk NOW, before capture bakes
+    // the buffer pointer, so no later resize can reallocate under the graph.
     if (executor_->has_decode_workspace())
         executor_->use_workspace(1);
-    (void)executor_->resize_workspace(1, stream);
+    const int ws_tokens = (!executor_->has_decode_workspace() &&
+                           runtime_config_.constrained.jump_ahead)
+                              ? kJumpRowsCap
+                              : 1;
+    (void)executor_->resize_workspace(ws_tokens, stream);
 
     InferenceState& st = p.state;
     st = InferenceState{};
@@ -426,10 +434,17 @@ int Engine::step_constrained_pipeline() {
     }
 
     cudaStream_t stream = decode_stream();
+    // Jump-ahead span consumption (#844): while fnext > 0, the tick's
+    // logits come from the drafted chunk's precomputed rows — no forward
+    // runs, no device pos advance (repointed absolutely at span exit).
+    const bool consuming = p.fnext > 0;
 
-    // 1. Mask + sample the in-flight forward's logits. The constraint mask is
-    //    host-computed from the FSM state after the last harvested token and
-    //    uploaded stream-ordered behind the forward.
+    // 1. Mask + sample this tick's logits: the in-flight forward's (normal
+    //    tick, and the first span tick — the forward already in flight
+    //    predicts the draft's first position), or a precomputed draft row.
+    //    The constraint mask is host-computed from the FSM state after the
+    //    last harvested token and uploaded stream-ordered behind the
+    //    producer of those logits.
     p.state.seed = engine_internal::compute_step_seed(*req);
     // Think-budget enforcement (mirrors fill_sampling_params): when the
     // reasoning budget is exhausted mid-think, force </think> this step.
@@ -442,17 +457,29 @@ int Engine::step_constrained_pipeline() {
     p.state.penalty_tokens = nullptr;
     p.state.n_penalty_tokens = 0;
     upload_penalties(*req, p.state, stream);
-    executor_->masked_sample_async(p.state, p.logits, p.d_token, p.h_token, stream);
-    launch_pipeline_advance(p.d_pos, p.d_ctx, stream);
+    Tensor row_logits;
+    const Tensor* tick_logits = &p.logits;
+    if (consuming && p.fnext >= 2) {
+        const int64_t vocab = model_->config().vocab_size;
+        int64_t shape[2] = {1, vocab};
+        row_logits = Tensor(p.d_frows + static_cast<size_t>(p.fnext - 2) * vocab, QType::F32, 2,
+                            shape, /*borrowed=*/true);
+        tick_logits = &row_logits;
+    }
+    executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token, stream);
+    if (!consuming)
+        launch_pipeline_advance(p.d_pos, p.d_ctx, stream);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(p.ev, stream));
 
     // 2. Enqueue the NEXT forward before the host knows the token — it reads
-    //    d_token (just written by the sampler) on the GPU timeline.
+    //    d_token (just written by the sampler) on the GPU timeline. While
+    //    consuming a drafted span, the chunk already covers the positions
+    //    ahead — no forward until the span exits.
     bool more = (p.produced + 1 < p.budget) &&
                 (static_cast<int>(req->output_tokens.size()) + 1 < req->max_tokens);
-    if (more)
+    if (more && !consuming)
         p.runner.execute(stream);
-    p.forward_in_flight = more;
+    p.forward_in_flight = more && !consuming;
 
     // 3. Wait only for the sampled token (GPU continues in forward N+1).
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(p.ev));
@@ -461,6 +488,8 @@ int Engine::step_constrained_pipeline() {
     // 4. Harvest — mirrors step_decode_process_outputs for one token.
     req->output_tokens.push_back(token);
     p.produced++;
+    if (consuming && p.fnext >= 2)
+        p.jumped_tokens++;  // sampled from a precomputed row — no forward ran
     track_think_state(*req, token);
     if (req->constraints)
         req->constraints->update(token);
@@ -479,11 +508,231 @@ int Engine::step_constrained_pipeline() {
         teardown_constrained_pipeline(/*synchronize=*/true);
         return 0;
     }
+
+    if (consuming) {
+        if (p.fnext <= p.frows && token == p.fdraft[p.fnext - 1]) {
+            // On draft: this token's KV came from the chunk and the row
+            // predicting the next position is already materialized — the
+            // next tick stays forward-free.
+            p.fnext++;
+            return 1;
+        }
+        if (getenv("IMP_JUMP_TRACE")) {
+            Tokenizer* tk = model_->tokenizer();
+            const int32_t want = p.fnext <= p.frows ? p.fdraft[p.fnext - 1] : -1;
+            IMP_LOG_INFO("[jump] exit at %d/%d: sampled %d [%s] draft %d [%s]", p.fnext, p.frows,
+                         token, tk ? tk->decode_token(token).c_str() : "?", want,
+                         want >= 0 && tk ? tk->decode_token(want).c_str() : "<bonus>");
+        }
+        // Span exit: the sampled token diverged from the draft (its KV slot
+        // holds the drafted token's KV) or it is the free token after a
+        // fully-matched span (no KV yet either way). Repoint the pipeline
+        // and replay — the forward rewrites the correct KV and produces the
+        // next tick's logits. Stale draft KV beyond d_ctx is never read.
+        const int pos = p.fbase_pos + p.fnext - 1;
+        const int ctx = pos + 1;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_token, &token, sizeof(int32_t),
+                                           cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_pos, &pos, sizeof(int), cudaMemcpyHostToDevice,
+                                           stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice,
+                                           stream));
+        p.runner.execute(stream);
+        p.forward_in_flight = true;
+        p.fdraft.clear();
+        p.fnext = 0;
+        p.frows = 0;
+        return 1;
+    }
+
+    // Jump-ahead (#844), two-step: a pending draft is confirmed token by
+    // token for free (these ticks' forwards run regardless); after
+    // kJumpFreeVerify matches the speculative chunk over the remainder is
+    // committed. A diverging token drops the draft at zero GPU cost. Then
+    // probe the FSM for the next forced span.
+    if (!p.fpending.empty()) {
+        if (token == p.fpending[p.fpend_cursor]) {
+            if (++p.fpend_cursor >= kJumpFreeVerify) {
+                constrained_jump_commit_(req, stream);
+                p.fpending.clear();
+                p.fpend_cursor = 0;
+            }
+            return 1;
+        }
+        if (getenv("IMP_JUMP_TRACE")) {
+            Tokenizer* tk = model_->tokenizer();
+            IMP_LOG_INFO("[jump] pending dropped at %d: sampled %d [%s] draft %d [%s]",
+                         p.fpend_cursor, token,
+                         tk ? tk->decode_token(token).c_str() : "?", p.fpending[p.fpend_cursor],
+                         tk ? tk->decode_token(p.fpending[p.fpend_cursor]).c_str() : "?");
+        }
+        p.fpending.clear();
+        p.fpend_cursor = 0;
+    }
+    constrained_jump_probe_(req);
     return 1;
+}
+
+// Jump-ahead (#844) probe: derive the forced continuation TEXT from the
+// schema FSM (chars every legal completion must spell — token-level forcing
+// is vacuous on BPE vocabs, where ':' / ':"' / ':{"' all spell the same
+// skeleton) and pend its canonical tokenization. Host-only; the chunk is
+// only committed after the next tick confirms the draft's first token for
+// free (see step_constrained_pipeline).
+void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
+    auto& p = cpipe_;
+    const auto& ccfg = runtime_config_.constrained;
+    if (!ccfg.jump_ahead || !req->constraints || !req->constraints->has_schema())
+        return;
+    // v1 gates: the chunk needs continuation prefill; recurrent state
+    // (SSM/GDN) advances per forwarded token and has no chunk-continuation
+    // wiring here (spec-ngram gates it out for the same reason).
+    if (ssm_state_ || gdn_state_ || !supports_chunked_prefill_())
+        return;
+    // Think-budget forcing owns the next step — don't compete with it.
+    if (p.state.force_token >= 0)
+        return;
+
+    // Probe the forced continuation (pure FSM walk). ~96 chars cover any
+    // realistic skeleton span; longer ones re-probe after this span.
+    std::string text;
+    if (req->constraints->forced_text(text, 96) <= 0)
+        return;
+    Tokenizer* tok = model_->tokenizer();
+    if (!tok)
+        return;
+    std::vector<int32_t> draft = tok->encode(text, /*no_prefix=*/true);
+    // The first kJumpFreeVerify tokens are confirmed for free; the chunk
+    // needs >=2 more tokens to pay for itself, and jump_min_run is the
+    // quality knob on top.
+    if (static_cast<int>(draft.size()) > kJumpRowsCap + kJumpFreeVerify)
+        draft.resize(kJumpRowsCap + kJumpFreeVerify);
+    if (static_cast<int>(draft.size()) <
+        std::max(kJumpFreeVerify + 2, ccfg.jump_min_run))
+        return;
+    p.fpending = std::move(draft);
+    p.fpend_cursor = 0;
+    if (getenv("IMP_JUMP_TRACE"))
+        IMP_LOG_INFO("[jump] pended %d tokens for forced span \"%s\"",
+                     static_cast<int>(p.fpending.size()), text.c_str());
+}
+
+// Jump-ahead (#844) commit: the pipeline just confirmed the draft's first
+// kJumpFreeVerify tokens for free, and the in-flight forward for the last
+// of them will produce the logits predicting the next draft position. Run
+// ONE speculative teacher-forced chunk over the rest of the pending draft:
+// KV for every draft position plus
+// a materialized logits row predicting each following position. Later ticks
+// masked-sample from those rows (see step_constrained_pipeline) instead of
+// running forwards. Stream-ordered behind the in-flight forward; pure on
+// any failure — nothing emitted, no FSM advance.
+void Engine::constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_t stream) {
+    auto& p = cpipe_;
+
+    std::vector<int32_t> draft(p.fpending.begin() + kJumpFreeVerify, p.fpending.end());
+
+    // Bounds: row-buffer cap, KV budget (>=1 token stays for the pipeline
+    // after the span), max_tokens, workspace token limit (resize_workspace
+    // silently clamps there), attn-scores capacity.
+    const int out_size = static_cast<int>(req->output_tokens.size());
+    int max_k = std::min({kJumpRowsCap, p.budget - p.produced - 1,
+                          req->max_tokens - out_size - 1, executor_->max_tokens()});
+    const int pos1 = req->context_len() - 1;  // position of the last confirmed token
+    const int s_cap = executor_->attn_scores_cap();
+    if (s_cap > 0) {
+        // Same rule as chunked prefill: n_tokens x ctx_len must fit s_cap^2.
+        const int64_t cap2 = static_cast<int64_t>(s_cap) * s_cap;
+        while (max_k > 0 && static_cast<int64_t>(max_k) * (pos1 + max_k + 1) > cap2)
+            --max_k;
+    }
+    if (static_cast<int>(draft.size()) > max_k)
+        draft.resize(std::max(max_k, 0));
+    const int K = static_cast<int>(draft.size());
+    if (K < 1)
+        return;
+
+    if (!ensure_spec_buffers_(K, 1))
+        return;
+    if (!p.d_frows) {
+        const size_t bytes = static_cast<size_t>(kJumpRowsCap) *
+                             model_->config().vocab_size * sizeof(float);
+        if (cudaMalloc(&p.d_frows, bytes) != cudaSuccess) {
+            p.d_frows = nullptr;
+            return;
+        }
+    }
+    // With a dedicated decode workspace the chunk runs on the prefill slot
+    // (the captured graph's buffers are untouched); without one it shares
+    // the graph's workspace — pre-sized to kJumpRowsCap at launch, so this
+    // resize can only shrink bookkeeping, never reallocate under the graph.
+    const bool dual_ws = executor_->has_decode_workspace();
+    if (dual_ws)
+        executor_->use_workspace(0);
+    if (!executor_->resize_workspace(K, stream)) {
+        if (dual_ws)
+            executor_->use_workspace(1);
+        return;
+    }
+
+    // Teacher-forced chunk over the draft at positions pos1+1..pos1+K,
+    // stream-ordered behind the in-flight forward (which contributes the
+    // harvested token's KV at pos1).
+    std::vector<int> h_positions(K);
+    for (int i = 0; i < K; ++i)
+        h_positions[i] = pos1 + 1 + i;
+    const int chunk_ctx = pos1 + K + 1;  // KV valid through the chunk's last position
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_tokens_, draft.data(), K * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_positions_, h_positions.data(), K * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_context_len_, &chunk_ctx, sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
+
+    InferenceState cs;
+    cs.token_ids = d_spec_tokens_;
+    cs.positions = d_spec_positions_;
+    cs.n_tokens = K;
+    cs.kv_cache = kv_cache_raw_;
+    cs.block_tables = p.d_bt;  // full table uploaded at launch, covers the whole budget
+    cs.context_lens = d_spec_context_len_;
+    cs.max_context_len = chunk_ctx;
+    cs.n_sequences = 1;
+    cs.max_blocks_per_seq = 0;
+    cs.is_prefill = true;
+    cs.prefill_offset = pos1 + 1;
+    cs.kv_manager = kv_manager_.get();
+    if (kv_manager_ && kv_manager_->residual_enabled())
+        cs.kv_seq_id = req->id;
+
+    Tensor chunk_logits;
+    executor_->forward_logits(cs, chunk_logits, stream);
+    // Materialize the per-position logits rows while the workspace that ran
+    // the chunk (hidden_) is still active; row j predicts position pos1+2+j.
+    executor_->project_logits_all(K, p.d_frows, stream);
+    if (dual_ws)
+        executor_->use_workspace(1);
+
+    p.fdraft = std::move(draft);
+    p.fnext = 1;  // the in-flight forward's logits predict fdraft[0]'s position
+    p.fbase_pos = pos1 + 1;
+    p.frows = K;
+    p.jumps++;
+    if (getenv("IMP_JUMP_TRACE")) {
+        std::string ids;
+        for (int32_t t : p.fdraft) ids += std::to_string(t) + " ";
+        IMP_LOG_INFO("[jump] committed %d-token chunk after free first-token match (ids: %s)", K,
+                     ids.c_str());
+    }
+    IMP_LOG_DEBUG("ConstrainedPipeline: jump-ahead committed a %d-token draft chunk", K);
 }
 
 void Engine::teardown_constrained_pipeline(bool synchronize) {
     auto& p = cpipe_;
+    if (p.jumps > 0) {
+        IMP_LOG_INFO("ConstrainedPipeline: jump-ahead saved %lld forwards across %d drafted "
+                     "spans (%d tokens produced)",
+                     p.jumped_tokens, p.jumps, p.produced);
+    }
     if (synchronize)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));
     p.runner.invalidate();
@@ -494,11 +743,20 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
     if (p.d_banned) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_banned)); p.d_banned = nullptr; }
     if (p.h_token) { IMP_CUDA_CHECK_LOG(cudaFreeHost(p.h_token)); p.h_token = nullptr; }
     if (p.ev) { IMP_CUDA_CHECK_LOG(cudaEventDestroy(p.ev)); p.ev = nullptr; }
+    if (p.d_frows) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_frows)); p.d_frows = nullptr; }
     p.req = nullptr;
     p.active = false;
     p.forward_in_flight = false;
     p.produced = 0;
     p.budget = 0;
+    p.fdraft.clear();
+    p.fpending.clear();
+    p.fpend_cursor = 0;
+    p.fnext = 0;
+    p.fbase_pos = 0;
+    p.frows = 0;
+    p.jumps = 0;
+    p.jumped_tokens = 0;
 }
 
 }  // namespace imp

@@ -376,8 +376,43 @@ private:
         int budget = 0;              // tokens coverable by pre-allocated KV
         int produced = 0;            // tokens harvested by this pipeline
         bool forward_in_flight = false;
+        // Jump-ahead (#844): forced-span speculative precompute. fdraft is
+        // the canonical tokenization of the schema-forced text; one chunk
+        // forward wrote KV + logits rows (d_frows) for every draft
+        // position, and later ticks masked-sample from those rows instead
+        // of running a forward. Exact for greedy AND sampling — each row IS
+        // the true logits given the accepted prefix; a sampled token that
+        // diverges from the draft just re-enters normal pipelining (its KV
+        // is rewritten by the replay; stale draft KV sits beyond d_ctx and
+        // is never read).
+        std::vector<int32_t> fdraft;
+        int fnext = 0;      // 1-based draft index the next harvested token must match; 0 = off
+        int fbase_pos = 0;  // position of fdraft[0]
+        float* d_frows = nullptr;  // [kJumpRowsCap, vocab] fp32 draft-prediction rows
+        int frows = 0;             // valid rows in d_frows (== fdraft.size())
+        // Free leading-token verify: the probe only PENDS the draft; the
+        // next kJumpFreeVerify ticks run normally (their forwards happen
+        // regardless) and each harvested token must match the draft before
+        // the chunk over the remainder is committed. A model that diverges
+        // early — the common case when it doesn't know the schema's keys or
+        // prefers a different tokenization split — costs nothing but the
+        // host probe.
+        std::vector<int32_t> fpending;
+        int fpend_cursor = 0;  // draft tokens confirmed for free so far
+        int jumps = 0;             // spans committed (stats, logged at teardown)
+        long long jumped_tokens = 0;  // forward-free harvested tokens
     };
     ConstrainedPipeline cpipe_;
+    // Max draft tokens per forced span (d_frows rows; ~0.6 MiB/row at 150k
+    // vocab, allocated lazily for the pipeline's lifetime). Longer forced
+    // skeletons simply re-probe after the span is consumed.
+    static constexpr int kJumpRowsCap = 16;
+    // Draft tokens confirmed for free (their ticks run forwards anyway)
+    // before the chunk is committed. Empirically the model diverges from
+    // the canonical tokenization mostly within the first two tokens; 2
+    // eliminates nearly all wasted chunk forwards at the cost of not
+    // precomputing those two positions.
+    static constexpr int kJumpFreeVerify = 2;
 
     // Teacher-forced perplexity capture (begin/end_perplexity_capture).
     // Device buffers of length n; step_prefill_one writes per-position NLL
@@ -688,6 +723,13 @@ private:
     // 1 = produced a token and continues, -1 = generation finished.
     bool try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream);
     int step_constrained_pipeline();
+    // Jump-ahead (#844): probe the schema FSM for a forced continuation and
+    // pend its canonical-tokenization draft (host-only, no GPU work).
+    void constrained_jump_probe_(std::shared_ptr<Request>& req);
+    // Commit a pending draft whose first token the pipeline just confirmed:
+    // enqueue the speculative chunk over fpending[1..] (KV + logits rows).
+    // Pure on failure — nothing emitted, no FSM advance.
+    void constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_t stream);
     void teardown_constrained_pipeline(bool synchronize);
 
     // Schedule prefill/decode batches and reconfigure green contexts.
