@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cassert>
 #include <mutex>
+#include <stdexcept>
 
 namespace imp {
 
@@ -205,8 +206,17 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
 
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
     void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes, stream);
-    if (!dequant_buf)
-        return;
+    if (!dequant_buf) {
+        // A silent return here corrupts whatever runs next: the output tensor
+        // keeps garbage, and under stream capture the recorded graph simply
+        // LACKS this GEMM — the #855 census "hybrid crash" was this exact
+        // hole (Nemotron: pre-alloc skipped for a >cap weight, fallback
+        // refused mid-capture, graph launched with an uninitialized
+        // activation buffer -> misaligned address). Throw instead; the
+        // verify capturer fails the capture cleanly and falls back eager.
+        throw std::runtime_error("gemm_nvfp4: no dequant workspace for M>1 fallback (capture-active "
+                                 "or allocation failure) — cannot run this GEMM");
+    }
 
     dequantize_nvfp4_to_fp16(A, dequant_buf, stream);
 

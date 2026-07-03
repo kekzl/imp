@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
+#include <stdexcept>
 #include <cuda_fp16.h>
 #include <vector>
 
@@ -146,8 +147,11 @@ TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
     int64_t cshape[2] = {tw.M, tw.N};
     Tensor a_t(tw.d_a, QType::F16, 2, ashape, /*on_device=*/true);
     Tensor c_t(tw.d_c, QType::F16, 2, cshape, /*on_device=*/true);
-    // Should NOT crash — guarded by cudaStreamIsCapturing inside ensure_dequant_buffer.
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    // Must fail LOUD: a silent skip records a graph that lacks this GEMM and
+    // launches with an uninitialized activation buffer (the #855 census
+    // "hybrid crash" — misaligned address on Nemotron). The capture-refusal
+    // in ensure_dequant_buffer now surfaces as a throw the capturer catches.
+    EXPECT_THROW(gemm_nvfp4(tw.qr, a_t, c_t, stream_), std::runtime_error);
 
     cudaGraph_t graph = nullptr;
     cudaError_t end_err = cudaStreamEndCapture(stream_, &graph);
