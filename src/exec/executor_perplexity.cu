@@ -42,7 +42,8 @@ namespace imp {
 // cross-block atomic accumulation order varies run-to-run.
 __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz, V]
                                        const int32_t* __restrict__ tokens, int chunk_start, int n,
-                                       int V, double* __restrict__ nll_per_pos) {
+                                       int V, double* __restrict__ nll_per_pos,
+                                       int32_t* __restrict__ match_per_pos) {
     int row = blockIdx.x;                 // local row in this chunk
     int global_pos = chunk_start + row;   // position in the corpus
     if (global_pos >= n - 1)
@@ -54,20 +55,38 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     __shared__ double s_sum;
     int tid = threadIdx.x;
 
-    // max over V
+    // max over V — track the argmax index alongside (smallest index on
+    // ties, matching the production greedy argmax in sampling.cu), so the
+    // corpus doubles as a teacher-forced greedy-agreement probe.
     float local_max = -INFINITY;
-    for (int i = tid; i < V; i += blockDim.x)
-        local_max = fmaxf(local_max, lg[i]);
+    int local_idx = 0;
+    for (int i = tid; i < V; i += blockDim.x) {
+        float v = lg[i];
+        if (v > local_max || (v == local_max && i < local_idx)) {
+            local_max = v;
+            local_idx = i;
+        }
+    }
     __shared__ float red[256];
+    __shared__ int redi[256];
     red[tid] = local_max;
+    redi[tid] = local_idx;
     __syncthreads();
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s)
-            red[tid] = fmaxf(red[tid], red[tid + s]);
+        if (tid < s) {
+            if (red[tid + s] > red[tid] ||
+                (red[tid + s] == red[tid] && redi[tid + s] < redi[tid])) {
+                red[tid] = red[tid + s];
+                redi[tid] = redi[tid + s];
+            }
+        }
         __syncthreads();
     }
-    if (tid == 0)
+    if (tid == 0) {
         s_max = red[0];
+        if (match_per_pos)
+            match_per_pos[global_pos] = (redi[0] == target) ? 1 : 0;
+    }
     __syncthreads();
     float mx = s_max;
 
@@ -206,14 +225,16 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
 }
 
 void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
-                                           int chunk_len, double* d_nll, cudaStream_t stream) {
+                                           int chunk_len, double* d_nll, cudaStream_t stream,
+                                           int32_t* d_match) {
     if (!initialized_ || chunk_len <= 0 || n_total < 2 || !d_tokens || !d_nll) {
         return;
     }
     const int V = model_->config().vocab_size;
     for_each_lm_head_batch_(chunk_len, stream, [&](const Tensor& lg, int row0, int csz) {
         perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
-                                                       chunk_start + row0, n_total, V, d_nll);
+                                                       chunk_start + row0, n_total, V, d_nll,
+                                                       d_match);
     });
 }
 

@@ -641,6 +641,12 @@ struct RuntimeConfig {
         // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
         // Legacy env: IMP_NVFP4_FORCE_DEQUANT.
         bool nvfp4_force_dequant = false;
+        // Skip building the NVFP4 decode cache entirely (bisection/eval
+        // tool): decode runs on the source-precision paths (dp4a GEMV for
+        // GGUF quants, FP16 GEMV otherwise) — the pre-cache decode
+        // semantics. Distinct from nvfp4_force_dequant, which dequantizes
+        // the already-NVFP4-quantized cache and so keeps NVFP4 values.
+        bool no_nvfp4_decode_cache = false;
         // Log shape + per-candidate algoId/tileId + chosen algo for every
         // benchmark_and_select_algo call. Legacy env: IMP_LOG_GEMM_ALGO.
         bool log_gemm_algo = false;

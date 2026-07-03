@@ -106,8 +106,11 @@ public:
     // n_total owned by the caller (Engine ppl capture). Enqueues on `stream`
     // only; the caller reduces after a sync. Overwrites the logits_
     // workspace — call only after all reads of the chunk's logits are done.
+    // Optional d_match[global_pos] ∈ {0,1}: greedy argmax == actual next
+    // token (production tie-break) — teacher-forced greedy-agreement probe.
     void perplexity_nll_partial(const int32_t* d_tokens, int n_total, int chunk_start,
-                                int chunk_len, double* d_nll, cudaStream_t stream);
+                                int chunk_len, double* d_nll, cudaStream_t stream,
+                                int32_t* d_match = nullptr);
 
     // Greedy verify for n-gram speculative decoding: applies the tier-aware
     // LM head to hidden_[0..n_rows-1] (the verify chunk that forward_logits
