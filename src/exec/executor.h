@@ -356,7 +356,7 @@ private:
     void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]
     size_t lora_scratch_sz_ = 0;
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
-    int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max_batch_size)
+    int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
