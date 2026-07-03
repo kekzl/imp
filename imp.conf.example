@@ -389,6 +389,9 @@ graph_diag           = false
 graph_dump_dir       = ""
 # Force NVFP4 dispatch through dequant→FP16 GEMV (M=1 bisection tool).
 nvfp4_force_dequant  = false
+# Skip building the NVFP4 decode cache: decode runs on the source-precision
+# paths (dp4a GEMV / FP16 GEMV) — bisection / quality-baseline tool.
+no_nvfp4_decode_cache = false
 # Log shape + per-candidate algo for every cuBLASLt algo selection.
 log_gemm_algo        = false
 # MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.
