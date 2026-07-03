@@ -22,6 +22,13 @@
 // same rollback that drops rejected drafts. The verify consumes argmax rows
 // [0, real_chunk_len) only.
 //
+// Hybrids (SSMState): the recurrent state has no causal-masking escape — pad
+// rows would advance the conv tail and scan state in place. The chunk
+// kernels therefore read the real chunk length from device (InferenceState::
+// d_chunk_len, refreshed per step like the other lengths) and stop the state
+// updates at the real last row. The slab pointers (seq_base(slot)) are baked
+// into the graph, so the cache key includes the recurrent slot.
+//
 // Safety: the first use of a bucket runs eager through the SAME capture-mode
 // code path (cuBLASLt/CUTLASS algo warmup — census PR #855 showed only the
 // first chunk per shape fails capture); the second use captures. Any capture
@@ -79,10 +86,13 @@ bool Engine::spec_capture_ready_(int ctx_padded) {
     // chunk, diagnostics only).
     if (runtime_config_.diagnostics.spec_capture_probe)
         return false;
-    // Hybrids: census showed the recurrent chunk path consumes a D2H result
-    // under capture that never executed (misaligned-address context poison).
-    // MoE host-offload syncs on the host per layer.
-    if (ssm_state_ || gdn_state_ || offload_mgr_)
+    // SSMState hybrids are capture-eligible: the recurrent chunk kernels
+    // read the real chunk length from device (InferenceState::d_chunk_len)
+    // so pad rows never advance the committed state, and the graph cache is
+    // keyed on the recurrent slot (the slab pointers are baked). The legacy
+    // GGUF GDNState path has no slab accessor (excluded from spec verify
+    // altogether); MoE host-offload syncs on the host per layer.
+    if (gdn_state_ || offload_mgr_)
         return false;
     // BitDecoding residual KV advances ring state on the host per forward.
     if (kv_manager_ && kv_manager_->residual_enabled())
@@ -126,7 +136,10 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         spec_capture_ws_gen_ = ws_gen;
     }
 
-    auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity}];
+    // Hybrids bake the recurrent-slab pointers (seq_base(slot)) into the
+    // graph — key it on the slot so a slot change gets its own graph.
+    const int rec_slot = state.ssm_state ? state.ssm_seq_id : -1;
+    auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot}];
     if (slot.exec) {
         cudaError_t err = cudaGraphLaunch(slot.exec, stream);
         if (err == cudaSuccess)
@@ -201,8 +214,8 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     }
     slot.exec = exec;
     spec_capture_failures_ = 0;
-    IMP_LOG_INFO("[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d)",
-                 state.n_tokens, state.ctx_capacity);
+    IMP_LOG_INFO("[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d, rec_slot=%d)",
+                 state.n_tokens, state.ctx_capacity, rec_slot);
     return true;
 }
 

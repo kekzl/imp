@@ -67,6 +67,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         IMP_LOG_INFO("MoE prefill: legacy FP16 fallback path (n=%d, expanded=%d)", n,
                      expanded);
     {
+        moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_offsets(ne + 1);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                            static_cast<size_t>(ne + 1) * sizeof(int32_t),

@@ -7,7 +7,24 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <stdexcept>
+
 namespace imp {
+
+// Several MoE prefill paths read routing metadata on the host (D2H + stream
+// sync) to size the per-expert GEMMs. Under an active stream capture that
+// sync fails SILENTLY (the error was unchecked) and the host reads
+// uninitialized offsets — the recorded graph then launches expert GEMMs with
+// garbage geometry and dies with `misaligned address` at graph launch (the
+// #855 census crash class; root-caused on Nemotron-H NVFP4 in #847). Only
+// the CUTLASS 3.x device-args path records cleanly; every host-args path
+// must fail the capture loudly instead (same lesson as #858).
+inline void moe_host_args_capture_guard(cudaStream_t stream) {
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone)
+        throw std::runtime_error(
+            "MoE host-args prefill path reads routing on the host — not graph-capturable");
+}
 
 __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n);
 __global__ void moe_apply_per_expert_scale_kernel(

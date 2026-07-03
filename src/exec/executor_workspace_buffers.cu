@@ -9,6 +9,7 @@
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/sampling.h"
 #include "runtime/config.h"
 #include "quant/quant_gemm.h"
@@ -1341,6 +1342,60 @@ bool GraphExecutor::chunk_capture_supported() const {
         return false;  // FP16-QK FA2 is the only device-length chunked kernel
     if (runtime_config().attention.fa2_fp16qk == "never")
         return false;
+    // MoE: only the CUTLASS 3.x device-args grouped path records into a
+    // graph without host-side routing reads — every other MoE prefill path
+    // does a D2H+sync per layer to size the expert GEMMs (capture-illegal;
+    // guarded by moe_host_args_capture_guard). Require the static
+    // device-args conditions for every MoE layer. Models whose experts live
+    // in the data-borrow decode slabs (e.g. Nemotron-H NVFP4: expert ids not
+    // in the CUTLASS tier) fall out here until a device-args grouped GEMM
+    // exists for that layout (#847 follow-up).
+    bool any_moe = false;
+    for (int i = 0; i < cfg.n_layers && !any_moe; ++i)
+        any_moe = layer_has_moe(i);
+    // moe.skip (debug) removes the MoE pass from eager and capture alike —
+    // the recorded graph stays consistent, so it does not block capture.
+    if (any_moe && !runtime_config().moe.skip) {
+        if (runtime_config().moe.no_cutlass3x || !runtime_config().moe.nvfp4_device_args)
+            return false;
+        if (!cutlass_grouped_3x_nvfp4_available())
+            return false;
+        const int ne = cfg.n_experts;
+        if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf || !moe_.d_M_per ||
+            moe_.d_M_per_count < ne || !moe_.d_sfa_offsets || !moe_.d_B_ptrs_cache ||
+            !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full || !moe_.cutlass3x_sfa_ptrs ||
+            moe_.cutlass3x_sfa_ptrs_count < ne)
+            return false;
+        auto covers = [&](const std::vector<TensorID>& ids) {
+            if (static_cast<int>(ids.size()) < ne)
+                return false;
+            for (int e = 0; e < ne; ++e) {
+                if (ids[e] == kInvalidTensorID)
+                    return false;
+                if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+                    return false;
+            }
+            return true;
+        };
+        for (int i = 0; i < cfg.n_layers; ++i) {
+            if (!layer_has_moe(i))
+                continue;
+            const auto& ly = model_->layer(i);
+            const bool gated = !(ly.expert_gate_packed.data == nullptr &&
+                                 (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
+            // Non-gated experts (RELU² — Nemotron-H): the device-args grouped
+            // GEMM passes every static check here, records cleanly, and the
+            // captured graph still dies with `misaligned address` on launch
+            // (repro: Nemotron-3-Nano verify capture; the gated Qwen3-Coder /
+            // Modelopt graphs are clean). Root cause in the non-gated
+            // device-args replay is open — keep it eager until then.
+            if (!gated)
+                return false;
+            if (!covers(ly.expert_up_ids) || !covers(ly.expert_down_ids) ||
+                !covers(ly.expert_gate_ids))
+                return false;
+        }
+    }
     return true;
 }
 

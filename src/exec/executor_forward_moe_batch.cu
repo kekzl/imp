@@ -71,6 +71,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     if (layer == 0)
         IMP_LOG_INFO("MoE prefill: NVFP4→FP16 batch path (n=%d, expanded=%d)", ctx.n, ctx.expanded);
 
+    moe_host_args_capture_guard(stream);
     std::vector<int32_t> h_offsets(ctx.ne + 1);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), ctx.routing.expert_offsets.data,
                                        static_cast<size_t>(ctx.ne + 1) * sizeof(int32_t),
@@ -366,6 +367,7 @@ bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream
         }
 
         size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
+        moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_offsets(ne + 1);
         cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                         static_cast<size_t>(ne + 1) * sizeof(int32_t), cudaMemcpyDeviceToHost,
@@ -418,6 +420,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                      expanded);
 
     // One D2H sync per layer for expert offsets
+    moe_host_args_capture_guard(stream);
     std::vector<int32_t> h_offsets(ne + 1);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
@@ -561,6 +564,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
     // top_k is bounded by FFN active-expert count (max 32 per kernel
     // launch guard at line ~2154 in the old per-token form). Use a
     // std::vector since n*top_k can exceed the old 32-entry stack array.
+    moe_host_args_capture_guard(stream);
     std::vector<int32_t> h_all_experts(static_cast<size_t>(n) * top_k);
     cudaMemcpyAsync(h_all_experts.data(), routing.expert_indices.data,
                     static_cast<size_t>(n) * top_k * sizeof(int32_t),
