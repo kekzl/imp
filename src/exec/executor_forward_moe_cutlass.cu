@@ -314,6 +314,7 @@ if (!ctx.moe_gather_done) {
 }
 
 // Legacy D2H+sync + smallM + non-smallM dispatch path.
+moe_host_args_capture_guard(stream);
 std::vector<int32_t> h_offsets(ne + 1);
 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                                    static_cast<size_t>(ne + 1) * sizeof(int32_t),

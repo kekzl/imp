@@ -14,6 +14,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <stdexcept>
+
 namespace imp {
 
 // Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
@@ -127,7 +129,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     if (conv_st) {
         if (state.is_prefill) {
             ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
-                               stream);
+                               stream, state.d_chunk_len);
         } else {
             ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
                               stream);
@@ -229,8 +231,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
 
             ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
-                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                             h_dtype, stream);
+                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
+                             n_groups, h_dtype, stream, state.d_chunk_len);
         }
     }
 
@@ -257,6 +259,13 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
 void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(ws_.shared_max_tokens());
+
+    // The GDN scan kernels are not device-length-aware yet — a padded verify
+    // chunk would advance the recurrent state through pad rows. Unreachable
+    // today (chunk_capture_supported requires hd==128 and every GDN model is
+    // hd=256/FMHA), but fail loud rather than corrupt state silently (#858).
+    if (state.d_chunk_len != nullptr)
+        throw std::runtime_error("run_gdn: GDN scan is not device-length-aware (captured verify chunk)");
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);

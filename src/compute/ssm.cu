@@ -199,10 +199,12 @@ __global__ void ssm_conv1d_prefill_kernel(
     const half* __restrict__ weight,  // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
     const half* __restrict__ bias,    // [channels] or nullptr
     half* __restrict__ x_out,         // [n_tokens, channels]
-    int n_tokens, int channels, int kernel_size) {
+    int n_tokens, int channels, int kernel_size,
+    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -231,26 +233,30 @@ __global__ void ssm_conv1d_prefill_kernel(
         }
         x_out[token * channels + ch] = __float2half(sum);
 
-        // For the last token, write conv_state
-        if (token == n_tokens - 1) {
+        // For the last (real) token, write conv_state. Chunks shorter than
+        // kernel_size shift the missing leading values in from the previous
+        // chunk's conv_state (per-thread read index real_n+k stays ahead of
+        // every write index k, so the in-place shift is ordered correctly).
+        if (token == real_n - 1 && conv_state) {
             float* state = conv_state + ch * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
-                int src_t = n_tokens - kernel_size + k;
-                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : 0.0f;
+                int src_t = real_n - kernel_size + k;
+                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                                        : state[src_t + kernel_size];
             }
         }
     }
 }
 
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
-                        Tensor& x_out, int conv_kernel, cudaStream_t stream) {
+                        Tensor& x_out, int conv_kernel, cudaStream_t stream, const int* d_real_n) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
 
     ssm_conv1d_prefill_kernel<<<n_tokens, 256, 0, stream>>>(
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel);
+        static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel, d_real_n);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,10 +268,11 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(float* __restrict__ conv_stat
                                                    const half* __restrict__ weight,
                                                    const half* __restrict__ bias,
                                                    float* __restrict__ x_out_f32, int n_tokens, int channels,
-                                                   int kernel_size) {
+                                                   int kernel_size, const int* __restrict__ d_real_n) {
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -292,25 +299,29 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(float* __restrict__ conv_stat
         // Fused SiLU + FP32 output
         x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
 
-        // Update conv_state for last token
-        if (token == n_tokens - 1) {
+        // Update conv_state for the last (real) token; short chunks shift the
+        // missing leading values in from the previous chunk's conv_state (see
+        // ssm_conv1d_prefill_kernel).
+        if (token == real_n - 1 && conv_state) {
             float* state = conv_state + ch * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
-                int src_t = n_tokens - kernel_size + k;
-                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : 0.0f;
+                int src_t = real_n - kernel_size + k;
+                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                                        : state[src_t + kernel_size];
             }
         }
     }
 }
 
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
-                                 const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream) {
+                                 const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
+                                 const int* d_real_n) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
     ssm_conv1d_prefill_f32_silu_kernel<<<n_tokens, 256, 0, stream>>>(
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        x_out_f32, n_tokens, channels, conv_kernel);
+        x_out_f32, n_tokens, channels, conv_kernel, d_real_n);
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +363,15 @@ __global__ void ssm_scan_kernel(
     void* __restrict__ h_state,         // [n_heads, state_size, head_dim_ssm] (transposed)
     half* __restrict__ y,               // [n_tokens, inner_size]
     const half* __restrict__ z,         // [n_tokens, inner_size] (gate, only if FUSE_GATE)
-    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles) {
+    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles,
+    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
     int h = blockIdx.x;
     if (h >= n_heads)
         return;
+    // Padded verify chunk (#847): y is produced for every row (padding rows
+    // are causally invisible downstream), but h_state stops advancing after
+    // the real last row so the committed recurrent state ignores the pads.
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
 
     int heads_per_group = n_heads / n_groups;
     int g = h / heads_per_group;
@@ -405,10 +421,12 @@ __global__ void ssm_scan_kernel(
                 h_old = static_cast<float*>(h_state)[idx];
             }
             float h_new = a_bar * h_old + dt_val * x_val * b_s;
-            if constexpr (H_FP16) {
-                static_cast<half*>(h_state)[idx] = __float2half(h_new);
-            } else {
-                static_cast<float*>(h_state)[idx] = h_new;
+            if (t < real_n) {
+                if constexpr (H_FP16) {
+                    static_cast<half*>(h_state)[idx] = __float2half(h_new);
+                } else {
+                    static_cast<float*>(h_state)[idx] = h_new;
+                }
             }
             y_partial += h_new * c_s;
         }
@@ -453,7 +471,7 @@ __global__ void ssm_scan_kernel(
 static void ssm_scan_launch(const half* x, const half* B, const half* C, const half* dt, const float* A_log,
                             const float* D, const float* dt_bias, void* h_state, half* y, const half* z,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            QType h_dtype, cudaStream_t stream) {
+                            QType h_dtype, cudaStream_t stream, const int* d_real_n = nullptr) {
     // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
     int hd = std::max(head_dim_ssm, 1);
     int max_s_tiles = std::min(state_size, 1024 / hd);
@@ -470,7 +488,8 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
 #define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                                   \
     ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                       \
         <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z, n_tokens, \
-                                                   n_heads, head_dim_ssm, state_size, n_groups, s_tiles)
+                                                   n_heads, head_dim_ssm, state_size, n_groups, s_tiles,    \
+                                                   d_real_n)
 
     if (fp16) {
         if (fused)
@@ -501,13 +520,13 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
                       const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
                       const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
-                      int n_groups, QType h_dtype, cudaStream_t stream) {
+                      int n_groups, QType h_dtype, cudaStream_t stream, const int* d_real_n) {
     ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
                     static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
                     static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
                     static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
                     static_cast<const half*>(z), n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
-                    h_dtype, stream);
+                    h_dtype, stream, d_real_n);
 }
 
 // ---------------------------------------------------------------------------

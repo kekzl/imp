@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 #include <map>
+#include <tuple>
 #include <unordered_map>
 #include <string>
 #include <cstdint>
@@ -598,22 +599,29 @@ private:
         cudaGraphExec_t exec = nullptr;
         int eager_uses = 0;  // first use per slot runs eager (algo warmup)
     };
-    // Keyed by (padded chunk length, ctx tier). The tier (power of two the
-    // context is rounded up to) sizes the gather grids — a graph baked for
-    // the full 32k capacity spends ~3x the gather time at short contexts, so
-    // graphs re-capture when the context outgrows their tier (rare,
-    // amortized over thousands of verify steps).
-    std::map<std::pair<int, int>, SpecVerifyGraph> spec_graphs_;
+    // Keyed by (padded chunk length, ctx tier, recurrent slot). The tier
+    // (power of two the context is rounded up to) sizes the gather grids — a
+    // graph baked for the full 32k capacity spends ~3x the gather time at
+    // short contexts, so graphs re-capture when the context outgrows their
+    // tier (rare, amortized over thousands of verify steps). Hybrids bake
+    // the recurrent-slab pointers (SSMState::seq_base(slot)) into the graph,
+    // so each slot keys its own graphs (-1 for dense models); slot count is
+    // bounded by SSMState::max_sequences and verify is batch-1-gated.
+    std::map<std::tuple<int, int, int>, SpecVerifyGraph> spec_graphs_;
     int spec_capture_ctx_tier_(int ctx_padded) const;
-    int* d_spec_past_len_ = nullptr;  // device int: p0 (cached-prefix length)
-    int spec_capture_ctx_cap_ = -1;   // resolved capacity; -1 = unresolved, 0 = disabled
+    int* d_spec_past_len_ = nullptr;   // device int: p0 (cached-prefix length)
+    int* d_spec_chunk_len_ = nullptr;  // device int: real (unpadded) chunk length
+    int spec_capture_ctx_cap_ = -1;    // resolved capacity; -1 = unresolved, 0 = disabled
     uint64_t spec_capture_ws_gen_ = 0;
     int spec_capture_failures_ = 0;
     bool spec_capture_doomed_ = false;
     // True when this verify step may use the captured path: config on, not
-    // doomed, non-hybrid, no MoE offload, executor-supported attention
-    // config, padded context within the resolved capacity. Resolves the
-    // capacity + allocates the executor scratch on first eligible use.
+    // doomed, no legacy-GGUF GDN state, no MoE offload, executor-supported
+    // attention config, padded context within the resolved capacity.
+    // Resolves the capacity + allocates the executor scratch on first
+    // eligible use. Hybrids with SSMState qualify: the recurrent chunk
+    // kernels read the real chunk length from device (d_chunk_len) so pad
+    // rows never advance the committed state.
     bool spec_capture_ready_(int ctx_padded);
     // Round the real chunk length up to its capture bucket.
     int spec_capture_bucket_(int chunk_len) const;

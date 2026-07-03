@@ -57,6 +57,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               cudaMalloc(&d_spec_block_table_, max_blocks * sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_context_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_past_len_, sizeof(int)) == cudaSuccess &&
+              cudaMalloc(&d_spec_chunk_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
               cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess;
     if (!ok) {
@@ -126,6 +127,7 @@ void Engine::free_spec_buffers_() {
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
     if (d_spec_context_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_context_len_));
     if (d_spec_past_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_past_len_));
+    if (d_spec_chunk_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_chunk_len_));
     if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
     if (h_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_argmax_));
     d_spec_tokens_ = nullptr;
@@ -133,6 +135,7 @@ void Engine::free_spec_buffers_() {
     d_spec_block_table_ = nullptr;
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
+    d_spec_chunk_len_ = nullptr;
     d_spec_argmax_ = nullptr;
     h_spec_argmax_ = nullptr;
     spec_chunk_cap_ = 0;
@@ -406,8 +409,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         !check(cudaMemcpyAsync(d_spec_context_len_, &ctx_len, sizeof(int), cudaMemcpyHostToDevice,
                                stream), "context len H2D") ||
         (capture_on &&
-         !check(cudaMemcpyAsync(d_spec_past_len_, &p0, sizeof(int), cudaMemcpyHostToDevice,
-                                stream), "past len H2D")))
+         (!check(cudaMemcpyAsync(d_spec_past_len_, &p0, sizeof(int), cudaMemcpyHostToDevice,
+                                 stream), "past len H2D") ||
+          !check(cudaMemcpyAsync(d_spec_chunk_len_, &chunk_len, sizeof(int),
+                                 cudaMemcpyHostToDevice, stream), "chunk len H2D"))))
         return false;
 
     // Forward the chunk through the standard continuation-prefill path.
@@ -439,6 +444,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // executor scratch covers the full capacity, so any tier fits it.
         state.ctx_capacity = spec_capture_ctx_tier_(ctx_len);
         state.d_past_len = d_spec_past_len_;
+        state.d_chunk_len = d_spec_chunk_len_;
     }
 
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
@@ -474,6 +480,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             if (spec_capture_doomed_) {
                 state.ctx_capacity = 0;
                 state.d_past_len = nullptr;
+                // Keep d_chunk_len: the chunk stays padded, and the hybrid
+                // recurrent-state updates must still stop at the real length.
             }
             executor_->forward_logits(state, logits_out, stream);
         }
@@ -587,6 +595,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                            cudaMemcpyHostToDevice, stream));
         state.n_tokens = matched + 1;
         state.max_context_len = replay_ctx;
+        // The replay is an unpadded eager forward of the accepted prefix —
+        // run it on the plain host-length chunk path, not the capture path.
+        state.ctx_capacity = 0;
+        state.d_past_len = nullptr;
+        state.d_chunk_len = nullptr;
         Tensor replay_logits;
         executor_->forward_logits(state, replay_logits, stream);
     }

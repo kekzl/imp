@@ -395,5 +395,241 @@ TEST(SSMConv1dTest, ChunkedPrefillEquivalence) {
     free_tensor(d_out_b);
 }
 
+// ===========================================================================
+// Test: Chunk shorter than kernel_size — the conv_state tail must shift the
+// missing leading values in from the previous chunk's state instead of
+// zero-padding. This is the hybrid verify partial-accept replay shape
+// (matched+1 tokens, often < conv_kernel).
+// ===========================================================================
+TEST(SSMConv1dTest, ChunkedPrefillShortChunkEquivalence) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int channels = 4;
+    constexpr int kernel_size = 4;
+    constexpr int n_chunk_a = 5;
+    constexpr int n_chunk_b = 2;  // < kernel_size: tail must read old conv_state
+    constexpr int n_total = n_chunk_a + n_chunk_b;
+
+    std::vector<float> h_x(n_total * channels);
+    for (int i = 0; i < n_total * channels; i++)
+        h_x[i] = std::cos(static_cast<float>(i) * 0.9f) * 1.5f;
+    std::vector<float> h_w(channels * kernel_size);
+    for (int i = 0; i < channels * kernel_size; i++)
+        h_w[i] = (i % 3 == 0) ? 0.4f : -0.2f;
+
+    // Reference: single full-sequence prefill.
+    float* d_state_full;
+    cudaMalloc(&d_state_full, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_full, 0, channels * kernel_size * sizeof(float));
+    Tensor d_x_full = make_fp16_gpu(h_x.data(), {n_total, channels});
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_out_full = alloc_fp16_gpu({n_total, channels});
+    Tensor d_bias = make_empty_tensor();
+    ssm_conv1d_prefill(d_state_full, d_x_full, d_w, d_bias, d_out_full, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+    auto out_full = read_fp16(d_out_full);
+    std::vector<float> state_full(channels * kernel_size);
+    cudaMemcpy(state_full.data(), d_state_full, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    // Chunked: 5 tokens, then a 2-token continuation chunk.
+    float* d_state_chunked;
+    cudaMalloc(&d_state_chunked, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_chunked, 0, channels * kernel_size * sizeof(float));
+    Tensor d_x_a = make_fp16_gpu(h_x.data(), {n_chunk_a, channels});
+    Tensor d_out_a = alloc_fp16_gpu({n_chunk_a, channels});
+    ssm_conv1d_prefill(d_state_chunked, d_x_a, d_w, d_bias, d_out_a, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+    Tensor d_x_b = make_fp16_gpu(h_x.data() + n_chunk_a * channels, {n_chunk_b, channels});
+    Tensor d_out_b = alloc_fp16_gpu({n_chunk_b, channels});
+    ssm_conv1d_prefill(d_state_chunked, d_x_b, d_w, d_bias, d_out_b, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+
+    auto out_b = read_fp16(d_out_b);
+    std::vector<float> state_chunked(channels * kernel_size);
+    cudaMemcpy(state_chunked.data(), d_state_chunked, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    for (int t = 0; t < n_chunk_b; t++)
+        for (int ch = 0; ch < channels; ch++)
+            EXPECT_NEAR(out_full[(n_chunk_a + t) * channels + ch], out_b[t * channels + ch], 1e-2f)
+                << "Short chunk output mismatch at t=" << t << " ch=" << ch;
+    for (int i = 0; i < channels * kernel_size; i++)
+        EXPECT_NEAR(state_full[i], state_chunked[i], 1e-2f)
+            << "Short chunk state mismatch at i=" << i;
+
+    cudaFree(d_state_full);
+    cudaFree(d_state_chunked);
+    free_tensor(d_x_full);
+    free_tensor(d_w);
+    free_tensor(d_out_full);
+    free_tensor(d_x_a);
+    free_tensor(d_out_a);
+    free_tensor(d_x_b);
+    free_tensor(d_out_b);
+}
+
+// ===========================================================================
+// Test: Padded verify chunk (#847) — with d_real_n set, the conv_state tail
+// must come from the real last rows; pad rows only produce (discarded)
+// outputs. Both prefill variants share the tail logic; the fused f32+SiLU
+// variant is covered by FP32SiLUFused for the output math.
+// ===========================================================================
+TEST(SSMConv1dTest, PrefillPaddedChunkDeviceLength) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int channels = 4;
+    constexpr int kernel_size = 4;
+    constexpr int n_real = 5;
+    constexpr int n_padded = 12;  // pad rows repeat the first token (t0 copies)
+
+    std::vector<float> h_x(n_padded * channels);
+    for (int i = 0; i < n_padded * channels; i++)
+        h_x[i] = std::sin(static_cast<float>(i) * 0.3f);
+    std::vector<float> h_w(channels * kernel_size);
+    for (int i = 0; i < channels * kernel_size; i++)
+        h_w[i] = 0.25f * ((i % 4) - 1.5f);
+
+    // Reference: plain run over the real rows only.
+    float* d_state_ref;
+    cudaMalloc(&d_state_ref, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_ref, 0, channels * kernel_size * sizeof(float));
+    Tensor d_x_ref = make_fp16_gpu(h_x.data(), {n_real, channels});
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_out_ref = alloc_fp16_gpu({n_real, channels});
+    Tensor d_bias = make_empty_tensor();
+    ssm_conv1d_prefill(d_state_ref, d_x_ref, d_w, d_bias, d_out_ref, kernel_size, nullptr);
+    cudaDeviceSynchronize();
+    auto out_ref = read_fp16(d_out_ref);
+    std::vector<float> state_ref(channels * kernel_size);
+    cudaMemcpy(state_ref.data(), d_state_ref, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    // Padded run with the real length in a device int.
+    float* d_state_pad;
+    cudaMalloc(&d_state_pad, channels * kernel_size * sizeof(float));
+    cudaMemset(d_state_pad, 0, channels * kernel_size * sizeof(float));
+    int* d_real_n;
+    cudaMalloc(&d_real_n, sizeof(int));
+    int real_n = n_real;
+    cudaMemcpy(d_real_n, &real_n, sizeof(int), cudaMemcpyHostToDevice);
+    Tensor d_x_pad = make_fp16_gpu(h_x.data(), {n_padded, channels});
+    Tensor d_out_pad = alloc_fp16_gpu({n_padded, channels});
+    ssm_conv1d_prefill(d_state_pad, d_x_pad, d_w, d_bias, d_out_pad, kernel_size, nullptr, d_real_n);
+    cudaDeviceSynchronize();
+    auto out_pad = read_fp16(d_out_pad);
+    std::vector<float> state_pad(channels * kernel_size);
+    cudaMemcpy(state_pad.data(), d_state_pad, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    for (int t = 0; t < n_real; t++)
+        for (int ch = 0; ch < channels; ch++)
+            EXPECT_NEAR(out_ref[t * channels + ch], out_pad[t * channels + ch], 1e-2f)
+                << "Real-row output mismatch at t=" << t << " ch=" << ch;
+    for (int i = 0; i < channels * kernel_size; i++)
+        EXPECT_NEAR(state_ref[i], state_pad[i], 1e-2f)
+            << "Padded-chunk state mismatch at i=" << i;
+
+    cudaFree(d_state_ref);
+    cudaFree(d_state_pad);
+    cudaFree(d_real_n);
+    free_tensor(d_x_ref);
+    free_tensor(d_w);
+    free_tensor(d_out_ref);
+    free_tensor(d_x_pad);
+    free_tensor(d_out_pad);
+}
+
+// ===========================================================================
+// Test: Padded verify chunk (#847), Mamba2 scan — with d_real_n set, y is
+// produced for every row but h_state must stop advancing after the real
+// last row (bit-equal to a plain run over the real rows).
+// ===========================================================================
+TEST(SSMScanTest, PrefillPaddedChunkDeviceLength) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int n_heads = 2;
+    constexpr int head_dim = 4;
+    constexpr int state_size = 8;
+    constexpr int n_groups = 1;
+    constexpr int inner = n_heads * head_dim;
+    constexpr int bc = n_groups * state_size;
+    constexpr int n_real = 5;
+    constexpr int n_padded = 12;
+
+    std::vector<float> h_x(n_padded * inner), h_B(n_padded * bc), h_C(n_padded * bc),
+        h_dt(n_padded * n_heads), h_z(n_padded * inner);
+    for (size_t i = 0; i < h_x.size(); i++) h_x[i] = std::sin(0.37f * i);
+    for (size_t i = 0; i < h_B.size(); i++) h_B[i] = std::cos(0.21f * i);
+    for (size_t i = 0; i < h_C.size(); i++) h_C[i] = std::sin(0.11f * i + 1.0f);
+    for (size_t i = 0; i < h_dt.size(); i++) h_dt[i] = 0.1f + 0.05f * (i % 7);
+    for (size_t i = 0; i < h_z.size(); i++) h_z[i] = std::cos(0.53f * i);
+    std::vector<float> h_A(n_heads, -0.5f), h_D(n_heads, 0.3f), h_dtb(n_heads, 0.2f);
+
+    auto make_f32_gpu = [](const float* host, size_t n) {
+        float* d;
+        cudaMalloc(&d, n * sizeof(float));
+        cudaMemcpy(d, host, n * sizeof(float), cudaMemcpyHostToDevice);
+        return d;
+    };
+    float* d_A = make_f32_gpu(h_A.data(), n_heads);
+    float* d_D = make_f32_gpu(h_D.data(), n_heads);
+    float* d_dtb = make_f32_gpu(h_dtb.data(), n_heads);
+    int64_t head_shape[1] = {n_heads};
+    Tensor t_A(d_A, QType::F32, 1, head_shape, true);
+    Tensor t_D(d_D, QType::F32, 1, head_shape, true);
+    Tensor t_dtb(d_dtb, QType::F32, 1, head_shape, true);
+
+    const size_t h_elems = static_cast<size_t>(n_heads) * state_size * head_dim;
+
+    auto run = [&](int n_tokens, const int* d_real_n, std::vector<float>& y_out,
+                   std::vector<float>& h_out) {
+        Tensor d_x = make_fp16_gpu(h_x.data(), {n_tokens, inner});
+        Tensor d_B = make_fp16_gpu(h_B.data(), {n_tokens, bc});
+        Tensor d_C = make_fp16_gpu(h_C.data(), {n_tokens, bc});
+        Tensor d_dt = make_fp16_gpu(h_dt.data(), {n_tokens, n_heads});
+        Tensor d_z = make_fp16_gpu(h_z.data(), {n_tokens, inner});
+        Tensor d_y = alloc_fp16_gpu({n_tokens, inner});
+        float* d_h;
+        cudaMalloc(&d_h, h_elems * sizeof(float));
+        cudaMemset(d_h, 0, h_elems * sizeof(float));
+        ssm_scan_prefill(d_x, d_B, d_C, d_dt, t_A, t_D, t_dtb, d_h, d_y, d_z.data, n_tokens,
+                         n_heads, head_dim, state_size, n_groups, QType::F32, nullptr, d_real_n);
+        cudaDeviceSynchronize();
+        y_out = read_fp16(d_y);
+        h_out.resize(h_elems);
+        cudaMemcpy(h_out.data(), d_h, h_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaFree(d_h);
+        free_tensor(d_x);
+        free_tensor(d_B);
+        free_tensor(d_C);
+        free_tensor(d_dt);
+        free_tensor(d_z);
+        free_tensor(d_y);
+    };
+
+    std::vector<float> y_ref, h_ref;
+    run(n_real, nullptr, y_ref, h_ref);
+
+    int* d_real_n;
+    cudaMalloc(&d_real_n, sizeof(int));
+    int real_n = n_real;
+    cudaMemcpy(d_real_n, &real_n, sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<float> y_pad, h_pad;
+    run(n_padded, d_real_n, y_pad, h_pad);
+    cudaFree(d_real_n);
+
+    for (int t = 0; t < n_real; t++)
+        for (int i = 0; i < inner; i++)
+            EXPECT_NEAR(y_ref[t * inner + i], y_pad[t * inner + i], 1e-3f)
+                << "y mismatch at t=" << t << " i=" << i;
+    for (size_t i = 0; i < h_elems; i++)
+        EXPECT_EQ(h_ref[i], h_pad[i]) << "h_state mismatch at i=" << i;
+
+    cudaFree(d_A);
+    cudaFree(d_D);
+    cudaFree(d_dtb);
+}
+
 }  // namespace
 }  // namespace imp

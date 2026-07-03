@@ -166,6 +166,10 @@ struct InferenceState {
     // FA2-served attention config (GraphExecutor::chunk_capture_supported).
     int ctx_capacity = 0;
     const int* d_past_len = nullptr;  // device int == prefill_offset
+    // Device int == real (unpadded) chunk length. Hybrid recurrent-state
+    // updates (conv tail, scan final state) read it so the padding rows of a
+    // captured verify chunk don't advance the committed state.
+    const int* d_chunk_len = nullptr;
 };
 
 }  // namespace imp
