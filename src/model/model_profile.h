@@ -39,6 +39,10 @@ struct ModelProfile {
     bool is_gemma4 = false;
     bool is_gpt_oss = false;
     bool is_llama4 = false;
+    // Encoder-only embedder (#836, nomic-bert): bidirectional attention,
+    // post-LN with bias, no KV cache / LM head / sampling. Served by the
+    // dedicated encoder forward, never by the decoder loop.
+    bool is_encoder = false;
 
     // --- attention variant (drives the SWA / NoPE dispatch in run_attention) ---
     // The attention path forks on how positions + sliding windows work. Encoding

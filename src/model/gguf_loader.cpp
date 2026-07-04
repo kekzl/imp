@@ -287,10 +287,15 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // healthy, and then hit a CUDA illegal memory access on the first request
     // (causal-LM prefill + sampling on a model with no LM head), poisoning the
     // CUDA context for the whole process. Fail loudly at load instead.
-    if (is_encoder_only_arch(arch_str)) {
+    // nomic-bert has a dedicated encoder path (#836): rotary positions,
+    // post-LN, mean pooling — served by the encoder forward. Other encoder
+    // archs (classic BERT/bge/e5: learned absolute positions + token-type
+    // sequences + CLS pooling) stay rejected until implemented.
+    if (is_encoder_only_arch(arch_str) && cfg.arch != ModelArch::NOMIC_BERT) {
         throw std::runtime_error("encoder-only architecture '" + arch_str +
                                  "' is not supported (imp runs causal decoder LMs; "
-                                 "embedding encoders need pooling support)");
+                                 "embedding encoders need pooling support — only "
+                                 "nomic-bert is wired, #836)");
     }
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));

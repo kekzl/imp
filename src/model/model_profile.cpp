@@ -43,6 +43,7 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.is_gemma4 = cfg.arch == ModelArch::GEMMA4;
     p.is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
     p.is_llama4 = cfg.arch == ModelArch::LLAMA4;
+    p.is_encoder = cfg.arch == ModelArch::NOMIC_BERT;
 
     // Attention variant. MLA and NoPE are mutually exclusive with the SWA
     // patterns. MLA is checked first (DeepSeek-V2/V3 have neither SWA nor
