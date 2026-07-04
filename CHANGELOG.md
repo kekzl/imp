@@ -4,6 +4,36 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-07-04
+
+FP4-attention research batch: the #846 program (SageAttention3 → ThriftAttention →
+KV-append-quant) is closed end-to-end with measurements on every branch. All new
+knobs are research scaffolds and ship **default-off**; no default-path behavior
+changes.
+
+### Added
+- `attention.mxfp4_promote_budget` (default 0): ThriftAttention-style outlier
+  block promotion (arXiv 2605.23081) in the MXFP4 FMHA — per q-tile, the
+  top-scoring fraction of visible KV tiles (block-mean score Q̄·K̄ᵀ, sink +
+  diagonal force-included) computes exactly instead of FP4. Takes the FP4
+  attention quality gate from +9.9%/+4.4% NLL (@1k/9.3k, prose) to −0.6%/−0.2%
+  at 5% budget (#870).
+- `attention.mxfp4_paged_kv` (default off): chunked-prefill continuation reads
+  K/V directly from the paged NVFP4 KV cache (quantization paid once at
+  append; no gather→FP16 pass, no in-kernel quant); the current chunk stays
+  fresh FP16 via force-promoted tiles. Quality gate passes (+0.34% NLL @9.3k
+  at 5% budget); kernel-level perf refuted — quality-validated scaffold (#872).
+
+### Changed
+- Docs: MISSION_JOURNAL records the full measurement chain — FP4-MMA delivers
+  as advertised (tensor pipe 40.8%→2.2%) but in-kernel K quantization costs
+  3.34× FA2's instruction budget; the smem-materializing kernel is
+  latency-bound (pure paged-MMA floor 8.5× FA2); quantizing the RECENCY window
+  is the entire quality cost of FP4 KV storage (stored-FP4 current chunk
+  +3.7–5.4% NLL even with exact compute, stored-FP4 past ≈ free); nvfp4 KV
+  costs ~+0.8% NLL in the decode-recency regime (FP8 auto-default clean) —
+  nvfp4-KV quality claims need a small-chunk (≤64) PPL arm (#871, #872).
+
 ## [0.16.1] - 2026-07-04
 
 Spec-verify economics batch (#847 ladder): chunk-path overhaul — default
