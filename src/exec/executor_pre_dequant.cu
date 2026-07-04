@@ -104,6 +104,39 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     pre_dequant_phase4b_drop_redundant_sources_(cfg, stream);
 }
 
+// NVFP4 view of the LM head for the MTP draft chain — mirrors the decode-path
+// LM-head dispatch (executor_forward.cu): secondary wcache_.nvfp4 entry first,
+// then the native-NVFP4 registry tier; FP8 takes precedence and disables it.
+bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
+    if (!model_)
+        return false;
+    const Tensor& lm = model_->output_proj();
+    if (!lm.data)
+        return false;
+    if (wcache_.fp8.count(lm.data))
+        return false;
+    auto it = wcache_.nvfp4.find(lm.data);
+    if (it != wcache_.nvfp4.end()) {
+        out = it->second;
+        out.owned = false;  // borrows the decode-cache storage
+        return true;
+    }
+    if (model_->out_proj_id == kInvalidTensorID)
+        return false;
+    const WeightHandle& h = registry_.handle(model_->out_proj_id);
+    if (h.primary_tier != StorageTier::NVFP4 || h.payload.nvfp4.data == nullptr)
+        return false;
+    out.packed_data  = h.payload.nvfp4.data;
+    out.micro_scales = h.payload.nvfp4.block_scales;
+    out.tensor_scale = (h.payload.nvfp4.tensor_scale != nullptr)
+                           ? *h.payload.nvfp4.tensor_scale
+                           : 1.0f;
+    out.N = model_->config().vocab_size;
+    out.K = model_->config().d_model;
+    out.owned = false;
+    return true;
+}
+
 // Fold the scattered arch-specific overlay rules into one pass over the plan so
 // the plan reproduces what the legacy builders do (the precondition for making
 // builders plan-driven without changing behaviour). Driven by the Phase-4

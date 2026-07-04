@@ -636,10 +636,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     if (draft_from_mtp) {
         mtp_econ_verifies_++;
         mtp_econ_emitted_ += emitted;
-        constexpr int kMtpEconSample = 8;        // fair sample before judging
-        constexpr int kMtpEconMinEmitx10 = 40;   // avg emitted/verify >= 4.0
-        if (mtp_econ_verifies_ >= kMtpEconSample &&
-            mtp_econ_emitted_ * 10 < static_cast<long long>(mtp_econ_verifies_) * kMtpEconMinEmitx10)
+        constexpr int kMtpEconSample = 8;  // fair sample before judging
+        // Break-even avg emitted/verify is configurable (0 disables): the
+        // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
+        // the verify-chunk cost, both of which have moved since #852.
+        const float min_emit = runtime_config_.speculative.mtp_econ_min_emit;
+        if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
+            static_cast<float>(mtp_econ_emitted_) <
+                static_cast<float>(mtp_econ_verifies_) * min_emit)
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
     }
     const bool acceptance_poor =

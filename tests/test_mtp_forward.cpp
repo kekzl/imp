@@ -17,6 +17,7 @@
 #include "model/safetensors_loader.h"
 #include "runtime/engine.h"
 #include "compute/mtp_forward.h"
+#include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -132,6 +133,37 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
     EXPECT_GE(out_token_id, 0);
     EXPECT_LT(out_token_id, vocab_size);
 
+    // NVFP4 chain lm_head (#847 lever 3): quantize the FP16 lm_head the same
+    // way the decode cache does, then draft through the NVFP4 GEMV + FP32
+    // argmax path. Same synthetic inputs — assert a valid token and that the
+    // NVFP4 path is deterministic against itself.
+    imp::NvFP4QuantResult lm4{};
+    imp::quantize_fp16_to_nvfp4(model->out_proj_, lm4, /*stream=*/nullptr);
+    ASSERT_NE(lm4.packed_data, nullptr);
+    ASSERT_NE(lm4.micro_scales, nullptr);
+
+    int out_token_nvfp4 = -1;
+    imp::mtp_kv_reset(ws);
+    ok = imp::mtp_draft_step(123, d_h_prev, *model->mtp_, model->tok_emb_,
+                             model->out_proj_, ws, hidden_dim, vocab_size,
+                             &out_token_nvfp4, /*stream=*/nullptr,
+                             /*out_topk_ids=*/nullptr, /*top_w=*/0, &lm4);
+    EXPECT_TRUE(ok) << "mtp_draft_step (NVFP4 lm_head) returned false";
+    EXPECT_GE(out_token_nvfp4, 0);
+    EXPECT_LT(out_token_nvfp4, vocab_size);
+
+    int out_token_nvfp4_b = -1;
+    imp::mtp_kv_reset(ws);
+    ok = imp::mtp_draft_step(123, d_h_prev, *model->mtp_, model->tok_emb_,
+                             model->out_proj_, ws, hidden_dim, vocab_size,
+                             &out_token_nvfp4_b, /*stream=*/nullptr,
+                             /*out_topk_ids=*/nullptr, /*top_w=*/0, &lm4);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(out_token_nvfp4, out_token_nvfp4_b)
+        << "NVFP4 chain lm_head draft is not deterministic";
+
+    if (lm4.packed_data) cudaFree(lm4.packed_data);
+    if (lm4.micro_scales) cudaFree(lm4.micro_scales);
     cudaFree(d_h_prev);
     imp::mtp_workspace_free(ws);
 }

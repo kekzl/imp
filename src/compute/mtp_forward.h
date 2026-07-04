@@ -28,6 +28,7 @@
 namespace imp {
 
 class Model;
+struct NvFP4QuantResult;
 
 // Max top-W width the MTP draft step can emit per position (tree-ceiling
 // measurement, Stage 0). The draft argmax is top-0.
@@ -49,6 +50,9 @@ struct MtpDraftWorkspace {
     void* d_h_final = nullptr;
     // [vocab_size] FP16 — draft logits
     void* d_logits = nullptr;
+    // [vocab_size] FP32 — draft logits when the lm_head GEMV runs through the
+    // NVFP4 decode cache (gemv_nvfp4_kpar_fp32 writes FP32). ~1 MiB.
+    void* d_logits_f32 = nullptr;
     // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe).
     int*  d_topk = nullptr;
 
@@ -160,6 +164,12 @@ struct MtpDraftWorkspace {
 //                       top_w>0, receives the top-W candidate ids in
 //                       descending-logit order (out_topk_ids[0] == *out_token_id).
 //                       Used by the Stage 0 tree-ceiling measurement.
+//   - lm_head_nvfp4   : optional NVFP4 decode-cache view of main_lm_head
+//                       (GraphExecutor::lm_head_nvfp4_view). When set, the
+//                       chain logits GEMV reads ~4x less HBM than the FP16
+//                       weight — the dominant per-draft cost on large-vocab
+//                       models. Draft-only: verification stays lossless
+//                       regardless of the draft head's precision.
 //
 // Returns false on any precondition violation (mtp not loaded, null buffers).
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
@@ -170,7 +180,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     int hidden_dim, int vocab_size,
                     int* out_token_id,
                     cudaStream_t stream,
-                    int* out_topk_ids = nullptr, int top_w = 0);
+                    int* out_topk_ids = nullptr, int top_w = 0,
+                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr);
 
 // Allocate the workspace from the VRAM allocator. Caller is responsible for
 // keeping ws alive (typically owned by the Engine for the lifetime of a session).

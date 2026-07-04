@@ -283,10 +283,26 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
         return false;
     }
     auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    // Chain lm_head via the NVFP4 decode cache when available: the full-vocab
+    // FP16 GEMV is the dominant per-draft cost (#847 lever 3). Draft-only
+    // precision — verify stays lossless. Falls back to the FP16 GEMV when no
+    // cache entry exists (nvfp4_lm_head/_gdn off, or FP8 LM head).
+    imp::NvFP4QuantResult lm_nvfp4;
+    const imp::NvFP4QuantResult* lm_nvfp4_p = nullptr;
+    if (runtime_config_.speculative.mtp_nvfp4_head && executor_ &&
+        executor_->lm_head_nvfp4_view(lm_nvfp4)) {
+        lm_nvfp4_p = &lm_nvfp4;
+        static bool logged = false;  // once-per-process path attribution
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("MTP chain lm_head: NVFP4 decode-cache view engaged (N=%lld K=%lld)",
+                         static_cast<long long>(lm_nvfp4.N), static_cast<long long>(lm_nvfp4.K));
+        }
+    }
     return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_,
                                 model_->tok_emb_, model_->out_proj_,
                                 *ws, hidden_dim, vocab_size, out_token_id,
-                                decode_stream(), out_topk_ids, top_w);
+                                decode_stream(), out_topk_ids, top_w, lm_nvfp4_p);
 }
 
 // =====================================================================

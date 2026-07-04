@@ -576,6 +576,21 @@ struct RuntimeConfig {
         // match (draft-poor prose — 78-94% depth-1 accept on Qwen3.6-35B-A3B,
         // PR #804). imp-cli equivalent: --mtp-spec-decode <k>.
         int mtp_k = 0;
+        // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
+        // decode cache when one exists (#847 lever 3). The chain re-reads the
+        // LM head once per drafted token (~2.5 GB FP16 on Qwen3.6-27B's 248k
+        // vocab — more traffic than the main forward at k=4); NVFP4 reads ~4x
+        // less. Draft-only precision, verification stays lossless. Off = keep
+        // the FP16 chain GEMV (A/B kill switch).
+        bool mtp_nvfp4_head = true;
+        // MTP economics guard: after an 8-verify sample, average emitted
+        // tokens per MTP-filled verify below this dooms MTP drafting for the
+        // request (the verify chunk + chain cost can't amortize). 0 disables
+        // the guard (raw-economics measurement). Default from the #852
+        // break-even measurement; re-derive when chain/verify costs change —
+        // note a chain of k can emit at most k+1 per verify, so values >= k+1
+        // doom that k unconditionally.
+        float mtp_econ_min_emit = 4.0f;
         // Graph-captured verify chunk (#847): cache one CUDA graph per
         // draft-length bucket and replay it each verify step — the chunk
         // metadata and KV lengths are read from device buffers, so the graph

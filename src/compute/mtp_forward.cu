@@ -16,6 +16,7 @@
 #include "compute/activation.h"     // swiglu, shared_expert_gate_scale
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
+#include "quant/nvfp4_gemm.h"       // gemv_nvfp4_kpar_fp32 (NVFP4 chain lm_head)
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
 #include "compute/rope.h"           // qknorm_rope_fused
@@ -51,10 +52,14 @@ __global__ void mtp_concat_kernel(const __half* __restrict__ a, const __half* __
     out[t] = (t < hidden_dim) ? a[t] : b[t - hidden_dim];
 }
 
-// Argmax over an FP16 vector [vocab_size]. Single CTA; uses shared-memory
+__device__ __forceinline__ float mtp_logit_to_float(__half v) { return __half2float(v); }
+__device__ __forceinline__ float mtp_logit_to_float(float v)  { return v; }
+
+// Argmax over an FP16/FP32 vector [vocab_size]. Single CTA; uses shared-memory
 // reduction. Writes the argmax index to *out_idx as int32. Caller must ensure
 // vocab_size fits one block (i.e., we strip-mine over vocab_size).
-__global__ void mtp_argmax_kernel(const __half* __restrict__ logits, int vocab_size,
+template <typename T>
+__global__ void mtp_argmax_kernel(const T* __restrict__ logits, int vocab_size,
                                    int* __restrict__ out_idx) {
     constexpr int kThreads = 256;
     __shared__ float s_val[kThreads];
@@ -64,7 +69,7 @@ __global__ void mtp_argmax_kernel(const __half* __restrict__ logits, int vocab_s
     float best_val = -1.0e38f;
     int   best_idx = 0;
     for (int i = tid; i < vocab_size; i += kThreads) {
-        float v = __half2float(logits[i]);
+        float v = mtp_logit_to_float(logits[i]);
         if (v > best_val) {
             best_val = v;
             best_idx = i;
@@ -85,11 +90,12 @@ __global__ void mtp_argmax_kernel(const __half* __restrict__ logits, int vocab_s
     if (tid == 0) *out_idx = s_idx[0];
 }
 
-// Top-W over an FP16 vector [vocab_size]. Single CTA; top_w (≤ kMtpMaxTopW)
+// Top-W over an FP16/FP32 vector [vocab_size]. Single CTA; top_w (≤ kMtpMaxTopW)
 // sequential argmax passes, masking previously selected indices. Writes the W
 // descending-logit indices to out_idx[0..top_w). W is tiny relative to the
 // lm_head GEMM that produced the logits, so the extra passes are cheap.
-__global__ void mtp_topk_kernel(const __half* __restrict__ logits, int vocab_size,
+template <typename T>
+__global__ void mtp_topk_kernel(const T* __restrict__ logits, int vocab_size,
                                 int top_w, int* __restrict__ out_idx) {
     constexpr int kThreads = 256;
     __shared__ float s_val[kThreads];
@@ -106,7 +112,7 @@ __global__ void mtp_topk_kernel(const __half* __restrict__ logits, int vocab_siz
                 if (s_found[f] == i) { taken = true; break; }
             }
             if (taken) continue;
-            float v = __half2float(logits[i]);
+            float v = mtp_logit_to_float(logits[i]);
             if (v > best_val) { best_val = v; best_idx = i; }
         }
         s_val[tid] = best_val;
@@ -399,6 +405,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_fc_out,     hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_h_final,    hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_logits,     vocab_size * sizeof(__half));
+    ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
 
     ws.hidden_dim   = hidden_dim;
@@ -480,6 +487,7 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_fc_out);
     frfn(ws.d_h_final);
     frfn(ws.d_logits);
+    frfn(ws.d_logits_f32);
     if (ws.d_topk) { cudaFree(ws.d_topk); ws.d_topk = nullptr; }
     frfn(ws.d_post_norm);
     frfn(ws.d_router_logits);
@@ -521,7 +529,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     int hidden_dim, int vocab_size,
                     int* out_token_id,
                     cudaStream_t stream,
-                    int* out_topk_ids, int top_w) {
+                    int* out_topk_ids, int top_w,
+                    const NvFP4QuantResult* lm_head_nvfp4) {
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
@@ -986,8 +995,16 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     if (out_token_id == nullptr)
         return true;
 
-    // Step 7: logits = lm_head @ h_final
-    {
+    // Step 7: logits = lm_head @ h_final. When an NVFP4 decode-cache view of
+    // the lm_head is available, use it — the full-vocab weight read dominates
+    // per-draft cost (~2.5 GB FP16 on Qwen3.6-27B's 248k vocab; NVFP4 reads
+    // ~4x less). Draft-only precision: verification stays lossless.
+    const bool nvfp4_lm = (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
+    if (nvfp4_lm) {
+        gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
+                             static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim,
+                             stream);
+    } else {
         int64_t h_final_shape[2] = {1, hidden_dim};
         int64_t logits_shape[2]  = {1, vocab_size};
         Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
@@ -1005,8 +1022,13 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
             return false;
         }
-        mtp_topk_kernel<<<1, 256, 0, stream>>>(
-            static_cast<const __half*>(ws.d_logits), vocab_size, w, ws.d_topk);
+        if (nvfp4_lm) {
+            mtp_topk_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const float*>(ws.d_logits_f32), vocab_size, w, ws.d_topk);
+        } else {
+            mtp_topk_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const __half*>(ws.d_logits), vocab_size, w, ws.d_topk);
+        }
         if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
@@ -1020,8 +1042,13 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
         return false;
     }
-    mtp_argmax_kernel<<<1, 256, 0, stream>>>(
-        static_cast<const __half*>(ws.d_logits), vocab_size, d_idx);
+    if (nvfp4_lm) {
+        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+            static_cast<const float*>(ws.d_logits_f32), vocab_size, d_idx);
+    } else {
+        mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+            static_cast<const __half*>(ws.d_logits), vocab_size, d_idx);
+    }
     if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
         cudaFreeAsync(d_idx, stream);

@@ -23,6 +23,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   drafting per request when average emitted/verify cannot beat the async
   loop (measured: accept 44-91% but net-negative on current verify
   economics — see #847 for follow-ups).
+- **MTP chain lm_head via the NVFP4 decode cache** (#847 lever 3) — the MTP
+  chain's per-draft full-vocab logits GEMV reads the NVFP4 LM-head decode
+  cache when one exists (~3.5x less HBM traffic than the raw FP16 weight:
+  2.5 GB → 0.7 GB per drafted token on Qwen3.6-27B's 248k vocab).
+  `speculative.mtp_nvfp4_head` (default on) is the kill switch; draft-only
+  precision, verification stays lossless. The MTP economics-guard threshold
+  is now configurable (`speculative.mtp_econ_min_emit`, default 4.0,
+  0 disables) since the break-even moves with chain/verify costs — note a
+  chain of k emits at most k+1 tokens per verify, so k=2 cannot pass the
+  default threshold and dooms by construction.
 
 ## [0.16.0] - 2026-07-02
 
