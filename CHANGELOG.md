@@ -5,6 +5,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Persistent K/V gather scratch for the eager chunked path** — spec-verify
+  re-enters the chunked attention per layer per verify; the per-call
+  `cudaMallocAsync`/`FreeAsync` pair (~140 allocs/verify on hybrids) is
+  replaced by a grow-only executor-owned scratch (64 MiB steps, per-call
+  fallback if the grow fails). Small win inside run-to-run noise
+  (best 27B MTP-only trial 56.4 ms/verify / 49.7 tok/s) and removes the
+  acknowledged hot-loop-malloc exception in the chunk gather.
 - **Small hd≠128 verify/boundary chunks prefer the tiled FMHA over cuBLAS**
   — cuBLAS re-runs its per-new-shape algo selection on every call (100 MiB
   workspace memset + candidate benchmark + blocking event sync); spec-verify

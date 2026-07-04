@@ -1258,6 +1258,15 @@ void GraphExecutor::free_buffers() {
         chunk_capture_v_ = nullptr;
     }
     chunk_capture_ctx_ = 0;
+    if (chunk_eager_k_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_eager_k_));
+        chunk_eager_k_ = nullptr;
+    }
+    if (chunk_eager_v_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(chunk_eager_v_));
+        chunk_eager_v_ = nullptr;
+    }
+    chunk_eager_bytes_ = 0;
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();

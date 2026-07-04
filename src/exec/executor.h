@@ -436,6 +436,14 @@ private:
     half* chunk_capture_v_ = nullptr;
     int chunk_capture_ctx_ = 0;
 
+    // Persistent K/V gather scratch for the EAGER chunked path. Spec-verify
+    // re-enters that path per layer per verify step — per-call
+    // cudaMallocAsync/FreeAsync was ~140 alloc pairs per verify on hybrids
+    // (#847). Grow-only; reused across layers (stream-ordered use).
+    half* chunk_eager_k_ = nullptr;
+    half* chunk_eager_v_ = nullptr;
+    size_t chunk_eager_bytes_ = 0;
+
     // Dense FFN phase tensors (views into shared_workspace_, set by configure_ffn_workspace)
     Tensor gate_out_;    // [max_tokens, d_ff]
     Tensor up_out_;      // [max_tokens, d_ff]
