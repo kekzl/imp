@@ -185,6 +185,15 @@ public:
     // LM head is NVFP4. Must run AFTER pre_dequant_weights().
     void build_lm_head_cutlass_(cudaStream_t stream);
 
+    // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV.
+    // Fills `out` from the secondary decode cache (wcache_.nvfp4) or the
+    // native-NVFP4 registry tier — the same sources the decode-path LM head
+    // dispatch uses. Returns false when the LM head is not NVFP4-served
+    // (cache disabled, FP8 LM head, or quantized source without a cache
+    // entry); callers then keep the FP16 GEMV. The returned pointers borrow
+    // executor-owned storage — do not free.
+    bool lm_head_nvfp4_view(NvFP4QuantResult& out) const;
+
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
         kv_layer_map_ = std::move(map);

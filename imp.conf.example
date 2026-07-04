@@ -342,6 +342,15 @@ hybrid               = true
 # MTP chains fill verify steps where the suffix matcher has no draft.
 # imp-cli equivalent: --mtp-spec-decode <k>.
 mtp_k                = 0
+# Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head decode
+# cache when one exists (~4x less HBM traffic per drafted token; the chain
+# re-reads the LM head once per draft). Draft-only precision — verification
+# stays lossless. false = keep the FP16 chain GEMV.
+mtp_nvfp4_head       = true
+# MTP economics guard: after an 8-verify sample, avg emitted tokens per
+# MTP-filled verify below this dooms MTP drafting for the request. 0 disables
+# the guard. Note: a chain of k emits at most k+1 per verify.
+mtp_econ_min_emit    = 4.0
 # Graph-captured verify (#847): cache one CUDA graph per draft-length bucket
 # and replay it each verify step (all growing lengths are read from device
 # buffers), removing the eager launch-pacing tax. Engages only where the
