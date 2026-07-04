@@ -218,6 +218,13 @@ struct RuntimeConfig {
         bool mxfp4_ksmooth = false;
         bool mxfp4_pv_fp4 = false;
         float mxfp4_promote_budget = 0.0f;
+        // mxfp4_paged_kv: KV-append-quant chunked prefill (#846 follow-up) —
+        //   continuation chunks read K/V DIRECTLY from the paged NVFP4 KV
+        //   cache (quantization paid once at append; no gather→FP16 pass, no
+        //   in-kernel quant). Combines with mxfp4_promote_budget for outlier
+        //   promotion. Requires kv_cache.dtype=nvfp4, head_dim 128, single
+        //   sequence; engages independently of `mxfp4` mode.
+        bool mxfp4_paged_kv = false;
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
         // for every MXFP4 tensor. "pruned" skips MoE expert_*_packed and

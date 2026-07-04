@@ -508,3 +508,30 @@ degrades far less (+1.9% @11.6k no-promote) — corpus choice is load-bearing fo
 default-off, NO perf round run (per spike order). A perf phase needs a register-resident FA2-class
 port of the FP4+promotion path; decode-side expectations remain dampened (KV already NVFP4-stored,
 long-ctx decode attention is latency-bound, see 2026-06-18 refutations).
+
+### 2026-07-04 (later II) — KV-append-quant paged-FP4-QK: quality CONFIRMED, perf REFUTED (#846 stays closed)
+
+Follow-up on the surviving thesis: read K/V for chunked-prefill continuation straight from the
+NVFP4 KV cache (quant paid once at append) instead of gather→FP16. Shipped flag-gated
+(`attention.mxfp4_paged_kv`, default off) with a PagedKV FMHA variant: past tiles feed the
+block-scale MMA from cache bytes (zero quant work), the CURRENT chunk stays fresh FP16
+(force-promoted tiles), promotion budget applies to past tiles.
+
+**Quality (Qwen3-14B-NVFP4, prose, Δnll vs FP16-KV): GATE PASSED** — paged + budget 0.05/0.10 =
++0.34%/+0.31% @9.3k (chunk 2048), +1.5% @1k (chunk 256, beats even the FP16-gather reference's
++2.26% there); promote=1.0 sanity +0.05%. Load-bearing finding along the way: **quantizing the
+recency window is the entire quality cost** — the pre-hybrid variant that stored the current
+chunk FP4 before attention lost +3.7–5.4% NLL even with EXACT FP32 compute over the stored
+values, while FP4-storing the whole past costs ≈0 (gather ref −0.12%). Corollary: teacher-forced
+chunked-prefill PPL is structurally blind to recency-window storage noise (current chunk is
+always fresh FP16) — an nvfp4-KV DECODE quality check (generation reads recents from cache)
+would need its own probe.
+
+**Perf: REFUTED, decisively.** nsys @9.3k attention path: gather+FA2 184.5 ms (gather itself only
+4 ms — it was never the cost); paged hybrid 2197 ms (12×, scalar current-band); **pure paged-MMA
+floor with zero quant work (probe, force-promote off): 1557 ms = 8.5× FA2**. Removing the quant
+instructions did NOT rescue the smem-materializing kernel — it is latency-bound
+(long-scoreboard), not quant-bound. Combined with FA2's profile (instruction-mix-bound, DRAM
+9.6% — bandwidth is not its bottleneck), a register-resident FP4-K port's upside is ~10–20%
+kernel on ~8% of prefill GPU time → not fundable. #846 stays closed; the paged path ships as a
+quality-validated research scaffold, default off.

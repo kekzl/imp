@@ -103,6 +103,37 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 #endif
 }
 
+// Decode two packed FP4 E2M1 nibbles into a half2 via the HW converter
+// (low nibble → .x, high nibble → .y — matches the KV-cache nibble packing
+// and pack_fp4_pair above).
+__device__ __forceinline__ half2 unpack_fp4_pair(uint8_t byte) {
+#if __CUDA_ARCH__ >= 1200
+    unsigned int fp16x2;
+    asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+        : "=r"(fp16x2)
+        : "r"((unsigned int)byte));
+    return *reinterpret_cast<half2*>(&fp16x2);
+#else
+    (void)byte;
+    return __half2half2(__float2half(0.0f));
+#endif
+}
+
+// Paged NVFP4 KV cache pointers for the PagedKV kernel variant (#846
+// KV-append-quant path). Layouts match write_kv_cache_nvfp4_kernel:
+//   data:   [num_blocks, block_size, nkv, hd/2]  uint8 (2 nibbles/byte,
+//           even d = low nibble)
+//   scales: [num_blocks, block_size, nkv, hd/16] uint8 UE4M3 (absmax/6, RAW —
+//           no attention-scale fold; the kernel applies `scale` post-MMA)
+struct MxPagedKVArgs {
+    const uint8_t* k_data = nullptr;
+    const uint8_t* k_scales = nullptr;
+    const uint8_t* v_data = nullptr;
+    const uint8_t* v_scales = nullptr;
+    const int* block_table = nullptr;  // flat (single sequence)
+    int block_size = 0;
+};
+
 // =============================================================================
 // Kernel template
 // =============================================================================
@@ -135,14 +166,34 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 //                         uniform per (block, kv tile), so phase-level branches
 //                         are __syncthreads()-safe. Quality spike — the FP32
 //                         dot path is not a perf path.
-template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false>
+// PagedKV (#846 KV-append-quant): K and V are read DIRECTLY from the paged
+//                         NVFP4 KV cache (MxPagedKVArgs) — no in-kernel
+//                         quantization at all. K's packed nibbles + UE4M3
+//                         scales are byte-compatible with the blockscale-MMA
+//                         smem layout (per-16-along-hd groups, even d = low
+//                         nibble), so the K phase is a pure copy. V is
+//                         dequantized FP16 into smem for the WMMA PV phase.
+//                         Cache scales carry no attention-scale fold — Q is
+//                         quantized with RAW absmax/6 scales and `scale` is
+//                         applied post-MMA in the fused store. Promoted tiles
+//                         compute FP32 dots over the DEQUANTIZED cache K
+//                         (exact arithmetic over FP4-stored values). The K/V
+//                         global-pointer args carry the FRESH FP16 current
+//                         chunk (rows [q_offset, seq_kv)) — current-chunk
+//                         tiles are force-promoted and read it exactly (the
+//                         recency window is where FP4 storage hurts; the
+//                         past is read FP4 from the cache).
+template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false,
+          bool PagedKV = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap, int q_offset, const float* __restrict__ d_kmean,
-    const uint8_t* __restrict__ d_promote, int n_kv_tiles_mask) {
+    const uint8_t* __restrict__ d_promote, int n_kv_tiles_mask, MxPagedKVArgs pkv = {}) {
     static_assert(!PVFP4 || UseBlockScaleMma, "PVFP4 rides on the block-scaled MMA path");
     static_assert(!Promote || UseBlockScaleMma, "Promote rides on the block-scaled MMA path");
+    static_assert(!PagedKV || (UseBlockScaleMma && !PVFP4),
+                  "PagedKV rides on the block-scaled MMA path with FP16 WMMA PV");
     constexpr int Bkv = MX_Bkv;
     constexpr int head_dim = HD;
     constexpr int hd_half = HD / 2;  // packed FP4 data bytes per row
@@ -235,6 +286,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     // pre-multiplied by attention_scale.  Split sqrt evenly: q_scales *= sqrt_scale,
     // k_scales *= sqrt_scale, so the product gives q*k*scale automatically.
     const float sqrt_scale = sqrtf(scale);
+    // PagedKV: cache K scales are raw (absmax/6) — quantize Q raw too and
+    // apply the full attention scale post-MMA in the fused store instead.
+    const float q_sfold = PagedKV ? 1.0f : sqrt_scale;
 
     // Can we use S_tile as temporary staging for FP16 data? (Opt 1/4)
     // Requires: Bkv * HD * sizeof(half) <= Bq * Bkv * sizeof(float), i.e. HD <= 2*Bq
@@ -278,7 +332,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 for (int i = 0; i < 16; i++)
                     absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
                 float raw = absmax / 6.0f;
-                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * q_sfold);
             }
         } else {
             // Absmax from shared memory (fast L1 reads) — per-row (legacy)
@@ -310,7 +364,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 if constexpr (UseBlockScaleMma) {
                     int kg = b4 / 2;  // 8 halves fit inside a 16-half k_group
                     float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
-                    inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                    inv_scale = (dequant > 0.0f) ? (q_sfold / dequant) : 0.0f;
                 } else {
                     inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
                 }
@@ -344,7 +398,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
                 }
                 float raw = absmax / 6.0f;
-                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * q_sfold);
             }
         } else {
             const int r = sm_row;
@@ -372,7 +426,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     if constexpr (UseBlockScaleMma) {
                         int kg = d / 16;
                         float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
-                        inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                        inv_scale = (dequant > 0.0f) ? (q_sfold / dequant) : 0.0f;
                     } else {
                         inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
                     }
@@ -429,14 +483,65 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 
         // #846 promotion: block-uniform per-tile flag. Promoted tiles skip the
         // K-quant phase and the FP4 QK MMA; Phase 1' computes exact scores.
+        // PagedKV force-promotes CURRENT-CHUNK tiles (kv_start >= q_offset):
+        // their K/V exist as fresh FP16 and quantizing the recency window is
+        // where the quality damage lives (B-arm finding) — the past reads FP4
+        // from the cache, the own chunk stays exact.
         bool promoted = false;
         if constexpr (Promote) {
-            promoted = d_promote[((size_t)batch_head * gridDim.x + tile_q) * n_kv_tiles_mask + j] != 0;
+            if (d_promote != nullptr)
+                promoted = d_promote[((size_t)batch_head * gridDim.x + tile_q) * n_kv_tiles_mask + j] != 0;
+            if constexpr (PagedKV)
+                promoted = promoted || (kv_start >= q_offset);
         }
 
         // ---- Quantize K tile to FP4 (Opt 1: shared-memory staging) ----
         if (promoted) {
             // Promoted tile: no K-side quantization work.
+        } else if constexpr (PagedKV) {
+            // Paged-FP4 K (#846): copy packed nibbles + UE4M3 scales straight
+            // from the NVFP4 KV cache into the blockscale-MMA smem layout —
+            // the cache format is bit-compatible with what the in-kernel
+            // quantizer produces, so this phase is pure data movement (the
+            // 3.3× quant instruction overhead measured on the dense path
+            // disappears). Zero bytes/scales for out-of-range rows: scale 0
+            // makes the HW MMA contribute 0 and the fused store masks them.
+            constexpr int kRowU32 = hd_half / 4;
+            const int kv_row_bytes = n_kv_heads * hd_half;
+            const int sc_row_bytes = n_kv_heads * n_k_groups;
+            {
+                const int total_u32 = Bkv * kRowU32;
+                for (int idx = tid; idx < total_u32; idx += MX_BLOCK_THREADS) {
+                    const int r = idx / kRowU32;
+                    const int b4 = idx % kRowU32;
+                    const int pos = kv_start + r;
+                    uint32_t val = 0;
+                    if (pos < seq_kv) {
+                        const int blk = pkv.block_table[pos / pkv.block_size];
+                        const int slot = pos % pkv.block_size;
+                        const uint8_t* row = pkv.k_data +
+                                             ((size_t)blk * pkv.block_size + slot) * kv_row_bytes +
+                                             (size_t)kv_head * hd_half;
+                        val = reinterpret_cast<const uint32_t*>(row)[b4];
+                    }
+                    *reinterpret_cast<uint32_t*>(&KV_fp4[r * hd_half_padded + b4 * 4]) = val;
+                }
+                const int total_sc = Bkv * n_k_groups;
+                for (int idx = tid; idx < total_sc; idx += MX_BLOCK_THREADS) {
+                    const int r = idx / n_k_groups;
+                    const int kg = idx % n_k_groups;
+                    const int pos = kv_start + r;
+                    uint8_t sc = 0;
+                    if (pos < seq_kv) {
+                        const int blk = pkv.block_table[pos / pkv.block_size];
+                        const int slot = pos % pkv.block_size;
+                        sc = pkv.k_scales[((size_t)blk * pkv.block_size + slot) * sc_row_bytes +
+                                          (size_t)kv_head * n_k_groups + kg];
+                    }
+                    k_scales_fp8[r * n_k_groups + kg] = sc;
+                }
+            }
+            __syncthreads();
         } else if constexpr (can_stage_in_stile) {
             // Load K FP16 → S_tile (as staging buffer), then read from shared
             // float4 = 8 halves per iter
@@ -640,19 +745,55 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 float s = -FLT_MAX;
                 if (lq < seq_q && gk < seq_kv && !(causal && gq < gk) &&
                     !(sliding_window > 0 && (gq - gk) >= sliding_window)) {
-                    const half* krow = &K_ptr[(int64_t)gk * kv_row_stride];
                     float acc = 0.0f;
-                    for (int d = 0; d < head_dim; d += 2) {
-                        const half2 qh = *reinterpret_cast<const half2*>(&qrow[d]);
-                        const half2 kh = *reinterpret_cast<const half2*>(&krow[d]);
-                        float k0 = __half2float(kh.x);
-                        float k1 = __half2float(kh.y);
-                        if (kmean != nullptr) {
-                            k0 -= kmean[d];
-                            k1 -= kmean[d + 1];
+                    if constexpr (PagedKV) {
+                      if (gk >= q_offset) {
+                        // Current-chunk key: exact FP16 from the fresh chunk
+                        // tensor (K arg holds rows [q_offset, seq_kv)).
+                        const half* krow = &K_ptr[(int64_t)(gk - q_offset) * kv_row_stride];
+                        for (int d = 0; d < head_dim; d += 2) {
+                            const half2 qh = *reinterpret_cast<const half2*>(&qrow[d]);
+                            const half2 kh = *reinterpret_cast<const half2*>(&krow[d]);
+                            acc = fmaf(__half2float(qh.x), __half2float(kh.x), acc);
+                            acc = fmaf(__half2float(qh.y), __half2float(kh.y), acc);
                         }
-                        acc = fmaf(__half2float(qh.x), k0, acc);
-                        acc = fmaf(__half2float(qh.y), k1, acc);
+                      } else {
+                        // Past key: exact FP32 arithmetic over the FP4-STORED
+                        // cache K (dequant nibbles × UE4M3 group scale) — the
+                        // best available K; storage quantization already
+                        // happened at append time.
+                        const int blk = pkv.block_table[gk / pkv.block_size];
+                        const int slot = gk % pkv.block_size;
+                        const uint8_t* krow = pkv.k_data +
+                                              ((size_t)blk * pkv.block_size + slot) *
+                                                  (n_kv_heads * hd_half) +
+                                              (size_t)kv_head * hd_half;
+                        const uint8_t* ksc = pkv.k_scales +
+                                             ((size_t)blk * pkv.block_size + slot) *
+                                                 (n_kv_heads * n_k_groups) +
+                                             (size_t)kv_head * n_k_groups;
+                        for (int d = 0; d < head_dim; d += 2) {
+                            const half2 kh = unpack_fp4_pair(krow[d / 2]);
+                            const float sc = fp8_e4m3_to_float_fast(ksc[d / 16]);
+                            const half2 qh = *reinterpret_cast<const half2*>(&qrow[d]);
+                            acc = fmaf(__half2float(qh.x), __half2float(kh.x) * sc, acc);
+                            acc = fmaf(__half2float(qh.y), __half2float(kh.y) * sc, acc);
+                        }
+                      }
+                    } else {
+                        const half* krow = &K_ptr[(int64_t)gk * kv_row_stride];
+                        for (int d = 0; d < head_dim; d += 2) {
+                            const half2 qh = *reinterpret_cast<const half2*>(&qrow[d]);
+                            const half2 kh = *reinterpret_cast<const half2*>(&krow[d]);
+                            float k0 = __half2float(kh.x);
+                            float k1 = __half2float(kh.y);
+                            if (kmean != nullptr) {
+                                k0 -= kmean[d];
+                                k1 -= kmean[d + 1];
+                            }
+                            acc = fmaf(__half2float(qh.x), k0, acc);
+                            acc = fmaf(__half2float(qh.y), k1, acc);
+                        }
                     }
                     s = acc * scale;
                     if (softcap > 0.0f)
@@ -829,6 +970,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int lq1 = q_start + base_row + r0 + 8;
                 int gq0 = q_offset + lq0;
                 int gq1 = q_offset + lq1;
+                // PagedKV: raw Q/K scales → apply the attention scale here.
+                const float pg_qs = PagedKV ? scale : 1.0f;
+                (void)pg_qs;
 
                 if constexpr (UseBlockScaleMma) {
 // 4-issue path: store 4 ci's, scales already HW-applied
@@ -837,10 +981,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         int base_col_x = (ci_meta_base + ci_off) * MX_MMA_N;                                             \
         int gk0_x = kv_start + base_col_x + c0;                                                          \
         int gk1_x = kv_start + base_col_x + c0 + 1;                                                      \
-        FUSED_STORE(d_a, lq0, gq0, gk0_x, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_x + c0);          \
-        FUSED_STORE(d_b, lq0, gq0, gk1_x, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_x + c0 + 1);      \
-        FUSED_STORE(d_c, lq1, gq1, gk0_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0);      \
-        FUSED_STORE(d_d, lq1, gq1, gk1_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1);  \
+        FUSED_STORE(d_a, lq0, gq0, gk0_x, pg_qs, 1.0f, (base_row + r0) * Bkv + base_col_x + c0);         \
+        FUSED_STORE(d_b, lq0, gq0, gk1_x, pg_qs, 1.0f, (base_row + r0) * Bkv + base_col_x + c0 + 1);     \
+        FUSED_STORE(d_c, lq1, gq1, gk0_x, pg_qs, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0);     \
+        FUSED_STORE(d_d, lq1, gq1, gk1_x, pg_qs, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1); \
     } while (0)
                     STORE_CI(d0, d1, d2, d3, 0);
                     STORE_CI(d4, d5, d6, d7, 1);
@@ -870,8 +1014,37 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         // Prefetch V tile via cp.async (overlaps with softmax below).
         // KV_fp16 and S_tile are separate SMEM regions, so V writes
         // don't conflict with softmax reads/writes on S_tile.
+        // PagedKV: V is dequantized FP16 into KV_fp16 from the paged
+        // cache instead (indirect addressing — no cp.async).
         // ============================================================
-        {
+        if constexpr (PagedKV) {
+            const int total_bytes = Bkv * hd_half;  // one packed byte = 2 V elems
+            for (int c = tid; c < total_bytes; c += MX_BLOCK_THREADS) {
+                const int r = c / hd_half;
+                const int b = c % hd_half;
+                const int pos = kv_start + r;
+                half2 out = __half2half2(__float2half(0.0f));
+                if (pos >= q_offset && pos < seq_kv) {
+                    // Current-chunk V: fresh FP16 (V arg holds the chunk rows).
+                    out = *reinterpret_cast<const half2*>(
+                        &V_ptr[(int64_t)(pos - q_offset) * kv_row_stride + 2 * b]);
+                } else if (pos < seq_kv) {
+                    const int blk = pkv.block_table[pos / pkv.block_size];
+                    const int slot = pos % pkv.block_size;
+                    const uint8_t* vrow = pkv.v_data +
+                                          ((size_t)blk * pkv.block_size + slot) * (n_kv_heads * hd_half) +
+                                          (size_t)kv_head * hd_half;
+                    const uint8_t* vsc = pkv.v_scales +
+                                         ((size_t)blk * pkv.block_size + slot) *
+                                             (n_kv_heads * n_k_groups) +
+                                         (size_t)kv_head * n_k_groups;
+                    const half2 hh = unpack_fp4_pair(vrow[b]);
+                    const float sc = fp8_e4m3_to_float_fast(vsc[(2 * b) / 16]);
+                    out = __floats2half2_rn(__half2float(hh.x) * sc, __half2float(hh.y) * sc);
+                }
+                *reinterpret_cast<half2*>(&KV_fp16[r * head_dim + 2 * b]) = out;
+            }
+        } else {
             constexpr int CHUNK_HALVES = 8;  // 16 bytes = 8 halves per cp.async
             const int total_chunks = (Bkv * head_dim) / CHUNK_HALVES;
             for (int c = tid; c < total_chunks; c += MX_BLOCK_THREADS) {
@@ -1011,7 +1184,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         }
 
         // Wait for V prefetch to complete, then sync all SMEM writes (P + V)
-        cp_async_wait_group<0>();
+        if constexpr (!PagedKV)
+            cp_async_wait_group<0>();
         __syncthreads();
 
         // Promoted tiles fall through to the FP16 WMMA Phase 3 (V is already
@@ -1238,6 +1412,41 @@ __global__ void mxfp4_tile_mean_kernel(const half* __restrict__ X, float* __rest
         for (int r = 0; r < rows; r++)
             s += __half2float(base[(int64_t)r * row_stride + d]);
         mean[((int64_t)bh * gridDim.x + tile) * head_dim + d] = s * inv;
+    }
+}
+
+// Paged variant of the K̄ tile mean: decodes FP4 nibbles × UE4M3 group scales
+// straight from the NVFP4 KV cache (single sequence, batch = 1). One block
+// per (kv_tile, kv_head); output layout matches mxfp4_tile_mean_kernel with
+// bh = kv_head.
+__global__ void mxfp4_tile_mean_paged_kernel(const uint8_t* __restrict__ k_data,
+                                             const uint8_t* __restrict__ k_scales,
+                                             const int* __restrict__ block_table, int block_size,
+                                             int seq_kv, int n_kv_heads, int head_dim, int tile_rows,
+                                             float* __restrict__ mean) {
+    const int tile = blockIdx.x;
+    const int kvh = blockIdx.y;
+    const int r0 = tile * tile_rows;
+    const int rows = min(tile_rows, seq_kv - r0);
+    const int n_groups = head_dim / 16;
+    const int row_bytes = n_kv_heads * (head_dim / 2);
+    const int sc_row_bytes = n_kv_heads * n_groups;
+    const float inv = 1.0f / (float)rows;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float s = 0.0f;
+        for (int r = 0; r < rows; r++) {
+            const int pos = r0 + r;
+            const int blk = block_table[pos / block_size];
+            const int slot = pos % block_size;
+            const uint8_t byte = k_data[((size_t)blk * block_size + slot) * row_bytes +
+                                        (size_t)kvh * (head_dim / 2) + d / 2];
+            const half2 hh = unpack_fp4_pair(byte);
+            const float sc = fp8_e4m3_to_float_fast(
+                k_scales[((size_t)blk * block_size + slot) * sc_row_bytes + (size_t)kvh * n_groups +
+                         d / 16]);
+            s += __half2float((d & 1) ? hh.y : hh.x) * sc;
+        }
+        mean[((int64_t)kvh * gridDim.x + tile) * head_dim + d] = s * inv;
     }
 }
 
@@ -1600,6 +1809,165 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 #undef LAUNCH_FMHA_MXFP4_NOPROMOTE
 #undef LAUNCH_FMHA_MXFP4_IMPL
     return false;
+}
+
+// =============================================================================
+// Paged-FP4-K launcher (#846 KV-append-quant path)
+// =============================================================================
+// Q: fresh chunk [1, seq_q, n_heads, hd] FP16 (post-RoPE). K/V come straight
+// from the NVFP4 paged cache covering [0, seq_kv) — the current chunk must
+// already be appended (write_kv_cache BEFORE attention). hd=128 only (the
+// only instantiated PagedKV head_dim; the PPL target Qwen3-14B).
+bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
+                                    const half* v_fresh, const uint8_t* k_data,
+                                    const uint8_t* k_scales, const uint8_t* v_data,
+                                    const uint8_t* v_scales, const int* block_table, int block_size,
+                                    int seq_kv, int n_kv_heads, float scale, bool causal,
+                                    int sliding_window, float softcap, cudaStream_t stream, int q_offset,
+                                    float promote_budget) {
+    if (Q.qtype != QType::F16)
+        return false;
+    // Current-chunk tiles read the fresh FP16 K/V and are force-promoted;
+    // q_offset must be tile-aligned so no tile straddles the boundary.
+    if (k_fresh == nullptr || v_fresh == nullptr || q_offset <= 0 || (q_offset % MX_Bkv) != 0)
+        return false;
+    const int batch_size = static_cast<int>(Q.shape[0]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    if (batch_size != 1 || head_dim != 128)
+        return false;
+    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0)
+        return false;
+    if (seq_q == 0 || seq_kv == 0 || block_size <= 0)
+        return false;
+    if (k_data == nullptr || k_scales == nullptr || v_data == nullptr || v_scales == nullptr ||
+        block_table == nullptr)
+        return false;
+
+    int device = 0;
+    cudaGetDevice(&device);
+    int max_smem = 0;
+    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+
+    int Bq;
+    {
+        size_t smem_128 = compute_smem_mxfp4(128, MX_Bkv, head_dim, false);
+        size_t smem_64 = compute_smem_mxfp4(64, MX_Bkv, head_dim, false);
+        size_t smem_32 = compute_smem_mxfp4(32, MX_Bkv, head_dim, false);
+        if (smem_128 <= (size_t)max_smem) {
+            Bq = 128;
+        } else if (smem_64 <= (size_t)max_smem) {
+            Bq = 64;
+        } else if (smem_32 <= (size_t)max_smem) {
+            Bq = 32;
+        } else {
+            return false;
+        }
+    }
+    const size_t smem = compute_smem_mxfp4(Bq, MX_Bkv, head_dim, false);
+
+    const int num_q_tiles = (seq_q + Bq - 1) / Bq;
+    const int n_kv_tiles = (seq_kv + MX_Bkv - 1) / MX_Bkv;
+
+    // Promotion pre-pass: Q̄ from the fresh chunk, K̄ decoded from the cache.
+    const uint8_t* d_promote = nullptr;
+    if (promote_budget > 0.0f) {
+        static float* s_d_means = nullptr;
+        static size_t s_means_cap = 0;
+        static uint8_t* s_d_promote = nullptr;
+        static size_t s_promote_cap = 0;
+        const size_t qmean_elems = (size_t)n_heads * num_q_tiles * head_dim;
+        const size_t kmean_elems = (size_t)n_kv_heads * n_kv_tiles * head_dim;
+        const size_t means_need = qmean_elems + kmean_elems;
+        const size_t mask_need = (size_t)n_heads * num_q_tiles * n_kv_tiles;
+        if (means_need > s_means_cap) {
+            if (s_d_means != nullptr)
+                cudaFree(s_d_means);
+            if (cudaMalloc(&s_d_means, means_need * sizeof(float)) != cudaSuccess) {
+                s_d_means = nullptr;
+                s_means_cap = 0;
+            } else {
+                s_means_cap = means_need;
+            }
+        }
+        if (mask_need > s_promote_cap) {
+            if (s_d_promote != nullptr)
+                cudaFree(s_d_promote);
+            if (cudaMalloc(&s_d_promote, mask_need) != cudaSuccess) {
+                s_d_promote = nullptr;
+                s_promote_cap = 0;
+            } else {
+                s_promote_cap = mask_need;
+            }
+        }
+        if (s_d_means != nullptr && s_d_promote != nullptr) {
+            float* d_qmean = s_d_means;
+            float* d_kmean_tiles = s_d_means + qmean_elems;
+            dim3 qmg(num_q_tiles, n_heads);
+            mxfp4_tile_mean_kernel<<<qmg, 128, 0, stream>>>(reinterpret_cast<const half*>(Q.data), d_qmean,
+                                                            seq_q, n_heads, head_dim, Bq);
+            dim3 kmg(n_kv_tiles, n_kv_heads);
+            mxfp4_tile_mean_paged_kernel<<<kmg, 128, 0, stream>>>(k_data, k_scales, block_table,
+                                                                  block_size, seq_kv, n_kv_heads,
+                                                                  head_dim, MX_Bkv, d_kmean_tiles);
+            dim3 sg(num_q_tiles, n_heads);
+            const size_t sel_smem = (size_t)(head_dim + n_kv_tiles) * sizeof(float);
+            mxfp4_promote_select_kernel<<<sg, 128, sel_smem, stream>>>(
+                d_qmean, d_kmean_tiles, s_d_promote, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq,
+                seq_q, q_offset, causal, promote_budget, head_dim);
+            d_promote = s_d_promote;
+        }
+    }
+
+    static bool logged_once_paged = false;
+    if (!logged_once_paged) {
+        logged_once_paged = true;
+        IMP_LOG_INFO("FMHA MXFP4 sm120 PAGED-FP4-K ACTIVE (hd=%d, Bq=%d, promote=%.2f, seq_kv=%d)",
+                     head_dim, Bq, (d_promote != nullptr) ? promote_budget : 0.0f, seq_kv);
+    }
+
+    MxPagedKVArgs pkv;
+    pkv.k_data = k_data;
+    pkv.k_scales = k_scales;
+    pkv.v_data = v_data;
+    pkv.v_scales = v_scales;
+    pkv.block_table = block_table;
+    pkv.block_size = block_size;
+
+    dim3 grid(num_q_tiles, batch_size * n_heads);
+    dim3 block(MX_WARP_SIZE, MX_NUM_WARPS);
+
+#define LAUNCH_FMHA_MXFP4_PAGED(BQ, PR)                                                                  \
+    do {                                                                                                 \
+        cudaError_t attr_err =                                                                           \
+            cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, 128, true, false, PR, true>,                \
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));   \
+        if (attr_err != cudaSuccess) {                                                                   \
+            IMP_LOG_WARN("FMHA MXFP4 paged: cudaFuncSetAttribute failed Bq=%d smem=%zu: %s", BQ, smem,   \
+                         cudaGetErrorString(attr_err));                                                  \
+            return false;                                                                                \
+        }                                                                                                \
+        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, 128, true, false, PR, true>,                    \
+                             cudaFuncAttributePreferredSharedMemoryCarveout,                             \
+                             cudaSharedmemCarveoutMaxShared);                                            \
+        fmha_sm120_mxfp4_kernel<BQ, 128, true, false, PR, true><<<grid, block, smem, stream>>>(          \
+            reinterpret_cast<const half*>(Q.data), k_fresh, v_fresh, reinterpret_cast<half*>(O.data),    \
+            batch_size, seq_q, seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap,      \
+            q_offset, /*d_kmean=*/nullptr, d_promote, n_kv_tiles, pkv);                                  \
+    } while (0)
+
+    // Promote is always instantiated: current-chunk tiles ride the promoted
+    // (exact) machinery even at budget 0 (d_promote == nullptr).
+    if (Bq == 128) {
+        LAUNCH_FMHA_MXFP4_PAGED(128, true);
+    } else if (Bq == 64) {
+        LAUNCH_FMHA_MXFP4_PAGED(64, true);
+    } else {
+        LAUNCH_FMHA_MXFP4_PAGED(32, true);
+    }
+#undef LAUNCH_FMHA_MXFP4_PAGED
+    return true;
 }
 
 }  // namespace imp

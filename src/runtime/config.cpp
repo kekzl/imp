@@ -146,6 +146,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.mxfp4_ksmooth", cfg.attention.mxfp4_ksmooth);
     B("attention.mxfp4_pv_fp4", cfg.attention.mxfp4_pv_fp4);
     F("attention.mxfp4_promote_budget", cfg.attention.mxfp4_promote_budget);
+    B("attention.mxfp4_paged_kv", cfg.attention.mxfp4_paged_kv);
     B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
     S("attention.mxfp4_fp16_cache_policy", cfg.attention.mxfp4_fp16_cache_policy);
     B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);

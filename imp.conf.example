@@ -146,6 +146,11 @@ mxfp4_blockscale     = false
 mxfp4_ksmooth        = false
 mxfp4_pv_fp4         = false
 mxfp4_promote_budget = 0.0
+# KV-append-quant chunked prefill (#846 follow-up): continuation chunks read
+# K/V directly from the paged NVFP4 KV cache (quant paid once at append, no
+# gather->FP16 pass, no in-kernel quant). Requires kv_cache dtype = "nvfp4",
+# head_dim 128, single sequence. Combine with mxfp4_promote_budget.
+mxfp4_paged_kv       = false
 mxfp4_fp16_fallback  = false
 # MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
 # tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).
