@@ -632,6 +632,67 @@ TEST_F(GemmKernelRegistryTest, Nvfp4GemmRegistryDispatchMatchesDirectPath) {
     cudaFree(d_out_registry);
 }
 
+// Small-M gemm_nvfp4 routes through the batched-M GEMV (spec-verify chunks:
+// M = drafts+1) instead of the dequant→cuBLAS fallback. Correctness oracle:
+// each output row must match the proven M=1 decode GEMV (same kpar quant
+// math, FP32 accumulate) within FP16 rounding of the accumulation order.
+TEST_F(GemmKernelRegistryTest, Nvfp4GemmSmallMBatchedGemvMatchesPerRowGemv) {
+    constexpr int M = 5;   // verify-chunk-like (k=4 drafts + 1)
+    constexpr int N = 32;
+    constexpr int K = 128;  // multiple of micro-block (16)
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__half> h_weight_fp16(N * K);
+    for (int i = 0; i < M * K; ++i) h_input[i] = __float2half(((i * 13) % 9) * 0.03125f - 0.125f);
+    for (int i = 0; i < N * K; ++i) h_weight_fp16[i] = __float2half(((i * 7) % 11) * 0.03125f - 0.15625f);
+
+    __half *d_input = nullptr, *d_weight_fp16 = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_weight_fp16, sizeof(__half) * N * K);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight_fp16, h_weight_fp16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
+
+    NvFP4QuantResult nv4{};
+    quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
+
+    // Path 1: gemm_nvfp4 with M=5 (takes the small-M batched-GEMV route).
+    __half* d_out_gemm = nullptr;
+    cudaMalloc(&d_out_gemm, sizeof(__half) * M * N);
+    Tensor out_gemm(d_out_gemm, QType::F16, 2, out_shape, /*on_device=*/true);
+    gemm_nvfp4(nv4, input, out_gemm, stream_);
+
+    // Path 2: per-row M=1 decode GEMV (proven path).
+    __half* d_out_rows = nullptr;
+    cudaMalloc(&d_out_rows, sizeof(__half) * M * N);
+    for (int m = 0; m < M; ++m) {
+        gemv_nvfp4_kpar(nv4, d_input + static_cast<int64_t>(m) * K,
+                        d_out_rows + static_cast<int64_t>(m) * N, N, K, stream_);
+    }
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_out_gemm(M * N), h_out_rows(M * N);
+    cudaMemcpy(h_out_gemm.data(), d_out_gemm, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out_rows.data(), d_out_rows, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < M * N; ++i) {
+        const float a = __half2float(h_out_gemm[i]);
+        const float b = __half2float(h_out_rows[i]);
+        EXPECT_NEAR(a, b, 5e-3f) << "row " << i / N << " col " << i % N;
+    }
+
+    free_nvfp4_result(nv4);
+    cudaFree(d_input);
+    cudaFree(d_weight_fp16);
+    cudaFree(d_out_gemm);
+    cudaFree(d_out_rows);
+}
+
 // End-to-end correctness: register-then-dispatch produces the same output
 // as calling gemm() directly. Uses small dims so the test is fast.
 TEST_F(GemmKernelRegistryTest, Fp16RegistryDispatchMatchesDirectGemm) {
