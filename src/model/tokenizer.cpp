@@ -2420,7 +2420,90 @@ std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) 
     if (type_ == "gemma4") {
         return encode_gemma4(normalized);
     }
+    if (type_ == "bert") {
+        return encode_wordpiece(normalized);
+    }
     return encode_spm(normalized, no_prefix);
+}
+
+// ---- BERT WordPiece (#836) ----
+// Uncased basic tokenizer (ASCII lowercase, whitespace split, punctuation
+// isolated) followed by greedy longest-match WordPiece: the first piece of a
+// word matches the raw vocab entry, continuations match "##"-prefixed
+// entries; a word with no full segmentation becomes [UNK]. Accent stripping
+// (NFD + combining-mark removal) is not implemented — the uncased vocab is
+// effectively ASCII and the HF-oracle cosine check gates correctness.
+std::vector<int32_t> Tokenizer::encode_wordpiece(const std::string& text) const {
+    std::vector<int32_t> out;
+    auto it_unk = token_to_id_.find("[UNK]");
+    const int32_t unk_id = (it_unk != token_to_id_.end()) ? it_unk->second : 100;
+
+    std::vector<std::string> words;
+    std::string cur;
+    auto flush = [&] {
+        if (!cur.empty()) {
+            words.push_back(cur);
+            cur.clear();
+        }
+    };
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x80) {
+            const char lc = static_cast<char>(std::tolower(c));
+            if (std::isspace(static_cast<unsigned char>(lc))) {
+                flush();
+                ++i;
+            } else if (std::ispunct(static_cast<unsigned char>(lc))) {
+                flush();
+                words.emplace_back(1, lc);
+                ++i;
+            } else {
+                cur += lc;
+                ++i;
+            }
+        } else {
+            // Multibyte codepoint: keep as-is inside the current word.
+            const size_t len = (c >= 0xF0) ? 4u : (c >= 0xE0) ? 3u : 2u;
+            cur += text.substr(i, std::min(len, text.size() - i));
+            i += len;
+        }
+    }
+    flush();
+
+    for (const auto& w : words) {
+        std::vector<int32_t> pieces;
+        size_t start = 0;
+        bool bad = false;
+        while (start < w.size()) {
+            size_t end = w.size();
+            int32_t id = -1;
+            while (end > start) {
+                // llama.cpp's BERT-GGUF vocab stores WordPiece in SPM
+                // convention: word-initial pieces carry "▁", continuations
+                // are bare (HF "##xyz" -> "xyz", "xyz" -> "▁xyz").
+                std::string sub =
+                    (start == 0 ? std::string("\xE2\x96\x81") : std::string()) +
+                    w.substr(start, end - start);
+                auto it = token_to_id_.find(sub);
+                if (it != token_to_id_.end()) {
+                    id = it->second;
+                    break;
+                }
+                --end;
+            }
+            if (id < 0) {
+                bad = true;
+                break;
+            }
+            pieces.push_back(id);
+            start = end;
+        }
+        if (bad)
+            out.push_back(unk_id);
+        else
+            out.insert(out.end(), pieces.begin(), pieces.end());
+    }
+    return out;
 }
 
 // ---- Decode (SentencePiece) ----

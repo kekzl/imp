@@ -151,6 +151,7 @@ enum {
     kApiGemma4 = 12,
     kApiQwen36Moe = 13,
     kApiGptOss = 14,
+    kApiNomicBert = 15,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -182,6 +183,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
     {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    // Encoder-only embedder (#836): rotary (neox pairs), SwiGLU FFN; sampling
+    // defaults unused (no LM head). Post-LN + pooling handled by the encoder
+    // forward, not the decoder loop.
+    {ModelArch::NOMIC_BERT, "nomic-bert", kApiNomicBert, 1, 0, -1, -1, false, false, 1.0f, 1.0f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 
@@ -263,6 +268,7 @@ ModelArch parse_model_arch(const std::string& s) {
         {"gemma2", ModelArch::GEMMA3},
         {"gemma4", ModelArch::GEMMA4},
         {"llama4", ModelArch::LLAMA4},
+        {"nomic-bert", ModelArch::NOMIC_BERT},
         {"qwen2", ModelArch::LLAMA},
         {"phi3", ModelArch::LLAMA},
         // HuggingFace architecture class names (from config.json "architectures")

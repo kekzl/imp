@@ -1159,7 +1159,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     }
 
     // Post-layer norms (Gemma-3/4)
-    for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm, &L.ffn_pre_norm_2, &L.ffn_post_norm_1,
+    for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm, &L.post_attn_norm_bias,
+                       &L.post_ffn_norm_bias, &L.ffn_pre_norm_2, &L.ffn_post_norm_1,
                        &L.ffn_post_norm_2, &L.ffn_gate_inp_scale, &L.layer_out_scale, &L.expert_down_scale}) {
         if (norm->data && !norm->on_device) {
             if (!upload_unquantized_weight(*norm, QType::NONE, ctx.compute_dtype, ctx.stream,
@@ -2016,6 +2017,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // --- Embeddings, output norm, output projection ---
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {
         return false;
+    }
+
+    // --- Encoder embedder extras (#836, nomic-bert) ---
+    for (auto* t : {&tok_emb_norm_, &tok_emb_norm_bias_, &token_types_}) {
+        if (t->data && !t->on_device) {
+            if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
+                                           ctx.gpu_allocs)) {
+                IMP_LOG_ERROR("Failed to upload encoder embedding norm/type tensor");
+                return false;
+            }
+        }
     }
 
     // =========================================================================

@@ -83,6 +83,10 @@ public:
     ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
+    // Encoder embedder extras (#836, nomic-bert): post-embedding LayerNorm
+    // (weight+bias) and the token-type embedding table [n_types, d_model]
+    // (row 0 is added to every text token's embedding).
+    Tensor tok_emb_norm_, tok_emb_norm_bias_, token_types_;
     // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
     TensorID tok_emb_id = kInvalidTensorID;   // registry handle for token embedding

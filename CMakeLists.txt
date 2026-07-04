@@ -276,6 +276,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
     src/compute/mtp_forward.cu
+    src/compute/encoder_forward.cu
 )
 
 set(IMP_EXEC_SOURCES
@@ -655,6 +656,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
         tests/test_mtp_forward.cpp
+        tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
         tests/test_lora.cpp

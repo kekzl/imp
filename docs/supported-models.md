@@ -8,6 +8,7 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---|---:|---:|---|
+| [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) | Q8_0 | 0.2 GB | embeddings (`/v1/embeddings`, HF-oracle cos ≥ 0.999) | GGUF |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
 | [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | **268** (tg128, CI baseline #540) | GGUF |

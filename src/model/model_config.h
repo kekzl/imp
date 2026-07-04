@@ -216,6 +216,9 @@ struct TransformerLayer {
     Tensor expert_down_packed_scales;      // U8 [ne, d_model, d_ff/32]
     Tensor attn_q_norm, attn_k_norm;       // QK-norm (Qwen3-style per-head RMSNorm)
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
+    // Encoder post-LN biases (#836, nomic-bert): true LayerNorm with bias,
+    // applied AFTER the residual add (weights live in post_attn/ffn_norm).
+    Tensor post_attn_norm_bias, post_ffn_norm_bias;
     // Gemma 4 extras
     Tensor ffn_pre_norm_2;      // pre-norm for expert branch (operates on attn_out)
     Tensor ffn_post_norm_1;     // post-norm for shared MLP branch

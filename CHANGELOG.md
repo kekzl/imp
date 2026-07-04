@@ -4,6 +4,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Encoder/embedding-model support** (#836) — `nomic-bert` GGUF checkpoints
+  (nomic-embed-text-v1.5) load into a dedicated encoder path: bidirectional
+  no-KV forward (post-LN with bias, rotary, SwiGLU), BERT WordPiece
+  tokenizer (llama.cpp GGUFs store it in SPM convention: word-initial `▁`,
+  bare continuations), true LayerNorm-with-bias kernel, mean pooling + L2
+  on device. `/v1/embeddings` serves it with [CLS]/[SEP] framing.
+  HF-oracle-verified: cos(imp, HF trust_remote_code) ≥ 0.999 on Q8_0.
+  Classic BERT/bge/e5 (learned positions, CLS pooling) stay rejected.
+
 ### Changed
 - **Persistent K/V gather scratch for the eager chunked path** — spec-verify
   re-enters the chunked attention per layer per verify; the per-call

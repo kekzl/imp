@@ -25,6 +25,14 @@ void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight, Tensor& ou
 void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight, float* out_fp32, int rows, int d_model,
                           float eps = 1e-5f, cudaStream_t stream = nullptr, float weight_offset = 0.0f);
 
+// True LayerNorm with residual add (#836, encoder post-LN):
+//   out = ((x + residual) - mean) / sqrt(var + eps) * weight + bias
+// x/residual/out: [rows, d_model] FP16; weight/bias: [d_model] F32 or F16.
+// residual may be empty (Tensor{}) for the post-embedding norm.
+void layernorm_residual(const Tensor& x, const Tensor& residual, const Tensor& weight,
+                        const Tensor& bias, Tensor& out, float eps = 1e-12f,
+                        cudaStream_t stream = nullptr);
+
 // Register layernorm kernels for PDL tail/head overlap.
 void layernorm_pdl_register();
 

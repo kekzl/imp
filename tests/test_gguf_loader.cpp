@@ -194,9 +194,11 @@ TEST(GgufLoaderTest, EncoderOnlyArchDetection) {
 }
 
 TEST(GgufLoaderTest, EncoderArchGgufRejectedAtLoad) {
-    // Minimal valid GGUF v3 with general.architecture = "nomic-bert" and no
-    // tensors. The loader must throw a clear error (translated to ImpError at
-    // the C-API boundary) instead of mapping the arch to the generic decoder.
+    // Minimal valid GGUF v3 with general.architecture = "bert" and no
+    // tensors. Encoder archs WITHOUT a dedicated path (classic BERT/bge/e5:
+    // learned positions, CLS pooling) must still throw a clear error instead
+    // of mapping to the generic decoder. nomic-bert is admitted since #836
+    // (dedicated encoder forward — e2e covered by EncoderEmbedTest).
     auto append_str = [](std::vector<uint8_t>& buf, const std::string& s) {
         uint64_t len = s.size();
         const uint8_t* lp = reinterpret_cast<const uint8_t*>(&len);
@@ -208,7 +210,7 @@ TEST(GgufLoaderTest, EncoderArchGgufRejectedAtLoad) {
     uint32_t t_string = 8;  // GGUFValueType::STRING
     const uint8_t* tp = reinterpret_cast<const uint8_t*>(&t_string);
     data.insert(data.end(), tp, tp + 4);
-    append_str(data, "nomic-bert");
+    append_str(data, "bert");
 
     std::string path = write_temp_gguf(data);
     ASSERT_FALSE(path.empty());
@@ -219,7 +221,7 @@ TEST(GgufLoaderTest, EncoderArchGgufRejectedAtLoad) {
                << (model ? "a model" : "nullptr");
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("encoder-only"), std::string::npos) << e.what();
-        EXPECT_NE(std::string(e.what()).find("nomic-bert"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("bert"), std::string::npos) << e.what();
     }
 
     unlink(path.c_str());

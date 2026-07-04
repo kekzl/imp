@@ -500,4 +500,73 @@ void layernorm_pdl_register() {
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp32_kernel));
 }
 
+// --------------------------------------------------------------------------
+// True LayerNorm with bias + optional residual (#836, encoder post-LN).
+// One CTA per row; the row is staged in dynamic shared memory (d_model * 4 B
+// = 3 KiB at nomic's 768), mean/var via two block reductions.
+// --------------------------------------------------------------------------
+namespace {
+__device__ __forceinline__ float ln_param(const void* p, bool f32, int i) {
+    return f32 ? static_cast<const float*>(p)[i]
+               : __half2float(static_cast<const __half*>(p)[i]);
+}
+
+__device__ float ln_block_sum(float v) {
+    __shared__ float warp_sums[32];
+    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+    for (int m = 16; m > 0; m >>= 1) v += __shfl_xor_sync(0xffffffff, v, m);
+    if (lane == 0) warp_sums[warp] = v;
+    __syncthreads();
+    const int n_warps = (blockDim.x + 31) / 32;
+    float total = (threadIdx.x < n_warps) ? warp_sums[threadIdx.x] : 0.0f;
+    if (threadIdx.x < 32)
+        for (int m = 16; m > 0; m >>= 1) total += __shfl_xor_sync(0xffffffff, total, m);
+    if (threadIdx.x == 0) warp_sums[0] = total;
+    __syncthreads();
+    return warp_sums[0];
+}
+
+__global__ void layernorm_residual_kernel(const __half* __restrict__ x,
+                                          const __half* __restrict__ residual,
+                                          const void* __restrict__ w, bool w_f32,
+                                          const void* __restrict__ b, bool b_f32,
+                                          __half* __restrict__ out, int d, float eps) {
+    extern __shared__ float row[];
+    const size_t base = static_cast<size_t>(blockIdx.x) * d;
+    float sum = 0.0f;
+    for (int i = threadIdx.x; i < d; i += blockDim.x) {
+        float v = __half2float(x[base + i]);
+        if (residual) v += __half2float(residual[base + i]);
+        row[i] = v;
+        sum += v;
+    }
+    __syncthreads();
+    const float mean = ln_block_sum(sum) / d;
+    float var_sum = 0.0f;
+    for (int i = threadIdx.x; i < d; i += blockDim.x) {
+        const float c = row[i] - mean;
+        var_sum += c * c;
+    }
+    __syncthreads();
+    const float rstd = rsqrtf(ln_block_sum(var_sum) / d + eps);
+    for (int i = threadIdx.x; i < d; i += blockDim.x) {
+        const float bias = b ? ln_param(b, b_f32, i) : 0.0f;
+        out[base + i] = __float2half((row[i] - mean) * rstd * ln_param(w, w_f32, i) + bias);
+    }
+}
+}  // namespace
+
+void layernorm_residual(const Tensor& x, const Tensor& residual, const Tensor& weight,
+                        const Tensor& bias, Tensor& out, float eps, cudaStream_t stream) {
+    const int rows = static_cast<int>(x.shape[0]);
+    const int d = static_cast<int>(x.shape[1]);
+    const bool w_f32 = weight.qtype == QType::F32;
+    const bool b_f32 = bias.qtype == QType::F32;
+    const size_t shmem = static_cast<size_t>(d) * sizeof(float);
+    layernorm_residual_kernel<<<rows, 256, shmem, stream>>>(
+        static_cast<const __half*>(x.data),
+        residual.data ? static_cast<const __half*>(residual.data) : nullptr, weight.data, w_f32,
+        bias.data, b_f32, static_cast<__half*>(out.data), d, eps);
+}
+
 }  // namespace imp
