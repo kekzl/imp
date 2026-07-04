@@ -8,6 +8,7 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -58,9 +59,19 @@ static void compute_errors(const half* ref, const half* test, size_t n, float& m
     mean_err = static_cast<float>(sum_err / n);
 }
 
+// #846 recipe knobs for run_compare_test. ksmooth/pv_fp4 are read from
+// process_diag inside the launcher — set + restore around the call.
+struct MxRecipe {
+    bool blockscale = false;
+    bool ksmooth = false;
+    bool pv_fp4 = false;
+    int q_offset = 0;
+};
+
 // Helper to run test with given dimensions
 void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool causal, int sliding_window,
-                      float softcap, float max_err_limit, float mean_err_limit, cudaStream_t stream, int sm) {
+                      float softcap, float max_err_limit, float mean_err_limit, cudaStream_t stream, int sm,
+                      MxRecipe recipe = {}) {
     size_t qo_elems = (size_t)B * SQ * NH * HD;
     size_t kv_elems = (size_t)B * SKV * NKV * HD;
 
@@ -86,7 +97,12 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor K(d_k, QType::F16, 4, kv_shape, true);
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_mxfp4, QType::F16, 4, qo_shape, true);
-        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+        process_diag_set_mxfp4_ksmooth(recipe.ksmooth);
+        process_diag_set_mxfp4_pv_fp4(recipe.pv_fp4);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                           recipe.blockscale, recipe.q_offset);
+        process_diag_set_mxfp4_ksmooth(false);
+        process_diag_set_mxfp4_pv_fp4(false);
         ASSERT_TRUE(ok) << "MXFP4 FMHA returned false for HD=" << HD;
     }
 
@@ -98,7 +114,8 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         ASSERT_GE(sm, 120) << "imp targets sm_120 only";
-        ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream));
+        ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                              recipe.q_offset));
     }
 
     cudaStreamSynchronize(stream);
@@ -344,6 +361,99 @@ TEST_F(FhmaMxFP4Test, RejectsHD48) {
     cudaFree(d_k);
     cudaFree(d_v);
     cudaFree(d_o);
+}
+
+// ============================================================================
+// #846 SageAttention3-recipe variants (blockscale MMA + K-smoothing + FP4 PV)
+// ============================================================================
+
+TEST_F(FhmaMxFP4Test, BlockscaleHD128) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, BlockscaleHD64) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    run_compare_test(1, 128, 128, 4, 2, 64, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, BlockscaleKsmoothHD128) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, BlockscaleKsmoothSlidingWindow) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    // Smoothing + SWA: the mean is global over seq_kv while the window masks
+    // per row — the dropped Q·mean^T term must still cancel row-wise.
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 64, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, BlockscalePvFp4HD128) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.pv_fp4 = true;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, FullRecipeLongSeq) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    // Full #846 recipe on a multi-tile sequence (online-softmax rescale
+    // interacts with the per-row two-level P factor across KV tiles).
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.pv_fp4 = true;
+    run_compare_test(1, 512, 512, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, FullRecipeGQA8x) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.pv_fp4 = true;
+    run_compare_test(1, 256, 256, 32, 4, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, BlockscaleQOffsetChunk) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    // Chunked-prefill continuation: Q is a 64-row chunk at global offset 192
+    // within a 256-token context (seq_kv == q_offset + seq_q invariant).
+    MxRecipe r;
+    r.blockscale = true;
+    r.q_offset = 192;
+    run_compare_test(1, 64, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+TEST_F(FhmaMxFP4Test, FullRecipeQOffsetChunk) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.pv_fp4 = true;
+    r.q_offset = 192;
+    run_compare_test(1, 64, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
 }
 
 }  // namespace

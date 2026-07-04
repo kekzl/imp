@@ -142,6 +142,9 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
     I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
     S("attention.mxfp4", cfg.attention.mxfp4);
+    B("attention.mxfp4_blockscale", cfg.attention.mxfp4_blockscale);
+    B("attention.mxfp4_ksmooth", cfg.attention.mxfp4_ksmooth);
+    B("attention.mxfp4_pv_fp4", cfg.attention.mxfp4_pv_fp4);
     B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
     S("attention.mxfp4_fp16_cache_policy", cfg.attention.mxfp4_fp16_cache_policy);
     B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);
