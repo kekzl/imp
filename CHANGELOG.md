@@ -4,6 +4,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **Small-M NVFP4 GEMM: batched GEMV replaces the dequant fallback** — for
+  M ≤ 16 (spec-verify chunks of drafts+1, short/boundary prefills),
+  `gemm_nvfp4` now runs the batched-M K-parallel GEMV (weight read once per
+  MR=4 tile at 0.25x FP16 bytes) instead of dequantizing the whole weight to
+  FP16 and calling cuBLAS (~2.25x FP16 bytes, re-paid EVERY chunk). nsys on
+  Qwen3.6-27B MTP-only verify: `dequantize_nvfp4_kernel` drops from 48% to
+  4% of GPU time; ms/verify k=2 ~77 → ~60, k=4 ~87 → ~76; Coder-30B echo
+  verify unregressed. `beta != 0`, non-F16 tensors, and the
+  `nvfp4-force-dequant` bisect flag keep the fallback.
+
 ### Added
 - **Speculative decoding on hybrid (GDN/SSM) models** — `speculative.hybrid`
   (default on; imp-cli `--bench` pins it off): the verify chunk snapshots the

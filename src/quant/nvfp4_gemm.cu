@@ -4,6 +4,7 @@
 #include "core/tensor.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>
@@ -111,6 +112,15 @@ static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
 static std::mutex s_nvfp4_dequant_mtx;
 
+// FP32 -> FP16 copy for the small-M batched-GEMV path (the batched kernel
+// accumulates and writes FP32; gemm_nvfp4's contract is an FP16 C).
+__global__ void nvfp4_fp32_to_fp16_kernel(const float* __restrict__ in, __half* __restrict__ out,
+                                          int64_t n) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n)
+        out[i] = __float2half(in[i]);
+}
+
 // Pre-allocated workspace from the executor. When set, ensure_dequant_buffer
 // uses this instead of the lazy cudaMalloc path — which would fail inside
 // CUDA stream capture. Lifetime owned by caller of set_nvfp4_dequant_workspace.
@@ -187,6 +197,36 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     if (M == 1) {
         gemv_nvfp4(A, B, C, stream);
         return;
+    }
+
+    // Small-M chunks (spec-verify: M = drafts+1, short/boundary prefills): the
+    // dequant fallback below rewrites the whole FP16 weight EVERY call — on
+    // Qwen3.6-27B MTP-only verify that was 49% of all GPU time (nsys, ~52
+    // dequants x ~600 us per verify). The batched-M GEMV reads the NVFP4
+    // weight once per MR=4 tile instead: at M<=16 that is <=4 passes at 0.25x
+    // FP16 bytes vs the fallback's ~2.25x (dequant read+write + GEMM read).
+    // beta!=0, non-F16 output, and the nvfp4-force-dequant bisect flag keep
+    // the fallback. FP32 accumulate + convert — same numerics class as the
+    // M=1 decode GEMV.
+    constexpr int64_t kSmallMBatchedGemv = 16;
+    if (M <= kSmallMBatchedGemv && beta == 0.0f && B.qtype == QType::F16 &&
+        C.qtype == QType::F16 && !process_diag_nvfp4_force_dequant()) {
+        std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
+        const size_t y32_bytes = static_cast<size_t>(M * N) * sizeof(float);
+        void* y32 = ensure_dequant_buffer(y32_bytes, stream);
+        if (y32 != nullptr) {
+            gemv_nvfp4_kpar_batched_fp32(A, reinterpret_cast<const half*>(B.data),
+                                         static_cast<float*>(y32), static_cast<int>(N),
+                                         static_cast<int>(K), static_cast<int>(M), stream);
+            const int64_t total = M * N;
+            const int block = 256;
+            const int grid = static_cast<int>((total + block - 1) / block);
+            nvfp4_fp32_to_fp16_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const float*>(y32), reinterpret_cast<half*>(C.data), total);
+            return;
+        }
+        // Scratch unavailable (capture-active without workspace): fall through —
+        // the dequant path below throws the loud capture error.
     }
 
     // Fallback path: dequantize full weight matrix to FP16 and use cuBLAS GEMM.
