@@ -485,3 +485,26 @@ All three degen-verified (55 server-suite checks, 0 fail; dense byte-exact strea
 Methodology note: deterministic ncu/nsys gates caught two near-phantom "wins" that were host-day decode
 variance, and pre-empted two multi-day kernel rewrites (TC attention, spec-verify) shown futile by a
 single measurement. Refutations > wins here — they save the next session from re-treading dead ends.
+
+### 2026-07-04 — ThriftAttention outlier promotion: FP4 attention quality gate PASSES (#846 reopened)
+
+Spike #846 (SageAttention3 recipe) was quality-refuted on 07-04 (noise compounds with context).
+Web recheck found the documented reopen path had matured: ThriftAttention (arXiv 2605.23081) is
+measured on GB202/sm_120 with Apache-2.0 sm120 kernels — runtime block-mean scores Q̄·K̄^T, top-k
+KV-tile promotion to exact compute, online-softmax merge. Implemented flag-gated in the #868
+scaffold (`attention.mxfp4_promote_budget`, default 0): pre-pass (tile means + top-k select, sink
++ diagonal force-included), `Promote` template param, promoted tiles = FP32 scores from global
+FP16 (kmean-consistent under ksmooth) + FP16 WMMA PV.
+
+**Teacher-forced NLL, Qwen3-14B-NVFP4, natural-prose corpus (Gutenberg 1342), Δ vs FA2 baseline:**
+full recipe no-promote **+9.9% @1k / +4.4% @9.3k** (failure mode reproduced); promote=1.0 sanity
++1.4% / −0.4%; **budget 0.05 → −0.6% / −0.2% — GATE PASSED** (0.10: −0.6% / +0.2%; 0.25: −1.3% /
++0.07%; blockscale-only+0.10: −1.8% / +0.4%). Two findings: (a) sink+diagonal promotion ALONE
+recovers most of the error at ≤1k (budgets ≤10% reduce to the 2 forced tiles there); (b) with
+promotion active, ksmooth/pv_fp4 stop mattering (bs-only arm ≈ full recipe). Docs/markdown corpus
+degrades far less (+1.9% @11.6k no-promote) — corpus choice is load-bearing for this failure mode.
+
+**Caveats:** quality spike only — promoted path is scalar FP32 from global (slow by design), knob
+default-off, NO perf round run (per spike order). A perf phase needs a register-resident FA2-class
+port of the FP4+promotion path; decode-side expectations remain dampened (KV already NVFP4-stored,
+long-ctx decode attention is latency-bound, see 2026-06-18 refutations).

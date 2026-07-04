@@ -37,6 +37,7 @@ struct ProcessDiag {
     bool mxfp4_blockscale = false;
     bool mxfp4_ksmooth = false;
     bool mxfp4_pv_fp4 = false;
+    float mxfp4_promote_budget = 0.0f;
 
     // FFN
     bool ffn_sparsity_probe = false;
@@ -89,6 +90,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
     d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
     d.mxfp4_pv_fp4 = cfg.attention.mxfp4_pv_fp4;
+    d.mxfp4_promote_budget = cfg.attention.mxfp4_promote_budget;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
@@ -133,6 +135,8 @@ bool process_diag_mxfp4_pv_fp4() { return slot().mxfp4_pv_fp4; }
 void process_diag_set_mxfp4_blockscale(bool v) { slot().mxfp4_blockscale = v; }
 void process_diag_set_mxfp4_ksmooth(bool v) { slot().mxfp4_ksmooth = v; }
 void process_diag_set_mxfp4_pv_fp4(bool v) { slot().mxfp4_pv_fp4 = v; }
+float process_diag_mxfp4_promote_budget() { return slot().mxfp4_promote_budget; }
+void process_diag_set_mxfp4_promote_budget(float v) { slot().mxfp4_promote_budget = v; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
