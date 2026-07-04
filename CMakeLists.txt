@@ -276,6 +276,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
     src/compute/mtp_forward.cu
+    src/compute/encoder_forward.cu
 )
 
 set(IMP_EXEC_SOURCES

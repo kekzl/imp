@@ -196,6 +196,11 @@ public:
 
     // One draft step. Public for Phase 5 smoke testing; production callers
     // should not invoke directly until Phase 4 wires this into the decode loop.
+    // Encoder embedder (#836): pooled + L2-normalized embedding for `tokens`.
+    // Only valid when the loaded model is encoder-only (profile().is_encoder).
+    bool encoder_embed(const int32_t* tokens, int n, std::vector<float>& out);
+    bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
+
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id,
                        int* out_topk_ids = nullptr, int top_w = 0,
@@ -517,6 +522,7 @@ private:
     // Defined in <compute/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
     void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
+    void* encoder_ws_storage_ = nullptr;  // type-erased EncoderWorkspace* (#836)
 
     // Phase 3.5 telemetry: rolling MTP-draft-accuracy across the active session.
     // mtp_pending_prediction_ is the prediction made at the end of the

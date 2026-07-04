@@ -9,6 +9,7 @@
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
+#include "compute/encoder_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
@@ -119,6 +120,13 @@ Engine::~Engine() {
     if (pf_staging_evt_) {
         IMP_CUDA_CHECK_LOG(cudaEventDestroy(pf_staging_evt_));
         pf_staging_evt_ = nullptr;
+    }
+    // Encoder embedder workspace cleanup (#836)
+    if (encoder_ws_storage_) {
+        auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
+        imp::encoder_workspace_free(*ews);
+        delete ews;
+        encoder_ws_storage_ = nullptr;
     }
     // MTP spec-decode workspace cleanup
     if (mtp_ws_storage_) {
@@ -269,6 +277,16 @@ void Engine::mtp_accuracy_reset() noexcept {
         auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
         imp::mtp_kv_reset(*ws);
     }
+}
+
+bool Engine::encoder_embed(const int32_t* tokens, int n, std::vector<float>& out) {
+    if (encoder_ws_storage_ == nullptr || !model_) {
+        IMP_LOG_ERROR("encoder_embed: no encoder workspace (not an encoder model?)");
+        return false;
+    }
+    auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
+    out.resize(model_->config_.d_model);
+    return imp::encoder_embed(*model_, *ews, tokens, n, out.data(), stream_);
 }
 
 bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
@@ -629,6 +647,28 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
     MemAccount::instance().checkpoint("01_prewarm_gemm");
+
+    // --- Encoder-only embedder (#836): no executor, KV cache, decoder
+    // features, or warmup. Upload weights, dequant them into the dedicated
+    // encoder workspace, done — /v1/embeddings drives encoder_embed().
+    if (model_->profile().is_encoder) {
+        if (!model_->upload_weights_gpu(config_.compute_dtype, stream_, 1ULL << 30)) {
+            IMP_LOG_ERROR("encoder: weight upload failed");
+            return false;
+        }
+        auto* ews = new imp::EncoderWorkspace();
+        int cap = model_->config_.max_seq_len > 0 ? model_->config_.max_seq_len : 2048;
+        if (config_.max_seq_len > 0)
+            cap = std::min(cap, config_.max_seq_len);
+        if (!imp::encoder_workspace_init(*ews, *model_, cap, stream_)) {
+            delete ews;
+            return false;
+        }
+        encoder_ws_storage_ = ews;
+        IMP_LOG_INFO("Encoder embedder ready (arch=%s, max_tokens=%d, d=%d)",
+                     model_arch_name(model_->config_.arch), cap, model_->config_.d_model);
+        return true;
+    }
 
     // --- Sub-phases ---
     if (!init_weights())
