@@ -40,6 +40,20 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
         assign_quant(model.out_norm_, tensor);
         return true;
     }
+    // Encoder embedder (#836, nomic-bert): post-embedding LayerNorm + token
+    // types. F32 vectors / tiny table — no quant handling needed.
+    if (name == "token_embd_norm.weight") {
+        model.tok_emb_norm_ = tensor;
+        return true;
+    }
+    if (name == "token_embd_norm.bias") {
+        model.tok_emb_norm_bias_ = tensor;
+        return true;
+    }
+    if (name == "token_types.weight") {
+        model.token_types_ = tensor;
+        return true;
+    }
     if (name == "rope_freqs.weight") {
         model.layers_[0].rope_freqs = tensor;
         return true;
@@ -114,6 +128,19 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
             layer.attn_sinks = tensor;
         else if (field == "attn_norm")
             layer.attn_norm = tensor;
+        // Encoder post-LN (#836, nomic-bert): LayerNorm AFTER the residual
+        // add; weights reuse the Gemma-3 post-norm fields, biases are new.
+        else if (field == "attn_output_norm") {
+            if (suffix == "bias")
+                layer.post_attn_norm_bias = tensor;
+            else
+                layer.post_attn_norm = tensor;
+        } else if (field == "layer_output_norm") {
+            if (suffix == "bias")
+                layer.post_ffn_norm_bias = tensor;
+            else
+                layer.post_ffn_norm = tensor;
+        }
         else if (field == "attn_q_norm")
             layer.attn_q_norm = tensor;
         else if (field == "attn_k_norm")
