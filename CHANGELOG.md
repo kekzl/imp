@@ -14,6 +14,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   4% of GPU time; ms/verify k=2 ~77 → ~60, k=4 ~87 → ~76; Coder-30B echo
   verify unregressed. `beta != 0`, non-F16 tensors, and the
   `nvfp4-force-dequant` bisect flag keep the fallback.
+- **Device-side MTP draft chain** (dense MTP heads) — chain step i's argmax
+  lands in a device slot and feeds step i+1's embedding lookup on-device;
+  one D2H + sync drains the whole chain instead of one host round-trip per
+  drafted token (process StreamSynchronize count roughly halved on an
+  MTP-only run; e2e-neutral today — the verify wall is elsewhere — but
+  required groundwork for capturing the chain into a CUDA graph). MoE MTP
+  heads keep the host loop (expert routing needs a per-step D2H). Also:
+  persistent argmax scratch replaces a per-draft cudaMallocAsync/Free pair.
 
 ### Added
 - **Speculative decoding on hybrid (GDN/SSM) models** — `speculative.hybrid`

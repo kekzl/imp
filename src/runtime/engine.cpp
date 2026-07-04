@@ -273,7 +273,8 @@ void Engine::mtp_accuracy_reset() noexcept {
 
 bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
                            int hidden_dim, int vocab_size, int* out_token_id,
-                           int* out_topk_ids, int top_w) {
+                           int* out_topk_ids, int top_w,
+                           const int32_t* d_prev_token, int32_t* d_out_token) {
     if (mtp_ws_storage_ == nullptr) {
         IMP_LOG_ERROR("mtp_draft_one: spec-decode not enabled");
         return false;
@@ -302,7 +303,8 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
     return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_,
                                 model_->tok_emb_, model_->out_proj_,
                                 *ws, hidden_dim, vocab_size, out_token_id,
-                                decode_stream(), out_topk_ids, top_w, lm_nvfp4_p);
+                                decode_stream(), out_topk_ids, top_w, lm_nvfp4_p,
+                                d_prev_token, d_out_token);
 }
 
 // =====================================================================
