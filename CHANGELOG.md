@@ -4,6 +4,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-04
+
+Spec-verify economics batch (#847 ladder): chunk-path overhaul — default
+suffix-speculation on Qwen3.6-27B prompt-echo 81 → 131 tok/s (**+61% vs
+v0.16.0**), 35B-A3B +10-15% — plus the SuffixDecoding drafter, MTP verify
+activation (opt-in), hybrid verify capture, nomic-bert embeddings, and the
+NVFP4-attention research spike (#846, refuted, knobs default-off).
+
 ### Added
 - **Encoder/embedding-model support** (#836) — `nomic-bert` GGUF checkpoints
   (nomic-embed-text-v1.5) load into a dedicated encoder path: bidirectional
@@ -13,6 +21,63 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   on device. `/v1/embeddings` serves it with [CLS]/[SEP] framing.
   HF-oracle-verified: cos(imp, HF trust_remote_code) ≥ 0.999 on Q8_0.
   Classic BERT/bge/e5 (learned positions, CLS pooling) stay rejected.
+
+- **SuffixDecoding-style suffix drafter** (#848) — per-request suffix index
+  over prompt + generated output with frequency-voted continuations and
+  adaptive draft length replaces plain n-gram prompt-lookup as the default
+  draft source (`speculative.suffix`, n-gram matcher stays as fallback).
+- **Speculative decoding on hybrid (GDN/SSM) models** — `speculative.hybrid`
+  (default on; imp-cli `--bench` pins it off): the verify chunk snapshots the
+  committed recurrent-state slab and, on partial acceptance, restores it and
+  re-forwards the accepted prefix, so suffix/n-gram speculation now engages on
+  Qwen3.5/3.6 and Nemotron-H hybrids. Measured (greedy, temp 0): Nemotron-3-
+  Nano-30B code-edit +60% tg, Qwen3.6-35B code-edit +18%, Qwen3.6-27B
+  prompt-echo prose +156%; draft-poor prompts are unchanged (miss-burst
+  hybrid). Token-lossless verified on Qwen3.5-4B (#847 enabler).
+- **MTP verify activation** (#847) — the trained MTP head now feeds the
+  verify loop as a draft source when the suffix matcher has no match
+  (`--mtp-spec-decode <k>` / `speculative.mtp_k`, default off). Loads both
+  sidecar MoE heads (Qwen3.6-35B `model_mtp.safetensors`) and embedded dense
+  heads (Qwen3.6-27B `mtp.*` in the main shard, new). Chunked-prefill-capable
+  MTP cache feed with DeepSeek-aligned pairing and feed-only forwards (no
+  lm_head), multi-turn prefix resume, and an economics guard that dooms MTP
+  drafting per request when average emitted/verify cannot beat the async
+  loop (measured: accept 44-91% but net-negative on current verify
+  economics — see #847 for follow-ups).
+- **MTP chain lm_head via the NVFP4 decode cache** (#847 lever 3) — the MTP
+  chain's per-draft full-vocab logits GEMV reads the NVFP4 LM-head decode
+  cache when one exists (~3.5x less HBM traffic than the raw FP16 weight:
+  2.5 GB → 0.7 GB per drafted token on Qwen3.6-27B's 248k vocab).
+  `speculative.mtp_nvfp4_head` (default on) is the kill switch; draft-only
+  precision, verification stays lossless. The MTP economics-guard threshold
+  is now configurable (`speculative.mtp_econ_min_emit`, default 4.0,
+  0 disables) since the break-even moves with chain/verify costs — note a
+  chain of k emits at most k+1 tokens per verify, so k=2 cannot pass the
+  default threshold and dooms by construction.
+- **Graph-captured verify chunk** (#856, foundation #855; hybrid extension
+  #859/#861) — per-(bucket × KV-tier) CUDA graphs replace the eager verify
+  forward: the chunk reads its real KV length from device (`d_kv_len`), so a
+  captured graph replays correctly as context grows. Launch-pacing win on
+  attention-only models (Coder-30B echo +65%, Q8 +7%); Mamba2/GDN hybrids
+  capture too (slot-keyed graphs, device-length conv-tail/scan updates) but
+  measure ±0 — scan-dominated, not launch-bound. `speculative.capture`
+  default on.
+- **Opt-in schema jump-ahead** (#849, idea #844) — char-level FSM probe
+  (`forced_text`) drafts structurally-forced spans as teacher-forced chunks
+  in the constrained pipeline; every emitted token is still masked-sampled
+  from its true logits row (exact for greedy and sampling). Default OFF
+  (`constrained.jump_ahead`): measured net-negative (−11% on 14B-NVFP4,
+  re-measured post-chunk-path-fixes) — the model picks context-dependent
+  tokenization splits the canonical draft misses. #844 closed; kept as
+  scaffold.
+- **NVFP4-attention research knobs** (#868, idea #846 — refuted) —
+  `attention.mxfp4_blockscale` (per-16-element UE4M3 scales in the
+  mxf4nvf4.block_scale MMA), `mxfp4_ksmooth` (K channel-mean smoothing),
+  `mxfp4_pv_fp4` (FP4 P·V with two-level P scaling). Per-16 blockscale
+  rescues FP4-QK from the catastrophic per-row failure mode (PPL 31546 →
+  5.90 on Qwen3-14B-NVFP4 @199 tok) but the residual noise compounds with
+  context (+10% NLL @9k, full recipe) — all three default OFF, documented
+  as research/diagnostic in imp.conf.example.
 
 ### Changed
 - **Persistent K/V gather scratch for the eager chunked path** — spec-verify
@@ -48,36 +113,38 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   required groundwork for capturing the chain into a CUDA graph). MoE MTP
   heads keep the host loop (expert routing needs a per-step D2H). Also:
   persistent argmax scratch replaces a per-draft cudaMallocAsync/Free pair.
+- **Batched verify/eval LM heads** (#854, #857) — the spec-verify logits
+  GEMV over drafts+1 rows reads each weight tile once per 4-row batch
+  instead of once per row ([1,V]-shape root cause; Coder echo +50%), and the
+  dp4a LM-head path gets the same one-weight-pass-per-batch treatment.
 
-### Added
-- **Speculative decoding on hybrid (GDN/SSM) models** — `speculative.hybrid`
-  (default on; imp-cli `--bench` pins it off): the verify chunk snapshots the
-  committed recurrent-state slab and, on partial acceptance, restores it and
-  re-forwards the accepted prefix, so suffix/n-gram speculation now engages on
-  Qwen3.5/3.6 and Nemotron-H hybrids. Measured (greedy, temp 0): Nemotron-3-
-  Nano-30B code-edit +60% tg, Qwen3.6-35B code-edit +18%, Qwen3.6-27B
-  prompt-echo prose +156%; draft-poor prompts are unchanged (miss-burst
-  hybrid). Token-lossless verified on Qwen3.5-4B (#847 enabler).
-- **MTP verify activation** (#847) — the trained MTP head now feeds the
-  verify loop as a draft source when the suffix matcher has no match
-  (`--mtp-spec-decode <k>` / `speculative.mtp_k`, default off). Loads both
-  sidecar MoE heads (Qwen3.6-35B `model_mtp.safetensors`) and embedded dense
-  heads (Qwen3.6-27B `mtp.*` in the main shard, new). Chunked-prefill-capable
-  MTP cache feed with DeepSeek-aligned pairing and feed-only forwards (no
-  lm_head), multi-turn prefix resume, and an economics guard that dooms MTP
-  drafting per request when average emitted/verify cannot beat the async
-  loop (measured: accept 44-91% but net-negative on current verify
-  economics — see #847 for follow-ups).
-- **MTP chain lm_head via the NVFP4 decode cache** (#847 lever 3) — the MTP
-  chain's per-draft full-vocab logits GEMV reads the NVFP4 LM-head decode
-  cache when one exists (~3.5x less HBM traffic than the raw FP16 weight:
-  2.5 GB → 0.7 GB per drafted token on Qwen3.6-27B's 248k vocab).
-  `speculative.mtp_nvfp4_head` (default on) is the kill switch; draft-only
-  precision, verification stays lossless. The MTP economics-guard threshold
-  is now configurable (`speculative.mtp_econ_min_emit`, default 4.0,
-  0 disables) since the break-even moves with chain/verify costs — note a
-  chain of k emits at most k+1 tokens per verify, so k=2 cannot pass the
-  default threshold and dooms by construction.
+### Fixed
+- **Non-gated NVFP4 MoE da_cache never built** (#860 → #861) — `!empty()`
+  id checks vs the loader's pre-sized all-invalid id vectors meant non-gated
+  (RELU²) models silently took the per-call H2D fallback, whose
+  `cudaMemcpyAsync` from stack vectors recorded into verify graphs replays
+  from dead stack addresses: nondeterministic garbage B pointers /
+  `misaligned address`. With the cache built, hybrid verify graphs record +
+  replay cleanly (Nemotron-3-Nano 23/23, deterministic).
+- **MoE host-args launches + NVFP4 capture-refusal fail loud under stream
+  capture** (#858, #859) — the M>1 dequant fallback's silent return and the
+  host-`expert_offsets` D2H + unchecked sync both recorded graphs with
+  missing/uninitialized work (`misaligned address` at replay, `<unk>`
+  output). Both sites now throw under capture (clean eager fallback);
+  dequant workspace pre-alloc is capped instead of all-or-nothing. Also a
+  genuine eager bug: the hybrid conv tail wrote zeros instead of shifting
+  the previous state on chunks shorter than `conv_kernel` — Qwen3.5-4B spec
+  on==off now byte-identical.
+- **Chunked-prefill q_offset + fully-masked-row guard in the opt-in MXFP4
+  FMHA** (#868) — continuation chunks masked with local row indices (wrong
+  causal/SWA masks past chunk 1) and fully-masked rows could poison the
+  online-softmax denominator; both now mirror the FA2/FP16 kernels.
+- **Schema keys reject backslash escapes** (#850 → #851) — `sim_advance`
+  OBJECT_KEY accepted `\` and swallowed it, so the emitted text carried the
+  escape while the FSM matched the raw key (`{"\number_of…": …}`-class
+  corruption).
+- **tools + json_schema preamble slack raised** (#840 → #842) — the schema
+  mask no longer fires mid-deliberation on tool-call requests.
 
 ## [0.16.0] - 2026-07-02
 
