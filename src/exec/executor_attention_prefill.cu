@@ -106,6 +106,37 @@
                 // the engine dooms capture for this model.
                 throw std::runtime_error("chunked_prefill: capture-replay preconditions violated");
             }
+            // #846 KV-append-quant (opt-in): serve the whole chunk straight
+            // from the NVFP4 paged cache — append the current chunk FIRST,
+            // then attention reads [0, ctx_len) as FP4 (no gather, no FP16
+            // materialization, no in-kernel quantization). Falls through to
+            // the gather path if the kernel declines; the tail write is then
+            // skipped (KV already persisted).
+            bool paged_kv_written = false;
+            if (!cap_replay && kvt == QType::NVFP4 && hd == 128 && shapes_uniform && !attn_sinks &&
+                state.n_sequences == 1 && runtime_config().attention.mxfp4_paged_kv) {
+                write_kv_cache(layer, state, stream);
+                paged_kv_written = true;
+                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                Tensor q4 = qv.reshape(4, q4s);
+                Tensor o4 = ao.reshape(4, o4s);
+                if (fmha_sm120_mxfp4_prefill_paged(
+                        q4, o4, static_cast<const half*>(kk.data), static_cast<const half*>(vv.data),
+                        static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                        static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                        static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), state.block_tables,
+                        kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
+                        cfg.attn_logit_softcap, stream, q_offset,
+                        runtime_config().attention.mxfp4_promote_budget)) {
+                    goto after_attention;
+                }
+                // Declined: the gather below covers only [0, q_offset) and the
+                // fresh-FP16 append fills the current chunk — correct even
+                // though the cache now already holds the current chunk too.
+            }
+
             const int gather_cap = cap_replay ? state.ctx_capacity : q_offset;
             const int* d_past = cap_replay ? state.d_past_len : nullptr;
             size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
@@ -283,8 +314,10 @@
                 cudaFreeAsync(v_full, stream);
             }
 
-            // Persist current chunk's K/V (same as non-chunked path)
-            write_kv_cache(layer, state, stream);
+            // Persist current chunk's K/V (same as non-chunked path).
+            // Skipped when the paged-FP4 branch already appended it above.
+            if (!paged_kv_written)
+                write_kv_cache(layer, state, stream);
             goto after_attention;
         }
 

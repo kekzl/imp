@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -56,5 +57,27 @@ namespace imp {
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
                               bool use_blockscale = false, int q_offset = 0);
+
+// #846 KV-append-quant path: chunked-prefill attention that reads K and V
+// DIRECTLY from the paged NVFP4 KV cache (packed E2M1 nibbles + per-16 UE4M3
+// scales, layout of write_kv_cache_nvfp4_kernel) — no gather→FP16 pre-pass,
+// no in-kernel quantization. The current chunk must already be appended to
+// the cache (call write_kv_cache BEFORE attention). K feeds the block-scaled
+// mxf4nvf4 MMA as-is; V is dequantized to FP16 smem for the WMMA P·V phase.
+// promote_budget > 0 enables ThriftAttention outlier promotion — promoted
+// PAST tiles compute exact FP32 dots over the dequantized cache K. The
+// CURRENT chunk (k_fresh/v_fresh, rows [q_offset, seq_kv)) is always read
+// exactly as FP16 — quantizing the recency window is where the quality
+// damage lives (measured: stored-FP4 current chunk +3.7-5.4% NLL even with
+// exact compute, stored-FP4 past ≈ free). Requirements: batch 1 (flat block
+// table), head_dim 128, tile-aligned q_offset, Q FP16 [1, seq_q, nh, hd].
+// Returns false if the config is unsupported (caller falls back to gather).
+bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh,
+                                    const half* v_fresh, const uint8_t* k_data,
+                                    const uint8_t* k_scales, const uint8_t* v_data,
+                                    const uint8_t* v_scales, const int* block_table, int block_size,
+                                    int seq_kv, int n_kv_heads, float scale, bool causal,
+                                    int sliding_window, float softcap, cudaStream_t stream, int q_offset,
+                                    float promote_budget);
 
 }  // namespace imp

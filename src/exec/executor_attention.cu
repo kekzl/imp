@@ -20,6 +20,7 @@
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
 #include "compute/attention_fmha_sm120.h"
+#include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged.h"
 #include "compute/kv_gather.h"
 #include "compute/moe_routing.h"

@@ -522,3 +522,40 @@ digits. No-go for the port; FA2 stays at its known mix-bound ceiling; FA3-class 
 tcgen05/TMEM (absent on sm_120). Surviving narrower thesis (documented as #846 reopen bar):
 NVFP4-KV-resident FP4-QK for chunked prefill continuation (quant paid once at KV-append, kills
 the gather→FP16 pre-pass; promoted ~5% gathers FP16) — own quality question, own spike.
+
+### 2026-07-04 (later II) — KV-append-quant paged-FP4-QK: quality CONFIRMED, perf REFUTED (#846 stays closed)
+
+Follow-up on the surviving thesis: read K/V for chunked-prefill continuation straight from the
+NVFP4 KV cache (quant paid once at append) instead of gather→FP16. Shipped flag-gated
+(`attention.mxfp4_paged_kv`, default off) with a PagedKV FMHA variant: past tiles feed the
+block-scale MMA from cache bytes (zero quant work), the CURRENT chunk stays fresh FP16
+(force-promoted tiles), promotion budget applies to past tiles.
+
+**Quality (Qwen3-14B-NVFP4, prose, Δnll vs FP16-KV): GATE PASSED** — paged + budget 0.05/0.10 =
++0.34%/+0.31% @9.3k (chunk 2048), +1.5% @1k (chunk 256, beats even the FP16-gather reference's
++2.26% there); promote=1.0 sanity +0.05%. Load-bearing finding along the way: **quantizing the
+recency window is the entire quality cost** — the pre-hybrid variant that stored the current
+chunk FP4 before attention lost +3.7–5.4% NLL even with EXACT FP32 compute over the stored
+values, while FP4-storing the whole past costs ≈0 (gather ref −0.12%). Corollary: teacher-forced
+chunked-prefill PPL is structurally blind to recency-window storage noise (current chunk is
+always fresh FP16) — an nvfp4-KV DECODE quality check (generation reads recents from cache)
+would need its own probe.
+
+**Perf: REFUTED, decisively.** nsys @9.3k attention path: gather+FA2 184.5 ms (gather itself only
+4 ms — it was never the cost); paged hybrid 2197 ms (12×, scalar current-band); **pure paged-MMA
+floor with zero quant work (probe, force-promote off): 1557 ms = 8.5× FA2**. Removing the quant
+instructions did NOT rescue the smem-materializing kernel — it is latency-bound
+(long-scoreboard), not quant-bound. Combined with FA2's profile (instruction-mix-bound, DRAM
+9.6% — bandwidth is not its bottleneck), a register-resident FP4-K port's upside is ~10–20%
+kernel on ~8% of prefill GPU time → not fundable. #846 stays closed; the paged path ships as a
+quality-validated research scaffold, default off.
+
+### 2026-07-04 (later III) — Decode-recency probe: nvfp4-KV costs ~+0.8% NLL in the decode regime, FP8 default clean
+
+The #872 corollary, measured: shrinking-chunk teacher-forced PPL emulates decode-side recency
+exposure (chunk 16 ≈ generation; chunk 2048 = the standard-PPL blind spot; FP16 arm bit-identical
+across chunk sizes). NVFP4 KV Δnll vs FP16: −0.12% @2048 → +0.58% @64 → **+0.81% @16**
+(monotone; extrapolates ~+1% at true decode granularity; no cliff — greedy 300-token generation
+fully coherent). FP8 (auto default) clean at every granularity. Methodology rule: any nvfp4-KV
+quality claim needs a small-chunk (≤64) PPL arm — standard chunked PPL understates the cost by
+~1 percentage point. Closes the last open measurement of the FP4-attention program.
