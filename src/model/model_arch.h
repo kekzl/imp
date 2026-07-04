@@ -19,6 +19,7 @@ enum class ModelArch {
     GEMMA3,
     GEMMA4,
     LLAMA4,
+    NOMIC_BERT,  // encoder-only embedder (#836): bidirectional, post-LN, mean-pool
     GENERIC,
 };
 
