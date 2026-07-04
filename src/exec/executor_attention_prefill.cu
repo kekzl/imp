@@ -63,9 +63,23 @@
             int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
             const bool smatrix_fits =
                 s_cap > 0 && n <= s_cap && fp16_elems_needed <= fp16_elems_avail;
-            const bool prefer_fmha = chunk_fmha_ok &&
-                                     runtime_config().attention.fmha_prefill_threshold > 0 &&
-                                     ctx_len >= runtime_config().attention.fmha_prefill_threshold;
+            // Spec-verify chunks (small n, ctx_len grows EVERY verify step) on
+            // hd!=128 configs land on cuBLAS below the FMHA threshold — and
+            // cuBLAS re-runs its per-new-shape algo selection on each call
+            // (100 MiB workspace memset + candidate benchmark + blocking
+            // event sync, per layer per verify: ~93 such trios/verify measured
+            // on Qwen3.6-27B MTP-only, 12-15 ms/verify of pure churn; FMHA
+            // reads ms/verify 78 → 60, +31% e2e, #847). The tiled FMHA keeps
+            // no shape-keyed state — prefer it for small chunks inside its
+            // correctness domain. hd==128 never reaches this (FA2 serves it);
+            // learned sinks / heterogeneous shapes are excluded by
+            // chunk_fmha_ok and keep cuBLAS.
+            const bool small_growing_chunk = n <= 32 && hd != 128;
+            const bool prefer_fmha =
+                chunk_fmha_ok &&
+                ((runtime_config().attention.fmha_prefill_threshold > 0 &&
+                  ctx_len >= runtime_config().attention.fmha_prefill_threshold) ||
+                 small_growing_chunk);
             if (!chunk_fa2_serves && !chunk_fmha_ok && !smatrix_fits) {
                 // Sinks/heterogeneous shapes can ONLY be served by cuBLAS — the
                 // engine clamps chunk sizes (max_safe_prefill_chunk) and rejects
