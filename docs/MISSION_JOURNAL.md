@@ -508,3 +508,17 @@ degrades far less (+1.9% @11.6k no-promote) — corpus choice is load-bearing fo
 default-off, NO perf round run (per spike order). A perf phase needs a register-resident FA2-class
 port of the FP4+promotion path; decode-side expectations remain dampened (KV already NVFP4-stored,
 long-ctx decode attention is latency-bound, see 2026-06-18 refutations).
+
+### 2026-07-04 (later) — ThriftAttention perf phase: register-resident FP4-QK port REFUTED, #846 re-closed
+
+Profiled the gate-passing config vs FA2 (nsys kernel sums @9.3k prose + ncu, healthy clocks).
+FA2 183.4 ms vs MXFP4 blockscale 923 ms (5.0×), +promote 0.05 = 1211 ms (6.6×); pre-pass ~0.9%.
+ncu: FP4 MMA works as advertised (tensor pipe 40.8% → 2.2% for the same math) — but in-kernel
+per-tile K quant costs **3.34× FA2's entire instruction budget** (35.8M → 119.7M inst) and turns
+the kernel latency-bound (long-scoreboard 0.34 → 3.87/issue). Quartering QK issues saves ≤15% of
+FA2's tensor cycles (~6% of kernel) — an order of magnitude below the quant overhead added. And
+attention is only ~8% of prefill GPU time at 2k chunks, so even a free kernel moves e2e single
+digits. No-go for the port; FA2 stays at its known mix-bound ceiling; FA3-class designs need
+tcgen05/TMEM (absent on sm_120). Surviving narrower thesis (documented as #846 reopen bar):
+NVFP4-KV-resident FP4-QK for chunked prefill continuation (quant paid once at KV-append, kills
+the gather→FP16 pre-pass; promoted ~5% gathers FP16) — own quality question, own spike.
