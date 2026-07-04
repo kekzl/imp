@@ -112,12 +112,36 @@
 
             half* k_full = nullptr;
             half* v_full = nullptr;
+            bool used_eager_scratch = false;
             if (cap_replay) {
                 k_full = chunk_capture_k_;
                 v_full = chunk_capture_v_;
             } else {
-                cudaMallocAsync(&k_full, full_bytes, stream);
-                cudaMallocAsync(&v_full, full_bytes, stream);
+                // Persistent gather scratch (grow-only, 64 MiB steps so a
+                // growing ctx doesn't re-allocate every chunk). Falls back to
+                // the per-call alloc when the grow fails.
+                if (chunk_eager_bytes_ < full_bytes) {
+                    constexpr size_t kGrowStep = 64u << 20;
+                    const size_t cap = ((full_bytes + kGrowStep - 1) / kGrowStep) * kGrowStep;
+                    if (chunk_eager_k_) { cudaFreeAsync(chunk_eager_k_, stream); chunk_eager_k_ = nullptr; }
+                    if (chunk_eager_v_) { cudaFreeAsync(chunk_eager_v_, stream); chunk_eager_v_ = nullptr; }
+                    chunk_eager_bytes_ = 0;
+                    if (cudaMallocAsync(&chunk_eager_k_, cap, stream) == cudaSuccess &&
+                        cudaMallocAsync(&chunk_eager_v_, cap, stream) == cudaSuccess) {
+                        chunk_eager_bytes_ = cap;
+                    } else {
+                        if (chunk_eager_k_) { cudaFreeAsync(chunk_eager_k_, stream); chunk_eager_k_ = nullptr; }
+                        if (chunk_eager_v_) { cudaFreeAsync(chunk_eager_v_, stream); chunk_eager_v_ = nullptr; }
+                    }
+                }
+                if (chunk_eager_bytes_ >= full_bytes) {
+                    k_full = chunk_eager_k_;
+                    v_full = chunk_eager_v_;
+                    used_eager_scratch = true;
+                } else {
+                    cudaMallocAsync(&k_full, full_bytes, stream);
+                    cudaMallocAsync(&v_full, full_bytes, stream);
+                }
             }
 
             // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
@@ -254,7 +278,7 @@
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
             }
 
-            if (!cap_replay) {
+            if (!cap_replay && !used_eager_scratch) {
                 cudaFreeAsync(k_full, stream);
                 cudaFreeAsync(v_full, stream);
             }
