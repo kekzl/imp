@@ -208,9 +208,16 @@ struct RuntimeConfig {
         // mxfp4_pv_fp4: P·V in NVFP4 too — P quantized per-row two-level
         //   (rescaled to the full E4M3 scale range before 1x16 microscaling),
         //   V per-16-block along KV. Requires mxfp4_blockscale.
+        // mxfp4_promote_budget: ThriftAttention-style outlier promotion
+        //   (arXiv 2605.23081) — per q-tile, the top-scoring fraction of
+        //   causally visible 64-token KV tiles (block-mean importance score
+        //   Q̄·K̄^T; sink + diagonal tiles force-included) is computed exactly
+        //   in FP32/FP16 instead of FP4. 0 = off, 1 = promote everything.
+        //   Requires mxfp4_blockscale; head_dim 64/128 only.
         bool mxfp4_blockscale = false;
         bool mxfp4_ksmooth = false;
         bool mxfp4_pv_fp4 = false;
+        float mxfp4_promote_budget = 0.0f;
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
         // for every MXFP4 tensor. "pruned" skips MoE expert_*_packed and

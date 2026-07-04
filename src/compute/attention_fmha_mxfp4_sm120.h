@@ -42,6 +42,14 @@ namespace imp {
 //     to the full E4M3 scale range before 1x16 microscaling to prevent
 //     scale-factor collapse on the post-softmax long tail), V per-16-block
 //     along the KV dim, PV via the same block-scaled MMA.
+//   mxfp4_promote_budget: ThriftAttention-style outlier promotion (arXiv
+//     2605.23081). A pre-pass scores every (q_tile, kv_tile) pair by the
+//     block-mean dot Q̄·K̄^T and promotes the top budget-fraction of visible
+//     KV tiles (sink + diagonal always included) to exact compute: FP32
+//     scores from global FP16, FP16 WMMA P·V. Requires blockscale; head_dim
+//     64/128 only. INVARIANT: with ksmooth active, the promoted score path
+//     subtracts the same K channel mean — mixing shifted (FP4) and unshifted
+//     (promoted) columns inside one softmax row would corrupt the result.
 //
 // q_offset: global position of Q row 0 (chunked-prefill continuation) —
 // causal/sliding-window masks use q_offset + local row.

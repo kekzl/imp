@@ -126,12 +126,23 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 //                         subtracted before quantization (nullptr = off). The
 //                         dropped Q·mean^T term is constant per query row and
 //                         cancels under softmax (launcher gates softcap == 0).
-template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false>
+// Promote (#846 ThriftAttention, arXiv 2605.23081): d_promote is a per-
+//                         (batch_head, q_tile, kv_tile) uint8 mask from the
+//                         block-mean top-k pre-pass. Promoted KV tiles skip FP4
+//                         quantization entirely: S is computed exactly in FP32
+//                         from global-memory FP16 Q/K, and P·V takes the FP16
+//                         WMMA path even under PVFP4. The promotion flag is
+//                         uniform per (block, kv tile), so phase-level branches
+//                         are __syncthreads()-safe. Quality spike — the FP32
+//                         dot path is not a perf path.
+template <int Bq, int HD, bool UseBlockScaleMma = false, bool PVFP4 = false, bool Promote = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_kmean) {
+    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_kmean,
+    const uint8_t* __restrict__ d_promote, int n_kv_tiles_mask) {
     static_assert(!PVFP4 || UseBlockScaleMma, "PVFP4 rides on the block-scaled MMA path");
+    static_assert(!Promote || UseBlockScaleMma, "Promote rides on the block-scaled MMA path");
     constexpr int Bkv = MX_Bkv;
     constexpr int head_dim = HD;
     constexpr int hd_half = HD / 2;  // packed FP4 data bytes per row
@@ -416,8 +427,17 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
+        // #846 promotion: block-uniform per-tile flag. Promoted tiles skip the
+        // K-quant phase and the FP4 QK MMA; Phase 1' computes exact scores.
+        bool promoted = false;
+        if constexpr (Promote) {
+            promoted = d_promote[((size_t)batch_head * gridDim.x + tile_q) * n_kv_tiles_mask + j] != 0;
+        }
+
         // ---- Quantize K tile to FP4 (Opt 1: shared-memory staging) ----
-        if constexpr (can_stage_in_stile) {
+        if (promoted) {
+            // Promoted tile: no K-side quantization work.
+        } else if constexpr (can_stage_in_stile) {
             // Load K FP16 → S_tile (as staging buffer), then read from shared
             // float4 = 8 halves per iter
             half* K_stage = reinterpret_cast<half*>(S_tile);
@@ -602,7 +622,46 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         const int s_meta_total_tiles = s_row_tiles * s_col_tile_metas;
         const int outer_total = UseBlockScaleMma ? s_meta_total_tiles : s_total_tiles;
 
-        for (int tile_idx = warp_id; tile_idx < outer_total; tile_idx += MX_NUM_WARPS) {
+        if (Promote && promoted) {
+            // ============================================================
+            // Phase 1' (#846 promotion): exact FP32 scores from global FP16.
+            // Scalar dots are slower than the MMA but exact — this is the
+            // quality arm, not a perf path. With ksmooth active the FP4
+            // tiles score Q·(K−mean)^T; the promoted tile MUST apply the
+            // same shift, otherwise its columns sit on a different additive
+            // offset inside the same softmax row (silent corruption).
+            // ============================================================
+            const int r = sm_row;  // TPR lanes cooperate per Q row
+            const int lq = q_start + r;
+            const int gq = q_offset + lq;
+            const half* qrow = &Q_ptr[(int64_t)r * q_row_stride];
+            for (int c = sm_lane; c < Bkv; c += TPR) {
+                const int gk = kv_start + c;
+                float s = -FLT_MAX;
+                if (lq < seq_q && gk < seq_kv && !(causal && gq < gk) &&
+                    !(sliding_window > 0 && (gq - gk) >= sliding_window)) {
+                    const half* krow = &K_ptr[(int64_t)gk * kv_row_stride];
+                    float acc = 0.0f;
+                    for (int d = 0; d < head_dim; d += 2) {
+                        const half2 qh = *reinterpret_cast<const half2*>(&qrow[d]);
+                        const half2 kh = *reinterpret_cast<const half2*>(&krow[d]);
+                        float k0 = __half2float(kh.x);
+                        float k1 = __half2float(kh.y);
+                        if (kmean != nullptr) {
+                            k0 -= kmean[d];
+                            k1 -= kmean[d + 1];
+                        }
+                        acc = fmaf(__half2float(qh.x), k0, acc);
+                        acc = fmaf(__half2float(qh.y), k1, acc);
+                    }
+                    s = acc * scale;
+                    if (softcap > 0.0f)
+                        s = softcap * tanhf(s / softcap);
+                }
+                S_tile[r * Bkv + c] = s;
+            }
+        }
+        for (int tile_idx = warp_id; !promoted && tile_idx < outer_total; tile_idx += MX_NUM_WARPS) {
             int ri, ci;
             int ci_meta_base = 0;
             if constexpr (UseBlockScaleMma) {
@@ -890,7 +949,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 }
             }
 
-            if constexpr (!PVFP4) {
+            // Promoted tiles always take the FP16 P path (their P·V runs on
+            // the FP16 WMMA Phase 3 below, even under PVFP4). The condition
+            // folds to a compile-time constant unless Promote is instantiated.
+            if (!PVFP4 || (Promote && promoted)) {
                 // Step 6: Normalize + float→half for P.
                 // In-place float→half compaction: stage in registers + barrier
                 // (SP_half row r aliases the bytes of float row r/2 — unsynced
@@ -952,7 +1014,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         cp_async_wait_group<0>();
         __syncthreads();
 
-        if constexpr (PVFP4) {
+        // Promoted tiles fall through to the FP16 WMMA Phase 3 (V is already
+        // FP16 in KV_fp16); constant-folds unless Promote is instantiated.
+        if (PVFP4 && !(Promote && promoted)) {
             // ============================================================
             // Phase 3' (#846): V^T per-16-block quant + FP4 P·V MMA
             // ============================================================
@@ -1151,6 +1215,125 @@ __global__ void mxfp4_k_channel_mean_kernel(const half* __restrict__ K, float* _
 }
 
 // =============================================================================
+// Promotion pre-pass (#846 ThriftAttention outlier selection)
+// =============================================================================
+// Generic per-tile channel mean over [batch, seq, heads, head_dim] FP16 input.
+// One block per (tile, batch*head); threads stride head_dim (coalesced per
+// row). Output: mean[(bh * gridDim.x + tile) * head_dim + d]. Serves both Q̄
+// (tile_rows = Bq) and K̄ (tile_rows = MX_Bkv).
+__global__ void mxfp4_tile_mean_kernel(const half* __restrict__ X, float* __restrict__ mean, int seq,
+                                       int n_heads_x, int head_dim, int tile_rows) {
+    const int tile = blockIdx.x;
+    const int bh = blockIdx.y;
+    const int batch = bh / n_heads_x;
+    const int h = bh % n_heads_x;
+    const int64_t row_stride = (int64_t)n_heads_x * head_dim;
+    const int r0 = tile * tile_rows;
+    const int rows = min(tile_rows, seq - r0);
+    const half* base = X + (int64_t)batch * seq * row_stride + (int64_t)r0 * row_stride +
+                       (int64_t)h * head_dim;
+    const float inv = 1.0f / (float)rows;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float s = 0.0f;
+        for (int r = 0; r < rows; r++)
+            s += __half2float(base[(int64_t)r * row_stride + d]);
+        mean[((int64_t)bh * gridDim.x + tile) * head_dim + d] = s * inv;
+    }
+}
+
+// Top-k KV-tile selection per (batch_head, q_tile): importance score
+// Ŝ_j = Q̄_i · K̄_j (ThriftAttention block-mean heuristic), budget = fraction
+// of the causally visible tiles, sink tile (j=0) and diagonal tile (j=last)
+// force-included within the budget. Sliding-window occlusion is ignored here
+// (a promoted-but-masked tile is wasted work, never wrong). Dynamic smem:
+// head_dim + n_kv_tiles floats. Writes a uint8 mask row [n_kv_tiles].
+__global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
+                                            const float* __restrict__ kmean_tiles,
+                                            uint8_t* __restrict__ mask, int n_heads, int n_kv_heads,
+                                            int n_q_tiles, int n_kv_tiles, int bq, int seq_q, int q_offset,
+                                            bool causal, float budget, int head_dim) {
+    const int q_tile = blockIdx.x;
+    const int bh = blockIdx.y;  // batch * n_heads + head
+    const int batch = bh / n_heads;
+    const int head = bh % n_heads;
+    const int kvh = head / (n_heads / n_kv_heads);
+    const int bkvh = batch * n_kv_heads + kvh;
+
+    extern __shared__ float sel_sm[];
+    float* qm = sel_sm;                 // [head_dim]
+    float* score = sel_sm + head_dim;   // [n_kv_tiles]
+    __shared__ float red_v[128];
+    __shared__ int red_j[128];
+
+    const float* qmv = qmean + ((int64_t)bh * n_q_tiles + q_tile) * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x)
+        qm[d] = qmv[d];
+
+    int last = n_kv_tiles - 1;
+    if (causal) {
+        const int gq_max = q_offset + min(seq_q, (q_tile + 1) * bq) - 1;
+        last = min(last, gq_max / MX_Bkv);
+        last = max(last, 0);
+    }
+
+    uint8_t* mrow = mask + ((int64_t)bh * n_q_tiles + q_tile) * n_kv_tiles;
+    for (int j = threadIdx.x; j < n_kv_tiles; j += blockDim.x)
+        mrow[j] = 0;
+    __syncthreads();
+
+    for (int j = threadIdx.x; j <= last; j += blockDim.x) {
+        const float* km = kmean_tiles + ((int64_t)bkvh * n_kv_tiles + j) * head_dim;
+        float s = 0.0f;
+        for (int d = 0; d < head_dim; d++)
+            s = fmaf(qm[d], km[d], s);
+        score[j] = s;
+    }
+    __syncthreads();
+
+    int k = (int)ceilf(budget * (float)(last + 1));
+    k = max(k, 1);
+    k = min(k, last + 1);
+    if (threadIdx.x == 0) {
+        mrow[0] = 1;
+        mrow[last] = 1;
+        score[0] = -FLT_MAX;
+        score[last] = -FLT_MAX;
+    }
+    __syncthreads();
+
+    // Iterative block-wide argmax for the remaining budget.
+    for (int sel = (last == 0) ? 1 : 2; sel < k; sel++) {
+        __syncthreads();  // break-check reads of red_j[0] complete before rewrite
+        float bv = -FLT_MAX;
+        int bj = -1;
+        for (int j = threadIdx.x; j <= last; j += blockDim.x) {
+            if (score[j] > bv) {
+                bv = score[j];
+                bj = j;
+            }
+        }
+        red_v[threadIdx.x] = bv;
+        red_j[threadIdx.x] = bj;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            for (int t = 1; t < blockDim.x; t++) {
+                if (red_v[t] > red_v[0]) {
+                    red_v[0] = red_v[t];
+                    red_j[0] = red_j[t];
+                }
+            }
+            if (red_j[0] >= 0) {
+                mrow[red_j[0]] = 1;
+                score[red_j[0]] = -FLT_MAX;
+            }
+        }
+        __syncthreads();
+        if (red_j[0] < 0)
+            break;  // all visible tiles already selected (uniform read)
+    }
+}
+
+// =============================================================================
 // Host launcher
 // =============================================================================
 
@@ -1235,16 +1418,74 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         }
     }
 
+    const int num_q_tiles = (seq_q + Bq - 1) / Bq;
+
+    // #846 ThriftAttention promotion pre-pass: block means → top-k mask.
+    // Grow-only static scratch (process lifetime), same pattern as s_d_kmean.
+    // Promote instantiations exist only for head_dim 64/128 (bounds ptxas
+    // time; the PPL target Qwen3-14B is hd=128).
+    const float promote_budget = use_blockscale ? process_diag_mxfp4_promote_budget() : 0.0f;
+    const int n_kv_tiles = (seq_kv + MX_Bkv - 1) / MX_Bkv;
+    const uint8_t* d_promote = nullptr;
+    if (promote_budget > 0.0f && (head_dim == 64 || head_dim == 128)) {
+        static float* s_d_means = nullptr;  // Q̄ tile means followed by K̄ tile means
+        static size_t s_means_cap = 0;
+        static uint8_t* s_d_promote = nullptr;
+        static size_t s_promote_cap = 0;
+        const size_t qmean_elems = (size_t)batch_size * n_heads * num_q_tiles * head_dim;
+        const size_t kmean_elems = (size_t)batch_size * n_kv_heads * n_kv_tiles * head_dim;
+        const size_t means_need = qmean_elems + kmean_elems;
+        const size_t mask_need = (size_t)batch_size * n_heads * num_q_tiles * n_kv_tiles;
+        if (means_need > s_means_cap) {
+            if (s_d_means != nullptr)
+                cudaFree(s_d_means);
+            if (cudaMalloc(&s_d_means, means_need * sizeof(float)) != cudaSuccess) {
+                s_d_means = nullptr;
+                s_means_cap = 0;
+            } else {
+                s_means_cap = means_need;
+            }
+        }
+        if (mask_need > s_promote_cap) {
+            if (s_d_promote != nullptr)
+                cudaFree(s_d_promote);
+            if (cudaMalloc(&s_d_promote, mask_need) != cudaSuccess) {
+                s_d_promote = nullptr;
+                s_promote_cap = 0;
+            } else {
+                s_promote_cap = mask_need;
+            }
+        }
+        if (s_d_means != nullptr && s_d_promote != nullptr) {
+            float* d_qmean = s_d_means;
+            float* d_kmean_tiles = s_d_means + qmean_elems;
+            dim3 qmg(num_q_tiles, batch_size * n_heads);
+            mxfp4_tile_mean_kernel<<<qmg, 128, 0, stream>>>(reinterpret_cast<const half*>(Q.data), d_qmean,
+                                                            seq_q, n_heads, head_dim, Bq);
+            dim3 kmg(n_kv_tiles, batch_size * n_kv_heads);
+            mxfp4_tile_mean_kernel<<<kmg, 128, 0, stream>>>(reinterpret_cast<const half*>(K.data),
+                                                            d_kmean_tiles, seq_kv, n_kv_heads, head_dim,
+                                                            MX_Bkv);
+            dim3 sg(num_q_tiles, batch_size * n_heads);
+            const size_t sel_smem = (size_t)(head_dim + n_kv_tiles) * sizeof(float);
+            mxfp4_promote_select_kernel<<<sg, 128, sel_smem, stream>>>(
+                d_qmean, d_kmean_tiles, s_d_promote, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq, seq_q,
+                q_offset, causal, promote_budget, head_dim);
+            d_promote = s_d_promote;
+        }
+    }
+
     // Engagement log (INFO once): the quality gate is only meaningful if this
     // kernel actually serves prefill — see the #511/#656 vacuous-closure lesson.
     static bool logged_once = false;
     if (!logged_once) {
         logged_once = true;
-        IMP_LOG_INFO("FMHA MXFP4 sm120 ACTIVE (hd=%d, Bq=%d, blockscale=%d, ksmooth=%d, pv_fp4=%d)",
-                     head_dim, Bq, (int)use_blockscale, (int)(d_kmean != nullptr), (int)pv_fp4);
+        IMP_LOG_INFO(
+            "FMHA MXFP4 sm120 ACTIVE (hd=%d, Bq=%d, blockscale=%d, ksmooth=%d, pv_fp4=%d, promote=%.2f)",
+            head_dim, Bq, (int)use_blockscale, (int)(d_kmean != nullptr), (int)pv_fp4,
+            (d_promote != nullptr) ? promote_budget : 0.0f);
     }
 
-    const int num_q_tiles = (seq_q + Bq - 1) / Bq;
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(MX_WARP_SIZE, MX_NUM_WARPS);
 
@@ -1254,9 +1495,9 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, Bq, MX_Bkv, smem, causal, sliding_window,
         softcap);
 
-#define LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, BS, PV)                                                             \
+#define LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, BS, PV, PR)                                                         \
     do {                                                                                                   \
-        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV>,               \
+        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV, PR>,           \
                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,           \
                                                     static_cast<int>(smem));                               \
         if (attr_err != cudaSuccess) {                                                                     \
@@ -1264,26 +1505,42 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                          (int)BS, smem, cudaGetErrorString(attr_err));                                     \
             return false;                                                                                  \
         }                                                                                                  \
-        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV>,                                      \
+        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV, PR>,                                  \
                              cudaFuncAttributePreferredSharedMemoryCarveout,                               \
                              cudaSharedmemCarveoutMaxShared);                                              \
-        fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV>                                                            \
+        fmha_sm120_mxfp4_kernel<BQ, HD, BS, PV, PR>                                                        \
             <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                         \
                                             reinterpret_cast<const half*>(K.data),                         \
                                             reinterpret_cast<const half*>(V.data),                         \
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,    \
                                             n_heads, n_kv_heads, scale, causal, sliding_window, softcap,   \
-                                            q_offset, d_kmean);                                            \
+                                            q_offset, d_kmean, d_promote, n_kv_tiles);                     \
     } while (0)
 
-#define LAUNCH_FMHA_MXFP4(BQ, HD)                         \
-    do {                                                  \
-        if (pv_fp4)                                       \
-            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, true);   \
-        else if (use_blockscale)                          \
-            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, false);  \
-        else                                              \
-            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false, false); \
+// Promote variants only instantiated for head_dim 64/128 (see the pre-pass
+// gate above) — HD 96/256 use the no-promote macro to bound ptxas time.
+#define LAUNCH_FMHA_MXFP4(BQ, HD)                                \
+    do {                                                         \
+        if (d_promote != nullptr && pv_fp4)                      \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, true, true);    \
+        else if (d_promote != nullptr)                           \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, false, true);   \
+        else if (pv_fp4)                                         \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, true, false);   \
+        else if (use_blockscale)                                 \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, false, false);  \
+        else                                                     \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false, false, false); \
+    } while (0)
+
+#define LAUNCH_FMHA_MXFP4_NOPROMOTE(BQ, HD)                      \
+    do {                                                         \
+        if (pv_fp4)                                              \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, true, false);   \
+        else if (use_blockscale)                                 \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true, false, false);  \
+        else                                                     \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false, false, false); \
     } while (0)
 
     if (Bq == 128) {
@@ -1292,13 +1549,13 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 LAUNCH_FMHA_MXFP4(128, 64);
                 return true;
             case 96:
-                LAUNCH_FMHA_MXFP4(128, 96);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(128, 96);
                 return true;
             case 128:
                 LAUNCH_FMHA_MXFP4(128, 128);
                 return true;
             case 256:
-                LAUNCH_FMHA_MXFP4(128, 256);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(128, 256);
                 return true;
             default:
                 break;
@@ -1309,13 +1566,13 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 LAUNCH_FMHA_MXFP4(64, 64);
                 return true;
             case 96:
-                LAUNCH_FMHA_MXFP4(64, 96);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(64, 96);
                 return true;
             case 128:
                 LAUNCH_FMHA_MXFP4(64, 128);
                 return true;
             case 256:
-                LAUNCH_FMHA_MXFP4(64, 256);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(64, 256);
                 return true;
             default:
                 break;
@@ -1326,13 +1583,13 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 LAUNCH_FMHA_MXFP4(32, 64);
                 return true;
             case 96:
-                LAUNCH_FMHA_MXFP4(32, 96);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(32, 96);
                 return true;
             case 128:
                 LAUNCH_FMHA_MXFP4(32, 128);
                 return true;
             case 256:
-                LAUNCH_FMHA_MXFP4(32, 256);
+                LAUNCH_FMHA_MXFP4_NOPROMOTE(32, 256);
                 return true;
             default:
                 break;
@@ -1340,6 +1597,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     }
 
 #undef LAUNCH_FMHA_MXFP4
+#undef LAUNCH_FMHA_MXFP4_NOPROMOTE
 #undef LAUNCH_FMHA_MXFP4_IMPL
     return false;
 }

@@ -80,6 +80,9 @@ bool process_diag_mxfp4_pv_fp4();
 void process_diag_set_mxfp4_blockscale(bool v);
 void process_diag_set_mxfp4_ksmooth(bool v);
 void process_diag_set_mxfp4_pv_fp4(bool v);
+// ThriftAttention-style outlier promotion budget (0 = off, requires blockscale).
+float process_diag_mxfp4_promote_budget();
+void process_diag_set_mxfp4_promote_budget(float v);
 
 // FFN
 bool process_diag_ffn_sparsity_probe();

@@ -65,6 +65,7 @@ struct MxRecipe {
     bool blockscale = false;
     bool ksmooth = false;
     bool pv_fp4 = false;
+    float promote_budget = 0.0f;
     int q_offset = 0;
 };
 
@@ -99,10 +100,12 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor O(d_o_mxfp4, QType::F16, 4, qo_shape, true);
         process_diag_set_mxfp4_ksmooth(recipe.ksmooth);
         process_diag_set_mxfp4_pv_fp4(recipe.pv_fp4);
+        process_diag_set_mxfp4_promote_budget(recipe.promote_budget);
         bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                            recipe.blockscale, recipe.q_offset);
         process_diag_set_mxfp4_ksmooth(false);
         process_diag_set_mxfp4_pv_fp4(false);
+        process_diag_set_mxfp4_promote_budget(0.0f);
         ASSERT_TRUE(ok) << "MXFP4 FMHA returned false for HD=" << HD;
     }
 
@@ -454,6 +457,96 @@ TEST_F(FhmaMxFP4Test, FullRecipeQOffsetChunk) {
     r.pv_fp4 = true;
     r.q_offset = 192;
     run_compare_test(1, 64, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+// ============================================================================
+// #846 ThriftAttention outlier promotion (mxfp4_promote_budget)
+// ============================================================================
+
+// budget=1.0 → every visited KV tile is promoted → the kernel runs exact FP32
+// scores + FP16 WMMA PV everywhere. Output must be near-FP16-tight against
+// the reference (validates the exact path, masking, and softmax merge — no
+// FP4 error budget left to hide behind).
+TEST_F(FhmaMxFP4Test, PromoteAllMatchesFP16) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.promote_budget = 1.0f;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.05f, 0.005f, stream_, sm_, r);
+}
+
+// Same, with ksmooth on: the promoted FP32 path must subtract the same K
+// channel mean as the FP4 tiles — a missing subtraction shows up here as a
+// gross mismatch (shift no longer cancels row-wise under softmax).
+TEST_F(FhmaMxFP4Test, PromoteAllKsmoothMatchesFP16) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.promote_budget = 1.0f;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.05f, 0.005f, stream_, sm_, r);
+}
+
+// budget=1.0 + pv_fp4: promoted tiles bypass the FP4 P·V path at runtime, so
+// the pv_fp4 knob must have no effect — still FP16-tight.
+TEST_F(FhmaMxFP4Test, PromoteAllBypassesPvFp4) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.pv_fp4 = true;
+    r.promote_budget = 1.0f;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f, 0.05f, 0.005f, stream_, sm_, r);
+}
+
+// Partial budget on the full recipe: promotion must never make error worse
+// than the unpromoted full recipe (same tolerances as FullRecipeLongSeq).
+TEST_F(FhmaMxFP4Test, PromotePartialFullRecipe) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.pv_fp4 = true;
+    r.promote_budget = 0.1f;
+    run_compare_test(1, 512, 512, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+// Chunked-prefill continuation with promotion: the mask's causal visibility
+// must use global positions (q_offset), matching the kernel's masks.
+TEST_F(FhmaMxFP4Test, PromoteQOffsetChunk) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.ksmooth = true;
+    r.pv_fp4 = true;
+    r.promote_budget = 0.1f;
+    r.q_offset = 192;
+    run_compare_test(1, 64, 256, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
+}
+
+// Promotion + GQA + HD64 (the second instantiated head_dim).
+TEST_F(FhmaMxFP4Test, PromoteAllHD64GQA) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.promote_budget = 1.0f;
+    run_compare_test(1, 256, 256, 32, 4, 64, true, 0, 0.0f, 0.05f, 0.005f, stream_, sm_, r);
+}
+
+// Sliding window with partial promotion: selection ignores SWA occlusion
+// (wasted picks allowed), but promoted tiles must still apply the SWA mask.
+TEST_F(FhmaMxFP4Test, PromoteSlidingWindow) {
+    if (!can_run())
+        GTEST_SKIP() << "Requires sm_120+";
+    MxRecipe r;
+    r.blockscale = true;
+    r.promote_budget = 0.25f;
+    run_compare_test(1, 256, 256, 4, 2, 128, true, 64, 0.0f, 0.5f, 0.1f, stream_, sm_, r);
 }
 
 }  // namespace
