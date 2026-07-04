@@ -5,6 +5,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Small hd≠128 verify/boundary chunks prefer the tiled FMHA over cuBLAS**
+  — cuBLAS re-runs its per-new-shape algo selection on every call (100 MiB
+  workspace memset + candidate benchmark + blocking event sync); spec-verify
+  chunks grow `ctx_len` every step, so hd=256 models paid ~93 such trios per
+  verify (~12-15 ms of churn, nsys timeline on Qwen3.6-27B MTP-only). Chunks
+  with n ≤ 32 and hd ≠ 128 now route to the tiled FMHA (shape-stateless,
+  PPL-identical per #511) inside its correctness domain; learned sinks and
+  heterogeneous shapes keep cuBLAS. Measured: 27B MTP-only verify 78 → 59
+  ms/verify, 34 → 44-46 tok/s (+31%).
 - **Small-M NVFP4 GEMM: batched GEMV replaces the dequant fallback** — for
   M ≤ 16 (spec-verify chunks of drafts+1, short/boundary prefills),
   `gemm_nvfp4` now runs the batched-M K-parallel GEMV (weight read once per
