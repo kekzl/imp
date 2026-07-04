@@ -398,6 +398,39 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             return;
         }
 
+        // Encoder-only embedder (#836, nomic-bert): the dedicated bidirectional
+        // forward pools + L2-normalizes on device. Frame with [CLS]/[SEP]
+        // (BERT convention; ids come from the GGUF bos/eos metadata).
+        if (state.ctx && state.ctx->engine && state.ctx->engine->is_encoder_model()) {
+            auto* engine = state.ctx->engine.get();
+            std::vector<int32_t> framed;
+            framed.reserve(n_tokens + 2);
+            const int32_t cls = imp_model_bos_token(state.model);
+            const int32_t sep = (engine->model() && engine->model()->tokenizer())
+                                    ? engine->model()->tokenizer()->eos_id()
+                                    : -1;
+            if (cls >= 0 && (n_tokens == 0 || tokens[0] != cls))
+                framed.push_back(cls);
+            framed.insert(framed.end(), tokens.begin(), tokens.begin() + n_tokens);
+            if (sep >= 0 && framed.back() != sep)
+                framed.push_back(sep);
+            std::vector<float> emb;
+            if (!engine->encoder_embed(framed.data(), static_cast<int>(framed.size()), emb)) {
+                nlohmann::json error = {
+                    {"error",
+                     {{"message", "encoder forward failed (input too long for the encoder "
+                                  "workspace?)"},
+                      {"type", "server_error"}}}};
+                res.status = 500;
+                res.set_content(dump_safe(error), "application/json");
+                return;
+            }
+            data.push_back(
+                {{"object", "embedding"}, {"embedding", emb}, {"index", input_idx}});
+            total_prompt_tokens += static_cast<int>(framed.size());
+            continue;
+        }
+
         // Reject over-long inputs before prefill. Two independent bounds:
         //   1. the engine's allocated context (state.max_seq_len), and
         //   2. the executor's single-pass hidden capacity (max_tokens()): the
