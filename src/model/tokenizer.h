@@ -141,6 +141,10 @@ private:
     // GPT2-style byte-level BPE (merge-rank based)
     std::vector<int32_t> encode_gpt2(const std::string& text) const;
 
+    // BERT WordPiece (#836, nomic-bert embedder): lowercase basic tokenizer +
+    // greedy longest-match with "##" continuation pieces, [UNK] fallback.
+    std::vector<int32_t> encode_wordpiece(const std::string& text) const;
+
     // GPT2 decode (reverse byte encoding)
     std::string decode_gpt2(const std::vector<int32_t>& tokens) const;
     std::string decode_gpt2_token(int32_t token) const;

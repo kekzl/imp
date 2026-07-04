@@ -994,6 +994,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // Gemma-4 uses SPM-style BPE: ▁ for spaces + BPE merge ranks.
         else if (tm == "gemma4")
             tok_type = "gemma4";
+        // BERT WordPiece (#836, nomic-bert embedder).
+        else if (tm == "bert")
+            tok_type = "bert";
     }
     tokenizer->set_type(tok_type);
 
