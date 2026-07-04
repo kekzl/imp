@@ -38,6 +38,7 @@ TEST(EncoderEmbedTest, NomicBertEmbedsMatchReferenceStructure) {
 
     std::shared_ptr<imp::Model> model = imp::load_gguf(kNomicGguf);
     ASSERT_NE(model, nullptr);
+    model->build_profile();  // Engine::init does this in production
     ASSERT_TRUE(model->profile().is_encoder);
 
     // 1. WordPiece vs HF reference ids (bert-base-uncased vocab):
