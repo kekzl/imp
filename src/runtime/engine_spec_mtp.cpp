@@ -72,34 +72,80 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     if (ws->max_seq_len > 0 && ws->mtp_pos + n_pairs + (chain_after ? K : 0) > ws->max_seq_len)
         return false;
 
+    // Device-side chain: dense MTP heads have no host dependency between
+    // chain steps (the MoE head's expert routing needs a per-step D2H) —
+    // each step's argmax lands in ws->d_chain_tokens[i] and feeds step i+1's
+    // embedding lookup on device. One D2H + sync drains the whole chain,
+    // replacing K host round-trips (each of which stalls the GPU pipeline).
+    const bool device_chain = chain_after && ws->n_experts == 0 &&
+                              ws->d_chain_tokens != nullptr && K <= imp::kMtpMaxChainK;
+
     const char* base = static_cast<const char*>(d_hidden_rows);
     int pred = -1;
     for (int j = 0; j < n_pairs; ++j) {
         const void* h_j = base + static_cast<size_t>(j) * hidden_dim * sizeof(__half);
-        int* out = (chain_after && j == n_pairs - 1) ? &pred : nullptr;
-        if (!mtp_draft_one(tokens[j], h_j, hidden_dim, vocab_size, out))
-            return false;
+        const bool last = (j == n_pairs - 1);
+        if (chain_after && last && device_chain) {
+            if (!mtp_draft_one(tokens[j], h_j, hidden_dim, vocab_size, nullptr,
+                               nullptr, 0, nullptr, /*d_out_token=*/ws->d_chain_tokens))
+                return false;
+        } else {
+            int* out = (chain_after && last) ? &pred : nullptr;
+            if (!mtp_draft_one(tokens[j], h_j, hidden_dim, vocab_size, out))
+                return false;
+        }
         mtp_history_.push_back(tokens[j]);
     }
     if (!chain_after)
         return true;
-    if (pred < 0 || pred >= vocab_size)
-        return false;
 
     // Chain: continue on the head's own h_final. The chained KV appends are
     // speculative — roll the cache back so only the real pairs persist.
     const int pos_after = ws->mtp_pos;
     std::vector<int32_t> chain;
     chain.reserve(K);
-    chain.push_back(pred);
-    int prev = pred;
-    for (int k = 1; k < K; ++k) {
-        int p = -1;
-        if (!mtp_draft_one(prev, ws->d_h_final, hidden_dim, vocab_size, &p) || p < 0 ||
-            p >= vocab_size)
-            break;
-        chain.push_back(p);
-        prev = p;
+    if (device_chain) {
+        int launched = 1;  // d_chain_tokens[0] came from the last feed pair
+        for (int k = 1; k < K; ++k) {
+            if (!mtp_draft_one(-1, ws->d_h_final, hidden_dim, vocab_size, nullptr,
+                               nullptr, 0, /*d_prev_token=*/ws->d_chain_tokens + k - 1,
+                               /*d_out_token=*/ws->d_chain_tokens + k))
+                break;
+            launched++;
+        }
+        int32_t h_chain[imp::kMtpMaxChainK];
+        cudaStream_t stream = decode_stream();
+        if (cudaMemcpyAsync(h_chain, ws->d_chain_tokens,
+                            static_cast<size_t>(launched) * sizeof(int32_t),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
+        cudaStreamSynchronize(stream);
+        for (int k = 0; k < launched; ++k) {
+            if (h_chain[k] < 0 || h_chain[k] >= vocab_size)
+                break;  // NaN-logits guard — keep the valid prefix
+            chain.push_back(h_chain[k]);
+        }
+        if (chain.empty()) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
+    } else {
+        if (pred < 0 || pred >= vocab_size) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
+        chain.push_back(pred);
+        int prev = pred;
+        for (int k = 1; k < K; ++k) {
+            int p = -1;
+            if (!mtp_draft_one(prev, ws->d_h_final, hidden_dim, vocab_size, &p) || p < 0 ||
+                p >= vocab_size)
+                break;
+            chain.push_back(p);
+            prev = p;
+        }
     }
     ws->mtp_pos = pos_after;
     mtp_pending_draft_ = std::move(chain);

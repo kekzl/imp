@@ -407,6 +407,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_logits,     vocab_size * sizeof(__half));
     ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxChainK * sizeof(int32_t));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
 
     ws.hidden_dim   = hidden_dim;
     ws.n_experts    = n_experts;
@@ -489,6 +491,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_logits);
     frfn(ws.d_logits_f32);
     if (ws.d_topk) { cudaFree(ws.d_topk); ws.d_topk = nullptr; }
+    if (ws.d_chain_tokens) { cudaFree(ws.d_chain_tokens); ws.d_chain_tokens = nullptr; }
+    if (ws.d_argmax) { cudaFree(ws.d_argmax); ws.d_argmax = nullptr; }
     frfn(ws.d_post_norm);
     frfn(ws.d_router_logits);
     frfn(ws.d_expert_gate_up);
@@ -530,7 +534,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     int* out_token_id,
                     cudaStream_t stream,
                     int* out_topk_ids, int top_w,
-                    const NvFP4QuantResult* lm_head_nvfp4) {
+                    const NvFP4QuantResult* lm_head_nvfp4,
+                    const int32_t* d_prev_token,
+                    int32_t* d_out_token) {
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
@@ -545,7 +551,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         IMP_LOG_ERROR("mtp_draft_step: main embedding or lm_head not on GPU");
         return false;
     }
-    if (prev_token_id < 0 || prev_token_id >= vocab_size) {
+    if (d_prev_token == nullptr && (prev_token_id < 0 || prev_token_id >= vocab_size)) {
         IMP_LOG_ERROR("mtp_draft_step: token_id %d out of range [0,%d)",
                       prev_token_id, vocab_size);
         return false;
@@ -557,7 +563,14 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     // raw FP16 produces garbage — every "embedding" decoded to the same
     // bit pattern, locking MTP predictions to a single token regardless
     // of input. imp::embedding_lookup handles the qtype dispatch.
-    {
+    if (d_prev_token != nullptr) {
+        // Device-chain input: the previous step's argmax already lives on
+        // device — no upload, no scratch.
+        int64_t out_shape[2] = {1, hidden_dim};
+        Tensor  out_view(ws.d_fc_in, QType::F16, 2, out_shape, /*on_device=*/true);
+        imp::embedding_lookup(main_tok_emb, d_prev_token, /*n_tokens=*/1, out_view,
+                              main_tok_emb.qtype, stream);
+    } else {
         // Upload prev_token_id to a tiny device buffer so embedding_lookup
         // can dispatch with the correct signature. (The graph-friendly
         // _from_device overload also exists if needed.)
@@ -992,7 +1005,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 
     // Feed-only step (prefill / verify catch-up): the KV append above is the
     // whole point — skip the lm_head GEMV, argmax and stream sync.
-    if (out_token_id == nullptr)
+    if (out_token_id == nullptr && d_out_token == nullptr)
         return true;
 
     // Step 7: logits = lm_head @ h_final. When an NVFP4 decode-cache view of
@@ -1010,6 +1023,19 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         Tensor h_final_view(ws.d_h_final, QType::F16, 2, h_final_shape, true);
         Tensor logits_view (ws.d_logits,  QType::F16, 2, logits_shape,  true);
         imp::gemm(h_final_view, main_lm_head, logits_view, 1.0f, 0.0f, stream);
+    }
+
+    // Step 8 (device chain): argmax straight into the caller's device slot —
+    // no D2H, no sync; the caller drains the chain in one copy at the end.
+    if (d_out_token != nullptr) {
+        if (nvfp4_lm) {
+            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
+        } else {
+            mtp_argmax_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const __half*>(ws.d_logits), vocab_size, d_out_token);
+        }
+        return true;
     }
 
     // Step 8: argmax (or top-W) → device int → D2H.
@@ -1037,10 +1063,16 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         return true;
     }
 
-    int* d_idx = nullptr;
-    if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
-        IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
-        return false;
+    // Host path: persistent argmax scratch (ws.d_argmax) — a per-draft
+    // cudaMallocAsync/cudaFreeAsync pair costs host time on the chain.
+    int* d_idx = ws.d_argmax;
+    bool owned_idx = false;
+    if (d_idx == nullptr) {
+        if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
+            IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
+            return false;
+        }
+        owned_idx = true;
     }
     if (nvfp4_lm) {
         mtp_argmax_kernel<<<1, 256, 0, stream>>>(
@@ -1051,10 +1083,10 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     }
     if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-        cudaFreeAsync(d_idx, stream);
+        if (owned_idx) cudaFreeAsync(d_idx, stream);
         return false;
     }
-    cudaFreeAsync(d_idx, stream);
+    if (owned_idx) cudaFreeAsync(d_idx, stream);
     cudaStreamSynchronize(stream);
     return true;
 }

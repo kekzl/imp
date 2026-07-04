@@ -198,7 +198,9 @@ public:
     // should not invoke directly until Phase 4 wires this into the decode loop.
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id,
-                       int* out_topk_ids = nullptr, int top_w = 0);
+                       int* out_topk_ids = nullptr, int top_w = 0,
+                       const int32_t* d_prev_token = nullptr,
+                       int32_t* d_out_token = nullptr);
 
     // Feed one prefill chunk's (token, hidden) pairs into the MTP-side KV
     // cache so the head enters decode with the same context as the main

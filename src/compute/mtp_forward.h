@@ -34,6 +34,10 @@ struct NvFP4QuantResult;
 // measurement, Stage 0). The draft argmax is top-0.
 constexpr int kMtpMaxTopW = 8;
 
+// Max device-side chain length (capacity of MtpDraftWorkspace::d_chain_tokens).
+// Longer speculative.mtp_k values fall back to the host chain loop.
+constexpr int kMtpMaxChainK = 16;
+
 // Workspace tensors needed for one draft step. Caller pre-allocates these so
 // the draft step is graph-safe (no cudaMalloc inside captured graph).
 struct MtpDraftWorkspace {
@@ -55,6 +59,13 @@ struct MtpDraftWorkspace {
     void* d_logits_f32 = nullptr;
     // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe).
     int*  d_topk = nullptr;
+    // [kMtpMaxChainK] int — device-side chain slots: step i's argmax lands in
+    // d_chain_tokens[i] and feeds step i+1's embedding lookup without a host
+    // round-trip; one D2H of the whole chain at the end.
+    int32_t* d_chain_tokens = nullptr;
+    // [1] int — persistent argmax scratch for the host-path draft step
+    // (replaces a per-draft cudaMallocAsync/cudaFreeAsync pair).
+    int*  d_argmax = nullptr;
 
     // ---- Phase 2.2 MoE scratch ----
     // [hidden_dim] FP16 — post_attention_layernorm(fc_out)
@@ -170,6 +181,14 @@ struct MtpDraftWorkspace {
 //                       weight — the dominant per-draft cost on large-vocab
 //                       models. Draft-only: verification stays lossless
 //                       regardless of the draft head's precision.
+//   - d_prev_token    : device-chain input — read the previous token id from
+//                       this device int instead of prev_token_id (which is
+//                       then ignored, pass -1). No H2D upload, no host
+//                       bounds check (validate the chain once after D2H).
+//   - d_out_token     : device-chain output — write the argmax to this device
+//                       int; NO D2H copy, NO stream sync (out_token_id and
+//                       the top-W path are ignored). The caller drains the
+//                       whole chain with a single D2H + sync.
 //
 // Returns false on any precondition violation (mtp not loaded, null buffers).
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
@@ -181,7 +200,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     int* out_token_id,
                     cudaStream_t stream,
                     int* out_topk_ids = nullptr, int top_w = 0,
-                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr);
+                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr,
+                    const int32_t* d_prev_token = nullptr,
+                    int32_t* d_out_token = nullptr);
 
 // Allocate the workspace from the VRAM allocator. Caller is responsible for
 // keeping ws alive (typically owned by the Engine for the lifetime of a session).
