@@ -27,12 +27,26 @@ namespace imp {
 //   mma.sync.kind::f8f6f4.m16n8k32   (legacy, 2× K-chunks per issue)
 // to
 //   mma.sync.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64  (half MMA count)
-// with uniform sfa=sfb=1.0 so output is bit-equivalent. head_dim must be a
-// multiple of 64 (legacy path requires only multiple of 32); unsupported
-// head_dim 96 falls through to the legacy path. Up to ~1.5-2× Phase 1
-// speedup measured on raw MMA (254 vs 102 TOPS).
+// with REAL per-16-element UE4M3 scales (per-(row, k_group) absmax) applied by
+// the hardware — finer quantization granularity than the legacy per-row path.
+// head_dim must be a multiple of 64 (legacy path requires only multiple of
+// 32); unsupported head_dim 96 falls through to the legacy path.
+//
+// #846 SageAttention3-recipe knobs (read from process_diag, blockscale only):
+//   mxfp4_ksmooth: K per-channel mean smoothing — a pre-pass computes the
+//     per-(batch, kv_head, channel) mean of K over seq_kv and the kernel
+//     subtracts it before quantization. The dropped Q·mean^T score term is
+//     constant per query row, so softmax is invariant. Auto-disabled when
+//     softcap > 0 (tanh breaks the shift invariance).
+//   mxfp4_pv_fp4: P·V in NVFP4 too — P quantized per-row two-level (rescaled
+//     to the full E4M3 scale range before 1x16 microscaling to prevent
+//     scale-factor collapse on the post-softmax long tail), V per-16-block
+//     along the KV dim, PV via the same block-scaled MMA.
+//
+// q_offset: global position of Q row 0 (chunked-prefill continuation) —
+// causal/sliding-window masks use q_offset + local row.
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                              bool use_blockscale = false);
+                              bool use_blockscale = false, int q_offset = 0);
 
 }  // namespace imp

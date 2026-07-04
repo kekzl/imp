@@ -197,6 +197,20 @@ struct RuntimeConfig {
         // Experimental quality probe. Env: IMP_FP8_QK_SCALED.
         bool fp8_qk_scaled = false;
         std::string mxfp4 = "auto";
+        // #846 NVFP4-attention spike (SageAttention3 recipe). All three only
+        // take effect when the MXFP4 FMHA serves prefill (mxfp4 = "always").
+        // mxfp4_blockscale: per-16-element UE4M3 block scales applied by the
+        //   mxf4nvf4.block_scale MMA (vs legacy per-row software scales).
+        // mxfp4_ksmooth: subtract the per-(batch,kv_head,channel) K mean before
+        //   quantization — the dropped Q·mean^T term is per-row-constant and
+        //   cancels under softmax. Auto-disabled when softcap > 0 (tanh breaks
+        //   the shift invariance). Requires mxfp4_blockscale.
+        // mxfp4_pv_fp4: P·V in NVFP4 too — P quantized per-row two-level
+        //   (rescaled to the full E4M3 scale range before 1x16 microscaling),
+        //   V per-16-block along KV. Requires mxfp4_blockscale.
+        bool mxfp4_blockscale = false;
+        bool mxfp4_ksmooth = false;
+        bool mxfp4_pv_fp4 = false;
         bool mxfp4_fp16_fallback = false;
         // MXFP4 → FP16 cache pruning policy. "legacy" (default) caches FP16
         // for every MXFP4 tensor. "pruned" skips MoE expert_*_packed and

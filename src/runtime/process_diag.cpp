@@ -34,6 +34,9 @@ struct ProcessDiag {
     bool attention_fp8_qk_scaled = false;
     bool force_splitk_fallback = false;  // test hook
     std::string attention_mxfp4_mode = "auto";
+    bool mxfp4_blockscale = false;
+    bool mxfp4_ksmooth = false;
+    bool mxfp4_pv_fp4 = false;
 
     // FFN
     bool ffn_sparsity_probe = false;
@@ -83,6 +86,9 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
+    d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
+    d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
+    d.mxfp4_pv_fp4 = cfg.attention.mxfp4_pv_fp4;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
@@ -121,6 +127,12 @@ void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
+bool process_diag_mxfp4_blockscale() { return slot().mxfp4_blockscale; }
+bool process_diag_mxfp4_ksmooth() { return slot().mxfp4_ksmooth; }
+bool process_diag_mxfp4_pv_fp4() { return slot().mxfp4_pv_fp4; }
+void process_diag_set_mxfp4_blockscale(bool v) { slot().mxfp4_blockscale = v; }
+void process_diag_set_mxfp4_ksmooth(bool v) { slot().mxfp4_ksmooth = v; }
+void process_diag_set_mxfp4_pv_fp4(bool v) { slot().mxfp4_pv_fp4 = v; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }

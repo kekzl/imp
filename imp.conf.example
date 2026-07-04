@@ -128,6 +128,18 @@ fa2_pv_f16acc        = true
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
 mxfp4                = "auto"
+# #846 NVFP4-attention spike (SageAttention3 recipe), all require
+# mxfp4 = "always" (+ fa2_fp16qk = "never" so the MXFP4 FMHA actually serves
+# hd=128 prefill). QUALITY-NEGATIVE on LLMs at real context lengths
+# (Qwen3-14B-NVFP4 teacher-forced NLL +10% at 9k tokens, full recipe) —
+# diagnostic/research knobs, keep off in production.
+# blockscale: per-16-element UE4M3 scales in the mxf4nvf4.block_scale MMA
+#   (vs legacy per-row software scales, which are catastrophically lossy).
+# ksmooth: subtract per-(batch,kv_head,channel) K mean before quantization.
+# pv_fp4: P·V in NVFP4 too (two-level P scaling).
+mxfp4_blockscale     = false
+mxfp4_ksmooth        = false
+mxfp4_pv_fp4         = false
 mxfp4_fp16_fallback  = false
 # MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
 # tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).

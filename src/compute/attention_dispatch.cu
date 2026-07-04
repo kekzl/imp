@@ -2,6 +2,7 @@
 #include "compute/attention_tc.h"
 #include "core/logging.h"
 #include "runtime/config.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -39,9 +40,12 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
                                 const RuntimeConfig& rcfg, int q_offset) {
     // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
-    // Enabled with IMP_MXFP4_ATTENTION=1.
+    // Enabled with [attention] mxfp4 = "always". Blockscale/ksmooth/pv_fp4
+    // (#846 SageAttention3-recipe spike) are read from process_diag inside
+    // the launcher.
     if (attention_mxfp4_available()) {
-        if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+        if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                     process_diag_mxfp4_blockscale(), q_offset)) {
             return;
         }
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path

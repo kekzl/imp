@@ -73,6 +73,13 @@ void process_diag_set_force_splitk_fallback(bool v);
 // "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
 // only enables MXFP4 attention when mode == "always".
 const std::string& process_diag_attention_mxfp4_mode();
+// #846 NVFP4-attention spike knobs (only meaningful when mxfp4 == "always").
+bool process_diag_mxfp4_blockscale();
+bool process_diag_mxfp4_ksmooth();
+bool process_diag_mxfp4_pv_fp4();
+void process_diag_set_mxfp4_blockscale(bool v);
+void process_diag_set_mxfp4_ksmooth(bool v);
+void process_diag_set_mxfp4_pv_fp4(bool v);
 
 // FFN
 bool process_diag_ffn_sparsity_probe();
