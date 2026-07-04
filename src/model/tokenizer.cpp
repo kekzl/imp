@@ -2478,7 +2478,12 @@ std::vector<int32_t> Tokenizer::encode_wordpiece(const std::string& text) const 
             size_t end = w.size();
             int32_t id = -1;
             while (end > start) {
-                std::string sub = (start > 0 ? "##" : "") + w.substr(start, end - start);
+                // llama.cpp's BERT-GGUF vocab stores WordPiece in SPM
+                // convention: word-initial pieces carry "▁", continuations
+                // are bare (HF "##xyz" -> "xyz", "xyz" -> "▁xyz").
+                std::string sub =
+                    (start == 0 ? std::string("\xE2\x96\x81") : std::string()) +
+                    w.substr(start, end - start);
                 auto it = token_to_id_.find(sub);
                 if (it != token_to_id_.end()) {
                     id = it->second;

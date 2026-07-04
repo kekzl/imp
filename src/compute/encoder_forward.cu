@@ -197,7 +197,9 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, const int32_t* toke
         gemm(h, fp16_view(E.wq, d, d), q, 1.0f, 0.0f, stream);
         gemm(h, fp16_view(E.wk, d, d), k, 1.0f, 0.0f, stream);
         gemm(h, fp16_view(E.wv, d, d), v, 1.0f, 0.0f, stream);
-        rope_forward(q, k, ws.d_positions, ws.head_dim, ws.rope_theta, 1.0f, /*rope_dim=*/0,
+        int64_t r4[4] = {1, n, ws.n_heads, ws.head_dim};
+        Tensor q4 = q.reshape(4, r4), k4 = k.reshape(4, r4);
+        rope_forward(q4, k4, ws.d_positions, ws.head_dim, ws.rope_theta, 1.0f, /*rope_dim=*/0,
                      /*neox=*/true, 0.0f, 1.0f, nullptr, stream);
 
         Tensor attn = fp16_view(ws.d_attn, n, d);
