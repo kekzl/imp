@@ -232,12 +232,20 @@ Server-only flags (not on `imp-cli`):
 
 | Flag | Effect |
 |---|---|
+| `--host <addr>` | Listen address (default `127.0.0.1`) |
+| `--port <n>` | Listen port (default `8080`) |
+| `--max-batch <n>` | Decode batch / KV+workspace sizing (default 0 = auto) |
+| `--models-dir <path>` | Directory to scan for `.gguf` models (auto-load on select) |
+| `--lora NAME=PATH` | Load a PEFT LoRA adapter (repeatable) — see the LoRA section below |
 | `--api-key <key>` | Require `Authorization: Bearer <key>` on requests |
 | `--max-concurrent <n>` | Max simultaneous requests (default 64, 0 = unlimited) |
 | `--rate-limit <n>` | Max requests/min per IP (default 0 = unlimited) |
 | `--log-requests <path>` | Append per-request JSONL with prompt + response content + timing to `<path>` (opt-in; off by default) |
 | `--reasoning-format <f>` | `deepseek` (default) or `none` — controls `<think>` channel handling |
 | `--think-budget <f>` | Fraction of `max_tokens` reserved for reasoning (default 0.5, 0 = disabled) |
+| `--request-timeout <s>` | Per-request timeout in seconds (default 300, 0 = unlimited) |
+| `--max-input-tokens <n>` | Reject prompts longer than n tokens with HTTP 400 (default 0 = unlimited) |
+| `--prefix-cache <path>` | Persist the prefix cache to `<path>` across restarts |
 
 ```bash
 # The model id is the served model's name (= /v1/models data[0].id)
