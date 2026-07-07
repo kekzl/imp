@@ -4,6 +4,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **MLA (DeepSeek-V2/V3) YaRN rope-mscale**: the RoPE cos/sin were scaled by
+  `yarn_get_mscale(factor, mscale_all_dim)` (=1.261 for V2-Lite) instead of the
+  HF ratio `yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)`
+  (=1.0 when the two coincide, as in V2-Lite). imp was inflating the rotary
+  embedding by 1.261×; the error compounds with position, so teacher-forced PPL
+  degraded with sequence length. `mscale` and `mscale_all_dim` are now loaded
+  separately: the softmax attention scale keeps `mscale_all_dim²` (unchanged),
+  the rope factor uses the ratio. Same-corpus PPL vs HF bf16 on DeepSeek-V2-Lite:
+  534-tok **+24.4% → +2.75%** (imp 7.78→6.43, HF 6.25); 196-tok +5.0% → +0.8%.
+  The residual ~1-3% is F16-vs-bf16 compute precision. Applies to both
+  DeepSeek-V2-Lite and DeepSeek-Coder-V2-Lite (same config); generalizes
+  correctly to V3 (where the two mscales differ).
+
 ## [0.16.2] - 2026-07-04
 
 FP4-attention research batch: the #846 program (SageAttention3 → ThriftAttention →

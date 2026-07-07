@@ -22,7 +22,7 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | Q6_K | 19 GB | — | GGUF |
 | [DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF) | Q8_0 | 7.6 GB | — | GGUF |
 | [DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF) | Q6_K | 12 GB | — | GGUF |
-| [DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) | bf16 | 28 GB | ~30 (eager) | SafeTensors — **MLA** (first Multi-head Latent Attention arch); experts host-offloaded on 32 GB → graphs disabled. PPL 6.06 vs HF 5.07 (+19.6%). |
+| [DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) | bf16 | 28 GB | ~30 (eager) | SafeTensors — **MLA** (first Multi-head Latent Attention arch); experts host-offloaded on 32 GB → graphs disabled. Same-corpus teacher-forced PPL within ~3% of HF bf16 (imp 6.43 vs HF 6.25 on a 534-tok corpus). The earlier "+19.6%" figure was a cross-corpus artifact compounded by a YaRN rope-mscale bug (imp inflated the RoPE cos/sin by 1.261× where HF applies 1.0; fixed 2026-07-07). |
 | [DeepSeek-Coder-V2-Lite-Instruct](https://huggingface.co/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct) | bf16 | 30 GB | — (eager) | SafeTensors — **MLA** (same `deepseek_v2` arch as V2-Lite: kv_lora_rank=512, q_lora_rank=0); experts host-offloaded on 32 GB → graphs disabled. Second MLA checkpoint, code-specialized — coherent codegen verified. |
 
 ## Hybrid (Gated DeltaNet + attention)
