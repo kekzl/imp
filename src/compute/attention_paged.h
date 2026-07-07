@@ -35,6 +35,17 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
 // Pass nullptr to disable split-K.
 void paged_attention_set_splitk_scratch(void* ptr, size_t size);
 
+// Token-tiled FP8 split-K kernel (attention_paged_fp8_tile.cu). Dispatched from
+// paged_attention_decode_fp8 for head_dim=128 / block_size % 16 == 0; writes the same
+// partial_out layout as the pipeline kernel (reduce kernel shared).
+bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size);
+void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+                                            float* partial_out, const int* block_tables,
+                                            const int* context_lens, int batch_size, int n_heads,
+                                            int n_kv_heads, int block_size, float scale, float kv_scale,
+                                            int max_num_blocks, int num_splits, int sliding_window,
+                                            float softcap, cudaStream_t stream);
+
 // FP8 E4M3 Paged attention for decode: KV cache stored in FP8 with on-the-fly dequant.
 // Q: [batch, 1, n_heads, head_dim] FP16
 // K_cache/V_cache: [num_blocks, n_kv_heads, block_size, head_dim] FP8_E4M3

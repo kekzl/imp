@@ -169,6 +169,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/kv_gather.cu
     src/compute/attention_paged.cu
     src/compute/attention_paged_fp8.cu
+    src/compute/attention_paged_fp8_tile.cu
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu

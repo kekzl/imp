@@ -252,6 +252,9 @@ struct RuntimeConfig {
         bool mla_absorb = false;
         bool no_qknorm_fused = false;
         bool splitk_pipe = true;
+        // Token-tiled FP8 split-K decode attention (hd=128/bs=16 only). Off =
+        // per-token pipeline kernel; A/B + rollback knob.
+        bool fp8_tile = true;
         bool gate_concat = false;
         // Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix. Caps the
         // prefill context length that uses the fast cuBLAS attention path before

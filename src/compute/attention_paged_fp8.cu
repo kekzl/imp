@@ -2,6 +2,7 @@
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -584,7 +585,37 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
 
         // Use pipelined cp.async kernel on sm_90+
         static int sm_ver_fp8 = get_device_sm_version();
-        if (sm_ver_fp8 >= 90) {
+        if (sm_ver_fp8 >= 90 && paged_attention_splitk_fp8_tile_supported(head_dim, block_size) &&
+            process_diag_attention_fp8_tile()) {
+            // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV
+            // pages instead of the per-token latency chain. hd=128, bs multiple of 16.
+            //
+            // Wave-aware split count: the tile kernel is smem-capped at 1
+            // block/SM, so wall time quantizes to ceil(batch*heads*splits/SMs)
+            // waves. The shared heuristic (targets 2*SMs blocks for multi-
+            // block/SM kernels) lands mid-wave here — e.g. 32 heads * 11
+            // splits = 2.07 waves, a nearly idle third wave. Pick the split
+            // count <= the heuristic's (scratch is sized for that) minimizing
+            // waves per unit of split work; ties -> fewer splits (fewer
+            // per-warp pipeline prologues + smaller reduce).
+            {
+                const int sms = kpar_n_sms();
+                const int bh = batch_size * n_heads;
+                int best_s = 1;
+                for (int s = 1; s <= num_splits; s++) {
+                    const int waves_s = (bh * s + sms - 1) / sms;
+                    const int waves_b = (bh * best_s + sms - 1) / sms;
+                    if ((int64_t)waves_s * best_s < (int64_t)waves_b * s)
+                        best_s = s;
+                }
+                num_splits = best_s;
+            }
+            paged_attention_splitk_fp8_tile_launch(
+                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
+                reinterpret_cast<const uint8_t*>(V_cache.data), partial, block_tables, context_lens,
+                batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
+                sliding_window, softcap, stream);
+        } else if (sm_ver_fp8 >= 90) {
             size_t pipe_smem = NUM_WARPS * 3 * head_dim;
             size_t launch_smem = (pipe_smem > smem_bytes) ? pipe_smem : smem_bytes;
 

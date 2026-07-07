@@ -4,6 +4,41 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-07 · Token-tiled FP8 split-K decode attention (hd=128) — long-ctx decode +51%
+
+`paged_attention_splitk_fp8_pipeline_kernel` was the top GPU-time consumer at
+long ctx (70% of decode wall @16k, PERF_LOG 06-18) and latency-bound at ~10%
+DRAM: the inner loop commits V[t]+K[t+1] in one cp.async group, so every token
+serially waits a global->smem round trip. Replaced (hd=128, block_size % 16 == 0,
+knob `attention.fp8_tile`) by a token-tiled kernel: bulk cp.async of whole
+16-token KV chunks (double-buffered per warp), 16 parallel QK dots, one
+tile-wise online-softmax step, plus a wave-quantization-aware split count (the
+tile kernel is smem-capped at 1 block/SM; the shared heuristic left a ~2.07-wave
+grid with a near-idle third wave).
+
+ncu @16k, Qwen3-Coder-30B-A3B-FP4 (FP8 KV), deterministic kernel time x30:
+99.98 us -> 69.3 us (tiling) -> **51.5 us (-48.5%)** with wave-aware splits;
+DRAM 9.6 -> 18.9%, long-scoreboard stall 4.7 -> 1.9.
+
+e2e decode (graphs ON, 3 trials x 3 reps, clocks healthy 2932/13801):
+
+| ctx | pipeline | tile | delta |
+|---|---|---|---|
+| 512 | 342.2 | 395.3 | +15.5% |
+| 4096 | 267.2 | 339.6 | +27.1% |
+| 16384 | 157.1 | 237.4 | **+51.1%** |
+
+(The 06-18 "split-K knob = 0.00 e2e" refutation measured split-count changes on
+the old latency-bound kernel; the kernel itself was on the critical path after
+all — halving its time moves short-ctx decode too.)
+
+Verified: test-attention + test-kv green (SplitKConsistency covers the new
+kernel), degen_suite 22/0 vs the live server, needle recall @14.3k tokens PASS,
+stderr clean. Remaining headroom: kernel is L2-bound at ~19% DRAM; GQA batching
+(one block computes all 8 q-heads per kv-head, /8 L2 traffic) is the next lever.
+
+---
+
 ## 2026-06-24 · CORRECTION — the "concurrency cliff" was a harness artifact
 
 The Phase-7 baseline below (c=16 TTFT 1443 ms, c=64 17376 ms) and the
