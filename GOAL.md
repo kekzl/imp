@@ -72,7 +72,7 @@ benchmark numbers):
 | Model | State (2026-06-06) |
 |---|---|
 | DeepSeek-R1-Distill-7B/14B | Never benched locally. Arch is Qwen2/Llama (covered). |
-| DeepSeek-V2-Lite (MLA) | **Supported** — first Multi-head Latent Attention arch (#802 materialized Stage A, #803 absorbed latent-KV decode, opt-in). Validated locally at bf16 (28 GB, experts host-offloaded → graphs disabled); PPL 6.06 vs HF 5.07. Real V2/V3/R1 MLA checkpoints now load via this path. |
+| DeepSeek-V2-Lite (MLA) | **Supported** — first Multi-head Latent Attention arch (#802 materialized Stage A, #803 absorbed latent-KV decode, opt-in). Validated locally at bf16 (28 GB, experts host-offloaded → graphs disabled); same-corpus PPL within ~3% of HF bf16 (imp 6.43 vs HF 6.25, 534-tok) after the 2026-07-07 YaRN rope-mscale fix. Real V2/V3/R1 MLA checkpoints now load via this path. |
 | Gemma-3 27B | 12B Q4_K_M + 4B-VL validated locally; 27B never staged. |
 | Phi-4 14B | NVFP4 (reasoning-plus) validated locally; GGUF Q6_K never staged. |
 | Mixtral 8x7B | Arch in the enum, chat-template test only; never staged. |

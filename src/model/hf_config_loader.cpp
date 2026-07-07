@@ -652,14 +652,24 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             // non-RoPE dims plus qk_rope_head_dim RoPE dims.
             cfg.head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim;
             cfg.rope_dim = cfg.qk_rope_head_dim;
-            // YaRN mscale from rope_scaling. Use mscale_all_dim (the value
-            // that HF applies to the softmax scale) with a fallback to mscale.
-            // In DeepSeek-V2-Lite both are 0.707; V3 may differ.
+            // YaRN mscale from rope_scaling. HF DeepSeek-V2 uses the two mscale
+            // fields DIFFERENTLY and they must NOT be conflated:
+            //   - the softmax attention scale gets yarn_get_mscale(factor, mscale_all_dim)^2
+            //   - the RoPE cos/sin get the RATIO
+            //       yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)
+            // For DeepSeek-V2-Lite both are 0.707, so the rope ratio is exactly
+            // 1.0 (no cos/sin scaling); V3 may differ. Load both separately.
             const JValue* rs = jobj_find(eff, "rope_scaling");
             if (rs && rs->type == JType::OBJECT) {
-                jobj_get_float(*rs, "mscale", cfg.mla_mscale);
-                // Override with mscale_all_dim if present (preferred for softmax scale).
-                jobj_get_float(*rs, "mscale_all_dim", cfg.mla_mscale);
+                float mscale = 1.0f, mscale_all_dim = 1.0f;
+                bool has_mscale = jobj_get_float(*rs, "mscale", mscale);
+                bool has_all_dim = jobj_get_float(*rs, "mscale_all_dim", mscale_all_dim);
+                // Softmax scale prefers mscale_all_dim, falls back to mscale.
+                cfg.mla_mscale = has_all_dim ? mscale_all_dim : (has_mscale ? mscale : 1.0f);
+                // RoPE ratio numerator is the raw mscale (fallback: mscale_all_dim
+                // → ratio 1.0, i.e. no rope scaling, which is HF's default when
+                // the two coincide).
+                cfg.mla_mscale_num = has_mscale ? mscale : cfg.mla_mscale;
             }
             IMP_LOG_INFO("  MLA: kv_lora_rank=%d q_lora_rank=%d "
                          "qk_rope=%d qk_nope=%d v_head=%d head_dim=%d mla_mscale=%.4f",
@@ -668,31 +678,35 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                          cfg.head_dim, cfg.mla_mscale);
             // MLA + YaRN rope mscale correction.
             //
-            // The rope_yarn kernel computes:
+            // imp's rope_yarn kernel scales cos/sin by:
             //   mscale_final = yarn_attn_factor * (1 + 0.1 * log(rope_freq_scale))
             //
-            // HF DeepSeek-V2 applies to cos/sin:
-            //   mscale = yarn_get_mscale(factor, config.rope_scaling.mscale)
-            //           = 0.1 * mscale * log(factor) + 1
+            // HF DeepseekV2YarnRotaryEmbedding scales cos/sin by the RATIO of the
+            // two configured mscales (modeling_deepseek.py):
+            //   _mscale = yarn_get_mscale(factor, mscale)
+            //             / yarn_get_mscale(factor, mscale_all_dim)
+            // where yarn_get_mscale(f, m) = 0.1*m*ln(f) + 1.
             //
-            // With the default yarn_attn_factor=1.0, imp gives 1 + 0.1*log(factor)
-            // which ignores the config's mscale field.  Correct it by adjusting
-            // yarn_attn_factor so mscale_final matches HF.  mla_mscale is loaded
-            // from mscale_all_dim (preferred) or mscale; for V2-Lite both are 0.707.
+            // For V2-Lite (factor=40, mscale == mscale_all_dim == 0.707) this
+            // ratio is EXACTLY 1.0 — HF does not scale the rotary at all. The
+            // earlier code used yarn_get_mscale(factor, mscale_all_dim)=1.261 as
+            // the target, inflating the rope cos/sin by 1.261x; the error
+            // compounds with position and cost ~+24% PPL at 512 tokens. Set
+            // yarn_attn_factor so mscale_final == the HF ratio.
             //
-            // For V2-Lite (factor=40, mscale=0.707):
-            //   HF rope mscale = 0.1*0.707*ln(40)+1 = 1.261
-            //   imp default     = 0.1*1.0 *ln(40)+1 = 1.369
-            //   yarn_attn_factor = 1.261 / 1.369 = 0.9208
+            // (The softmax attention scale separately receives
+            // yarn_get_mscale(factor, mscale_all_dim)^2 via
+            // mla_attention_scale_multiplier — that is unchanged.)
             if (cfg.yarn_ext_factor > 0.0f && cfg.rope_freq_scale > 1.0f) {
                 const float log_scale = std::log(cfg.rope_freq_scale);
-                const float hf_mscale = 0.1f * cfg.mla_mscale * log_scale + 1.0f;
+                const float ms_num = 0.1f * cfg.mla_mscale_num * log_scale + 1.0f;
+                const float ms_den = 0.1f * cfg.mla_mscale     * log_scale + 1.0f;
+                const float hf_rope_mscale = ms_num / ms_den;
                 const float imp_mscale = 0.1f * log_scale + 1.0f;
-                cfg.yarn_attn_factor = hf_mscale / imp_mscale;
+                cfg.yarn_attn_factor = hf_rope_mscale / imp_mscale;
                 IMP_LOG_INFO("  MLA YaRN rope-mscale adjust: yarn_attn_factor=%.4f "
-                             "(hf_mscale=%.4f, attn_scale_multiplier=%.4f)",
-                             cfg.yarn_attn_factor, hf_mscale,
-                             hf_mscale * hf_mscale);
+                             "(hf_rope_mscale=%.4f, softmax_scale_mult=%.4f)",
+                             cfg.yarn_attn_factor, hf_rope_mscale, ms_den * ms_den);
             }
         }
     }

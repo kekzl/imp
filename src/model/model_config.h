@@ -60,6 +60,14 @@ struct ModelConfig {
     // Stores rope_scaling.mscale_all_dim if present, else rope_scaling.mscale.
     // For DeepSeek-V2-Lite both are 0.707; the distinction matters for V3.
     float mla_mscale        = 1.0f;
+    // Raw rope_scaling.mscale (the numerator of the RoPE cos/sin scale).
+    // HF DeepseekV2YarnRotaryEmbedding scales cos/sin by the RATIO
+    //   yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim),
+    // which for V2-Lite (mscale == mscale_all_dim == 0.707) is exactly 1.0 —
+    // NOT yarn_get_mscale(factor, mscale_all_dim). Kept separate from
+    // mla_mscale (= mscale_all_dim, used by the softmax scale) so the rope
+    // factor below can form the ratio instead of double-applying the mscale.
+    float mla_mscale_num    = 1.0f;
     bool  is_mla() const { return kv_lora_rank > 0; }
     int   first_k_dense_replace = 0; // layers [0, k) use dense FFN even in a MoE model
     // NoPE attention (Nemotron-H family): attention layers use NO rotary

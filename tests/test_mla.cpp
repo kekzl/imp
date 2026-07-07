@@ -13,6 +13,8 @@
 // Set IMP_TEST_MODEL_DEEPSEEK to the directory path, or place the model at
 // /models/DeepSeek-V2-Lite (Docker bind-mount fallback). Skipped if absent.
 
+#include <cmath>
+
 #include "model/hf_config_loader.h"
 #include "model/model.h"
 #include "model/model_config.h"
@@ -91,15 +93,48 @@ TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
     // head_dim overridden to nope+rope = 128+64 = 192 for MLA models
     EXPECT_EQ(cfg.head_dim, 192);
 
-    // mla_mscale: raw 0.707 from rope_scaling.mscale
-    // (yarn-adjusted attention scale formula is Task 2.5)
+    // mla_mscale: mscale_all_dim (0.707), used by the softmax attention scale.
     EXPECT_NEAR(cfg.mla_mscale, 0.707f, 1e-3f);
+    // mla_mscale_num: raw rope_scaling.mscale (0.707), the ratio numerator.
+    EXPECT_NEAR(cfg.mla_mscale_num, 0.707f, 1e-3f);
 
     // MoE shared experts
     EXPECT_EQ(cfg.n_experts_shared, 2);
 
     // First k dense layers (hybrid MoE)
     EXPECT_EQ(cfg.first_k_dense_replace, 1);
+}
+
+// Regression: the RoPE cos/sin mscale for DeepSeek-V2-Lite must be 1.0, NOT
+// yarn_get_mscale(factor, mscale_all_dim)=1.261. HF scales cos/sin by the ratio
+// yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim),
+// which is exactly 1.0 when the two mscales coincide (as in V2-Lite). imp's
+// rope_yarn applies mscale_final = yarn_attn_factor * (1 + 0.1*ln(freq_scale));
+// this must equal the HF ratio. The pre-fix code inflated it to 1.261, which
+// compounded with position and cost ~+24% PPL at 512 tokens.
+TEST(MLAConfig, YarnRopeMscaleIsUnityForV2Lite) {
+    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
+                                            "/models/DeepSeek-V2-Lite");
+    if (!std::filesystem::exists(dir)) {
+        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
+                     << dir << " to run MLA rope-mscale tests";
+    }
+
+    ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(dir, cfg));
+    ASSERT_TRUE(cfg.is_mla());
+    ASSERT_GT(cfg.rope_freq_scale, 1.0f);
+    ASSERT_GT(cfg.yarn_ext_factor, 0.0f);
+
+    // Effective rope cos/sin scale imp's rope_yarn kernel will apply.
+    const float imp_builtin = 1.0f + 0.1f * std::log(cfg.rope_freq_scale);
+    const float rope_mscale = cfg.yarn_attn_factor * imp_builtin;
+    EXPECT_NEAR(rope_mscale, 1.0f, 1e-3f)
+        << "MLA rope cos/sin mscale must be the HF ratio (1.0 for V2-Lite), "
+           "not yarn_get_mscale(factor, mscale_all_dim)";
+
+    // The softmax attention scale is unaffected (still mscale_all_dim^2 ≈ 1.59).
+    EXPECT_NEAR(imp::mla_attention_scale_multiplier(cfg), 1.261f * 1.261f, 1e-2f);
 }
 
 TEST(MLAConfig, IsMlaReturnsFalseForNonMLA) {
