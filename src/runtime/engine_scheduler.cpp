@@ -813,8 +813,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // workspace, which is illegal under capture (cublasLt status 14 →
         // cascading capture failure, observed on GGUF mxfp4 GDN). Run eager.
         const bool ends_at_snapshot = (snap_end > 0 && offset + chunk_len == snap_end);
+        // moe_prefill_uncapturable: legacy host-args MoE prefill (GGUF Q*_K
+        // MoE) reads routing on the host — its capture guard throws and the
+        // aborted capture costs a wasted forward per chunk. Run eager (#874).
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
-                                 !ends_at_snapshot && !executor_->nvfp4_dequant_uncapturable();
+                                 !ends_at_snapshot && !executor_->nvfp4_dequant_uncapturable() &&
+                                 !executor_->moe_prefill_uncapturable();
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());
             if (chunk_len != last_prefill_chunk_len_ || block_count != last_prefill_block_count_) {

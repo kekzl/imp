@@ -334,6 +334,34 @@ bool CudaGraphCapture::end_capture_and_update() {
     return true;
 }
 
+void CudaGraphCapture::abort_capture() {
+    if (!capture_stream_)
+        return;
+    cudaGraph_t g = nullptr;
+    // EndCapture on an invalidated capture returns an error and g stays null —
+    // either way the stream leaves capture state, which is the point here.
+    (void)cudaStreamEndCapture(capture_stream_, &g);
+    graph_diag::g_phase = graph_diag::Phase::NORMAL;
+    if (g)
+        cudaGraphDestroy(g);
+    (void)cudaGetLastError();  // clear the sticky capture-invalidated error
+    capture_stream_ = nullptr;
+}
+
+void abort_stream_capture(cudaStream_t stream) {
+    if (!stream)
+        return;
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &st) != cudaSuccess || st == cudaStreamCaptureStatusNone)
+        return;
+    cudaGraph_t g = nullptr;
+    (void)cudaStreamEndCapture(stream, &g);
+    if (g)
+        cudaGraphDestroy(g);
+    (void)cudaGetLastError();
+    IMP_LOG_WARN("abort_stream_capture: closed a stray open capture (stream %p)", (void*)stream);
+}
+
 void CudaGraphCapture::reset() {
     bool had_exec = (graph_exec_ != nullptr);
     if (graph_exec_) {
@@ -397,7 +425,25 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
             return true;
         }
 
-        decode_fn_(stream);
+        try {
+            decode_fn_(stream);
+        } catch (const std::exception& e) {
+            // #874: the forward threw while the stream was capturing (e.g. the
+            // MoE host-args guard, or cuBLAS failing under capture). The
+            // capture MUST be closed here — unwinding past it leaves the
+            // stream capturing forever and every later op on it fails with
+            // "operation failed due to a previous error during capture".
+            IMP_LOG_ERROR(
+                "CudaGraphRunner: forward threw during capture (%s) — aborting "
+                "capture and falling back to per-step decode.",
+                e.what());
+            graph_.abort_capture();
+            capture_failed_ = true;
+            // Nothing executed during the aborted capture; run for real now.
+            decode_fn_(stream);
+            step_count_++;
+            return true;
+        }
 
         // Prefer the update path so re-captures (after invalidate_for_update)
         // reuse the existing exec via cudaGraphExecUpdate. On first capture

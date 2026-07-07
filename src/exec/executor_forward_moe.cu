@@ -349,6 +349,22 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 // The path-selection ORDER + arch/config gates are mirrored as a pure function
 // `select_moe_prefill_path` in moe_prefill_decision.h, pinned by
 // test_routing_decision.cpp (R2 / P1.4).
+bool GraphExecutor::moe_prefill_uncapturable() const {
+    if (!has_moe_)
+        return false;
+    // Mirrors the function-entry gate of try_run_moe_cutlass3x_nvfp4_prefill_:
+    // without the CUTLASS 3.x grouped path + packed/scale workspace, every
+    // MoE prefill lands in run_moe_legacy_fallback_, whose host-args guard
+    // throws under capture (moe_host_args_capture_guard).
+    if (runtime_config().moe.no_cutlass3x)
+        return true;
+    if (!cutlass_grouped_3x_nvfp4_available())
+        return true;
+    if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
+        return true;
+    return false;
+}
+
 bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
     if (runtime_config().moe.no_cutlass3x)

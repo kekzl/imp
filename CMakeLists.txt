@@ -628,6 +628,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_green_ctx.cu
+        tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
@@ -653,6 +654,7 @@ if(IMP_BUILD_TESTS)
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
         tests/test_weight_registry_preservation.cpp
+        tests/test_vram_budget_reserve.cpp
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
         tests/test_mtp_forward.cpp
