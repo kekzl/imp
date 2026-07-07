@@ -44,13 +44,20 @@ int64_t unix_timestamp() {
 void handle_health(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     bool loaded;
     int queue = 0;
+    bool faulted = false;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         loaded = state.model_loaded();
-        if (state.batching)
+        if (state.batching) {
             queue = state.batching->queue_depth();
+            faulted = state.batching->faulted();
+        }
     }
-    json body = {{"status", "ok"}, {"model_loaded", loaded}, {"queue_depth", queue}};
+    json body = {{"status", faulted ? "unhealthy" : "ok"},
+                 {"model_loaded", loaded},
+                 {"queue_depth", queue}};
+    if (faulted)
+        res.status = 503;  // let orchestrators restart a wedged server (#874)
     res.set_content(dump_safe(body), "application/json");
 }
 

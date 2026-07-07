@@ -506,6 +506,12 @@ private:
 public:
     bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
 
+    // True when MoE prefill will run the legacy host-args fallback (no CUTLASS
+    // NVFP4 grouped workspace — e.g. any GGUF Q*_K MoE model). That path reads
+    // routing on the host (D2H + sync) and throws under an active capture, so
+    // the scheduler must not attempt prefill-graph capture at all (#874).
+    bool moe_prefill_uncapturable() const;
+
 private:
     // Init-time weight-quantization pipeline (D2 extraction). Owns the build-only
     // StoragePlan; fills the long-lived caches below by reference in build().

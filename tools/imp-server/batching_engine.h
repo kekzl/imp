@@ -109,6 +109,12 @@ public:
 
     bool is_running() const { return running_.load(std::memory_order_relaxed); }
 
+    // True after the worker declared the CUDA context poisoned and stopped
+    // (#874). /health reports unhealthy so an orchestrator can restart the
+    // process — before this the server answered "ok" while every request
+    // failed with internal_error.
+    bool faulted() const { return faulted_.load(std::memory_order_relaxed); }
+
 private:
     void worker_loop();
 
@@ -117,6 +123,7 @@ private:
     std::thread worker_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> faulted_{false};
 
     // Graceful pause handshake (see pause()/resume()). pause_requested_ tells
     // the worker to drain in-flight work and park; paused_ reports that it has.

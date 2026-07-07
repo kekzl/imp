@@ -11,6 +11,10 @@ class GraphExecutor;
 struct InferenceState;
 
 // Low-level CUDA graph capture/replay wrapper.
+// Close a stray open capture on `stream`, if any (no-op otherwise). Safety
+// net for exception paths that unwound past an active capture (#874).
+void abort_stream_capture(cudaStream_t stream);
+
 class CudaGraphCapture {
 public:
     CudaGraphCapture() = default;
@@ -40,6 +44,12 @@ public:
     // Used by CudaGraphRunner to force a re-capture pass while still
     // enabling cudaGraphExecUpdate against the retained exec.
     void mark_needs_recapture() { captured_ = false; }
+
+    // Close an in-flight capture without keeping its graph (#874). Called
+    // when the captured fn throws mid-capture: the stream must be taken out
+    // of capture state or every later async op on it fails with
+    // cudaErrorStreamCaptureInvalidated until process restart.
+    void abort_capture();
 
 private:
     cudaGraph_t graph_ = nullptr;

@@ -266,6 +266,45 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                              phase3_reserve / (1024.0 * 1024.0));
                 cutlass_sf_estimate = native_need;
             }
+        } else if (!plan.failed && per_block_total > 0) {
+            // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not
+            // nvfp4_beneficial (estimate 0) but the planner routes them to the
+            // FP16 cache — exactly the divergence the log above warns about.
+            // Without reserving that demand the KV backstop below eats ALL
+            // post-weight VRAM and phases 1/3 build 0 tensors: Ornith-35B
+            // Q4_K_M served 11 tok/s via on-the-fly dequant with a 159k-token
+            // KV pool nobody asked for (#874 follow-up). Same failure class as
+            // the native-NVFP4 branch above, same fix: fold the real demand
+            // into cutlass_sf_estimate so both the strategy math and the
+            // backstop see it.
+            //
+            // Gated on a 2x divergence so heuristic-covered models (Q6_K/Q8
+            // dense — the tuned bench configs) keep their KV pools unchanged.
+            size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
+            if (plan.projected_vram_bytes > 2 * heuristic) {
+                size_t want = plan.projected_vram_bytes +
+                              std::max(total_vram / 10, static_cast<size_t>(256ULL * 1024 * 1024));
+                // Never squeeze the pool below one full max_seq_len sequence
+                // (or the min-KV floor, whichever is larger) — long-context
+                // must stay servable; concurrency is bounded by scheduler
+                // admission, not by pool size.
+                int floor_tok = config.min_kv_tokens > 0
+                                    ? config.min_kv_tokens
+                                    : std::min(16384, config.max_seq_len * 4);
+                int guarantee_blocks = std::max(blocks_per_seq, (floor_tok + bs - 1) / bs);
+                size_t guarantee_bytes = static_cast<size_t>(guarantee_blocks) * per_block_total;
+                size_t cap = (available > guarantee_bytes) ? available - guarantee_bytes : 0;
+                size_t reserve = std::min(want, cap);
+                if (reserve > heuristic) {
+                    IMP_LOG_INFO(
+                        "VRAM budget: planner-driven weight-cache reserve %.1f MiB "
+                        "(plan=%.1f MiB, heuristic=%.1f MiB, kv guarantee=%d blocks)",
+                        reserve / (1024.0 * 1024.0),
+                        plan.projected_vram_bytes / (1024.0 * 1024.0),
+                        heuristic / (1024.0 * 1024.0), guarantee_blocks);
+                    cutlass_sf_estimate = reserve - nvfp4_estimate;
+                }
+            }
         }
     }
 

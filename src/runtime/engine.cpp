@@ -386,6 +386,16 @@ void Engine::invalidate_graphs() {
     // Captured verify-chunk graphs (#847) baked the forward as well (incl.
     // any active LoRA kernels/pointers) — recapture costs two verify steps.
     free_spec_graphs_();
+
+    // #874 safety net: if an exception unwound past an active prefill-chunk
+    // capture, the prefill stream is still in capture state and every later
+    // op on it fails ("previous error during capture") — permanently wedging
+    // the server. Close any stray capture and drop the prefill runner so the
+    // next request starts from a clean stream.
+    prefill_graph_runner_.invalidate();
+    last_prefill_chunk_len_ = -1;
+    last_prefill_block_count_ = -1;
+    abort_stream_capture(prefill_stream());
 }
 
 int Engine::lora_load(const std::string& path) {

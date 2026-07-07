@@ -40,6 +40,7 @@ void BatchingEngine::start(ImpContext ctx) {
     }
     ctx_ = ctx;
     stop_requested_.store(false);
+    faulted_.store(false);
     pause_requested_.store(false);
     paused_.store(false);
     running_.store(true);
@@ -223,6 +224,7 @@ void BatchingEngine::worker_loop() {
                     IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
                                   "worker; the server must be restarted.",
                                   cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
+                    faulted_.store(true, std::memory_order_relaxed);
                     stop_requested_.store(true, std::memory_order_relaxed);
                 }
             }
@@ -251,6 +253,7 @@ void BatchingEngine::worker_loop() {
                     IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
                                   "worker; the server must be restarted.",
                                   cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
+                    faulted_.store(true, std::memory_order_relaxed);
                     stop_requested_.store(true, std::memory_order_relaxed);
                 }
             }
