@@ -25,7 +25,7 @@ bool Engine::init_weights() {
 
     // Initialize graph executor (Phase 1: compute sizes, no GPU allocation)
     executor_ = std::make_unique<GraphExecutor>();
-    executor_->set_vram_allocator(&memory_manager_.vram_allocator());
+    executor_->set_vram_allocator(&vram_alloc_);
     executor_->set_runtime_config(runtime_config_);
     {
         int eff_batch = config_.max_batch_size;
@@ -104,7 +104,7 @@ bool Engine::init_weights() {
     // spec decoder block tables, vision staging) use cudaMallocAsync with the
     // default pool; the default threshold is 0, which calls cuMemUnmap on every
     // free. Setting UINT64_MAX keeps allocations for re-use — the KV cache and
-    // workspaces already own their memory through the DeviceAllocator, so the
+    // workspaces own their memory via VRAMAllocator/plain cudaMalloc, so the
     // default-pool footprint stays small.
     {
         cudaMemPool_t default_pool = nullptr;

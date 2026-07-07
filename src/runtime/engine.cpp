@@ -88,11 +88,11 @@ Engine::~Engine() {
         async_d_banned_tokens_ = nullptr;
     }
     if (d_penalty_tokens_) {
-        memory_manager_.vram_allocator().free(d_penalty_tokens_);
+        vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
     if (d_token_is_whitespace_) {
-        memory_manager_.vram_allocator().free(d_token_is_whitespace_);
+        vram_alloc_.free(d_token_is_whitespace_);
         d_token_is_whitespace_ = nullptr;
     }
     if (d_kv_slot_buf_) {
@@ -106,7 +106,7 @@ Engine::~Engine() {
     log_spec_stats_();
     free_spec_buffers_();
     if (prefill_pool_) {
-        memory_manager_.vram_allocator().free(prefill_pool_);
+        vram_alloc_.free(prefill_pool_);
         prefill_pool_ = nullptr;
     }
     if (h_pf_positions_) {
@@ -348,11 +348,6 @@ void Engine::reset_ssm_state(int seq_id) {
         const int cap = ssm_state_->max_sequences();
         int slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? seq_id % cap : 0);
         ssm_state_->reset_sequence(slot, stream_);
-    }
-    if (gdn_state_) {
-        const int cap = gdn_state_->max_sequences();
-        int slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? seq_id % cap : 0);
-        gdn_state_->reset_sequence(slot, stream_);
     }
     release_recurrent_slot_(seq_id);
 }
@@ -647,7 +642,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
-    if (!memory_manager_.vram_allocator().init(0.05f)) {
+    if (!vram_alloc_.init(0.05f)) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }

@@ -74,6 +74,33 @@ constexpr bool is_compute_dtype(QType q) {
     }
 }
 
+// Does this source qtype benefit from an NVFP4 decode-cache conversion?
+// (> 4.5 bits/elem, or no fast native decode kernel.) Single source of truth
+// for the pre-dequant phases AND the VRAM-budget heuristic — keep any policy
+// change here so the two can't drift.
+inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
+    switch (qt) {
+        case QType::Q8_0:
+        case QType::Q8_K:
+        case QType::Q6_K:
+        case QType::Q5_K:
+            return true;
+        case QType::Q4_K:
+        case QType::Q3_K:
+        case QType::Q2_K:
+            return decode_all;
+        case QType::IQ4_NL:
+        case QType::IQ4_XS:
+            // i-quants have no dp4a/MMVQ decode kernels — without the NVFP4
+            // decode cache they fall to dequant->cuBLAS GEMV (uncapturable
+            // under graph capture, ~2x slower). Similar bit-width to Q4_K,
+            // but here the conversion is the only fast decode path.
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Bytes-per-row for a tensor of `cols` elements at the given qtype.
 // For block-quantised types this includes the per-block overhead.
 // Returns 0 for QType::NONE or unknown types.

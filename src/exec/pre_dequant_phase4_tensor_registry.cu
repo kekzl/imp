@@ -553,8 +553,6 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
 // log a coverage-gap warning instead of reading freed memory.
 void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    constexpr bool actually_free = true;
-
     auto* mut_model = const_cast<Model*>(model_);
     size_t marked_bytes = 0;
     size_t marked_count = 0;
@@ -571,21 +569,19 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             return false;
         int64_t cols = t.ndim > 1 ? t.shape[1] : 1;
         size_t bytes = qtype_row_bytes(t.qtype, cols) * static_cast<size_t>(t.shape[0]);
-        if (actually_free) {
-            if (!mut_model->is_base_gpu_allocation(t.data)) {
-                ++skipped_shared_count;
-                skipped_shared_bytes += bytes;
-                return false;
-            }
-            if (wcache_->cutlass_nvfp4.count(t.data) > 0 ||
-                wcache_->nvfp4.count(t.data) > 0) {
-                ++skipped_shared_count;
-                skipped_shared_bytes += bytes;
-                return false;
-            }
-            mut_model->release_gpu_allocation(t.data);
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
+        if (!mut_model->is_base_gpu_allocation(t.data)) {
+            ++skipped_shared_count;
+            skipped_shared_bytes += bytes;
+            return false;
         }
+        if (wcache_->cutlass_nvfp4.count(t.data) > 0 ||
+            wcache_->nvfp4.count(t.data) > 0) {
+            ++skipped_shared_count;
+            skipped_shared_bytes += bytes;
+            return false;
+        }
+        mut_model->release_gpu_allocation(t.data);
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
         t.dropped_source = true;
         marked_bytes += bytes;
         marked_count++;
@@ -617,22 +613,19 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // allocation() above already flagged the model as sources-consumed so a
         // second engine on this handle is rejected up front (#830).
         IMP_LOG_INFO(
-            "Phase-4b drop-source: %s %zu sources (%.2f MiB). "
+            "Phase-4b drop-source: freed %zu sources (%.2f MiB). "
             "Skipped %zu sources (%.2f MiB) that are offsets into shared "
             "allocations.",
-            actually_free ? "freed" : "marked (bisect mode — no cudaFreeAsync)",
             marked_count, marked_bytes / (1024.0 * 1024.0),
             skipped_shared_count, skipped_shared_bytes / (1024.0 * 1024.0));
-        if (actually_free) {
-            // Drain async frees. cudaFreeAsync returns allocations to the pool
-            // WITHOUT releasing physical pages (no WDDM page release → no
-            // cuBLAS status-14). The pool retains the memory for reuse by
-            // future cudaMallocAsync calls. Physical reclaim is deferred to
-            // Model::~Model which trims the pool after all weights are freed.
-            cudaStreamSynchronize(stream);
-            IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
-                         marked_bytes / (1024.0 * 1024.0));
-        }
+        // Drain async frees. cudaFreeAsync returns allocations to the pool
+        // WITHOUT releasing physical pages (no WDDM page release → no
+        // cuBLAS status-14). The pool retains the memory for reuse by
+        // future cudaMallocAsync calls. Physical reclaim is deferred to
+        // Model::~Model which trims the pool after all weights are freed.
+        cudaStreamSynchronize(stream);
+        IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
+                     marked_bytes / (1024.0 * 1024.0));
     }
 }
 

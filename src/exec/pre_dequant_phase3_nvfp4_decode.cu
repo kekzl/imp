@@ -612,7 +612,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 
         size_t free_mem2 = 0, total_mem2 = 0;
         vram_budget_mem_get_info(&free_mem2, &total_mem2);
-        size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
+        size_t nvfp4_safety2 = vram_reserve_floor(total_mem2);
         if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
             break;
 

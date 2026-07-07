@@ -15,7 +15,7 @@
 // VRAMAllocator + empty caches, call build(), assert the caches filled) is
 // the preferred proof, but it is currently impractical: a bare imp::Model is
 // only reachable via the opaque ImpModel C-API handle, VRAMAllocator is owned
-// by the engine's MemoryManager and constructed inside engine->init(), and
+// by the Engine and constructed inside engine->init(), and
 // the VRAMBudget that drives which phases run is computed during KV-cache
 // init. Standing all of that up in a test means reproducing ~half of engine
 // init.

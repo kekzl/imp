@@ -587,7 +587,7 @@ void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
     // v1 gates: the chunk needs continuation prefill; recurrent state
     // (SSM/GDN) advances per forwarded token and has no chunk-continuation
     // wiring here (spec-ngram gates it out for the same reason).
-    if (ssm_state_ || gdn_state_ || !supports_chunked_prefill_())
+    if (ssm_state_ || !supports_chunked_prefill_())
         return;
     // Think-budget forcing owns the next step — don't compete with it.
     if (p.state.force_token >= 0)

@@ -3,7 +3,6 @@
 #include "core/tensor.h"
 #include "memory/kv_cache.h"     // KVCache
 #include "memory/ssm_state.h"    // SSMState
-#include "memory/gdn_state.h"    // GDNState
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <utility>
@@ -33,10 +32,6 @@ struct InferenceState {
     // SSM state for Mamba2 layers (nullptr for non-hybrid models)
     SSMState* ssm_state = nullptr;
     int ssm_seq_id = 0;  // sequence ID for SSM state access
-
-    // GDN state for Gated DeltaNet layers (Qwen3.5, nullptr for non-GDN models)
-    class GDNState* gdn_state = nullptr;
-    int gdn_seq_id = 0;
 
     // BitDecoding Phase 3 residual KV cache.
     //

@@ -50,7 +50,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         vram_budget_mem_get_info(&f, &total_vram);
     }
     if (config.use_nvfp4_decode != 2) {
-        budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
+        budget.reserve_bytes = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));
     }
 
     // Estimate SSM footprint
@@ -107,32 +107,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     int needed_blocks = blocks_per_seq * config.max_batch_size;
 
     // --- 5. Estimate NVFP4-eligible weight cache size ---
+    // Eligibility policy is the shared nvfp4_beneficial() in core/qtype.h —
+    // the same predicate the pre-dequant phases use, so the estimate and the
+    // actual cache build can't drift.
     const bool decode_all = config.nvfp4_decode_all;
-    auto nvfp4_beneficial = [decode_all](QType qt) -> bool {
-        using enum QType;
-        switch (qt) {
-            case Q8_0:
-            case Q8_K:
-            case Q6_K:
-            case Q5_K:
-                return true;
-            case Q4_K:
-            case Q3_K:
-            case Q2_K:
-                return decode_all;
-            case IQ4_NL:
-            case IQ4_XS:
-                // No dp4a/MMVQ kernels for i-quants — NVFP4 decode cache is
-                // the only fast decode path (mirror pre_dequant_internal.h).
-                return true;
-            default:
-                return false;
-        }
-    };
-
     size_t nvfp4_elems = 0;
     auto count_nvfp4 = [&](const Tensor& w, QType qt) {
-        if (!w.data || !nvfp4_beneficial(qt))
+        if (!w.data || !nvfp4_beneficial(qt, decode_all))
             return;
         if (w.shape[1] % 16 != 0)
             return;
@@ -159,12 +140,16 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
     size_t cutlass_sf_estimate = nvfp4_elems / 16;
 
-    // Phase 5 PR #1 Commit 5.1.5: cross-check the heuristic estimate against
-    // the StoragePlanner's projected total (source-qtype-aware via 5.1.1).
-    // Diverging numbers indicate the heuristic missed a tier (e.g. Q4_K weights
-    // that the planner correctly routes to FP16 but the heuristic treats as 0
-    // because nvfp4_beneficial is false). Logged as INFO; the heuristic still
-    // drives allocation until the strategy/planner unification lands.
+    // Cross-check the heuristic estimate against the StoragePlanner's
+    // projected total (source-qtype-aware). Diverging numbers indicate the
+    // heuristic missed a tier (e.g. Q4_K weights that the planner routes to
+    // the FP16 cache but the heuristic treats as 0 because nvfp4_beneficial
+    // is false). The heuristic drives allocation; the plan built here is
+    // UNCONSTRAINED (no vram_budget_bytes hint, so no downgrade loop and
+    // plan.failed can never be set) — it measures ideal per-tensor demand,
+    // which the GGUF branch below folds into the weight-cache reserve (#875).
+    // The budget-constrained plan the phases actually consult is built
+    // separately in QuantPipeline::build (executor_pre_dequant.cu).
     {
         PlanHints hints;
         hints.prefer_nvfp4_decode = (config.use_nvfp4_decode > 0);
@@ -173,8 +158,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         StoragePlan plan = plan_storage(model, mcfg, hints);
         IMP_LOG_INFO(
             "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "
-            "nvfp4=%.1f MiB cutlass_sf=%.1f MiB. Heuristic still drives "
-            "allocation; planner output diagnostic only (5.1.5).",
+            "nvfp4=%.1f MiB cutlass_sf=%.1f MiB.",
             plan.projected_vram_bytes / (1024.0 * 1024.0), plan.entries.size(),
             nvfp4_estimate / (1024.0 * 1024.0), cutlass_sf_estimate / (1024.0 * 1024.0));
 
@@ -254,9 +238,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                 else
                     count_native_vec(L.expert_w_down);
             }
-            size_t phase3_reserve =
-                std::max(total_vram / 10, static_cast<size_t>(256ULL * 1024 * 1024)) +
-                1024ULL * 1024 * 1024;
+            size_t phase3_reserve = vram_reserve_floor(total_vram) + 1024ULL * 1024 * 1024;
             size_t native_need = sf_bytes + max_moe_slab + phase3_reserve;
             if (native_need > cutlass_sf_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
@@ -266,7 +248,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                              phase3_reserve / (1024.0 * 1024.0));
                 cutlass_sf_estimate = native_need;
             }
-        } else if (!plan.failed && per_block_total > 0) {
+        } else if (per_block_total > 0) {
             // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not
             // nvfp4_beneficial (estimate 0) but the planner routes them to the
             // FP16 cache — exactly the divergence the log above warns about.
@@ -282,8 +264,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // dense — the tuned bench configs) keep their KV pools unchanged.
             size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
             if (plan.projected_vram_bytes > 2 * heuristic) {
-                size_t want = plan.projected_vram_bytes +
-                              std::max(total_vram / 10, static_cast<size_t>(256ULL * 1024 * 1024));
+                size_t want = plan.projected_vram_bytes + vram_reserve_floor(total_vram);
                 // Never squeeze the pool below one full max_seq_len sequence
                 // (or the min-KV floor, whichever is larger) — long-context
                 // must stay servable; concurrency is bounded by scheduler
@@ -420,7 +401,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // back down. The post-clamp computation lets mode 1 (additive) populate
     // both caches when VRAM allows — Qwen3-14B Q6_K mode 1 default flags
     // previously cached fp8=0 tensors and paid ~28 % prefill for it.
-    if (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE) {
+    if (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE && config.use_fp8_prefill) {
         size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
         size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
         size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
@@ -434,9 +415,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             fp8_size_cap = remaining_for_fp8;
         budget.fp8_cache_bytes = std::min(fp8_size_cap, remaining_for_fp8);
     }
+    // With FP8 prefill resolved off (the sm_120 auto default), the strategy's
+    // KV math above still applies but no FP8 cache will ever be built (Phase 2
+    // is gated on use_fp8) — report 0 instead of a phantom reservation.
 
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
-                                 ? "FP8_PREFILL_NVFP4_DECODE"
+                                 ? (config.use_fp8_prefill ? "FP8_PREFILL_NVFP4_DECODE"
+                                                           : "NVFP4_DECODE (fp8 prefill off)")
                              : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY) ? "NVFP4_DECODE_ONLY"
                                                                                   : "FP16_ONLY";
     IMP_LOG_INFO(
