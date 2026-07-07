@@ -122,7 +122,8 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
 
     // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
     // legacy-serial-fallback uninit reads become deterministic zero reads.
-    // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
+    // Enable via the moe.zero_workspace config flag (was IMP_MOE_ZERO_WORKSPACE env). Cheap (~1 MiB
+    // total memset).
     if (runtime_config().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);

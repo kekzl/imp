@@ -246,6 +246,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     imp::server::StreamToolCallFilter tool_filter(tpl_family);
     std::vector<ParsedToolCall> stream_tool_calls;
     bool tool_calls_emitted = false;
+    // parallel_tool_calls=false: a second streamed call was opened by the
+    // filter but is being suppressed (skip its deltas/END too).
+    bool stream_call_suppressed = false;
 
     // Reasoning extraction (DeepSeek <think>). enable_thinking also covers
     // text-level thinkers (Nemotron) — see the chat streaming path.
@@ -459,6 +462,19 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
                         if (!emit_text(seg.text))
                             return false;
                     }
+                    continue;
+                }
+                // parallel_tool_calls=false: stream at most one tool call.
+                // (For a streamed call the gate fires at CALL_BEGIN, so the
+                // later deltas/END of a suppressed call are skipped too.)
+                if (!ctx.params.parallel_tool_calls &&
+                    ((seg.kind == SegKind::CALL && !stream_tool_calls.empty()) ||
+                     (seg.kind == SegKind::CALL_BEGIN && !stream_tool_calls.empty()) ||
+                     (seg.kind != SegKind::CALL && stream_call_suppressed))) {
+                    if (seg.kind == SegKind::CALL_BEGIN)
+                        stream_call_suppressed = true;
+                    if (seg.kind == SegKind::CALL_END)
+                        stream_call_suppressed = false;
                     continue;
                 }
                 if (seg.kind == SegKind::CALL_BEGIN) {

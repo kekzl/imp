@@ -43,10 +43,6 @@ public:
     // Called after processing a layer to avoid dangling GPU pointers.
     void release_layer(int layer);
 
-    bool is_offloaded(int layer) const {
-        return layer >= 0 && layer < static_cast<int>(offloaded_.size()) && offloaded_[layer];
-    }
-
     bool is_enabled() const { return enabled_; }
 
 private:

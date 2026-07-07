@@ -70,20 +70,6 @@ inline cudaLaunchConfig_t build_cluster_config(dim3 grid, dim3 block, size_t dyn
     return config;
 }
 
-// Convenience: launch a cluster kernel with (cluster_x, 1, 1) cluster
-// dimension + GPC-spread scheduling. For more complex attribute mixes
-// (cluster + PDL, cluster + access-policy), build the config + attr
-// array by hand using the helpers above.
-//
-// Returns cudaLaunchKernelEx's status — caller is responsible for
-// IMP_CUDA_CHECK_LOG / abort on failure.
-template <typename KernelFunc, typename... Args>
-cudaError_t launch_cluster_1d(KernelFunc func, dim3 grid, dim3 block, size_t dyn_smem,
-                              cudaStream_t stream, unsigned int cluster_x, Args... args) {
-    cudaLaunchAttribute attrs[2];
-    cudaLaunchConfig_t config = build_cluster_config(grid, block, dyn_smem, stream, attrs, cluster_x);
-    return cudaLaunchKernelEx(&config, func, args...);
-}
 
 // Cluster dimension validity check (CUDA requires power-of-2 in each axis
 // and total cluster size ≤ 16 on GB202). Use at launch sites that

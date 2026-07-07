@@ -25,11 +25,6 @@ void enable_kernel(KernelFunc func) {
     enable(reinterpret_cast<const void*>(func));
 }
 
-template <typename KernelFunc>
-void disable_kernel(KernelFunc func) {
-    disable(reinterpret_cast<const void*>(func));
-}
-
 // ---------------------------------------------------------------------------
 // PDL-aware kernel launch.  Uses cudaLaunchKernelEx with the
 // ProgrammaticStreamSerialization attribute when PDL is enabled for the

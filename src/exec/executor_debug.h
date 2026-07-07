@@ -19,7 +19,8 @@ inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); 
 
 // Decode-step counter shared between executor_forward.cu (writer) and
 // executor_ssm_gdn.cu (reader). Prefill passes use step=0; each single-token
-// decode pass increments it. Used for IMP_DUMP_HIDDEN filename tagging so
+// decode pass increments it. Used for diagnostics.dump_hidden_dir config flag (was
+// IMP_DUMP_HIDDEN env) filename tagging so
 // GDN-internal dumps correlate with per-layer snapshots.
 inline int& debug_decode_step() {
     static int s = 0;
@@ -29,7 +30,7 @@ inline int& debug_decode_step() {
 // Hidden-state npy dump for layer-diff analysis against llama.cpp.
 // Returns the directory if [diagnostics] dump_hidden_dir is non-empty, else
 // nullptr. Accepts "1" or "all" as shorthand for /tmp (matches the legacy
-// IMP_DUMP_HIDDEN=1 behaviour). Resolution happens in process_diag_install().
+// IMP_DUMP_HIDDEN env shorthand). Resolution happens in process_diag_install().
 inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(); }
 
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.
@@ -62,7 +63,8 @@ inline void write_npy_fp32(const std::string& path, const float* data, int rows,
 }
 
 // Dump a 2D [rows, cols] tensor (FP16 or FP32) as FP32 .npy.
-// Early-returns when IMP_DUMP_HIDDEN is unset. Syncs the stream (debug only).
+// Early-returns when the diagnostics.dump_hidden_dir config flag (was IMP_DUMP_HIDDEN env) is
+// unset. Syncs the stream (debug only).
 inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t stream, int layer, int step) {
     const char* dir = dump_hidden_dir();
     if (!dir)
@@ -109,7 +111,8 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
 }
 
 // Print min/max/mean/L2norm of a GPU tensor (first row only for multi-row tensors).
-// Syncs the stream — only call when IMP_DEBUG_FORWARD is active.
+// Syncs the stream — only call when the diagnostics.debug_forward config flag (was
+// IMP_DEBUG_FORWARD env) is active.
 inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t stream, int row = 0,
                                int max_rows = 1) {
     if (!debug_forward_enabled())

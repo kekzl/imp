@@ -144,9 +144,10 @@ static void run_expert_matmul(cublasHandle_t handle, const Tensor& Ai, const Ten
 // All GEMMs are issued on the same stream to allow the GPU scheduler to
 // overlap kernel execution where possible.
 //
-// TODO: Could use a true grouped/batched GEMM
-// API.  For now we fall back to a loop of individual cublasLtMatmul calls
-// which is the safe portable path.
+// Note: this is the simple per-expert loop of individual cublasLtMatmul
+// calls — the safe portable path. True grouped/batched paths already exist
+// for the hot cases: gemm_moe_batched() below (cublasGemmBatchedEx) and the
+// CUTLASS 3.x grouped MoE path; this loop remains for the fallback callers.
 // ---------------------------------------------------------------------------
 void gemm_grouped(const std::vector<Tensor>& A, const std::vector<Tensor>& B, std::vector<Tensor>& C,
                   cudaStream_t stream) {

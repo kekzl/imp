@@ -134,6 +134,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     if (!validate_sampling_params(body, res))
         return;
 
+    // /v1/completions does not implement multi-choice generation. Reject n>1
+    // explicitly instead of validating n in [1,4] and then silently returning a
+    // single choice (only the chat endpoint honors n, via n_completions).
+    if (body.value("n", 1) > 1) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "n>1 is not supported on /v1/completions; request one completion per call");
+        return;
+    }
+
     // Extract prompt
     std::string prompt = body.value("prompt", "");
     if (prompt.empty()) {
@@ -167,8 +176,27 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
 
-    bool req_logprobs = body.value("logprobs", false);
+    // Completions API types `logprobs` as an integer (top-N count); Chat uses a
+    // bool `logprobs` + int `top_logprobs`. Accept both so a spec-compliant
+    // Completions client sending `logprobs: 5` isn't 400'd on a json type error.
+    bool req_logprobs = false;
     int top_logprobs = body.value("top_logprobs", 0);
+    if (body.contains("logprobs") && !body["logprobs"].is_null()) {
+        const auto& lp = body["logprobs"];
+        if (lp.is_boolean()) {
+            req_logprobs = lp.get<bool>();
+        } else if (lp.is_number_integer()) {
+            int n = lp.get<int>();
+            if (n > 0) {
+                req_logprobs = true;
+                top_logprobs = std::max(top_logprobs, n);
+            }
+        } else {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logprobs\" must be an integer (Completions) or boolean");
+            return;
+        }
+    }
     if (top_logprobs < 0)
         top_logprobs = 0;
     if (top_logprobs > 20)
@@ -686,7 +714,29 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     }
 }
 
+static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // Any exception escaping the impl — notably from the inner
+    // handle_chat_completions shim on the non-streaming path — must return the
+    // Anthropic error envelope ({"type":"error",...}), not the OpenAI-shaped one
+    // the global exception handler emits, which strict Anthropic SDK clients
+    // fail to parse (#891). res is untouched by the shim (it writes a separate
+    // shim_res) when the throw propagates, so it is safe to rewrite here.
+    try {
+        handle_messages_impl(req, res, state);
+    } catch (const std::exception& e) {
+        res.status = 500;
+        json err = {{"type", "error"}, {"error", {{"type", "server_error"}, {"message", e.what()}}}};
+        res.set_content(dump_safe(err), "application/json");
+    } catch (...) {
+        res.status = 500;
+        json err = {{"type", "error"}, {"error", {{"type", "server_error"}, {"message", "internal error"}}}};
+        res.set_content(dump_safe(err), "application/json");
+    }
+}
+
+static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     namespace anth = imp_server::anthropic;
 
     // Capture original Anthropic request data for opt-in JSONL logging.

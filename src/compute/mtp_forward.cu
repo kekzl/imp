@@ -445,7 +445,6 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     // Phase 2.2 MoE buffers (only if n_experts > 0)
     const bool has_moe = n_experts > 0 && top_k > 0 && expert_d_ff > 0;
     if (ok && has_moe) {
-        ok &= alloc(&ws.d_router_logits,   n_experts * sizeof(__half));
         ok &= alloc(&ws.d_expert_gate_up,  2 * expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_act,      expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_outputs,  top_k * hidden_dim * sizeof(__half));
@@ -494,7 +493,6 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     if (ws.d_chain_tokens) { cudaFree(ws.d_chain_tokens); ws.d_chain_tokens = nullptr; }
     if (ws.d_argmax) { cudaFree(ws.d_argmax); ws.d_argmax = nullptr; }
     frfn(ws.d_post_norm);
-    frfn(ws.d_router_logits);
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
     frfn(ws.d_expert_outputs);

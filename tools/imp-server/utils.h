@@ -48,6 +48,10 @@ void json_escape_into(std::string& out, const char* s, size_t len);
 
 int b64_val(unsigned char c);
 std::vector<uint8_t> base64_decode(const std::string& encoded);
+// Standard base64 (with '=' padding) of a raw byte buffer. Used to serve the
+// OpenAI `encoding_format: "base64"` embeddings response (the little-endian
+// float32 array encoded as bytes — the default in the OpenAI Python SDK).
+std::string base64_encode(const uint8_t* data, size_t len);
 
 void strip_think_block(std::string& text);
 std::pair<std::string, std::string> extract_reasoning(const std::string& text);

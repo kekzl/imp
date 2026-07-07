@@ -218,13 +218,19 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
                    m.inter_token);
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
-    bool loaded;
-    int queue = 0;
+    bool loaded = false;
+    int queue = -1;
     {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        loaded = state.model_loaded();
-        if (state.batching)
-            queue = state.batching->queue_depth();
+        // Bounded lock so a scrape can't hang behind a long /v1/embeddings
+        // holder (#889); fall back to the lock-free status snapshot.
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock()) {
+            loaded = state.model_loaded();
+            if (state.batching)
+                queue = state.batching->queue_depth();
+        } else {
+            loaded = state.model_status_snapshot().loaded;  // queue stays -1 (unknown)
+        }
     }
     out += "imp_model_loaded " + std::string(loaded ? "1" : "0") + "\n";
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
@@ -315,6 +321,30 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
+    // Response encoding: OpenAI supports "float" (JSON array) and "base64"
+    // (little-endian float32 bytes, base64). base64 is the default in the
+    // OpenAI Python SDK — reject anything else rather than silently returning
+    // floats a base64-expecting client would then mis-decode.
+    std::string encoding_format = body.value("encoding_format", std::string("float"));
+    if (encoding_format != "float" && encoding_format != "base64") {
+        send_json_error(res, 400, "invalid_request_error",
+                        "Unsupported encoding_format '" + encoding_format +
+                            "' (expected 'float' or 'base64')");
+        return;
+    }
+    // Matryoshka dimension truncation is not supported. Accept the field only
+    // when it matches the model's native width (checked against d_model once a
+    // model is confirmed loaded, below) — never silently ignore it.
+    bool has_dimensions = body.contains("dimensions") && !body["dimensions"].is_null();
+    int requested_dims = 0;
+    if (has_dimensions) {
+        if (!body["dimensions"].is_number_integer()) {
+            send_json_error(res, 400, "invalid_request_error", "\"dimensions\" must be an integer");
+            return;
+        }
+        requested_dims = body["dimensions"].get<int>();
+    }
+
     // Acquire inference lock and pause batching engine for exclusive access
     std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
     if (!lock.owns_lock()) {
@@ -326,12 +356,15 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         return;
     }
 
-    if (!state.model_loaded()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
-        res.set_content(dump_safe(err), "application/json");
+    // Validate the requested model / auto-load when started model-less, exactly
+    // like the chat and completions endpoints (ensure_model_loaded returns 404
+    // model_not_found for an unknown model instead of serving whatever is
+    // loaded). Lenient default: an absent "model" field uses the loaded model.
+    std::string requested_model = body.value("model", std::string());
+    if (requested_model.empty())
+        requested_model = state.model_name;
+    if (!ensure_model_loaded(state, requested_model, res))
         return;
-    }
 
     // Pause the batching engine for exclusive C-API access (imp_prefill drives
     // engine->step() directly, which must not race the worker). pause() lets
@@ -368,6 +401,22 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     int d_model = imp_model_d_model(state.model);
     int total_prompt_tokens = 0;
 
+    if (has_dimensions && requested_dims != d_model) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "This server does not support Matryoshka dimension truncation; "
+                        "\"dimensions\" must equal the model width (" + std::to_string(d_model) + ")");
+        return;
+    }
+
+    // Serialize one embedding per the requested encoding_format: a JSON float
+    // array ("float") or base64 of the little-endian float32 bytes ("base64").
+    auto embedding_field = [&](const std::vector<float>& v) -> json {
+        if (encoding_format == "base64") {
+            return base64_encode(reinterpret_cast<const uint8_t*>(v.data()), v.size() * sizeof(float));
+        }
+        return json(v);
+    };
+
     json data = json::array();
 
     for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
@@ -395,6 +444,16 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
                 {"error",
                  {{"message", "Input tokenizes to zero tokens"}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
+            return;
+        }
+
+        // Enforce the operator's --max-input-tokens per-request cap, like chat
+        // and completions do — bounding embedding prefill cost regardless of
+        // the (much larger) engine context / encoder capacity.
+        if (state.max_input_tokens > 0 && n_tokens > state.max_input_tokens) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) + " > " +
+                                std::to_string(state.max_input_tokens) + ")");
             return;
         }
 
@@ -426,7 +485,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
                 return;
             }
             data.push_back(
-                {{"object", "embedding"}, {"embedding", emb}, {"index", input_idx}});
+                {{"object", "embedding"}, {"embedding", embedding_field(emb)}, {"index", input_idx}});
             total_prompt_tokens += static_cast<int>(framed.size());
             continue;
         }
@@ -510,7 +569,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             embedding[d] *= inv_norm;
         }
 
-        data.push_back({{"object", "embedding"}, {"embedding", embedding}, {"index", input_idx}});
+        data.push_back(
+            {{"object", "embedding"}, {"embedding", embedding_field(embedding)}, {"index", input_idx}});
 
         // Reset context for next input
         imp_context_reset(state.ctx);

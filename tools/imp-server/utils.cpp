@@ -154,6 +154,32 @@ int b64_val(unsigned char c) {
     return -1;
 }
 
+std::string base64_encode(const uint8_t* data, size_t len) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((len + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 3 <= len; i += 3) {
+        uint32_t n = (static_cast<uint32_t>(data[i]) << 16) |
+                     (static_cast<uint32_t>(data[i + 1]) << 8) | static_cast<uint32_t>(data[i + 2]);
+        out.push_back(tbl[(n >> 18) & 0x3F]);
+        out.push_back(tbl[(n >> 12) & 0x3F]);
+        out.push_back(tbl[(n >> 6) & 0x3F]);
+        out.push_back(tbl[n & 0x3F]);
+    }
+    if (i < len) {
+        uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+        bool have_two = (i + 1 < len);
+        if (have_two)
+            n |= static_cast<uint32_t>(data[i + 1]) << 8;
+        out.push_back(tbl[(n >> 18) & 0x3F]);
+        out.push_back(tbl[(n >> 12) & 0x3F]);
+        out.push_back(have_two ? tbl[(n >> 6) & 0x3F] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
 std::vector<uint8_t> base64_decode(const std::string& encoded) {
     std::vector<uint8_t> out;
     out.reserve(encoded.size() * 3 / 4);

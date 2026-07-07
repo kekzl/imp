@@ -70,9 +70,6 @@ struct MtpDraftWorkspace {
     // ---- Phase 2.2 MoE scratch ----
     // [hidden_dim] FP16 — post_attention_layernorm(fc_out)
     void* d_post_norm   = nullptr;
-    // [n_experts] FP16 — router logits (currently unused — moe_gate_topk_fused
-    // produces indices+weights directly into the routing buffers).
-    void* d_router_logits = nullptr;
     // [2*expert_d_ff] FP16 — single-expert gate_up output (gate at 0..d_ff,
     // up at d_ff..2*d_ff)
     void* d_expert_gate_up = nullptr;

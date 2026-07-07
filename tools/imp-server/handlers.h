@@ -24,6 +24,12 @@
 
 using json = nlohmann::json;
 
+// Observability endpoints (/health, /metrics, /v1/models) grab state.mtx with
+// this bounded timeout instead of blocking unbounded: a long /v1/embeddings
+// call holds the lock for its whole computation, and an unbounded wait here
+// would hang a liveness probe and get a healthy container killed (#889).
+inline constexpr std::chrono::milliseconds kObservabilityLockTimeout{250};
+
 // Per-request JSONL logger. Opt-in via --log-requests <path>; appends one
 // line per chat/completions or messages call with the raw client body, basic
 // metadata, and (for non-streaming) the assistant response. Thread-safe.
@@ -154,6 +160,29 @@ struct ServerState {
     RequestLogger request_logger;
 
     bool model_loaded() const { return ctx != nullptr; }
+
+    // Lock-free-ish snapshot of {loaded, model_name} for the observability
+    // endpoints (/health, /metrics, /v1/models). Guarded by its own tiny mutex
+    // that is only ever held for a trivial copy — never across inference — so
+    // these endpoints can read model status without contending on `mtx`, which
+    // a long /v1/embeddings call deliberately holds for its whole computation
+    // (#889). Published under `mtx` at every (un)load; read on lock timeout.
+    std::mutex obs_mtx;
+    bool obs_loaded = false;
+    std::string obs_model_name;
+    struct ObsStatus {
+        bool loaded;
+        std::string model_name;
+    };
+    void publish_model_status(bool loaded, const std::string& name) {
+        std::lock_guard<std::mutex> lk(obs_mtx);
+        obs_loaded = loaded;
+        obs_model_name = name;
+    }
+    ObsStatus model_status_snapshot() {
+        std::lock_guard<std::mutex> lk(obs_mtx);
+        return {obs_loaded, obs_model_name};
+    }
 
     // Check rate limit for an IP. Returns true if allowed.
     bool check_rate_limit(const std::string& ip) {

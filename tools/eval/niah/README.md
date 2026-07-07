@@ -1,12 +1,12 @@
-# TurboQuant Phase 2 NIAH harness
+# KV-cache NIAH harness
 
 Runs a 4-config × 2-context × 5-depth × 3-seed Needle-in-a-Haystack
-retrieval test on Qwen3-8B Q8_0, comparing FP16 / FP8 / TurboQuant
-(QJL on) / TurboQuant (QJL off via `IMP_TQ_SKIP_QJL=1`, shipped in
-PR #246).
+retrieval test on Qwen3-8B Q8_0, comparing the KV-cache dtypes
+FP16 / FP8 / NVFP4 / MXFP4-KV. (The TurboQuant `tq_qjl_on` / `tq_qjl_off`
+configs were retired in Phase 5, 2026-05-17.)
 
 Output: `sample_results/niah_results.json` (raw) + `niah_summary.md`
-(aggregate accuracy + Phase 2 verdict).
+(aggregate accuracy + verdict).
 
 ## Usage
 
@@ -17,16 +17,11 @@ tools/eval/niah/niah_bench.py
 # Smoke test (1 prompt):
 tools/eval/niah/niah_bench.py --smoke
 
-# Subset (e.g. only TQ configs, only 4K context):
-tools/eval/niah/niah_bench.py --config tq_qjl_on --config tq_qjl_off --ctx 4096
+# Subset (e.g. only the FP4 KV configs, only 4K context):
+tools/eval/niah/niah_bench.py --config nvfp4 --config mxfp4_kv --ctx 4096
 ```
 
-## Caveat
+Available `--config` names: `fp16`, `fp8`, `nvfp4`, `mxfp4_kv`.
 
-`IMP_TQ_SKIP_QJL=1` proxies "post-Path-A storage" at the **quality** level
-by stripping QJL while keeping PolarQuant FP4 K + INT4 V. It does NOT
-swap the underlying storage to straight MXFP4-K. So this harness answers
-"does the QJL correction matter for retrieval quality" — not the strictly
-broader "does PolarQuant→straight-MXFP4 storage transition matter".
-
-See `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` §5 Phase 2.
+See `docs/plans/turboquant_fp8_gap_design_2026_05_17.md` §5 Phase 2 for
+the historical TurboQuant context.

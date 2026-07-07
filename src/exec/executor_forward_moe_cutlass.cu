@@ -46,7 +46,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     //   Prefill n=120: ~2750 tok/s (vs legacy ~77)   — 35x win
     //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
     // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
-    // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
+    // The moe.no_cutlass3x config flag (was IMP_NO_CUTLASS3X_MOE env) forces
+    // legacy for debugging.
     static const bool force_off = runtime_config().moe.no_cutlass3x;
     if (force_off)
         return false;
@@ -74,8 +75,9 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
 
 // =========================================================================
 // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM path (NVFP4 × NVFP4 → FP16).
-// Gated by IMP_CUTLASS3X_MOE=1. Zero dequant overhead vs the nvfp4→FP16
-// batch path; per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
+// On by default; the moe.no_cutlass3x config flag (was IMP_CUTLASS3X_MOE env)
+// forces legacy. Zero dequant overhead vs the nvfp4→FP16 batch path;
+// per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
 // =========================================================================
 //
 // Phase 3c-full Step 2b: fully device-args dispatch placed BEFORE

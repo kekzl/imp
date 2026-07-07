@@ -18,6 +18,16 @@
 
 using json = nlohmann::json;
 
+// The five inference routes that consume engine capacity and must go through
+// rate-limiting / max-concurrent admission control. /v1/messages (Anthropic)
+// and /v1/embeddings were previously omitted from these checks, silently
+// bypassing both guards (the non-stream /v1/messages path reaches inference by
+// directly calling handle_chat_completions() without re-entering pre-routing).
+static bool is_inference_endpoint(const std::string& path) {
+    return path == "/v1/chat/completions" || path == "/v1/completions" ||
+           path == "/v1/responses" || path == "/v1/messages" || path == "/v1/embeddings";
+}
+
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
 
@@ -128,8 +138,7 @@ int main(int argc, char** argv) {
             return httplib::Server::HandlerResponse::Unhandled;
 
         // Rate limiting (per-IP, inference endpoints only)
-        if (state.rate_limit > 0 && (req.path == "/v1/chat/completions" || req.path == "/v1/completions" ||
-                                     req.path == "/v1/responses")) {
+        if (state.rate_limit > 0 && is_inference_endpoint(req.path)) {
             std::string ip = req.get_header_value("X-Forwarded-For");
             if (ip.empty())
                 ip = req.remote_addr;
@@ -142,9 +151,7 @@ int main(int argc, char** argv) {
         }
 
         // Max concurrent requests
-        if (state.max_concurrent > 0 &&
-            (req.path == "/v1/chat/completions" || req.path == "/v1/completions" ||
-             req.path == "/v1/responses")) {
+        if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             int queue = 0;
             {
                 std::lock_guard<std::timed_mutex> lock(state.mtx);

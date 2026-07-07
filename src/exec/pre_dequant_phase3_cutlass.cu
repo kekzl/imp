@@ -475,20 +475,16 @@ if (mx_native > 0) {
         bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                               fp16_total + kRuntimeHeadroom > free_mem);
         // The "force anyway despite oversubscription" path is gone —
-        // attention.mxfp4_fp16_fallback is a plain bool now. If the
-        // user explicitly opts in via imp.conf the oversubscribe
-        // check still gates them; this matches the previous
-        // IMP_MXFP4_FP16_FALLBACK=1 semantics. The legacy
-        // =force escape hatch is obsolete.
-        bool allow_force = false;
-        if (oversubscribe && !allow_force) {
+        // attention.mxfp4_fp16_fallback is a plain bool now. Opting in via
+        // imp.conf still gets gated by this oversubscribe check (matching the
+        // old IMP_MXFP4_FP16_FALLBACK=1 semantics); the legacy =force escape
+        // hatch is obsolete, so oversubscription is always refused here.
+        if (oversubscribe) {
             IMP_LOG_ERROR(
                 "MXFP4 FP16 fallback would oversubscribe VRAM "
                 "(need %.1f GiB + %.1f GiB runtime headroom, %.1f GiB free). "
                 "Model is too large for this GPU with the FP16 decode "
-                "fallback. Use a smaller quant or a smaller model. "
-                "Set IMP_MXFP4_FP16_FALLBACK=force to attempt anyway "
-                "(may IMA at first decode forward).",
+                "fallback. Use a smaller quant or a smaller model.",
                 fp16_total / (1024.0 * 1024.0 * 1024.0),
                 kRuntimeHeadroom / (1024.0 * 1024.0 * 1024.0),
                 free_mem / (1024.0 * 1024.0 * 1024.0));
@@ -496,11 +492,6 @@ if (mx_native > 0) {
             // Downstream code will detect the missing entries and bail
             // with its own diagnostic instead of silently corrupting state.
             fp16_total = 0;
-        } else if (oversubscribe) {
-            IMP_LOG_WARN(
-                "MXFP4 FP16 fallback: forcing oversubscribed alloc "
-                "(IMP_MXFP4_FP16_FALLBACK=force, %.1f GiB > %.1f GiB free)",
-                fp16_total / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
         }
     }
     if (fp16_total > 0) {

@@ -292,6 +292,9 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
 
     imp::server::StreamToolCallFilter tool_filter(tpl_family);
     bool tool_calls_emitted = false;
+    // parallel_tool_calls=false: a second streamed call was opened by the
+    // filter but is being suppressed (skip its deltas/END too).
+    bool stream_call_suppressed = false;
 
     const bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
                                 (snap_is_think_model || enable_thinking));
@@ -472,6 +475,19 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                         if (!emit_text(seg.text))
                             return false;
                     }
+                    continue;
+                }
+                // parallel_tool_calls=false: stream at most one tool call.
+                // (For a streamed call the gate fires at CALL_BEGIN, so the
+                // later deltas/END of a suppressed call are skipped too.)
+                if (!ctx.params.parallel_tool_calls &&
+                    ((seg.kind == SegKind::CALL && !stream_tool_calls.empty()) ||
+                     (seg.kind == SegKind::CALL_BEGIN && !stream_tool_calls.empty()) ||
+                     (seg.kind != SegKind::CALL && stream_call_suppressed))) {
+                    if (seg.kind == SegKind::CALL_BEGIN)
+                        stream_call_suppressed = true;
+                    if (seg.kind == SegKind::CALL_END)
+                        stream_call_suppressed = false;
                     continue;
                 }
                 if (seg.kind == SegKind::CALL_BEGIN) {
