@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Docker base images (root + analysis/roofline tools)
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/tools/analysis"
+      - "/tools/roofline"
+    schedule:
+      interval: "weekly"
+
+  # Python deps for the API test suite
+  - package-ecosystem: "pip"
+    directory: "/tests/api"
+    schedule:
+      interval: "weekly"
