@@ -94,7 +94,7 @@ with open('/tmp/imp-omma-audit.kernels.tsv') as f:
         omma, hmma = int(omma), int(hmma)
 
         if 'gemm_grouped_nvfp4_smallM_cu' in kern:
-            label = 'src/compute/gemm_grouped_nvfp4_smallM.cu (opt-in IMP_NVFP4_SMALLM)'
+            label = 'src/compute/gemm_grouped_nvfp4_smallM.cu (opt-in moe.nvfp4_smallM)'
         elif 'gemm_cutlass_mxfp4_sm120_cu' in kern:
             label = 'src/compute/gemm_cutlass_mxfp4_sm120.cu'
         elif 'gemm_cutlass_grouped_3x_cu' in kern:

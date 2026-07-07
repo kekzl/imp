@@ -46,7 +46,7 @@ make format        # clang-format
 - **English only in the repo.** All PRs (title + body), commit messages, code comments, docs, and `.md` files are written entirely in English. (Chat replies to the user stay German per global instructions — this rule covers artifacts that land in the repository or on GitHub.)
 - **Always branch off `main` and `gh pr create --base main`.** Never stack PRs (squash-merge + stacking caused recovery-PR cascades). Prefer fewer, batched PRs over one-per-fix.
 - **Performance is gated.** `tests/perf_baseline.json` is the canonical baseline (CI: 3% decode / 5% prefill thresholds). Refresh via `scripts/gen_perf_baseline.sh` when a change intentionally moves perf, and say so in the PR.
-- Runtime config lives in `src/runtime/config.h` as `RuntimeConfig` (loaded from `imp.conf` + `--config`; legacy `IMP_*` env vars still seed it). Don't reintroduce ad-hoc env-var reads.
+- Runtime config lives in `src/runtime/config.h` as `RuntimeConfig` (loaded from `imp.conf` + `--config` + `--set`; the only env vars still seeded are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2` — the rest of the legacy `IMP_*` surface was retired 2026-07-07). Don't reintroduce ad-hoc env-var reads.
 - Internal errors throw and are translated to `ImpError` at the `src/api/imp_api.cpp` boundary — this is intentional, don't convert those throws to status returns.
 - Match surrounding code style; keep it simple and direct, no speculative abstraction.
 

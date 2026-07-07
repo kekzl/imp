@@ -376,7 +376,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         //
         // Cross-converted checkpoints (HF → GGUF → HF, or weights re-packed by
         // a third-party tool) can ship in the opposite layout. Override via
-        // gdn.layout_override="tiled" (legacy IMP_GDN_LAYOUT=tiled); default
+        // gdn.layout_override="tiled"; default
         // for SafeTensors stays grouped.
         cfg.gdn_grouped_head_layout = true;
         {

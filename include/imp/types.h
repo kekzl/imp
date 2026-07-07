@@ -16,8 +16,8 @@ typedef enum {
     IMP_DTYPE_INT4 = 6,
     IMP_DTYPE_INT32 = 7,
     IMP_DTYPE_FP4_E2M1 = 8,
-    IMP_DTYPE_TURBOQUANT = 9,        // DEPRECATED: TurboQuant retired (Phase 5, 2026-05-17). Alias for IMP_DTYPE_MXFP4_KV.
-    IMP_DTYPE_TURBOQUANT_LITE = 10,  // DEPRECATED: TurboQuant Lite retired (Phase 5, 2026-05-17). Alias for IMP_DTYPE_MXFP4_KV.
+    // Values 9 and 10 (TURBOQUANT / TURBOQUANT_LITE aliases) removed 2026-07-07
+    // (TurboQuant retired Phase 5, 2026-05-17; the aliases had no callers).
     IMP_DTYPE_NVFP4 = 11,            // NVFP4 KV cache: packed FP4 + UE4M3 per-group_of_16 scales
     IMP_DTYPE_MXFP4_KV = 12,        // MXFP4-KV cache: packed FP4 + UE8M0 per-group_of_16 scales (Path A retirement target)
 } ImpDType;

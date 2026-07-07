@@ -255,7 +255,7 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         // RELEASE budget, never tighten it vs the previous behavior. Floor
         // at 256 MiB to keep workspace + scratch room.
         //
-        // IMP_MOE_RESERVE_MIB still overrides for manual tuning (range
+        // moe.reserve_mib still overrides for manual tuning (range
         // 128-4096 MiB).
         int n_attn_layers = 0;
         for (int i = 0; i < cfg.n_layers; i++) {

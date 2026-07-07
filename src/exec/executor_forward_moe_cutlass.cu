@@ -92,7 +92,7 @@ bool device_args_done = false;
     // pp512 vs the legacy host-args + smallM dispatch on
     // Qwen3-Coder / Qwen3.6 / Qwen3-30B-Modelopt / Gemma-4
     // NVFP4 (decode unchanged). Set moe.nvfp4_device_args=false
-    // (legacy IMP_NVFP4_DEVICE_ARGS=0) to force the legacy
+    // to force the legacy
     // path for A/B or workarounds.
     const bool da_enabled = runtime_config().moe.nvfp4_device_args;
     // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2
@@ -114,7 +114,7 @@ bool device_args_done = false;
         if (layer == 0 && !s_da_logged.exchange(true))
             IMP_LOG_INFO(
                 "MoE prefill: CUTLASS 3.x device-args full path "
-                "(default; set IMP_NVFP4_DEVICE_ARGS=0 to disable)");
+                "(default; set moe.nvfp4_device_args=false to disable)");
         // Populate device-resident d_M_per (no D2H).
         imp::compute_M_per_from_offsets_device(
             static_cast<const int32_t*>(routing.expert_offsets.data),
@@ -345,8 +345,8 @@ char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
 char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
 // ---------------------------------------------------------------------
-// Optional smallM kernel branch — opt-in via IMP_NVFP4_SMALLM=1.
-// Activates when max(M_per) <= IMP_NVFP4_SMALLM_THRESHOLD (default 64)
+// Optional smallM kernel branch — opt-in via moe.nvfp4_smallM.
+// Activates when max(M_per) <= moe.nvfp4_smallM_threshold (default 64)
 // AND all three NVFP4 native MoE pointers are populated for this layer
 // (the native [n_experts, N, K/16] layout is what smallM consumes).
 // Falls through to CUTLASS 3.x on any failure / unavailability.

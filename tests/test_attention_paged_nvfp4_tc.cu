@@ -21,7 +21,7 @@ namespace {
 // Equivalence on REAL input is covered by:
 // 1. Phase-0 microbench (`tools/analysis/bench_nvfp4_qk_tc_vs_scalar.sh`):
 //    isolated Q.K dot, max_abs_err 9.15e-05 rel 1.10e-04 vs scalar reference.
-// 2. End-to-end smoke (Qwen3-8B Q8_0 + --kv-nvfp4 + IMP_USE_BITDECODING_QK=1):
+// 2. End-to-end smoke (Qwen3-8B Q8_0 + --kv-nvfp4 + kv_cache.bitdecoding_qk=true):
 //    both paths produce "The capital of France is Paris" coherent.
 // 3. SASS audit: TC kernel emits 24 HMMA per template instantiation; scalar
 //    kernel remains 0 HMMA / 346 scalar (default path unchanged).

@@ -13,7 +13,7 @@
 namespace imp {
 
 // runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local"
-// (legacy env: IMP_GRAPH_CAPTURE_MODE). Selects the cudaStreamCaptureMode
+// Selects the cudaStreamCaptureMode
 // used by CudaGraphCapture::begin_capture and the ConditionalRunner body-graph
 // capture. Probed at first call and cached.
 //

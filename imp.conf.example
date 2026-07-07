@@ -108,7 +108,6 @@ fp8_prefill          = "auto"
 fp8_fmha             = "never"
 # amax-scaled e4m3 QK conversion on the fp8-QK path (only takes effect when
 # fa2_fp16qk=never or declined). Experimental quality probe; default off.
-# Legacy env: IMP_FP8_QK_SCALED.
 fp8_qk_scaled        = false
 fmha_sm120           = "auto"
 # Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).

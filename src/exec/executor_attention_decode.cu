@@ -163,8 +163,7 @@
         } else if (cache_dtype == QType::NVFP4) {
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk (legacy
-            // IMP_USE_BITDECODING_QK=1) routes to the WMMA-Q.K variant; default
+            // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk routes to the WMMA-Q.K variant; default
             // keeps the scalar-FFMA path unchanged.
             const bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc) {

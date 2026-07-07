@@ -254,7 +254,7 @@ void Engine::init_resolve_fp8_prefill_() {
             IMP_LOG_INFO("FP8 prefill: auto → enabled");
         }
     } else if (no_fp8_prefill) {
-        IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
+        IMP_LOG_INFO("FP8 prefill: disabled (attention.fp8_prefill=never)");
     }
 }
 

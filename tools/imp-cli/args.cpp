@@ -47,8 +47,8 @@ void print_usage(const char* prog) {
             "                        Default is FP16 KV — FP8 is not safe on every\n"
             "                        model (Mistral-Small-3.1 Q6_K, DeepSeek-R1,\n"
             "                        Qwen3.5-GDN Q8_0, Gemma-4 all hit a stride bug).\n"
-            "  --kv-fp16             (default, no-op) — was an escape hatch under\n"
-            "                        the old auto-FP8 default.\n"
+            "  --kv-fp16             Force FP16 KV cache (opts out of the auto FP8\n"
+            "                        upgrade for models with a kv-FP8 author hint).\n"
             "  --no-fp8-prefill      Disable auto FP8 weight cache for prefill.\n"
             "                        Use with --kv-fp16 --no-nvfp4 for full FP16\n"
             "                        path (fixes DeepSeek-R1 Q6_K garbage output).\n"
@@ -56,11 +56,7 @@ void print_usage(const char* prog) {
             "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
             "  --kv-nvfp4            Use NVFP4 KV cache (quarters KV memory; FP4 + E4M3 scales)\n"
             "  --kv-mxfp4            Use MXFP4-KV cache (quarters KV memory; FP4 + UE8M0 scales)\n"
-            "  --kv-turboquant       [DEPRECATED] Alias for --kv-mxfp4\n"
-            "  --kv-turboquant-lite  [DEPRECATED] Alias for --kv-mxfp4\n"
-            "  --tq-sketch-mult <n>  [DEPRECATED, ignored]\n"
             "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50% SSM VRAM)\n"
-            "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma, "
             "deepseek_r1, phi\n"
@@ -171,10 +167,11 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--kv-fp8") == 0) {
             args.kv_fp8 = true;
         } else if (std::strcmp(arg, "--kv-fp16") == 0) {
-            // Force FP16 KV cache via the same IMP_KV_FP16 env var the engine reads.
-            setenv("IMP_KV_FP16", "1", 1);
+            // Force FP16 KV cache — opts out of the "auto" FP8 upgrade for
+            // models that ship a kv_cache_quant_algo=FP8 hint.
+            args.config_overrides.push_back("kv_cache.dtype=fp16");
         } else if (std::strcmp(arg, "--no-fp8-prefill") == 0) {
-            setenv("IMP_NO_FP8_PREFILL", "1", 1);
+            args.config_overrides.push_back("attention.fp8_prefill=never");
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--kv-int4") == 0) {
@@ -183,16 +180,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.kv_nvfp4 = true;
         } else if (std::strcmp(arg, "--kv-mxfp4") == 0) {
             args.kv_mxfp4 = true;
-        } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
-            args.kv_turboquant = true;  // deprecated alias → kv_mxfp4
-        } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {
-            args.kv_turboquant_lite = true;  // deprecated alias → kv_mxfp4
-        } else if (std::strcmp(arg, "--tq-sketch-mult") == 0 && i + 1 < argc) {
-            ++i;  // consume the argument; flag is deprecated and ignored
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
             args.ssm_fp16 = true;
-        } else if (std::strcmp(arg, "--cuda-graphs") == 0) {
-            // no-op: cuda graphs enabled by default now
         } else if (std::strcmp(arg, "--no-cuda-graphs") == 0) {
             args.no_cuda_graphs = true;
         } else if (std::strcmp(arg, "--chat-template") == 0 && i + 1 < argc) {

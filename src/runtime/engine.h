@@ -328,7 +328,7 @@ private:
     // Prefill graph runner — captures forward_logits for non-last chunks of
     // chunked prefill. Single runner: in practice chunk_len == prefill_chunk_size
     // for all non-last chunks, so per-shape variability collapses to one shape.
-    // Opt-in via IMP_PREFILL_GRAPH=1 (Phase 4 of MoE-prefill-graphs work).
+    // Gated by runtime.prefill_graph (Phase 4 of MoE-prefill-graphs work).
     CudaGraphRunner prefill_graph_runner_;
     int last_prefill_chunk_len_ = -1;
     int last_prefill_block_count_ = -1;
@@ -743,7 +743,7 @@ private:
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
     // for control-tagged tokens (authoritative GGUF token_types) or falls back
     // to heuristic patterns. Excludes stop/EOS/think/channel tokens. Bypassed
-    // by IMP_NO_BAN=1 for bisecting NVFP4 repetition issues.
+    // by generation.no_ban for bisecting NVFP4 repetition issues.
     void build_banned_token_list();
 
     // ── Inference helpers ────────────────────────────────────────────

@@ -3,7 +3,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
@@ -299,9 +298,13 @@ std::string home_dir() {
     return {};
 }
 
-// Backward-compat: legacy IMP_* env vars seed the matching RuntimeConfig
-// fields before [imp.conf] file overrides. Semantics preserved exactly
-// per original call-site checks (see review/phase3_maint.md §9.1).
+// Env seeding, deliberately minimal. imp.conf + --set replaced the old
+// ~30-var legacy IMP_* surface (retired 2026-07-07 — no producers existed);
+// only the two vars with real in-repo producers remain:
+//   IMP_DETERMINISTIC — set by tests (test_determinism_e2e, test_lora) to
+//     inject determinism through the public API without a config file.
+//   IMP_FMHA_FA2 — set by the roofline A/B harness (tools/roofline/roofline.py)
+//     to toggle the FA2 prefill kernel per subprocess.
 void seed_from_env(RuntimeConfig& cfg) {
     // runtime.deterministic — IMP_DETERMINISTIC: '1'/'true' enables full
     // reproducibility (also implies deterministic_gemm).
@@ -311,134 +314,10 @@ void seed_from_env(RuntimeConfig& cfg) {
             cfg.runtime.deterministic_gemm = true;
     }
 
-    // moe.reserve_mib — IMP_MOE_RESERVE_MIB: integer MiB.
-    if (const char* e = std::getenv("IMP_MOE_RESERVE_MIB"))
-        cfg.moe.reserve_mib = parse_int(e, cfg.moe.reserve_mib);
-
-    // kv_cache.bitdecoding_qk — IMP_USE_BITDECODING_QK: '1' enables.
-    if (const char* e = std::getenv("IMP_USE_BITDECODING_QK"))
-        cfg.kv_cache.bitdecoding_qk = (e[0] == '1');
-
-    // moe.nvfp4_device_args — IMP_NVFP4_DEVICE_ARGS: '0' disables, default ON.
-    if (const char* e = std::getenv("IMP_NVFP4_DEVICE_ARGS"))
-        cfg.moe.nvfp4_device_args = (std::atoi(e) != 0);
-
-    // gemm.nvfp4_lm_head — IMP_NO_NVFP4_LM_HEAD: '1' disables the FP16-LM-head
-    // NVFP4 decode cache (default ON).
-    if (const char* e = std::getenv("IMP_NO_NVFP4_LM_HEAD"))
-        cfg.gemm.nvfp4_lm_head = (std::atoi(e) == 0);
-
-    // gemm.nvfp4_moe_decode — IMP_NO_NVFP4_MOE_DECODE: '1' disables the fast
-    // per-expert NVFP4 MoE decode path (default ON).
-    if (const char* e = std::getenv("IMP_NO_NVFP4_MOE_DECODE"))
-        cfg.gemm.nvfp4_moe_decode = (std::atoi(e) == 0);
-
-    // attention.attn_scores_mib — IMP_ATTN_SCORES_MIB: cuBLAS attention S-matrix cap.
-    if (const char* e = std::getenv("IMP_ATTN_SCORES_MIB")) {
-        int v = std::atoi(e);
-        if (v > 0)
-            cfg.attention.attn_scores_mib = v;
-    }
-
     // attention.fmha_fa2 — IMP_FMHA_FA2: '1' enables the register-resident FA2
     // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
     if (const char* e = std::getenv("IMP_FMHA_FA2"))
         cfg.attention.fmha_fa2 = (std::atoi(e) != 0) ? "on" : "never";
-
-    // attention.fa2_f16acc — IMP_FA2_F16ACC: '1' enables f16-accumulate QK^T
-    // in the fp16-qk FA2 kernel (#597, +3-4% long-ctx prefill / +0.37% PPL).
-    if (const char* e = std::getenv("IMP_FA2_F16ACC"))
-        cfg.attention.fa2_f16acc = (std::atoi(e) != 0);
-
-    // attention.fa2_pv_f16acc — IMP_FA2_PV_F16ACC: '1' also accumulates the
-    // PV MMA in f16 (full-rate HMMA + halved O-fragment registers).
-    if (const char* e = std::getenv("IMP_FA2_PV_F16ACC"))
-        cfg.attention.fa2_pv_f16acc = (std::atoi(e) != 0);
-
-    // attention.fp8_qk_scaled — IMP_FP8_QK_SCALED: '1' enables amax-scaled
-    // e4m3 conversion in the fp8-QK FA2 path (#680).
-    if (const char* e = std::getenv("IMP_FP8_QK_SCALED"))
-        cfg.attention.fp8_qk_scaled = (std::atoi(e) != 0);
-
-    // moe.nvfp4_smallM — IMP_NVFP4_SMALLM: integer != 0 enables.
-    if (const char* e = std::getenv("IMP_NVFP4_SMALLM"))
-        cfg.moe.nvfp4_smallM = (std::atoi(e) != 0);
-
-    // moe.nvfp4_smallM_threshold — IMP_NVFP4_SMALLM_THRESHOLD: clamped int.
-    if (const char* e = std::getenv("IMP_NVFP4_SMALLM_THRESHOLD")) {
-        int v = std::atoi(e);
-        if (v < 0)
-            v = 0;
-        if (v > 128)
-            v = 128;
-        cfg.moe.nvfp4_smallM_threshold = v;
-    }
-
-    // moe.mr_nr — IMP_MOE_MR_NR: rows-per-block for NVFP4 MoE decode kernels.
-    if (const char* e = std::getenv("IMP_MOE_MR_NR"))
-        cfg.moe.mr_nr = std::atoi(e);
-
-    // diagnostics.nvfp4_force_dequant — IMP_NVFP4_FORCE_DEQUANT: '1' only.
-    if (const char* e = std::getenv("IMP_NVFP4_FORCE_DEQUANT"))
-        cfg.diagnostics.nvfp4_force_dequant = (e[0] == '1');
-
-    // diagnostics.log_gemm_algo — IMP_LOG_GEMM_ALGO: '1' only.
-    if (const char* e = std::getenv("IMP_LOG_GEMM_ALGO"))
-        cfg.diagnostics.log_gemm_algo = (e[0] == '1');
-
-    // runtime.graph_capture_mode — IMP_GRAPH_CAPTURE_MODE: string.
-    if (const char* e = std::getenv("IMP_GRAPH_CAPTURE_MODE"))
-        cfg.runtime.graph_capture_mode = e;
-
-    // runtime.prefill_graph — IMP_PREFILL_GRAPH: presence enables.
-    if (std::getenv("IMP_PREFILL_GRAPH") != nullptr)
-        cfg.runtime.prefill_graph = true;
-
-    // generation.no_ban — IMP_NO_BAN: '1' only.
-    if (const char* e = std::getenv("IMP_NO_BAN"))
-        cfg.generation.no_ban = (e[0] == '1');
-
-    // generation.mtp_no_rope — IMP_MTP_NO_ROPE: set AND first char != '0'.
-    // Note: empty string ('\0' != '0') enables. Preserves original behavior.
-    if (const char* e = std::getenv("IMP_MTP_NO_ROPE"))
-        cfg.generation.mtp_no_rope = (e[0] != '0');
-
-    // diagnostics.mtp_pattern_log — IMP_MTP_PATTERN_LOG: non-empty AND first char != '0'.
-    if (const char* e = std::getenv("IMP_MTP_PATTERN_LOG"))
-        cfg.diagnostics.mtp_pattern_log = (std::strlen(e) > 0 && e[0] != '0');
-
-    // diagnostics.mtp_prenorm_h — IMP_MTP_PRENORM_H: same convention.
-    if (const char* e = std::getenv("IMP_MTP_PRENORM_H"))
-        cfg.diagnostics.mtp_prenorm_h = (std::strlen(e) > 0 && e[0] != '0');
-
-    // diagnostics.audit_nvfp4_scales — IMP_AUDIT_NVFP4_SCALES: presence enables.
-    if (std::getenv("IMP_AUDIT_NVFP4_SCALES") != nullptr)
-        cfg.diagnostics.audit_nvfp4_scales = true;
-
-    // gdn.layout_override — IMP_GDN_LAYOUT: string value.
-    if (const char* e = std::getenv("IMP_GDN_LAYOUT"))
-        cfg.gdn.layout_override = e;
-
-    // ffn.sparsity_probe — IMP_FFN_SPARSITY_PROBE: '1' enables.
-    if (const char* e = std::getenv("IMP_FFN_SPARSITY_PROBE"))
-        cfg.ffn.sparsity_probe = (e[0] == '1');
-
-    // ffn.sparsity_threshold — IMP_FFN_SPARSITY_THRESHOLD: float.
-    if (const char* e = std::getenv("IMP_FFN_SPARSITY_THRESHOLD"))
-        cfg.ffn.sparsity_threshold = parse_float(e, cfg.ffn.sparsity_threshold);
-
-    // speculative.ngram — IMP_SPEC_NGRAM: '1' enables.
-    if (const char* e = std::getenv("IMP_SPEC_NGRAM"))
-        cfg.speculative.ngram = (e[0] == '1');
-
-    // speculative.k — IMP_SPEC_K: int.
-    if (const char* e = std::getenv("IMP_SPEC_K"))
-        cfg.speculative.k = parse_int(e, cfg.speculative.k);
-
-    // attention.fp8_prefill — IMP_NO_FP8_PREFILL: '1' sets fp8_prefill="never".
-    if (const char* e = std::getenv("IMP_NO_FP8_PREFILL"))
-        if (e[0] == '1')
-            cfg.attention.fp8_prefill = "never";
 }
 
 }  // anonymous namespace

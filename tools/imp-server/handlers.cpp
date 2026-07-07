@@ -246,8 +246,6 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
     bool kv_nvfp4 = overrides.value("kv_nvfp4", args.kv_nvfp4);
     bool kv_mxfp4 = overrides.value("kv_mxfp4", args.kv_mxfp4);
-    bool kv_turboquant = overrides.value("kv_turboquant", args.kv_turboquant);
-    bool kv_turboquant_lite = overrides.value("kv_turboquant_lite", args.kv_turboquant_lite);
     if (kv_fp8)
         config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (kv_int8)
@@ -258,26 +256,6 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
         config.kv_cache_dtype = IMP_DTYPE_NVFP4;
     if (kv_mxfp4)
         config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
-    if (kv_turboquant) {
-        // DEPRECATED: TurboQuant retired — falls back to MXFP4-KV
-        static bool warned_tq = false;
-        if (!warned_tq) {
-            fprintf(stderr, "[IMP WARN] --kv-turboquant is deprecated; TurboQuant has been retired. "
-                            "Using --kv-mxfp4 instead.\n");
-            warned_tq = true;
-        }
-        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
-    }
-    if (kv_turboquant_lite) {
-        // DEPRECATED: TurboQuant Lite retired — falls back to MXFP4-KV
-        static bool warned_tql = false;
-        if (!warned_tql) {
-            fprintf(stderr, "[IMP WARN] --kv-turboquant-lite is deprecated; TurboQuant has been retired. "
-                            "Using --kv-mxfp4 instead.\n");
-            warned_tql = true;
-        }
-        config.kv_cache_dtype = IMP_DTYPE_MXFP4_KV;
-    }
 
     int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
     // Default chunk = -1 → engine resolver picks per-arch default (512 for

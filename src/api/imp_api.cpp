@@ -85,8 +85,7 @@ const char* imp_error_string(ImpError err) {
 ImpConfig imp_config_default(void) {
     ImpConfig config;
     config.device_id = 0;
-    config.gpu_memory_pool_size = 0;  // auto
-    config.kv_cache_max_blocks = 0;   // auto
+    config.kv_cache_max_blocks = 0;  // auto
     config.max_batch_size = 0;        // auto (engine detects from model size)
     config.max_seq_len = 0;           // auto (engine detects from model metadata + VRAM)
     config.compute_dtype = IMP_DTYPE_FP16;
@@ -111,9 +110,7 @@ ImpConfig imp_config_default(void) {
     config.use_prefix_caching = 0;            // off by default
     config.prefix_cache_path[0] = '\0';       // no persistence by default
     config.prefix_pin_budget_pct = 25;        // cache_control pins capped at 25% of the KV pool
-    config.num_cpu_threads = 0;               // auto
     config.mmproj_path = NULL;                // no vision model
-    config.turboquant_sketch_multiplier = 2;  // sketch_dim = 2 * head_dim
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
     config.streaming_kv_auto = 1;             // auto-enable when KV cache >90% full
     config.streaming_kv_n_sinks = 4;          // StreamingLLM paper default
@@ -185,30 +182,6 @@ static imp::QType map_dtype(ImpDType dt) {
             return imp::QType::INT32;
         case IMP_DTYPE_FP4_E2M1:
             return imp::QType::FP4_E2M1;
-        case IMP_DTYPE_TURBOQUANT:
-            // DEPRECATED: TurboQuant retired. IMP_DTYPE_TURBOQUANT is kept for ABI
-            // compatibility and silently maps to MXFP4_KV. Callers should switch to
-            // IMP_DTYPE_MXFP4_KV. A one-shot warning is printed the first time.
-            {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    IMP_LOG_WARN("IMP_DTYPE_TURBOQUANT is deprecated (TurboQuant retired). "
-                                 "Using IMP_DTYPE_MXFP4_KV instead.");
-                }
-            }
-            return imp::QType::MXFP4_KV;
-        case IMP_DTYPE_TURBOQUANT_LITE:
-            // DEPRECATED: TurboQuant Lite retired. Maps to MXFP4_KV.
-            {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    IMP_LOG_WARN("IMP_DTYPE_TURBOQUANT_LITE is deprecated (TurboQuant retired). "
-                                 "Using IMP_DTYPE_MXFP4_KV instead.");
-                }
-            }
-            return imp::QType::MXFP4_KV;
         case IMP_DTYPE_NVFP4:
             return imp::QType::NVFP4;
         case IMP_DTYPE_MXFP4_KV:
@@ -403,8 +376,6 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;
         ecfg.prefix_pin_budget_pct = config->prefix_pin_budget_pct;
-        // config->turboquant_sketch_multiplier is deprecated and ignored (kept in
-        // ImpConfig for ABI compatibility only).
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
         ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);

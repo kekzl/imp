@@ -320,8 +320,7 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
 static constexpr int kMaxAlgoCandidates = 8;
 static constexpr int kBenchmarkIters = 5;
 
-// Diagnostic: when diagnostics.log_gemm_algo (legacy IMP_LOG_GEMM_ALGO=1)
-// is set, log shape + per-candidate algoId/tileId + chosen algo for every
+// Diagnostic: when diagnostics.log_gemm_algo is set, log shape + per-candidate algoId/tileId + chosen algo for every
 // benchmark_and_select_algo call. Used to enumerate which exact GEMM shapes
 // select cuBLAS legacy WMMA kernels (Finding 1/5).
 static int gemm_algo_log_enabled() { return imp::process_diag_log_gemm_algo() ? 1 : 0; }
@@ -352,7 +351,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.workspace_size = 0;
         return;
     }
-    // [diag] IMP_LOG_GEMM_ALGO: dump shape + per-candidate algoId/tileId.
+    // [diag] diagnostics.log_gemm_algo: dump shape + per-candidate algoId/tileId.
     // Helps identify which shapes are stuck on legacy WMMA candidates.
     if (gemm_algo_log_enabled() && M > 0) {
         fprintf(stderr, "[gemm-algo] shape M=%d N=%d K=%d  candidates=%d\n", M, N, K, nresults);

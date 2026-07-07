@@ -170,7 +170,7 @@ bool Engine::init_features() {
 }
 
 void Engine::build_banned_token_list() {
-    // Diagnostic bypass: generation.no_ban (legacy IMP_NO_BAN=1) disables the
+    // Diagnostic bypass: generation.no_ban disables the
     // ban list. Used to bisect Mistral-Small-3.2-NVFP4 long-form repetition
     // (ban vs weight quality).
     if (runtime_config_.generation.no_ban) {

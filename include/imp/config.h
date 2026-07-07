@@ -13,8 +13,7 @@ typedef struct {
     int device_id;
 
     // Memory
-    size_t gpu_memory_pool_size;  // Pre-allocated GPU pool (bytes), 0 = auto
-    size_t kv_cache_max_blocks;   // Max KV cache blocks, 0 = auto
+    size_t kv_cache_max_blocks;  // Max KV cache blocks, 0 = auto
 
     // Inference
     int max_batch_size;
@@ -38,11 +37,6 @@ typedef struct {
 
     // KV cache precision
     ImpDType kv_cache_dtype;  // FP16 (default), FP8_E4M3, INT8, INT4, NVFP4, or MXFP4_KV
-
-    // [DEPRECATED, ignored] turboquant_sketch_multiplier was the QJL sketch dimension
-    // multiplier for TurboQuant Lite. TurboQuant was retired in Phase 5 (2026-05-17).
-    // Retained for ABI compatibility; the engine ignores this value.
-    int turboquant_sketch_multiplier;  // deprecated, ignored
 
     // SSM state precision
     ImpDType ssm_state_dtype;  // FP32 (default) or FP16 for SSM h_state
@@ -89,9 +83,6 @@ typedef struct {
     int streaming_kv_window;     // sliding window size (0 = use ModelConfig::sliding_window)
     int streaming_kv_threshold;  // ctx_len at which streaming activates
                                  // (0 = auto: n_sinks + window + 2*kKVBlockSize)
-
-    // Threading
-    int num_cpu_threads;  // 0 = auto (hardware_concurrency)
 
     // Vision (multimodal)
     const char* mmproj_path;  // Path to mmproj GGUF file (NULL = text-only)

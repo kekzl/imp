@@ -105,12 +105,6 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.kv_nvfp4 = true;
         } else if (std::strcmp(arg, "--kv-mxfp4") == 0) {
             args.kv_mxfp4 = true;
-        } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
-            args.kv_turboquant = true;  // deprecated alias → kv_mxfp4
-        } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {
-            args.kv_turboquant_lite = true;  // deprecated alias → kv_mxfp4
-        } else if (std::strcmp(arg, "--tq-sketch-mult") == 0 && i + 1 < argc) {
-            ++i;  // consume the argument; flag is deprecated and ignored
         } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {
