@@ -234,7 +234,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec1 = 0;
         ws->mrope_sec2 = 0;
     }
-    // Diagnostic: generation.mtp_no_rope (legacy IMP_MTP_NO_ROPE=1) disables RoPE entirely.
+    // Diagnostic: generation.mtp_no_rope disables RoPE entirely.
     if (runtime_config_.generation.mtp_no_rope) {
         ws->rope_dim = 0;
     }

@@ -172,8 +172,8 @@ Performance:
   --kv-int4                 INT4 KV cache (quality cost; long-ctx only)
   --kv-nvfp4                NVFP4 KV cache (FP4 + E4M3 scales, 25% of FP16)
   --kv-mxfp4                MXFP4-KV cache (FP4 + UE8M0 scales, 25% of FP16)
-  --kv-fp16                 Force FP16 KV cache (the current default)
-  (--kv-turboquant{,-lite}  DEPRECATED post-PR #251; aliased to --kv-mxfp4)
+  --kv-fp16                 Force FP16 KV cache (opts out of the auto FP8
+                            upgrade for models with a kv-FP8 author hint)
   --prefill-fp8             FP8 weight cache for prefill
   --prefill-chunk-size <n>  Max tokens per prefill chunk (default: 0)
   --decode-nvfp4            NVFP4 decode cache (FP16 prefill + NVFP4 decode)

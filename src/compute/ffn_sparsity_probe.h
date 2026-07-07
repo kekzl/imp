@@ -16,8 +16,7 @@ namespace imp {
 // (one line per (layer, threshold) pair + one model-aggregate line) and
 // resets the counters.
 //
-// Off unless ffn.sparsity_probe = true in imp.conf (or
-// IMP_FFN_SPARSITY_PROBE=1 in the env). When off, the public functions
+// Off unless ffn.sparsity_probe = true in imp.conf. When off, the public functions
 // short-circuit before any device work.
 void probe_ffn_silu_sparsity(int layer, const __half* gate, const __half* up, int K,
                              cudaStream_t stream);

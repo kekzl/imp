@@ -103,7 +103,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             tmp.K = static_cast<int>(x.shape[1]);
 
             int M = static_cast<int>(x.shape[0]);
-            // Diagnostic: diagnostics.nvfp4_force_dequant (legacy IMP_NVFP4_FORCE_DEQUANT=1)
+            // Diagnostic: diagnostics.nvfp4_force_dequant
             // routes the M=1 decode path through gemm_nvfp4 (dequant→cuBLAS
             // GEMV) instead of the native gemv_nvfp4_kpar kernel. Used to
             // bisect Mistral-Small-3.2-NVFP4 long-form repetition loops — if

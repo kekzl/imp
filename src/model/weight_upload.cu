@@ -2084,8 +2084,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.
     if (config_.is_nvfp4_prequant) {
         int scale_count = 0;
-        // Diagnostic: diagnostics.audit_nvfp4_scales (legacy
-        // IMP_AUDIT_NVFP4_SCALES=1) dumps per-slot stats for weight_scale_2
+        // Diagnostic: diagnostics.audit_nvfp4_scales
+        // dumps per-slot stats for weight_scale_2
         // (tensor-level FP32 scalar) BEFORE upload, so we can bisect
         // Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges against
         // a known-good model (e.g. Gemma-4-NVFP4).

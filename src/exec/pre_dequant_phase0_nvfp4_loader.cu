@@ -354,12 +354,12 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             // at inference: the long-context-bug investigation refuted the
             // hypothesis that absorbing it would fix Mistral-3.2-NVFP4
             // drift (see memory `llm_compressor_input_scale_dead_end_2026_05_07.md`).
-            // Loading is kept as a diagnostic path: pass IMP_AUDIT_NVFP4_SCALES=1
-            // for per-Linear stats. Without that env var, scratch tensors
+            // Loading is kept as a diagnostic path: set diagnostics.audit_nvfp4_scales
+            // for per-Linear stats. Without it, scratch tensors
             // are skipped during GPU upload (no VRAM cost).
             IMP_LOG_INFO(
                 "NVFP4 prequant: %d Linears carry input_scale (intentionally NOT applied; "
-                "set IMP_AUDIT_NVFP4_SCALES=1 for stats).",
+                "set diagnostics.audit_nvfp4_scales=true for stats).",
                 n_with_input_scale);
         }
     }

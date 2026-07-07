@@ -374,8 +374,8 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     // -----------------------------------------------------------------------
     // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays.
     // -----------------------------------------------------------------------
-    // The CUTLASS 3.x device-args dispatch (Phase 3c-full Step 2b, opt-in via
-    // IMP_NVFP4_DEVICE_ARGS=1) consumes per-expert weight pointers as
+    // The CUTLASS 3.x device-args dispatch (Phase 3c-full Step 2b,
+    // moe.nvfp4_device_args) consumes per-expert weight pointers as
     // device-resident arrays. Per-call host iteration + 3× cudaMemcpyAsync
     // (~3 KiB total) was the residual overhead blocking full CUDA-graph
     // capture of the MoE prefill. Build the caches once here while the

@@ -65,7 +65,7 @@ struct RuntimeConfig {
         // Set graph_capture_mode = "global" via imp.conf to opt back into
         // the legacy strict mode (any decode regression should also be
         // investigated under "thread_local" before assuming relaxed is the
-        // cause). Legacy env: IMP_GRAPH_CAPTURE_MODE.
+        // cause).
         std::string graph_capture_mode = "relaxed";
         // Capture prefill into a CUDA graph (in addition to decode). Default
         // flipped 2026-05-17 after the M3 Phase 4 A/B sweep across
@@ -80,7 +80,7 @@ struct RuntimeConfig {
         // noise documented in CLAUDE.md) but the candidate (relaxed)
         // never regressed below baseline. Opt out via
         // `--set runtime.prefill_graph=false` or imp.conf if a model
-        // regresses. Legacy env: IMP_PREFILL_GRAPH.
+        // regresses.
         bool prefill_graph = true;
         // 0 = auto: the engine sizes the decode batch from the model's weight
         // footprint (a >20 GiB MoE auto-picks 1). A positive value forces it.
@@ -135,8 +135,7 @@ struct RuntimeConfig {
         // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
         // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
         int bitdecoding_residual_tokens = 0;
-        // BitDecoding TC path for NVFP4 paged attention QK. Legacy env:
-        // IMP_USE_BITDECODING_QK.
+        // BitDecoding TC path for NVFP4 paged attention QK.
         bool bitdecoding_qk = false;
     } kv_cache;
 
@@ -179,7 +178,7 @@ struct RuntimeConfig {
         // scores are softmaxed immediately, so the reduced accumulate
         // precision stays in the noise. Default ON since 2026-06-11; set
         // false to restore f32 accumulate. Only affects the fa2_fp16qk path,
-        // the fp8-QK path keeps f32 accumulate. Env: IMP_FA2_F16ACC.
+        // the fp8-QK path keeps f32 accumulate.
         bool fa2_f16acc = true;
         // f16-accumulate the PV MMA as well. Post-#673 the PV accumulate was
         // the last 1/4-rate HMMA in the FA2 kernel, dominating its tensor-
@@ -191,13 +190,13 @@ struct RuntimeConfig {
         // convex combinations of V, so range is safe; the per-tile rescale
         // rounding stays below the f16 output precision). Default ON since
         // 2026-06-11; set false to restore f32 PV accumulate. Requires
-        // fa2_f16acc. Env: IMP_FA2_PV_F16ACC.
+        // fa2_f16acc.
         bool fa2_pv_f16acc = true;
         // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
         // raw conversion is the #511 quality cliff; scaling Q and K to the
         // full e4m3 range is the numerics class FlashInfer runs. Only
         // takes effect on the fp8-QK path (fa2_fp16qk=never or declined).
-        // Experimental quality probe. Env: IMP_FP8_QK_SCALED.
+        // Experimental quality probe.
         bool fp8_qk_scaled = false;
         std::string mxfp4 = "auto";
         // #846 NVFP4-attention spike (SageAttention3 recipe). All three only
@@ -260,7 +259,7 @@ struct RuntimeConfig {
         // 256 MiB caps ~32-head models at seq 2048 but high-head-count models
         // (e.g. Qwen3-14B, 40 heads → ~1824) drop to the slower FMHA at 2048.
         // Larger = longer prefill on the fast path, at the cost of KV headroom.
-        // Legacy env: IMP_ATTN_SCORES_MIB. Auto-shrinks if the alloc fails.
+        // Auto-shrinks if the alloc fails.
         // 384 keeps the fast cuBLAS attention path up to seq 2048 for up to
         // 48-head models (e.g. Qwen3-14B, 40 heads: +21% pp2048 vs the old 256
         // cap which dropped it to FMHA at ~1824). Only allocates what the
@@ -301,24 +300,20 @@ struct RuntimeConfig {
         bool no_shexp_gate = false;
         bool no_cutlass3x = false;
         // Per-process MoE workspace reserve override (MiB). 0 = use computed
-        // default. Legacy env: IMP_MOE_RESERVE_MIB.
+        // default.
         int reserve_mib = 0;
         // CUTLASS 3.x device-args full path for NVFP4 MoE prefill. Default ON
-        // since 2026-05-14 (+11-39% pp512 on 4-model A/B). Legacy env:
-        // IMP_NVFP4_DEVICE_ARGS (0 disables).
+        // since 2026-05-14 (+11-39% pp512 on 4-model A/B).
         bool nvfp4_device_args = true;
-        // Opt-in smallM kernel branch for NVFP4 MoE prefill. Legacy env:
-        // IMP_NVFP4_SMALLM.
+        // Opt-in smallM kernel branch for NVFP4 MoE prefill.
         bool nvfp4_smallM = false;
-        // Threshold M for smallM kernel (clamped to [0,128]). Legacy env:
-        // IMP_NVFP4_SMALLM_THRESHOLD.
+        // Threshold M for smallM kernel (clamped to [0,128]).
         int nvfp4_smallM_threshold = 64;
         // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels
         // (gemv_nvfp4_moe_{gate_up,decode}_mr<NR>). One warp computes one
         // row, so threads-per-block = NR * 32. Higher NR amortizes block
         // launch overhead at the cost of fewer concurrent CTAs. Valid
         // values: 4, 8 (default), 16, 32. Other values fall back to 8.
-        // Env: IMP_MOE_MR_NR.
         int mr_nr = 8;
     } moe;
 
@@ -348,7 +343,7 @@ struct RuntimeConfig {
         // exhaustively benched, Phase 1b.1 remains the fastest chunkwise
         // path on sm_120 — the WY-rep + TC-MMA variants all stay behind it.
         bool chunkwise_scan = true;
-        // Override gated-DeltaNet weight layout. Legacy env: IMP_GDN_LAYOUT.
+        // Override gated-DeltaNet weight layout.
         std::string layout_override;
     } gdn;
 
@@ -392,8 +387,7 @@ struct RuntimeConfig {
         // The GGUF path already NVFP4-caches a Q*_K/Q8_0 output_proj; this
         // extends the same win to native-NVFP4 dense models. Excluded for
         // GDN/SSM-hybrid models (LM-head NVFP4 degrades recurrent-state
-        // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted). Legacy
-        // env: IMP_NO_NVFP4_LM_HEAD=1 to disable.
+        // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted).
         bool nvfp4_lm_head = true;
         // FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F instead of
         // 32F). GeForce sm_120 runs FP16 tensor cores with FP32 accumulate at
@@ -421,8 +415,8 @@ struct RuntimeConfig {
         // run-to-run, so it's signal not noise). Default ON: the +11.4% decode
         // gain serves the primary mission metric (best batch=1 tok/s on the
         // 5090) and the +2.2% PPL cost is small; set false to keep the FP16
-        // lm_head for maximum coherence. Env IMP_NO_NVFP4_LM_HEAD=1 still kills
-        // the NVFP4 lm_head entirely (dense + GDN) via gemm.nvfp4_lm_head.
+        // lm_head for maximum coherence. gemm.nvfp4_lm_head=false still kills
+        // the NVFP4 lm_head entirely (dense + GDN).
         bool nvfp4_lm_head_gdn = true;
         // Batched-decode (n>1) LM head via a single CUTLASS NVFP4 tensor-core
         // GEMM instead of the FP16-activation batched-M GEMV. Reads the LM-head
@@ -468,7 +462,7 @@ struct RuntimeConfig {
         // already-resident contiguous expert data + scales, instead of the
         // CUTLASS grouped-GEMM (which under-utilizes the GPU at M=1). +54-80%
         // MoE decode on Qwen3-30B-A3B / Coder-30B / Gemma-4-26B. Prefill stays
-        // on CUTLASS. Legacy env: IMP_NO_NVFP4_MOE_DECODE=1 to disable.
+        // on CUTLASS.
         bool nvfp4_moe_decode = true;
     } gemm;
 
@@ -481,10 +475,9 @@ struct RuntimeConfig {
         bool no_logit_softcap = false;
         bool lm_dequant_fp16 = false;
         bool force_bos = false;
-        // Disable banned-token list (debug). Legacy env: IMP_NO_BAN.
+        // Disable banned-token list (debug).
         bool no_ban = false;
-        // Disable RoPE inside the MTP draft head (diagnostic). Legacy env:
-        // IMP_MTP_NO_ROPE.
+        // Disable RoPE inside the MTP draft head (diagnostic).
         bool mtp_no_rope = false;
     } generation;
 
@@ -702,7 +695,6 @@ struct RuntimeConfig {
         std::string graph_dump_dir;
         // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
         // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
-        // Legacy env: IMP_NVFP4_FORCE_DEQUANT.
         bool nvfp4_force_dequant = false;
         // Skip building the NVFP4 decode cache entirely (bisection/eval
         // tool): decode runs on the source-precision paths (dp4a GEMV for
@@ -716,16 +708,14 @@ struct RuntimeConfig {
         // outcomes — a capturability census, not a perf path.
         bool spec_capture_probe = false;
         // Log shape + per-candidate algoId/tileId + chosen algo for every
-        // benchmark_and_select_algo call. Legacy env: IMP_LOG_GEMM_ALGO.
+        // benchmark_and_select_algo call.
         bool log_gemm_algo = false;
-        // MTP pattern logging (predicted, actual, match per step). Legacy
-        // env: IMP_MTP_PATTERN_LOG.
+        // MTP pattern logging (predicted, actual, match per step).
         bool mtp_pattern_log = false;
         // MTP: pass main model's post-RMSNorm hidden to draft head (vLLM
-        // variant). Legacy env: IMP_MTP_PRENORM_H.
+        // variant).
         bool mtp_prenorm_h = false;
-        // Audit NVFP4 weight scales at load time. Legacy env:
-        // IMP_AUDIT_NVFP4_SCALES.
+        // Audit NVFP4 weight scales at load time.
         bool audit_nvfp4_scales = false;
         // Per-component VRAM accounting harness (MemAccount): lifecycle
         // checkpoints + per-pool notes + device-used peak sampler. Default off

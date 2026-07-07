@@ -29,8 +29,6 @@ struct ServerArgs {
     bool kv_int4 = false;
     bool kv_nvfp4 = false;
     bool kv_mxfp4 = false;
-    bool kv_turboquant = false;      // [DEPRECATED] alias for kv_mxfp4
-    bool kv_turboquant_lite = false; // [DEPRECATED] alias for kv_mxfp4
     int prefill_chunk_size = -1;  // -1 = per-arch default (2048 if supported, 0 otherwise)
     int decode_nvfp4 = -1;                      // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;                 // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill

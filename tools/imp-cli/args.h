@@ -50,8 +50,6 @@ struct CliArgs {
     bool kv_int4 = false;                // Use INT4 KV cache (quarter size)
     bool kv_nvfp4 = false;               // Use NVFP4 KV cache (quarter size, FP4 E2M1 + UE4M3 scales)
     bool kv_mxfp4 = false;              // Use MXFP4-KV cache (packed FP4 + UE8M0 scales)
-    bool kv_turboquant = false;          // [DEPRECATED] alias for kv_mxfp4 — emits one-shot WARN
-    bool kv_turboquant_lite = false;     // [DEPRECATED] alias for kv_mxfp4 — emits one-shot WARN
     bool ssm_fp16 = false;               // Use FP16 for SSM h_state
     bool no_cuda_graphs = false;         // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
