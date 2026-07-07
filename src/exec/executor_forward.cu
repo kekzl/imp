@@ -26,7 +26,6 @@
 #include "compute/gdn.h"
 #include "memory/kv_cache_manager.h"
 #include "exec/executor_kernels.h"
-#include "memory/gdn_state.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"

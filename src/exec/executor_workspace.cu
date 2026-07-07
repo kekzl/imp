@@ -2,6 +2,7 @@
 #include "exec/workspace.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
+#include "memory/mem_account.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -170,13 +171,12 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
         IMP_LOG_INFO("SSM layers: %d out of %d total", ssm_idx, cfg.n_layers);
     }
 
-    // Build GDN layer index mapping (Gated DeltaNet, e.g., Qwen3.5)
+    // Detect GDN layers (Gated DeltaNet, e.g., Qwen3.5)
     {
-        gdn_layer_map_.resize(cfg.n_layers, -1);
         int gdn_idx = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             if (model_->layer(i).gdn_gate.data != nullptr) {
-                gdn_layer_map_[i] = gdn_idx++;
+                gdn_idx++;
             }
         }
         if (gdn_idx > 0) {
@@ -291,6 +291,11 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     // behavior for Gemma-4 host experts).
     allocate_auxiliary_buffers(/*skip_batch_dequant=*/false);
     (void)experts_on_host;
+
+    // MemAccount per-pool attribution (vram_audit diagnostic). The estimate
+    // covers persistent + shared workspace, the dominant executor buffers.
+    MemAccount::instance().note("EXEC_WORKSPACES",
+                                static_cast<std::ptrdiff_t>(ws_.workspace_estimate()));
 
     return true;
 }

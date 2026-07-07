@@ -523,9 +523,8 @@ private:
     // Mode flags mirrored from wcache_ for PlanHints (hints_ is the Phase 5 source of truth).
     PlanHints hints_;
 
-    // The build-only StoragePlan (storage_plan_), plan_tier_of(), and
-    // apply_arch_rules_() moved into QuantPipeline (exec/quant_pipeline.h) —
-    // they have no hot-path reader.
+    // The build-only StoragePlan (storage_plan_) and apply_arch_rules_()
+    // moved into QuantPipeline (exec/quant_pipeline.h) — no hot-path reader.
 
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
     WeightRegistry registry_;
@@ -551,9 +550,6 @@ private:
 
     // Mapping from global layer index to SSM layer index (for SSMState access)
     std::vector<int> ssm_layer_map_;  // ssm_layer_map_[global_idx] = ssm_idx, or -1
-
-    // Mapping from global layer index to GDN layer index (for GDNState access)
-    std::vector<int> gdn_layer_map_;  // gdn_layer_map_[global_idx] = gdn_idx, or -1
 
     // Mapping from global layer index to KV cache layer index (for attention layers only)
     std::vector<int> kv_layer_map_;  // kv_layer_map_[global_idx] = kv_idx, or -1

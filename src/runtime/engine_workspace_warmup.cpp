@@ -130,7 +130,7 @@ bool Engine::init_features() {
                         token_is_whitespace_[id] = 1;
                 }
                 d_token_is_whitespace_ = static_cast<uint8_t*>(
-                    memory_manager_.vram_allocator().allocate(vocab * sizeof(uint8_t),
+                    vram_alloc_.allocate(vocab * sizeof(uint8_t),
                                                               "token_is_whitespace"));
                 if (d_token_is_whitespace_) {
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_is_whitespace_,
@@ -145,7 +145,7 @@ bool Engine::init_features() {
 
     // Vision
     if (!config_.mmproj_path.empty()) {
-        if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), memory_manager_.vram_allocator(), stream_))
+        if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), vram_alloc_, stream_))
             return false;
     }
 

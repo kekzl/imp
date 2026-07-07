@@ -393,8 +393,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // Staging buffer for host→device expert weight transfer
+        // Staging buffer for host→device expert weight transfer. Its only
+        // consumers are the `!packed.on_device` branches of the legacy MoE
+        // forward, so skip it entirely when every packed expert tensor is
+        // device-resident (the common all-on-device load).
         size_t max_expert_raw = 0;
+        bool any_host_packed_experts = false;
         {
             for (int li = 0; li < model_->n_layers(); li++) {
                 const auto& L = model_->layer(li);
@@ -404,12 +408,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     size_t rb = qtype_row_bytes(qt, p.shape[2]);
                     size_t expert_raw = static_cast<size_t>(p.shape[1]) * rb;
                     max_expert_raw = std::max(max_expert_raw, expert_raw);
+                    if (!p.on_device)
+                        any_host_packed_experts = true;
                 };
                 check(L.expert_up_packed, L.expert_up_packed.qtype);
                 check(L.expert_down_packed, L.expert_down_packed.qtype);
                 check(L.expert_gate_packed, L.expert_gate_packed.qtype);
             }
-            if (max_expert_raw > 0) {
+            if (max_expert_raw > 0 && any_host_packed_experts) {
                 moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
                 if (!moe_.raw_staging_buf) {
                     IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes)", max_expert_raw);
@@ -419,6 +425,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     IMP_LOG_INFO("MoE staging buffer: %.2f MiB (1 expert raw)",
                                  max_expert_raw / (1024.0 * 1024.0));
                 }
+            } else if (max_expert_raw > 0) {
+                IMP_LOG_INFO("MoE staging buffer: skipped (all packed experts on device)");
             }
         }
 

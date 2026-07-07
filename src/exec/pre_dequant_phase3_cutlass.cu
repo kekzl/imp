@@ -48,7 +48,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t
         // The dense in-loop safety relaxation already delivers the +15%
         // decode win; the CUTLASS path stays conservative until the
         // capture-failure root cause is understood.
-        size_t kCtReserve = std::max(total_mem / 10, static_cast<size_t>(256ULL * 1024 * 1024));
+        size_t kCtReserve = vram_reserve_floor(total_mem);
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
     } else {
         ct_budget = (remaining_budget > wcache_->nvfp4_bytes)

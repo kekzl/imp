@@ -8,6 +8,7 @@
 // below.
 
 #include "exec/executor.h"
+#include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "core/logging.h"
@@ -47,9 +48,9 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // struct controls strategy-level decisions (which phases to skip).
     size_t free_vram = 0, total_vram = 0;
     vram_budget_mem_get_info(&free_vram, &total_vram);
-    // Reserve at least 10% of total VRAM as headroom to avoid shared/system
-    // memory fallback on WSL2 (not visible via nvidia-smi).
-    size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);
+    // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
+    // visible via nvidia-smi) — canonical floor in vram_query.h.
+    size_t min_reserve = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));
     // Deduct NVFP4 decode cache (Phase 3, not yet allocated) from the budget
     // so Phase 1's FP16 cache doesn't overcommit VRAM on large dense models
     // (Gemma-3-12B Q4_K_M: 12.3 GiB FP16 + 1.4 GiB NVFP4 + 6.1 GiB KV → IMA).
@@ -65,14 +66,14 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // (body extracted to pre_dequant_phase0b_register_cutlass_nvfp4_)
     pre_dequant_phase0b_register_cutlass_nvfp4_(cfg, stream);
 
-    // Stage 1 (one-tier-truth): build the StoragePlan once and hold it for the
-    // model's lifetime. The pre-dequant phases are being migrated to read their
-    // overlay-tier decision from `storage_plan_` (plan_tier_of) instead of
-    // scattered nvfp4_beneficial/plan_routes_to_fp16 checks. Built AFTER Phase 0
-    // so prequant-NVFP4 weights already carry QType::NVFP4 (Phase 0 stamps it) —
-    // building earlier mis-tiered native-NVFP4 weights as FP16/FP8. A plan-vs-
-    // actual parity diagnostic runs in Phase 4 to surface any mismatch before a
-    // builder is switched. The plan does not drive allocation yet.
+    // Stage 1 (one-tier-truth): build the budget-constrained StoragePlan once
+    // and hold it for the model's lifetime. Built AFTER Phase 0 so prequant-
+    // NVFP4 weights already carry QType::NVFP4 (Phase 0 stamps it) — building
+    // earlier mis-tiered native-NVFP4 weights as FP16/FP8. Phase 1 reads its
+    // FP16-tier decision from the plan; a plan-vs-actual parity diagnostic
+    // runs in Phase 4. The per-phase cache SIZING stays with the heuristic
+    // budget (a separate UNCONSTRAINED plan feeds the #875 weight-cache
+    // reserve in vram_budget.cpp — see the comment there).
     hints_->vram_budget_bytes = remaining_budget;
     storage_plan_ = plan_storage(*model_, cfg, *hints_);
     apply_arch_rules_(storage_plan_, cfg);
@@ -100,8 +101,22 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // --- Phase 4: tensor registry + overlay diagnostic + NVFP4 device-args (extracted) ---
     pre_dequant_phase4_tensor_registry_(cfg, stream);
 
-    // --- Phase 4b: mark redundant sources as dropped (5.1.4.b — bisect mode) ---
+    // --- Phase 4b: free GGUF sources no path reads anymore ---
     pre_dequant_phase4b_drop_redundant_sources_(cfg, stream);
+
+    // MemAccount per-pool attribution (vram_audit diagnostic): the caches
+    // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
+    // note the build totals here — one note per cache family.
+    MemAccount::instance().note("WEIGHT_CACHE_FP16",
+                                static_cast<std::ptrdiff_t>(wcache_->fp16_bytes));
+    MemAccount::instance().note("WEIGHT_CACHE_FP8",
+                                static_cast<std::ptrdiff_t>(wcache_->fp8_bytes));
+    MemAccount::instance().note(
+        "WEIGHT_CACHE_NVFP4",
+        static_cast<std::ptrdiff_t>(wcache_->nvfp4_bytes + wcache_->nvfp4_moe_bytes));
+    MemAccount::instance().note(
+        "WEIGHT_CACHE_CUTLASS_SF",
+        static_cast<std::ptrdiff_t>(wcache_->cutlass_nvfp4_bytes + wcache_->cutlass_mxfp4_bytes));
 }
 
 // NVFP4 view of the LM head for the MTP draft chain — mirrors the decode-path

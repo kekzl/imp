@@ -100,7 +100,7 @@ bool Engine::init_kv_cache() {
 
     // VRAM budget
     auto vram_budget =
-        MemoryManager::compute_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram());
+        compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram());
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
@@ -136,10 +136,10 @@ bool Engine::init_kv_cache() {
             k++;
         }
         kv_cache = std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &memory_manager_.vram_allocator());
+                                             max_blocks, kv_bs, &vram_alloc_);
     } else {
         kv_cache = std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, head_dim, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &memory_manager_.vram_allocator());
+                                             max_blocks, kv_bs, &vram_alloc_);
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -156,7 +156,7 @@ bool Engine::init_kv_cache() {
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
-            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &memory_manager_.vram_allocator())) {
+            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_)) {
                 // Persistent batch→slot lookup buffer (graph-safe). [max_batch_size] ints.
                 size_t slot_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
                 cudaMalloc(&d_kv_slot_buf_, slot_bytes);
@@ -210,7 +210,7 @@ bool Engine::init_kv_cache() {
             int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();
             if (!ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
-                                  mcfg.ssm_state_size, config_.ssm_state_dtype, &memory_manager_.vram_allocator())) {
+                                  mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_)) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
             }
@@ -303,11 +303,11 @@ bool Engine::init_kv_cache() {
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 
     // Pre-allocate decode batch pool + penalty buffer
-    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &memory_manager_.vram_allocator());
+    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &vram_alloc_);
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
         d_penalty_tokens_ = static_cast<int32_t*>(
-            memory_manager_.vram_allocator().allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
         if (!d_penalty_tokens_) {
             IMP_LOG_WARN("Failed to pre-allocate penalty token buffer");
             d_penalty_tokens_capacity_ = 0;
@@ -325,7 +325,7 @@ bool Engine::init_kv_cache() {
         size_t bt_bytes = static_cast<size_t>(max_blocks) * sizeof(int);
         size_t cl_bytes = sizeof(int);
         prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + cl_bytes;
-        prefill_pool_ = memory_manager_.vram_allocator().allocate(prefill_pool_size_, "prefill_pool");
+        prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
         if (prefill_pool_) {
             auto* base = static_cast<char*>(prefill_pool_);
             d_pf_token_ids_ = reinterpret_cast<int32_t*>(base);
@@ -354,7 +354,7 @@ bool Engine::init_kv_cache() {
             IMP_LOG_INFO("GPU memory: %.0f MiB used / %.0f MiB total (%.0f MiB free)",
                          (total_mem - free_mem) / (1024.0 * 1024.0), total_mem / (1024.0 * 1024.0),
                          free_mem / (1024.0 * 1024.0));
-        memory_manager_.vram_allocator().report();
+        vram_alloc_.report();
     }
 
     return true;

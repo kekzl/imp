@@ -219,9 +219,7 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return false;
     // Recurrent state (SSM/GDN) advances on every forwarded token. The
     // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
-    // per-sequence slab for snapshot/restore; the legacy GGUF-era GDNState
-    // pool has no slab accessor and stays excluded.
-    if (gdn_state_) return false;
+    // per-sequence slab for snapshot/restore.
     if (ssm_state_ && !runtime_config_.speculative.hybrid) return false;
     // MoE speculation engages only for native-NVFP4 experts: the batched
     // verify forward reads the NVFP4 expert cache directly and nets +49-81%

@@ -90,9 +90,6 @@ private:
 
     // Owned build-only state.
     StoragePlan storage_plan_;
-    // Planned overlay tier for a source pointer, or Undefined if the pointer is
-    // not in the plan (native GGUF blocks bypass the overlay layer).
-    StorageTier plan_tier_of(const void* src) const { return storage_plan_.tier_of(src); }
 
     // --- moved phase / helper declarations (verbatim from executor.h) ---
     // Stage 1.2: fold the scattered arch-specific overlay rules into one pass

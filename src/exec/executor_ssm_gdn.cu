@@ -6,7 +6,6 @@
 #include "compute/activation.h"
 #include "compute/ssm.h"
 #include "compute/gdn.h"
-#include "memory/gdn_state.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
 #include "runtime/config.h"

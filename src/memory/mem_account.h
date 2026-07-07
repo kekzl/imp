@@ -25,8 +25,12 @@ namespace imp {
 //      This is the ground-truth backbone of the breakdown.
 //
 //   2. NOTES — explicit note(pool, +/-bytes) calls at the big allocation
-//      sites give current + peak attribution WITHIN a phase (e.g. how much of
-//      "init_weights" is the NVFP4 decode cache vs the SafeTensors upload).
+//      sites give current + peak attribution WITHIN a phase. Wired pools:
+//      WEIGHTS (SafeTensors/GGUF upload), KV_BLOCK_POOL (KV + scale pools),
+//      WEIGHT_CACHE_FP16 / _FP8 / _NVFP4 / _CUTLASS_SF (pre-dequant caches,
+//      noted as build totals after QuantPipeline::build), EXEC_WORKSPACES
+//      (executor workspace estimate). Anything else lands in the UNTRACKED
+//      reconciliation residual — add a note() when a new consumer grows big.
 //
 //   3. SAMPLER — a background thread polling cudaMemGetInfo at high frequency
 //      records the true device-used PEAK, capturing transient spikes (the

@@ -14,10 +14,8 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
-#include "memory/gdn_state.h"
 #include "memory/recurrent_snapshot_store.h"
 #include "memory/layer_offload.h"
-#include "memory/memory_manager.h"
 #include "memory/vram_allocator.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
@@ -271,9 +269,7 @@ public:
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
-    VRAMAllocator& vram_allocator() noexcept { return memory_manager_.vram_allocator(); }
-    MemoryManager& memory_manager() noexcept { return memory_manager_; }
-    const MemoryManager& memory_manager() const noexcept { return memory_manager_; }
+    VRAMAllocator& vram_allocator() noexcept { return vram_alloc_; }
 
     // Phase 5 Track D: per-Engine RuntimeConfig (replaces RuntimeConfig::current()
     // singleton). Engine::init snapshots the loaded config; engine_init_resolver
@@ -284,9 +280,7 @@ public:
 
 private:
     // ── Core components ──────────────────────────────────────────────
-    // Phase 5 Track C: façade over VRAMAllocator + (lazy) PinnedAllocator/
-    // DeviceAllocator + vram_budget/storage_planner free functions.
-    MemoryManager memory_manager_;
+    VRAMAllocator vram_alloc_;
     // Phase 5 Track D: per-Engine runtime configuration (replaces the
     // RuntimeConfig::current() process-wide singleton). Snapshot is
     // initialized from take_pending_runtime_config() at the start of
@@ -431,7 +425,6 @@ private:
 
     // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;
-    std::unique_ptr<GDNState> gdn_state_;
 
     // Recurrent (SSM/GDN) state-slot allocator. One slot per concurrent
     // sequence (capacity == config.max_batch_size). Slots MUST be unique among

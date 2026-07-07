@@ -89,10 +89,9 @@ bool Engine::spec_capture_ready_(int ctx_padded) {
     // SSMState hybrids are capture-eligible: the recurrent chunk kernels
     // read the real chunk length from device (InferenceState::d_chunk_len)
     // so pad rows never advance the committed state, and the graph cache is
-    // keyed on the recurrent slot (the slab pointers are baked). The legacy
-    // GGUF GDNState path has no slab accessor (excluded from spec verify
-    // altogether); MoE host-offload syncs on the host per layer.
-    if (gdn_state_ || offload_mgr_)
+    // keyed on the recurrent slot (the slab pointers are baked). MoE
+    // host-offload syncs on the host per layer.
+    if (offload_mgr_)
         return false;
     // BitDecoding residual KV advances ring state on the host per forward.
     if (kv_manager_ && kv_manager_->residual_enabled())

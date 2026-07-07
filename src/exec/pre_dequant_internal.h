@@ -93,30 +93,9 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
     }
 }
 
-// Does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
-// Used by Phase 1 (FFN-skip logic) and Phase 3 (NVFP4 decode cache).
-inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
-    switch (qt) {
-        case QType::Q8_0:
-        case QType::Q8_K:
-        case QType::Q6_K:
-        case QType::Q5_K:
-            return true;
-        case QType::Q4_K:
-        case QType::Q3_K:
-        case QType::Q2_K:
-            return decode_all;
-        case QType::IQ4_NL:
-        case QType::IQ4_XS:
-            // i-quants have no dp4a/MMVQ decode kernels — without the NVFP4
-            // decode cache they fall to dequant->cuBLAS GEMV (uncapturable
-            // under graph capture, ~2x slower). Similar bit-width to Q4_K,
-            // but here the conversion is the only fast decode path.
-            return true;
-        default:
-            return false;
-    }
-}
+// nvfp4_beneficial() moved to core/qtype.h — the VRAM-budget heuristic
+// (vram_budget.cpp) shares the same policy and the two must not drift.
+using imp::nvfp4_beneficial;
 
 inline void deduct_budget(size_t& budget, size_t amount) {
     budget = (budget > amount) ? (budget - amount) : 0;

@@ -214,10 +214,10 @@ void Engine::upload_penalties(const Request& req, InferenceState& state, cudaStr
     size_t n = req.output_tokens.size();
     if (n > d_penalty_tokens_capacity_) {
         if (d_penalty_tokens_)
-            memory_manager_.vram_allocator().free(d_penalty_tokens_);
+            vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
         d_penalty_tokens_ = static_cast<int32_t*>(
-            memory_manager_.vram_allocator().allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
         if (!d_penalty_tokens_) {
             IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
             d_penalty_tokens_capacity_ = 0;
@@ -234,8 +234,7 @@ void Engine::upload_penalties(const Request& req, InferenceState& state, cudaStr
 // be UNIQUE among live sequences (the recurrent state is the sequence memory).
 // The free list is sized lazily from the state capacity (== max_batch_size).
 int Engine::acquire_recurrent_slot_(int req_id) {
-    const int cap = ssm_state_ ? ssm_state_->max_sequences()
-                               : (gdn_state_ ? gdn_state_->max_sequences() : 0);
+    const int cap = ssm_state_ ? ssm_state_->max_sequences() : 0;
     if (cap <= 0)
         return 0;
     auto it = recurrent_slot_of_.find(req_id);
@@ -272,7 +271,7 @@ void Engine::release_recurrent_slot_(int req_id) {
 
 void Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
                                   cudaStream_t stream) {
-    if (!ssm_state_ && !gdn_state_)
+    if (!ssm_state_)
         return;
     int slot;
     if (reset) {
@@ -280,7 +279,7 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
     } else {
         auto it = recurrent_slot_of_.find(req.id);
         // Decode / later prefill chunks reuse the slot acquired at offset==0.
-        const int cap = ssm_state_ ? ssm_state_->max_sequences() : gdn_state_->max_sequences();
+        const int cap = ssm_state_->max_sequences();
         slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? req.id % cap : 0);
     }
     if (ssm_state_) {
@@ -304,12 +303,6 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
                 ssm_state_->reset_sequence(slot, stream);
             }
         }
-    }
-    if (gdn_state_) {
-        state.gdn_state = gdn_state_.get();
-        state.gdn_seq_id = slot;
-        if (reset)
-            gdn_state_->reset_sequence(slot, stream);
     }
 }
 
