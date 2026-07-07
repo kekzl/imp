@@ -37,7 +37,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # full history so the base SHA is present for `git diff`
 
@@ -85,7 +85,7 @@ jobs:
       # saves the slow nvcc ptxas pass for sm_120a.
       - name: Restore ccache
         if: steps.changes.outputs.code == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /github/home/.ccache
           key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
@@ -105,7 +105,7 @@ jobs:
       # ccache provides per-TU hits even when the build cache misses.
       - name: Cache build directory
         if: steps.changes.outputs.code == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -164,7 +164,7 @@ jobs:
 
       - name: Upload build artifacts
         if: steps.changes.outputs.code == 'true'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: imp-build
           path: |
@@ -198,7 +198,7 @@ jobs:
     env:
       CUDA_VERSION: "13.3"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
       - name: Install deps
@@ -206,7 +206,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends cmake g++ git python3 clang-tidy
       - name: Restore build dir (compile_commands.json + _deps)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build
           key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
@@ -253,7 +253,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -278,7 +278,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install clang-format
@@ -317,7 +317,7 @@ jobs:
     name: File size
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -339,10 +339,10 @@ jobs:
     runs-on: [self-hosted, gpu, cuda]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download build
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: imp-build
           path: build/
