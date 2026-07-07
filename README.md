@@ -67,7 +67,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 
 **Use [vLLM](https://github.com/vllm-project/vllm) if** you serve high-concurrency batched workloads on datacenter GPUs (H100/B200). It has continuous batching, PagedAttention at scale, and production-grade serving.
 
-**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) and want the fastest backend for **agentic AI** — coding agents, tool-using assistants and reasoning loops — on one card. It is the fastest engine on the 5090 for both decode and NVFP4 prefill (native NVFP4/FP4, no dequant overhead), with a first-class agentic surface: tool calling, `json_schema` constrained decoding, separable reasoning channels, prefix-cached long-context multi-turn, and moderate concurrency for sub-agent fan-out. The trade-off is scope, not speed: it's single-GPU by design — no multi-GPU, no datacenter-scale batching.
+**Use imp if** you run a Blackwell consumer/workstation card (RTX 5090, RTX PRO 6000) and want the fastest backend for **agentic AI** — coding agents, tool-using assistants and reasoning loops — on one card. It is the fastest engine on the 5090 for both decode and NVFP4 prefill (native NVFP4/FP4, no dequant overhead), with a first-class agentic surface: tool calling, `json_schema` constrained decoding, separable reasoning channels, prefix-cached long-context multi-turn, and moderate concurrency for sub-agent fan-out. The trade-off is scope, not speed: it's single-GPU by design, with no multi-GPU and no datacenter-scale batching.
 
 ## Known limitations
 
@@ -78,7 +78,7 @@ command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
 - **Moderate concurrency, not datacenter scale.** Concurrent sub-agent fan-out (tens of requests) is a tuned, supported workload; batch=64+ continuous-batching throughput on a rack is not — that's vLLM/SGLang territory.
-- **Single-user / agentic scope.** Built and tuned for single-user and agentic inference on a 5090 — not high-concurrency datacenter serving.
+- **Single-user / agentic scope.** Built and tuned for single-user and agentic inference on a 5090, not high-concurrency datacenter serving.
 
 ## Quickstart
 
