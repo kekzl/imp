@@ -282,10 +282,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         int nh = cfg.n_heads;
         int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh);
-        // Size splits proportional to max context blocks, capped at 64
-        // (raised from 32 to support aggressive flash-decode splitting)
+        // Size splits proportional to max context blocks, capped at 128 (the
+        // GQA tile kernel runs grid.y = n_kv_heads instead of n_heads and
+        // recovers parallelism through the split count — see
+        // paged_attention_decode_fp8).
         int max_context_blocks = (max_tokens_ + kKVBlockSize - 1) / kKVBlockSize;
-        int max_splits = std::min(64, std::max(1, max_context_blocks));
+        int max_splits = std::min(128, std::max(1, max_context_blocks));
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);

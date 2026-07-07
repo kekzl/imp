@@ -255,6 +255,10 @@ struct RuntimeConfig {
         // Token-tiled FP8 split-K decode attention (hd=128/bs=16 only). Off =
         // per-token pipeline kernel; A/B + rollback knob.
         bool fp8_tile = true;
+        // GQA-batched tile variant: one block computes all Q heads of a KV head
+        // from a shared smem tile (L2 KV traffic /G). Off = per-head tile
+        // kernel; A/B + rollback knob.
+        bool fp8_tile_gqa = true;
         bool gate_concat = false;
         // Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix. Caps the
         // prefill context length that uses the fast cuBLAS attention path before

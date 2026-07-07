@@ -585,8 +585,22 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
 
         // Use pipelined cp.async kernel on sm_90+
         static int sm_ver_fp8 = get_device_sm_version();
-        if (sm_ver_fp8 >= 90 && paged_attention_splitk_fp8_tile_supported(head_dim, block_size) &&
-            process_diag_attention_fp8_tile()) {
+        if (sm_ver_fp8 >= 90 &&
+            paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads) &&
+            process_diag_attention_fp8_tile() && process_diag_attention_fp8_tile_gqa()) {
+            // GQA-batched tile variant: grid.y = n_kv_heads instead of n_heads
+            // (each block computes all G Q heads from one shared smem tile ->
+            // KV L2 traffic /G). The split count is re-derived for that
+            // geometry next to the kernel.
+            num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads,
+                                                                    head_dim, block_size, max_context_len);
+            paged_attention_splitk_fp8_tile_gqa_launch(
+                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
+                reinterpret_cast<const uint8_t*>(V_cache.data), partial, block_tables, context_lens,
+                batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
+                sliding_window, softcap, stream);
+        } else if (sm_ver_fp8 >= 90 && paged_attention_splitk_fp8_tile_supported(head_dim, block_size) &&
+                   process_diag_attention_fp8_tile()) {
             // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV
             // pages instead of the per-token latency chain. hd=128, bs multiple of 16.
             //

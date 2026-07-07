@@ -172,6 +172,9 @@ splitk_pipe          = true
 # Token-tiled FP8 split-K decode attention (hd=128/bs=16 only); off = the
 # per-token pipeline kernel (A/B + rollback knob).
 fp8_tile             = true
+# GQA-batched tile variant: one block computes all Q heads of a KV head from
+# a shared smem tile (KV L2 traffic /G); off = per-head tile kernel.
+fp8_tile_gqa         = true
 gate_concat          = false
 # Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
 # long prefill stays on the fast cuBLAS path before falling back to FMHA.
