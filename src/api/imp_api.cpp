@@ -403,7 +403,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;
         ecfg.prefix_pin_budget_pct = config->prefix_pin_budget_pct;
-        ecfg.turboquant_sketch_multiplier = config->turboquant_sketch_multiplier;
+        // config->turboquant_sketch_multiplier is deprecated and ignored (kept in
+        // ImpConfig for ABI compatibility only).
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
         ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);

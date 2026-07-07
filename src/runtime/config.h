@@ -127,7 +127,10 @@ struct RuntimeConfig {
         // force that dtype regardless of the hint.
         std::string dtype = "auto";
         bool allow_nondeterministic_fp8 = false;
-        bool fp8_auto_legacy = false;  // legacy IMP_KV_FP8_AUTO compat
+        // Legacy unconditional FP8 auto-upgrade: force FP8 E4M3 whenever the
+        // dtype resolves to FP16 (pre-hint behavior). imp.conf key only — the
+        // old IMP_KV_FP8_AUTO env var is no longer read.
+        bool fp8_auto_legacy = false;
         // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
         // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
         // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
@@ -363,7 +366,7 @@ struct RuntimeConfig {
         // the quartered f32-accumulate paths). Replaces the dequant-to-FP16 →
         // cuBLAS round-trip for Q8_0 prefill (M ≥ 64). Redesigned against the
         // Q4_K-IMMA phase-2B ceiling diagnosis (SMEM-staged scales, 128x128x64
-        // tiles, symmetric epilogue). Experimental: default off.
+        // tiles, symmetric epilogue). Default on.
         bool q8_imma_enabled = true;
         // Q4_K dense prefill via the (new-stack) IMMA kernel: uses
         // mmq_q4k_imma_reorder's symmetric-s8 + α/β form with the unified
@@ -375,7 +378,7 @@ struct RuntimeConfig {
         // ~32-rows-per-expert routing at pp512). Covers Q8_0/Q4_K expert
         // tensors; others (Q6_K down_proj) stay on dequant→cuBLAS. This is
         // lever #1 for the 2.4-2.6x GGUF-MoE prefill gap
-        // (docs/audit/prefill_gap_2026_06_07.md §4.2). Default off.
+        // (docs/audit/prefill_gap_2026_06_07.md §4.2). Default on.
         bool moe_imma_prefill = true;
         // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
         // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode

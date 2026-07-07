@@ -8,7 +8,7 @@
 #   5. embedded defaults            (no file, all values below)
 #
 # Per-run overrides on top via:
-#   imp --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never ...
+#   imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never ...
 #
 # Lines starting with '#' are comments; section headers in [brackets].
 
@@ -44,6 +44,13 @@ max_batch_size       = 0
 # paths are unaffected. 0 = legacy unbounded behavior. Ignored when
 # deterministic = true (the unbounded loop stays for bit-reproducible evals).
 decode_burst         = 128
+# Cap the prefill chunk while other sequences are decoding: prefill and decode
+# share one stream, so every chunk forward inserts its full latency between two
+# decode steps of the active sessions. 1024 is the measured compromise (decoder
+# p95 inter-token 94 ms at +27% ingest TTFT); 512 for latency-critical
+# multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
+# soon as nobody is decoding.
+prefill_chunk_decode_cap = 1024
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding
@@ -156,6 +163,11 @@ mxfp4_fp16_fallback  = false
 # tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).
 mxfp4_fp16_cache_policy = "legacy"
 force_cublas_decode  = false
+# MLA absorbed-decode latent KV cache (DeepSeek-V2/V3): decode stores only the
+# compressed latent + decoupled RoPE key and runs the mathematically-equivalent
+# absorbed attention (~9x smaller per-token KV). Prefill stays materialized;
+# single-sequence only (falls back to materialized otherwise). Opt-in.
+mla_absorb           = false
 no_qknorm_fused      = false
 splitk_pipe          = true
 gate_concat          = false
@@ -235,6 +247,11 @@ nvfp4_lm_head        = true
 # Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
+# Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
+# FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
+# forces NVFP4 activations on the final logits (quality/speed trade). Opt-in
+# until the PPL trade is measured per family; single-stream is unaffected.
+nvfp4_lm_head_cutlass = false
 # Force GGUF-hybrid GDN/SSM in/out projections into the NVFP4 decode cache
 # (Qwen3.6-35B Q4_K_M: +53% decode, PPL flat). Opt-in.
 nvfp4_ssm_proj       = false
@@ -435,6 +452,10 @@ nvfp4_force_dequant  = false
 # Skip building the NVFP4 decode cache: decode runs on the source-precision
 # paths (dp4a GEMV / FP16 GEMV) — bisection / quality-baseline tool.
 no_nvfp4_decode_cache = false
+# #847 graph-captured-verify feasibility probe: stream-capture every spec
+# verify chunk forward and log per-attempt outcomes (capturability census,
+# not a perf path; falls back to the eager forward on any failure).
+spec_capture_probe   = false
 # Log shape + per-candidate algo for every cuBLASLt algo selection.
 log_gemm_algo        = false
 # MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.

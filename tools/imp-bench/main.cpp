@@ -18,7 +18,9 @@ static void print_usage(const char* prog) {
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
-    printf("  all         Run all benchmarks (default)\n");
+    printf("  all         Run all benchmarks\n");
+    printf("\nDefault (no argument) runs gemm, attention, decode-attn and e2e;\n");
+    printf("nvfp4 is excluded (isolated ncu target) — run it via 'nvfp4' or 'all'.\n");
     printf("\nOptions:\n");
     printf("  --help, -h  Show this help message\n");
 }
@@ -55,6 +57,7 @@ int main(int argc, char** argv) {
             run_e2e = true;
         } else if (strcmp(arg, "all") == 0) {
             run_gemm = true;
+            run_gemm_nvfp4 = true;
             run_attention = true;
             run_decode_attn = true;
             run_e2e = true;

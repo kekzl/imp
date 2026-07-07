@@ -92,7 +92,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
-        IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
+        IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
     } else if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     } else if (config_.kv_cache_dtype == QType::NVFP4) {
