@@ -46,6 +46,21 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
                                             int max_num_blocks, int num_splits, int sliding_window,
                                             float softcap, cudaStream_t stream);
 
+// GQA-batched tile variant: one block per KV head computes all G Q heads from a
+// shared smem tile (L2 KV traffic /G). Grid.y = n_kv_heads; the launcher's split
+// count should be raised accordingly (see paged_attention_decode_fp8).
+bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size, int n_heads,
+                                                   int n_kv_heads);
+int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
+                                               int block_size, int max_context_len);
+void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_cache,
+                                                const uint8_t* V_cache, float* partial_out,
+                                                const int* block_tables, const int* context_lens,
+                                                int batch_size, int n_heads, int n_kv_heads, int block_size,
+                                                float scale, float kv_scale, int max_num_blocks,
+                                                int num_splits, int sliding_window, float softcap,
+                                                cudaStream_t stream);
+
 // FP8 E4M3 Paged attention for decode: KV cache stored in FP8 with on-the-fly dequant.
 // Q: [batch, 1, n_heads, head_dim] FP16
 // K_cache/V_cache: [num_blocks, n_kv_heads, block_size, head_dim] FP8_E4M3

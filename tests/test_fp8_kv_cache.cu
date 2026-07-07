@@ -297,6 +297,159 @@ TEST(FP8KVCache, SplitKConsistency) {
 }
 
 // ============================================================================
+// GQA-batched FP8 tile kernel vs per-head tile kernel vs non-split reference.
+// Flagship FP8-KV shape: GQA 32q/4kv, hd=128, block_size=32 (chunks_per_page=2,
+// the Qwen3-MoE FP8-KV page size). ctx_len=1000 is deliberately unaligned
+// (tail-chunk masking), and num_splits=13 leaves two empty splits (sentinel
+// path). The two tile kernels are launched directly (bypassing dispatch) so
+// each is pinned regardless of config defaults.
+// ============================================================================
+TEST(FP8KVCache, SplitKGqaTileConsistency) {
+    SKIP_IF_NO_CUDA();
+
+    const int batch_size = 1;
+    const int n_heads = 32;
+    const int n_kv_heads = 4;  // G = 8: one warp per Q head in the GQA kernel
+    const int head_dim = 128;
+    const int ctx_len = 1000;
+    const int block_size = 32;
+    const int num_blocks = (ctx_len + block_size - 1) / block_size;  // 32
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    ASSERT_TRUE(paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads));
+
+    const int q_elems = batch_size * 1 * n_heads * head_dim;
+    std::vector<half> h_q(q_elems);
+    srand(4242);
+    for (int i = 0; i < q_elems; i++)
+        h_q[i] = __float2half(((rand() % 200) - 100) / 100.0f);
+    void* d_q = nullptr;
+    cudaMalloc(&d_q, q_elems * sizeof(half));
+    cudaMemcpy(d_q, h_q.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    const int total_kv_elems = num_blocks * block_size * n_kv_heads * head_dim;
+    std::vector<half> h_kv(total_kv_elems);
+    for (int i = 0; i < total_kv_elems; i++)
+        h_kv[i] = __float2half(0.5f * ((rand() % 200) - 100) / 100.0f);
+    void* d_k_fp16 = nullptr;
+    void* d_v_fp16 = nullptr;
+    cudaMalloc(&d_k_fp16, total_kv_elems * sizeof(half));
+    cudaMalloc(&d_v_fp16, total_kv_elems * sizeof(half));
+    cudaMemcpy(d_k_fp16, h_kv.data(), total_kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+    for (int i = 0; i < total_kv_elems; i++)
+        h_kv[i] = __float2half(0.5f * ((rand() % 200) - 100) / 100.0f);
+    cudaMemcpy(d_v_fp16, h_kv.data(), total_kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    std::vector<int> h_bt(num_blocks);
+    std::iota(h_bt.begin(), h_bt.end(), 0);
+    int* d_bt = nullptr;
+    cudaMalloc(&d_bt, num_blocks * sizeof(int));
+    cudaMemcpy(d_bt, h_bt.data(), num_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int* d_ctx = nullptr;
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_ctx, &ctx_len, sizeof(int), cudaMemcpyHostToDevice);
+
+    int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
+    int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
+    Tensor t_k16(d_k_fp16, QType::F16, 4, kv_shape, true);
+    Tensor t_v16(d_v_fp16, QType::F16, 4, kv_shape, true);
+    float k_scale = calibrate_fp8_scale(t_k16, nullptr);
+    cudaDeviceSynchronize();
+    float v_scale = calibrate_fp8_scale(t_v16, nullptr);
+    cudaDeviceSynchronize();
+    float kv_scale = fmaxf(k_scale, v_scale);
+    if (kv_scale <= 0.0f)
+        kv_scale = 1.0f;
+
+    void* d_k_fp8 = nullptr;
+    void* d_v_fp8 = nullptr;
+    cudaMalloc(&d_k_fp8, total_kv_elems);
+    cudaMalloc(&d_v_fp8, total_kv_elems);
+    quantize_fp16_to_fp8_e4m3_scaled(d_k_fp16, d_k_fp8, total_kv_elems, kv_scale, nullptr);
+    quantize_fp16_to_fp8_e4m3_scaled(d_v_fp16, d_v_fp8, total_kv_elems, kv_scale, nullptr);
+    cudaDeviceSynchronize();
+
+    Tensor t_q(d_q, QType::F16, 4, q_shape, true);
+    Tensor t_k8(d_k_fp8, QType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_v8(d_v_fp8, QType::FP8_E4M3, 4, kv_shape, true);
+
+    // ---- 1. Non-split reference (independent kernel) ----
+    void* d_o_ref = nullptr;
+    cudaMalloc(&d_o_ref, q_elems * sizeof(half));
+    Tensor t_o_ref(d_o_ref, QType::F16, 4, q_shape, true);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_ref, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len, 0,
+                               0.0f, nullptr);
+    cudaDeviceSynchronize();
+
+    // ---- 2./3. Direct tile / GQA-tile launches with a shared reduce ----
+    const int num_splits = 13;  // 32 pages -> bps=3, splits 11+12 empty (sentinel)
+    size_t scratch_size = (size_t)batch_size * n_heads * num_splits * (2 + head_dim) * sizeof(float);
+    float* d_partial = nullptr;
+    cudaMalloc(&d_partial, scratch_size);
+
+    auto run_tile = [&](bool gqa, void* d_o) {
+        cudaMemset(d_partial, 0, scratch_size);
+        if (gqa) {
+            paged_attention_splitk_fp8_tile_gqa_launch(
+                static_cast<const half*>(d_q), static_cast<const uint8_t*>(d_k_fp8),
+                static_cast<const uint8_t*>(d_v_fp8), d_partial, d_bt, d_ctx, batch_size, n_heads,
+                n_kv_heads, block_size, scale, kv_scale, num_blocks, num_splits, 0, 0.0f, nullptr);
+        } else {
+            paged_attention_splitk_fp8_tile_launch(
+                static_cast<const half*>(d_q), static_cast<const uint8_t*>(d_k_fp8),
+                static_cast<const uint8_t*>(d_v_fp8), d_partial, d_bt, d_ctx, batch_size, n_heads,
+                n_kv_heads, block_size, scale, kv_scale, num_blocks, num_splits, 0, 0.0f, nullptr);
+        }
+        paged_attention_launch_reduce(d_partial, static_cast<half*>(d_o), batch_size, n_heads, head_dim,
+                                      num_splits, nullptr);
+        cudaDeviceSynchronize();
+    };
+
+    void* d_o_tile = nullptr;
+    void* d_o_gqa = nullptr;
+    cudaMalloc(&d_o_tile, q_elems * sizeof(half));
+    cudaMalloc(&d_o_gqa, q_elems * sizeof(half));
+    run_tile(false, d_o_tile);
+    run_tile(true, d_o_gqa);
+
+    std::vector<half> h_ref(q_elems), h_tile(q_elems), h_gqa(q_elems);
+    cudaMemcpy(h_ref.data(), d_o_ref, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_tile.data(), d_o_tile, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_gqa.data(), d_o_gqa, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    auto rel_rmse = [&](const std::vector<half>& a, const std::vector<half>& b) {
+        double sum_sq = 0.0;
+        float max_abs = 0.0f;
+        for (int i = 0; i < q_elems; i++) {
+            float fa = __half2float(a[i]);
+            float fb = __half2float(b[i]);
+            sum_sq += (double)(fa - fb) * (fa - fb);
+            max_abs = fmaxf(max_abs, fabsf(fa));
+        }
+        float rmse = sqrtf((float)(sum_sq / q_elems));
+        return (max_abs > 1e-6f) ? rmse / max_abs : rmse;
+    };
+
+    // Same FP8 data; only FP32 accumulation order differs between the three.
+    EXPECT_LT(rel_rmse(h_ref, h_gqa), 0.02f) << "GQA tile vs non-split reference";
+    EXPECT_LT(rel_rmse(h_tile, h_gqa), 0.01f) << "GQA tile vs per-head tile";
+
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_q);
+    cudaFree(d_k_fp16);
+    cudaFree(d_v_fp16);
+    cudaFree(d_k_fp8);
+    cudaFree(d_v_fp8);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_o_ref);
+    cudaFree(d_o_tile);
+    cudaFree(d_o_gqa);
+    cudaFree(d_partial);
+}
+
+// ============================================================================
 // Test 6: INT8 KV Cache construction — verify scale pool allocation
 // ============================================================================
 TEST(INT8KVCache, Construction) {
