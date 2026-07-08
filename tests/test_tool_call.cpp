@@ -240,3 +240,68 @@ TEST(ToolCallValidate, AdditionalPropertiesAllowed) {
     validate_tool_call(tc, weather_tools());
     EXPECT_TRUE(tc.valid) << tc.error;
 }
+
+// ---------------------------------------------------------------------------
+// Qwen3.6 XML fallback — <function=NAME><parameter=KEY>VAL</parameter></function>
+// The distinct parse_qwen36_xml_call path had no direct coverage.
+// ---------------------------------------------------------------------------
+TEST(ToolCallQwen36Xml, NoFunctionTagReturnsFalse) {
+    ParsedToolCall tc;
+    EXPECT_FALSE(parse_qwen36_xml_call("just some text", tc));
+}
+
+TEST(ToolCallQwen36Xml, SingleStringParam) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call(
+        "<function=get_weather><parameter=city>Paris</parameter></function>", tc));
+    EXPECT_EQ(tc.name, "get_weather");
+    json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["city"], "Paris");
+}
+
+TEST(ToolCallQwen36Xml, CoercesScalarTypes) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=f>"
+                                      "<parameter=s>hello</parameter>"
+                                      "<parameter=i>42</parameter>"
+                                      "<parameter=d>3.5</parameter>"
+                                      "<parameter=b>true</parameter>"
+                                      "<parameter=n>null</parameter>"
+                                      "</function>",
+                                      tc));
+    json args = json::parse(tc.arguments);
+    EXPECT_TRUE(args["s"].is_string());
+    EXPECT_EQ(args["s"], "hello");
+    EXPECT_TRUE(args["i"].is_number_integer());
+    EXPECT_EQ(args["i"], 42);
+    EXPECT_TRUE(args["d"].is_number_float());
+    EXPECT_DOUBLE_EQ(args["d"].get<double>(), 3.5);
+    EXPECT_EQ(args["b"], true);
+    EXPECT_TRUE(args["n"].is_null());
+}
+
+TEST(ToolCallQwen36Xml, NameIsTrimmed) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function= spaced_name >\n</function>", tc));
+    EXPECT_EQ(tc.name, "spaced_name");
+}
+
+TEST(ToolCallQwen36Xml, EmptyNameReturnsFalse) {
+    ParsedToolCall tc;
+    EXPECT_FALSE(parse_qwen36_xml_call("<function=   ></function>", tc));
+}
+
+TEST(ToolCallQwen36Xml, MissingCloseFunctionTagStillParses) {
+    // No </function> — the parser scans to end of body.
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=f><parameter=k>v</parameter>", tc));
+    EXPECT_EQ(tc.name, "f");
+    EXPECT_EQ(json::parse(tc.arguments)["k"], "v");
+}
+
+TEST(ToolCallQwen36Xml, NoParamsGivesEmptyArgs) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=ping></function>", tc));
+    EXPECT_EQ(tc.name, "ping");
+    EXPECT_EQ(json::parse(tc.arguments), json::object());
+}
