@@ -25,7 +25,9 @@ Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template aut
 | `POST /v1/responses` | OpenAI Responses | Agents SDK / Codex dialect; stateless shim over the chat path (`responses.cpp`); native SSE events incl. incremental `function_call_arguments.delta` |
 | `POST /v1/messages` | **Anthropic** | thinking, tool use, `cache_control`, **real per-token SSE** (`main.cpp:192` — old "synthetic replay" info is obsolete) |
 | `POST /v1/embeddings` | OpenAI | embedding vectors |
-| `GET /v1/models` | both | **strict semantics since PR #507**: only the loaded model is listed; a foreign `model` field → 404 `model_not_found`; switching models = restart (auto-swap was removed after a reload SIGSEGV) |
+| `GET /v1/models` | both | **strict semantics since PR #507**: only the loaded model is listed; a foreign `model` field → 404 `model_not_found`; switching models = restart (auto-swap was removed after a reload SIGSEGV). Model object also carries the context window as vLLM `max_model_len` + llama.cpp `meta.n_ctx_train` |
+| `GET /props` | llama.cpp | context-window probe: `n_ctx` (top-level + `default_generation_settings.n_ctx`) |
+| `GET /info` | TGI | context-window probe: `max_total_tokens` / `max_input_tokens` |
 | `POST /tokenize`, `/detokenize` | imp | |
 | `GET /health`, `/metrics` | imp | healthcheck / Prometheus |
 

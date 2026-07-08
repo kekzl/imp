@@ -205,6 +205,18 @@ int main(int argc, char** argv) {
         handle_models(req, res, state);
     });
 
+    // Context-window auto-detection probes for OpenAI-compatible clients:
+    // /props is the llama.cpp shape, /info the TGI shape (/v1/models also
+    // carries vLLM's max_model_len). A client written for any of the three can
+    // read imp's context length without a hard-coded table.
+    svr.Get("/props", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_props(req, res, state);
+    });
+
+    svr.Get("/info", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_info(req, res, state);
+    });
+
     svr.Post("/v1/chat/completions", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_chat_completions(req, res, state);
     });
@@ -290,7 +302,9 @@ int main(int argc, char** argv) {
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
     printf("  GET    /health\n");
-    printf("  GET    /v1/models\n");
+    printf("  GET    /v1/models            (vLLM max_model_len + llama.cpp meta.n_ctx_train)\n");
+    printf("  GET    /props               llama.cpp-compatible context probe (n_ctx)\n");
+    printf("  GET    /info                TGI-compatible context probe (max_total_tokens)\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)\n");
     printf("  POST   /v1/completions\n");

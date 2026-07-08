@@ -219,14 +219,22 @@ Endpoints: `/v1/chat/completions`, `/v1/responses` (OpenAI Responses API —
 the Agents SDK / Codex dialect; stateless, so use `store: false` and resend
 the transcript in `input`), `/v1/completions`, `/v1/embeddings`,
 `/v1/models`, `/v1/messages` (Anthropic-compatible, streaming +
-non-streaming), `/tokenize`, `/detokenize`, `/health`. Tool/function
-calling, streaming usage stats, logprobs, and API-key auth
+non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`.
+Tool/function calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
 `/v1/models` lists the model the server is serving (OpenAI semantics: the
 server exposes exactly what it can serve). Requests must name that model —
 any other `model` value gets `404 model_not_found`; inference requests never
 trigger a model load/swap. To switch models, restart the server with a
 different `--model`.
+
+**Context-window auto-detection.** The served context length is exposed in
+the three conventions OpenAI-compatible clients already probe, so no
+hard-coded table is needed: `/v1/models` carries vLLM's `max_model_len` and
+llama.cpp's `meta.n_ctx_train` on the model object, `GET /props` returns the
+llama.cpp `n_ctx` (top-level and under `default_generation_settings`), and
+`GET /info` returns TGI's `max_total_tokens` / `max_input_tokens`. All three
+report the same window (the engine-detected `max_seq_len`).
 
 Server-only flags (not on `imp-cli`):
 
