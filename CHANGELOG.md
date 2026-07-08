@@ -4,6 +4,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-07-08
+
+Small server-compatibility release: the served context window is now
+discoverable through the three field conventions OpenAI-compatible clients
+already probe, so they can auto-detect it instead of keeping a hard-coded
+table. Server-only, no functional change to inference; perf baseline untouched.
+
+### Added
+- **Context-window auto-detection across the three live conventions (#921):**
+  `GET /v1/models` now carries the context length as vLLM's `max_model_len` and
+  llama.cpp's `meta.n_ctx_train` on the model object (plus `created` for OpenAI
+  compliance); new `GET /props` (llama.cpp shape — `n_ctx`) and `GET /info`
+  (TGI shape — `max_total_tokens` / `max_input_tokens`). All three report the
+  same engine-detected `max_seq_len`.
+
 ## [0.17.1] - 2026-07-08
 
 Follow-up to the 0.17.0 C++23 toolchain bump: now that the whole tree builds as
