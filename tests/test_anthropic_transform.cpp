@@ -340,4 +340,106 @@ TEST(AnthropicMessages, ToolResultArrayContentFlattened) {
     EXPECT_EQ(msgs[0]["content"], "a\nb");
 }
 
+// ---- openai_to_anthropic_response (reverse transform) ----------------------
+
+// Wrap an OpenAI assistant message + finish_reason into a chat.completion.
+json oai_response(json message, const std::string& finish = "stop") {
+    json choice = json{{"index", 0}, {"message", std::move(message)}, {"finish_reason", finish}};
+    return json{{"id", "chatcmpl-abc"}, {"choices", json::array({choice})}};
+}
+
+TEST(AnthropicResponse, ErrorEnvelopeFlipsType) {
+    json err = json{{"error", json{{"type", "invalid_request_error"}, {"message", "bad"}}}};
+    json out = openai_to_anthropic_response(err, "claude-x");
+    EXPECT_EQ(out["type"], "error");
+    EXPECT_EQ(out["error"]["type"], "invalid_request_error");
+    EXPECT_EQ(out["error"]["message"], "bad");
+}
+
+TEST(AnthropicResponse, TextContentBecomesTextBlock) {
+    json out = openai_to_anthropic_response(oai_response(json{{"content", "hello"}}), "claude-x");
+    EXPECT_EQ(out["type"], "message");
+    EXPECT_EQ(out["role"], "assistant");
+    EXPECT_EQ(out["model"], "claude-x");
+    ASSERT_EQ(out["content"].size(), 1u);
+    EXPECT_EQ(out["content"][0]["type"], "text");
+    EXPECT_EQ(out["content"][0]["text"], "hello");
+    EXPECT_EQ(out["stop_reason"], "end_turn");
+}
+
+TEST(AnthropicResponse, ThinkingEmittedBeforeText) {
+    json msg = json{{"reasoning_content", "hmm"}, {"content", "answer"}};
+    json content = openai_to_anthropic_response(oai_response(msg), "m")["content"];
+    ASSERT_EQ(content.size(), 2u);
+    EXPECT_EQ(content[0]["type"], "thinking");
+    EXPECT_EQ(content[0]["thinking"], "hmm");
+    EXPECT_EQ(content[1]["type"], "text");
+}
+
+TEST(AnthropicResponse, EmptyTextProducesNoBlock) {
+    json content = openai_to_anthropic_response(oai_response(json{{"content", ""}}), "m")["content"];
+    EXPECT_TRUE(content.empty());
+}
+
+TEST(AnthropicResponse, ToolCallsBecomeToolUse) {
+    json fn = json{{"name", "foo"}, {"arguments", "{\"a\":1}"}};
+    json tc = json{{"id", "call_imp_7"}, {"type", "function"}, {"function", fn}};
+    json msg = json{{"content", nullptr}, {"tool_calls", json::array({tc})}};
+    json out = openai_to_anthropic_response(oai_response(msg, "tool_calls"), "m");
+    EXPECT_EQ(out["stop_reason"], "tool_use");
+    ASSERT_EQ(out["content"].size(), 1u);
+    EXPECT_EQ(out["content"][0]["type"], "tool_use");
+    EXPECT_EQ(out["content"][0]["id"], "toolu_7");  // call_imp_ -> toolu_
+    EXPECT_EQ(out["content"][0]["name"], "foo");
+    EXPECT_EQ(out["content"][0]["input"], (json{{"a", 1}}));
+}
+
+TEST(AnthropicResponse, MalformedToolArgsBecomeEmptyObject) {
+    json fn = json{{"name", "f"}, {"arguments", "{not json"}};
+    json tc = json{{"id", "call_imp_1"}, {"function", fn}};
+    json msg = json{{"tool_calls", json::array({tc})}};
+    json out = openai_to_anthropic_response(oai_response(msg, "tool_calls"), "m");
+    EXPECT_EQ(out["content"][0]["input"], json::object());
+}
+
+TEST(AnthropicResponse, FinishReasonMapping) {
+    auto stop_for = [](const std::string& finish) {
+        return openai_to_anthropic_response(oai_response(json{{"content", "x"}}, finish), "m")
+            .value("stop_reason", "");
+    };
+    EXPECT_EQ(stop_for("stop"), "end_turn");
+    EXPECT_EQ(stop_for("length"), "max_tokens");
+    EXPECT_EQ(stop_for("tool_calls"), "tool_use");
+    EXPECT_EQ(stop_for("cancelled"), "end_turn");
+    EXPECT_EQ(stop_for("content_filter"), "content_filter");  // unknown → passthrough
+}
+
+TEST(AnthropicResponse, UsageSplitsCacheReadFromInput) {
+    json details = json{{"cached_tokens", 30}, {"cache_creation_tokens", 5}};
+    json usage = json{{"prompt_tokens", 100}, {"completion_tokens", 20}, {"prompt_tokens_details", details}};
+    json oai = oai_response(json{{"content", "x"}});
+    oai["usage"] = usage;
+    json u = openai_to_anthropic_response(oai, "m")["usage"];
+    EXPECT_EQ(u["input_tokens"], 70);  // prompt - cached
+    EXPECT_EQ(u["cache_read_input_tokens"], 30);
+    EXPECT_EQ(u["cache_creation_input_tokens"], 5);
+    EXPECT_EQ(u["output_tokens"], 20);
+}
+
+TEST(AnthropicResponse, UsageCachedClampedToPrompt) {
+    json details = json{{"cached_tokens", 500}};  // absurdly larger than prompt
+    json usage = json{{"prompt_tokens", 40}, {"completion_tokens", 0}, {"prompt_tokens_details", details}};
+    json oai = oai_response(json{{"content", "x"}});
+    oai["usage"] = usage;
+    json u = openai_to_anthropic_response(oai, "m")["usage"];
+    EXPECT_EQ(u["input_tokens"], 0);
+    EXPECT_EQ(u["cache_read_input_tokens"], 40);  // clamped to prompt_tokens
+}
+
+TEST(AnthropicResponse, ChatcmplIdRewrittenToMsg) {
+    json out = openai_to_anthropic_response(oai_response(json{{"content", "x"}}), "m");
+    // "chatcmpl-abc" -> "msg_-abc"
+    EXPECT_EQ(out["id"].get<std::string>().rfind("msg_", 0), 0u);
+}
+
 }  // namespace
