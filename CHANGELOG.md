@@ -4,6 +4,30 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-08
+
+Follow-up to the 0.17.0 C++23 toolchain bump: now that the whole tree builds as
+C++23, this release adopts the C++23 language idioms that genuinely fit the
+codebase. Behavior-neutral — identical values, same accessors, same functors;
+decode verified coherent and unchanged, perf baseline untouched. `std::expected`,
+`std::mdspan`, `std::print`, and `[[assume]]` were deliberately left out (the
+throw-based error model, device-side nvcc limits, and — for `[[assume]]` —
+proven-inert codegen on the NVFP4 GEMV decode path).
+
+### Changed
+- **Adopted C++23 idioms across the tree (#919), no functional change:**
+  `std::to_underlying` at ~67 real enum-to-underlying cast sites (with `<utility>`
+  added per translation unit — `to_underlying` is a hard compile error on
+  non-enums, so the build itself confirms every site); `deducing this` collapses
+  four duplicated const/non-const accessor pairs into one overload each
+  (`Model::layer`, `SchemaConstrain::top`, jinja `Value::as_object`,
+  `WeightRegistry::handle`); `static operator()` on six stateless functors (two
+  host hash functors plus four `__device__` activation functors — nvcc 13.3
+  accepts `static operator()` in device code).
+
+### Tests
+- Cover `format_tool_response` + `reconstruct_tool_call_output` (#914).
+
 ## [0.17.0] - 2026-07-08
 
 Toolchain-modernization release: the engine now builds as **C++23** on an
