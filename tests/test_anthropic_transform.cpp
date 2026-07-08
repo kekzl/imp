@@ -177,4 +177,59 @@ TEST(AnthropicThinking, UnknownTypeOrMalformedIsIgnored) {
     EXPECT_FALSE(anthropic_to_openai_body(req2).contains("enable_thinking"));
 }
 
+// ---- tool_choice conversion + parallel_tool_calls (issue #892) -------------
+
+TEST(AnthropicToolChoice, AbsentLeavesToolChoiceUnset) {
+    json oai = anthropic_to_openai_body(base_request());
+    EXPECT_FALSE(oai.contains("tool_choice"));
+    EXPECT_FALSE(oai.contains("parallel_tool_calls"));
+}
+
+TEST(AnthropicToolChoice, AutoNoneAnyMap) {
+    json req = base_request();
+    req["tool_choice"] = json{{"type", "auto"}};
+    EXPECT_EQ(anthropic_to_openai_body(req)["tool_choice"], "auto");
+
+    req["tool_choice"] = json{{"type", "none"}};
+    EXPECT_EQ(anthropic_to_openai_body(req)["tool_choice"], "none");
+
+    // Anthropic "any" (must call some tool) → OpenAI "required".
+    req["tool_choice"] = json{{"type", "any"}};
+    EXPECT_EQ(anthropic_to_openai_body(req)["tool_choice"], "required");
+}
+
+TEST(AnthropicToolChoice, NamedToolMapsToFunction) {
+    json req = base_request();
+    req["tool_choice"] = json{{"type", "tool"}, {"name", "get_weather"}};
+    json tc = anthropic_to_openai_body(req)["tool_choice"];
+    EXPECT_EQ(tc.value("type", ""), "function");
+    EXPECT_EQ(tc["function"].value("name", ""), "get_weather");
+}
+
+TEST(AnthropicToolChoice, StringPassthrough) {
+    // A client that already supplied the OpenAI string form is kept as-is.
+    json req = base_request();
+    req["tool_choice"] = "required";
+    EXPECT_EQ(anthropic_to_openai_body(req)["tool_choice"], "required");
+}
+
+TEST(AnthropicToolChoice, DisableParallelToolUseSetsFlag) {
+    json req = base_request();
+    req["tool_choice"] = json{{"type", "auto"}, {"disable_parallel_tool_use", true}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_EQ(oai["tool_choice"], "auto");
+    EXPECT_FALSE(oai.value("parallel_tool_calls", true));  // mapped to false
+}
+
+TEST(AnthropicToolChoice, ParallelDefaultLeavesFlagUnset) {
+    // Without disable_parallel_tool_use the flag must not be forced (default is
+    // parallel-allowed on the OpenAI side).
+    json req = base_request();
+    req["tool_choice"] = json{{"type", "auto"}};
+    EXPECT_FALSE(anthropic_to_openai_body(req).contains("parallel_tool_calls"));
+
+    req["tool_choice"] = json{{"type", "auto"}, {"disable_parallel_tool_use", false}};
+    EXPECT_FALSE(anthropic_to_openai_body(req).contains("parallel_tool_calls"));
+}
+
 }  // namespace
