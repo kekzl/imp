@@ -26,6 +26,7 @@
 #include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <functional>
 #include <vector>
 #include <unordered_map>

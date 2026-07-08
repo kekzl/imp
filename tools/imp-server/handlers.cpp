@@ -12,6 +12,7 @@
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>

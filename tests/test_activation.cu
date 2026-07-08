@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 namespace imp {
 namespace {
