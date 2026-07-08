@@ -4,7 +4,7 @@
 // into imp — pure viability/correctness prototype (zero degeneration risk).
 //
 // Run via the WSL-driver dev recipe (see docs/archive/tile-fa2-dispatch-shelved.md). Build:
-//   nvcc -std=c++20 --enable-tile -arch=sm_120a -o tile_fa2_probe tile_fa2_probe.cu
+//   nvcc -std=c++23 --enable-tile -arch=sm_120a -o tile_fa2_probe tile_fa2_probe.cu
 #include "cuda_tile.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
