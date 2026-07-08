@@ -232,4 +232,112 @@ TEST(AnthropicToolChoice, ParallelDefaultLeavesFlagUnset) {
     EXPECT_FALSE(anthropic_to_openai_body(req).contains("parallel_tool_calls"));
 }
 
+// ---- message / content-block conversion ------------------------------------
+
+// Small builders to keep the nested Anthropic payloads readable.
+json tblk(const std::string& text) {
+    return json{{"type", "text"}, {"text", text}};
+}
+json one_user(const json& content) {
+    json r = base_request();
+    r["messages"] = json::array({json{{"role", "user"}, {"content", content}}});
+    return r;
+}
+json one_assistant(const json& content) {
+    json r = base_request();
+    r["messages"] = json::array({json{{"role", "assistant"}, {"content", content}}});
+    return r;
+}
+
+TEST(AnthropicMessages, SystemStringPrependedAsSystemRole) {
+    json req = base_request();
+    req["system"] = "You are helpful.";
+    json msgs = anthropic_to_openai_body(req)["messages"];
+    ASSERT_FALSE(msgs.empty());
+    EXPECT_EQ(msgs[0]["role"], "system");
+    EXPECT_EQ(msgs[0]["content"], "You are helpful.");
+}
+
+TEST(AnthropicMessages, SystemBlockArrayFlattenedWithNewlines) {
+    json req = base_request();
+    req["system"] = json::array({tblk("A"), tblk("B")});
+    json msgs = anthropic_to_openai_body(req)["messages"];
+    EXPECT_EQ(msgs[0]["role"], "system");
+    EXPECT_EQ(msgs[0]["content"], "A\nB");
+}
+
+TEST(AnthropicMessages, SingleUserTextBlockCollapsesToString) {
+    json msgs = anthropic_to_openai_body(one_user(json::array({tblk("hi")})))["messages"];
+    ASSERT_EQ(msgs.size(), 1u);
+    EXPECT_EQ(msgs[0]["role"], "user");
+    EXPECT_EQ(msgs[0]["content"], "hi");  // collapsed, not an array
+}
+
+TEST(AnthropicMessages, UserImageBase64BecomesDataUrl) {
+    json src = json{{"type", "base64"}, {"media_type", "image/png"}, {"data", "AAA"}};
+    json img = json{{"type", "image"}, {"source", src}};
+    json oai = anthropic_to_openai_body(one_user(json::array({tblk("look"), img})));
+    json content = oai["messages"][0]["content"];
+    ASSERT_TRUE(content.is_array());
+    ASSERT_EQ(content.size(), 2u);
+    EXPECT_EQ(content[0]["type"], "text");
+    EXPECT_EQ(content[1]["type"], "image_url");
+    EXPECT_EQ(content[1]["image_url"]["url"], "data:image/png;base64,AAA");
+}
+
+TEST(AnthropicMessages, UserImageUrlSourcePassedThrough) {
+    json img = json{{"type", "image"}, {"source", json{{"type", "url"}, {"url", "https://x/y.png"}}}};
+    json content = anthropic_to_openai_body(one_user(json::array({img})))["messages"][0]["content"];
+    ASSERT_TRUE(content.is_array());
+    EXPECT_EQ(content[0]["type"], "image_url");
+    EXPECT_EQ(content[0]["image_url"]["url"], "https://x/y.png");
+}
+
+TEST(AnthropicMessages, AssistantToolUseBecomesToolCalls) {
+    json tu = json{{"type", "tool_use"}, {"id", "tu_1"}, {"name", "foo"}, {"input", json{{"a", 1}}}};
+    json msg = anthropic_to_openai_body(one_assistant(json::array({tblk("ok"), tu})))["messages"][0];
+    EXPECT_EQ(msg["role"], "assistant");
+    EXPECT_EQ(msg["content"], "ok");
+    ASSERT_TRUE(msg.contains("tool_calls"));
+    ASSERT_EQ(msg["tool_calls"].size(), 1u);
+    EXPECT_EQ(msg["tool_calls"][0]["id"], "tu_1");
+    EXPECT_EQ(msg["tool_calls"][0]["type"], "function");
+    EXPECT_EQ(msg["tool_calls"][0]["function"]["name"], "foo");
+    // arguments is a serialized JSON string — parse it back to compare stably.
+    std::string raw_args = msg["tool_calls"][0]["function"]["arguments"].get<std::string>();
+    EXPECT_EQ(json::parse(raw_args), (json{{"a", 1}}));
+}
+
+TEST(AnthropicMessages, AssistantOnlyToolUseHasNullContent) {
+    json tu = json{{"type", "tool_use"}, {"id", "tu_2"}, {"name", "f"}, {"input", json::object()}};
+    json msg = anthropic_to_openai_body(one_assistant(json::array({tu})))["messages"][0];
+    EXPECT_TRUE(msg["content"].is_null());
+    EXPECT_EQ(msg["tool_calls"][0]["id"], "tu_2");
+}
+
+TEST(AnthropicMessages, AssistantThinkingBecomesReasoningContent) {
+    json think = json{{"type", "thinking"}, {"thinking", "hmm"}};
+    json msg = anthropic_to_openai_body(one_assistant(json::array({think, tblk("answer")})))["messages"][0];
+    EXPECT_EQ(msg["content"], "answer");
+    EXPECT_EQ(msg.value("reasoning_content", ""), "hmm");
+}
+
+TEST(AnthropicMessages, ToolResultBecomesToolRoleMessage) {
+    json tr = json{{"type", "tool_result"}, {"tool_use_id", "tu_1"}, {"content", "42"}};
+    json msgs = anthropic_to_openai_body(one_user(json::array({tr})))["messages"];
+    ASSERT_EQ(msgs.size(), 1u);
+    EXPECT_EQ(msgs[0]["role"], "tool");
+    EXPECT_EQ(msgs[0]["tool_call_id"], "tu_1");
+    EXPECT_EQ(msgs[0]["content"], "42");
+}
+
+TEST(AnthropicMessages, ToolResultArrayContentFlattened) {
+    json tr = json{{"type", "tool_result"},
+                   {"tool_use_id", "tu_9"},
+                   {"content", json::array({tblk("a"), tblk("b")})}};
+    json msgs = anthropic_to_openai_body(one_user(json::array({tr})))["messages"];
+    EXPECT_EQ(msgs[0]["role"], "tool");
+    EXPECT_EQ(msgs[0]["content"], "a\nb");
+}
+
 }  // namespace
