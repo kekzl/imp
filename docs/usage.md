@@ -108,7 +108,25 @@ as GGUF.
 Auto defaults target ~60% of free VRAM for KV, sized for the actual KV
 dtype after model-specific overrides (e.g. Gemma-4 → FP16 KV via the
 `engine.cpp:547` carve-out). `--min-kv-tokens` overrides the defensive
-80% cap and trades FP16 weight-cache capacity for more context.
+80% cap and trades FP16 weight-cache capacity for more context. The
+budget planner's envelope itself is tunable via imp.conf `[vram]`:
+`kv_fraction` (default 0.8 — the KV share of post-reserve VRAM) and
+`reserve_floor_pct` (default 10 — the free-VRAM headroom floor as % of
+total). See `imp.conf.example`.
+
+To serve a context longer than the model's native window, inject RoPE
+scaling at load via imp.conf `[rope]` (or `--set`), e.g. a native-32k
+model at 128k:
+
+```bash
+imp-server --model model.gguf --set rope.scaling=yarn --set rope.factor=4
+```
+
+The override mirrors model-declared `rope_scaling` metadata (YaRN or
+linear), raises the detected context window to `factor × orig_ctx`, and
+is refused for LongRoPE/llama3 per-dimension tables, MLA, and NoPE
+models. Quality past the native window is the checkpoint's YaRN
+extrapolation quality — validate on your workload.
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb` in imp.conf) hard-caps
 this process's VRAM: every sizing decision — weight caches, KV clamp, expert

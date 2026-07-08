@@ -97,6 +97,39 @@ bitdecoding_qk              = false
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0
 
+[rope]
+# Runtime RoPE-scaling override: stretch a model's usable context past its
+# native window without editing the checkpoint (e.g. a native-32k model to
+# 128k via YaRN). Sets the same fields the loaders set from model-declared
+# rope_scaling metadata and raises the declared context to factor × orig_ctx
+# (KV sizing / max_seq_len auto-detection see the extended window).
+# Refused for models with per-dimension RoPE tables (LongRoPE / llama3),
+# MLA, and NoPE. If the model already declares scaling, the override
+# REPLACES it (a warning is logged — set orig_ctx explicitly there).
+# "" = off (model metadata only) | "yarn" | "linear".
+scaling     = ""
+# Context-extension factor (> 1.0). Example: 4.0 → 32k becomes 128k.
+factor      = 1.0
+# Native training context the factor applies to. 0 = auto (model-declared
+# rope_n_ctx_orig, else the declared context length).
+orig_ctx    = 0
+# HF attn_factor multiplier. The kernel already applies the YaRN-paper
+# mscale 1 + 0.1*ln(factor) internally — leave at 1.0 normally.
+attn_factor = 1.0
+beta_fast   = 32.0
+beta_slow   = 1.0
+
+[vram]
+# Budget-planner tuning. Governs compute_vram_budget() only (the pre-dequant
+# phases keep their internal safety floors).
+# Share of post-reserve / post-weight-cache VRAM the KV pool targets.
+# Clamped to [0.05, 0.95]. Raise to trade weight-cache headroom for context.
+kv_fraction       = 0.8
+# Free-VRAM reserve floor as % of (budget-visible) total VRAM, still floored
+# at 256 MiB absolute. Clamped to [0, 50]. Default 10 ≈ 3.2 GiB on a 32 GiB
+# card — lower to hand more VRAM to the KV pool.
+reserve_floor_pct = 10
+
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
 # context length. Override only for benchmarking or compatibility tests.

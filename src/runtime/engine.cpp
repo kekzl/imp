@@ -619,6 +619,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.mmproj_path = runtime_config_.paths.mmproj;
     if (config_.vram_budget_mb == 0 && runtime_config_.runtime.vram_budget_mb > 0)
         config_.vram_budget_mb = static_cast<size_t>(runtime_config_.runtime.vram_budget_mb);
+    if (config_.kv_fraction == 0.8f)  // EngineConfig default untouched → take imp.conf
+        config_.kv_fraction = runtime_config_.vram.kv_fraction;
+    if (config_.vram_reserve_floor_pct == 10)
+        config_.vram_reserve_floor_pct = runtime_config_.vram.reserve_floor_pct;
 
     // Install the process-wide VRAM budget view BEFORE any sizing runs —
     // every cudaMemGetInfo-based decision below (weight upload gates, cache
@@ -653,6 +657,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     init_apply_debug_raw_overrides_();
+    init_apply_rope_override_();
     init_resolve_kv_dtype_policy_();
     init_resolve_ssm_dtype_();
     init_resolve_fp8_prefill_();

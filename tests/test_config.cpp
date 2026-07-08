@@ -73,6 +73,48 @@ expert_overhead_pct = 30
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 30);
 }
 
+TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
+    // Defaults: override off, planner at the historical envelope.
+    RuntimeConfig defaults;
+    EXPECT_TRUE(defaults.rope.scaling.empty());
+    EXPECT_FLOAT_EQ(defaults.rope.factor, 1.0f);
+    EXPECT_EQ(defaults.rope.orig_ctx, 0);
+    EXPECT_FLOAT_EQ(defaults.rope.attn_factor, 1.0f);
+    EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 0.8f);
+    EXPECT_EQ(defaults.vram.reserve_floor_pct, 10);
+
+    TempFile f(R"(
+[rope]
+scaling = "yarn"
+factor = 4.0
+orig_ctx = 32768
+attn_factor = 1.5
+beta_fast = 24
+beta_slow = 2
+
+[vram]
+kv_fraction = 0.5
+reserve_floor_pct = 5
+)");
+
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.load_from_file(f.path));
+    EXPECT_EQ(cfg.rope.scaling, "yarn");
+    EXPECT_FLOAT_EQ(cfg.rope.factor, 4.0f);
+    EXPECT_EQ(cfg.rope.orig_ctx, 32768);
+    EXPECT_FLOAT_EQ(cfg.rope.attn_factor, 1.5f);
+    EXPECT_FLOAT_EQ(cfg.rope.beta_fast, 24.0f);
+    EXPECT_FLOAT_EQ(cfg.rope.beta_slow, 2.0f);
+    EXPECT_FLOAT_EQ(cfg.vram.kv_fraction, 0.5f);
+    EXPECT_EQ(cfg.vram.reserve_floor_pct, 5);
+
+    // --set style overrides reach the same fields.
+    cfg.apply_overrides({"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
+    EXPECT_EQ(cfg.rope.scaling, "linear");
+    EXPECT_FLOAT_EQ(cfg.rope.factor, 2.0f);
+    EXPECT_FLOAT_EQ(cfg.vram.kv_fraction, 0.9f);
+}
+
 TEST(RuntimeConfigTest, IgnoresCommentsAndBlankLines) {
     TempFile f(R"(
 # top comment

@@ -12,11 +12,14 @@
 
 #include <gtest/gtest.h>
 
+#include "memory/vram_query.h"
 #include "model/model.h"
 #include "model/model_config.h"
 #include "runtime/engine.h"
 #include "runtime/storage_planner.h"
 #include "runtime/vram_budget.h"
+
+#include <algorithm>
 
 #include "test_cuda_skip.h"
 
@@ -113,4 +116,113 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
     const size_t per_block = 16ull * 8 * 128 * 2 * 2 * 32;
     const size_t kv_bytes = static_cast<size_t>(with_planner.kv_max_blocks) * per_block;
     EXPECT_GE(kv_bytes, 4 * GiB) << "reservation must not fire for heuristic-covered sources";
+}
+
+// --- imp.conf [vram] knobs (kv_fraction / reserve_floor_pct) ---
+//
+// F16 weights keep both the heuristic and the planner projection at zero, so
+// the KV math is undisturbed by weight-cache reservations — the knobs' effect
+// is exactly observable. max_seq_len is small enough that neither the
+// min-KV floor nor the target_blocks clamp rewrites the fraction result.
+
+namespace {
+
+EngineConfig knob_config() {
+    EngineConfig config;
+    config.max_seq_len = 2048;
+    config.max_batch_size = 8;
+    config.use_nvfp4_decode = 0;  // FP16_ONLY strategy, reserve floor applies
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+    return config;
+}
+
+}  // namespace
+
+TEST(VramBudgetReserve, VramKnobDefaultsArePinned) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::F16, QType::F16);
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    EngineConfig def = knob_config();
+    EngineConfig expl = knob_config();
+    expl.kv_fraction = 0.8f;
+    expl.vram_reserve_floor_pct = 10;
+
+    VRAMBudget a = compute_vram_budget(m, def, 32, 128, 8 * GiB);
+    VRAMBudget b = compute_vram_budget(m, expl, 32, 128, 8 * GiB);
+    EXPECT_EQ(a.reserve_bytes, b.reserve_bytes);
+    EXPECT_EQ(a.kv_cache_bytes, b.kv_cache_bytes);
+    EXPECT_EQ(a.kv_max_blocks, b.kv_max_blocks);
+}
+
+TEST(VramBudgetReserve, KvFractionScalesKvPool) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::F16, QType::F16);
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    EngineConfig cfg_08 = knob_config();
+    EngineConfig cfg_04 = knob_config();
+    cfg_04.kv_fraction = 0.4f;
+
+    VRAMBudget b08 = compute_vram_budget(m, cfg_08, 32, 128, 8 * GiB);
+    VRAMBudget b04 = compute_vram_budget(m, cfg_04, 32, 128, 8 * GiB);
+    // Same `available` in both runs — halving the fraction halves the pool
+    // target. (kv_max_blocks can converge to the same value downstream via
+    // the physical-fit backstop / min-KV floor, which are fraction-
+    // independent — the bytes target is the knob's contract.)
+    EXPECT_EQ(b04.kv_cache_bytes * 2, b08.kv_cache_bytes);
+    EXPECT_LE(b04.kv_max_blocks, b08.kv_max_blocks);
+}
+
+TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::F16, QType::F16);
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    EngineConfig cfg_10 = knob_config();
+    EngineConfig cfg_20 = knob_config();
+    cfg_20.vram_reserve_floor_pct = 20;
+
+    size_t total_vram = 0;
+    vram_budget_mem_get_info(nullptr, &total_vram);
+    ASSERT_GT(total_vram, 0u);
+
+    VRAMBudget b10 = compute_vram_budget(m, cfg_10, 32, 128, 8 * GiB);
+    VRAMBudget b20 = compute_vram_budget(m, cfg_20, 32, 128, 8 * GiB);
+    // Feature reserve here is 512 MiB (graphs off) — the floor dominates on
+    // any real card, so the reserve must equal vram_reserve_floor(total, pct).
+    EXPECT_EQ(b10.reserve_bytes,
+              std::max<size_t>(512ull * 1024 * 1024, vram_reserve_floor(total_vram, 10)));
+    EXPECT_EQ(b20.reserve_bytes,
+              std::max<size_t>(512ull * 1024 * 1024, vram_reserve_floor(total_vram, 20)));
+    EXPECT_GE(b20.reserve_bytes, b10.reserve_bytes);
+}
+
+TEST(VramBudgetReserve, VramKnobsAreClamped) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::F16, QType::F16);
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    EngineConfig silly = knob_config();
+    silly.kv_fraction = 5.0f;            // clamped to 0.95
+    silly.vram_reserve_floor_pct = -5;   // clamped to 0 → 512 MiB feature base
+
+    EngineConfig max_sane = knob_config();
+    max_sane.kv_fraction = 0.95f;
+    max_sane.vram_reserve_floor_pct = 0;
+
+    VRAMBudget a = compute_vram_budget(m, silly, 32, 128, 8 * GiB);
+    VRAMBudget b = compute_vram_budget(m, max_sane, 32, 128, 8 * GiB);
+    EXPECT_EQ(a.reserve_bytes, b.reserve_bytes);
+    EXPECT_EQ(a.kv_cache_bytes, b.kv_cache_bytes);
+    EXPECT_EQ(a.kv_max_blocks, b.kv_max_blocks);
 }
