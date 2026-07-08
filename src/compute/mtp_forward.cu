@@ -20,6 +20,7 @@
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
 #include "compute/rope.h"           // qknorm_rope_fused
+#include "compute/rope_yarn.cuh"    // rope_yarn (shared YaRN device math)
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -355,7 +356,11 @@ __global__ void mtp_mrope_kernel(
     __half* __restrict__ x,           // Q: [n_heads, head_dim], K: [n_kv_heads, head_dim]
     int n_heads, int head_dim, int rope_dim, float theta,
     int sec0, int sec1, int sec2,    // mrope_section half-counts (sec0+sec1+sec2 == rope_dim/2)
-    int pos_t, int pos_h, int pos_w) {
+    int pos_t, int pos_h, int pos_w,
+    // RoPE scaling — mirrors rope.cu's rope_forward_kernel so the draft head
+    // rotates identically to the verifier (issue #897). inv_scaling = 1/freq_scale;
+    // ext_factor > 0 engages YaRN blending (corr_dim_0/1, attn_factor=mscale).
+    float inv_scaling, float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1) {
     int h = blockIdx.x;
     if (h >= n_heads) return;
     __half* row = x + static_cast<int64_t>(h) * head_dim;
@@ -368,11 +373,20 @@ __global__ void mtp_mrope_kernel(
         if      (k < s01) pos = pos_t;
         else if (k < s12) pos = pos_h;
         else              pos = pos_w;
-        // Frequency: theta^(-2k/rope_dim)
-        float inv_freq = expf(-static_cast<float>(2 * k) / static_cast<float>(rope_dim) * logf(theta));
-        float angle = static_cast<float>(pos) * inv_freq;
-        float c = __cosf(angle);
-        float s = __sinf(angle);
+        // cos/sin with the same YaRN / linear-scaling math as the main forward.
+        float c, s;
+        if (ext_factor != 0.0f) {
+            // YaRN mode: per-dimension frequency blending.
+            float theta_extrap =
+                static_cast<float>(pos) / powf(theta, static_cast<float>(2 * k) / static_cast<float>(rope_dim));
+            rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * k, ext_factor, attn_factor, c, s);
+        } else {
+            // Linear mode: frequency = theta^(-2k/rope_dim), scaled by inv_scaling.
+            float freq = inv_scaling / powf(theta, static_cast<float>(2 * k) / static_cast<float>(rope_dim));
+            float angle = static_cast<float>(pos) * freq;
+            c = __cosf(angle);
+            s = __sinf(angle);
+        }
         // NeoX-style pair: (x[k], x[k + rope_dim/2])
         int i0 = k;
         int i1 = k + pairs;
@@ -384,6 +398,28 @@ __global__ void mtp_mrope_kernel(
     // (void) IsKv — currently unused but reserved for any future per-head
     // GQA/MQA divergences. Both Q and K paths share the same rotation math.
     if (false) (void)IsKv;
+}
+
+// Host wrapper: apply the YaRN-aware mrope rotation to a single MTP step's
+// Q [n_heads, head_dim] and K [n_kv_heads, head_dim] in place. Text-only, so
+// the three mrope position components collapse to `pos`. Shared by the draft
+// step and the rope-parity unit test (issue #897).
+void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
+                     float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
+                     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
+                     cudaStream_t stream) {
+    if (rope_dim <= 0 || sec0 + sec1 + sec2 != rope_dim / 2) return;
+    const int kBlock = 128;
+    if (n_heads > 0 && d_q) {
+        mtp_mrope_kernel<false><<<n_heads, kBlock, 0, stream>>>(
+            static_cast<__half*>(d_q), n_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
+            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+    }
+    if (n_kv_heads > 0 && d_k) {
+        mtp_mrope_kernel<true><<<n_kv_heads, kBlock, 0, stream>>>(
+            static_cast<__half*>(d_k), n_kv_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
+            pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,22 +752,13 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             // is structured to support distinct T/H/W positions for future
             // multimodal token handling. NeoX-style pairing only.
             if (ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
-                const int pos_t = ws.mtp_pos;  // text-only: T=H=W=mtp_pos
-                const int pos_h = ws.mtp_pos;
-                const int pos_w = ws.mtp_pos;
-                const int kBlock = 128;
-                // Q rotation: nh CTAs, each handles head_dim/2 pairs
-                mtp_mrope_kernel<false><<<nh, kBlock, 0, stream>>>(
-                    static_cast<__half*>(ws.d_q_attn),
-                    nh, hdh, ws.rope_dim, ws.rope_theta,
-                    ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2,
-                    pos_t, pos_h, pos_w);
-                // K rotation: nkv CTAs
-                mtp_mrope_kernel<true><<<nkv, kBlock, 0, stream>>>(
-                    static_cast<__half*>(ws.d_k_proj),
-                    nkv, hdh, ws.rope_dim, ws.rope_theta,
-                    ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2,
-                    pos_t, pos_h, pos_w);
+                // RoPE-scaling params mirrored from the main forward (issue #897):
+                // inv_scaling = 1/freq_scale; ext_factor>0 → YaRN. Defaults leave
+                // the base (unscaled) rope unchanged. Text-only → single position.
+                mtp_apply_mrope(ws.d_q_attn, nh, ws.d_k_proj, nkv, hdh, ws.rope_dim, ws.rope_theta,
+                                ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2, ws.mtp_pos,
+                                1.0f / ws.rope_freq_scale, ws.yarn_ext_factor, ws.yarn_attn_factor,
+                                ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream);
             }
             const int pos = ws.mtp_pos;
             // 5.A.4.a — append k_step, v_step into cache at pos

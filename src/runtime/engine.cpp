@@ -9,6 +9,7 @@
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
+#include "compute/rope.h"           // rope_yarn_corr_dims (MTP rope-scaling parity)
 #include "compute/encoder_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
@@ -234,6 +235,36 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->mrope_sec1 = 0;
         ws->mrope_sec2 = 0;
     }
+    // RoPE scaling — mirror the main forward so the drafter rotates Q/K the
+    // same way as the verifier at extended positions (issue #897). Without
+    // this a rope-scaled model's draft head diverges and acceptance silently
+    // degrades with position.
+    ws->rope_freq_scale  = model_->config_.rope_freq_scale;
+    ws->yarn_ext_factor  = model_->config_.yarn_ext_factor;
+    ws->yarn_attn_factor = model_->config_.yarn_attn_factor;
+    if (model_->config_.yarn_ext_factor > 0.0f) {
+        int hd = model_->config_.head_dim > 0 ? model_->config_.head_dim
+                                              : (model_->config_.d_model / model_->config_.n_heads);
+        int n_dims = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : hd;
+        int n_ctx_orig = model_->config_.rope_n_ctx_orig > 0 ? model_->config_.rope_n_ctx_orig
+                                                             : model_->config_.max_seq_len;
+        float corr[2] = {0.0f, 0.0f};
+        imp::rope_yarn_corr_dims(n_dims, n_ctx_orig, model_->config_.rope_theta,
+                                 model_->config_.yarn_beta_fast, model_->config_.yarn_beta_slow, corr);
+        ws->yarn_corr_dim_0 = corr[0];
+        ws->yarn_corr_dim_1 = corr[1];
+        IMP_LOG_INFO("MTP YaRN: ext=%.2f attn=%.3f freq_scale=%.4f corr_dims=[%.1f, %.1f]",
+                     ws->yarn_ext_factor, ws->yarn_attn_factor, ws->rope_freq_scale,
+                     ws->yarn_corr_dim_0, ws->yarn_corr_dim_1);
+    }
+    // LongRoPE (Phi-family) isn't plumbed into the single-token MTP kernel — no
+    // MTP model ships it today (Qwen uses YaRN/linear). Warn rather than silently
+    // diverge if that ever changes.
+    if (!model_->config_.rope_short_factor.empty() || !model_->config_.rope_long_factor.empty()) {
+        IMP_LOG_WARN("MTP spec-decode: model uses LongRoPE scaling, which the draft head does not apply "
+                     "— draft rope will diverge from the verifier; expect degraded acceptance");
+    }
+
     // Diagnostic: generation.mtp_no_rope disables RoPE entirely.
     if (runtime_config_.generation.mtp_no_rope) {
         ws->rope_dim = 0;
