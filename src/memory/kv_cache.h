@@ -23,14 +23,32 @@ public:
     // Per-layer-shape constructor (Gemma 4 dual attention geometry).
     // n_kv_heads_per_layer[l] and head_dim_per_layer[l] define layer l's
     // KV shape. The scale/sketch pools are sized using max across layers.
+    //
+    // SWA-aware sizing (kv_cache.swa_sizing): when `layer_is_swa` is non-empty,
+    // layers flagged 1 get a small dedicated block group of `swa_max_blocks`
+    // capacity instead of the full `max_blocks` — sliding-window layers only
+    // ever hold the trailing window, so their regions shrink accordingly.
+    // SWA blocks live in a SEPARATE block-id space [0, swa_max_blocks) with
+    // their own free list (allocate_swa_block/free_swa_block); k_ptr/v_ptr
+    // interpret block_id in the layer's group space (per-layer offsets).
     KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
             const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
-            VRAMAllocator* alloc);
+            VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0);
     ~KVCache();
 
     // Block allocation / deallocation
     int allocate_block();
     void free_block(int block_id);
+
+    // ── SWA block group (separate id space, no ref-count sharing) ────
+    bool swa_enabled() const { return swa_max_blocks_ > 0; }
+    bool layer_is_swa(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[layer];
+    }
+    int allocate_swa_block();
+    void free_swa_block(int block_id);
+    int num_free_swa_blocks() const { return static_cast<int>(swa_free_list_.size()); }
+    int swa_total_blocks() const { return swa_max_blocks_; }
 
     // Reference counting (for copy-on-write / prefix caching)
     int ref_count(int block_id) const;
@@ -93,6 +111,13 @@ private:
     void* scale_pool_ = nullptr;
     size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
 
+    // ── SWA block group state (per-layer ctor only) ──────────────────
+    // layer_is_swa_[l] = 1 → layer l's region has swa_max_blocks_ capacity and
+    // block ids passed to k_ptr/v_ptr for it come from the SWA id space.
+    std::vector<char> layer_is_swa_;
+    int swa_max_blocks_ = 0;
+    std::vector<int> swa_ref_counts_;
+    std::vector<int> swa_free_list_;
 };
 
 }  // namespace imp

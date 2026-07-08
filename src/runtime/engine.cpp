@@ -84,6 +84,10 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
         async_d_block_tables_ = nullptr;
     }
+    if (async_d_block_tables_swa_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+        async_d_block_tables_swa_ = nullptr;
+    }
     if (async_d_banned_tokens_) {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
         async_d_banned_tokens_ = nullptr;

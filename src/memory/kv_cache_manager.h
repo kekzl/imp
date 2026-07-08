@@ -141,6 +141,37 @@ public:
     // excluding pinned blocks. O(1).
     int num_reclaimable_cached_blocks() const { return reclaimable_cached_count_; }
 
+    // ── SWA-aware sizing (kv_cache.swa_sizing) ───────────────────────
+    //
+    // Sliding-window layers read/write a small dedicated block group
+    // (KVCache SWA group); the manager keeps a second positional table per
+    // sequence, same length/indexing as the global table, with -1 holes
+    // for positions outside the trailing window. Engine contract:
+    //   - swa_prepare(seq, from_tokens, upto_tokens) BEFORE forwarding the
+    //     token range [from, upto) (prefill chunk / decode step / on-device
+    //     burst incl. spec drafts): pads the SWA table to the global
+    //     table's length and allocates live entries for blocks intersecting
+    //     [from - window - slack, upto) — every write in the range plus the
+    //     window each query reads. Earlier slots stay/become -1.
+    //   - swa_trim(seq, committed_tokens) after the step commits: frees
+    //     entries fully below committed - window - slack. The slack must
+    //     cover the deepest spec-decode rollback (rollback never restores
+    //     positions older than slack tokens behind the prepared tail).
+    //   - rollback() / free_sequence() handle the SWA table automatically.
+    // SWA blocks are never hashed, pinned, persisted, or shared.
+    void enable_swa_sizing(int window_tokens, int slack_tokens);
+    bool swa_sizing_enabled() const { return swa_window_ > 0; }
+    int swa_window() const { return swa_window_; }
+    int swa_slack() const { return swa_slack_; }
+    [[nodiscard]] bool swa_prepare(int seq_id, int from_tokens, int upto_tokens);
+    [[nodiscard]] bool swa_prepare(int seq_id, int upto_tokens) {
+        return swa_prepare(seq_id, upto_tokens, upto_tokens);
+    }
+    void swa_trim(int seq_id, int committed_tokens);
+    // Positional SWA block table (parallel to block_table; -1 = hole).
+    // Empty vector if unknown seq or SWA sizing disabled.
+    const std::vector<int>& swa_block_table(int seq_id) const;
+
     // ── Speculative decoding rollback ────────────────────────────────
 
     // Truncate a sequence's block table to fit `new_seq_len` tokens.
@@ -287,6 +318,17 @@ private:
 
     // seq_id -> ordered list of block ids.
     std::unordered_map<int, std::vector<int>> seq_blocks_;
+
+    // ── SWA-aware sizing state ───────────────────────────────────────
+    // seq_id -> positional SWA-group block table (parallel to seq_blocks_,
+    // -1 holes outside the trailing window). Only populated when
+    // enable_swa_sizing() armed the feature.
+    std::unordered_map<int, std::vector<int>> seq_swa_blocks_;
+    // seq_id -> first not-yet-trimmed SWA table index (amortizes swa_trim
+    // to O(new dead blocks) per call instead of O(table)).
+    std::unordered_map<int, int> swa_trim_cursor_;
+    int swa_window_ = 0;  // 0 = SWA sizing disabled
+    int swa_slack_ = 0;
 
     // ── LRU tracking ─────────────────────────────────────────────────
     // Doubly-linked list of seq_ids; most recently used at the *tail*.

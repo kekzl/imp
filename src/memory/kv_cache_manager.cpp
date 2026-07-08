@@ -332,6 +332,16 @@ void KVCacheManager::free_sequence(int seq_id) {
 
     seq_blocks_.erase(it);
     seq_block_hashes_.erase(seq_id);
+
+    // SWA table: free every live SWA-group block (never hashed/pinned/shared).
+    if (auto sit = seq_swa_blocks_.find(seq_id); sit != seq_swa_blocks_.end()) {
+        for (int bid : sit->second)
+            if (bid >= 0)
+                cache_->free_swa_block(bid);
+        seq_swa_blocks_.erase(sit);
+        swa_trim_cursor_.erase(seq_id);
+    }
+
     // Phase 3: reset residual ring state AND return the slot to the free list.
     // release_residual_slot is a no-op if no slot was allocated for this seq.
     release_residual_slot(seq_id);
@@ -753,6 +763,89 @@ void KVCacheManager::unpin_prefix(int seq_id) {
 
 int KVCacheManager::num_pinned_blocks() const { return static_cast<int>(pinned_blocks_.size()); }
 
+// ─── SWA-aware sizing (kv_cache.swa_sizing) ──────────────────────────
+
+void KVCacheManager::enable_swa_sizing(int window_tokens, int slack_tokens) {
+    if (!cache_->swa_enabled() || window_tokens <= 0) {
+        IMP_LOG_WARN("KVCacheManager: enable_swa_sizing ignored (cache swa group %s, window=%d)",
+                     cache_->swa_enabled() ? "present" : "absent", window_tokens);
+        return;
+    }
+    swa_window_ = window_tokens;
+    // Slack floor of one block covers the partially-filled boundary block;
+    // the caller adds the spec-decode rollback depth on top.
+    swa_slack_ = std::max(slack_tokens, cache_->block_size());
+    IMP_LOG_INFO("KVCacheManager: SWA sizing enabled (window=%d, slack=%d, group=%d blocks)",
+                 swa_window_, swa_slack_, cache_->swa_total_blocks());
+}
+
+bool KVCacheManager::swa_prepare(int seq_id, int from_tokens, int upto_tokens) {
+    if (swa_window_ <= 0 || upto_tokens <= 0)
+        return true;
+    auto git = seq_blocks_.find(seq_id);
+    if (git == seq_blocks_.end())
+        return true;  // no global blocks yet — nothing to mirror
+    auto& swa = seq_swa_blocks_[seq_id];
+    const int bs = cache_->block_size();
+    // Pad to the global table's length: new slots start as holes; only the
+    // live tail below gets physical blocks.
+    if (swa.size() < git->second.size())
+        swa.resize(git->second.size(), -1);
+
+    const long long live_start_tok =
+        static_cast<long long>(std::min(from_tokens, upto_tokens)) - swa_window_ - swa_slack_;
+    const int first_live = live_start_tok > 0 ? static_cast<int>(live_start_tok / bs) : 0;
+    const int end_block = std::min(static_cast<int>((upto_tokens + bs - 1) / bs),
+                                   static_cast<int>(swa.size()));
+    for (int b = first_live; b < end_block; ++b) {
+        if (swa[b] >= 0)
+            continue;
+        int id = cache_->allocate_swa_block();
+        if (id < 0) {
+            IMP_LOG_ERROR(
+                "KVCacheManager: SWA block group exhausted (seq %d, block %d/%d, 0 free) — "
+                "group undersized for the live span",
+                seq_id, b, end_block);
+            return false;
+        }
+        swa[b] = id;
+    }
+    return true;
+}
+
+void KVCacheManager::swa_trim(int seq_id, int committed_tokens) {
+    if (swa_window_ <= 0)
+        return;
+    auto it = seq_swa_blocks_.find(seq_id);
+    if (it == seq_swa_blocks_.end())
+        return;
+    auto& swa = it->second;
+    const int bs = cache_->block_size();
+    const long long dead_end_tok =
+        static_cast<long long>(committed_tokens) - swa_window_ - swa_slack_;
+    if (dead_end_tok <= 0)
+        return;
+    // Block b is dead when it ends at or before dead_end_tok: (b+1)*bs <= dead_end.
+    const int dead_blocks = static_cast<int>(
+        std::min<long long>(dead_end_tok / bs, static_cast<long long>(swa.size())));
+    int& cursor = swa_trim_cursor_[seq_id];
+    for (int b = cursor; b < dead_blocks; ++b) {
+        if (swa[b] >= 0) {
+            cache_->free_swa_block(swa[b]);
+            swa[b] = -1;
+        }
+    }
+    cursor = std::max(cursor, dead_blocks);
+}
+
+const std::vector<int>& KVCacheManager::swa_block_table(int seq_id) const {
+    static const std::vector<int> empty;
+    auto it = seq_swa_blocks_.find(seq_id);
+    if (it == seq_swa_blocks_.end())
+        return empty;
+    return it->second;
+}
+
 // ─── Speculative decoding rollback ───────────────────────────────────
 
 int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_window_tokens) {
@@ -853,6 +946,19 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
         while (static_cast<int>(hashes.size()) > blocks_needed) {
             hashes.pop_back();
         }
+    }
+
+    // SWA table: drop the tail in lockstep (trimmed holes stay holes — the
+    // slack guarantees anything a post-rollback forward reads is still live).
+    if (auto sit = seq_swa_blocks_.find(seq_id); sit != seq_swa_blocks_.end()) {
+        auto& swa = sit->second;
+        while (static_cast<int>(swa.size()) > blocks_needed) {
+            if (swa.back() >= 0)
+                cache_->free_swa_block(swa.back());
+            swa.pop_back();
+        }
+        if (auto cit = swa_trim_cursor_.find(seq_id); cit != swa_trim_cursor_.end())
+            cit->second = std::min(cit->second, blocks_needed);
     }
 }
 

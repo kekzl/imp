@@ -9,7 +9,7 @@
 namespace imp {
 
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
-                               size_t free_vram) {
+                               size_t free_vram, int swa_live_tokens, int n_swa_layers) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
@@ -96,17 +96,36 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
                              dtype_size(config.kv_cache_dtype);
     }
-    // K+V (2x) for all supported dtypes.
-    size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
+    // Per-token scale overhead folded into the per-layer block bytes.
+    size_t scale_per_block = 0;
     if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4) {
-        size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
-        per_block_total += scale_per_block * 2 * n_kv_layers;  // K scales + V scales (always 2x)
+        scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
+    } else if (config.kv_cache_dtype == QType::NVFP4 || config.kv_cache_dtype == QType::MXFP4_KV) {
+        scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 16);
     }
-    // NVFP4 / MXFP4_KV: 1 scale byte per 16 elems per head per token, K+V (2x).
-    if (config.kv_cache_dtype == QType::NVFP4 || config.kv_cache_dtype == QType::MXFP4_KV) {
-        size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 16);
-        per_block_total += scale_per_block * 2 * n_kv_layers;
+    const size_t per_layer_block_bytes = (single_block_bytes + scale_per_block) * 2;  // K+V
+
+    // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold a
+    // fixed live span (window + slack + burst/chunk peak) per sequence slot —
+    // charge them batch-shaped up front, exactly like the SSM state slabs,
+    // and let only the global layers scale with context below.
+    int n_global_layers = n_kv_layers;
+    if (swa_live_tokens > 0 && n_swa_layers > 0 && n_swa_layers <= n_kv_layers) {
+        n_global_layers = n_kv_layers - n_swa_layers;
+        int swa_blocks_per_seq = (swa_live_tokens + bs - 1) / bs + 1;
+        int batch = config.max_batch_size > 0 ? config.max_batch_size : 1;
+        budget.swa_max_blocks = swa_blocks_per_seq * batch;
+        size_t swa_footprint = static_cast<size_t>(budget.swa_max_blocks) * per_layer_block_bytes *
+                               static_cast<size_t>(n_swa_layers);
+        available = (available > swa_footprint) ? (available - swa_footprint) : 0;
+        IMP_LOG_INFO("VRAM budget: SWA group %d blocks × %d layers = %.1f MiB "
+                     "(live span %d tokens, %d global layers keep full context)",
+                     budget.swa_max_blocks, n_swa_layers, swa_footprint / (1024.0 * 1024.0),
+                     swa_live_tokens, n_global_layers);
     }
+
+    // K+V (2x) per GLOBAL layer — SWA layers were charged batch-shaped above.
+    size_t per_block_total = per_layer_block_bytes * n_global_layers;
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;
     int needed_blocks = blocks_per_seq * config.max_batch_size;

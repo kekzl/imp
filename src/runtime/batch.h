@@ -15,6 +15,10 @@ struct Batch {
     std::vector<int32_t> positions;     // position ids
     std::vector<int32_t> seq_offsets;   // [n_seqs+1] ragged offsets
     std::vector<int32_t> block_tables;  // flattened KV block tables (padded per seq)
+    // Parallel SWA-group block tables (kv_cache.swa_sizing): same
+    // [n_seqs, max_blocks_per_seq] shape/stride as block_tables, -1 = hole.
+    // Empty when SWA sizing is off.
+    std::vector<int32_t> block_tables_swa;
     std::vector<int32_t> context_lens;  // [n_seqs] context lengths
 
     int n_sequences = 0;
@@ -29,6 +33,7 @@ struct GPUBatch {
     int* d_positions = nullptr;      // [total_tokens]
     int* d_seq_offsets = nullptr;    // [n_sequences+1]
     int* d_block_tables = nullptr;   // [n_sequences, max_blocks_per_seq] padded
+    int* d_block_tables_swa = nullptr;  // SWA-group tables (same shape) or nullptr
     int* d_context_lens = nullptr;   // [n_sequences]
 
     int n_sequences = 0;
@@ -53,7 +58,10 @@ public:
     ~GPUBatchPool();
 
     // Allocate pool for the given max configuration. Call once at init.
-    void allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc = nullptr);
+    // with_swa_tables adds a second block-table region for the SWA-group
+    // tables (kv_cache.swa_sizing) — same stride, stable pointer.
+    void allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc = nullptr,
+                  bool with_swa_tables = false);
 
     // Upload a CPU batch into the pre-allocated pool (async).
     // Returns a GPUBatch with pointers into the pool (caller must NOT free them).
@@ -64,7 +72,10 @@ public:
 
     bool is_allocated() const { return pool_ != nullptr; }
     int max_blocks_per_seq() const { return max_blocks_per_seq_; }
-    void reset_upload_cache() { last_upload_block_tables_.clear(); }
+    void reset_upload_cache() {
+        last_upload_block_tables_.clear();
+        last_upload_block_tables_swa_.clear();
+    }
 
     // Pre-allocated single int32 result buffer for sampling kernels
     int32_t* d_sample_result() const { return d_sample_result_; }
@@ -79,6 +90,7 @@ private:
     int* d_positions_ = nullptr;
     int* d_seq_offsets_ = nullptr;
     int* d_block_tables_ = nullptr;
+    int* d_block_tables_swa_ = nullptr;
     int* d_context_lens_ = nullptr;
     int32_t* d_sample_result_ = nullptr;
 
@@ -97,6 +109,7 @@ private:
     // addresses" when prefix caching was first turned off). A host-side
     // vector compare of <=max_blocks ints costs nanoseconds per decode step.
     std::vector<int> last_upload_block_tables_;
+    std::vector<int> last_upload_block_tables_swa_;
 };
 
 class BatchBuilder {
@@ -105,19 +118,24 @@ public:
 
     void reset();
 
-    // Add a prefill sequence (multiple tokens)
+    // Add a prefill sequence (multiple tokens). swa_block_table (optional)
+    // is the parallel SWA-group table — pass nullptr when SWA sizing is off.
     void add_prefill_sequence(const int32_t* tokens, int n_tokens, const int* block_table, int n_blocks,
-                              int start_pos);
+                              int start_pos, const int* swa_block_table = nullptr,
+                              int n_swa_blocks = 0);
 
     // Add a decode sequence (single token)
     void add_decode_sequence(int32_t token, int position, const int* block_table, int n_blocks,
-                             int context_len);
+                             int context_len, const int* swa_block_table = nullptr,
+                             int n_swa_blocks = 0);
 
     Batch build();
 
 private:
     Batch batch_;
     std::vector<std::pair<const int*, int>> raw_block_tables_;  // (ptr, n_blocks)
+    std::vector<std::pair<const int*, int>> raw_swa_block_tables_;
+    bool any_swa_tables_ = false;
 };
 
 }  // namespace imp

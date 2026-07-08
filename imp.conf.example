@@ -96,6 +96,14 @@ bitdecoding_qk              = false
 # BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0
+# SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
+# other layer, gemma-3 5:1 pattern) allocate only the trailing window in a
+# small dedicated block group instead of full-length KV — ~2x more KV tokens
+# on gpt-oss, ~5-6x on gemma-3. Auto-disabled (logged) for models without
+# SWA layers, INT8/INT4 KV, hybrids, MLA, StreamingLLM, green contexts, and
+# deterministic mode; prefix caching is forced off while active (freed
+# window blocks can't back prefix reuse). Default off until validated.
+swa_sizing                  = false
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its

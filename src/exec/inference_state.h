@@ -26,6 +26,11 @@ struct InferenceState {
     // KV cache for paged attention (decode)
     KVCache* kv_cache = nullptr;
     const int* block_tables = nullptr;  // [n_sequences, max_blocks_per_seq] on device (2D padded)
+    // SWA-group block tables (kv_cache.swa_sizing): same shape/stride as
+    // block_tables, -1 holes outside the trailing window. Sliding-window
+    // layers read/write through this table; nullptr when the feature is off
+    // (all layers use block_tables, today's behavior).
+    const int* block_tables_swa = nullptr;
     const int* context_lens = nullptr;  // [n_sequences] on device
     int max_context_len = 0;
 

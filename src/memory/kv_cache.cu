@@ -110,11 +110,24 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 // ---------------------------------------------------------------------------
 KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
                  const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
-                 VRAMAllocator* alloc)
-    : n_layers_(n_layers), max_blocks_(max_blocks), block_size_(block_size), dtype_(dtype), alloc_(alloc) {
+                 VRAMAllocator* alloc, const std::vector<char>& layer_is_swa, int swa_max_blocks)
+    : n_layers_(n_layers), max_blocks_(max_blocks), block_size_(block_size), dtype_(dtype), alloc_(alloc),
+      layer_is_swa_(layer_is_swa), swa_max_blocks_(swa_max_blocks) {
     bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
     size_t elem_size = packed_4bit ? 0  // 4-bit modes use /2 below
                                    : dtype_size(dtype);
+
+    // SWA group only meaningful with both a flag vector and a capacity.
+    if (layer_is_swa_.empty() || swa_max_blocks_ <= 0) {
+        layer_is_swa_.clear();
+        swa_max_blocks_ = 0;
+    }
+    // Per-layer region capacity: SWA layers hold only the trailing window.
+    auto layer_capacity = [&](int l) -> size_t {
+        return (swa_max_blocks_ > 0 && l < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[l])
+                   ? static_cast<size_t>(swa_max_blocks_)
+                   : static_cast<size_t>(max_blocks_);
+    };
 
     // Compute per-layer block bytes and offsets.
     layer_block_bytes_.resize(n_layers_);
@@ -141,9 +154,9 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
 
         // Layout: K region then V region for this layer.
         layer_k_offset_[l] = running;
-        running += static_cast<size_t>(max_blocks_) * bb;
+        running += layer_capacity(l) * bb;
         layer_v_offset_[l] = running;
-        running += static_cast<size_t>(max_blocks_) * bb;
+        running += layer_capacity(l) * bb;
     }
     size_t total = running;
 
@@ -200,9 +213,9 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
             size_t sbb = static_cast<size_t>(block_size_) * nkv * (hd / kNVFP4Group);
             layer_scale_block_bytes_[l] = sbb;
             layer_k_scale_offset_[l] = srunning;
-            srunning += static_cast<size_t>(max_blocks_) * sbb;
+            srunning += layer_capacity(l) * sbb;
             layer_v_scale_offset_[l] = srunning;
-            srunning += static_cast<size_t>(max_blocks_) * sbb;
+            srunning += layer_capacity(l) * sbb;
         }
         size_t sc_total = srunning;
         if (alloc_) {
@@ -235,6 +248,22 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
     free_list_.reserve(max_blocks_);
     for (int i = max_blocks_ - 1; i >= 0; --i) {
         free_list_.push_back(i);
+    }
+
+    // SWA group: separate id space with its own free list.
+    if (swa_max_blocks_ > 0) {
+        swa_ref_counts_.resize(swa_max_blocks_, 0);
+        swa_free_list_.reserve(swa_max_blocks_);
+        for (int i = swa_max_blocks_ - 1; i >= 0; --i) {
+            swa_free_list_.push_back(i);
+        }
+        int n_swa_layers = 0;
+        for (char f : layer_is_swa_)
+            if (f)
+                n_swa_layers++;
+        IMP_LOG_INFO("KVCache (per-layer): SWA group %d blocks × %d windowed layers "
+                     "(global group %d blocks × %d layers)",
+                     swa_max_blocks_, n_swa_layers, max_blocks_, n_layers_ - n_swa_layers);
     }
 
     IMP_LOG_INFO("KVCache (per-layer): %zu layers, pool %.2f MiB, max nkv=%d, max hd=%d", (size_t)n_layers_,
@@ -302,6 +331,29 @@ void KVCache::free_block(int block_id) {
     if (ref_counts_[block_id] == 0) {
         free_list_.push_back(block_id);
     }
+}
+
+// ---------------------------------------------------------------------------
+// SWA block group (kv_cache.swa_sizing): separate id space, no sharing —
+// SWA blocks are never prefix-cached or pinned, so ref counts stay 0/1.
+// ---------------------------------------------------------------------------
+
+int KVCache::allocate_swa_block() {
+    if (swa_free_list_.empty())
+        return -1;
+    int block_id = swa_free_list_.back();
+    swa_free_list_.pop_back();
+    swa_ref_counts_[block_id] = 1;
+    return block_id;
+}
+
+void KVCache::free_swa_block(int block_id) {
+    if (block_id < 0 || block_id >= swa_max_blocks_)
+        return;
+    if (swa_ref_counts_[block_id] <= 0)
+        return;
+    if (--swa_ref_counts_[block_id] == 0)
+        swa_free_list_.push_back(block_id);
 }
 
 // ---------------------------------------------------------------------------

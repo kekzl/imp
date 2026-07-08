@@ -59,7 +59,11 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               cudaMalloc(&d_spec_past_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_chunk_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
-              cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess;
+              cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
+              // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
+              // main table. Allocated unconditionally so a mid-session gate
+              // flip can't leave it null; tiny (max_blocks ints).
+              cudaMalloc(&d_spec_block_table_swa_, max_blocks * sizeof(int)) == cudaSuccess;
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
         free_spec_buffers_();
@@ -125,6 +129,7 @@ void Engine::free_spec_buffers_() {
     if (d_spec_tokens_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_tokens_));
     if (d_spec_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_positions_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
+    if (d_spec_block_table_swa_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_swa_));
     if (d_spec_context_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_context_len_));
     if (d_spec_past_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_past_len_));
     if (d_spec_chunk_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_chunk_len_));
@@ -133,6 +138,7 @@ void Engine::free_spec_buffers_() {
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
+    d_spec_block_table_swa_ = nullptr;
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
     d_spec_chunk_len_ = nullptr;
@@ -342,7 +348,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // (copies of t0 at positions after every real row) are causally invisible
     // to the real rows; their KV entries fall to the same rollback that drops
     // rejected drafts, and the argmax window below stays [0, chunk_len).
-    const bool capture_on = spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
+    // SWA-aware sizing: the verify chunk stays EAGER (captured verify bakes
+    // full-context gather grids + a static block-table pointer; the SWA table
+    // rewrites every step). Correctness still requires the SWA table below.
+    const bool capture_on =
+        !swa_sizing_active_ && spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
     const int chunk_pad = capture_on ? spec_capture_bucket_(chunk_len) : chunk_len;
     const int ctx_len = p0 + chunk_pad;  // context including the full (padded) chunk
 
@@ -363,8 +373,21 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             return false;
         }
     }
+    // SWA-aware sizing: keep the trailing window live across the whole
+    // chunk's write+read span [p0, ctx_len). Runs after the global append
+    // loop above so the SWA table can pad to the grown global length.
+    if (swa_sizing_active_) {
+        kv_manager_->swa_trim(req->id, p0);
+        if (!kv_manager_->swa_prepare(req->id, p0, ctx_len)) {
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
+        }
+    }
+
     const auto& block_table = kv_manager_->block_table(req->id);
     const int n_blocks = static_cast<int>(block_table.size());
+    const auto& swa_block_table = kv_manager_->swa_block_table(req->id);
 
     // Staging capacity follows the REAL table size — the async graph loop
     // pre-allocates blocks for the whole remaining generation, so the table
@@ -404,6 +427,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                cudaMemcpyHostToDevice, stream), "positions H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
                                cudaMemcpyHostToDevice, stream), "block table H2D") ||
+        (swa_sizing_active_ && !swa_block_table.empty() &&
+         !check(cudaMemcpyAsync(d_spec_block_table_swa_, swa_block_table.data(),
+                                static_cast<int>(swa_block_table.size()) * sizeof(int),
+                                cudaMemcpyHostToDevice, stream), "swa block table H2D")) ||
         !check(cudaMemcpyAsync(d_spec_context_len_, &ctx_len, sizeof(int), cudaMemcpyHostToDevice,
                                stream), "context len H2D") ||
         (capture_on &&
@@ -429,6 +456,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     state.n_tokens = chunk_pad;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = d_spec_block_table_;
+    state.block_tables_swa =
+        (swa_sizing_active_ && !swa_block_table.empty()) ? d_spec_block_table_swa_ : nullptr;
     state.context_lens = d_spec_context_len_;
     state.max_context_len = ctx_len;
     state.n_sequences = 1;

@@ -52,7 +52,21 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     int capped = blocks_got * kv_bs - ctx_len;
     if (capped <= 0)
         return 0;
-    return std::min(capped, remaining);
+    int steps = std::min(capped, remaining);
+
+    // SWA-aware sizing: the loop runs on-device with no host trim mid-burst,
+    // so the WHOLE burst span must have live SWA blocks. Clamp the burst to
+    // the span the SWA group is sized for (the loop relaunches afterwards)
+    // and prepare the range up front.
+    if (swa_sizing_active_) {
+        steps = std::min(steps, swa_burst_cap_tokens_);
+        if (steps <= 0)
+            return 0;
+        kv_manager_->swa_trim(req->id, ctx_len);
+        if (!kv_manager_->swa_prepare(req->id, ctx_len, ctx_len + steps))
+            return 0;
+    }
+    return steps;
 }
 
 CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req, int remaining) const {
@@ -129,12 +143,27 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
         return {};
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, full_bt.data(), max_blocks_per_seq * sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
+    int* d_block_tables_swa = nullptr;
+    if (swa_sizing_active_) {
+        const auto& swa_bt = kv_manager_->swa_block_table(req->id);
+        if (static_cast<int>(swa_bt.size()) == max_blocks_per_seq &&
+            cudaMallocAsync(&d_block_tables_swa, max_blocks_per_seq * sizeof(int), stream) ==
+                cudaSuccess) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_swa, swa_bt.data(),
+                                               max_blocks_per_seq * sizeof(int),
+                                               cudaMemcpyHostToDevice, stream));
+        } else {
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+            return {};
+        }
+    }
 
     (void)executor_->resize_workspace(1, stream);
 
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
     state_template.block_tables = d_block_tables;
+    state_template.block_tables_swa = d_block_tables_swa;
     state_template.n_sequences = 1;
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
@@ -161,12 +190,16 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         if (d_banned)
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+        if (d_block_tables_swa)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
         return {};
     }
     if (!runner.launch(stream)) {
         if (d_banned)
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+        if (d_block_tables_swa)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
         return {};
     }
@@ -174,6 +207,8 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     auto tokens = runner.wait_and_get_tokens(stream);
     if (d_banned)
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
+    if (d_block_tables_swa)
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
     IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
     runner.cleanup();
@@ -198,13 +233,22 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);
         const int ctx = req->context_len();
-        if (async_parked_req_id_ == req->id && async_d_block_tables_ != nullptr &&
+        // SWA table must exist at matching length for a rearm (swa_prepare in
+        // prepare_graph_loop already covered the new burst range).
+        const auto& swa_bt = kv_manager_->swa_block_table(req->id);
+        const bool swa_ok = !swa_sizing_active_ ||
+                            (async_d_block_tables_swa_ != nullptr && swa_bt.size() == bt.size());
+        if (async_parked_req_id_ == req->id && async_d_block_tables_ != nullptr && swa_ok &&
             static_cast<int>(bt.size()) <= async_bt_capacity_) {
             // Verify steps may have appended KV blocks since the park —
             // refresh the table contents (pointer/capacity baked in graph).
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(async_d_block_tables_, bt.data(),
                                                bt.size() * sizeof(int), cudaMemcpyHostToDevice,
                                                stream));
+            if (swa_sizing_active_)
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(async_d_block_tables_swa_, swa_bt.data(),
+                                                   swa_bt.size() * sizeof(int),
+                                                   cudaMemcpyHostToDevice, stream));
             // Remaining think budget for this launch (the device counter
             // restarts at 0 per launch; see build_graph_config).
             int think_limit = 0;
@@ -237,6 +281,10 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
             IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
             async_d_block_tables_ = nullptr;
         }
+        if (async_d_block_tables_swa_) {
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+            async_d_block_tables_swa_ = nullptr;
+        }
         if (async_d_banned_tokens_) {
             IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
             async_d_banned_tokens_ = nullptr;
@@ -252,12 +300,24 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         return false;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(), max_blocks_per_seq * sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
+    int* d_bt_swa = nullptr;
+    if (swa_sizing_active_) {
+        const auto& swa_bt = kv_manager_->swa_block_table(req->id);
+        if (static_cast<int>(swa_bt.size()) != max_blocks_per_seq ||
+            cudaMalloc(&d_bt_swa, max_blocks_per_seq * sizeof(int)) != cudaSuccess) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt_swa, swa_bt.data(), max_blocks_per_seq * sizeof(int),
+                                           cudaMemcpyHostToDevice, stream));
+    }
 
     (void)executor_->resize_workspace(1, stream);
 
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
     state_template.block_tables = d_bt;
+    state_template.block_tables_swa = d_bt_swa;
     state_template.n_sequences = 1;
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
@@ -287,6 +347,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         if (d_banned)
             IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
+        if (d_bt_swa)
+            IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
         return false;
     }
@@ -294,12 +356,15 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         async_graph_runner_.cleanup();
         if (d_banned)
             IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
+        if (d_bt_swa)
+            IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
         return false;
     }
 
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
+    async_d_block_tables_swa_ = d_bt_swa;
     async_d_banned_tokens_ = d_banned;
     async_bt_capacity_ = max_blocks_per_seq;
     async_parked_req_id_ = -1;
@@ -324,6 +389,12 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
 // =====================================================================
 
 bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream) {
+    // SWA-aware sizing: the pipeline captures a decode graph with a baked
+    // block-table pointer + jump-ahead chunk, neither wired for the per-step
+    // SWA table rewrite. Fall back to eager constrained decode (step_decode,
+    // which threads the SWA table) — correct, just not pipelined.
+    if (swa_sizing_active_)
+        return false;
     int budget = prepare_graph_loop(req);
     if (budget <= 0)
         return false;

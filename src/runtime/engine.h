@@ -320,6 +320,7 @@ private:
     GPUBatchPool decode_batch_pool_;
     BatchBuilder decode_builder_;
     std::vector<int> padded_block_table_;
+    std::vector<int> padded_swa_block_table_;
     std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
     std::vector<std::shared_ptr<Request>> sched_decode_batch_;
     std::vector<std::shared_ptr<Request>> valid_decode_;
@@ -361,6 +362,7 @@ private:
     // so the next burst of the SAME request can rearm instead of recapture.
     int async_parked_req_id_ = -1;
     int async_bt_capacity_ = 0;  // block-table slots baked into the graph
+    int* async_d_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
 
     // Pipelined constrained decode (json_mode / json_schema, single sequence).
     // Constrained requests can't run the conditional graph loop (the grammar
@@ -381,6 +383,7 @@ private:
         int* d_pos = nullptr;        // [1] current position
         int* d_ctx = nullptr;        // [1] current context length
         int* d_bt = nullptr;         // uploaded block table
+        int* d_bt_swa = nullptr;     // SWA-group mirror (kv_cache.swa_sizing)
         int32_t* d_banned = nullptr; // banned token ids (device)
         int32_t* h_token = nullptr;  // pinned landing for the sampled token
         cudaEvent_t ev = nullptr;    // sampled-token-ready event
@@ -488,6 +491,7 @@ private:
     int32_t* d_pf_token_ids_ = nullptr;
     int* d_pf_positions_ = nullptr;
     int* d_pf_block_tables_ = nullptr;
+    int* d_pf_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_pf_context_lens_ = nullptr;
     int* h_pf_positions_ = nullptr;      // pinned host staging
     int32_t* h_pf_token_ids_ = nullptr;  // pinned host staging
@@ -671,6 +675,7 @@ private:
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
     int* d_spec_block_table_ = nullptr;
+    int* d_spec_block_table_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_spec_context_len_ = nullptr;
     int32_t* d_spec_argmax_ = nullptr;
     int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
@@ -693,6 +698,19 @@ private:
         long long emitted = 0;       // tokens emitted by verify steps
     };
     SpecStats spec_stats_{};
+
+    // ── SWA-aware KV sizing (kv_cache.swa_sizing) ────────────────────
+    // Resolved once in init_kv_cache (gate + geometry). When active, every
+    // forward's SWA layers go through the parallel SWA-group block tables;
+    // the engine calls kv_manager_->swa_prepare/swa_trim around each
+    // forwarded token range (prefill chunks, decode steps, on-device
+    // bursts, spec verify chunks).
+    bool swa_sizing_active_ = false;
+    int swa_window_max_ = 0;        // largest per-layer sliding window (tokens)
+    int swa_slack_tokens_ = 0;      // rollback/boundary cushion (tokens)
+    // Longest on-device burst span the SWA group is sized for — the graph
+    // decode loop clamps its step budget to this (no host trim mid-burst).
+    int swa_burst_cap_tokens_ = 0;
 
     // ── Banned tokens (special/control tokens that must not be generated) ──
     std::vector<int32_t> banned_token_ids_;
@@ -740,11 +758,12 @@ private:
     // the matching free path.
     [[nodiscard]] bool prefill_upload_metadata_(std::shared_ptr<Request>& req,
                                                 const std::vector<int>& block_table,
+                                                const std::vector<int>& swa_block_table,
                                                 int chunk_len, int offset, int ctx_len,
                                                 cudaStream_t pf_stream,
                                                 int32_t*& d_token_ids, int*& d_positions,
-                                                int*& d_block_tables, int*& d_context_lens,
-                                                bool& pf_pool_used);
+                                                int*& d_block_tables, int*& d_block_tables_swa,
+                                                int*& d_context_lens, bool& pf_pool_used);
     // step_decode_forward sub-phase: populate `state` from the uploaded
     // GPU batch + per-seq residual metadata + sampling params + recurrent
     // state + JSON/schema constrainers. Returns `needs_logprobs` so the

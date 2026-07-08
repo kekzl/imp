@@ -53,7 +53,7 @@
             dim3 fused_grid(n, 2);
             write_kv_cache_rope_fused_kernel<<<fused_grid, threads, 0, stream>>>(
                 static_cast<const half*>(kv_view.data), static_cast<const half*>(vv_view.data),
-                state.positions, state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
+                state.positions, layer_block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
                 static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size_d, n,
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
@@ -81,10 +81,16 @@
             // Heap-sized to n_blocks — a fixed [1024] stack array overran 4x at
             // the 64K context cap (n_blocks=4096) and silently smashed the frame.
             std::vector<int32_t> h_block_table(n_blocks > 0 ? n_blocks : 1);
-            cudaMemcpy(h_block_table.data(), state.block_tables, n_blocks * sizeof(int32_t),
+            cudaMemcpy(h_block_table.data(), layer_block_tables, n_blocks * sizeof(int32_t),
                        cudaMemcpyDeviceToHost);
+            // SWA trailing-free holes (-1) leave their rows zeroed — they sit
+            // outside the window mask, so the reference output is unaffected.
+            cudaMemset(k_flat, 0, kv_elems * sizeof(half));
+            cudaMemset(v_flat, 0, kv_elems * sizeof(half));
             for (int b = 0; b < n_blocks; b++) {
                 int block_id = h_block_table[b];
+                if (block_id < 0)
+                    continue;
                 int toks_in_block = std::min(kv_bs, ctx_len - b * kv_bs);
                 size_t row_bytes = nkv * hd * sizeof(half);
                 half* k_src = static_cast<half*>(cache_dbg->k_ptr(kv_layer_dbg, block_id));
@@ -158,7 +164,7 @@
             paged_attention_decode_int4(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                        state.block_tables, state.context_lens, kv_bs, scale,
+                                        layer_block_tables, state.context_lens, kv_bs, scale,
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                         stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::NVFP4) {
@@ -177,7 +183,7 @@
                 const uint8_t* k_scales = static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0));
                 const uint8_t* v_scales = static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0));
                 if (!residual_on) {
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, state.block_tables,
+                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
                                                     state.context_lens, kv_bs, scale, state.max_context_len,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                                     state.max_blocks_per_seq);
@@ -215,7 +221,7 @@
                         res_count = rs.fill_count;
                         res_widx = rs.write_idx;
                     }
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, state.block_tables,
+                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
                                                     state.context_lens, kv_bs, scale, state.max_context_len,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                                     state.max_blocks_per_seq, 0, k_res, v_res, res_count,
@@ -229,7 +235,7 @@
                 paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                              static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, state.context_lens, kv_bs, scale,
+                                             layer_block_tables, state.context_lens, kv_bs, scale,
                                              state.max_context_len, layer_sliding_window,
                                              cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
             }
@@ -240,7 +246,7 @@
             paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                            state.block_tables, state.context_lens, kv_bs, scale,
+                                            layer_block_tables, state.context_lens, kv_bs, scale,
                                             state.max_context_len, layer_sliding_window,
                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::INT8) {
@@ -249,7 +255,7 @@
             paged_attention_decode_int8(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                        state.block_tables, state.context_lens, kv_bs, scale,
+                                        layer_block_tables, state.context_lens, kv_bs, scale,
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                         stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::FP8_E4M3) {
@@ -258,12 +264,12 @@
                                  ? kv_scales_[kv_layer]
                                  : 1.0f;
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode_fp8(q4, k_c, v_c, o4, state.block_tables, state.context_lens, kv_bs, scale,
+            paged_attention_decode_fp8(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
                                        kv_scale, state.max_context_len, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else {
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode(q4, k_c, v_c, o4, state.block_tables, state.context_lens, kv_bs, scale,
+            paged_attention_decode(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                    stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks, vhd);
         }

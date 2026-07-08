@@ -239,10 +239,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     }
 
 
-    // Per-layer RoPE theta and sliding window (Gemma-3: alternating local/global layers)
+    // Per-layer RoPE theta and sliding window (Gemma-3: alternating local/global layers).
+    // The window decision itself is centralized in layer_swa_window() (shared with
+    // the SWA-aware KV sizing); this block only resolves the per-layer RoPE params.
     float layer_rope_theta = cfg.rope_theta;
     float layer_rope_freq_scale = cfg.rope_freq_scale;
-    int layer_sliding_window = cfg.sliding_window;
+    int layer_sliding_window = layer_swa_window(cfg, prof, layer);
     // StreamingLLM: only meaningful when this layer also has a sliding window
     // (otherwise full attention covers the full context anyway). Resolved
     // again per-layer below in case Gemma-3 disables SWA on this layer.
@@ -253,24 +255,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         if (is_swa) {
             layer_rope_theta = (cfg.rope_theta_swa > 0.0f) ? cfg.rope_theta_swa : cfg.rope_local_theta;
             layer_rope_freq_scale = 1.0f;
-            // layer_sliding_window stays at cfg.sliding_window (1024)
-        } else {
-            // Global layer: full attention, model rope_theta, with freq scaling
-            layer_sliding_window = 0;
         }
+        // Global layer: full attention, model rope_theta, with freq scaling.
     } else if (prof.attn_variant == AttnVariant::GPTOSS_SWA) {
         // gpt-oss (#547): even layers sliding_attention (window 128), odd
         // layers full attention. Same RoPE (YaRN) on both layer types —
         // only the window toggles.
-        bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-        if (!is_swa)
-            layer_sliding_window = 0;
     } else if (cfg.sliding_window_pattern > 0) {
         bool is_global = (layer % cfg.sliding_window_pattern) == (cfg.sliding_window_pattern - 1);
-        if (is_global) {
-            // Global layer: full attention, model-level rope_theta, with freq scaling
-            layer_sliding_window = 0;
-        } else {
+        if (!is_global) {
             // Local layer: sliding window, local rope_theta, no freq scaling
             if (cfg.rope_local_theta > 0.0f)
                 layer_rope_theta = cfg.rope_local_theta;
@@ -282,6 +275,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         layer_sliding_window = streaming_window_;
     if (layer_sliding_window <= 0)
         layer_n_sinks = 0;
+
+    // SWA-aware KV sizing (kv_cache.swa_sizing): windowed layers read/write
+    // the small SWA block group through the parallel table (-1 holes outside
+    // the trailing window — the kernels' window mask never reaches them).
+    // nullptr table = feature off → every layer shares state.block_tables.
+    const int* layer_block_tables =
+        (state.block_tables_swa != nullptr && layer_sliding_window > 0) ? state.block_tables_swa
+                                                                        : state.block_tables;
 
     // Select LongRoPE frequency table based on context length (nullptr if not longrope)
     const float* longrope_freqs = nullptr;

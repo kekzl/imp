@@ -583,6 +583,23 @@ void Engine::init_compute_max_seq_len_() {
             if (populated > 0)
                 kv_layer_count = populated;
         }
+        // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold
+        // only a fixed trailing window, so they don't scale with context —
+        // count only global layers for the per-token cost. (The final gate is
+        // resolved in init_kv_cache; if it declines there the budget clamps
+        // conservatively, never OOMs.)
+        if (runtime_config_.kv_cache.swa_sizing) {
+            int swa_layers = 0;
+            for (int l = 0; l < mcfg.n_layers; l++)
+                if (layer_swa_window(mcfg, model_->profile(), l) > 0)
+                    ++swa_layers;
+            if (swa_layers > 0 && swa_layers < kv_layer_count) {
+                IMP_LOG_INFO("max_seq_len auto: SWA sizing — %d/%d windowed layers excluded "
+                             "from per-token KV cost",
+                             swa_layers, kv_layer_count);
+                kv_layer_count -= swa_layers;
+            }
+        }
         auto kv = config_.kv_cache_dtype;
         bool packed_int4 = (kv == QType::INT4);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
