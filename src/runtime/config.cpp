@@ -129,6 +129,18 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
     B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
 
+    // [rope]
+    S("rope.scaling", cfg.rope.scaling);
+    F("rope.factor", cfg.rope.factor);
+    I("rope.orig_ctx", cfg.rope.orig_ctx);
+    F("rope.attn_factor", cfg.rope.attn_factor);
+    F("rope.beta_fast", cfg.rope.beta_fast);
+    F("rope.beta_slow", cfg.rope.beta_slow);
+
+    // [vram]
+    F("vram.kv_fraction", cfg.vram.kv_fraction);
+    I("vram.reserve_floor_pct", cfg.vram.reserve_floor_pct);
+
     // [attention]
     S("attention.fp8_prefill", cfg.attention.fp8_prefill);
     S("attention.fp8_fmha", cfg.attention.fp8_fmha);

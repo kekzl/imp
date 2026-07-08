@@ -517,6 +517,7 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
         tests/test_suffix_draft.cpp
         tests/test_routing_decision.cpp
