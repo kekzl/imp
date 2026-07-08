@@ -2,6 +2,7 @@
 #include "model/hf_config_loader.h"
 #include "model/model_arch.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
