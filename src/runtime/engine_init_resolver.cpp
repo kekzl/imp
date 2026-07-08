@@ -52,6 +52,97 @@ void Engine::init_apply_debug_raw_overrides_() {
     // not about swapping kernel variants.
 }
 
+// Runtime RoPE-scaling override (imp.conf [rope]): inject YaRN/linear
+// scaling into a model that doesn't declare it (or replace what it does
+// declare). Mirrors the HF-loader semantics (hf_config_loader.cpp,
+// rope_scaling type=yarn/linear): rope_freq_scale stores the FACTOR, the
+// kernel applies 1/factor itself and self-computes the paper mscale
+// 1 + 0.1*ln(factor) (rope_yarn.cuh). Must run before
+// init_compute_max_seq_len_() so the extended window reaches the KV sizing
+// math, and before executor setup so yarn_corr_dims_ + the MTP draft head
+// (shared ModelConfig + rope_yarn.cuh) see the final fields.
+bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope) {
+    if (rope.scaling.empty())
+        return false;
+    if (rope.scaling != "yarn" && rope.scaling != "linear") {
+        IMP_LOG_WARN("[rope] scaling=\"%s\" unknown (yarn|linear) — override ignored",
+                     rope.scaling.c_str());
+        return false;
+    }
+    if (rope.factor <= 1.0f) {
+        IMP_LOG_WARN("[rope] factor=%.3f must be > 1.0 — override ignored", rope.factor);
+        return false;
+    }
+    // Refuse model classes where a scalar factor is silently wrong:
+    // per-dimension frequency tables (LongRoPE / llama3 precomputed pairs),
+    // MLA (YaRN mscale is entangled with the softmax scale ratio, #880),
+    // and NoPE (no rotary embedding to scale).
+    if (!mcfg.rope_short_factor.empty() || !mcfg.rope_long_factor.empty()) {
+        IMP_LOG_ERROR("[rope] model uses per-dimension RoPE tables (LongRoPE/llama3) — "
+                      "override refused");
+        return false;
+    }
+    if (mcfg.is_mla()) {
+        IMP_LOG_ERROR("[rope] MLA models entangle YaRN mscale with the softmax scale — "
+                      "override refused");
+        return false;
+    }
+    if (mcfg.rope_attn_disabled) {
+        IMP_LOG_ERROR("[rope] model uses NoPE attention (no rotary embedding) — override refused");
+        return false;
+    }
+
+    // Resolve the native window the factor applies to BEFORE touching
+    // max_seq_len: explicit rope.orig_ctx > model-declared rope_n_ctx_orig >
+    // the model's declared context.
+    int orig_ctx = rope.orig_ctx > 0 ? rope.orig_ctx
+                   : mcfg.rope_n_ctx_orig > 0 ? mcfg.rope_n_ctx_orig
+                                              : mcfg.max_seq_len;
+    if (orig_ctx <= 0) {
+        IMP_LOG_WARN("[rope] cannot resolve original context (orig_ctx=0, model ctx=%d) — "
+                     "override ignored",
+                     mcfg.max_seq_len);
+        return false;
+    }
+
+    if (mcfg.rope_freq_scale != 1.0f || mcfg.yarn_ext_factor > 0.0f) {
+        IMP_LOG_WARN("[rope] model already declares scaling (freq_scale=%.3f, yarn_ext=%.2f) — "
+                     "replacing with %s factor=%.2f (set rope.orig_ctx if the declared context "
+                     "is already extended)",
+                     mcfg.rope_freq_scale, mcfg.yarn_ext_factor, rope.scaling.c_str(), rope.factor);
+    }
+
+    mcfg.rope_freq_scale = rope.factor;
+    if (rope.scaling == "yarn") {
+        mcfg.yarn_ext_factor = 1.0f;
+        mcfg.yarn_attn_factor = rope.attn_factor;
+        mcfg.yarn_beta_fast = rope.beta_fast;
+        mcfg.yarn_beta_slow = rope.beta_slow;
+        mcfg.rope_n_ctx_orig = orig_ctx;
+    } else {  // linear: pure interpolation, no YaRN blending
+        mcfg.yarn_ext_factor = 0.0f;
+        mcfg.rope_n_ctx_orig = orig_ctx;
+    }
+
+    int extended = static_cast<int>(rope.factor * static_cast<float>(orig_ctx));
+    if (extended > mcfg.max_seq_len)
+        mcfg.max_seq_len = extended;
+
+    if (mcfg.sliding_window_pattern > 0 || !mcfg.swa_layers.empty()) {
+        IMP_LOG_INFO("[rope] note: sliding-window layers keep freq_scale=1.0 by design — the "
+                     "override affects global-attention layers only");
+    }
+    IMP_LOG_INFO("[rope] override applied: %s factor=%.2f orig_ctx=%d → model ctx %d "
+                 "(attn_factor=%.2f, beta=%.1f/%.1f)",
+                 rope.scaling.c_str(), rope.factor, orig_ctx, mcfg.max_seq_len, rope.attn_factor,
+                 rope.beta_fast, rope.beta_slow);
+    return true;
+}
+
+void Engine::init_apply_rope_override_() {
+    apply_rope_override(model_->config_, runtime_config_.rope);
+}
+
 // KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
 // max_batch_size auto-sizing. Default: FP16 (safe). FP8 / NVFP4 / MXFP4-KV
 // are opt-in. See the inline rationale for the 2026-04-24 root-cause memo.
@@ -514,11 +605,15 @@ void Engine::init_compute_max_seq_len_() {
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
         size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
-        // The budget planner downstream uses 80% of free VRAM for KV. Cap the
-        // auto-detect at ~60% so it doesn't undershoot what the planner can
-        // afford. (Was 30%, calibrated when weight caches competed at FP16.)
-        int max_by_vram = (kv_bytes_per_token > 0) ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
-                                                   : 131072;
+        // The budget planner downstream targets kv_fraction (default 0.8) of
+        // free VRAM for KV. Cap the auto-detect at 0.75 × that (0.6 at the
+        // default) so it doesn't undershoot what the planner can afford and
+        // keeps tracking a tuned vram.kv_fraction. (Was a flat 30%, calibrated
+        // when weight caches competed at FP16.)
+        float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 0.95f);
+        int max_by_vram = (kv_bytes_per_token > 0)
+                              ? static_cast<int>(free_vram * (0.75 * kv_fraction) / kv_bytes_per_token)
+                              : 131072;
         // Agentic workloads (tool loops, accumulating history, large file
         // context) routinely exceed 16K and run a single long sequence rather
         // than many short ones, so a high per-request ceiling is the right

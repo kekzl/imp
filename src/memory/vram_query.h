@@ -47,16 +47,20 @@ size_t vram_budget_bytes();
 // null. Returns false (zeros) if the raw query fails.
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);
 
-// Canonical free-VRAM reserve floor for the sizing phases: 10% of the
+// Canonical free-VRAM reserve floor for the sizing phases: pct% of the
 // (budget-visible) total, floored at 256 MiB. Keeps the WSL2 shared-memory
 // spill guard in ONE place — the budget pass and every pre-dequant phase
 // used to re-derive this independently (and one copy had drifted to a
 // 1 MiB floor). Pass the `total` from vram_budget_mem_get_info so the
 // floor scales with a --vram-budget slice, not the physical card.
-inline size_t vram_reserve_floor(size_t total_bytes) {
+// The pct parameter is a budget-planner knob (imp.conf vram.reserve_floor_pct,
+// consumed only inside compute_vram_budget); the pre-dequant phases keep the
+// default so their internal safety floors stay independent of the knob.
+inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
     const size_t floor_bytes = 256ULL * 1024 * 1024;
-    const size_t tenth = total_bytes / 10;
-    return tenth > floor_bytes ? tenth : floor_bytes;
+    pct = pct < 0 ? 0 : (pct > 50 ? 50 : pct);
+    const size_t share = total_bytes * static_cast<size_t>(pct) / 100;
+    return share > floor_bytes ? share : floor_bytes;
 }
 
 }  // namespace imp

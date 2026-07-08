@@ -59,6 +59,14 @@ struct EngineConfig {
     // VRAM budget: max GPU memory to use (MiB), 0 = use all available
     size_t vram_budget_mb = 0;
 
+    // Budget-planner tuning (imp.conf [vram], see RuntimeConfig::Vram).
+    // kv_fraction: share of post-reserve/post-weight-cache VRAM the KV pool
+    // targets (clamped [0.05, 0.95] in compute_vram_budget).
+    // vram_reserve_floor_pct: reserve floor as % of total VRAM (clamped
+    // [0, 50]); the 256 MiB absolute floor always applies.
+    float kv_fraction = 0.8f;
+    int vram_reserve_floor_pct = 10;
+
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
@@ -108,6 +116,14 @@ struct EngineConfig {
     int streaming_kv_window = 0;     // 0 = derive from ModelConfig::sliding_window
     int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2*kKVBlockSize
 };
+
+// Apply the imp.conf [rope] runtime override to a loaded ModelConfig (see
+// RuntimeConfig::Rope). Sets the same fields the GGUF/HF loaders set from
+// model-declared rope_scaling and bumps max_seq_len to factor × orig_ctx.
+// Returns true if the override was applied; false when off or refused
+// (LongRoPE/llama3 per-dim tables, MLA, NoPE, bad factor). Free function so
+// host-only tests can drive it without an Engine/GPU.
+bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope);
 
 class Engine {
 public:
@@ -714,6 +730,7 @@ private:
     // init_weights / init_kv_cache / init_features. Order matters: see the
     // call sequence in init() for which flag each one resolves.
     void init_apply_debug_raw_overrides_();
+    void init_apply_rope_override_();
     void init_resolve_kv_dtype_policy_();
     void init_resolve_ssm_dtype_();
     void init_resolve_fp8_prefill_();

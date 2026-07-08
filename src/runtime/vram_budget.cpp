@@ -49,8 +49,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         size_t f;
         vram_budget_mem_get_info(&f, &total_vram);
     }
+    // Budget-planner knobs (imp.conf [vram]): clamp once here so direct
+    // EngineConfig embedders (tests, C-API) get the same envelope.
+    const float kv_fraction = std::clamp(config.kv_fraction, 0.05f, 0.95f);
+    const int reserve_floor_pct = std::clamp(config.vram_reserve_floor_pct, 0, 50);
     if (config.use_nvfp4_decode != 2) {
-        budget.reserve_bytes = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));
+        budget.reserve_bytes =
+            std::max(budget.reserve_bytes, vram_reserve_floor(total_vram, reserve_floor_pct));
     }
 
     // Estimate SSM footprint
@@ -257,7 +262,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                 else
                     count_native_vec(L.expert_w_down);
             }
-            size_t phase3_reserve = vram_reserve_floor(total_vram) + 1024ULL * 1024 * 1024;
+            size_t phase3_reserve =
+                vram_reserve_floor(total_vram, reserve_floor_pct) + 1024ULL * 1024 * 1024;
             size_t native_need = sf_bytes + max_moe_slab + phase3_reserve;
             if (native_need > cutlass_sf_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
@@ -283,7 +289,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // dense — the tuned bench configs) keep their KV pools unchanged.
             size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
             if (plan.projected_vram_bytes > 2 * heuristic) {
-                size_t want = plan.projected_vram_bytes + vram_reserve_floor(total_vram);
+                size_t want =
+                    plan.projected_vram_bytes + vram_reserve_floor(total_vram, reserve_floor_pct);
                 // Never squeeze the pool below one full max_seq_len sequence
                 // (or the min-KV floor, whichever is larger) — long-context
                 // must stay servable; concurrency is bounded by scheduler
@@ -315,7 +322,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             budget.nvfp4_cache_bytes = nvfp4_estimate;
             size_t weight_total = nvfp4_estimate + cutlass_sf_estimate;
             size_t kv_available = (available > weight_total) ? (available - weight_total) : 0;
-            budget.kv_cache_bytes = static_cast<size_t>(kv_available * 0.8);
+            budget.kv_cache_bytes = static_cast<size_t>(kv_available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
                                        ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
                                        : needed_blocks;
@@ -326,18 +333,18 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // NVFP4 decode cache is critical for performance — ensure it fits first.
             // FP8 prefill cache is nice-to-have but not essential (fallback: dequant on-the-fly).
             budget.nvfp4_cache_bytes = nvfp4_estimate;
-            // KV target = 0.8 of available for BOTH modes. Mode 2 (native-NVFP4
-            // second pass) previously used 0.1 and skipped the needed_blocks
-            // floor — intended to leave room for an FP8 prefill cache. But on
-            // sm_120 FP8 prefill is unavailable (native NVFP4 uses the CUTLASS
-            // NVFP4 GEMM, no FP8 weight cache is built), so the 90% reserve was
-            // dead VRAM: an NVFP4 SafeTensors model starved its KV pool to ~24K
-            // tokens while 16 GB sat free — the long-context/agentic default was
-            // effectively broken. target_blocks (below) still clamps mode 2 to
-            // needed_blocks, so 0.8 only lifts KV up to the per-sequence need
-            // and leaves the remainder for FP8 (computed post-clamp) when it IS
-            // enabled — no regression for fp8-prefill configs.
-            double kv_fraction = 0.8;
+            // KV target = kv_fraction (default 0.8) of available for BOTH
+            // modes. Mode 2 (native-NVFP4 second pass) previously used 0.1 and
+            // skipped the needed_blocks floor — intended to leave room for an
+            // FP8 prefill cache. But on sm_120 FP8 prefill is unavailable
+            // (native NVFP4 uses the CUTLASS NVFP4 GEMM, no FP8 weight cache is
+            // built), so the 90% reserve was dead VRAM: an NVFP4 SafeTensors
+            // model starved its KV pool to ~24K tokens while 16 GB sat free —
+            // the long-context/agentic default was effectively broken.
+            // target_blocks (below) still clamps mode 2 to needed_blocks, so
+            // the fraction only lifts KV up to the per-sequence need and leaves
+            // the remainder for FP8 (computed post-clamp) when it IS enabled —
+            // no regression for fp8-prefill configs.
             budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
                                        ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
@@ -351,7 +358,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         case VRAMBudget::FP16_ONLY: {
             budget.fp8_cache_bytes = 0;
             budget.nvfp4_cache_bytes = 0;
-            budget.kv_cache_bytes = static_cast<size_t>(available * 0.8);
+            budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
                                        ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
                                        : needed_blocks;
@@ -404,7 +411,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // user explicitly sets min_kv_tokens, respect their request up to the
     // physical max_affordable — they're opting into a tighter weight-cache
     // budget in exchange for more context.
-    int cap = user_requested_min ? max_affordable : static_cast<int>(max_affordable * 0.8);
+    int cap = user_requested_min ? max_affordable : static_cast<int>(max_affordable * kv_fraction);
     min_kv_blocks = std::min(min_kv_blocks, cap);
     if (budget.kv_max_blocks < min_kv_blocks) {
         IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)", budget.kv_max_blocks,

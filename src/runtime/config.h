@@ -149,6 +149,42 @@ struct RuntimeConfig {
         bool swa_sizing = false;
     } kv_cache;
 
+    // Runtime RoPE-scaling override — stretch a model's usable context past
+    // its native window without editing the checkpoint. Sets the same
+    // ModelConfig fields the GGUF/HF loaders set from model-declared
+    // rope_scaling metadata, before max_seq_len auto-detection, so the
+    // extended window flows into KV sizing, YaRN corr-dims, and the MTP
+    // draft head. Refused (logged) for models with per-dimension frequency
+    // tables (LongRoPE / llama3), MLA (mscale entanglement), and NoPE.
+    struct Rope {
+        // "" = off (model metadata only). "yarn" | "linear".
+        std::string scaling;
+        // Context-extension factor (> 1.0), e.g. 4.0 stretches 32k → 128k.
+        float factor = 1.0f;
+        // Original (native) training context the factor applies to.
+        // 0 = auto: the model's declared rope_n_ctx_orig, else max_seq_len.
+        int orig_ctx = 0;
+        // HF attn_factor multiplier. The kernel already applies the YaRN
+        // paper mscale 1 + 0.1*ln(factor) internally — leave at 1.0 unless
+        // matching a checkpoint that shipped a custom attn_factor.
+        float attn_factor = 1.0f;
+        float beta_fast = 32.0f;
+        float beta_slow = 1.0f;
+    } rope;
+
+    // VRAM budget-planner tuning. Governs compute_vram_budget() only —
+    // the pre-dequant phases keep their own internal reserve floors.
+    struct Vram {
+        // Fraction of post-reserve/post-weight-cache VRAM the KV pool
+        // targets. Clamped to [0.05, 0.95] at use.
+        float kv_fraction = 0.8f;
+        // Free-VRAM reserve floor as % of (budget-visible) total VRAM,
+        // still floored at 256 MiB absolute. Clamped to [0, 50] at use.
+        // Default 10 ≈ 3.2 GiB on a 32 GiB card — lower to trade headroom
+        // for KV pool.
+        int reserve_floor_pct = 10;
+    } vram;
+
     struct Attention {
         std::string fp8_prefill = "auto";
         // fp8-QK FMHA family (smem-materializing fp8 kernel + FA2 in fp8-QK
