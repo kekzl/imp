@@ -4,6 +4,38 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-08
+
+Toolchain-modernization release: the engine now builds as **C++23** on an
+**Ubuntu 26.04 / GCC 15.2 / CUDA 13.3** base (was C++20 / Ubuntu 24.04 / GCC 13).
+The standard bump changes no default-path behavior and no perf (decode verified
+neutral). Ships alongside two FP8 tile decode-attention kernels (large
+long-context wins), the MLA/MTP RoPE correctness fixes, an async-mempool teardown
+fix, and the server-hardening / config / VRAM cleanups from the 2026-07-07
+structural audit.
+
+### Changed
+- **C++ standard raised to C++23** (host + CUDA). CMake's NVIDIA-CUDA module has no
+  CUDA23 dialect flag, so the build teaches it `-std=c++23` explicitly (shim to drop
+  once CMake ships a native mapping). No source changes were required (#916).
+- **Build toolchain → Ubuntu 26.04 / GCC 15.2** (CUDA stays 13.3); the Dockerfile and
+  both CI compile containers moved, which catches the GCC-15 missing-include class in
+  CI. **Note:** nvcc silently drops `-std=c++23` on a host compiler older than GCC 14,
+  so dev/profiling images must be on this base — the `impdev:ncu` recipe is now
+  committed at `tools/Dockerfile.ncu` (#907).
+- Retired the legacy config surface: env-var seeding (down to `IMP_DETERMINISTIC` +
+  `IMP_FMHA_FA2`), turboquant aliases, and dead flags (#879); `imp.conf.example`,
+  `--help`, and config comments synced to parser reality (#878).
+- VRAM-layer audit: dead modules removed, one reserve floor, honest budget logs (#877).
+- Tokenizer: dropped the duplicated JSON parser in favor of shared `model/json_util` (#887).
+- Analysis/roofline tooling: PTX survey scripts track the latest CUDA toolkit (#908);
+  Python 3.14 plot env + roofline baseline re-pin (#904).
+
+### Added
+- **FP8 tile decode-attention kernels.** Token-tiled FP8 split-K decode (K and V staged
+  in one cp.async group) — long-context decode **+51%** (#899); a GQA-batched variant
+  reads each KV head once across the warp group for a further **+14%** (#900).
+
 ### Fixed
 - **MLA (DeepSeek-V2/V3) YaRN rope-mscale**: the RoPE cos/sin were scaled by
   `yarn_get_mscale(factor, mscale_all_dim)` (=1.261 for V2-Lite) instead of the
@@ -16,7 +48,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   534-tok **+24.4% → +2.75%** (imp 7.78→6.43, HF 6.25); 196-tok +5.0% → +0.8%.
   The residual ~1-3% is F16-vs-bf16 compute precision. Applies to both
   DeepSeek-V2-Lite and DeepSeek-Coder-V2-Lite (same config); generalizes
-  correctly to V3 (where the two mscales differ).
+  correctly to V3 (where the two mscales differ) (#880).
+- **MTP draft-head mrope** now applies YaRN / rope-scaling (was plain NeoX RoPE), so the
+  drafter no longer drifts from the verifier on rope-scaled models — speculative
+  acceptance no longer degrades with position (#913).
+- **Async mempool** is now trimmed on `Model` teardown, not only at the C-API boundary,
+  releasing device memory between in-process model swaps (#915).
+- **Capture-poisoned engine wedge**: a failed CUDA-graph capture no longer wedges the
+  engine; plus planner-driven KV-pool sizing (#874, #875).
+- **GCC 15 build**: added the `<algorithm>` / `<numeric>` includes that libstdc++15 no
+  longer pulls in transitively (#903, #906).
+- No-GPU audit sweep #888–#894: server admission control / observability / `/health`
+  locking, embeddings, API strictness, and tool-call suppression, plus dead-code and
+  doc/comment drift (#901).
 
 ## [0.16.2] - 2026-07-04
 
