@@ -70,8 +70,8 @@
 // Build & run (host has no CUDA toolkit — use the CUDA 13.3 container).
 // NOTE: block-scale mxf4nvf4 needs the explicit compute_120a gencode; the
 // `-arch=sm_120a` shorthand does NOT enable .block_scale (ptxas rejects it):
-//   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.0-devel-ubuntu24.04 \
-//     sh -c 'nvcc -O3 -std=c++17 --generate-code=arch=compute_120a,code=sm_120a \
+//   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.0-devel-ubuntu26.04 \
+//     sh -c 'nvcc -O3 -std=c++23 --generate-code=arch=compute_120a,code=sm_120a \
 //            gemm_nvfp4_sm120a.cu -o gemm && ./gemm'
 // -----------------------------------------------------------------------------
 

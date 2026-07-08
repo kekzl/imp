@@ -48,8 +48,8 @@
 // Still simplified vs production: f32 QK^T accumulate, MHA only (no GQA grouping).
 //
 // Build & run (host has no CUDA toolkit — use the CUDA 13.3 container):
-//   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.0-devel-ubuntu24.04 \
-//     sh -c 'nvcc -O3 -std=c++17 -arch=sm_120a fa2_sm120a_optimal.cu -o fa2 && ./fa2'
+//   docker run --rm --gpus all -v "$PWD":/w -w /w nvidia/cuda:13.3.0-devel-ubuntu26.04 \
+//     sh -c 'nvcc -O3 -std=c++23 -arch=sm_120a fa2_sm120a_optimal.cu -o fa2 && ./fa2'
 // (imp's own image already has nvcc: imp:test works as the image too.)
 // -----------------------------------------------------------------------------
 
