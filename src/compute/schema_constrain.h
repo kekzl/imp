@@ -156,8 +156,11 @@ private:
     PreambleGate preamble_;
 
     // Helpers
-    SchemaFrame& top() { return stack_.back(); }
-    const SchemaFrame& top() const { return stack_.back(); }
+    // C++23 deducing this: one overload serves const and non-const callers.
+    template <typename Self>
+    auto&& top(this Self&& self) {
+        return self.stack_.back();
+    }
 
     void push_value_frame(const SchemaNode* node);
 

@@ -7,6 +7,7 @@
 #include <float.h>
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace imp {
 
@@ -60,7 +61,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     initialized_ = true;
 
     IMP_LOG_INFO("SchemaConstrainer: initialized with %d tokens, schema type=%d", vocab_size_,
-                 static_cast<int>(schema_->type));
+                 std::to_underlying(schema_->type));
     return true;
 }
 
@@ -432,12 +433,12 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
                     token_allow_[e] = 1;
             cat_mask = 0xFFFF;
             IMP_LOG_WARN("SchemaConstrainer: no token satisfies the schema in phase %d — allowing EOS",
-                         static_cast<int>(top().phase));
+                         std::to_underlying(top().phase));
         }
     }
 
     IMP_LOG_DEBUG("SchemaConstrainer::apply_mask phase=%d cat_mask=0x%04x need_allow=%d stack=%zu",
-                  static_cast<int>(top().phase), cat_mask, need_token_allow_, stack_.size());
+                  std::to_underlying(top().phase), cat_mask, need_token_allow_, stack_.size());
 
     // Upload category mask
     IMP_CUDA_CHECK_LOG(
@@ -478,7 +479,7 @@ void SchemaConstrainer::update(int32_t token) {
     }
     if (!stack_.empty()) {
         IMP_LOG_DEBUG("SchemaConstrainer::update token=%d [%s] phase %d->%d stack=%zu", token, text.c_str(),
-                      static_cast<int>(before), static_cast<int>(top().phase), stack_.size());
+                      std::to_underlying(before), std::to_underlying(top().phase), stack_.size());
     }
 }
 

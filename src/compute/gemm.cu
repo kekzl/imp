@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include <utility>
 
 #define CUBLASLT_CHECK(call)                                                        \
     do {                                                                            \
@@ -142,7 +143,7 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
         case QType::INT32:
             return CUDA_R_32I;
         default:
-            fprintf(stderr, "imp::gemm: unsupported dtype %d\n", (int)dt);
+            fprintf(stderr, "imp::gemm: unsupported dtype %d\n", std::to_underlying(dt));
             return CUDA_R_16F;  // fallback (caller guard should prevent reaching here)
     }
 }
@@ -212,7 +213,7 @@ struct GemmCacheKey {
 };
 
 struct GemmCacheKeyHash {
-    size_t operator()(const GemmCacheKey& k) const {
+    static size_t operator()(const GemmCacheKey& k) {
         size_t h = 14695981039346656037ULL;
         auto mix = [&](uint64_t v) {
             h ^= v;

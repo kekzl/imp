@@ -11,6 +11,7 @@
 
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -31,7 +32,7 @@ static std::vector<std::string> split(const std::string& s, char delim) {
 // ---- Assign a single tensor to the model by GGUF name ----
 
 bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype) {
-    auto qtype = static_cast<QType>(static_cast<uint32_t>(gtype));
+    auto qtype = static_cast<QType>(std::to_underlying(gtype));
     if (name == "token_embd.weight") {
         assign_quant(model.tok_emb_, tensor);
         return true;

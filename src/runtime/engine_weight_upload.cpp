@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 namespace imp {
 
@@ -47,7 +48,7 @@ bool Engine::init_weights() {
                 IMP_LOG_WARN(
                     "StreamingLLM smart KV cache requires FP16 KV cache "
                     "(requested %d) — disabling streaming.",
-                    static_cast<int>(config_.kv_cache_dtype));
+                    std::to_underlying(config_.kv_cache_dtype));
                 config_.streaming_kv_enabled = false;
             } else {
                 int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;

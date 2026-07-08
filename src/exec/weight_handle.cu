@@ -3,6 +3,7 @@
 #include "core/logging.h"
 
 #include <cstring>
+#include <utility>
 
 namespace imp {
 
@@ -18,20 +19,6 @@ TensorID WeightRegistry::reserve(TensorKind kind, int64_t rows, int64_t cols) {
     std::memset(&h.payload, 0, sizeof(h.payload));
     handles_.push_back(h);
     return id;
-}
-
-WeightHandle& WeightRegistry::handle(TensorID id) {
-    if (id < 0 || id >= static_cast<TensorID>(handles_.size())) {
-        IMP_LOG_FATAL("WeightRegistry::handle: id %d out of range [0, %zu)", id, handles_.size());
-    }
-    return handles_[id];
-}
-
-const WeightHandle& WeightRegistry::handle(TensorID id) const {
-    if (id < 0 || id >= static_cast<TensorID>(handles_.size())) {
-        IMP_LOG_FATAL("WeightRegistry::handle: id %d out of range [0, %zu)", id, handles_.size());
-    }
-    return handles_[id];
 }
 
 void WeightRegistry::clear() { handles_.clear(); }
@@ -85,7 +72,7 @@ size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
                     "WeightRegistry::free_owned_storage: handle id=%d "
                     "kind=%d tier=%d has owned_bytes=%lld but no "
                     "type-specific free is wired; skipping.",
-                    h.id, static_cast<int>(h.kind), static_cast<int>(h.primary_tier),
+                    h.id, std::to_underlying(h.kind), std::to_underlying(h.primary_tier),
                     static_cast<long long>(h.owned_bytes));
                 break;
         }

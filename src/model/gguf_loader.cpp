@@ -38,6 +38,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -967,7 +968,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 case QType::Q8_0:
                     return scale_q8_0(t);
                 default:
-                    IMP_LOG_ERROR("gpt-oss GGUF rescale: unsupported qtype %d", (int)t.qtype);
+                    IMP_LOG_ERROR("gpt-oss GGUF rescale: unsupported qtype %d", std::to_underlying(t.qtype));
                     return false;
             }
         };

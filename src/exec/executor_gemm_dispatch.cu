@@ -1,4 +1,5 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
+#include <utility>
 //
 // Extracted from executor_kernels.cu (D3, structural-debt audit): the
 // WeightHandle-keyed GEMM dispatch (GraphExecutor::gemm_via_handle_) and its
@@ -67,7 +68,7 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
         }
         IMP_LOG_ERROR(
             "gemm_dispatch_uncached_fallback: beta=%.3f but no FP16 path for qtype=%d",
-            ctx.beta, (int)qtype);
+            ctx.beta, std::to_underlying(qtype));
         return;
     }
 
@@ -94,7 +95,7 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
             IMP_LOG_WARN(
                 "gemm_dispatch_uncached_fallback: dropped weight at final fallback! "
                 "M=%d qtype=%d kind=%s — overlay coverage gap.",
-                M, static_cast<int>(qtype), tensor_kind_name(weight.kind));
+                M, std::to_underlying(qtype), tensor_kind_name(weight.kind));
         }
         return;
     }

@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace imp {
 
@@ -64,7 +65,7 @@ StorageTier pick_initial_tier(TensorKind kind, const KindCapabilities& cap, cons
 // StorageTier enum order: FP32=1, FP16=2, FP8=3, NVFP4=4, CUTLASS_NVFP4=5, MXFP4=6
 // Higher integer = more compressed, so "downgrade" = increase enum value.
 StorageTier downgrade_one(StorageTier current, StorageTier floor, const KindCapabilities& cap) {
-    for (int s = static_cast<int>(current) + 1; s <= static_cast<int>(StorageTier::MXFP4); ++s) {
+    for (int s = std::to_underlying(current) + 1; s <= std::to_underlying(StorageTier::MXFP4); ++s) {
         auto candidate = static_cast<StorageTier>(s);
         if (!mask_contains(cap.supported, candidate))
             continue;

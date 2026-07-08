@@ -31,8 +31,11 @@ public:
     // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
     // values (<0) mean the field was not present.
     const HFConfigLoader::GenerationConfig& generation_config() const { return generation_config_; }
-    const TransformerLayer& layer(int i) const { return layers_[i]; }
-    TransformerLayer& layer(int i) { return layers_[i]; }
+    // C++23 deducing this: one overload serves const and non-const callers.
+    template <typename Self>
+    auto&& layer(this Self&& self, int i) {
+        return self.layers_[i];
+    }
     const Tensor& token_embedding() const { return tok_emb_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }

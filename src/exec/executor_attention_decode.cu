@@ -1,4 +1,5 @@
 // Decode attention dispatch block for GraphExecutor::run_attention.
+#include <utility>
 //
 // This is NOT a standalone translation unit — it is textually #include'd inside
 // the body of GraphExecutor::run_attention (executor_attention.cu), inside the
@@ -272,7 +273,7 @@
                 warned_sinks_kv = true;
                 IMP_LOG_WARN("attention sinks: only the FP16 paged decode kernels apply sinks — "
                              "kv_cache.dtype=%d ignores them; use fp16 KV for this model.",
-                             (int)cache_dtype);
+                             std::to_underlying(cache_dtype));
             }
         }
 

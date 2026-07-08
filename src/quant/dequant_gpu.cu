@@ -3,6 +3,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cstdio>
+#include <utility>
 
 namespace imp {
 
@@ -844,7 +845,7 @@ void dequant_gpu_fp8(const void* src, void* dst, QType qtype, int rows, int cols
             break;
         }
         default:
-            IMP_LOG_ERROR("dequant_gpu_fp8: unsupported qtype %u", static_cast<unsigned>(qtype));
+            IMP_LOG_ERROR("dequant_gpu_fp8: unsupported qtype %u", std::to_underlying(qtype));
             break;
     }
 }
@@ -892,7 +893,7 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             DEQUANT_CASE(IQ4_XS, dequant_iq4_xs_kernel)
 
         default:
-            IMP_LOG_ERROR("dequant_gpu: unsupported qtype %u", static_cast<unsigned>(qtype));
+            IMP_LOG_ERROR("dequant_gpu: unsupported qtype %u", std::to_underlying(qtype));
             break;
     }
 }

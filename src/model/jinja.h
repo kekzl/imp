@@ -65,8 +65,11 @@ public:
     double as_double() const { return std::get<double>(data_); }
     const std::string& as_string() const { return std::get<std::string>(data_); }
     const Array& as_array() const { return std::get<Array>(data_); }
-    const Object& as_object() const { return std::get<Object>(data_); }
-    Object& as_object() { return std::get<Object>(data_); }
+    // C++23 deducing this: one overload serves const and non-const callers.
+    template <typename Self>
+    auto&& as_object(this Self&& self) {
+        return std::get<Object>(self.data_);
+    }
 
     // Truthiness (Python/Jinja2 rules)
     bool truthy() const;

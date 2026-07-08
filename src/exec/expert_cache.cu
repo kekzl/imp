@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -188,7 +189,7 @@ void* ExpertLRUCache::find(int layer, ExpertCacheKey key) {
 void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
                                   const void* src_host, size_t expert_bytes,
                                   cudaStream_t stream) {
-    const int proj_idx = static_cast<int>(proj);
+    const int proj_idx = std::to_underlying(proj);
     if (layer < 0 || layer >= n_layers_) {
         IMP_LOG_ERROR("ExpertLRUCache::get_or_load: layer %d out of range [0, %d)", layer,
                       n_layers_);

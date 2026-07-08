@@ -24,6 +24,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <utility>
 
 namespace imp {
 
@@ -1478,7 +1479,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             if (!t.data || t.on_device)
                 return true;
             if (t.qtype != QType::BF16) {
-                IMP_LOG_ERROR("gpt-oss rescale: expected BF16, got qtype %d", (int)t.qtype);
+                IMP_LOG_ERROR("gpt-oss rescale: expected BF16, got qtype %d", std::to_underlying(t.qtype));
                 return false;
             }
             int64_t n = t.numel();

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 
 namespace imp {
 
@@ -211,7 +212,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
         }
         device_allocs_.push_back(dev);
 
-        LoraWeights& w = layers_[layer].proj[static_cast<int>(proj)];
+        LoraWeights& w = layers_[layer].proj[std::to_underlying(proj)];
         if (is_A) {
             w.A = dev;
             w.r = static_cast<int>(shape[0]);
@@ -227,7 +228,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
 
     // Validate pairs + collect max rank.
     for (size_t li = 0; li < layers_.size(); li++) {
-        for (int pi = 0; pi < static_cast<int>(LoraProj::COUNT); pi++) {
+        for (int pi = 0; pi < std::to_underlying(LoraProj::COUNT); pi++) {
             LoraWeights& w = layers_[li].proj[pi];
             if ((w.A == nullptr) != (w.B == nullptr)) {
                 IMP_LOG_ERROR("LoRA: layer %zu proj %d has unpaired A/B", li, pi);

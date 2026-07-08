@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <cstring>
 #include <algorithm>
+#include <utility>
 
 namespace imp {
 
@@ -467,7 +468,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
                 token_allow_[eid] = 1;
         }
         IMP_LOG_WARN("JsonConstrainer: no token satisfies the grammar in state %d — allowing EOS",
-                     static_cast<int>(current_state_));
+                     std::to_underlying(current_state_));
     }
 
     if (!d_token_allow_) {

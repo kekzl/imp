@@ -1,4 +1,5 @@
 #include "runtime/constraint_manager.h"
+#include <utility>
 
 namespace imp {
 
@@ -119,7 +120,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
             // no char fallback — degrade to current "drop schema" behaviour.
             IMP_LOG_INFO(
                 "ConstraintManager: no tool-tag dialect for family %d, dropping schema/json_mode",
-                static_cast<int>(tpl_family));
+                std::to_underlying(tpl_family));
             return;
         }
     }

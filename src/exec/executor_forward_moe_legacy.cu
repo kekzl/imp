@@ -46,6 +46,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <utility>
 
 namespace imp {
 
@@ -92,7 +93,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     "dequant_expert: OOB! expert %d offset=%zu + raw=%zu > total=%zu "
                     "(packed shape [%ld,%ld,%ld] qtype=%u)",
                     expert_idx, offset, expert_raw, total_raw, (long)packed.shape[0],
-                    (long)packed.shape[1], (long)packed.shape[2], (unsigned)qtype);
+                    (long)packed.shape[1], (long)packed.shape[2], std::to_underlying(qtype));
                 return Tensor();
             }
 

@@ -16,6 +16,7 @@
 #ifdef __linux__
 #include <fstream>
 #include <string>
+#include <utility>
 #endif
 
 namespace imp {
@@ -701,7 +702,7 @@ static bool upload_qtype_raw_fallback_(Tensor& weight, QType qtype, cudaStream_t
                                        std::vector<void*>& gpu_allocs) {
     size_t bytes = weight.nbytes();
     if (bytes == 0) {
-        IMP_LOG_WARN("Empty raw weight for qtype %u, skipping", static_cast<unsigned>(qtype));
+        IMP_LOG_WARN("Empty raw weight for qtype %u, skipping", std::to_underlying(qtype));
         return false;
     }
     void* d_data = nullptr;
@@ -1328,7 +1329,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
             }
         } else {
             IMP_LOG_ERROR("SSM scalar tensor has unexpected qtype %u (layer %d)",
-                          static_cast<unsigned>(t->qtype), i);
+                          std::to_underlying(t->qtype), i);
             return false;
         }
 
