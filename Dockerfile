@@ -8,7 +8,11 @@
 # install needed. The host driver (UMD 13.3) supports it. sm_120 gains the 13.3
 # ptxas/PTX-ISA-9.3 codegen; no new tensor-core HW (still mma.sync, no
 # tcgen05/wgmma).
-FROM nvidia/cuda:13.3.0-devel-ubuntu24.04 AS builder
+# Ubuntu 26.04 LTS host userland → GCC 15.2 / libstdc++ 15. GCC 15 no longer
+# pulls <algorithm>/<numeric> in transitively through other headers, so it
+# catches the missing-include class of bugs at build time (see #903) that the
+# older GCC 13 toolchain silently accepted.
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04 AS builder
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -79,7 +83,7 @@ RUN cmake -B build -G Ninja \
 # Native CUDA 13.3 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04
+FROM nvidia/cuda:13.3.0-runtime-ubuntu26.04
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here
