@@ -375,6 +375,14 @@ json anthropic_to_openai_body(const json& anth) {
     }
     if (anth.contains("tool_choice")) {
         oai["tool_choice"] = convert_tool_choice(anth["tool_choice"]);
+        // Anthropic expresses "one tool at a time" as
+        // tool_choice.disable_parallel_tool_use; map it to the OpenAI
+        // parallel_tool_calls flag the (non-)streaming tool loops honor so the
+        // suppression actually reaches the /v1/messages path (#892).
+        if (anth["tool_choice"].is_object() &&
+            anth["tool_choice"].value("disable_parallel_tool_use", false)) {
+            oai["parallel_tool_calls"] = false;
+        }
     }
 
     // cache_control → prompt-KV pinning (internal "cache_prompt" field,

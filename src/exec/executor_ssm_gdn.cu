@@ -19,7 +19,8 @@ namespace imp {
 
 // Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
 // precision through the residual add so downstream RMSNorm sees bit-accurate
-// inputs (fixes Qwen 3.6 sign flips). Used when IMP_GDN_FP32_OUT=1.
+// inputs (fixes Qwen 3.6 sign flips). Used when the gdn.fp32_out config flag (was IMP_GDN_FP32_OUT
+// env) is set.
 __global__ void fp32_plus_fp16_to_fp16(const float* __restrict__ a_fp32, const __half* __restrict__ b_fp16,
                                        __half* __restrict__ out_fp16, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -379,7 +380,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // The GGUF converter may store V in tiled layout (h0_g0, h1_g1, ... then
     // h0_g0_r1, ...) while the scan kernel reads V[h*HD+d] assuming grouped
     // layout. Qwen 3.6 uses 16K/32V asymmetric heads and triggers this
-    // mismatch. Gated by IMP_GDN_VHEAD_REORDER to avoid regressing symmetric
+    // mismatch. Gated by the gdn.vhead_reorder config flag (was IMP_GDN_VHEAD_REORDER env) to avoid
+    // regressing symmetric
     // models or models whose converters already emit grouped layout.
     const bool vhead_reorder = runtime_config().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
@@ -475,10 +477,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // 5b. Multi-token delta rule scan.
         // Default: fused kernel with register-cached state (n×32 fewer launches,
         // 125× less state memory traffic).
-        // IMP_GDN_REF=1: reference kernel with shared-memory state, no fusion.
+        // gdn.ref_kernel config flag (was IMP_GDN_REF env): reference kernel with shared-memory state, no
+        // fusion.
         //   Use when debugging new architectures — if outputs differ it isolates
         //   bugs to the fused-kernel optimizations.
-        // IMP_GDN_FP32_SCAN=1: keep scan output in FP32 through RMSNorm+Gate.
+        // gdn.fp32_scan config flag (was IMP_GDN_FP32_SCAN env): keep scan output in FP32 through
+        // RMSNorm+Gate.
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
         const bool use_ref = runtime_config().gdn.ref_kernel;
@@ -515,7 +519,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // — the !use_fp32_out path of ssm_out reads y_buf as FP16 input. The
             // older code gated this on debug_forward_enabled() which left y_buf
             // uninitialized in production runs (= ssm_out fed zeros) and only
-            // appeared coherent under IMP_DEBUG_FORWARD=1.
+            // appeared coherent under the diagnostics.debug_forward config flag (was IMP_DEBUG_FORWARD env).
             gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32, static_cast<const half*>(gate_out.data),
                                              static_cast<const half*>(ly.ssm_norm_w.data), eps, n, n_heads,
                                              head_dim_ssm, stream);
@@ -561,7 +565,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     // Per-element dump: raw scan output (FP16), pre-rmsnorm_gated_silu.
     // Only populated in the default path — FP32_SCAN writes to y_fp32 and only
-    // copies back to y_buf when IMP_DEBUG_FORWARD is set. Compare to llama's
+    // copies back to y_buf when the diagnostics.debug_forward config flag (was IMP_DEBUG_FORWARD env)
+    // is set. Compare to llama's
     // `attn_output-{layer}` from common-eval-callback.
     if (!use_fp32_scan) {
         dump_tensor_npy("gdn_y_post_scan", y_buf, stream, layer, cur_decode_step_);
@@ -569,7 +574,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
-    // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
+    // When the gdn.fp32_scan config flag (was IMP_GDN_FP32_SCAN env) is active, this was already done
+    // inline with the
     // scan above (FP32-input variant). Skip to avoid double-applying.
     // [gdn] norm_eps_override > 0 can override eps (diagnostic).
     float norm_eps = eps;
@@ -587,7 +593,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     dump_tensor_npy("gdn_y_post_norm", y_buf, stream, layer, cur_decode_step_);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
-    // IMP_GDN_FP32_OUT=1: compute the ssm_out GEMM with FP32 output and add the
+    // gdn.fp32_out config flag (was IMP_GDN_FP32_OUT env): compute the ssm_out GEMM with FP32 output
+    // and add the
     // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
     // element vs llama.cpp; that small drift amplifies to sign flips in
     // downstream near-zero projections and breaks Qwen 3.6.

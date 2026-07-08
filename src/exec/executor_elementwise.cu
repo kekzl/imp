@@ -264,7 +264,8 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
 // FP32-input variant of rmsnorm_fp32_accum_to_fp16_kernel.
 // Input is FP32 (e.g. attention output projection kept in FP32 to preserve
 // cuBLAS internal accumulator precision). Same accum + overflow protection as
-// the FP16-input variant. Used by IMP_GEMMA4_FP32_GEMM_OUT for attention.
+// the FP16-input variant. Used by the overrides.gemma4.fp32_gemm_out config flag
+// (was IMP_GEMMA4_FP32_GEMM_OUT env) for attention.
 __global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
     const float* __restrict__ input,  // [n, d_model] FP32 pre-norm data
     const half* __restrict__ norm_w,  // [d_model] RMSNorm weights

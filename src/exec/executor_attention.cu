@@ -306,7 +306,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     //       — original Qwen 3.5 layout imp was built for.
     //   (b) Feature-dim concat:   [Q_all(nh*hd) | Gate_all(nh*hd)]
     //       — Qwen 3.6 / Qwen3-Next layout used by llama.cpp `qwen3next.cpp`.
-    // Select via `IMP_ATTN_GATE_CONCAT=1` — default stays on interleaved for
+    // Select via the attention.gate_concat config flag (was IMP_ATTN_GATE_CONCAT env) — default
+    // stays on interleaved for
     // backwards compat with Qwen 3.5 GDN models. Planned: auto-detect via
     // arch or config, once Qwen 3.6 passes an E2E test.
     Tensor attn_gate_buf;
@@ -596,13 +597,15 @@ after_attention:
         gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add.
-        // Diagnostic: when IMP_GEMMA4_FP32_GEMM_OUT is set on Gemma-4, after the
+        // Diagnostic: when the overrides.gemma4.fp32_gemm_out config flag (was IMP_GEMMA4_FP32_GEMM_OUT
+        // env) is set on Gemma-4, after the
         // FP16 GEMM, also produce an FP32 view (fp16_to_fp32). Then route the
         // post-attn-norm through the FP32-input variant. This keeps the proven
         // FP16 GEMM path while letting us validate the FP32-input rmsnorm
         // independently. Any precision win comes from the rmsnorm pre-cast
         // happening once in __half2float vs implicit casts inside the kernel.
-        // IMP_GEMMA4_FP32_GEMM_OUT: keep attention output projection in FP32 to
+        // overrides.gemma4.fp32_gemm_out config flag (was IMP_GEMMA4_FP32_GEMM_OUT env): keep attention
+        // output projection in FP32 to
         // preserve cuBLAS's internal FP32 accumulator precision through the
         // post-attention rmsnorm. Uses the cublasGemmEx FP16×FP16→FP32 path
         // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq

@@ -74,9 +74,6 @@ public:
     // untracked weights/fragmentation). phase_label tags the emission point.
     void report(const char* phase_label);
 
-    // Convenience: largest device-used so far (bytes), 0 if never sampled.
-    size_t device_peak_used() const { return peak_used_.load(std::memory_order_relaxed); }
-
 private:
     MemAccount() = default;
     ~MemAccount();

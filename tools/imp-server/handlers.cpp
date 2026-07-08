@@ -42,16 +42,24 @@ int64_t unix_timestamp() {
 }
 
 void handle_health(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
-    bool loaded;
-    int queue = 0;
+    // Never block unbounded on state.mtx: a long /v1/embeddings call holds it
+    // across its whole computation, so an unbounded lock here would hang a
+    // liveness probe (#889). Grab it with a short timeout and fall back to the
+    // lock-free status snapshot on contention — a held lock means a request is
+    // in flight, i.e. the server is alive and cannot be faulted right now.
+    bool loaded = false;
+    int queue = -1;
     bool faulted = false;
-    {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
+    std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+    if (lock.owns_lock()) {
         loaded = state.model_loaded();
         if (state.batching) {
             queue = state.batching->queue_depth();
             faulted = state.batching->faulted();
         }
+        lock.unlock();
+    } else {
+        loaded = state.model_status_snapshot().loaded;  // queue_depth stays -1 (unknown)
     }
     json body = {{"status", faulted ? "unhealthy" : "ok"},
                  {"model_loaded", loaded},
@@ -110,13 +118,21 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
 void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     json data = json::array();
 
-    // Snapshot state fields under lock
-    bool loaded;
+    // Snapshot state fields under a bounded lock (see #889 — do not block
+    // behind a long /v1/embeddings holder). On contention, fall back to the
+    // lock-free status snapshot rather than hang.
+    bool loaded = false;
     std::string model_name;
     {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        loaded = state.model_loaded();
-        model_name = state.model_name;
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock()) {
+            loaded = state.model_loaded();
+            model_name = state.model_name;
+        } else {
+            ServerState::ObsStatus snap = state.model_status_snapshot();
+            loaded = snap.loaded;
+            model_name = snap.model_name;
+        }
     }
 
     // OpenAI semantics: expose only what this server can actually serve —
@@ -316,6 +332,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     state.tok = nullptr;
     state.have_template = false;
     state.model_name.clear();
+    // Publish "not loaded" for the whole load window; republished as loaded
+    // once the context is up and the name is set (#889 observability snapshot).
+    state.publish_model_status(false, "");
 
     // Auto-detect format from path
     ImpModelFormat format = imp::is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
@@ -366,6 +385,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         id_path.pop_back();
     size_t slash = id_path.find_last_of('/');
     state.model_name = (slash != std::string::npos) ? id_path.substr(slash + 1) : id_path;
+    state.publish_model_status(true, state.model_name);
 
     // Set up tokenizer and chat template
     state.tok = state.model->model->tokenizer();

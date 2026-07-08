@@ -81,7 +81,7 @@ __global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(float* __res
 // write_kv_cache: moved to executor_kv_write.cu
 
 // ---------------------------------------------------------------------------
-// Forward pass diagnostics (IMP_DEBUG_FORWARD=1)
+// Forward pass diagnostics (diagnostics.debug_forward config flag; was IMP_DEBUG_FORWARD env)
 // ---------------------------------------------------------------------------
 
 // debug_forward_enabled, debug_tensor_stats: shared via executor_debug.h
@@ -210,9 +210,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             IMP_LOG_WARN("Cleared stale error before forward: %s", cudaGetErrorString(e_));
     }
 
-    // ---- Optional per-component profiling (IMP_PROFILE=1) ----
+    // ---- Optional per-component profiling (diagnostics.profile config flag, was IMP_PROFILE env) ----
     // Profiling disables CUDA graph capture (they are incompatible).
-    // Use IMP_PROFILE=1 for diagnostic runs only.
+    // Use the diagnostics.profile config flag (was IMP_PROFILE env) for diagnostic runs only.
     const bool do_profile = runtime_config().diagnostics.profile;
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
