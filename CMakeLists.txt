@@ -1,10 +1,19 @@
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 project(imp LANGUAGES C CXX CUDA VERSION 0.16.2)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD 23)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# CMake's NVIDIA-CUDA module (through 4.3.x) tops out at c++20 — it defines no
+# CUDA23 dialect flag, so `CMAKE_CUDA_STANDARD 23` fails with "CMake does not know
+# the flags to enable it". nvcc 13.3 does accept `-std=c++23`, so teach CMake the
+# flag directly. Drop this once the module ships a native CUDA23 mapping.
+if(NOT DEFINED CMAKE_CUDA23_STANDARD_COMPILE_OPTION)
+  set(CMAKE_CUDA23_STANDARD_COMPILE_OPTION  "-std=c++23")
+  set(CMAKE_CUDA23_EXTENSION_COMPILE_OPTION "-std=c++23")
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Custom cmake modules
