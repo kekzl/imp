@@ -219,6 +219,12 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// Context-window probes for OpenAI-compatible clients that auto-detect the max
+// context length. /props follows llama.cpp (n_ctx), /info follows TGI
+// (max_total_tokens / max_input_tokens); /v1/models carries vLLM's
+// max_model_len + llama.cpp's meta.n_ctx_train on the model object.
+void handle_props(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_info(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic-compatible Messages API. Non-streaming requests are a thin shim

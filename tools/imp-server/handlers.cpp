@@ -124,26 +124,97 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     // lock-free status snapshot rather than hang.
     bool loaded = false;
     std::string model_name;
+    int max_seq_len = 0;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
             model_name = state.model_name;
+            max_seq_len = state.max_seq_len;
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
             loaded = snap.loaded;
             model_name = snap.model_name;
+            max_seq_len = state.max_seq_len;  // plain int, set once at load
         }
     }
 
     // OpenAI semantics: expose only what this server can actually serve —
     // the loaded model. Listing the whole models directory invited clients
     // to request models the server then had to swap in mid-flight.
+    //
+    // The context window is not part of OpenAI's model object, but every major
+    // OpenAI-compatible server bolts it on so clients can auto-detect it. We
+    // follow both live conventions on the same object: vLLM's `max_model_len`
+    // and llama.cpp's `meta.n_ctx_train`. See also GET /props and GET /info.
     if (loaded) {
-        data.push_back({{"id", model_name}, {"object", "model"}, {"owned_by", "imp"}});
+        json model = {{"id", model_name},
+                      {"object", "model"},
+                      {"created", unix_timestamp()},
+                      {"owned_by", "imp"}};
+        if (max_seq_len > 0) {
+            model["max_model_len"] = max_seq_len;               // vLLM convention
+            model["meta"] = {{"n_ctx_train", max_seq_len}};     // llama.cpp convention
+        }
+        data.push_back(std::move(model));
     }
 
     json body = {{"object", "list"}, {"data", data}};
+    res.set_content(dump_safe(body), "application/json");
+}
+
+// Snapshot {loaded, model_name, max_seq_len} for the context-length probes
+// below, using the same bounded-lock / fall-back-to-snapshot discipline as the
+// other observability endpoints (#889).
+static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_name,
+                         int& max_seq_len) {
+    std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+    if (lock.owns_lock()) {
+        loaded = state.model_loaded();
+        model_name = state.model_name;
+    } else {
+        ServerState::ObsStatus snap = state.model_status_snapshot();
+        loaded = snap.loaded;
+        model_name = snap.model_name;
+    }
+    max_seq_len = state.max_seq_len;  // plain int, set once at load
+}
+
+// GET /props — llama.cpp-compatible context probe. llama.cpp clients read the
+// context window from `default_generation_settings.n_ctx` (and a top-level
+// `n_ctx`); we mirror both so an auto-detect path written for llama.cpp works
+// unchanged against imp.
+void handle_props(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
+    bool loaded = false;
+    std::string model_name;
+    int max_seq_len = 0;
+    snapshot_ctx(state, loaded, model_name, max_seq_len);
+
+    json body = {{"model_path", model_name},
+                 {"total_slots", state.max_concurrent},
+                 {"n_ctx", max_seq_len},
+                 {"default_generation_settings", {{"n_ctx", max_seq_len}}}};
+    res.set_content(dump_safe(body), "application/json");
+}
+
+// GET /info — Text-Generation-Inference-compatible context probe. TGI clients
+// read `max_total_tokens` (context window) and `max_input_tokens` (largest
+// prompt). We expose both so a TGI-shaped auto-detect path works against imp.
+void handle_info(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
+    bool loaded = false;
+    std::string model_name;
+    int max_seq_len = 0;
+    snapshot_ctx(state, loaded, model_name, max_seq_len);
+
+    // TGI's max_input_tokens is the prompt cap; if the operator pinned one via
+    // --max-input-tokens, honor it, otherwise it is (context - 1) to leave room
+    // for at least one generated token.
+    int max_input = state.max_input_tokens > 0 ? state.max_input_tokens
+                    : max_seq_len > 0          ? max_seq_len - 1
+                                               : 0;
+    json body = {{"model_id", model_name},
+                 {"max_total_tokens", max_seq_len},
+                 {"max_input_tokens", max_input}};
     res.set_content(dump_safe(body), "application/json");
 }
 

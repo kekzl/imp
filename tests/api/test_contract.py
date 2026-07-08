@@ -61,6 +61,45 @@ class TestModelsEndpoint:
             assert "object" in entry
             assert entry["object"] == "model"
 
+    def test_models_exposes_context_length(self, client):
+        # Context window is auto-detected by clients via vLLM's max_model_len
+        # and llama.cpp's meta.n_ctx_train on the model object.
+        r = client.get("/v1/models")
+        body = r.json()
+        if body["data"]:
+            entry = body["data"][0]
+            assert entry["max_model_len"] > 0
+            assert entry["meta"]["n_ctx_train"] == entry["max_model_len"]
+
+
+class TestContextProbes:
+    """Context-window auto-detection endpoints for OpenAI-compatible clients."""
+
+    def test_props_returns_n_ctx(self, client):
+        # llama.cpp shape: /props with n_ctx (top-level + generation settings).
+        r = client.get("/props")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["n_ctx"] > 0
+        assert body["default_generation_settings"]["n_ctx"] == body["n_ctx"]
+
+    def test_info_returns_total_tokens(self, client):
+        # TGI shape: /info with max_total_tokens >= max_input_tokens.
+        r = client.get("/info")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["max_total_tokens"] > 0
+        assert body["max_input_tokens"] < body["max_total_tokens"]
+
+    def test_probes_agree_on_context_length(self, client):
+        # All three conventions must report the same window.
+        models = client.get("/v1/models").json()["data"]
+        if not models:
+            return
+        max_model_len = models[0]["max_model_len"]
+        assert client.get("/props").json()["n_ctx"] == max_model_len
+        assert client.get("/info").json()["max_total_tokens"] == max_model_len
+
 
 class TestChatCompletionsSchema:
     """Verify response JSON matches the OpenAI chat completions schema."""

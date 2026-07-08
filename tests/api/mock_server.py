@@ -38,6 +38,7 @@ MOCK_VOCAB = [
 ]
 
 MOCK_MODEL_ID = "mock-model-v1"
+MOCK_MAX_SEQ_LEN = 32768  # mirrors the server's context-length probes
 
 _server_instance = None
 _shutdown_event = threading.Event()
@@ -130,8 +131,24 @@ class MockHandler(BaseHTTPRequestHandler):
                 "data": [{
                     "id": MOCK_MODEL_ID,
                     "object": "model",
+                    "created": int(time.time()),
                     "owned_by": "imp",
+                    "max_model_len": MOCK_MAX_SEQ_LEN,        # vLLM convention
+                    "meta": {"n_ctx_train": MOCK_MAX_SEQ_LEN},  # llama.cpp convention
                 }],
+            })
+        elif path == "/props":
+            self._send_json(200, {
+                "model_path": MOCK_MODEL_ID,
+                "total_slots": 64,
+                "n_ctx": MOCK_MAX_SEQ_LEN,
+                "default_generation_settings": {"n_ctx": MOCK_MAX_SEQ_LEN},
+            })
+        elif path == "/info":
+            self._send_json(200, {
+                "model_id": MOCK_MODEL_ID,
+                "max_total_tokens": MOCK_MAX_SEQ_LEN,
+                "max_input_tokens": MOCK_MAX_SEQ_LEN - 1,
             })
         elif path == "/metrics":
             uptime = time.monotonic() - metrics.start_time
