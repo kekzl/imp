@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "model/model_arch.h"
 #include "core/logging.h"
+#include "memory/mem_account.h"  // trim_device_mempool
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cctype>
@@ -31,6 +32,7 @@ Model::~Model() {
     // before this destructor runs, making the frees return an error.
     // Silently ignore — the driver reclaims all device memory on context
     // destroy.
+    const bool had_gpu_weights = !gpu_allocations_.empty();
     int free_fail = 0;
     cudaError_t first_err = cudaSuccess;
     for (void* ptr : gpu_allocations_) {
@@ -43,7 +45,7 @@ Model::~Model() {
             }
         }
     }
-    if (!gpu_allocations_.empty())
+    if (had_gpu_weights)
         (void)cudaStreamSynchronize(nullptr);  // retire the frees for the pool
     if (free_fail > 0) {
         IMP_LOG_WARN("Model teardown: %d/%zu weight frees failed (first: %s)", free_fail,
@@ -51,6 +53,15 @@ Model::~Model() {
         (void)cudaGetLastError();  // clear sticky error (e.g. process-exit teardown)
     }
     gpu_allocations_.clear();
+    // Return the freed weights to the driver. The default cudaMallocAsync pool
+    // runs with an unbounded release threshold (engine init), so cudaFreeAsync
+    // above only parks weights-sized memory in the pool — the next plain
+    // cudaMalloc (e.g. a subsequent model's token-embedding upload) can't see
+    // it and OOMs. Previously this trim only ran at the C-API teardown boundary
+    // (imp_model_free), so direct-C++ model teardown (tests, embedders) leaked
+    // the reservation. Trim here so ANY model destruction returns it.
+    if (had_gpu_weights)
+        trim_device_mempool();
 
     for (void* ptr : host_pinned_) {
         if (ptr)

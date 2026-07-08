@@ -108,4 +108,15 @@ private:
     int sampler_interval_us_ = 2000;
 };
 
+// Retire pending stream-ordered frees and return the default CUDA mempool's
+// unused reserved slack to the driver (cudaMemPoolTrimTo). Engine init raises
+// the default cudaMallocAsync pool's release threshold to UINT64_MAX so freed
+// blocks are kept for re-use, so cudaFreeAsync alone only parks weights-sized
+// memory in the pool — the next plain-cudaMalloc path (cudaMemGetInfo-based
+// sizing, token-embedding upload) can't see it and OOMs. Call after tearing
+// down anything that freed large async allocations (model/context teardown).
+// Safe at process exit (guards a torn-down pool, clears sticky errors). Logs
+// the reserved delta.
+void trim_device_mempool();
+
 }  // namespace imp

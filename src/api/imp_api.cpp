@@ -6,6 +6,7 @@
 #include "model/tokenizer.h"
 #include "model/chat_template.h"
 #include "memory/kv_cache.h"
+#include "memory/mem_account.h"  // trim_device_mempool
 
 #include "core/logging.h"
 
@@ -18,40 +19,6 @@
 
 #include <cuda_runtime.h>
 
-namespace {
-
-// Return retained default-mempool blocks to the driver after a teardown.
-//
-// Engine init raises the default cudaMallocAsync pool's release threshold to
-// UINT64_MAX so freed blocks are kept for re-use. Model weights are allocated
-// from that pool (weight_upload.cu checked_cuda_malloc), so freeing a model
-// parks ~weights-sized memory in the pool instead of returning it. The next
-// model load can't see it: cudaMemGetInfo-based sizing (engine_init_resolver,
-// the upload oversubscription gate) and plain-cudaMalloc paths only observe
-// driver-free memory. Symptom: server auto-swap found ~1.5 GB free on a 32 GB
-// card and failed with "Failed to upload token embedding".
-void trim_default_mempool() {
-    // Retire pending async frees before trimming, otherwise their blocks are
-    // still referenced and survive the trim.
-    cudaDeviceSynchronize();
-    int dev = 0;
-    cudaMemPool_t pool = nullptr;
-    if (cudaGetDevice(&dev) == cudaSuccess &&
-        cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool != nullptr) {
-        unsigned long long rsv_before = 0, used_before = 0, rsv_after = 0, used_after = 0;
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_before);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_before);
-        cudaError_t te = cudaMemPoolTrimTo(pool, 0);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_after);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_after);
-        IMP_LOG_INFO("mempool trim: reserved %.0f->%.0f MiB used %.0f->%.0f MiB (rc=%s)",
-                     rsv_before / (1024.0 * 1024.0), rsv_after / (1024.0 * 1024.0),
-                     used_before / (1024.0 * 1024.0), used_after / (1024.0 * 1024.0),
-                     cudaGetErrorString(te));
-    }
-}
-
-}  // namespace
 
 // --- Error string ---
 
@@ -253,7 +220,7 @@ void imp_model_free(ImpModel model) {
     if (!model)
         return;
     delete model;
-    trim_default_mempool();
+    imp::trim_device_mempool();
 }
 
 ImpModelArch imp_model_arch(ImpModel model) {
@@ -416,7 +383,7 @@ void imp_context_free(ImpContext ctx) {
     if (!ctx)
         return;
     delete ctx;
-    trim_default_mempool();
+    imp::trim_device_mempool();
 }
 
 // --- Helper: tokenize a prompt using chat template or raw encoding ---
