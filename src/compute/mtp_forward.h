@@ -143,6 +143,17 @@ struct MtpDraftWorkspace {
     int   mrope_sec0      = 0;
     int   mrope_sec1      = 0;
     int   mrope_sec2      = 0;
+    // RoPE scaling — must mirror the main forward's rope path or the drafter
+    // rotates Q/K differently from the verifier at extended positions, silently
+    // degrading acceptance with position (issue #897). rope_freq_scale is the
+    // linear scaling (main uses inv_scaling = 1/freq_scale); yarn_ext_factor > 0
+    // engages YaRN blending with yarn_corr_dim_0/1 (from rope_yarn_corr_dims())
+    // and yarn_attn_factor (mscale). Defaults = no scaling (Qwen3.6 base).
+    float rope_freq_scale = 1.0f;
+    float yarn_ext_factor  = 0.0f;
+    float yarn_attn_factor = 1.0f;
+    float yarn_corr_dim_0  = 0.0f;
+    float yarn_corr_dim_1  = 0.0f;
     float rms_norm_eps    = 1e-6f;
     float arch_norm_offset = 0.0f;  // for q_norm/k_norm (Qwen3.5/3.6 gamma=1+W)
 };
@@ -200,6 +211,17 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     const NvFP4QuantResult* lm_head_nvfp4 = nullptr,
                     const int32_t* d_prev_token = nullptr,
                     int32_t* d_out_token = nullptr);
+
+// Apply the YaRN-aware mrope rotation to a single MTP step's Q [n_heads, head_dim]
+// and K [n_kv_heads, head_dim] (FP16) in place at position `pos`. Mirrors the main
+// forward's rope_forward math so the draft head and the verifier rotate Q/K
+// identically on rope-scaled models (issue #897): inv_scaling = 1/rope_freq_scale,
+// ext_factor > 0 engages YaRN blending via corr_dim_0/1 + attn_factor (mscale).
+// Exposed for the rope-parity unit test. Pass null d_q or d_k to skip that side.
+void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
+                     float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
+                     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
+                     cudaStream_t stream);
 
 // Allocate the workspace from the VRAM allocator. Caller is responsible for
 // keeping ws alive (typically owned by the Engine for the lifetime of a session).

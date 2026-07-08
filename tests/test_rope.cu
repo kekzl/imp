@@ -3,6 +3,7 @@
 #include <cuda_fp16.h>
 #include "core/tensor.h"
 #include "compute/rope.h"
+#include "compute/mtp_forward.h"
 #include <vector>
 #include <cmath>
 #include <cstdlib>
@@ -511,6 +512,89 @@ TEST(RoPETest, PartialRoPE) {
     cudaFree(q_dev);
     cudaFree(k_dev);
     cudaFree(pos_dev);
+}
+
+// =========================================================================
+// MtpMropeMatchesMainYarn (issue #897)
+//   The MTP draft head must rotate Q/K identically to the main forward on a
+//   rope-scaled (YaRN) model. Runs the shared main rope_forward and the MTP
+//   mtp_apply_mrope with the SAME YaRN params at an extended position and
+//   asserts they agree — the exact drift the old inline plain-RoPE caused.
+// =========================================================================
+TEST(RoPETest, MtpMropeMatchesMainYarn) {
+    const int n_heads = 2, n_kv_heads = 2;
+    const int head_dim = 256, rope_dim = 64;   // Qwen3.x partial rope
+    const float theta = 1000000.0f;
+    const float freq_scale = 4.0f;             // rope-scaled (YaRN)
+    const float ext_factor = 1.0f;             // YaRN on
+    const float attn_factor = 1.0f;
+    const int pos = 6000;                      // extended position (> n_ctx_orig)
+
+    // YaRN correction dims, exactly as the engine/executor compute them.
+    float corr[2] = {0.0f, 0.0f};
+    rope_yarn_corr_dims(rope_dim, /*n_ctx_orig=*/2048, theta, /*beta_fast=*/32.0f, /*beta_slow=*/1.0f, corr);
+
+    // Identical FP16 Q/K for both paths (single token).
+    const int64_t qn = (int64_t)n_heads * head_dim;
+    const int64_t kn = (int64_t)n_kv_heads * head_dim;
+    std::vector<float> qf(qn), kf(kn);
+    fill_linear(qf);
+    fill_linear(kf);
+    std::vector<__half> qh(qn), kh(kn);
+    for (int64_t i = 0; i < qn; i++) qh[i] = __float2half(qf[i]);
+    for (int64_t i = 0; i < kn; i++) kh[i] = __float2half(kf[i]);
+
+    // --- Main forward path (verifier): neox, YaRN ---
+    __half* q_main = to_device(qh.data(), qn);
+    __half* k_main = to_device(kh.data(), kn);
+    int pos_arr = pos;
+    int* pos_dev = to_device(&pos_arr, 1);
+    Tensor Qm = make_device_tensor(q_main, QType::F16, 1, 1, n_heads, head_dim);
+    Tensor Km = make_device_tensor(k_main, QType::F16, 1, 1, n_kv_heads, head_dim);
+    rope_forward(Qm, Km, pos_dev, head_dim, theta, freq_scale, rope_dim, /*neox=*/true, ext_factor,
+                 attn_factor, corr, /*stream=*/nullptr, /*longrope=*/nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto q_main_out = to_host(q_main, qn);
+    auto k_main_out = to_host(k_main, kn);
+
+    // --- MTP draft path: same params, Qwen3.6 mrope section split [11,11,10] ---
+    __half* q_mtp = to_device(qh.data(), qn);
+    __half* k_mtp = to_device(kh.data(), kn);
+    mtp_apply_mrope(q_mtp, n_heads, k_mtp, n_kv_heads, head_dim, rope_dim, theta, /*sec0=*/11,
+                    /*sec1=*/11, /*sec2=*/10, pos, /*inv_scaling=*/1.0f / freq_scale, ext_factor,
+                    attn_factor, corr[0], corr[1], /*stream=*/nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto q_mtp_out = to_host(q_mtp, qn);
+    auto k_mtp_out = to_host(k_mtp, kn);
+
+    // --- Parity: MTP must match the verifier within FP16 tolerance ---
+    const float tol = 3e-3f;
+    for (int64_t i = 0; i < qn; i++) {
+        EXPECT_NEAR(__half2float(q_mtp_out[i]), __half2float(q_main_out[i]), tol)
+            << "Q mismatch at " << i << " (MTP draft rope drifted from verifier)";
+    }
+    for (int64_t i = 0; i < kn; i++) {
+        EXPECT_NEAR(__half2float(k_mtp_out[i]), __half2float(k_main_out[i]), tol)
+            << "K mismatch at " << i;
+    }
+
+    // --- Guard: the YaRN scaling must actually change the result, else the
+    // parity above could pass trivially (both silently ignoring the params).
+    __half* q_plain = to_device(qh.data(), qn);
+    __half* k_plain = to_device(kh.data(), kn);
+    mtp_apply_mrope(q_plain, n_heads, k_plain, n_kv_heads, head_dim, rope_dim, theta, 11, 11, 10, pos,
+                    /*inv_scaling=*/1.0f, /*ext_factor=*/0.0f, /*attn_factor=*/1.0f, 0.0f, 0.0f,
+                    /*stream=*/nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto q_plain_out = to_host(q_plain, qn);
+    float max_diff = 0.0f;
+    for (int64_t i = 0; i < qn; i++)
+        max_diff = std::fmax(max_diff, std::fabs(__half2float(q_mtp_out[i]) - __half2float(q_plain_out[i])));
+    EXPECT_GT(max_diff, 1e-2f) << "YaRN scaling had no effect vs plain RoPE — params ignored?";
+
+    cudaFree(q_main);  cudaFree(k_main);  cudaFree(pos_dev);
+    cudaFree(q_mtp);   cudaFree(k_mtp);
+    cudaFree(q_plain); cudaFree(k_plain);
 }
 
 }  // namespace
