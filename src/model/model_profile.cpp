@@ -66,4 +66,29 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     return p;
 }
 
+int layer_swa_window(const ModelConfig& cfg, const ModelProfile& prof, int layer) {
+    if (cfg.sliding_window <= 0)
+        return 0;
+    switch (prof.attn_variant) {
+        case ModelProfile::AttnVariant::GEMMA4_SWA:
+        case ModelProfile::AttnVariant::GPTOSS_SWA: {
+            // Per-layer SWA mask in cfg.swa_layers (1 = sliding, 0 = global).
+            bool is_swa = (layer < static_cast<int>(cfg.swa_layers.size()) && cfg.swa_layers[layer]);
+            return is_swa ? cfg.sliding_window : 0;
+        }
+        case ModelProfile::AttnVariant::MLA:
+        case ModelProfile::AttnVariant::NOPE:
+            return 0;
+        case ModelProfile::AttnVariant::STANDARD:
+            break;
+    }
+    if (cfg.sliding_window_pattern > 0) {
+        // Gemma-3: every sliding_window_pattern-th layer is global.
+        bool is_global = (layer % cfg.sliding_window_pattern) == (cfg.sliding_window_pattern - 1);
+        return is_global ? 0 : cfg.sliding_window;
+    }
+    // Plain sliding_window (Mistral/Qwen3 style): every layer is windowed.
+    return cfg.sliding_window;
+}
+
 }  // namespace imp

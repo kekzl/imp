@@ -30,6 +30,12 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     KVCache* cache = state.kv_cache;
     int n = state.n_tokens;
     const auto& cfg = model_->config();
+    // SWA-aware KV sizing (kv_cache.swa_sizing): windowed layers write into
+    // the SWA block group through the parallel table (-1 holes below the
+    // window are skipped by the kernels' block_id<0 guard).
+    const int* block_tables = state.block_tables;
+    if (state.block_tables_swa != nullptr && layer_swa_window(cfg, model_->profile(), layer) > 0)
+        block_tables = state.block_tables_swa;
     // Per-layer shape support (Gemma 4 dual attention geometry)
     int nkv, hd;
     if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
@@ -64,7 +70,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 grid_nvfp4(n, 2);
         write_kv_cache_nvfp4_kernel<<<grid_nvfp4, 256, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), nvfp4_block_stride,
@@ -79,7 +85,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 grid_mxfp4(n, 2);
         write_kv_cache_mxfp4_kv_kernel<<<grid_mxfp4, 256, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), mxfp4_block_stride,
@@ -94,7 +100,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 grid_int4(n, 2);
         write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), int4_block_stride, scale_block_stride, nkv,
@@ -108,7 +114,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), block_stride, scale_block_stride, nkv, hd,
@@ -169,7 +175,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 fp8_grid(n, 2);
         write_kv_cache_fp8_fused_kernel<<<fp8_grid, threads, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
             kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
     } else {
@@ -186,7 +192,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_fused_kernel<<<fused_grid, threads, 0, stream>>>(
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
-            state.block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
+            block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     }

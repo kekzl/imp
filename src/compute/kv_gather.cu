@@ -48,10 +48,20 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
     const int kv_block_stride = block_size * nkv * hd;
     const int kv_slot_stride = nkv * hd;
 
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free hole (kv_cache.swa_sizing) or
+        // StreamingLLM-evicted block. Rows this far back are never consumed
+        // (the chunk attention kernels skip pre-window tiles) — zero-fill so
+        // the gathered buffer stays deterministic and NaN-free.
+        for (int d = d_lane; d < hd; d += threads_per_token)
+            dst_row[d] = __float2half(0.0f);
+        return;
+    }
+
     const half* src_row = src + (size_t)phys_block * kv_block_stride
                               + (size_t)slot * kv_slot_stride
                               + (size_t)kv_head * hd;
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // Streaming load (skip L1, evict-first from L2) so KV bytes don't pollute
@@ -87,10 +97,18 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
     const int kv_block_stride = block_size * nkv * hd;
     const int kv_slot_stride = nkv * hd;
 
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
+        // paged_kv_gather_fp16_kernel).
+        for (int d = d_lane; d < hd; d += threads_per_token)
+            dst_row[d] = __float2half(0.0f);
+        return;
+    }
+
     const __nv_fp8_e4m3* src_row = src + (size_t)phys_block * kv_block_stride
                                        + (size_t)slot * kv_slot_stride
                                        + (size_t)kv_head * hd;
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // Streaming load via __ldcs on uint8 (FP8 is 1 byte).
@@ -163,13 +181,21 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv * (hd / kGroup);
     const int sc_slot_stride = nkv * (hd / kGroup);
 
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
+        // paged_kv_gather_fp16_kernel).
+        for (int d = d_lane; d < hd; d += threads_per_token)
+            dst_row[d] = __float2half(0.0f);
+        return;
+    }
+
     const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
                                         + (size_t)slot * kv_slot_stride_bytes
                                         + (size_t)kv_head * (hd / 2);
     const uint8_t* sc_row = src_scales + (size_t)phys_block * sc_block_stride
                                        + (size_t)slot * sc_slot_stride
                                        + (size_t)kv_head * (hd / kGroup);
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // FP4 nibble decode: PTX cvt produces a half2 from two packed nibbles.
@@ -240,13 +266,21 @@ __global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv * (hd / kGroup);
     const int sc_slot_stride = nkv * (hd / kGroup);
 
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
+        // paged_kv_gather_fp16_kernel).
+        for (int d = d_lane; d < hd; d += threads_per_token)
+            dst_row[d] = __float2half(0.0f);
+        return;
+    }
+
     const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
                                         + (size_t)slot * kv_slot_stride_bytes
                                         + (size_t)kv_head * (hd / 2);
     const uint8_t* sc_row = src_scales + (size_t)phys_block * sc_block_stride
                                        + (size_t)slot * sc_slot_stride
                                        + (size_t)kv_head * (hd / kGroup);
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // FP4 nibble decode: same as NVFP4 (E2M1 format identical)
@@ -313,6 +347,18 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv;
     const int sc_slot_stride = nkv;
 
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
+        // paged_kv_gather_fp16_kernel).
+        for (int d = d_lane * 2; d < hd; d += threads_per_token * 2) {
+            dst_row[d] = __float2half(0.0f);
+            if (d + 1 < hd)
+                dst_row[d + 1] = __float2half(0.0f);
+        }
+        return;
+    }
+
     const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
                                         + (size_t)slot * kv_slot_stride_bytes
                                         + (size_t)kv_head * (hd / 2);
@@ -320,7 +366,6 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
                               + (size_t)slot * sc_slot_stride
                               + (size_t)kv_head];
     float scale = __half2float(scale_h);
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
 
     // Each lane writes 2 FP16 values per byte read. We iterate in steps of 2
     // along head_dim so each thread handles one packed byte.

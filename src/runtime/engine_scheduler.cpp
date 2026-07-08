@@ -169,6 +169,10 @@ int Engine::step_async_graph_resume() {
                 IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
                 async_d_block_tables_ = nullptr;
             }
+            if (async_d_block_tables_swa_) {
+                IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+                async_d_block_tables_swa_ = nullptr;
+            }
             if (async_d_banned_tokens_) {
                 IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
                 async_d_banned_tokens_ = nullptr;
@@ -537,16 +541,19 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
 // pageable→pinned copy inside cuMemcpy).
 bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                                       const std::vector<int>& block_table,
+                                      const std::vector<int>& swa_block_table,
                                       int chunk_len, int offset, int ctx_len,
                                       cudaStream_t pf_stream,
                                       int32_t*& d_token_ids, int*& d_positions,
-                                      int*& d_block_tables, int*& d_context_lens,
-                                      bool& pf_pool_used) {
+                                      int*& d_block_tables, int*& d_block_tables_swa,
+                                      int*& d_context_lens, bool& pf_pool_used) {
     d_token_ids = nullptr;
     d_positions = nullptr;
     d_block_tables = nullptr;
+    d_block_tables_swa = nullptr;
     d_context_lens = nullptr;
     pf_pool_used = false;
+    const bool want_swa = swa_sizing_active_ && !swa_block_table.empty();
 
     auto check = [&req](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -560,6 +567,8 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
         d_token_ids = d_pf_token_ids_;
         d_positions = d_pf_positions_;
         d_block_tables = d_pf_block_tables_;
+        if (want_swa)
+            d_block_tables_swa = d_pf_block_tables_swa_;
         d_context_lens = d_pf_context_lens_;
         pf_pool_used = true;
     } else {
@@ -568,6 +577,9 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
             !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
             !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream),
                    "malloc block_tables") ||
+            (want_swa &&
+             !check(cudaMallocAsync(&d_block_tables_swa, swa_block_table.size() * sizeof(int), pf_stream),
+                    "malloc block_tables_swa")) ||
             !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
             if (d_token_ids)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, pf_stream));
@@ -575,6 +587,8 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, pf_stream));
             if (d_block_tables)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, pf_stream));
+            if (d_block_tables_swa)
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, pf_stream));
             if (d_context_lens)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
             kv_manager_->free_sequence(req->id);
@@ -626,6 +640,11 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
     check(cudaMemcpyAsync(d_block_tables, block_table.data(), block_table.size() * sizeof(int),
                           cudaMemcpyHostToDevice, pf_stream),
           "memcpy block_tables");
+    if (want_swa && d_block_tables_swa) {
+        check(cudaMemcpyAsync(d_block_tables_swa, swa_block_table.data(),
+                              swa_block_table.size() * sizeof(int), cudaMemcpyHostToDevice, pf_stream),
+              "memcpy block_tables_swa");
+    }
     check(cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int), cudaMemcpyHostToDevice, pf_stream),
           "memcpy context_lens");
     return true;
@@ -708,16 +727,30 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         return;  // caller already set req->status = CANCELLED
     }
 
+    // SWA-aware sizing: live window blocks for this chunk's write range plus
+    // the window its queries/continuation-gathers read back into. Trimming of
+    // blocks that fell out of the window happens after the chunk commits.
+    if (swa_sizing_active_) {
+        kv_manager_->swa_trim(req->id, offset);
+        if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
+            kv_manager_->free_sequence(req->id);
+            req->status = RequestStatus::CANCELLED;
+            return;
+        }
+    }
+
     const auto& block_table = kv_manager_->block_table(req->id);
+    const auto& swa_block_table = kv_manager_->swa_block_table(req->id);
 
     int32_t* d_token_ids = nullptr;
     int* d_positions = nullptr;
     int* d_block_tables = nullptr;
+    int* d_block_tables_swa = nullptr;
     int* d_context_lens = nullptr;
     bool pf_pool_used = false;
-    if (!prefill_upload_metadata_(req, block_table, chunk_len, offset, ctx_len, pf_stream,
-                                  d_token_ids, d_positions, d_block_tables, d_context_lens,
-                                  pf_pool_used)) {
+    if (!prefill_upload_metadata_(req, block_table, swa_block_table, chunk_len, offset, ctx_len,
+                                  pf_stream, d_token_ids, d_positions, d_block_tables,
+                                  d_block_tables_swa, d_context_lens, pf_pool_used)) {
         return;  // caller already set req->status = CANCELLED
     }
 
@@ -728,6 +761,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.n_tokens = chunk_len;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = d_block_tables;
+    state.block_tables_swa = d_block_tables_swa;
     state.context_lens = d_context_lens;
     state.max_context_len = ctx_len;
     state.n_sequences = 1;
@@ -1154,9 +1188,21 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             }
         }
 
+        // SWA-aware sizing: keep the trailing window live for this step's
+        // write + reads; retire blocks that fell out of the window.
+        if (swa_sizing_active_) {
+            kv_manager_->swa_trim(req->id, ctx_len);
+            if (!kv_manager_->swa_prepare(req->id, ctx_len)) {
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                continue;
+            }
+        }
+
         // Auto-activate StreamingLLM when KV cache is nearly exhausted.
         // Only fires once (guards on !streaming_kv_enabled) and only for FP16
         // KV — quantized variants don't support sentinel-block skipping yet.
+        // Never under SWA sizing (streaming_kv_auto is cleared at init there).
         if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
             auto st = kv_manager_->stats();
             if (st.total_blocks > 0 && st.free_blocks < st.total_blocks / 10) {
@@ -1225,6 +1271,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.max_blocks_per_seq = gpu_batch.max_blocks_per_seq;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = gpu_batch.d_block_tables;
+    state.block_tables_swa = gpu_batch.d_block_tables_swa;
     state.context_lens = gpu_batch.d_context_lens;
     state.max_context_len = max_ctx;
     state.is_prefill = false;
@@ -1359,8 +1406,11 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         int position = ctx_len - 1;
 
         const auto& bt = kv_manager_->block_table(req->id);
+        const auto& sbt = kv_manager_->swa_block_table(req->id);
         decode_builder_.add_decode_sequence(last_token, position, bt.data(), static_cast<int>(bt.size()),
-                                            ctx_len);
+                                            ctx_len,
+                                            swa_sizing_active_ && !sbt.empty() ? sbt.data() : nullptr,
+                                            static_cast<int>(sbt.size()));
     }
 
     Batch batch = decode_builder_.build();
@@ -1381,6 +1431,17 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 }
             }
             batch.block_tables.swap(padded_block_table_);
+            // Re-pad the SWA tables at the same stride (-1 = hole, never 0).
+            if (!batch.block_tables_swa.empty()) {
+                padded_swa_block_table_.assign(needed, -1);
+                for (int s = 0; s < n_seq; s++) {
+                    for (int b = 0; b < old_stride; b++) {
+                        padded_swa_block_table_[s * pool_max + b] =
+                            batch.block_tables_swa[s * old_stride + b];
+                    }
+                }
+                batch.block_tables_swa.swap(padded_swa_block_table_);
+            }
             batch.max_blocks_per_seq = pool_max;
         }
         gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);

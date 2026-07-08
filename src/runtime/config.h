@@ -137,6 +137,16 @@ struct RuntimeConfig {
         int bitdecoding_residual_tokens = 0;
         // BitDecoding TC path for NVFP4 paged attention QK.
         bool bitdecoding_qk = false;
+        // SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on
+        // every other layer, gemma-3 5:1 pattern) allocate only the trailing
+        // window in a small dedicated block group instead of full-length KV
+        // (~2x more KV tokens on gpt-oss, ~5-6x on gemma-3). Auto-disabled
+        // (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
+        // MLA, StreamingLLM, green contexts, and deterministic mode; prefix
+        // caching is forced off while active (freed window blocks cannot
+        // back prefix reuse — snapshot-based reuse is a follow-up).
+        // Default off until validated across the SWA model zoo.
+        bool swa_sizing = false;
     } kv_cache;
 
     struct Attention {

@@ -89,18 +89,22 @@ void BatchBuilder::reset() {
     batch_.positions.clear();
     batch_.seq_offsets.clear();
     batch_.block_tables.clear();
+    batch_.block_tables_swa.clear();
     batch_.context_lens.clear();
     batch_.n_sequences = 0;
     batch_.total_tokens = 0;
     batch_.max_blocks_per_seq = 0;
     batch_.actual_blocks_per_seq = 0;
     raw_block_tables_.clear();
+    raw_swa_block_tables_.clear();
+    any_swa_tables_ = false;
 
     batch_.seq_offsets.push_back(0);
 }
 
 void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens, const int* block_table,
-                                        int n_blocks, int start_pos) {
+                                        int n_blocks, int start_pos, const int* swa_block_table,
+                                        int n_swa_blocks) {
     for (int i = 0; i < n_tokens; ++i) {
         batch_.token_ids.push_back(tokens[i]);
         batch_.positions.push_back(start_pos + i);
@@ -108,6 +112,8 @@ void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens, con
 
     batch_.context_lens.push_back(start_pos + n_tokens);
     raw_block_tables_.push_back({block_table, n_blocks});
+    raw_swa_block_tables_.push_back({swa_block_table, n_swa_blocks});
+    any_swa_tables_ |= (swa_block_table != nullptr);
 
     batch_.total_tokens += n_tokens;
     batch_.n_sequences++;
@@ -115,11 +121,13 @@ void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens, con
 }
 
 void BatchBuilder::add_decode_sequence(int32_t token, int position, const int* block_table, int n_blocks,
-                                       int context_len) {
+                                       int context_len, const int* swa_block_table, int n_swa_blocks) {
     batch_.token_ids.push_back(token);
     batch_.positions.push_back(position);
     batch_.context_lens.push_back(context_len);
     raw_block_tables_.push_back({block_table, n_blocks});
+    raw_swa_block_tables_.push_back({swa_block_table, n_swa_blocks});
+    any_swa_tables_ |= (swa_block_table != nullptr);
 
     batch_.total_tokens += 1;
     batch_.n_sequences++;
@@ -146,6 +154,20 @@ Batch BatchBuilder::build() {
         }
     }
 
+    // Parallel SWA tables (same shape/stride). Padded with -1 — a padded slot
+    // must read as a hole, never as SWA block 0.
+    if (any_swa_tables_) {
+        batch_.block_tables_swa.assign(static_cast<unsigned long>(batch_.n_sequences) * max_blocks, -1);
+        for (int s = 0; s < batch_.n_sequences; s++) {
+            auto& [ptr, n] = raw_swa_block_tables_[s];
+            if (!ptr)
+                continue;
+            for (int b = 0; b < n && b < max_blocks; b++) {
+                batch_.block_tables_swa[s * max_blocks + b] = ptr[b];
+            }
+        }
+    }
+
     return std::move(batch_);
 }
 
@@ -155,13 +177,15 @@ Batch BatchBuilder::build() {
 
 GPUBatchPool::~GPUBatchPool() { free_pool(); }
 
-void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc) {
+void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc,
+                            bool with_swa_tables) {
     free_pool();
     alloc_ = alloc;
 
     max_batch_size_ = max_batch_size;
     max_blocks_per_seq_ = max_blocks_per_seq;
     last_upload_block_tables_.clear();
+    last_upload_block_tables_swa_.clear();
 
     // Compute sizes with 256-byte alignment per sub-buffer
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
@@ -170,10 +194,12 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllo
     size_t positions_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
     size_t seq_offsets_sz = align256(static_cast<size_t>(max_batch_size + 1) * sizeof(int));
     size_t block_tab_sz = align256(static_cast<size_t>(max_batch_size) * max_blocks_per_seq * sizeof(int));
+    size_t swa_tab_sz = with_swa_tables ? block_tab_sz : 0;
     size_t ctx_lens_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
     size_t sample_res_sz = align256(sizeof(int32_t));
 
-    pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz + block_tab_sz + ctx_lens_sz + sample_res_sz;
+    pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz + block_tab_sz + swa_tab_sz + ctx_lens_sz +
+                 sample_res_sz;
 
     if (alloc_) {
         pool_ = alloc_->allocate(pool_size_, "batch_pool");
@@ -196,6 +222,10 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllo
     ptr += seq_offsets_sz;
     d_block_tables_ = reinterpret_cast<int*>(ptr);
     ptr += block_tab_sz;
+    if (with_swa_tables) {
+        d_block_tables_swa_ = reinterpret_cast<int*>(ptr);
+        ptr += swa_tab_sz;
+    }
     d_context_lens_ = reinterpret_cast<int*>(ptr);
     ptr += ctx_lens_sz;
     d_sample_result_ = reinterpret_cast<int32_t*>(ptr);
@@ -215,6 +245,8 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
     gpu.d_positions = d_positions_;
     gpu.d_seq_offsets = d_seq_offsets_;
     gpu.d_block_tables = d_block_tables_;
+    gpu.d_block_tables_swa =
+        (!batch.block_tables_swa.empty() && d_block_tables_swa_) ? d_block_tables_swa_ : nullptr;
     gpu.d_context_lens = d_context_lens_;
 
     // Async copy data into pool
@@ -249,6 +281,22 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
         }
     }
 
+    // SWA-group tables: same shape/dedupe as the main table.
+    if (gpu.d_block_tables_swa && batch.max_blocks_per_seq > 0) {
+        if (batch.n_sequences == 1 && batch.block_tables_swa == last_upload_block_tables_swa_) {
+            // Skip — content identical to last upload
+        } else {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_swa_, batch.block_tables_swa.data(),
+                                               static_cast<unsigned long>(batch.n_sequences) *
+                                                   batch.max_blocks_per_seq * sizeof(int),
+                                               cudaMemcpyHostToDevice, stream));
+            if (batch.n_sequences == 1)
+                last_upload_block_tables_swa_ = batch.block_tables_swa;
+            else
+                last_upload_block_tables_swa_.clear();
+        }
+    }
+
     return gpu;
 }
 
@@ -265,9 +313,11 @@ void GPUBatchPool::free_pool() {
     d_positions_ = nullptr;
     d_seq_offsets_ = nullptr;
     d_block_tables_ = nullptr;
+    d_block_tables_swa_ = nullptr;
     d_context_lens_ = nullptr;
     d_sample_result_ = nullptr;
     last_upload_block_tables_.clear();
+    last_upload_block_tables_swa_.clear();
 }
 
 }  // namespace imp

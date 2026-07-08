@@ -1448,5 +1448,120 @@ TEST(KVCacheManagerTest, CacheHitOnCachedBlockKeepsReclaimableCountExact) {
     EXPECT_EQ(mgr->num_reclaimable_cached_blocks(), 2);
 }
 
+// ============================================================================
+// SWA-aware KV sizing (kv_cache.swa_sizing) — dedicated block group + the
+// trailing-free positional table in the manager.
+// ============================================================================
+
+// Per-layer ctor with a SWA group: windowed layers draw from a separate,
+// smaller block-id space; global layers keep the full pool.
+TEST(KVCacheTest, SwaGroupCapacityAndIdSpace) {
+    SKIP_IF_NO_CUDA();
+
+    const int n_layers = 4;
+    const int global_max = 64;
+    const int swa_max = 6;
+    std::vector<int> nkv(n_layers, 4);
+    std::vector<int> hd(n_layers, 64);
+    std::vector<char> is_swa = {1, 0, 1, 0};  // layers 0,2 windowed
+
+    KVCache cache(n_layers, nkv, hd, QType::F16, global_max, kKVBlockSize, nullptr, is_swa, swa_max);
+    ASSERT_TRUE(cache.swa_enabled());
+    EXPECT_TRUE(cache.layer_is_swa(0));
+    EXPECT_FALSE(cache.layer_is_swa(1));
+    EXPECT_EQ(cache.swa_total_blocks(), swa_max);
+
+    // Global id space: global_max blocks.
+    EXPECT_EQ(cache.num_free_blocks(), global_max);
+    // SWA id space: swa_max blocks, allocated independently.
+    EXPECT_EQ(cache.num_free_swa_blocks(), swa_max);
+    std::vector<int> swa_ids;
+    for (int i = 0; i < swa_max; ++i) {
+        int id = cache.allocate_swa_block();
+        ASSERT_GE(id, 0);
+        ASSERT_LT(id, swa_max);
+        swa_ids.push_back(id);
+    }
+    EXPECT_EQ(cache.allocate_swa_block(), -1);  // group exhausted
+    EXPECT_EQ(cache.num_free_blocks(), global_max);  // global untouched
+    cache.free_swa_block(swa_ids[0]);
+    EXPECT_EQ(cache.num_free_swa_blocks(), 1);
+    // k_ptr for a windowed layer with a SWA-space id resolves inside the pool.
+    EXPECT_NE(cache.k_ptr(0, swa_ids[1]), nullptr);
+}
+
+// Manager trailing-free: swa_prepare allocates only the live window tail;
+// earlier positions are -1 holes; swa_trim frees blocks that fell out.
+TEST(KVCacheManagerTest, SwaTrailingFreeTable) {
+    SKIP_IF_NO_CUDA();
+
+    const int bs = 16;
+    const int n_layers = 2;
+    std::vector<int> nkv(n_layers, 4), hd(n_layers, 64);
+    std::vector<char> is_swa = {1, 0};
+    const int swa_max = 8;
+    auto cache = std::make_unique<KVCache>(n_layers, nkv, hd, QType::F16, /*global*/ 256, bs, nullptr,
+                                           is_swa, swa_max);
+    KVCacheManager mgr(std::move(cache));
+    const int window = 2 * bs;   // 32 tokens
+    const int slack = bs;        // 16
+    mgr.enable_swa_sizing(window, slack);
+    ASSERT_TRUE(mgr.swa_sizing_enabled());
+
+    // Grow the global table to 10 blocks (160 tokens), as prefill would.
+    ASSERT_TRUE(mgr.allocate_blocks(0, 10));
+    // Prepare the live window for a forward up to token 160.
+    ASSERT_TRUE(mgr.swa_prepare(0, /*upto*/ 160));
+    const auto& swa = mgr.swa_block_table(0);
+    ASSERT_EQ(static_cast<int>(swa.size()), 10);
+    // Live span = [160 - 32 - 16, 160) → tokens 112.., i.e. blocks 7,8,9.
+    for (int b = 0; b < 7; ++b)
+        EXPECT_EQ(swa[b], -1) << "block " << b << " must be a hole";
+    for (int b = 7; b < 10; ++b)
+        EXPECT_GE(swa[b], 0) << "block " << b << " must be live";
+    int live_after_prepare = swa_max - mgr.kv_cache()->num_free_swa_blocks();
+    EXPECT_EQ(live_after_prepare, 3);
+
+    // Advance context and trim: blocks that fall fully out of window get freed.
+    // At committed=160, dead end = 160-32-16 = 112 → block 6 (ends at 112) dead;
+    // already a hole, so no change. Grow to 240 tokens (15 blocks) then trim.
+    ASSERT_TRUE(mgr.allocate_blocks(0, 5));  // 15 blocks total
+    ASSERT_TRUE(mgr.swa_prepare(0, 240));
+    mgr.swa_trim(0, 240);
+    const auto& swa2 = mgr.swa_block_table(0);
+    // Live span for 240 = [192, 240) → blocks 12,13,14; earlier live blocks freed.
+    for (int b = 0; b < 12; ++b)
+        EXPECT_EQ(swa2[b], -1) << "block " << b << " must be trimmed to a hole";
+    for (int b = 12; b < 15; ++b)
+        EXPECT_GE(swa2[b], 0) << "block " << b << " must be live";
+
+    // free_sequence returns every live SWA block.
+    mgr.free_sequence(0);
+    EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), swa_max);
+}
+
+// rollback drops the SWA tail in lockstep with the global table.
+TEST(KVCacheManagerTest, SwaRollback) {
+    SKIP_IF_NO_CUDA();
+
+    const int bs = 16;
+    std::vector<int> nkv(2, 4), hd(2, 64);
+    std::vector<char> is_swa = {1, 0};
+    auto cache = std::make_unique<KVCache>(2, nkv, hd, QType::F16, 256, bs, nullptr, is_swa, 16);
+    KVCacheManager mgr(std::move(cache));
+    mgr.enable_swa_sizing(bs, bs);  // window=16, slack=16
+
+    ASSERT_TRUE(mgr.allocate_blocks(0, 10));
+    ASSERT_TRUE(mgr.swa_prepare(0, 160));
+    int live_before = 16 - mgr.kv_cache()->num_free_swa_blocks();
+    EXPECT_GT(live_before, 0);
+
+    // Roll back to 5 blocks (80 tokens) — the SWA table shrinks to match and
+    // frees the dropped tail.
+    mgr.rollback(0, 80);
+    EXPECT_EQ(static_cast<int>(mgr.swa_block_table(0).size()), 5);
+    EXPECT_EQ(static_cast<int>(mgr.block_table(0).size()), 5);
+}
+
 }  // namespace
 }  // namespace imp

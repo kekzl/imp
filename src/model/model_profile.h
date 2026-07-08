@@ -64,4 +64,12 @@ struct ModelProfile {
 // Pure: no side effects, no allocation. Reads the model's layers + config once.
 ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg);
 
+// Per-layer sliding-window size: 0 for global-attention layers, the window in
+// tokens for SWA layers. Single source of truth for the four SWA variants
+// (Gemma-4 / gpt-oss swa_layers[], Gemma-3 sliding_window_pattern, plain
+// Mistral-style sliding_window) — consumed by the attention dispatch mask AND
+// the SWA-aware KV sizing, so the two can't drift. `layer` is the global layer
+// index (not the compacted KV-layer index).
+int layer_swa_window(const ModelConfig& cfg, const ModelProfile& prof, int layer);
+
 }  // namespace imp

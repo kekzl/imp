@@ -126,7 +126,7 @@
                         static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                         static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                         static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), state.block_tables,
+                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), layer_block_tables,
                         kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
                         cfg.attn_logit_softcap, stream, q_offset,
                         runtime_config().attention.mxfp4_promote_budget)) {
@@ -178,49 +178,49 @@
             // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
             if (kvt == QType::F16) {
                 paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
-                                     state.block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                     layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
                 paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
-                                     state.block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                     layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
             } else if (kvt == QType::FP8_E4M3) {
                 float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
                                      ? kv_scales_[kv_layer]
                                      : 1.0f;
                 paged_kv_gather_fp8_to_fp16(k_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                                            state.block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            layer_block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
                                             stream, d_past);
                 paged_kv_gather_fp8_to_fp16(v_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-                                            state.block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            layer_block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
                                             stream, d_past);
             } else if (kvt == QType::NVFP4) {
                 paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                              state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                               d_past);
                 paged_kv_gather_nvfp4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                              state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                               d_past);
             } else if (kvt == QType::MXFP4_KV) {
                 paged_kv_gather_mxfp4_kv_to_fp16(k_full,
                                                  static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                                 state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                                  d_past);
                 paged_kv_gather_mxfp4_kv_to_fp16(v_full,
                                                  static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                                 state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                                  d_past);
             } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
                 paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                              d_past);
                 paged_kv_gather_int4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             state.block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                              d_past);
             }
 

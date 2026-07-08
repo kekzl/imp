@@ -99,9 +99,78 @@ bool Engine::init_kv_cache() {
     const int kv_bs = config_.kv_block_size;
     int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
 
+    // ── SWA-aware KV sizing gate (kv_cache.swa_sizing) ────────────────
+    // Sliding-window layers get a small dedicated block group instead of
+    // full-length KV. Resolve the gate + geometry before the VRAM budget so
+    // the budget charges SWA layers window-cost, not context-cost.
+    swa_sizing_active_ = false;
+    swa_window_max_ = 0;
+    int n_swa_layers = 0;
+    if (runtime_config_.kv_cache.swa_sizing) {
+        const auto& prof = model_->profile();
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            if (kv_layer_map[i] < 0)
+                continue;  // non-attention layer
+            int w = layer_swa_window(mcfg, prof, i);
+            if (w > 0) {
+                n_swa_layers++;
+                swa_window_max_ = std::max(swa_window_max_, w);
+            }
+        }
+        const char* off_reason = nullptr;
+        if (n_swa_layers == 0)
+            off_reason = "model has no sliding-window layers";
+        else if (n_swa_layers == n_kv_layers && swa_window_max_ >= config_.max_seq_len)
+            off_reason = "window >= max_seq_len (nothing to save)";
+        else if (config_.kv_cache_dtype == QType::INT8 || config_.kv_cache_dtype == QType::INT4)
+            off_reason = "INT8/INT4 KV lacks the per-layer cache path";
+        else if (prof.is_ssm || prof.is_gdn)
+            off_reason = "hybrid recurrent model (conservative)";
+        else if (mcfg.is_mla())
+            off_reason = "MLA attention";
+        else if (config_.streaming_kv_enabled)
+            off_reason = "StreamingLLM is enabled";
+        else if (config_.use_green_contexts)
+            off_reason = "green contexts (cross-stream block reuse unordered)";
+        else if (runtime_config_.runtime.deterministic)
+            off_reason = "deterministic mode (unbounded graph loop would be burst-chunked)";
+        if (off_reason) {
+            IMP_LOG_INFO("kv_cache.swa_sizing=true ignored: %s", off_reason);
+            swa_window_max_ = 0;
+            n_swa_layers = 0;
+        } else {
+            swa_sizing_active_ = true;
+            // Slack must cover the deepest speculative rollback (verify
+            // chunks roll back rejected drafts) plus the partial boundary
+            // block. Sized from the spec config so the assert can't trip.
+            const auto& sc = runtime_config_.speculative;
+            int spec_depth = std::max({sc.k, sc.suffix_k_max, sc.mtp_k + 1, kJumpRowsCap});
+            swa_slack_tokens_ = std::max(2 * kv_bs, spec_depth + kv_bs);
+            // Longest on-device burst span (graph decode loop) plus the
+            // largest prefill chunk the live window must ride through.
+            int chunk_peak = config_.prefill_chunk_size > 0 ? config_.prefill_chunk_size : 2048;
+            int burst_peak = runtime_config_.runtime.decode_burst > 0
+                                 ? runtime_config_.runtime.decode_burst
+                                 : 512;
+            swa_burst_cap_tokens_ = std::max(chunk_peak, burst_peak);
+            // Prefix caching cannot reuse freed window blocks — force it off
+            // (snapshot-based SWA reuse is a follow-up).
+            if (config_.use_prefix_caching) {
+                config_.use_prefix_caching = false;
+                IMP_LOG_INFO("kv_cache.swa_sizing: prefix caching disabled (freed window "
+                             "blocks cannot back prefix reuse)");
+            }
+            // StreamingLLM auto-enable frees middle blocks of the GLOBAL
+            // table — redundant and conflicting here.
+            config_.streaming_kv_auto = false;
+        }
+    }
+    const int swa_live_tokens =
+        swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
+
     // VRAM budget
-    auto vram_budget =
-        compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram());
+    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
+                                           effective_free_vram(), swa_live_tokens, n_swa_layers);
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
@@ -119,31 +188,42 @@ bool Engine::init_kv_cache() {
 
     // Per-layer KV shape path (Gemma 4 dual attention geometry): build per-layer
     // nkv/hd arrays restricted to attention layers (hybrid models may have non-attn layers).
+    // SWA sizing also requires the per-layer path (per-layer region capacities).
     std::unique_ptr<KVCache> kv_cache;
-    if (!mcfg.head_dim_per_layer.empty() && config_.kv_cache_dtype != QType::INT8 &&
-        config_.kv_cache_dtype != QType::INT4) {
+    if ((!mcfg.head_dim_per_layer.empty() || swa_sizing_active_) &&
+        config_.kv_cache_dtype != QType::INT8 && config_.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
         std::vector<int> per_layer_hd(n_kv_layers, 0);
+        std::vector<char> per_layer_swa(swa_sizing_active_ ? n_kv_layers : 0, 0);
         for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
             // Only attention layers get KV cache entries
             int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size()) ? mcfg.n_kv_heads_per_layer[l]
                                                                        : mcfg.n_kv_heads;
-            if (attn_nkv <= 0)
+            if (kv_layer_map[l] < 0)
                 continue;  // non-attention layer (SSM/GDN)
+            if (attn_nkv <= 0)
+                attn_nkv = mcfg.n_kv_heads;
             per_layer_nkv[k] = attn_nkv;
             per_layer_hd[k] = (l < (int)mcfg.head_dim_per_layer.size() && mcfg.head_dim_per_layer[l] > 0)
                                   ? mcfg.head_dim_per_layer[l]
                                   : head_dim;
+            if (swa_sizing_active_)
+                per_layer_swa[k] = layer_swa_window(mcfg, model_->profile(), l) > 0 ? 1 : 0;
             k++;
         }
         kv_cache = std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &vram_alloc_);
+                                             max_blocks, kv_bs, &vram_alloc_, per_layer_swa,
+                                             swa_sizing_active_ ? vram_budget.swa_max_blocks : 0);
     } else {
         kv_cache = std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, head_dim, config_.kv_cache_dtype,
                                              max_blocks, kv_bs, &vram_alloc_);
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
+    if (swa_sizing_active_) {
+        kv_manager_->enable_swa_sizing(swa_window_max_, swa_slack_tokens_);
+        swa_sizing_active_ = kv_manager_->swa_sizing_enabled();
+    }
 
     // BitDecoding Phase 3: residual FP16 cache (opt-in).
     //
@@ -304,7 +384,8 @@ bool Engine::init_kv_cache() {
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 
     // Pre-allocate decode batch pool + penalty buffer
-    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &vram_alloc_);
+    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &vram_alloc_,
+                                /*with_swa_tables=*/swa_sizing_active_);
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
         d_penalty_tokens_ = static_cast<int32_t*>(
@@ -324,15 +405,20 @@ bool Engine::init_kv_cache() {
         // max_blocks so the H2D copy at the prefill metadata upload site
         // doesn't overflow on long-cumulative-KV requests.
         size_t bt_bytes = static_cast<size_t>(max_blocks) * sizeof(int);
+        size_t swa_bt_bytes = swa_sizing_active_ ? bt_bytes : 0;
         size_t cl_bytes = sizeof(int);
-        prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + cl_bytes;
+        prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes + cl_bytes;
         prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
         if (prefill_pool_) {
             auto* base = static_cast<char*>(prefill_pool_);
             d_pf_token_ids_ = reinterpret_cast<int32_t*>(base);
             d_pf_positions_ = reinterpret_cast<int*>(base + tok_bytes);
             d_pf_block_tables_ = reinterpret_cast<int*>(base + tok_bytes + pos_bytes);
-            d_pf_context_lens_ = reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes);
+            if (swa_sizing_active_)
+                d_pf_block_tables_swa_ =
+                    reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes);
+            d_pf_context_lens_ =
+                reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes);
         } else {
             IMP_LOG_WARN("Failed to pre-allocate prefill pool, will use per-request malloc");
         }
