@@ -18,6 +18,7 @@
 #include "quant/dequant_gpu.h"
 #include <cuda_fp16.h>
 #include <numeric>
+#include <utility>
 
 namespace imp {
 
@@ -74,7 +75,7 @@ void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
     } else if (dequant_gpu_supported(w.qtype)) {
         dequant_gpu(w.data, dst, w.qtype, rows, cols, stream);
     } else {
-        IMP_LOG_ERROR("encoder: unsupported weight qtype %d", static_cast<int>(w.qtype));
+        IMP_LOG_ERROR("encoder: unsupported weight qtype %d", std::to_underlying(w.qtype));
         cudaFree(dst);
         return nullptr;
     }

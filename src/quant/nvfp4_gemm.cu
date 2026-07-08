@@ -12,6 +12,7 @@
 #include <cassert>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 
 namespace imp {
 
@@ -89,8 +90,8 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
     IMP_CHECK(A.packed_data != nullptr, "gemv_nvfp4: A.packed_data is null");
     IMP_CHECK(x.on_device, "gemv_nvfp4: x must be on device");
     IMP_CHECK(y.on_device, "gemv_nvfp4: y must be on device");
-    IMP_CHECK(x.qtype == QType::F16, "gemv_nvfp4: x must be FP16, got qtype=%d", static_cast<int>(x.qtype));
-    IMP_CHECK(y.qtype == QType::F16, "gemv_nvfp4: y must be FP16, got qtype=%d", static_cast<int>(y.qtype));
+    IMP_CHECK(x.qtype == QType::F16, "gemv_nvfp4: x must be FP16, got qtype=%d", std::to_underlying(x.qtype));
+    IMP_CHECK(y.qtype == QType::F16, "gemv_nvfp4: y must be FP16, got qtype=%d", std::to_underlying(y.qtype));
 
     int M = static_cast<int>(A.N);
     int K = static_cast<int>(A.K);

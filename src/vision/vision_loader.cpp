@@ -15,6 +15,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <utility>
 
 namespace imp {
 
@@ -240,7 +241,7 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else {
-        IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload", static_cast<uint32_t>(type));
+        IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload", std::to_underlying(type));
         return false;
     }
 
@@ -273,7 +274,7 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
         }
     } else {
         IMP_LOG_ERROR("Vision: unsupported GGML type %u for transposed upload",
-                      static_cast<uint32_t>(type));
+                      std::to_underlying(type));
         return false;
     }
 

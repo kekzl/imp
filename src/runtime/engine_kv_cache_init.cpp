@@ -19,6 +19,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -39,7 +40,7 @@ uint64_t Engine::model_fingerprint_() const {
     uint64_t h = 0xcbf29ce484222325ULL;
     const auto& c = model_->config();
     const uint32_t ids[] = {
-        static_cast<uint32_t>(c.arch),    static_cast<uint32_t>(c.n_layers),
+        std::to_underlying(c.arch),    static_cast<uint32_t>(c.n_layers),
         static_cast<uint32_t>(c.n_heads), static_cast<uint32_t>(c.n_kv_heads),
         static_cast<uint32_t>(c.d_model), static_cast<uint32_t>(c.d_ff),
         static_cast<uint32_t>(c.vocab_size), static_cast<uint32_t>(c.head_dim),

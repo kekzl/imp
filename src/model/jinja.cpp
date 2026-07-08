@@ -13,6 +13,7 @@
 #include <ctime>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 namespace imp::jinja {
 
@@ -808,8 +809,8 @@ private:
 
     void expect(TokenType t) {
         if (!check(t)) {
-            IMP_LOG_WARN("jinja: expected token type %d, got %d ('%s')", static_cast<int>(t),
-                         static_cast<int>(peek().type), peek().value.c_str());
+            IMP_LOG_WARN("jinja: expected token type %d, got %d ('%s')", std::to_underlying(t),
+                         std::to_underlying(peek().type), peek().value.c_str());
         }
         advance();
     }

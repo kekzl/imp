@@ -8,6 +8,7 @@
 #include <functional>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <utility>
 
 namespace imp {
 
@@ -932,7 +933,7 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
     hdr.n_layers = static_cast<uint32_t>(nl);
     hdr.n_kv_heads = static_cast<uint32_t>(cache_->n_kv_heads());
     hdr.head_dim = static_cast<uint32_t>(cache_->head_dim());
-    hdr.dtype = static_cast<uint32_t>(cache_->qtype());
+    hdr.dtype = std::to_underlying(cache_->qtype());
     hdr.block_bytes = bb;
     hdr.model_fingerprint = model_fingerprint;
 
@@ -1055,12 +1056,12 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
     if (hdr.n_layers != static_cast<uint32_t>(cache_->n_layers()) ||
         hdr.n_kv_heads != static_cast<uint32_t>(cache_->n_kv_heads()) ||
         hdr.head_dim != static_cast<uint32_t>(cache_->head_dim()) ||
-        hdr.dtype != static_cast<uint32_t>(cache_->qtype()) || hdr.block_bytes != cache_->block_bytes()) {
+        hdr.dtype != std::to_underlying(cache_->qtype()) || hdr.block_bytes != cache_->block_bytes()) {
         IMP_LOG_WARN(
             "Prefix cache: config mismatch (layers=%u/%d, heads=%u/%d, "
             "dim=%u/%d, dtype=%u/%d)",
             hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(), hdr.head_dim,
-            cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->qtype()));
+            cache_->head_dim(), hdr.dtype, std::to_underlying(cache_->qtype()));
         fclose(f);
         return -1;
     }

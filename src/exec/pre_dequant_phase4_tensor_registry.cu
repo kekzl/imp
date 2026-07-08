@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <utility>
 
 using imp::pre_dequant_internal::borrow_payload_from_wcache;
 using imp::pre_dequant_internal::infer_tier_from_wcache;
@@ -235,19 +236,19 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // model that has tensor kinds the runtime caches but plan_storage
         // doesn't yet enumerate (or vice versa).
         if (registry_count < plan_overlay) {
-            int plan_per_kind[static_cast<int>(TensorKind::COUNT)] = {0};
-            int registry_per_kind[static_cast<int>(TensorKind::COUNT)] = {0};
+            int plan_per_kind[std::to_underlying(TensorKind::COUNT)] = {0};
+            int registry_per_kind[std::to_underlying(TensorKind::COUNT)] = {0};
             for (const auto& e : ideal_plan.entries) {
                 bool overlay = (e.tier == StorageTier::FP16 || e.tier == StorageTier::FP8 ||
                                 e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
                                 e.tier == StorageTier::MXFP4);
                 if (overlay)
-                    ++plan_per_kind[static_cast<int>(e.kind)];
+                    ++plan_per_kind[std::to_underlying(e.kind)];
             }
             for (TensorID id = 0; id < static_cast<TensorID>(registry_->size()); ++id) {
                 ++registry_per_kind[static_cast<int>(registry_->handle(id).kind)];
             }
-            for (int k = 0; k < static_cast<int>(TensorKind::COUNT); ++k) {
+            for (int k = 0; k < std::to_underlying(TensorKind::COUNT); ++k) {
                 int diff = plan_per_kind[k] - registry_per_kind[k];
                 if (diff > 0) {
                     IMP_LOG_INFO("Phase-4 gap by kind: %s plan=%d registry=%d (uncached=%d)",
@@ -320,8 +321,8 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     ++mismatch;
                     StorageTier actual = infer_tier_from_wcache(*wcache_, e.source_data);
                     IMP_LOG_INFO("Phase-4 plan/actual MISMATCH: %s plan-tier=%d actual-tier=%d",
-                                 tensor_kind_name(e.kind), static_cast<int>(e.tier),
-                                 static_cast<int>(actual));
+                                 tensor_kind_name(e.kind), std::to_underlying(e.tier),
+                                 std::to_underlying(actual));
                 } else {
                     ++evicted;  // planned overlay but not cached (budget / native fallback)
                 }

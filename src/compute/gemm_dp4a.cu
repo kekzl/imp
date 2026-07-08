@@ -29,8 +29,8 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 struct IdentityAct {
-    __device__ __forceinline__ float operator()(const half* input, const half* /*unused*/, int idx,
-                                                int total) const {
+    __device__ __forceinline__ static float operator()(const half* input, const half* /*unused*/, int idx,
+                                                       int total) {
         // Early-out for OOB threads (preserves original quantize_fp16_to_q8_1 behavior
         // where partial-warp threads return instead of contributing val=0).
         (void)total;
@@ -42,8 +42,8 @@ struct IdentityAct {
 
 struct SwiGLUAct {
     // SwiGLU: silu(gate) * up = gate * sigmoid(gate) * up
-    __device__ __forceinline__ float operator()(const half* gate, const half* up, int idx,
-                                                int /*total*/) const {
+    __device__ __forceinline__ static float operator()(const half* gate, const half* up, int idx,
+                                                       int /*total*/) {
         float g = __half2float(gate[idx]);
         float u = __half2float(up[idx]);
         return g / (1.0f + expf(-g)) * u;
@@ -54,8 +54,8 @@ struct SwiGLUAct {
 
 struct GeGLUAct {
     // GEGLU: gelu_tanh(gate) * up
-    __device__ __forceinline__ float operator()(const half* gate, const half* up, int idx,
-                                                int /*total*/) const {
+    __device__ __forceinline__ static float operator()(const half* gate, const half* up, int idx,
+                                                       int /*total*/) {
         constexpr float SQRT_2_PI = 0.7978845608028654f;
         constexpr float COEFF = 0.044715f;
         float g = __half2float(gate[idx]);
@@ -69,8 +69,8 @@ struct GeGLUAct {
 
 struct ReLUSqrAct {
     // relu²(x) = max(0, x)²
-    __device__ __forceinline__ float operator()(const half* input, const half* /*unused*/, int idx,
-                                                int /*total*/) const {
+    __device__ __forceinline__ static float operator()(const half* input, const half* /*unused*/, int idx,
+                                                       int /*total*/) {
         float v = __half2float(input[idx]);
         return (v > 0.0f) ? v * v : 0.0f;
     }

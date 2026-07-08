@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -135,7 +136,7 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
                                            n * sizeof(float), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
     } else {
-        fprintf(stderr, "[DEBUG_FWD] %s: unsupported dtype %d\n", name, (int)t.qtype);
+        fprintf(stderr, "[DEBUG_FWD] %s: unsupported dtype %d\n", name, std::to_underlying(t.qtype));
         return;
     }
 
@@ -218,7 +219,7 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
     if (t.qtype != QType::F16 && t.qtype != QType::F32) {
-        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, (int)t.qtype);
+        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, std::to_underlying(t.qtype));
         return;
     }
     std::vector<float> host(n);

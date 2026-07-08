@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <utility>
 
 #include "exec/executor_attention_internal.h"
 namespace imp {
@@ -629,7 +630,7 @@ after_attention:
             debug_tensor_rows("ao_pre_wo-0", view_tokens(ao, n), stream);
             // dump wo weight shape info
             fprintf(stderr, "[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d\n", ly.wo.ndim,
-                    (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo.qtype);
+                    (long)ly.wo.shape[0], (long)ly.wo.shape[1], std::to_underlying(ly.wo.qtype));
         }
         if (has_post_attn_norm && using_fp32_accum) {
             // Sandwich norm with FP32 accumulator (Gemma-3):

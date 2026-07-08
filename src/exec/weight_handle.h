@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/logging.h"
 #include "core/qtype.h"
 #include "core/tensor_kind.h"
 #include "core/storage_tier.h"
@@ -109,8 +110,15 @@ class VRAMAllocator;
 class WeightRegistry {
 public:
     TensorID reserve(TensorKind kind, int64_t rows, int64_t cols);
-    WeightHandle& handle(TensorID id);
-    const WeightHandle& handle(TensorID id) const;
+
+    // C++23 deducing this: one overload serves const and non-const callers.
+    template <typename Self>
+    auto&& handle(this Self&& self, TensorID id) {
+        if (id < 0 || id >= static_cast<TensorID>(self.handles_.size())) {
+            IMP_LOG_FATAL("WeightRegistry::handle: id %d out of range [0, %zu)", id, self.handles_.size());
+        }
+        return self.handles_[id];
+    }
     size_t size() const { return handles_.size(); }
 
     void clear();

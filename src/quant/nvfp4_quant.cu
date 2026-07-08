@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cfloat>
 #include <cmath>
+#include <utility>
 
 namespace imp {
 
@@ -379,7 +380,7 @@ __global__ void dequantize_nvfp4_kernel(const uint8_t* __restrict__ packed_data,
 float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_reusable_max) {
     IMP_CHECK(input.on_device, "calibrate_nvfp4_scales: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "calibrate_nvfp4_scales: input must be FP16, got qtype=%d",
-              static_cast<int>(input.qtype));
+              std::to_underlying(input.qtype));
 
     int64_t n_elements = input.numel();
 
@@ -421,7 +422,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4: input must be FP16, got qtype=%d",
-              static_cast<int>(input.qtype));
+              std::to_underlying(input.qtype));
     IMP_CHECK(input.ndim == 2, "quantize_fp16_to_nvfp4: input must be 2D [N, K], got ndim=%d", input.ndim);
 
     int64_t N = input.shape[0];
@@ -466,7 +467,7 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
                                   float* d_tensor_scale_buf, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4_async: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4_async: input must be FP16, got qtype=%d",
-              static_cast<int>(input.qtype));
+              std::to_underlying(input.qtype));
     IMP_CHECK(input.ndim == 2, "quantize_fp16_to_nvfp4_async: input must be 2D [N, K], got ndim=%d",
               input.ndim);
 

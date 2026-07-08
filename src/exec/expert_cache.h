@@ -27,7 +27,7 @@ struct ExpertCacheKey {
 };
 
 struct ExpertCacheKeyHash {
-    size_t operator()(const ExpertCacheKey& k) const {
+    static size_t operator()(const ExpertCacheKey& k) {
         // Combine pointer hash and expert index
         size_t h = std::hash<const void*>{}(k.packed_ptr);
         h ^= std::hash<int>{}(k.expert_idx) + 0x9e3779b9 + (h << 6) + (h >> 2);

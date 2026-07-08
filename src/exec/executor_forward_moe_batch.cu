@@ -48,6 +48,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <utility>
 
 namespace imp {
 
@@ -909,7 +910,8 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                                             expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
                                             gate_stride, up_stride_bytes, /*x_stride=*/0, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d", (int)up_qtype);
+                IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d",
+                              std::to_underlying(up_qtype));
             }
         } else {
             if (up_qtype == QType::Q6_K) {
@@ -919,7 +921,8 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                 gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
                                      up_stride_bytes, /*x_stride=*/0, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d", (int)up_qtype);
+                IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d",
+                              std::to_underlying(up_qtype));
             }
         }
     }
@@ -964,7 +967,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                                  down_stride, /*x_stride=*/eff, top_k, stream);
         } else {
             IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d",
-                          (int)ly.expert_down_packed.qtype);
+                          std::to_underlying(ly.expert_down_packed.qtype));
         }
     }
 

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -52,7 +53,7 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
         case QType::INT32:
             return CUDA_R_32I;
         default:
-            fprintf(stderr, "imp::gemm_grouped: unsupported dtype %d\n", (int)dt);
+            fprintf(stderr, "imp::gemm_grouped: unsupported dtype %d\n", std::to_underlying(dt));
             abort();
     }
 }

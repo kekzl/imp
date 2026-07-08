@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <atomic>
+#include <utility>
 
 namespace imp {
 
@@ -27,7 +28,7 @@ static const char* level_str(LogLevel level) {
 }
 
 void log_message(LogLevel level, const char* file, int line, const char* fmt, ...) {
-    if (static_cast<int>(level) < static_cast<int>(g_log_level.load(std::memory_order_relaxed))) {
+    if (std::to_underlying(level) < std::to_underlying(g_log_level.load(std::memory_order_relaxed))) {
         return;
     }
 

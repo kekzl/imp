@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -59,7 +60,7 @@ public:
 
 private:
     struct LayerSlots {
-        LoraWeights proj[static_cast<int>(LoraProj::COUNT)];
+        LoraWeights proj[std::to_underlying(LoraProj::COUNT)];
     };
     std::vector<LayerSlots> layers_;
     std::vector<void*> device_allocs_;

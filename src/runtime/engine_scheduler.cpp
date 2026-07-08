@@ -38,6 +38,7 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -306,8 +307,8 @@ int Engine::resolve_prefill_chunk_size_() const {
     if (!supports_chunked_prefill_()) {
         IMP_LOG_WARN(
             "prefill_chunk_size=%d ignored: arch=%d / kv_dtype=%d not in chunked-prefill scope; using 0",
-            explicit_val, (int)model_->config().arch,
-            kv_cache_raw_ ? (int)kv_cache_raw_->qtype() : -1);
+            explicit_val, std::to_underlying(model_->config().arch),
+            kv_cache_raw_ ? std::to_underlying(kv_cache_raw_->qtype()) : -1);
         return 0;
     }
     return explicit_val;

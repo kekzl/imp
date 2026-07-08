@@ -1,4 +1,5 @@
 #include "exec/gemm_kernel_registry.h"
+#include <utility>
 #include "compute/gemm.h"
 #include "core/logging.h"
 
@@ -19,7 +20,7 @@ void GemmKernelRegistry::register_kernel(GemmStrategy strategy, GemmKernelFn fn)
         if (entries_[i].strategy == strategy) {
             IMP_LOG_WARN(
                 "GemmKernelRegistry: overriding existing entry (tier=%d qtype=%d m_is_one=%d)",
-                static_cast<int>(strategy.tier), static_cast<int>(strategy.weight_qtype),
+                std::to_underlying(strategy.tier), std::to_underlying(strategy.weight_qtype),
                 strategy.m_is_one ? 1 : 0);
             entries_[i].fn = fn;
             return;
@@ -59,7 +60,7 @@ static GemmDispatchResult fp16_gemm_kernel(const GemmKernelArgs& args) {
 
     const Tensor& weight = *static_cast<const Tensor*>(args.weight_payload);
     IMP_CHECK(weight.qtype == QType::F16, "fp16_gemm_kernel: weight qtype=%d, expected F16",
-              static_cast<int>(weight.qtype));
+              std::to_underlying(weight.qtype));
     gemm(*args.input, weight, *args.output, /*alpha=*/1.0f, args.beta, args.stream);
     return GemmDispatchResult::Ok;
 }

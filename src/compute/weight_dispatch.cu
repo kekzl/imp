@@ -12,6 +12,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <vector>
+#include <utility>
 
 namespace imp {
 
@@ -274,7 +275,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
 
         case StorageTier::FP32:
         case StorageTier::Undefined:
-            IMP_LOG_FATAL("gemm_dispatch: handle in invalid tier %d", static_cast<int>(w.primary_tier));
+            IMP_LOG_FATAL("gemm_dispatch: handle in invalid tier %d", std::to_underlying(w.primary_tier));
             return;
     }
 }
@@ -374,7 +375,7 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
         }
 
         default:
-            IMP_LOG_FATAL("gemv_dispatch: handle in invalid tier %d", static_cast<int>(w.primary_tier));
+            IMP_LOG_FATAL("gemv_dispatch: handle in invalid tier %d", std::to_underlying(w.primary_tier));
             return;
     }
 }
@@ -456,7 +457,7 @@ void gemm_grouped_dispatch(cublasLtHandle_t /*lt*/, std::span<const WeightHandle
             return;
 
         default:
-            IMP_LOG_FATAL("gemm_grouped_dispatch: undefined tier %d", static_cast<int>(tier));
+            IMP_LOG_FATAL("gemm_grouped_dispatch: undefined tier %d", std::to_underlying(tier));
             return;
     }
 }
