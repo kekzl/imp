@@ -533,7 +533,8 @@ if(IMP_BUILD_TESTS)
             tests/test_tool_call.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_server_auth.cpp
-            tests/test_server_args.cpp)
+            tests/test_server_args.cpp
+            tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
     endif()
