@@ -1695,17 +1695,6 @@ TEST(QuantIntegrationTest, Q5_KForwardPass) {
     std::vector<float> h_logits(32);
     cudaMemcpy(h_logits.data(), logits.data, 32 * sizeof(float), cudaMemcpyDeviceToHost);
 
-    int nan_count = 0;
-    for (int i = 0; i < 32; ++i) {
-        if (std::isnan(h_logits[i]))
-            nan_count++;
-    }
-    if (nan_count == 32) {
-        // Known issue: Q4_KMultiLayer's 4-layer forward pass leaves stale
-        // cuBLAS global state that makes a subsequent Q5_K executor produce
-        // all-NaN. Passes in isolation; fails only as part of the full suite.
-        GTEST_SKIP() << "Q5_K all-NaN: stale cuBLAS state from Q4_KMultiLayer (known test-ordering issue)";
-    }
     for (int i = 0; i < 32; ++i) {
         EXPECT_FALSE(std::isnan(h_logits[i])) << "Q5_K logit NaN at " << i;
         EXPECT_FALSE(std::isinf(h_logits[i])) << "Q5_K logit Inf at " << i;
