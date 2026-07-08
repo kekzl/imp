@@ -66,16 +66,18 @@ nvcc warning : The -std=c++23 flag is not supported with the configured host com
 and compiles as the default dialect **without failing**. The production builder
 (Ubuntu 26.04 / GCC 15.2) is fine. Implication: bumping the standard requires the
 **profiling / ncu image (`impdev:ncu`) to be rebuilt on the 26.04/GCC-15 base too**,
-or profiling/roofline builds quietly compile non-c++23 and diverge from CI. This is
-the single action item; it's the same "impdev:ncu stale" trap already noted in memory.
+or profiling/roofline builds quietly compile non-c++23 and diverge from CI. It's the
+same "impdev:ncu stale" trap already noted in memory. **Done:** `impdev:ncu` rebuilt
+on the 26.04 base; the recipe is now committed at `tools/Dockerfile.ncu` (verified:
+nvcc honours `-std=c++23`, no drop warning) to end the "no recipe / stale COPY" trap.
 
 ## What the migration actually is
 
-1. `CMakeLists.txt:4-7` — flip `CMAKE_CXX_STANDARD 20`→`23` and `CMAKE_CUDA_STANDARD 20`→`23`.
-2. Rebuild `impdev:ncu` (and any other dev/profiling image) on `ubuntu26.04` / GCC 15.2.
-3. Full `make build` + `make test-unit` / `test-gpu` (this audit compiled representative
-   TUs, not the whole tree — the residual unknown is only the ~110 host TUs and ~200 `.cu`
-   not individually sampled; risk is low given no `-Werror` and c++23 ≈ superset here).
+1. `CMakeLists.txt:4-7` — flip `CMAKE_CXX_STANDARD 20`→`23` and `CMAKE_CUDA_STANDARD 20`→`23`
+   (plus a CMake shim teaching it the `-std=c++23` CUDA flag — see above).
+2. Rebuild `impdev:ncu` on `ubuntu26.04` / GCC 15.2 — done; recipe at `tools/Dockerfile.ncu`.
+3. Full `make build` + `make test-unit` / `test-gpu` — done: whole tree 0 errors, unit
+   37/37, gpu 0 failures.
 
 ## Residual low-risk items to watch during the full build
 

@@ -1,0 +1,33 @@
+# impdev:ncu — profiling / dev image (Nsight Compute `ncu` + `nsys` + nvcc + GCC 15.2).
+#
+# Build (needs `imp:test` from `make build` first, which supplies the C++23 binaries):
+#   docker build -f tools/Dockerfile.ncu -t impdev:ncu .
+#
+# Run (source mounted at /src, models at /models):
+#   docker run --rm --gpus all -v $PWD:/src -v /home/kekz/models:/models \
+#     -w /src impdev:ncu ncu --set full ./build/<binary>
+#
+# MUST stay on the ubuntu26.04 (GCC 15.2) base: on the old ubuntu24.04/GCC-13 base
+# nvcc SILENTLY dropped `-std=c++23` (warning, not error) and recompiles inside the
+# image diverged from the C++23 CI build. Nsight Compute and nsys already ship in
+# this CUDA devel base.
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends libdw1t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+
+# Prebuilt C++23 imp binaries from the current imp:test image (keeps them in sync
+# with the build under profile). Recompilation uses the mounted source at /src.
+COPY --from=imp:test /usr/local/bin/imp-cli    /usr/local/bin/imp-cli
+COPY --from=imp:test /usr/local/bin/imp-server /usr/local/bin/imp-server
+COPY --from=imp:test /usr/local/bin/test-core       /usr/local/bin/test-core
+COPY --from=imp:test /usr/local/bin/test-text       /usr/local/bin/test-text
+COPY --from=imp:test /usr/local/bin/test-compute    /usr/local/bin/test-compute
+COPY --from=imp:test /usr/local/bin/test-attention  /usr/local/bin/test-attention
+COPY --from=imp:test /usr/local/bin/test-quant      /usr/local/bin/test-quant
+COPY --from=imp:test /usr/local/bin/test-kv         /usr/local/bin/test-kv
+COPY --from=imp:test /usr/local/bin/test-moe-gdn    /usr/local/bin/test-moe-gdn
+COPY --from=imp:test /usr/local/bin/test-e2e        /usr/local/bin/test-e2e
