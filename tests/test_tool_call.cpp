@@ -305,3 +305,78 @@ TEST(ToolCallQwen36Xml, NoParamsGivesEmptyArgs) {
     EXPECT_EQ(tc.name, "ping");
     EXPECT_EQ(json::parse(tc.arguments), json::object());
 }
+
+// ---------------------------------------------------------------------------
+// format_tool_response — render a role=tool message into the family wire format
+// ---------------------------------------------------------------------------
+TEST(ToolResponseFormat, Llama3AndChatMLPassContentThrough) {
+    json msg = {{"content", "sunny"}};
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::LLAMA3, msg), "sunny");
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, msg), "sunny");
+}
+
+TEST(ToolResponseFormat, NonStringContentSerialized) {
+    // A structured payload must be serialized, not dropped to "".
+    json msg = {{"content", json{{"temp", 20}}}};
+    std::string out = format_tool_response(ChatTemplateFamily::LLAMA3, msg);
+    EXPECT_EQ(json::parse(out), (json{{"temp", 20}}));
+}
+
+TEST(ToolResponseFormat, NullOrAbsentContentIsEmpty) {
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, json{{"content", nullptr}}), "");
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::CHATML, json::object()), "");
+}
+
+TEST(ToolResponseFormat, GemmaWrapsWithNameAndQuotes) {
+    json msg = {{"content", "sunny"}, {"name", "get_weather"}};
+    EXPECT_EQ(format_tool_response(ChatTemplateFamily::GEMMA, msg),
+              "<|tool_response>response:get_weather{value:<|\"|>sunny<|\"|>}<tool_response|>");
+}
+
+TEST(ToolResponseFormat, GemmaDefaultsNameToTool) {
+    std::string s = format_tool_response(ChatTemplateFamily::GEMMA, json{{"content", "x"}});
+    EXPECT_NE(s.find("response:tool{"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// reconstruct_tool_call_output — rebuild the assistant tool-call wire text
+// ---------------------------------------------------------------------------
+TEST(ToolCallReconstruct, LeadingContentPreserved) {
+    json calls = json::array();
+    EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "hello"), "hello");
+    // "null" content is treated as empty.
+    EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "null"), "");
+}
+
+TEST(ToolCallReconstruct, ChatMLWrapsParsedCall) {
+    json calls = json::array({{{"function", {{"name", "foo"}, {"arguments", "{\"a\":1}"}}}}});
+    std::string out = reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "");
+    // Extract and re-parse the inner JSON to avoid key-order/spacing fragility.
+    auto open = out.find("<tool_call>\n");
+    auto close = out.find("\n</tool_call>");
+    ASSERT_NE(open, std::string::npos);
+    ASSERT_NE(close, std::string::npos);
+    std::string inner = out.substr(open + 12, close - (open + 12));
+    json parsed = json::parse(inner);
+    EXPECT_EQ(parsed["name"], "foo");
+    EXPECT_EQ(parsed["arguments"], (json{{"a", 1}}));
+}
+
+TEST(ToolCallReconstruct, Llama3WrapsCall) {
+    json calls = json::array({{{"function", {{"name", "foo"}, {"arguments", "{\"a\":1}"}}}}});
+    std::string out = reconstruct_tool_call_output(ChatTemplateFamily::LLAMA3, calls, "");
+    EXPECT_NE(out.find("<function=foo>"), std::string::npos);
+    EXPECT_NE(out.find("</function>"), std::string::npos);
+}
+
+TEST(ToolCallReconstruct, GemmaWrapsCall) {
+    json calls = json::array({{{"function", {{"name", "foo"}, {"arguments", "{\"a\":1}"}}}}});
+    std::string out = reconstruct_tool_call_output(ChatTemplateFamily::GEMMA, calls, "");
+    EXPECT_NE(out.find("<|tool_call>call:foo{"), std::string::npos);
+    EXPECT_NE(out.find("}<tool_call|>"), std::string::npos);
+}
+
+TEST(ToolCallReconstruct, SkipsEntryWithoutFunction) {
+    json calls = json::array({{{"id", "x"}}});  // no "function" key
+    EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "keep"), "keep");
+}
