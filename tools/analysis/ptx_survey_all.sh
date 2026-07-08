@@ -12,6 +12,9 @@
 set -e
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=tools/analysis/latest_cuda_img.sh
+source "$DIR/latest_cuda_img.sh"
+CUDA_IMG=${CUDA_IMG:-$(latest_cuda_devel_img)}
 SURVEYS=(
     ptx_cvt_survey.sh
     ptx_mma_survey.sh
@@ -24,7 +27,7 @@ SURVEYS=(
 echo "# PTX feature acceptance survey for sm_120f"
 echo ""
 echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "Toolkit:   $(docker run --rm nvidia/cuda:13.2.1-devel-ubuntu24.04 nvcc --version 2>/dev/null | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+echo "Toolkit:   $(docker run --rm "$CUDA_IMG" nvcc --version 2>/dev/null | grep -oE 'V[0-9]+\.[0-9]+\.[0-9]+' | head -1) ($CUDA_IMG)"
 echo "Arch:      compute_120f / sm_120 (RTX 5090 GB202)"
 echo ""
 echo "Each section is a separate ptxas-acceptance test for one PTX instruction"

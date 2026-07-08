@@ -4,7 +4,9 @@
 # packed FP16 arithmetic (add/mul/fma f16x2/bf16x2), and special activations.
 
 set -e
-CUDA_IMG=${CUDA_IMG:-nvidia/cuda:13.2.1-devel-ubuntu24.04}
+# shellcheck source=tools/analysis/latest_cuda_img.sh
+source "$(dirname "${BASH_SOURCE[0]}")/latest_cuda_img.sh"
+CUDA_IMG=${CUDA_IMG:-$(latest_cuda_devel_img)}
 ARCH=${ARCH:-compute_120f,code=sm_120}
 WORK=$(mktemp -d)
 trap "rm -rf $WORK" EXIT
