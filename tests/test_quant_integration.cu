@@ -9,6 +9,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
 #include "core/tensor.h"
+#include "memory/mem_account.h"  // trim_device_mempool (mempool-trim regression)
 
 #include <vector>
 #include <cstdint>
@@ -1995,6 +1996,68 @@ TEST(DualPathQuant, WeightCachesFlag) {
 
     wcache.dual_path_quant = true;
     EXPECT_TRUE(wcache.dual_path_quant);
+}
+
+// ===========================================================================
+// Model teardown must trim the async mempool (issue: EncoderEmbed OOM)
+// ---------------------------------------------------------------------------
+// The default cudaMallocAsync pool runs with an unbounded release threshold,
+// so freeing a model's weights (cudaFreeAsync) parks weights-sized memory in
+// the pool instead of returning it to the driver. A later plain cudaMalloc
+// (the next model's token-embedding upload) then OOMs even though the memory
+// is "free". The trim used to run only at the C-API teardown boundary; the
+// direct-C++ path (tests, embedders) leaked the reservation and, in the full
+// aggregate suite, starved EncoderEmbedTest after the heavy MoE MtpForwardTest.
+// After the fix, ~Model() trims, so destroying a model leaves ~no trimmable
+// slack in the pool.
+// ===========================================================================
+namespace {
+double mempool_trimmable_mib() {
+    cudaDeviceSynchronize();
+    int dev = 0;
+    cudaMemPool_t pool = nullptr;
+    if (cudaGetDevice(&dev) != cudaSuccess ||
+        cudaDeviceGetDefaultMemPool(&pool, dev) != cudaSuccess || pool == nullptr)
+        return -1.0;
+    unsigned long long rsv = 0, usd = 0;
+    cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv);
+    cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd);
+    return (rsv >= usd) ? static_cast<double>(rsv - usd) / (1024.0 * 1024.0) : 0.0;
+}
+}  // namespace
+
+TEST(QuantIntegrationTest, ModelTeardownTrimsAsyncPool) {
+    SKIP_IF_NO_CUDA();
+    // Reproduce the real condition: engine init raises the default async pool's
+    // release threshold to UINT64_MAX, so freed blocks are NOT auto-returned on
+    // sync — only an explicit trim reclaims them. Set it here (save/restore so
+    // other tests in the binary are unaffected).
+    cudaMemPool_t pool = nullptr;
+    int dev = 0;
+    ASSERT_EQ(cudaGetDevice(&dev), cudaSuccess);
+    ASSERT_EQ(cudaDeviceGetDefaultMemPool(&pool, dev), cudaSuccess);
+    uint64_t prev_threshold = 0;
+    cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &prev_threshold);
+    uint64_t maxed = UINT64_MAX;
+    ASSERT_EQ(cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &maxed), cudaSuccess);
+
+    // A model with ~1.5 GiB of FP16 weights: big enough that an untrimmed pool
+    // leaves an unambiguous reservation. Uploaded via cudaMallocAsync, so the
+    // destructor's cudaFreeAsync + trim is exercised.
+    {
+        auto model = make_q8_0_test_model(/*d_model=*/2048, /*d_ff=*/5504, /*n_heads=*/16,
+                                          /*n_kv_heads=*/16, /*n_layers=*/6, /*vocab_size=*/32000);
+        ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
+        // model destroyed here at scope exit → ~Model() must trim the pool.
+    }
+    // cudaMemPoolTrimTo(pool, 0) returns reserved down to used, so trimmable
+    // slack must be ~0. Pre-fix (no ~Model trim) this held the freed weights
+    // (~1.5 GiB) because the raised threshold suppresses auto-release.
+    double slack = mempool_trimmable_mib();
+    cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &prev_threshold);
+    ASSERT_GE(slack, 0.0) << "no default mempool on this device";
+    EXPECT_LT(slack, 128.0) << "async mempool retained " << slack
+                            << " MiB of trimmable slack after model teardown (not trimmed)";
 }
 
 }  // namespace
