@@ -54,22 +54,30 @@ public:
     // parseable, the engine renders via Jinja2 instead of hardcoded families.
     bool init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str = "");
 
-    // Build token ID vector: special tokens as raw IDs, text segments encoded
-    // suppress_thinking: inject /no_think for Qwen3 models to prevent thinking
+    // Build token ID vector: special tokens as raw IDs, text segments encoded.
+    // suppress_thinking: inject /no_think + stamp enable_thinking=false so the
+    //   template renders its answer-directly branch.
+    // force_thinking: stamp enable_thinking=true so a template that defaults the
+    //   variable to a *closed* block (e.g. Qwen3.5-4B: `<think>\n\n</think>\n\n`)
+    //   instead opens the block for an explicit caller request. suppress wins if
+    //   both are set. Default (neither) leaves the variable undefined so each
+    //   template author's own default applies (Qwen3 open vs Gemma-4 closed).
     std::vector<int32_t> apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
-                               bool suppress_thinking = false) const;
+                               bool suppress_thinking = false, bool force_thinking = false) const;
 
     // Build token ID vector with tool definitions passed to Jinja2 context.
     // Falls back to standard apply() if Jinja2 doesn't handle tools.
     std::vector<int32_t> apply_with_tools(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                           const std::vector<ToolFunction>& tools,
                                           const std::string& tool_choice = "auto",
-                                          bool suppress_thinking = false) const;
+                                          bool suppress_thinking = false,
+                                          bool force_thinking = false) const;
 
     // Build token ID vector with image tokens inserted before the first user message.
     // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
     std::vector<int32_t> apply_with_image(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
-                                          int n_image_tokens, bool suppress_thinking = false) const;
+                                          int n_image_tokens, bool suppress_thinking = false,
+                                          bool force_thinking = false) const;
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
@@ -153,14 +161,16 @@ private:
     // Jinja2-based apply: render template, split on control tokens, encode
     bool probe_render_mentions_think(const Tokenizer& tok) const;
     std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
-                                     bool add_generation_prompt = true, bool suppress_thinking = false) const;
+                                     bool add_generation_prompt = true, bool suppress_thinking = false,
+                                     bool force_thinking = false) const;
 
     // Jinja2-based apply with tool definitions in context
     std::vector<int32_t> apply_jinja_with_tools(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                                                 const std::vector<ToolFunction>& tools,
                                                 const std::string& tool_choice,
                                                 bool add_generation_prompt = true,
-                                                bool suppress_thinking = false) const;
+                                                bool suppress_thinking = false,
+                                                bool force_thinking = false) const;
 
     // Shared helper: split rendered string on control tokens and encode
     std::vector<int32_t> tokenize_rendered(const Tokenizer& tok, const std::string& rendered) const;

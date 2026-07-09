@@ -4,6 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **An explicit `enable_thinking: true` request is now honored on templates
+  that default the switch to a closed block** (e.g. Qwen3.5-4B). The chat
+  render only ever stamped `enable_thinking=false` (suppression); an explicit
+  *true* was silently dropped, so the template kept rendering its pre-closed
+  `<think>\n\n</think>\n\n` block and the model answered directly instead of
+  reasoning. The server now stamps `enable_thinking=true` into the render for
+  an explicit request, so such templates open the think block; the reasoning
+  then separates into `reasoning_content` as expected. Default (no explicit
+  request) still leaves the variable undefined so each template author's own
+  default wins. The thinking-state decision is documented as one pipeline
+  (intent → render → rendered-prompt ground truth).
+
 ## [0.18.0] - 2026-07-09
 
 ### Changed

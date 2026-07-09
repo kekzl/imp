@@ -535,12 +535,21 @@ bool snapshot_state_and_tokenize_(
         ctx.params.stop_sequences.push_back("\nHuman");
     }
 
+    // force_thinking stamps enable_thinking=true INTO the Jinja render, so a
+    // template that defaults the variable to a pre-closed block (Qwen3.5-4B)
+    // actually opens the think block when the caller EXPLICITLY asked for
+    // thinking — otherwise `enable_thinking:true` was a silent no-op on such
+    // templates. Only for an explicit request: the default case stays undefined
+    // so each template author's own default wins (Qwen3 open vs Gemma-4 closed).
+    const bool force_thinking = ctx.params.enable_thinking_set &&
+                                ctx.params.enable_thinking_requested && ctx.snap.enable_thinking;
+
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && ctx.snap.has_vision_request) {
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256, ctx.snap.suppress_thinking);
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256, ctx.snap.suppress_thinking, force_thinking);
     } else if (ctx.snap.have_template && ctx.snap.tools_via_jinja) {
         std::string tc_str = ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>() : "auto";
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.tool_defs, tc_str, ctx.snap.suppress_thinking);
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.tool_defs, tc_str, ctx.snap.suppress_thinking, force_thinking);
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
@@ -562,7 +571,7 @@ bool snapshot_state_and_tokenize_(
                     ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
                 }
             }
-            ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking);
+            ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking, force_thinking);
         }
     } else if (ctx.snap.have_template) {
         // No tools, or no Jinja2 support — inject text-based tool prompt if tools present
@@ -586,7 +595,7 @@ bool snapshot_state_and_tokenize_(
                 }
             }
         }
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking);
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking, force_thinking);
     } else {
         // Concatenate all message content as raw text
         std::string raw;
@@ -595,6 +604,16 @@ bool snapshot_state_and_tokenize_(
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
     }
 
+    // Thinking-state pipeline (single source of truth = the rendered prompt):
+    //   1. INTENT  — `want_thinking` above: explicit request, else heuristic.
+    //   2. RENDER  — apply() stamps enable_thinking only when we force/suppress
+    //      (above); otherwise the template author's own default decides.
+    //   3. GROUND TRUTH — the block below reconciles enable_thinking against what
+    //      the render actually produced in the prompt tail (open <think> prefix →
+    //      thinking on; pre-closed block → off), then force-appends <think> for
+    //      templateless think-models. Stages 2–3 keep the splitter's start phase
+    //      consistent with the bytes the model will actually continue from.
+    //
     // Detect chat-template-injected <think> prefix (Qwen3 / Qwen3.5 / Qwen3.6
     // / DeepSeek-R1 add `<think>\n` via add_generation_prompt by default). When
     // present, the model output starts mid-thinking with no opener — only a
