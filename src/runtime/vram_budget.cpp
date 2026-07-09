@@ -1,6 +1,7 @@
 #include "runtime/vram_budget.h"
 #include "runtime/engine.h"  // EngineConfig full definition
 #include "runtime/storage_planner.h"
+#include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (SfAtom padding)
 #include "core/logging.h"
 #include "memory/vram_query.h"
 #include <algorithm>
@@ -8,8 +9,100 @@
 
 namespace imp {
 
+NativeCacheDemand compute_native_cache_demand(const Model& model) {
+    NativeCacheDemand d;
+    const auto& mcfg = model.config();
+    if (!mcfg.is_nvfp4_prequant)
+        return d;
+
+    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cu): each
+    // slab entry is align_up(cutlass_nvfp4_sf_size(N, K), 256); contiguous
+    // MoE expert groups occupy align_up(ne × sf_size, 256) as ONE entry.
+    // Wire shapes store the PACKED byte dim (K/2 for e2m1 pairs), so
+    // logical K = 2 × shape[1]. The previous elems/16+256 heuristic was
+    // NOT an upper bound under SfAtom padding (rows→128, K→64 elems).
+    constexpr size_t kSfAlign = 256;
+    auto align_up = [](size_t x, size_t a) { return (x + a - 1) / a * a; };
+
+    auto add_dense = [&](const Tensor& w) {
+        if (!w.data || w.ndim < 2)
+            return;
+        if (w.ndim >= 3) {
+            // Packed 3D experts [ne, N, K/2] (GGUF / Gemma-4 loaders): one
+            // contiguous group entry + the transient per-(layer,proj) copy.
+            int ne = static_cast<int>(w.shape[0]);
+            int N = static_cast<int>(w.shape[1]);
+            int64_t K = static_cast<int64_t>(w.shape[2]) * 2;
+            d.sf_bytes += align_up(static_cast<size_t>(ne) *
+                                       cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
+                                   kSfAlign);
+            size_t slab = static_cast<size_t>(ne) * N * (K / 2) +
+                          static_cast<size_t>(ne) * N * (K / 16) +
+                          static_cast<size_t>(ne) * sizeof(float);
+            d.moe_slab_bytes = std::max(d.moe_slab_bytes, slab);
+            return;
+        }
+        int N = static_cast<int>(w.shape[0]);
+        int64_t K = static_cast<int64_t>(w.shape[1]) * 2;
+        d.sf_bytes += align_up(cutlass_nvfp4_sf_size(N, static_cast<int>(K)), kSfAlign);
+    };
+    auto add_experts = [&](const std::vector<Tensor>& ws) {
+        if (ws.empty() || !ws[0].data || ws[0].ndim < 2)
+            return;
+        int ne = static_cast<int>(ws.size());
+        int N = static_cast<int>(ws[0].shape[0]);
+        int64_t Kp = ws[0].shape[1];
+        int64_t K = Kp * 2;
+        d.sf_bytes += align_up(static_cast<size_t>(ne) *
+                                   cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
+                               kSfAlign);
+        // Transient contiguous-copy slab (phase 3-moe copy branch: packed +
+        // micro-scales + tensor-scales, matching add_bytes there). The
+        // zero-copy borrow branch needs ~none — this is the upper bound.
+        size_t slab = static_cast<size_t>(ne) * N * Kp + static_cast<size_t>(ne) * N * (K / 16) +
+                      static_cast<size_t>(ne) * sizeof(float);
+        d.moe_slab_bytes = std::max(d.moe_slab_bytes, slab);
+    };
+
+    // The same tensor set phase 0b registers for the decode cache
+    // (pre_dequant_phase0_nvfp4_loader.cu register_prequant) — including
+    // ssm_in/ssm_out/gdn_gate, which the previous inline scan omitted
+    // (under-count on GDN hybrids, i.e. Qwen3.6-35B itself).
+    add_dense(model.output_proj());
+    for (int i = 0; i < mcfg.n_layers; i++) {
+        const auto& L = model.layer(i);
+        add_dense(L.wq);
+        add_dense(L.wk);
+        add_dense(L.wv);
+        add_dense(L.wo);
+        add_dense(L.w_gate);
+        add_dense(L.w_up);
+        add_dense(L.w_down);
+        add_dense(L.w_gate_shared);
+        add_dense(L.w_up_shared);
+        add_dense(L.w_down_shared);
+        add_dense(L.ssm_in);
+        add_dense(L.ssm_out);
+        add_dense(L.gdn_gate);
+        if (L.expert_gate_packed.data)
+            add_dense(L.expert_gate_packed);
+        else
+            add_experts(L.expert_w_gate);
+        if (L.expert_up_packed.data)
+            add_dense(L.expert_up_packed);
+        else
+            add_experts(L.expert_w_up);
+        if (L.expert_down_packed.data)
+            add_dense(L.expert_down_packed);
+        else
+            add_experts(L.expert_w_down);
+    }
+    return d;
+}
+
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
-                               size_t free_vram, int swa_live_tokens, int n_swa_layers) {
+                               size_t free_vram, int swa_live_tokens, int n_swa_layers,
+                               size_t mandatory_cache_prealloc) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
@@ -203,73 +296,34 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // Both the count above AND the plan classify by source qtype,
             // which at budget time is still the wire dtype (NVFP4-ness lives
             // in the nvfp4_scratch_ sidecars until phase 0 promotes it) — so
-            // scan the projection tensors directly, no qtype filter: on an
-            // NVFP4-prequant checkpoint these are exactly the quantized set.
-            size_t sf_bytes = 0;
-            size_t max_moe_slab = 0;
-            // Wire shapes store the PACKED byte dim (K/2 for e2m1 pairs), so
-            // logical elems = 2 × shape product — verified against the built
-            // caches: Coder-30B SfAtom 1800.55 MiB vs 914 unscaled, 14B
-            // 833.87 vs 440 (both exactly 2×).
-            auto count_native = [&](const Tensor& w) {
-                if (!w.data || w.ndim < 2 || w.shape[1] % 16 != 0)
-                    return;
-                size_t elems = 2;
-                for (int d = 0; d < w.ndim; d++)
-                    elems *= static_cast<size_t>(w.shape[d]);
-                sf_bytes += elems / 16 + 256;  // + per-entry SfAtom align slack
-                if (w.ndim >= 3)  // packed experts: transient copy per (layer,proj)
-                    max_moe_slab = std::max(max_moe_slab, elems / 2 + elems / 16);
-            };
-            auto count_native_vec = [&](const std::vector<Tensor>& ws) {
-                size_t elems = 0;
-                for (const auto& w : ws) {
-                    if (!w.data || w.ndim < 2)
-                        continue;
-                    size_t e = 2;
-                    for (int d = 0; d < w.ndim; d++)
-                        e *= static_cast<size_t>(w.shape[d]);
-                    elems += e;
-                }
-                if (!elems)
-                    return;
-                sf_bytes += elems / 16 + 256 * ws.size();
-                max_moe_slab = std::max(max_moe_slab, elems / 2 + elems / 16);
-            };
-            count_native(model.output_proj());
-            for (int i = 0; i < mcfg.n_layers; i++) {
-                const auto& L = model.layer(i);
-                count_native(L.wq);
-                count_native(L.wk);
-                count_native(L.wv);
-                count_native(L.wo);
-                count_native(L.w_gate);
-                count_native(L.w_up);
-                count_native(L.w_down);
-                count_native(L.w_gate_shared);
-                count_native(L.w_up_shared);
-                count_native(L.w_down_shared);
-                if (L.expert_gate_packed.data)
-                    count_native(L.expert_gate_packed);
-                else
-                    count_native_vec(L.expert_w_gate);
-                if (L.expert_up_packed.data)
-                    count_native(L.expert_up_packed);
-                else
-                    count_native_vec(L.expert_w_up);
-                if (L.expert_down_packed.data)
-                    count_native(L.expert_down_packed);
-                else
-                    count_native_vec(L.expert_w_down);
-            }
+            // compute_native_cache_demand scans the projection tensors
+            // directly, no qtype filter: on an NVFP4-prequant checkpoint
+            // these are exactly the quantized set.
+            NativeCacheDemand demand = compute_native_cache_demand(model);
+            // Floors are only handed to phase 3 when the balloon physically
+            // guaranteed the bytes — an unbacked floor on a genuinely tight
+            // card would over-commit the SF slab cudaMalloc. Phase 3b (SF)
+            // runs before phase 3-moe, so an sf-only balloon still floors SF.
+            budget.mandatory_sf_bytes =
+                (mandatory_cache_prealloc >= demand.sf_bytes) ? demand.sf_bytes : 0;
+            budget.mandatory_moe_bytes =
+                (mandatory_cache_prealloc >= demand.total()) ? demand.moe_slab_bytes : 0;
             size_t phase3_reserve =
                 vram_reserve_floor(total_vram, reserve_floor_pct) + 1024ULL * 1024 * 1024;
-            size_t native_need = sf_bytes + max_moe_slab + phase3_reserve;
+            // Bytes already physically held by the Engine's balloon are
+            // excluded from free_vram — charge KV only for the UNCOVERED
+            // remainder (normally 0) so the demand isn't counted twice.
+            size_t uncovered = (demand.total() > mandatory_cache_prealloc)
+                                   ? demand.total() - mandatory_cache_prealloc
+                                   : 0;
+            size_t native_need = uncovered + phase3_reserve;
             if (native_need > cutlass_sf_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
-                             "(sf=%.1f, moe_slab=%.1f, phase3+workspaces=%.1f)",
-                             native_need / (1024.0 * 1024.0), sf_bytes / (1024.0 * 1024.0),
-                             max_moe_slab / (1024.0 * 1024.0),
+                             "(sf=%.1f, moe_slab=%.1f, prealloc-covered=%.1f, "
+                             "phase3+workspaces=%.1f)",
+                             native_need / (1024.0 * 1024.0), demand.sf_bytes / (1024.0 * 1024.0),
+                             demand.moe_slab_bytes / (1024.0 * 1024.0),
+                             std::min(demand.total(), mandatory_cache_prealloc) / (1024.0 * 1024.0),
                              phase3_reserve / (1024.0 * 1024.0));
                 cutlass_sf_estimate = native_need;
             }

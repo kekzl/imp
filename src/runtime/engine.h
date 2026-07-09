@@ -471,6 +471,15 @@ private:
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
+    // Balloon reservation for the mandatory native-NVFP4 decode caches
+    // (CUTLASS SfAtom slab + nvfp4_moe). Held from right after weight
+    // upload (before workspaces/KV consume the headroom) until just before
+    // pre_dequant_weights builds the caches into the guaranteed space.
+    // Plain cudaMalloc (NOT the async pool) so the release is immediately
+    // visible to cudaMemGetInfo readers.
+    void* native_cache_balloon_ = nullptr;
+    size_t native_cache_balloon_bytes_ = 0;
+    void release_native_cache_balloon_(const char* when);
     ChatTemplate chat_template_;
 
     // ── Extracted subsystems ─────────────────────────────────────────

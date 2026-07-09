@@ -141,6 +141,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [vram]
     F("vram.kv_fraction", cfg.vram.kv_fraction);
     I("vram.reserve_floor_pct", cfg.vram.reserve_floor_pct);
+    B("vram.native_cache_reserve", cfg.vram.native_cache_reserve);
 
     // [attention]
     S("attention.fp8_prefill", cfg.attention.fp8_prefill);

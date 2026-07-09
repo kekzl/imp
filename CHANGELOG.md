@@ -4,6 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **VRAM ordering: mandatory NVFP4 decode caches are now reserved before
+  workspaces and the KV pool.** For native-NVFP4 models the CUTLASS SfAtom SF
+  slab (~2 GB) and the nvfp4_moe decode cache were built last from already-
+  starved free VRAM; partial caches abort decode CUDA-graph capture (one
+  uncovered MoE layer -> host-args path -> capture throws), pinning
+  Qwen3.6-35B-A3B-NVFP4 at 26-40 tok/s under default config. A balloon
+  allocation right after weight upload holds the exact demand (new
+  `compute_native_cache_demand`, sized with `cutlass_nvfp4_sf_size` and now
+  including the GDN/SSM projections the old estimate missed) until the cache
+  build, and the phase-3 budgets are floored at the balloon-backed guarantee
+  (live `cudaMemGetInfo` lags async frees). Default config now reaches full
+  caches + captured decode graph: 247-249 tok/s with a 138k-token KV pool
+  (was 26-40). Non-prequant (GGUF/FP16) budget arithmetic is unchanged
+  (pinned by test); escape hatch `[vram] native_cache_reserve` (default on).
+  A new post-build coverage log states FULL/PARTIAL cache status and remedies.
+
 ## [0.17.2] - 2026-07-08
 
 Small server-compatibility release: the served context window is now

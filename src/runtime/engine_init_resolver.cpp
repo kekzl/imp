@@ -8,6 +8,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
+#include "runtime/vram_budget.h"
 #include "model/model_arch.h"
 #include "runtime/process_diag.h"
 #include "core/logging.h"
@@ -18,6 +19,22 @@
 #include <cstdlib>
 
 namespace imp {
+
+namespace {
+
+// Crude pre-upload weight-footprint estimate (weights are still host/mmap at
+// resolver time, so cudaMemGetInfo reports the near-empty card). Shared by
+// the auto max_batch_size and auto max_seq_len resolvers.
+size_t approx_weight_footprint_bytes(const ModelConfig& mcfg) {
+    size_t bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers * 12;
+    if (mcfg.n_experts > 0) {
+        bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
+                 mcfg.n_layers * 2;
+    }
+    return bytes;
+}
+
+}  // namespace
 
 // IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
 // for reproducible byte-level comparison against a reference implementation
@@ -237,11 +254,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (config_.max_batch_size <= 0) {
-        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model * mcfg.n_layers * 12;
-        if (mcfg.n_experts > 0) {
-            approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff * mcfg.d_model *
-                                   mcfg.n_layers * 2;
-        }
+        size_t approx_weight_bytes = approx_weight_footprint_bytes(mcfg);
         // Weight-footprint tier — kept as a FLOOR so this never regresses below
         // the previous default for any model.
         int tier;
@@ -279,7 +292,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // real post-load headroom. approx_weight_bytes under-counts the NVFP4
             // decode + CUTLASS-SF caches, but kKvHeadroomFrac (0.6) reserves for
             // those + workspaces, and the downstream KV clamp is the hard backstop.
-            headroom = (free_vram > approx_weight_bytes) ? (free_vram - approx_weight_bytes) : 0;
+            size_t upload_bytes = approx_weight_bytes;
+            // Native-NVFP4 models: the mandatory decode caches (CUTLASS SfAtom
+            // slab + nvfp4_moe) are physically reserved right after upload
+            // (vram.native_cache_reserve balloon) — subtract them too so the
+            // auto batch doesn't size workspaces into the reserved bytes.
+            if (mcfg.is_nvfp4_prequant)
+                upload_bytes += compute_native_cache_demand(*model_).total();
+            headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
                                        : (mcfg.n_heads > 0 ? mcfg.d_model / mcfg.n_heads : 128);
@@ -611,8 +631,19 @@ void Engine::init_compute_max_seq_len_() {
         // keeps tracking a tuned vram.kv_fraction. (Was a flat 30%, calibrated
         // when weight caches competed at FP16.)
         float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 0.95f);
+        // Native-NVFP4 models: weights + the mandatory decode caches (CUTLASS
+        // SfAtom slab + nvfp4_moe, physically reserved right after upload)
+        // will consume most of the card — subtract them so the auto context
+        // reflects the KV room that actually remains. GGUF models keep the
+        // historical raw-free overshoot (absorbed by the downstream KV clamp).
+        size_t free_for_kv = free_vram;
+        if (mcfg.is_nvfp4_prequant) {
+            size_t reserved = approx_weight_footprint_bytes(mcfg) +
+                              compute_native_cache_demand(*model_).total();
+            free_for_kv = (free_vram > reserved) ? (free_vram - reserved) : 0;
+        }
         int max_by_vram = (kv_bytes_per_token > 0)
-                              ? static_cast<int>(free_vram * (0.75 * kv_fraction) / kv_bytes_per_token)
+                              ? static_cast<int>(free_for_kv * (0.75 * kv_fraction) / kv_bytes_per_token)
                               : 131072;
         // Agentic workloads (tool loops, accumulating history, large file
         // context) routinely exceed 16K and run a single long sequence rather
