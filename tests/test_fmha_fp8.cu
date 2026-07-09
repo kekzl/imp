@@ -551,7 +551,8 @@ TEST_F(FmhaFA2Hd256Test, Fp8QkStillDeclines) {
 // Reports per-kernel ms + cross-path max relative error. Not a perf gate —
 // the stage-1 decision data (see PR body).
 TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
-    const int B = 1, Sq = 2048, Skv = 2048, NH = 8, NKV = 2, HD = 256;
+    for (int sweep_sq : {512, 1024, 2048, 4096}) {
+    const int B = 1, Sq = sweep_sq, Skv = sweep_sq, NH = 8, NKV = 2, HD = 256;
     const bool causal = true;
     const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     process_diag_set_fa2_f16acc(true);
@@ -636,14 +637,13 @@ TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
     printf("[hd256-bench] Qwen3.6 shape (Sq=%d NH=%d NKV=%d): FA2=%.3f ms  WMMA=%.3f ms  "
            "(FA2/WMMA = %.2fx)\n",
            Sq, NH, NKV, fa2_ms, wmma_ms, fa2_ms / wmma_ms);
-    RecordProperty("fa2_ms", std::to_string(fa2_ms));
-    RecordProperty("wmma_ms", std::to_string(wmma_ms));
 
     cudaFree(d_q);
     cudaFree(d_k);
     cudaFree(d_v);
     cudaFree(d_o_fa2);
     cudaFree(d_o_wmma);
+    }  // sweep_sq
 }
 
 }  // namespace
