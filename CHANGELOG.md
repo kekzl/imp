@@ -4,6 +4,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **HD=256 FA2 default-on + FP8-KV deterministic forcing lifted (stage 3).**
+  `attention.fa2_hd256` now defaults to true: head_dim=256 models (Qwen3.6
+  hybrids, gemma-3-class) route prefill through the register-resident f16-QK
+  FA2 kernel by default. The single-shot prefill path gains the chunked
+  path's uniform-shape refinement — GDN/Mamba2 hybrids (one distinct
+  attention shape) now take FA2 single-shot at any head_dim instead of
+  unconditionally falling to cuBLAS; learned sinks (gpt-oss) and
+  heterogeneous per-layer shapes (gemma-4) keep cuBLAS. With FA2 serving
+  every attention call on uniform hd=128/256 models, the FP8-KV
+  deterministic-cuBLAS forcing (`engine_init_resolver`) is skipped for
+  hd=256 too — FP8 KV on Qwen3.6-35B no longer drags in the model-wide
+  deterministic algo pinning. Validation battery in PR.
+
 ### Added
 - **Stage-1 HD=256 FA2 port (`attention.fa2_hd256`, default off).** The
   register-resident FA2 prefill kernel gains head_dim=256 instances (fp16-qk,

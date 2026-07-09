@@ -327,7 +327,16 @@
 
         // Prefill dispatch (post-Phase-2 + Phase-5 Track D):
         // attn_sinks: only the cuBLAS softmax understands learned sinks.
-        const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
+        // Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on non-attention
+        // layers, one distinct nonzero value) are FA2-servable — same
+        // refinement the chunked path has used since #924. Only truly
+        // heterogeneous shapes (gemma-4 dual head_dim) and learned sinks
+        // (gpt-oss) require cuBLAS. Without this, hybrids never took
+        // single-shot FA2 at any head_dim, and the FP8-KV deterministic skip
+        // ("FA2 serves all attention") would be a lie for prompts below the
+        // chunk size.
+        const bool force_cublas_attn =
+            (per_layer_shapes && !attn_shapes_uniform()) || attn_sinks != nullptr;
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold — see the chunked path above

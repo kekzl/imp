@@ -303,22 +303,34 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 
     // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16.
-    // Only the materialized cuBLAS prefill fallback consumes this. On hd=128
-    // models without learned sinks (gpt-oss is hd=64, so hd==128 already excludes
-    // it) or per-layer shapes, FP16-QK FA2 serves ALL prefill at-or-above cuBLAS
-    // at every length (Qwen3-Coder-30B NVFP4: ~parity pp512, +24% pp1024, +52%
-    // pp2048, measured 2026-06-12) — the buffer is dead weight there, so skip it (reclaims
-    // up to ~380 MiB at batch8/ctx4096). cuBLAS stays the reference for hd != 128
-    // (gemma hd=256), per-layer shapes (gemma-4 hd=512), and the explicit
+    // Only the materialized cuBLAS prefill fallback consumes this. On uniform-
+    // shape models without learned sinks whose head_dim FA2 covers (128 always,
+    // 256 behind attention.fa2_hd256), FP16-QK FA2 serves ALL prefill at-or-above
+    // cuBLAS at every length (hd=128: Qwen3-Coder-30B NVFP4 ~parity pp512, +24%
+    // pp1024, +52% pp2048, 2026-06-12; hd=256 rides the #930/#932 port) — the
+    // buffer is dead weight there, so skip it (reclaims up to ~380 MiB at
+    // batch8/ctx4096). Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on
+    // non-attention layers) take FA2 too since the #932 single-shot refinement.
+    // cuBLAS stays the reference for heterogeneous shapes (gemma-4 dual head_dim),
+    // learned sinks (gpt-oss), hd=256 with fa2_hd256 off, and the explicit
     // fa2_fp16qk=never opt-out. See the run_attention dispatch (FA2 tried first).
-    const int hd_for_attn = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-    const bool fa2_serves_all_prefill = hd_for_attn == 128 &&
+    int hd_for_attn = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+    for (int x : cfg.head_dim_per_layer) {
+        if (x > 0) {
+            hd_for_attn = x;  // hybrids: first attention layer's head_dim
+            break;
+        }
+    }
+    const bool fa2_hd_ok = hd_for_attn == 128 ||
+                           (hd_for_attn == 256 && runtime_config().attention.fa2_hd256);
+    const bool fa2_serves_all_prefill = fa2_hd_ok &&
                                         runtime_config().attention.fa2_fp16qk != "never" &&
-                                        cfg.head_dim_per_layer.empty() &&
-                                        cfg.n_kv_heads_per_layer.empty();
+                                        attn_shapes_uniform() &&
+                                        !model_->profile().is_gpt_oss;
     if (fa2_serves_all_prefill) {
-        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all hd=128 prefill — "
-                     "no S-matrix needed)");
+        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all hd=%d prefill — "
+                     "no S-matrix needed)",
+                     hd_for_attn);
     } else if (!skip_batch_dequant) {
         int nh = cfg.n_heads;
         // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
