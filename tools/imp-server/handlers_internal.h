@@ -125,10 +125,10 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
     return creation > 0 ? creation : 0;
 }
 
-// Set true on the calling thread when handle_messages is delegating to
-// handle_chat_completions via a shim — suppresses inner request-log entries
-// so the Anthropic call only logs once at the outer handler. Defined in
-// handlers_chat_core.cpp.
+// Set true on the calling thread when a shim handler (handle_messages,
+// handle_responses, handle_count_tokens) is delegating to
+// handle_chat_completions — suppresses inner request-log entries so the
+// call only logs once at the outer handler. Defined in handlers_chat_core.cpp.
 extern thread_local bool g_in_anthropic_shim;
 
 // ---------------------------------------------------------------------------

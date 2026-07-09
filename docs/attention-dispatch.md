@@ -8,34 +8,37 @@ If this doc and the code disagree, the code wins. Source of truth is `src/exec/e
 > on hd=128 models (Qwen3 dense/MoE — Q8_0, Q4_K_M, NVFP4) the legacy
 > materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512–pp4096
 > — FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range.
-> Only hd≠128 models (gemma-3-12b, hd=256) still hit it: 3.6–6.9% of prefill
-> time = 92–99% of their attention time.
+> At the time of that measurement hd≠128 models (gemma-3-12b, hd=256) still hit
+> it (3.6–6.9% of prefill time); since #930/#932 hd=256 rides the FA2 port too
+> (`attention.fa2_hd256`, default on), so the cuBLAS path now serves only
+> heterogeneous-shape / sinks / opted-out configs.
 
-## Prefill — gate (post #525: FA2 f16-QK first, cuBLAS as hd≠128 fallback)
+## Prefill — gate (post #525/#932: FA2 f16-QK first at hd 128 and 256, cuBLAS as fallback)
 
-The prefill dispatch in `src/exec/executor_attention.cu` (~line 942) tries the
-FP16-QK FA2 drop-in before the materialized cuBLAS path:
+The prefill dispatch in `src/exec/executor_attention_prefill.cu` (~line 338) tries
+the FP16-QK FA2 drop-in before the materialized cuBLAS path:
 
 ```cpp
-const bool force_cublas_attn = per_layer_shapes || attn_sinks != nullptr;
+// Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on non-attention layers)
+// are FA2-servable since #932 — only truly heterogeneous shapes (gemma-4 dual
+// head_dim) and learned sinks (gpt-oss) force cuBLAS.
+const bool force_cublas_attn = (per_layer_shapes && !attn_shapes_uniform()) ||
+                               attn_sinks != nullptr;
 const bool s_matrix_fits     = attn_scores_buf_ != nullptr &&
                                n <= attn_scores_.shape[1];
 const bool prefer_fmha       = !force_cublas_attn &&
                                (n >= attention.fmha_prefill_threshold);
 
-if (s_matrix_fits && !prefer_fmha) {
-    if (!force_cublas_attn && try_fa2_fp16qk_prefill(...)) { /* FA2 f16-QK */ }
-    else attention_cublas_prefill(...);            // legacy materialized
-} else {
-    attention_prefill_dispatch(...);               // FMHA chain
-}
+if (!force_cublas_attn && try_fa2_fp16qk_prefill(...)) { /* FA2 f16-QK */ }
+else if (s_matrix_fits && !prefer_fmha) attention_cublas_prefill(...); // legacy materialized
+else attention_prefill_dispatch(...);                                  // FMHA chain
 ```
 
 | Condition | Path | Why |
 |---|---|---|
-| short seq (n < `fmha_prefill_threshold`, auto ≈ S-matrix cap + 1), **hd=128**, `fa2_fp16qk != "never"` | `fmha_sm120_fa2_kernel<…,FP16QK=1>` | FP16-QK FA2 drop-in (#525): cuBLAS-FP16-quality without the materialized S-matrix. |
-| short seq, **hd≠128** (gemma hd=256) or `attn_sinks`/per-layer shapes | `attention_cublas_prefill` | Legacy materialized path: cuBLAS QK^T → [nh, n, n] FP16 S-matrix (`attn_scores_mib`, default 384 MiB) → causal softmax → cuBLAS PV. The only remaining production user. |
-| long seq (n ≥ threshold) | FMHA chain below | Tiled O(n) memory; no materialized S. |
+| **hd=128, or hd=256 with `fa2_hd256` (default on)**, uniform shapes, no sinks, `fa2_fp16qk != "never"` | `fmha_sm120_fa2_kernel<…,FP16QK=1>` | FP16-QK FA2 (#525, hd=256 since #930/#932): cuBLAS-FP16-quality without the materialized S-matrix, at every length. |
+| short seq, FA2 declined (heterogeneous shapes, `attn_sinks`, hd ∉ {128, 256}, or `fa2_hd256=false`) | `attention_cublas_prefill` | Legacy materialized path: cuBLAS QK^T → [nh, n, n] FP16 S-matrix (`attn_scores_mib`, default 384 MiB; skipped entirely at init when FA2 serves all prefill, #932) → causal softmax → cuBLAS PV. |
+| long seq (n ≥ threshold), FA2 declined | FMHA chain below | Tiled O(n) memory; no materialized S. |
 | chunked continuation (`q_offset > 0`) with cumulative ctx < threshold | `attention_cublas_prefill` | FA2 f16-QK still declines `q_offset > 0` (conservative blanket gate post-#548); the FMHA chain needs ctx ≥ threshold. |
 
 ### FMHA chain (`src/compute/attention_dispatch.cu`, host model: `attention_dispatch_decision.h`)
@@ -43,9 +46,9 @@ if (s_matrix_fits && !prefer_fmha) {
 Tried in order, first hit wins:
 
 1. **`fmha_sm120_mxfp4_prefill`** — opt-in (`attention_mxfp4_available()`), hd%32==0
-2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd==128 only**. f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
+2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd 128 and 256** (hd=256 via `attention.fa2_hd256`, default on since #932; Bq=64/TWOSLOT instance). f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
 3. **`fmha_sm120_fp8_prefill`** — strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0. Raw e4m3 Q/K conversion compounds per-layer score error on real activations (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill. Off by default.
-4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0. Default server for hd≠128 long prefill (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).
+4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0. Fallback for the configs FA2 declines: hd=256 with `fa2_hd256=false`, FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).
 5. **`flash_attention_blackwell`** — WMMA 128×64 tiles, last tier. Declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in).
 6. **Chain exhausted → `std::runtime_error`** (#654). The old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10); tc also lacks `q_offset`, so chunked continuations would mask wrongly even when it launches. Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim — both error loudly now.
 
@@ -82,4 +85,4 @@ cuBLAS path passes `cfg.attn_logit_softcap` through `attention_cublas_prefill`. 
 
 ## Known wounds
 
-- **~384 MiB cuBLAS S-matrix workspace** (default `attention.attn_scores_mib`, `executor_workspace_buffers.cu`). Caps maximum context length for the legacy hd≠128 cuBLAS fallback (FA2 is the primary hd=128 path since #687). Phase 5 Track E (the six-variant tiled streaming softmax) was **closed**, not deferred — code removed in PR #358. Reopens only if a regression specifically attributes to the workspace cap.
+- **~384 MiB cuBLAS S-matrix workspace** (default `attention.attn_scores_mib`, `executor_workspace_buffers.cu`). Caps maximum context length for the legacy cuBLAS fallback (FA2 is the primary path for hd 128 since #687 and hd 256 since #932; the S-matrix is skipped entirely at init on FA2-served configs). Phase 5 Track E (the six-variant tiled streaming softmax) was **closed**, not deferred — code removed in PR #358. Reopens only if a regression specifically attributes to the workspace cap.

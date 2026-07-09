@@ -31,9 +31,9 @@ struct ProcessDiag {
     bool attention_splitk_pipe = true;
     bool attention_fp8_tile = true;
     bool attention_fp8_tile_gqa = true;
-    bool attention_fa2_f16acc = false;
-    bool attention_fa2_pv_f16acc = false;
-    bool attention_fa2_hd256 = false;
+    bool attention_fa2_f16acc = true;     // matches the config.h default
+    bool attention_fa2_pv_f16acc = true;  // matches the config.h default
+    bool attention_fa2_hd256 = true;  // matches the config.h default (on since #932)
     bool attention_fp8_qk_scaled = false;
     bool force_splitk_fallback = false;  // test hook
     std::string attention_mxfp4_mode = "auto";

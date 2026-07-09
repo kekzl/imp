@@ -94,11 +94,14 @@ else
     attention_prefill_dispatch(...);                        // per-dtype FMHA family
 ```
 
-The FP16-QK FA2 kernel is the primary hd=128 path at every length (at-or-above the
+The FP16-QK FA2 kernel is the primary path for hd=128 and — since #930/#932
+(`attention.fa2_hd256`, default on) — hd=256 at every length (at-or-above the
 materialized cuBLAS path: ~parity pp512, +24% pp1024, +52% pp2048) and needs no
 S-matrix. `attention_cublas_prefill` (cuBLAS QK^T → ~384 MiB S-matrix → causal
-softmax → cuBLAS PV) stays the fallback for the configs FA2 declines — `hd != 128`
-(e.g. Gemma hd=256) and `force_cublas_attn` (learned sinks / per-layer shapes).
+softmax → cuBLAS PV) stays the fallback for the configs FA2 declines — `hd ∉
+{128, 256}`, hd=256 with `fa2_hd256=false`, and `force_cublas_attn` (learned
+sinks / truly heterogeneous per-layer shapes; uniform GDN/Mamba2-hybrid shapes
+are FA2-servable since #932).
 Everything else falls through to `attention_prefill_dispatch`, which selects among
 the per-dtype FMHA kernels. Full coverage matrix: [`attention-dispatch.md`](attention-dispatch.md).
 
@@ -159,8 +162,8 @@ Per token:
 
 ## Known limitations
 
-- **The cuBLAS attention path allocates ~384 MiB of S-matrix workspace** (default `attention.attn_scores_mib`), which caps maximum context length for that legacy path; since #687 FA2 is the primary hd=128 prefill kernel (S-matrix skipped), so this only applies to the hd≠128 cuBLAS fallback (e.g. Gemma hd=256).
-- **`RuntimeConfig::current()` is a global singleton** rather than per-Engine, preventing true multi-engine use in a single process.
+- **The cuBLAS attention path allocates ~384 MiB of S-matrix workspace** (default `attention.attn_scores_mib`), which caps maximum context length for that legacy path; FA2 is the primary prefill kernel for hd=128 (#687) and hd=256 (#932), and on FA2-served configs the S-matrix is skipped entirely at init — so this only applies to the remaining cuBLAS fallback configs (heterogeneous shapes, learned sinks, opted-out hd=256).
+- **`process_diag` is a process-wide config snapshot.** `RuntimeConfig` itself is per-Engine since Phase 5 Track D, but the leaf-utility diagnostics cache (`src/runtime/process_diag.h`) is seeded once per process — two Engines with *different* diagnostics/attention-variant settings in one process would fight over it.
 
 ## Re-rendering the diagram
 
