@@ -154,6 +154,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 
     if (h.primary_tier == StorageTier::Undefined) {
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        // Preserve semantic identity + NVFP4 scale sidecars so the uncached
+        // fallback can (a) diagnose which weight leaked and (b) route packed
+        // NVFP4 to a real dequant instead of feeding raw bytes to cuBLAS.
+        weight.kind = h.kind;
+        weight.scales = h.source_scales;
+        weight.tensor_scale = h.source_tensor_scale;
         gemm_dispatch_uncached_fallback(input, weight, output, ctx);
         return;
     }
@@ -415,6 +421,33 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             return;
         }
     }
+
+    // Native-NVFP4 prefill (M>1) safety net: dequant the packed weight to FP16
+    // and run cuBLAS. Reached when the fast CUTLASS-NVFP4 path above declined
+    // (e.g. kernel shape/workspace decline) and there is no FP16/FP8 prefill
+    // companion — the source is native NVFP4, which dequant_gpu_supported()
+    // rejects, so the GGUF-overlay dequant (above) was skipped too. Without
+    // this, dispatch falls through to imp::gemm_dispatch → the generic gemm(),
+    // which sees the raw packed NVFP4 payload (QType::INT8-typed bytes) and
+    // hands cuBLAS an unsupported FP16×INT8 GEMM → CUBLAS_STATUS_NOT_SUPPORTED
+    // (status 15) → silent repeated-token garbage + downstream IMA. This hit
+    // the Qwen3.6-35B-A3B-NVFP4 shared-expert gate/up projections (the only
+    // native-NVFP4 dense weights routed through gemm_via_handle_). Slower than
+    // CUTLASS but correct; only fires on the decline.
+    if (M > 1 && h.source_data && h.source_scales &&
+        (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4) &&
+        (h.source_qtype == QType::NVFP4 || h.source_qtype == QType::INT8)) {
+        NvFP4QuantResult nv;
+        nv.packed_data = const_cast<void*>(h.source_data);
+        nv.micro_scales = h.source_scales;
+        nv.tensor_scale = h.source_tensor_scale;
+        nv.N = h.shape[0];
+        nv.K = h.shape[1] * 2;  // packed K/2 → logical K
+        nv.owned = false;       // borrows resident weight storage
+        gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta);
+        return;
+    }
+
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        ws_.shared(), ws_.shared_size(), ctx.stream);
 }
