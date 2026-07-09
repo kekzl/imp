@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <unordered_map>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 #include <utility>
 
@@ -371,11 +372,53 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // repeat runs produce bitwise-identical prefill outputs.
     const bool s_deterministic_gemm = imp::process_diag_deterministic_gemm();
     if (s_deterministic_gemm || nresults == 1) {
-        entry.algo = results[0].algo;
-        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
+        // Deterministic selection must still be VALID: the cuBLASLt heuristic
+        // can return a top candidate that faults at RUNTIME on sm_120 (status
+        // 14 / NOT_SUPPORTED at certain M) — the timing path below rejects
+        // those in its warmup, but deterministic mode skips timing. Blindly
+        // trusting results[0] here is what let an unvalidated algo reach the
+        // real matmul and corrupt the forward pass (FP8-KV forces this path
+        // model-wide on head_dim!=128 models; the failure surfaced as silent
+        // repeated-token garbage on Qwen3.6-35B FFN GEMMs). Warmup-probe the
+        // candidates in heuristic order and pick the FIRST that survives —
+        // that order is stable across runs, so determinism is preserved.
+        int pick = 0;
+        if (nresults > 1 && s_bench_scratch && C_bytes <= s_bench_scratch_size) {
+            void* temp_c = s_bench_scratch;
+            constexpr int kDetWarmupIters = 2;
+            pick = -1;
+            for (int i = 0; i < nresults && pick < 0; i++) {
+                if (results[i].workspaceSize > s_workspace_size)
+                    continue;
+                bool ok = true;
+                for (int w = 0; w < kDetWarmupIters; w++) {
+                    cublasStatus_t wst = cublasLtMatmul(
+                        lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero,
+                        temp_c, entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
+                        results[i].workspaceSize, stream);
+                    if (wst != CUBLAS_STATUS_SUCCESS) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok)
+                    pick = i;
+            }
+            if (pick < 0) {
+                // Every candidate faults at runtime — leave has_algo=false so
+                // the matmul uses cuBLASLt's own default (and the caller's
+                // fallback chain / fatal guard handles a genuine dead shape).
+                entry.has_algo = false;
+                entry.workspace_size = 0;
+                return;
+            }
+        }
+        entry.algo = results[pick].algo;
+        entry.workspace_size =
+            (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
         entry.has_algo = true;
         if (gemm_algo_log_enabled() && M > 0) {
-            fprintf(stderr, "[gemm-algo]   PICKED cand[0] (deterministic or only candidate)\n");
+            fprintf(stderr, "[gemm-algo]   PICKED cand[%d] (deterministic, warmup-validated)\n", pick);
         }
         return;
     }
@@ -603,9 +646,22 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 (int)st, (long)M, (long)K, (long)N);
             cublasHandle_t fb_handle = get_cublas_handle();
             cublasSetStream(fb_handle, stream);
-            cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha, B.data,
-                         cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C,
-                         (int)N, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
+            cublasStatus_t fb_st = cublasGemmEx(
+                fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha, B.data, cuda_dtype_B,
+                (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C, (int)N,
+                CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
+            if (fb_st != CUBLAS_STATUS_SUCCESS) {
+                // Both cublasLt and the cublasGemmEx fallback failed: C holds
+                // garbage. Continuing corrupts the forward pass silently
+                // (repeated-token gibberish + downstream IMA). Fail loudly —
+                // the throw is translated to ImpError at the API boundary.
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "gemm(INT): cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
+                         "M=%ld K=%ld N=%ld — aborting rather than emitting garbage",
+                         (int)fb_st, (long)M, (long)K, (long)N);
+                throw std::runtime_error(msg);
+            }
         }
     } else {
         // COMPUTE_16F descriptors take __half alpha/beta (scale type R_16F).
@@ -646,14 +702,19 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
                 if (fb_st != CUBLAS_STATUS_SUCCESS) {
                     // Both cublasLt and cublasGemmEx failed. Output buffer holds
-                    // garbage; downstream kernels will likely IMA on its values
-                    // or produce silent NaN. Surface the failure here instead.
-                    IMP_LOG_ERROR(
-                        "gemm: cublasGemmEx fallback also failed (status %d) "
-                        "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d. Output "
-                        "buffer is garbage; expect downstream IMA.",
-                        (int)fb_st, (long)M, (long)K, (long)N, (int)cuda_dtype_A, (int)cuda_dtype_B,
-                        (int)cuda_dtype_C);
+                    // garbage; continuing corrupts the forward pass silently
+                    // (repeated-token gibberish + downstream IMA). Fail loudly
+                    // instead — the throw is translated to ImpError at the API
+                    // boundary, and under CUDA-graph capture it aborts the
+                    // capture (per-step fallback) rather than baking in garbage.
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "gemm: cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
+                             "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d — aborting rather than "
+                             "emitting garbage",
+                             (int)fb_st, (long)M, (long)K, (long)N, (int)cuda_dtype_A,
+                             (int)cuda_dtype_B, (int)cuda_dtype_C);
+                    throw std::runtime_error(msg);
                 }
             }
         }
