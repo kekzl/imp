@@ -378,8 +378,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         // those in its warmup, but deterministic mode skips timing. Blindly
         // trusting results[0] here is what let an unvalidated algo reach the
         // real matmul and corrupt the forward pass (FP8-KV forces this path
-        // model-wide on head_dim!=128 models; the failure surfaced as silent
-        // repeated-token garbage on Qwen3.6-35B FFN GEMMs). Warmup-probe the
+        // model-wide on models FA2 doesn't serve — pre-#932 that included all
+        // hd=256 models; the failure surfaced as silent repeated-token garbage
+        // on Qwen3.6-35B FFN GEMMs). Warmup-probe the
         // candidates in heuristic order and pick the FIRST that survives —
         // that order is stable across runs, so determinism is preserved.
         int pick = 0;

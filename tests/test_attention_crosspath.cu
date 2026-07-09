@@ -26,6 +26,7 @@
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
 #include "refs/attention_crosspath_golden.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -140,8 +141,24 @@ ErrStats err_stats(const std::vector<float>& got, const std::vector<double>& ref
 
 class AttentionCrossPathTest : public ::testing::Test {
 protected:
-    void SetUp() override { cudaStreamCreate(&stream_); }
-    void TearDown() override { cudaStreamDestroy(stream_); }
+    void SetUp() override {
+        cudaStreamCreate(&stream_);
+        // The strictness model below assumes FA2-f16 runs the f32-score-chain
+        // variant. Pin it explicitly — the process_diag defaults follow the
+        // production config (f16acc on since #674), which only meets the wider
+        // f16-class envelope, not the 1e-2 pairwise assert.
+        saved_f16acc_ = imp::process_diag_fa2_f16acc();
+        saved_pv_f16acc_ = imp::process_diag_fa2_pv_f16acc();
+        imp::process_diag_set_fa2_f16acc(false);
+        imp::process_diag_set_fa2_pv_f16acc(false);
+    }
+    void TearDown() override {
+        imp::process_diag_set_fa2_f16acc(saved_f16acc_);
+        imp::process_diag_set_fa2_pv_f16acc(saved_pv_f16acc_);
+        cudaStreamDestroy(stream_);
+    }
+    bool saved_f16acc_ = false;
+    bool saved_pv_f16acc_ = false;
 
     // Strictness model (see tests/refs/README.md):
     // the f32-score-chain paths (cuBLAS FP32-S, FA2-f16) and — since the

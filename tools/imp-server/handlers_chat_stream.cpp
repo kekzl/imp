@@ -34,9 +34,7 @@
 // must outlive the SSE response (httplib invokes the chunked provider after
 // this function returns; ctx is a stack-local in handle_chat_completions
 // which keeps the request frame alive until the response is fully sent).
-bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                             const std::shared_ptr<ServerRequest>& server_req);
-
+// run_chat_stream_ itself is declared in handlers_internal.h.
 void stream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                                   const std::shared_ptr<ServerRequest>& server_req) {
     // SSE streaming response

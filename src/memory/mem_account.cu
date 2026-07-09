@@ -63,8 +63,6 @@ void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
 void MemAccount::checkpoint(const char* name) {
     size_t free_b = 0, total_b = 0;
     query_free_total(free_b, total_b);
-    if (total_b)
-        total_vram_ = total_b;
     sample_once();  // fold the checkpoint instant into the peak too
     if (!enabled_.load(std::memory_order_relaxed))
         return;

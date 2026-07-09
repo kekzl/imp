@@ -65,7 +65,7 @@ bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follo
 // test hooks (mirror process_diag_set_cublas_fp16_acc)
 void process_diag_set_fa2_f16acc(bool v);
 void process_diag_set_fa2_pv_f16acc(bool v);
-bool process_diag_fa2_hd256();  // stage-1 HD=256 FA2 port (attention.fa2_hd256, default off)
+bool process_diag_fa2_hd256();  // HD=256 FA2 port (attention.fa2_hd256, default on since #932)
 void process_diag_set_fa2_hd256(bool v);
 bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
 void process_diag_set_fp8_qk_scaled(bool v);

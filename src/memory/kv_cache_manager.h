@@ -161,8 +161,6 @@ public:
     // SWA blocks are never hashed, pinned, persisted, or shared.
     void enable_swa_sizing(int window_tokens, int slack_tokens);
     bool swa_sizing_enabled() const { return swa_window_ > 0; }
-    int swa_window() const { return swa_window_; }
-    int swa_slack() const { return swa_slack_; }
     [[nodiscard]] bool swa_prepare(int seq_id, int from_tokens, int upto_tokens);
     [[nodiscard]] bool swa_prepare(int seq_id, int upto_tokens) {
         return swa_prepare(seq_id, upto_tokens, upto_tokens);

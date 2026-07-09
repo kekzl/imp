@@ -4,6 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **Structural audit #6** (`docs/audit/structural_debt_2026_07_10.md`): swept the
+  ~40 PRs since audit #5. Confirmed findings filed as #941 (responses-stream
+  metrics/keepalive drift), #942 (pre-upload KV reserve computes 0 bytes for
+  4-bit KV dtypes), #943 (`workspace_estimate()` still reserves the S-matrix on
+  FA2-served configs). Cleanup landed alongside: dead `MemAccount::total_vram_`
+  and unused `KVCacheManager::swa_window()/swa_slack()` getters removed; stale
+  "fa2_hd256 default off" comments (#932 flipped it on) and hd=256 routing docs
+  (`attention-dispatch.md`, `architecture.md`) refreshed; `process_diag`
+  fallback defaults for `fa2_f16acc`/`fa2_pv_f16acc`/`fa2_hd256` aligned with
+  the config defaults per the header's own contract (the crosspath test now
+  pins the f32-score-chain explicitly instead of inheriting it).
+
 ### Fixed
 - **An explicit `enable_thinking: true` request is now honored on templates
   that default the switch to a closed block** (e.g. Qwen3.5-4B). The chat

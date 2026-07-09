@@ -36,8 +36,8 @@ static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, c
                                    cudaStream_t stream, const int* d_kv_len = nullptr) {
     if (rcfg.attention.fa2_fp16qk == "never")
         return false;
-    // hd=256: stage-1 FA2 port, opt-in (attention.fa2_hd256). Other head
-    // dims decline as before; the kernel wrapper re-checks the same gate.
+    // hd=256: stage-1 FA2 port (attention.fa2_hd256, default on since #932).
+    // Other head dims decline as before; the kernel wrapper re-checks the gate.
     if (hd != 128 && !(hd == 256 && rcfg.attention.fa2_hd256))
         return false;
     // Chunk CONTINUATION (q_offset > 0, queries attend gathered past KV) is

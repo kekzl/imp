@@ -100,7 +100,6 @@ private:
     std::vector<Pool> pools_;
     std::vector<Checkpoint> checkpoints_;
     std::string dump_path_;
-    size_t total_vram_ = 0;
 
     std::atomic<size_t> peak_used_{0};
     std::atomic<bool> sampler_run_{false};

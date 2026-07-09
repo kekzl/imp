@@ -46,7 +46,7 @@
             // head_dim 256/512) and learned sinks (gpt-oss) require cuBLAS.
             const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
             // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
-            // off): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
+            // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
             const bool fa2_hd_ok =
                 hd == 128 || (hd == 256 && runtime_config().attention.fa2_hd256);
             const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && fa2_hd_ok &&
@@ -364,8 +364,9 @@
         // fast path does not depend on the attn_scores buffer being allocated or
         // large enough for n: a too-small buffer used to make s_matrix_fits false
         // and drop n≈512 chunks into the slow tiled dispatch (−93% pp512). cuBLAS
-        // stays the fallback for the configs f16-QK declines (hd != 128) and for
-        // force_cublas_attn (learned sinks / per-layer shapes).
+        // stays the fallback for the configs f16-QK declines (hd ∉ {128, 256},
+        // or hd=256 with fa2_hd256 off) and for force_cublas_attn (learned
+        // sinks / heterogeneous per-layer shapes).
         if (!force_cublas_attn &&
             try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
                                    layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,

@@ -1836,7 +1836,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (seq_q == 0 || seq_kv == 0)
         return false;
     // HD=128 is the tuned mainline. HD=256 (Qwen3.6 hybrids, gemma-class) is a
-    // stage-1 port behind attention.fa2_hd256 (default off): fp16-qk only,
+    // stage-1 port behind attention.fa2_hd256 (default ON since #932): fp16-qk only,
     // fixed Bq=64/Bkv=64/TWOSLOT (double-buffer at HD=256 needs 135 KB smem >
     // the 99 KB opt-in; TWOSLOT fits at 67.6 KB). Register pressure doubles
     // with HD (a_frag + O accumulator scale linearly), so the HD=256 instances
