@@ -542,6 +542,7 @@ if(IMP_BUILD_TESTS)
             tests/test_sse_stream_utils.cpp
             tests/test_tool_call.cpp
             tests/test_tool_stream_filter.cpp
+            tests/test_reasoning_reconcile.cpp
             tests/test_server_auth.cpp
             tests/test_server_args.cpp
             tests/test_base64.cpp)

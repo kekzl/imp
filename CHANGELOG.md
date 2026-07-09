@@ -31,6 +31,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   gemma-class models.
 
 ### Fixed
+- **Qwen3.5-4B-mxfp4 (and any closed-block reasoning template) now returns its
+  answer in `content`, not `reasoning_content` (#934 follow-up).** The server
+  defaulted thinking ON whenever the chat template merely *mentioned*
+  `enable_thinking`, but Qwen3.5-4B's template defaults it to a pre-*closed*
+  empty block `<think>\n\n</think>\n\n` (the model answers directly). Starting
+  the reasoning splitter in REASONING then trapped the whole answer in
+  `reasoning_content` with empty user-visible `content` on every OpenAI /
+  Anthropic / Responses endpoint. `enable_thinking` is now reconciled against
+  what the template *actually* rendered into the prompt tail (open prefix →
+  thinking on; pre-closed block → off), via a pure, unit-tested helper. Genuine
+  reasoning models (open-`<think>` prefix, e.g. Qwen3-14B) are unaffected.
+- **Qwen3.5-4B-mxfp4 decode no longer aborts CUDA-graph capture with cuBLAS
+  status-14.** The GDN projection GEMM (FP16, N=32) was rejected by the
+  capture-safe sm_120 WMMA kernel's `N < BN` guard and fell through to
+  cuBLASLt, which fails under stream capture on sm_120 → the whole decode graph
+  fell back to per-step. The kernel already masks partial N/M tiles in both the
+  load (cp.async src-size=0 zero-fill) and the store (`g_col >= N`), so the
+  guard was needlessly conservative; narrow N is now accepted and capture
+  succeeds. Correctness pinned by a new N=32 test.
 - **MXFP4-GDN hybrids no longer serve `!!!…` garbage when VRAM is tight
   (#934).** On GDN hybrids the native MXFP4 GEMV is unavailable, so decode
   requires the FP16 dequant cache (~4x the raw MXFP4 bytes) resident alongside

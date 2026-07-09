@@ -294,10 +294,13 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
                               float beta, cudaStream_t stream) {
     if (!capture_gemm_fp16_sm120_available()) return false;
     if (M <= 0 || N <= 0 || K <= 0) return false;
-    // K must be a multiple of BK=32 (cp.async chunks fill full tiles). N must be
-    // at least one BN-block. M is handled by either BM=64 or BM=128 variant.
+    // K must be a multiple of BK=32 (cp.async chunks fill full tiles). N and M
+    // partial tiles are handled by both the load (cp.async src-size=0 zero-fill
+    // for g_row/g_col past N/M) and the store (masked `g_col >= N`), so any
+    // positive N is safe — a narrow N < BN just wastes part of the BN=128 tile.
+    // Accepting it is what matters under capture: cuBLASLt would else fail with
+    // status 14 and abort the whole decode graph (#934, GDN N=32 projections).
     if (K % BK != 0) return false;
-    if (N < BN) return false;
 
     bool use_bm64 = should_use_bm64(M, N);
     int BM_v     = use_bm64 ? 64 : 128;

@@ -30,6 +30,31 @@
 
 namespace imp::server {
 
+// Reconcile a heuristic "thinking is on" default against what the chat
+// template ACTUALLY rendered into the prompt tail. The render is ground truth
+// for whether the model's generation begins inside an open <think> block:
+//   open block   (<think> present, no matching </think>) -> thinking ON
+//   closed block (<think> AND </think> present)          -> thinking OFF
+//   no <think>   (neither)                               -> keep `current`
+// The closed-block downgrade is #934: templates such as Qwen3.5-4B default
+// enable_thinking to a pre-closed empty block `<think>\n\n</think>\n\n` (the
+// model answers directly), but the upstream heuristic only sees the template
+// *mention* thinking (its Jinja names `enable_thinking`) and turns it ON.
+// Starting the reasoning splitter in REASONING then traps the whole answer in
+// reasoning_content with empty user-visible content. The upgrade direction was
+// already handled inline; this makes the decision symmetric and testable. An
+// explicit caller `enable_thinking` request is left untouched (a closed-block
+// template cannot honor an explicit `true` anyway, and we do not silently flip
+// an explicit choice — that is the caller's to make).
+inline bool reconcile_thinking_with_prompt_tail(bool current, bool explicit_set,
+                                                bool tail_has_think, bool tail_has_close) {
+    if (tail_has_think && !tail_has_close)
+        return true;  // open prefix: model is mid-reasoning
+    if (tail_has_think && tail_has_close && !explicit_set)
+        return false;  // pre-closed block: model answers directly (#934)
+    return current;    // no <think> at all, or explicit request — leave as-is
+}
+
 enum class ThinkPhase { SCAN, REASONING, CONTENT };
 
 class StreamReasoningSplitter {
