@@ -24,6 +24,8 @@
 #include <cstdlib>
 #include <unordered_set>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace imp {
@@ -500,18 +502,24 @@ if (mx_native > 0) {
         // old IMP_MXFP4_FP16_FALLBACK=1 semantics); the legacy =force escape
         // hatch is obsolete, so oversubscription is always refused here.
         if (oversubscribe) {
-            IMP_LOG_ERROR(
-                "MXFP4 FP16 fallback would oversubscribe VRAM "
-                "(need %.1f GiB + %.1f GiB runtime headroom, %.1f GiB free). "
-                "Model is too large for this GPU with the FP16 decode "
-                "fallback. Use a smaller quant or a smaller model.",
-                fp16_total / (1024.0 * 1024.0 * 1024.0),
-                kRuntimeHeadroom / (1024.0 * 1024.0 * 1024.0),
-                free_mem / (1024.0 * 1024.0 * 1024.0));
-            // Skip the alloc — wcache_->fp16 stays empty for these weights.
-            // Downstream code will detect the missing entries and bail
-            // with its own diagnostic instead of silently corrupting state.
-            fp16_total = 0;
+            // We are inside `if (!mxfp4_gemv_available)`: the native MXFP4
+            // GEMV is unavailable (GDN weights / forced / non-linear scales),
+            // so this FP16 fallback is the ONLY valid decode path for these
+            // weights. Skipping it does NOT degrade gracefully — decode then
+            // runs against weights with no usable kernel and emits uniform
+            // logits → token-0 ("!") garbage (#934). The earlier "downstream
+            // will bail" assumption was false. Fail loud at load instead: the
+            // VRAM budget reserves this fallback up front (vram_budget.cpp), so
+            // reaching here means the model genuinely does not fit — surface
+            // that instead of serving garbage.
+            throw std::runtime_error(
+                "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
+                std::to_string(fp16_total / (1024 * 1024)) + " MiB + " +
+                std::to_string(kRuntimeHeadroom / (1024 * 1024)) + " MiB runtime headroom, " +
+                std::to_string(free_mem / (1024 * 1024)) +
+                " MiB free). This model needs the FP16 decode cache (native MXFP4 GEMV is "
+                "unavailable on its weights) and does not fit on this GPU at the requested "
+                "context length. Reduce --min-kv-tokens / max context, or use a smaller model.");
         }
     }
     if (fp16_total > 0) {

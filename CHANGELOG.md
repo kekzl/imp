@@ -31,6 +31,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   gemma-class models.
 
 ### Fixed
+- **MXFP4-GDN hybrids no longer serve `!!!…` garbage when VRAM is tight
+  (#934).** On GDN hybrids the native MXFP4 GEMV is unavailable, so decode
+  requires the FP16 dequant cache (~4x the raw MXFP4 bytes) resident alongside
+  the weights — but the VRAM budget never charged for it. At the server's
+  default (large) `max_seq_len` the KV pool ate the headroom, the FP16 fallback
+  then failed to allocate, and decode ran against weights with no usable kernel
+  → uniform logits → token-0 (`!`) garbage. `compute_vram_budget` now reserves
+  the MXFP4→FP16 fallback up front (mirroring the SWA/SSM/NVFP4/Q4_K reserves)
+  so the KV pool sizes down to leave room, and the fallback path in
+  `pre_dequant_phase3_cutlass` now throws a legible out-of-VRAM error at load
+  instead of silently skipping the alloc and serving garbage. Verified on
+  Qwen3.5-4B-mxfp4 via imp-server at default context: coherent output restored.
 - **Deterministic cuBLAS GEMM now validates its algo choice (intermittent
   status-14 garbage on FP8-KV / head_dim=256 models).** `runtime.deterministic_gemm`
   (also force-enabled for FP8 KV on non-FA2 / head_dim!=128 models like
