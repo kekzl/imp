@@ -85,7 +85,12 @@ public:
     void use_workspace(int slot);
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);
-    size_t workspace_estimate() const;
+    // include_attn_scores: charge the cuBLAS S-matrix term (capped 256 MiB,
+    // non-MoE only). Pass false when FA2 serves all prefill — the allocator
+    // skips the buffer there (#932), so the estimate must not hold phantom
+    // headroom for it (#943). GraphExecutor::workspace_estimate() derives
+    // the flag from fa2_serves_all_prefill().
+    size_t workspace_estimate(bool include_attn_scores) const;
 
     // Free the owned shared + persistent workspace buffers (called from
     // GraphExecutor::free_buffers). Mirrors the original free path exactly:

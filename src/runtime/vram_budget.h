@@ -74,4 +74,12 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
                                size_t mandatory_cache_prealloc = 0);
 
+// Bytes of one paged KV block for a single layer, K+V combined (2x),
+// packing- and scale-aware. Single source for every KV-size estimate
+// (#942): raw dtype_size() returns 0 for NVFP4/MXFP4_KV (zeroing the
+// estimate), counts INT4 at 1 byte/elem (2x the packed size), and knows
+// nothing about the per-token (INT8/INT4) or per-16-element-group
+// (NVFP4/MXFP4_KV) scale overhead the cache actually stores.
+size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, int head_dim);
+
 }  // namespace imp

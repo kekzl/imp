@@ -77,8 +77,13 @@ public:
     [[nodiscard]] bool allocate_workspaces(bool experts_on_host = false);
 
     // Estimated GPU memory needed by allocate_workspaces().
-    // Used by Engine to compute the expert upload reserve.
-    size_t workspace_estimate() const { return ws_.workspace_estimate(); }
+    // Used by Engine to compute the expert upload reserve. The S-matrix term
+    // is included only when the allocator would actually build one (#943) —
+    // on FA2-served configs it is skipped there, so charging it here would
+    // hold up to 256 MiB of phantom headroom out of the cache/KV planners.
+    size_t workspace_estimate() const {
+        return ws_.workspace_estimate(/*include_attn_scores=*/!fa2_serves_all_prefill());
+    }
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
@@ -256,6 +261,12 @@ public:
     // FA2/FMHA chunked-prefill family; only truly heterogeneous shapes
     // (Gemma-4 dual head_dim 256/512) require the rectangular cuBLAS path.
     bool attn_shapes_uniform() const;
+
+    // True when FP16-QK FA2 serves ALL prefill for this model (uniform
+    // shapes, no learned sinks, head_dim covered: 128 always, 256 behind
+    // attention.fa2_hd256, fa2_fp16qk != "never"). Shared by the S-matrix
+    // allocator skip and workspace_estimate() so the two cannot drift (#943).
+    bool fa2_serves_all_prefill() const;
 
     // Largest prefill chunk starting at `offset` that the chunked-attention
     // dispatch can serve without overflowing the cuBLAS S-matrix (constraint:

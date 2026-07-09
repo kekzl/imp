@@ -179,8 +179,8 @@ bool Engine::init_kv_cache() {
 
     {
         QType kv_dtype = config_.kv_cache_dtype;
-        size_t block_bytes = static_cast<size_t>(kv_bs) * mcfg.n_kv_heads * head_dim * dtype_size(kv_dtype);
-        size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
+        size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks *
+                          kv_block_bytes_per_layer(kv_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
         IMP_LOG_INFO(
             "KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
             "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",

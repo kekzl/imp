@@ -314,23 +314,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // cuBLAS stays the reference for heterogeneous shapes (gemma-4 dual head_dim),
     // learned sinks (gpt-oss), hd=256 with fa2_hd256 off, and the explicit
     // fa2_fp16qk=never opt-out. See the run_attention dispatch (FA2 tried first).
-    int hd_for_attn = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-    for (int x : cfg.head_dim_per_layer) {
-        if (x > 0) {
-            hd_for_attn = x;  // hybrids: first attention layer's head_dim
-            break;
-        }
-    }
-    const bool fa2_hd_ok = hd_for_attn == 128 ||
-                           (hd_for_attn == 256 && runtime_config().attention.fa2_hd256);
-    const bool fa2_serves_all_prefill = fa2_hd_ok &&
-                                        runtime_config().attention.fa2_fp16qk != "never" &&
-                                        attn_shapes_uniform() &&
-                                        !model_->profile().is_gpt_oss;
-    if (fa2_serves_all_prefill) {
-        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all hd=%d prefill — "
-                     "no S-matrix needed)",
-                     hd_for_attn);
+    if (fa2_serves_all_prefill()) {
+        IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — "
+                     "no S-matrix needed)");
     } else if (!skip_batch_dequant) {
         int nh = cfg.n_heads;
         // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
@@ -1310,6 +1296,21 @@ bool GraphExecutor::attn_shapes_uniform() const {
         return true;
     };
     return uniform(cfg.head_dim_per_layer) && uniform(cfg.n_kv_heads_per_layer);
+}
+
+bool GraphExecutor::fa2_serves_all_prefill() const {
+    const auto& cfg = model_->config();
+    int hd_for_attn = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+    for (int x : cfg.head_dim_per_layer) {
+        if (x > 0) {
+            hd_for_attn = x;  // hybrids: first attention layer's head_dim
+            break;
+        }
+    }
+    const bool fa2_hd_ok = hd_for_attn == 128 ||
+                           (hd_for_attn == 256 && runtime_config().attention.fa2_hd256);
+    return fa2_hd_ok && runtime_config().attention.fa2_fp16qk != "never" &&
+           attn_shapes_uniform() && !model_->profile().is_gpt_oss;
 }
 
 int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {

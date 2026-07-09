@@ -4,6 +4,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **Streaming `/v1/responses` requests now update server metrics and send SSE
+  keepalives** (#941). The responses token loop never touched `requests_total`,
+  the token counters, or the TTFT/duration/inter-token histograms (only
+  `requests_cancelled`), and emitted nothing during long prefills — reverse
+  proxies could kill the idle stream. Both blocks now match the chat/messages
+  streams.
+- **The pre-upload KV reserve computed 0 bytes for NVFP4/MXFP4_KV cache
+  dtypes** (#942): it multiplied by raw `dtype_size()`, which has no case for
+  the packed 4-bit KV dtypes (and counts INT4 at twice its packed size, with
+  no scale overhead anywhere). The packing- and scale-aware per-block
+  calculation is now shared (`kv_block_bytes_per_layer`) between the VRAM
+  budget planner, the expert-offload reserve, and the KV init log.
+- **`workspace_estimate()` no longer charges the 256 MiB cuBLAS S-matrix on
+  FA2-served configs** (#943): the allocator skips that buffer since #932, but
+  the estimate still reserved it, holding phantom headroom out of the
+  cache/KV planners during weight upload. The gate (`fa2_serves_all_prefill`)
+  is now a shared predicate so the two sites cannot drift.
+
 ### Changed
 - **Structural audit #6** (`docs/audit/structural_debt_2026_07_10.md`): swept the
   ~40 PRs since audit #5. Confirmed findings filed as #941 (responses-stream
