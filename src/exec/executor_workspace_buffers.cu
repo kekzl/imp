@@ -1369,8 +1369,13 @@ bool GraphExecutor::chunk_capture_supported() const {
             break;
         }
     }
-    if (hd_u != 128)
-        return false;  // FP16-QK FA2 is the only device-length chunked kernel
+    // FP16-QK FA2 is the only device-length chunked attention kernel. hd=256
+    // rides the #930 port (d_kv_len is a runtime kernel argument shared by
+    // every instance); the GDN/Mamba2 recurrent kernels stop state updates at
+    // the device chunk length (d_chunk_len), so hd=256 hybrids (Qwen3.5/3.6)
+    // are capture-eligible when the fa2_hd256 flag is on.
+    if (hd_u != 128 && !(hd_u == 256 && runtime_config().attention.fa2_hd256))
+        return false;
     if (runtime_config().attention.fa2_fp16qk == "never")
         return false;
     // MoE: only the CUTLASS 3.x device-args grouped path records into a

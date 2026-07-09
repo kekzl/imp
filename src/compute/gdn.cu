@@ -1,6 +1,9 @@
 #include "compute/gdn_internal.cuh"
 #include "core/logging.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace imp {
 
 // Forward declarations
@@ -33,11 +36,17 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     const float* __restrict__ dt_bias,   // [n_heads] FP32
     float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
     YOut* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16 or FP32
-    int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout) {
+    int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout,
+    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
     const int d = threadIdx.x;
+    // Padded verify chunk (#847): y is produced for every row (padding rows
+    // are causally invisible downstream), but the committed h_state is the
+    // register snapshot at the real last row — H_reg keeps evolving through
+    // the pads only to define their (discarded) y values.
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
 
     // Head-to-K-group mapping. GGUF stores heads in tiled layout where head h's
     // group is `h % n_groups`. HF SafeTensors (Qwen3.5/3.6) stores heads in
@@ -164,19 +173,21 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
             }
         }
 
+        // Commit the state at the real last row (per-thread register column,
+        // no barrier needed). For the unpadded case real_n == n_tokens and
+        // this is the single end-of-scan store the kernel always did.
+        if (t + 1 == real_n) {
+            float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+            for (int s = 0; s < SS; s++)
+                H_col[s * HD] = H_reg[s];
+        }
+
         // Sync before next token — the next iteration overwrites s_k/s_q in
         // shared memory. Without this barrier, fast threads can overwrite
         // s_k/s_q while slow threads are still reading them in the loops above.
         if (t + 1 < n_tokens)
             __syncthreads();
-    }
-
-    // Store state back to global memory (once, at the end)
-    {
-        float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-#pragma unroll
-        for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
     }
 }
 
@@ -305,7 +316,7 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                        int grouped_layout) {
+                        int grouped_layout, const int* d_real_n) {
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
 
@@ -313,13 +324,18 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     if (head_dim_ssm == 128 && state_size == 128) {
         gdn_scan_fused_kernel<128, 128, half>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
-                                             n_heads, n_groups, conv_channels, grouped_layout);
+                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, half>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
-                                            n_heads, n_groups, conv_channels, grouped_layout);
+                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
     } else {
-        // Fallback: per-token loop (for unsupported HD/SS sizes)
+        // Fallback: per-token loop (for unsupported HD/SS sizes). The host
+        // loop cannot bound itself by a device-side length — reject padded
+        // verify chunks loudly instead of advancing state through pad rows.
+        if (d_real_n != nullptr)
+            throw std::runtime_error("gdn_scan_fused_f32: padded verify chunk unsupported for HD=" +
+                                     std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
         int inner = n_heads * head_dim_ssm;
         int BC_size = n_groups * state_size;
         size_t smem_old = 2 * state_size * sizeof(float) + 2 * sizeof(float);
@@ -338,17 +354,20 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout) {
+                            cudaStream_t stream, int grouped_layout, const int* d_real_n) {
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
     if (head_dim_ssm == 128 && state_size == 128) {
         gdn_scan_fused_kernel<128, 128, float>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
-                                             n_heads, n_groups, conv_channels, grouped_layout);
+                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, float>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
-                                            n_heads, n_groups, conv_channels, grouped_layout);
+                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
     } else {
+        if (d_real_n != nullptr)
+            throw std::runtime_error("gdn_scan_fused_fp32out: padded verify chunk unsupported for HD=" +
+                                     std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
         // No FP32 fallback: supported sizes are HD=SS=128 / 64 only.
         // Fall back to FP16 path + post-hoc upcast (precision loss intact).
         int inner = n_heads * head_dim_ssm;
@@ -398,13 +417,16 @@ __global__ void gdn_scan_reference_kernel(
     float* __restrict__ h_state,         // [n_heads, state_size, head_dim_v] FP32
     half* __restrict__ y_out,            // [n_tokens, n_heads * head_dim_v] FP16
     int n_tokens, int n_heads, int n_groups, int head_dim_v, int state_size, int conv_channels,
-    int grouped_layout) {
+    int grouped_layout, const int* __restrict__ d_real_n) {
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
     const int d = threadIdx.x;  // [0, head_dim_v)
     const int SS = state_size;
     const int HD = head_dim_v;
+    // Padded verify chunk (#847): commit the state at the real last row; pads
+    // only define their (discarded) y rows. See gdn_scan_fused_kernel.
+    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
 
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
@@ -513,22 +535,23 @@ __global__ void gdn_scan_reference_kernel(
 
         y_out[t * inner + h * HD + d] = __float2half(y_partial * rsqrtf(static_cast<float>(HD)));
 
-        __syncthreads();  // before next token overwrites s_k/s_q/s_v
-    }
-
-    // Store state back to global.
-    {
-        float* H_dst = h_state + static_cast<size_t>(h) * SS * HD;
-        for (int idx = d; idx < SS * HD; idx += HD) {
-            H_dst[idx] = s_H[idx];
+        // Commit the state at the real last row. Each thread copies exactly
+        // the column (d, d+HD, ...) it wrote above — no barrier needed.
+        if (t + 1 == real_n) {
+            float* H_dst = h_state + static_cast<size_t>(h) * SS * HD;
+            for (int idx = d; idx < SS * HD; idx += HD) {
+                H_dst[idx] = s_H[idx];
+            }
         }
+
+        __syncthreads();  // before next token overwrites s_k/s_q/s_v
     }
 }
 
 void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                             int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                            int grouped_layout) {
+                            int grouped_layout, const int* d_real_n) {
     // Shared memory: state slab [SS*HD] + K[SS] + Q[SS] + V[HD] + reduce[HD]
     // For Qwen 3.6 (SS=128, HD=128): ~66 KB — exceeds 48 KB default per block,
     // needs the opt-in dynamic-shared attribute.
@@ -542,7 +565,8 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
     gdn_scan_reference_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias,
                                                                        h_state, y, n_tokens, n_heads,
                                                                        n_groups, head_dim_ssm, state_size,
-                                                                       conv_channels, grouped_layout);
+                                                                       conv_channels, grouped_layout,
+                                                                       d_real_n);
 }
 
 // FP32-input variant: reads y as FP32, writes FP16. Used together with
