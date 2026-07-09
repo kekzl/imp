@@ -459,6 +459,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         min_kv_tok = std::min(16384, config.max_seq_len * 4);
     }
     int min_kv_blocks = (min_kv_tok + bs - 1) / bs;
+    const int min_kv_blocks_wanted = min_kv_blocks;  // pre-cap: what the floor asked for
     int max_affordable = (per_block_total > 0) ? static_cast<int>(available / per_block_total)
                                                : budget.kv_max_blocks;
     // Defensive cap for auto mode (leaves room for weight caches). When the
@@ -472,6 +473,20 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                      min_kv_blocks, min_kv_tok);
         budget.kv_max_blocks = min_kv_blocks;
         budget.kv_cache_bytes = static_cast<size_t>(min_kv_blocks) * per_block_total;
+    }
+    // Loud when the pool STILL can't hold the KV floor after every clamp: any
+    // request longer than the pool is rejected/cancelled at admission while
+    // /v1/models keeps advertising max_seq_len. Observed: --max-batch 64 on
+    // Qwen3.6-35B-A3B-NVFP4 (32 GB card) collapsed KV to 16 blocks = 512
+    // tokens — every longer prompt came back finish_reason=cancelled with no
+    // hint why. Batch-scaled workspaces are the usual culprit.
+    if (budget.kv_max_blocks < min_kv_blocks_wanted) {
+        IMP_LOG_WARN(
+            "VRAM budget: KV pool holds only %d tokens (< %d-token floor; requested context "
+            "%d). Longer requests will be rejected or cancelled at admission. Lower "
+            "max_batch_size (batch-scaled workspaces are the usual VRAM consumer) or "
+            "runtime.max_seq_len, or use a smaller model/quant.",
+            budget.kv_max_blocks * bs, min_kv_tok, config.max_seq_len);
     }
 
     // FP8 prefill: use remaining VRAM after NVFP4 decode + the *final* KV size.
