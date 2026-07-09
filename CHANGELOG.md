@@ -4,6 +4,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-07-09
+
+Native-NVFP4 serving fix release: the mandatory decode caches are now
+physically reserved before the elastic VRAM consumers, so large NVFP4-prequant
+MoE models (Qwen3.6-35B-A3B-NVFP4) reach full decode-cache coverage + captured
+decode graphs under pure default config. No perf change for GGUF/FP16 models
+(budget arithmetic byte-identical, pinned by test); perf baseline untouched.
+
 ### Fixed
 - **VRAM ordering: mandatory NVFP4 decode caches are now reserved before
   workspaces and the KV pool.** For native-NVFP4 models the CUTLASS SfAtom SF
@@ -20,6 +28,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (was 26-40). Non-prequant (GGUF/FP16) budget arithmetic is unchanged
   (pinned by test); escape hatch `[vram] native_cache_reserve` (default on).
   A new post-build coverage log states FULL/PARTIAL cache status and remedies.
+  (#926)
+- **Loud WARN when the KV pool collapses below its token floor (#927):** with
+  an oversized `max_batch_size` the batch-scaled workspaces can shrink the KV
+  pool to the 16-block minimum; longer requests were silently cancelled at
+  admission while `/v1/models` kept advertising the full context. The budget
+  planner now warns with the real pool size and remedies. Log-only.
 
 ## [0.17.2] - 2026-07-08
 
