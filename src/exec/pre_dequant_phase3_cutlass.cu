@@ -34,8 +34,8 @@ using imp::pre_dequant_internal::deduct_budget;
 // Must run after FP16-free; the CUTLASS cache approximately doubles NVFP4
 // VRAM (repacked data + SfAtom scales).  Budget-aware: stops if VRAM
 // budget runs out and emits an info line.
-void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t& remaining_budget,
-                                                  cudaStream_t stream) {
+void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                                  size_t& remaining_budget, cudaStream_t stream) {
     // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
     size_t ct_budget;
     if (wcache_->nvfp4_decode_mode == 2) {
@@ -50,6 +50,18 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t
         // capture-failure root cause is understood.
         size_t kCtReserve = vram_reserve_floor(total_mem);
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
+        // Prequant models: the Engine's balloon physically reserved the SF
+        // slab bytes (released just before this build), so the demand is
+        // guaranteed even when cudaMemGetInfo under-reports free (async
+        // frees are reclaimed late on this driver). Floor, don't trust
+        // live-free below the guarantee.
+        if (budget.mandatory_sf_bytes > ct_budget) {
+            IMP_LOG_INFO("CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
+                         "(live-free-derived %.1f MiB under-reports)",
+                         budget.mandatory_sf_bytes / (1024.0 * 1024.0),
+                         ct_budget / (1024.0 * 1024.0));
+            ct_budget = budget.mandatory_sf_bytes;
+        }
     } else {
         ct_budget = (remaining_budget > wcache_->nvfp4_bytes)
                         ? (remaining_budget - wcache_->nvfp4_bytes)
@@ -171,6 +183,14 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t
     if (ct_total > 0) {
         void* sf_slab = nullptr;
         IMP_CUDA_CHECK_LOG(cudaMalloc(&sf_slab, ct_total));
+        if (!sf_slab) {
+            // Defensive (floor over-commit or genuine exhaustion): a null
+            // slab must not be offset into by the convert passes below.
+            IMP_LOG_WARN("CUTLASS NVFP4 cache: slab cudaMalloc(%.1f MiB) failed — "
+                         "cache skipped (decode falls back; expect degraded perf)",
+                         ct_total / (1024.0 * 1024.0));
+            return;
+        }
         // Zero every entry's SfAtom padding rows at once (convert kernels write
         // only valid (n, k_group) cells).
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(sf_slab, 0, ct_total, stream));

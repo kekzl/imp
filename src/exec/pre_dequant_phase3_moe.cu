@@ -235,6 +235,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
 }
 
 void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
+                                                    const VRAMBudget& budget,
                                                     size_t& remaining_budget,
                                                     cudaStream_t stream,
                                                     Nvfp4DecodeContext& dctx) {
@@ -287,6 +288,21 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         constexpr size_t kRuntimeHeadroom = 512ULL * 1024 * 1024;
         size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
         moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
+        // Prequant models: the Engine's balloon physically reserved the MoE
+        // slab bytes (released just before phase 3), so the guarantee holds
+        // even when cudaMemGetInfo under-reports free after async frees.
+        // The +128 MiB covers the borrow branch's small ts/ms-copy + SfAtom
+        // side allocations; the copy branch is net-zero per projection via
+        // the moe_logical_avail refund below.
+        if (budget.mandatory_moe_bytes > 0) {
+            size_t guaranteed = budget.mandatory_moe_bytes + 128ULL * 1024 * 1024;
+            if (guaranteed > moe_budget) {
+                IMP_LOG_INFO("NVFP4 MoE cache: budget floored at guaranteed %.1f MiB "
+                             "(live-free-derived %.1f MiB under-reports)",
+                             guaranteed / (1024.0 * 1024.0), moe_budget / (1024.0 * 1024.0));
+                moe_budget = guaranteed;
+            }
+        }
     } else {
         moe_budget = (remaining_budget > wcache_->nvfp4_bytes) ? (remaining_budget - wcache_->nvfp4_bytes)
                                                               : 0;

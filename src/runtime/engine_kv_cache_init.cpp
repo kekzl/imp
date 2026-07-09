@@ -168,9 +168,12 @@ bool Engine::init_kv_cache() {
     const int swa_live_tokens =
         swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
 
-    // VRAM budget
+    // VRAM budget. The mandatory-cache balloon (init_weights) is still held
+    // here — effective_free_vram() excludes it, and passing the held bytes
+    // keeps the prequant reserve from charging KV for the same demand twice.
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
-                                           effective_free_vram(), swa_live_tokens, n_swa_layers);
+                                           effective_free_vram(), swa_live_tokens, n_swa_layers,
+                                           native_cache_balloon_bytes_);
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
@@ -365,10 +368,50 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    // Hand the reserved space to the cache build: everything elastic (KV
+    // pool, workspaces, SSM state) has allocated by now, so the freed bytes
+    // go to phase 3's CUTLASS-SF + nvfp4_moe builds — which additionally
+    // floor their live-free-derived budgets at vram_budget.mandatory_*.
+    release_native_cache_balloon_("cache build");
+
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
+
+    // Coverage check: for prequant MoE models the nvfp4_moe decode cache is
+    // all-or-nothing (predicate mirrors executor_forward_moe.cu
+    // nvfp4_covers_layer) — one uncovered layer makes decode fall to the
+    // host-args legacy path, which throws under CUDA-graph capture and
+    // aborts the WHOLE decode graph. Surface partial coverage loudly.
+    if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
+        int moe_layers = 0, covered = 0;
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            bool has_experts = L.expert_up_packed.data != nullptr ||
+                               (!L.expert_w_up.empty() && L.expert_w_up[0].data != nullptr);
+            if (!has_experts)
+                continue;
+            moe_layers++;
+            bool ok = L.nvfp4_moe_up_ptr != nullptr && L.nvfp4_moe_down_ptr != nullptr;
+            if (ok && L.expert_gate_packed.data != nullptr)
+                ok = L.nvfp4_moe_gate_ptr != nullptr;
+            if (ok)
+                covered++;
+        }
+        if (moe_layers > 0 && covered == moe_layers) {
+            IMP_LOG_INFO("NVFP4 decode caches: FULL (%d/%d MoE layers) — decode graph "
+                         "capture eligible",
+                         covered, moe_layers);
+        } else if (moe_layers > 0) {
+            IMP_LOG_WARN(
+                "NVFP4 decode caches: PARTIAL (%d/%d MoE layers covered) — decode "
+                "CUDA-graph capture will abort and decode runs per-step (~10x slower). "
+                "Remedies: lower runtime.max_seq_len or max_batch_size (both shrink the "
+                "workspaces/KV competing for cache VRAM), or check the [vram] knobs.",
+                covered, moe_layers);
+        }
+    }
 
     // Pre-allocate the gemm_nvfp4 fallback dequant workspace. Sized from
     // wcache_.nvfp4 which is populated by pre_dequant_weights above, so this

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "compute/gemm_cutlass_sm120.h"
 #include "memory/vram_query.h"
 #include "model/model.h"
 #include "model/model_config.h"
@@ -203,6 +204,124 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     EXPECT_EQ(b20.reserve_bytes,
               std::max<size_t>(512ull * 1024 * 1024, vram_reserve_floor(total_vram, 20)));
     EXPECT_GE(b20.reserve_bytes, b10.reserve_bytes);
+}
+
+// --- Mandatory native-NVFP4 decode-cache demand + balloon prealloc ---
+//
+// compute_native_cache_demand must mirror phase 3b's SfAtom slab sizing
+// exactly (cutlass_nvfp4_sf_size + 256-byte per-entry alignment; contiguous
+// expert groups as ONE entry) and include the GDN/SSM projections that
+// phase 0b registers — the old inline elems/16 heuristic omitted them and
+// was not an upper bound under SfAtom padding.
+
+namespace {
+
+// Fake prequant hybrid: 2 layers, dense attention proj + GDN projections +
+// 4-expert MoE (per-expert 2D views, the SafeTensors prequant layout).
+// Shapes store the PACKED byte dim (K/2), mirroring the NVFP4 wire format.
+void fill_prequant_model(Model& m) {
+    m.config_.n_layers = 2;
+    m.config_.n_kv_heads = 8;
+    m.config_.n_experts = 4;
+    m.config_.is_nvfp4_prequant = true;
+    uintptr_t next = 1;
+    for (int i = 0; i < 2; ++i) {
+        TransformerLayer L;
+        L.wq = make_weight(TensorKind::WQ, 1024, 512, QType::INT8, next++);
+        L.ssm_in = make_weight(TensorKind::WQ, 2048, 1024, QType::INT8, next++);
+        L.gdn_gate = make_weight(TensorKind::WQ, 512, 1024, QType::INT8, next++);
+        for (int e = 0; e < 4; ++e) {
+            L.expert_w_up.push_back(make_weight(TensorKind::EXPERT_UP, 768, 512, QType::INT8, next++));
+            L.expert_w_down.push_back(
+                make_weight(TensorKind::EXPERT_DOWN, 256, 768, QType::INT8, next++));
+        }
+        m.layers_.push_back(std::move(L));
+    }
+}
+
+size_t sf_entry(int n, int k_packed) {
+    constexpr size_t kSfAlign = 256;
+    size_t sz = imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
+}
+
+size_t sf_group(int ne, int n, int k_packed) {
+    constexpr size_t kSfAlign = 256;
+    size_t sz = static_cast<size_t>(ne) * imp::cutlass_nvfp4_sf_size(n, k_packed * 2);
+    return (sz + kSfAlign - 1) / kSfAlign * kSfAlign;
+}
+
+size_t moe_slab(int ne, int n, int k_packed) {
+    int64_t k = static_cast<int64_t>(k_packed) * 2;
+    return static_cast<size_t>(ne) * n * k_packed + static_cast<size_t>(ne) * n * (k / 16) +
+           static_cast<size_t>(ne) * sizeof(float);
+}
+
+}  // namespace
+
+TEST(VramBudgetReserve, NativeCacheDemandMatchesPhase3Sizing) {
+    Model m;
+    fill_prequant_model(m);
+
+    NativeCacheDemand d = compute_native_cache_demand(m);
+
+    const size_t expected_sf = 2 * (sf_entry(1024, 512)      // wq
+                                    + sf_entry(2048, 1024)   // ssm_in (GDN hybrid!)
+                                    + sf_entry(512, 1024)    // gdn_gate
+                                    + sf_group(4, 768, 512)  // expert up group
+                                    + sf_group(4, 256, 768)  // expert down group
+                                   );
+    EXPECT_EQ(d.sf_bytes, expected_sf);
+
+    const size_t expected_slab = std::max(moe_slab(4, 768, 512), moe_slab(4, 256, 768));
+    EXPECT_EQ(d.moe_slab_bytes, expected_slab);
+    EXPECT_EQ(d.total(), expected_sf + expected_slab);
+}
+
+TEST(VramBudgetReserve, NativeCacheDemandZeroForNonPrequant) {
+    Model m;
+    fill_model(m, QType::Q6_K, QType::Q6_K);
+
+    NativeCacheDemand d = compute_native_cache_demand(m);
+    EXPECT_EQ(d.sf_bytes, 0u);
+    EXPECT_EQ(d.moe_slab_bytes, 0u);
+}
+
+TEST(VramBudgetReserve, PreallocCoversDemandAndFreesKv) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_prequant_model(m);
+
+    EngineConfig config;
+    config.max_seq_len = 32768;
+    config.max_batch_size = 8;
+    config.use_nvfp4_decode = 2;
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    NativeCacheDemand d = compute_native_cache_demand(m);
+    ASSERT_GT(d.total(), 0u);
+
+    // Without prealloc: full demand charged against KV; floors unbacked → 0.
+    VRAMBudget none = compute_vram_budget(m, config, 2, 128, 4 * GiB);
+    EXPECT_EQ(none.mandatory_sf_bytes, 0u);
+    EXPECT_EQ(none.mandatory_moe_bytes, 0u);
+
+    // With the balloon held (free_vram already excludes it): only the
+    // uncovered remainder (0) is charged, and the floors are backed.
+    VRAMBudget held =
+        compute_vram_budget(m, config, 2, 128, 4 * GiB, /*swa_live_tokens=*/0,
+                            /*n_swa_layers=*/0, /*mandatory_cache_prealloc=*/d.total());
+    EXPECT_EQ(held.mandatory_sf_bytes, d.sf_bytes);
+    EXPECT_EQ(held.mandatory_moe_bytes, d.moe_slab_bytes);
+    EXPECT_GE(held.kv_max_blocks, none.kv_max_blocks);
+
+    // Partial (SF-only) balloon: SF floor backed, MoE floor not.
+    VRAMBudget sf_only = compute_vram_budget(m, config, 2, 128, 4 * GiB, 0, 0, d.sf_bytes);
+    EXPECT_EQ(sf_only.mandatory_sf_bytes, d.sf_bytes);
+    EXPECT_EQ(sf_only.mandatory_moe_bytes, 0u);
 }
 
 TEST(VramBudgetReserve, VramKnobsAreClamped) {

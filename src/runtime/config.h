@@ -183,6 +183,14 @@ struct RuntimeConfig {
         // Default 10 ≈ 3.2 GiB on a 32 GiB card — lower to trade headroom
         // for KV pool.
         int reserve_floor_pct = 10;
+        // Native-NVFP4 (prequant) models: physically reserve the mandatory
+        // decode caches (CUTLASS SfAtom SF slab + nvfp4_moe) right after
+        // weight upload — BEFORE workspaces and the KV pool consume the
+        // headroom — via a balloon allocation released just before the
+        // cache build. Partial caches abort decode CUDA-graph capture
+        // (~10× decode hit), so the caches rank above KV/context size.
+        // Escape hatch only; leave on.
+        bool native_cache_reserve = true;
     } vram;
 
     struct Attention {

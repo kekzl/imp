@@ -63,6 +63,10 @@ Engine::~Engine() {
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
 
+    // Defensive: the mandatory-cache balloon is normally released before
+    // pre_dequant_weights; don't leak it if init aborted in between.
+    release_native_cache_balloon_("teardown");
+
     // Save prefix cache to disk before shutdown (dense only — hybrid reuse
     // needs recurrent snapshots, which are device-resident and not persisted)
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled() &&
@@ -716,11 +720,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Sub-phases ---
-    if (!init_weights())
+    if (!init_weights()) {
+        release_native_cache_balloon_("init_weights failed");
         return false;
+    }
     MemAccount::instance().checkpoint("02_weights+decode_cache");
-    if (!init_kv_cache())
+    if (!init_kv_cache()) {
+        release_native_cache_balloon_("init_kv_cache failed");
         return false;
+    }
     MemAccount::instance().checkpoint("03_kv_cache");
     if (!init_features())
         return false;

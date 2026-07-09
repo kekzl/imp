@@ -358,7 +358,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     nvfp4_decode_cache_fp16_projections_(cfg, stream);
 
     if (!wcache_->nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
-        nvfp4_decode_convert_cutlass_(cfg, remaining_budget, stream);
+        nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
     }
 
     nvfp4_decode_convert_mxfp4_and_native_(cfg, stream);
@@ -369,7 +369,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
 
     if (model_->profile().is_gpt_oss)
         gpt_oss_convert_moe_experts_(cfg, dctx);
-    nvfp4_decode_cache_moe_experts_(cfg, remaining_budget, stream, dctx);
+    nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);
 }
 
 // Mode 2 ("only") incremental NVFP4 quantize. Process FP16-cached entries

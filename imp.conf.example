@@ -137,6 +137,11 @@ kv_fraction       = 0.8
 # at 256 MiB absolute. Clamped to [0, 50]. Default 10 ≈ 3.2 GiB on a 32 GiB
 # card — lower to hand more VRAM to the KV pool.
 reserve_floor_pct = 10
+# Native-NVFP4 (prequant) models only: physically reserve the mandatory
+# decode caches (CUTLASS SfAtom slab + nvfp4_moe) right after weight upload,
+# before workspaces/KV consume the headroom. Partial caches abort decode
+# CUDA-graph capture (~10x decode hit). Escape hatch only - leave on.
+native_cache_reserve = true
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +

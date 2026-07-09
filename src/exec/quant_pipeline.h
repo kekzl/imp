@@ -117,12 +117,13 @@ private:
                                                  Nvfp4DecodeContext& dctx);
     void nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
                                    Nvfp4DecodeContext& dctx);
-    void nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, size_t& remaining_budget,
-                                       cudaStream_t stream);
+    void nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                       size_t& remaining_budget, cudaStream_t stream);
     void nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
-    void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, size_t& remaining_budget,
-                                         cudaStream_t stream, Nvfp4DecodeContext& dctx);
+    void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                         size_t& remaining_budget, cudaStream_t stream,
+                                         Nvfp4DecodeContext& dctx);
     bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
                                  Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
                                  size_t& moe_logical_avail);
