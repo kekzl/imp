@@ -804,6 +804,11 @@ struct UploadCtx {
     // wcache). Set true for ModelArch::GPT_OSS so upload_packed_experts skips
     // them instead of uploading raw MXFP4 the executor cannot consume.
     bool is_gpt_oss = false;
+    // NVFP4-prequant SafeTensors: the MoE host-offload path does NOT support
+    // native-NVFP4 experts (they stay QType::INT8 packed and leak to the
+    // generic cuBLAS GEMM → status-15 garbage). Force all experts on-device for
+    // these models so Phase-0 promotes them; see decide_expert_layer_placement_.
+    bool is_nvfp4_prequant = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1515,7 +1520,8 @@ static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& l
 // reserve.
 static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expert_bytes,
                                            size_t total_expert_bytes, size_t expert_reserve_bytes,
-                                           int n_layers, std::vector<bool>& experts_upload_layer) {
+                                           int n_layers, std::vector<bool>& experts_upload_layer,
+                                           bool is_nvfp4_prequant) {
     if (total_expert_bytes == 0)
         return;
 
@@ -1544,9 +1550,27 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
                 total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
         }
     }
+    // NVFP4-prequant experts have NO working host-offload path: kept host-
+    // resident they stay QType::INT8 packed (Phase-0 promote never runs on
+    // them), and at inference the MoE fallback hands their raw packed bytes to
+    // the generic cuBLAS GEMM → CUBLAS_STATUS_NOT_SUPPORTED (status 15) →
+    // repeated-token garbage + IMA (Qwen3.6-35B-A3B-NVFP4: default context
+    // offloaded layers 23-39 → gibberish). They are mandatory on-device. Drop
+    // the KV/workspace overhead reserve so they all upload when they physically
+    // fit; the KV pool is sized later from the remaining VRAM (with a min
+    // floor) and shrinks to accommodate — correctness over context length.
+    if (is_nvfp4_prequant)
+        overhead_pct = 0;
     size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
     size_t total_reserve = expert_reserve_bytes + overhead;
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
+    if (is_nvfp4_prequant && budget < total_expert_bytes) {
+        IMP_LOG_WARN(
+            "NVFP4-prequant experts (%.2f GiB) exceed on-device budget (%.2f GiB free) — "
+            "some experts will be host-resident, which is UNSUPPORTED for NVFP4 and will "
+            "produce garbage. Reduce context (runtime.max_seq_len) or KV dtype (--kv-nvfp4).",
+            total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
+    }
 
     int force_host_n = process_diag_moe_force_host_experts();
     if (force_host_n < 0)
@@ -1621,7 +1645,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
 
     std::vector<bool> experts_upload_layer(n_layers, false);
     decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,
-                                   experts_upload_layer);
+                                   experts_upload_layer, ctx.is_nvfp4_prequant);
 
     // Upload expert weights for each layer
     for (int i = 0; i < n_layers; ++i) {
@@ -2013,7 +2037,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                                        : 0.0f;
     const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);
     UploadCtx ctx{compute_dtype,       stream,          gpu_allocations_, host_pinned_,
-                  host_pinned_allocs_, arch_norm_offset, is_gpt_oss};
+                  host_pinned_allocs_, arch_norm_offset, is_gpt_oss,
+                  config_.is_nvfp4_prequant};
 
     // --- Embeddings, output norm, output projection ---
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {

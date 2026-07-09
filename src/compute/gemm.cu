@@ -3,6 +3,7 @@
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "compute/gemm_internal.cuh"
 #include "core/logging.h"
+#include "core/tensor_kind.h"
 #include "runtime/pdl.h"
 #include "runtime/process_diag.h"
 
@@ -660,6 +661,32 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
 }
 
 void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream) {
+    // Defensive guard: a packed NVFP4 weight (or its INT8-typed packed
+    // payload) must never reach the generic FP16 cuBLAS path. cuBLAS rejects
+    // the FP16xINT8/NVFP4 operand mix with CUBLAS_STATUS_NOT_SUPPORTED
+    // (status 15) and leaves an uninitialised output buffer — silent
+    // repeated-token garbage plus downstream illegal-memory-access crashes.
+    // The correct dispatch for these weights is the NVFP4 decode/CUTLASS cache
+    // (see pre_dequant_phase3_*), which the budget planner now reserves for
+    // (the double-counted-reserve fix). If one still slips through — a future
+    // budget regression or an un-tiered weight — fail LOUD and skip the
+    // multiply instead of corrupting the forward pass. The output buffer is
+    // pre-zeroed by the caller, so an early return is safe (wrong-but-bounded,
+    // never an IMA). Log the exact identity, bounded to avoid flooding.
+    if ((B.qtype == QType::INT8 || B.qtype == QType::NVFP4) && A.qtype == QType::F16) {
+        static std::atomic<int> leak_count{0};
+        int n = leak_count.fetch_add(1, std::memory_order_relaxed);
+        if (n < 20) {
+            IMP_LOG_ERROR(
+                "gemm(): packed NVFP4 weight reached the generic cuBLAS path — "
+                "kind=%s B.qtype=%d scales=%s M=%ld K=%ld N=%ld — skipping "
+                "(routing/tier bug; expected NVFP4 decode/CUTLASS dispatch)",
+                tensor_kind_name(B.kind), std::to_underlying(B.qtype),
+                B.scales ? "SET" : "NULL",
+                (long)A.shape[0], (long)A.shape[1], (long)B.shape[0]);
+        }
+        return;
+    }
     // Guard against quantized weight tensors (e.g. MXFP4 with dtype=INT4)
     // that should have been handled by the FP16 weight cache path.
     // Passing raw quantized data to cuBLAS causes illegal memory access
