@@ -260,12 +260,10 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(ws_.shared_max_tokens());
 
-    // The GDN scan kernels are not device-length-aware yet — a padded verify
-    // chunk would advance the recurrent state through pad rows. Unreachable
-    // today (chunk_capture_supported requires hd==128 and every GDN model is
-    // hd=256/FMHA), but fail loud rather than corrupt state silently (#858).
-    if (state.d_chunk_len != nullptr)
-        throw std::runtime_error("run_gdn: GDN scan is not device-length-aware (captured verify chunk)");
+    // Padded verify chunk (#847): state.d_chunk_len carries the real chunk
+    // length on device. The conv1d and delta-rule scan kernels below commit
+    // conv tail + h_state at the real last row; pad rows only produce their
+    // (causally discarded) y values. Same contract as run_ssm.
 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
@@ -342,7 +340,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                 static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
                                 cudaMemcpyDeviceToDevice, stream));
             ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
-                                        conv_kernel, stream);
+                                        conv_kernel, stream, state.d_chunk_len);
         } else {
             // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
             // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
@@ -505,14 +503,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<const float*>(ly.ssm_a.data),
                                            static_cast<const float*>(ly.ssm_dt_b.data),
                                            static_cast<float*>(h_st), y_fp32, n, n_heads, head_dim_ssm, ssize,
-                                           n_groups, stream, /*chunk_size=*/64, gl);
+                                           n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len);
             } else {
                 gdn_scan_fused_fp32out(conv_f32, conv_channels,
                                        static_cast<const half*>(alpha_proj_out.data),
                                        static_cast<const half*>(beta_proj_out.data),
                                        static_cast<const float*>(ly.ssm_a.data),
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                                       y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
+                                       y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
+                                       state.d_chunk_len);
             }
             // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
             // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional
@@ -538,7 +537,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    static_cast<const float*>(ly.ssm_a.data),
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                                   stream, gl);
+                                   stream, gl, state.d_chunk_len);
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             if (use_chunkwise) {
@@ -548,14 +547,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        static_cast<const float*>(ly.ssm_a.data),
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                        static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
-                                       n_groups, stream, /*chunk_size=*/64, gl);
+                                       n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len);
             } else {
                 gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                    static_cast<const half*>(beta_proj_out.data),
                                    static_cast<const float*>(ly.ssm_a.data),
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                                   stream, gl);
+                                   stream, gl, state.d_chunk_len);
             }
         }
     }

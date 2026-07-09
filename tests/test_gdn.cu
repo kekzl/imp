@@ -1208,5 +1208,111 @@ TEST(GDNScanTest, RMSNormGatedSiLU) {
     cudaFree(d_weight);
 }
 
+// ===========================================================================
+// Test: Padded verify chunk (#847), GDN scans — with d_real_n set, y is
+// produced for every row but h_state must stop advancing after the real
+// last row (bit-equal to a plain run over the real rows). Covers the fused
+// kernel, the chunkwise entry (routes padded chunks through one fused call)
+// and the reference kernel.
+// ===========================================================================
+TEST(GDNScanTest, PaddedChunkDeviceLength) {
+    constexpr int n_heads = 4;
+    constexpr int n_groups = 2;
+    constexpr int head_dim = 64;
+    constexpr int state_size = 64;
+    constexpr int inner = n_heads * head_dim;
+    constexpr int BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_real = 5;
+    constexpr int n_padded = 12;
+
+    std::vector<float> conv_f32(n_padded * conv_channels);
+    std::vector<half> h_alpha(n_padded * n_heads), h_beta(n_padded * n_heads);
+    std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
+    for (size_t i = 0; i < conv_f32.size(); i++)
+        conv_f32[i] = std::sin(0.37f * i);
+    for (size_t i = 0; i < h_alpha.size(); i++) {
+        h_alpha[i] = __float2half(std::cos(0.21f * i));
+        h_beta[i] = __float2half(std::sin(0.11f * i + 1.0f));
+    }
+
+    float *d_conv, *d_A, *d_dt;
+    half *d_alpha, *d_beta;
+    cudaMalloc(&d_conv, conv_f32.size() * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half));
+    cudaMalloc(&d_beta, h_beta.size() * sizeof(half));
+    cudaMemcpy(d_conv, conv_f32.data(), conv_f32.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
+
+    int* d_real_n;
+    cudaMalloc(&d_real_n, sizeof(int));
+    int real_n = n_real;
+    cudaMemcpy(d_real_n, &real_n, sizeof(int), cudaMemcpyHostToDevice);
+
+    const size_t h_elems = static_cast<size_t>(n_heads) * state_size * head_dim;
+
+    // scan_fn(n_tokens, d_real_n, d_state, d_y)
+    auto check_variant = [&](const char* name, auto scan_fn) {
+        float* d_state;
+        half* d_y;
+        cudaMalloc(&d_state, h_elems * sizeof(float));
+        cudaMalloc(&d_y, static_cast<size_t>(n_padded) * inner * sizeof(half));
+
+        // Reference: plain run over the real rows only.
+        cudaMemset(d_state, 0, h_elems * sizeof(float));
+        scan_fn(n_real, static_cast<const int*>(nullptr), d_state, d_y);
+        cudaDeviceSynchronize();
+        std::vector<float> h_ref(h_elems);
+        std::vector<half> y_ref(static_cast<size_t>(n_real) * inner);
+        cudaMemcpy(h_ref.data(), d_state, h_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(y_ref.data(), d_y, y_ref.size() * sizeof(half), cudaMemcpyDeviceToHost);
+
+        // Padded run with the device-side real length.
+        cudaMemset(d_state, 0, h_elems * sizeof(float));
+        scan_fn(n_padded, static_cast<const int*>(d_real_n), d_state, d_y);
+        cudaDeviceSynchronize();
+        std::vector<float> h_pad(h_elems);
+        std::vector<half> y_pad(static_cast<size_t>(n_padded) * inner);
+        cudaMemcpy(h_pad.data(), d_state, h_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(y_pad.data(), d_y, y_pad.size() * sizeof(half), cudaMemcpyDeviceToHost);
+
+        for (int t = 0; t < n_real; t++)
+            for (int i = 0; i < inner; i++)
+                EXPECT_EQ(__half2float(y_ref[t * inner + i]), __half2float(y_pad[t * inner + i]))
+                    << name << ": y mismatch at t=" << t << " i=" << i;
+        for (size_t i = 0; i < h_elems; i++)
+            EXPECT_EQ(h_ref[i], h_pad[i]) << name << ": h_state mismatch at i=" << i;
+
+        cudaFree(d_state);
+        cudaFree(d_y);
+    };
+
+    check_variant("fused", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
+        gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok, n_heads,
+                           head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_rn);
+    });
+    check_variant("chunkwise", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
+        gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
+                               n_heads, head_dim, state_size, n_groups, nullptr, /*chunk_size=*/64,
+                               /*grouped_layout=*/0, d_rn);
+    });
+    check_variant("reference", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
+        gdn_scan_reference_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
+                               n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_rn);
+    });
+
+    cudaFree(d_real_n);
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+}
+
 }  // namespace
 }  // namespace imp

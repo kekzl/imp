@@ -476,7 +476,16 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
                                         const half* beta, const float* A_log, const float* dt_bias,
                                         float* h_state, YOut* y, int n_tokens, int n_heads, int head_dim_ssm,
                                         int state_size, int n_groups, cudaStream_t stream, int chunk_size,
-                                        int grouped_layout, FusedFallback fused) {
+                                        int grouped_layout, const int* d_real_n, FusedFallback fused) {
+    // Padded verify chunk (#847): the host cannot split a device-side length
+    // across chunks, and neither the chunkwise fast kernel nor the wrapper
+    // loop is device-length-aware. Run the whole (small — verify buckets are
+    // ≤ k_max+1 tokens) padded chunk through one sequential fused call, which
+    // commits the state at the real last row.
+    if (d_real_n != nullptr) {
+        fused(conv_f32, alpha, beta, h_state, y, n_tokens, d_real_n);
+        return;
+    }
     if (chunk_size <= 0)
         chunk_size = 64;
     if (chunk_size > n_tokens)
@@ -521,7 +530,7 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
     while (t < n_tokens) {
         const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
         fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + t * n_heads, beta + t * n_heads,
-              h_state, y + static_cast<size_t>(t) * inner, this_chunk);
+              h_state, y + static_cast<size_t>(t) * inner, this_chunk, nullptr);
         t += this_chunk;
     }
 }
@@ -529,15 +538,15 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
 void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int chunk_size, int grouped_layout) {
+                            cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n) {
     gdn_scan_chunkwise_dispatch<half>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, head_dim_ssm,
-        state_size, n_groups, stream, chunk_size, grouped_layout,
+        state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
         [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, half* y_,
-            int n_tok_chunk) {
+            int n_tok_chunk, const int* d_real_n_chunk) {
             gdn_scan_fused_f32(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
                                n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                               grouped_layout);
+                               grouped_layout, d_real_n_chunk);
         });
 }
 
@@ -548,15 +557,16 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
 void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                                 const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                                cudaStream_t stream, int chunk_size, int grouped_layout) {
+                                cudaStream_t stream, int chunk_size, int grouped_layout,
+                                const int* d_real_n) {
     gdn_scan_chunkwise_dispatch<float>(
         conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads, head_dim_ssm,
-        state_size, n_groups, stream, chunk_size, grouped_layout,
+        state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
         [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, float* y_,
-            int n_tok_chunk) {
+            int n_tok_chunk, const int* d_real_n_chunk) {
             gdn_scan_fused_fp32out(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
                                    n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                                   grouped_layout);
+                                   grouped_layout, d_real_n_chunk);
         });
 }
 
