@@ -33,6 +33,7 @@ struct ProcessDiag {
     bool attention_fp8_tile_gqa = true;
     bool attention_fa2_f16acc = false;
     bool attention_fa2_pv_f16acc = false;
+    bool attention_fa2_hd256 = false;
     bool attention_fp8_qk_scaled = false;
     bool force_splitk_fallback = false;  // test hook
     std::string attention_mxfp4_mode = "auto";
@@ -89,6 +90,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_fp8_tile_gqa = cfg.attention.fp8_tile_gqa;
     d.attention_fa2_f16acc = cfg.attention.fa2_f16acc;
     d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
+    d.attention_fa2_hd256 = cfg.attention.fa2_hd256;
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
@@ -130,6 +132,8 @@ bool process_diag_fa2_f16acc() { return slot().attention_fa2_f16acc; }
 bool process_diag_fa2_pv_f16acc() { return slot().attention_fa2_pv_f16acc; }
 void process_diag_set_fa2_f16acc(bool v) { slot().attention_fa2_f16acc = v; }
 void process_diag_set_fa2_pv_f16acc(bool v) { slot().attention_fa2_pv_f16acc = v; }
+bool process_diag_fa2_hd256() { return slot().attention_fa2_hd256; }
+void process_diag_set_fa2_hd256(bool v) { slot().attention_fa2_hd256 = v; }
 bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
 void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }

@@ -175,6 +175,10 @@ fa2_f16acc           = true
 # PPL on a 14.8k teacher-forced corpus: 14B −0.06%, 30B −0.30%, Q8 +0.002%
 # (noise). Default true since 2026-06-11. Needs fa2_f16acc.
 fa2_pv_f16acc        = true
+# Stage-1 HD=256 FA2 port: route head_dim=256 prefill (Qwen3.6 hybrids,
+# gemma-class) through the register-resident FA2 kernel (fp16-qk, Bq=64,
+# TWOSLOT) instead of the SMEM-tiled WMMA FMHA. A/B lever, default off.
+fa2_hd256            = false
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).

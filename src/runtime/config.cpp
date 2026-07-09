@@ -150,6 +150,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("attention.fmha_fa2", cfg.attention.fmha_fa2);
     S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
     B("attention.fa2_f16acc", cfg.attention.fa2_f16acc);
+    B("attention.fa2_hd256", cfg.attention.fa2_hd256);
     B("attention.fa2_pv_f16acc", cfg.attention.fa2_pv_f16acc);
     B("attention.fp8_qk_scaled", cfg.attention.fp8_qk_scaled);
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
