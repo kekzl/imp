@@ -58,6 +58,7 @@ roots = ["src", "tools", "tests"]
 "src/compute/attention_paged.cu" = "(c) 1134 code LOC — one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster — shared block/KV layout"
 "src/compute/attention_paged_nvfp4_tc.cu" = "(c) 845 code LOC — NVFP4 tensor-core paged-attn family (decode/splitk/reduce) — shared TC path"
 "src/compute/attention_fmha_mxfp4_sm120.cu" = "(c) 810 code LOC — single MXFP4 FA2 attention kernel family"
+"src/compute/gemm.cu" = "(c) 613 code LOC — one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)"
 "src/compute/gemm_grouped_nvfp4_smallM.cu" = "(c) 718 code LOC — one small-M grouped-GEMM family (software-ref + prod + smoke variants)"
 "src/compute/schema_constrain.cu" = "(c) 676 code LOC — one module: schema-constrained decode token-mask compute (host-side)"
 "src/compute/mtp_forward.cu" = "(c) 651 code LOC — MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature"
