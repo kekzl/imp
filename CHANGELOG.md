@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-09
+
 ### Changed
 - **HD=256 FA2 default-on + FP8-KV deterministic forcing lifted (stage 3).**
   `attention.fa2_hd256` now defaults to true: head_dim=256 models (Qwen3.6
