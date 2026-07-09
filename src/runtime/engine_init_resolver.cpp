@@ -227,14 +227,22 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // without it kv-fp8 is perf-neutral-to-positive at clean PPL on
     // Qwen3-30B/14B/8B). Non-FA2 configs (gemma-class hd!=128, attn sinks
     // via head_dim, fa2 disabled) keep the workaround.
-    const bool fa2_serves_attention = mcfg.head_dim == 128 &&
+    // hd=256 rides the FA2 port (#930) since attention.fa2_hd256 went
+    // default-on: with the single-shot uniform-hybrid refinement the f16-QK
+    // FA2 chain serves every attention call on uniform hd=128/256 models —
+    // cuBLAS attention (the FP8-KV NaN-roundtrip risk this forcing guards)
+    // only remains for learned sinks (gpt-oss, hd=64) and heterogeneous
+    // per-layer shapes (gemma-4), which keep the workaround below.
+    const bool fa2_hd_ok = mcfg.head_dim == 128 ||
+                           (mcfg.head_dim == 256 && runtime_config_.attention.fa2_hd256);
+    const bool fa2_serves_attention = fa2_hd_ok &&
                                       runtime_config_.attention.fmha_fa2 != "never" &&
                                       runtime_config_.attention.fa2_fp16qk != "never";
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
         !runtime_config_.runtime.deterministic_gemm) {
-        IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128) — skipping the legacy "
-                     "deterministic-cuBLAS forcing (set kv_cache.allow_nondeterministic_fp8=false "
-                     "semantics unchanged for non-FA2 configs)");
+        IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128/256) — skipping the legacy "
+                     "deterministic-cuBLAS forcing (non-FA2 configs — learned sinks, heterogeneous "
+                     "per-layer shapes — keep it; set runtime.deterministic_gemm=true to force)");
     }
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
         !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
