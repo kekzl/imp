@@ -421,12 +421,12 @@ static std::vector<ChatMessage> maybe_suppress_default_system(const Tokenizer& t
 }
 
 std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
-                                         bool suppress_thinking) const {
+                                         bool suppress_thinking, bool force_thinking) const {
     auto eff_msgs = maybe_suppress_default_system(tok, messages);
     // Prefer Jinja2 rendering when available (data-driven from GGUF).
     // Falls back to hardcoded families if Jinja rendering fails.
     if (use_jinja_ && jinja_tpl_) {
-        auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking);
+        auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking, force_thinking);
         if (!tokens.empty())
             return tokens;
         IMP_LOG_WARN("Jinja2 render produced empty result, falling back to hardcoded template");
@@ -747,7 +747,8 @@ void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
 }
 
 std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
-                                               bool add_generation_prompt, bool suppress_thinking) const {
+                                               bool add_generation_prompt, bool suppress_thinking,
+                                               bool force_thinking) const {
     if (!jinja_tpl_)
         return {};
 
@@ -765,8 +766,14 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
     // verbose-think loop with no exit ("* Wait, I should...", "* Let's try
     // a simpler one:", repeating). Leaving the variable undefined for the
     // default case lets each template author's default win.
+    // force_thinking stamps enable_thinking=true so a template that defaults the
+    // variable to a pre-CLOSED block (Qwen3.5-4B) opens the block for an explicit
+    // caller request — without it, `enable_thinking:true` was silently a no-op on
+    // such templates. suppress wins if both are set.
     if (suppress_thinking) {
         ctx["enable_thinking"] = jinja::Value(false);
+    } else if (force_thinking) {
+        ctx["enable_thinking"] = jinja::Value(true);
     }
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
@@ -819,7 +826,8 @@ bool ChatTemplate::probe_render_mentions_think(const Tokenizer& tok) const {
 
 std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     const Tokenizer& tok, const std::vector<ChatMessage>& msgs, const std::vector<ToolFunction>& tools,
-    const std::string& tool_choice, bool add_generation_prompt, bool suppress_thinking) const {
+    const std::string& tool_choice, bool add_generation_prompt, bool suppress_thinking,
+    bool force_thinking) const {
     if (!jinja_tpl_)
         return {};
 
@@ -854,7 +862,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     // which trains the model to skip tool selection and answer in plain text).
     if (suppress_thinking) {
         ctx["enable_thinking"] = jinja::Value(false);
-    } else if (family_ == ChatTemplateFamily::GEMMA) {
+    } else if (force_thinking || family_ == ChatTemplateFamily::GEMMA) {
         ctx["enable_thinking"] = jinja::Value(true);
     }
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
@@ -884,12 +892,14 @@ std::vector<int32_t> ChatTemplate::apply_with_tools(const Tokenizer& tok,
                                                     const std::vector<ChatMessage>& messages,
                                                     const std::vector<ToolFunction>& tools,
                                                     const std::string& tool_choice,
-                                                    bool suppress_thinking) const {
+                                                    bool suppress_thinking,
+                                                    bool force_thinking) const {
     // Try Jinja2 tools-aware path. Returns empty if Jinja2 is unavailable or
     // rendering fails, signaling the caller to fall back to text-based tool injection.
     if (use_jinja_ && jinja_tpl_ && !tools.empty()) {
         auto eff_msgs = maybe_suppress_default_system(tok, messages);
-        auto tokens = apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice, true, suppress_thinking);
+        auto tokens =
+            apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice, true, suppress_thinking, force_thinking);
         if (!tokens.empty())
             return tokens;
         IMP_LOG_WARN("Jinja2 tools render failed, caller should inject text-based tool prompt");
