@@ -4,6 +4,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **Deterministic cuBLAS GEMM now validates its algo choice (intermittent
+  status-14 garbage on FP8-KV / head_dim=256 models).** `runtime.deterministic_gemm`
+  (also force-enabled for FP8 KV on non-FA2 / head_dim!=128 models like
+  Qwen3.6-35B-A3B-NVFP4) picked cuBLASLt's top heuristic candidate blindly,
+  skipping the per-candidate runtime warmup the timing path uses precisely
+  because "the heuristic can return algos that fail at runtime on sm_120". A
+  bad `results[0]` for some FFN shapes (e.g. M=608 K=2048 N=8192) then failed
+  with `CUBLAS_STATUS_INTERNAL_ERROR` (14) and the `void` GEMM wrapper
+  continued with a garbage buffer → repeated-token gibberish. The deterministic
+  path now warmup-probes candidates in (stable) heuristic order and picks the
+  first that survives — reproducible AND valid. Determinism preserved (dense Q8
+  greedy output byte-identical run-to-run).
+- **A totally-failed GEMM is now fatal instead of silent garbage.** When both
+  cublasLtMatmul (after algo reselect) and the cublasGemmEx fallback fail in the
+  generic FP16/INT path, `gemm` throws (translated to ImpError at the API
+  boundary; aborts CUDA-graph capture → per-step fallback) rather than leaving
+  an uninitialised output buffer for the forward pass to turn into gibberish.
+
 ## [0.17.3] - 2026-07-09
 
 Native-NVFP4 serving fix release: the mandatory decode caches are now
