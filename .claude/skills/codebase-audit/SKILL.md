@@ -36,6 +36,10 @@ verification, not the sweep.
    off `main`, never stack, Docker `make build` + `make test-unit`, prefer batching
    related nits. Behavior-sensitive removals: also a coherence check (check-degeneration).
 
+## File-size gate (god-file findings go through this, not ad-hoc splits)
+
+`tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job `File size`: advisory warn step + **blocking** hard step. The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count — split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. A legitimately monolithic file goes into `[allow]` in the toml **with a reason** (empty reason is rejected). Baseline + per-file rationale: `AUDIT_FILESIZE.md`.
+
 ## Priors — settled, do NOT re-flag
 
 From the structural-debt audit chain (D1–D4 / C1–C8, archived in `docs/archive/README.md`;
@@ -47,6 +51,11 @@ current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
 - `gdn.cu` is domain-cohesive ("don't touch"); the compute/ files are not god-files.
 - The two-config-systems split (`RuntimeConfig` global vs `ModelConfig::Overrides`) is
   known and deliberate; config keys use the typed-binder `B/I/F/S(...)` ladder (PR #626).
+- **Audit #5 (2026-07-07, `docs/audit/structural_debt_2026_07_07.md`)**: server layer is
+  the dominant debt source → issues #888–#897 filed. Before a new pass, read that
+  report's **NOT-flagged list** — re-flagging its verified negatives wastes the sweep.
+  Companion: `docs/audit/vram_audit_2026_07_07.md` (note: a `VramOwned` type does NOT
+  exist — past audits hallucinated it).
 
 ## Red flags — you are about to over-flag
 

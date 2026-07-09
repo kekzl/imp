@@ -7,12 +7,12 @@ description: Use when building imp, running its test suite, checking CI status, 
 
 ## Hard rules (violations cost hours)
 
-1. **The host has NO CUDA toolkit by design.** All build/run/test happens inside Docker (`make build` → image `imp:test`, CUDA 13.3, nvcc V13.3.33). Never apt-install toolchains on the host.
+1. **The host has NO CUDA toolkit by design.** All build/run/test happens inside Docker (`make build` → image `imp:test`, CUDA 13.3 on Ubuntu 26.04 / GCC 15.2, C++23 for host AND device — `CMAKE_CUDA_STANDARD 23` needs the shim at `CMakeLists.txt:10`). Never apt-install toolchains on the host.
 2. **`build/` is root-owned** (created by the container). Remove via throwaway container, never `sudo` on the host: `docker run --rm -v $PWD:/src -w /src ubuntu rm -rf build`.
 3. **Never use `--mount=type=cache`** in the Dockerfile — it silently invalidates test results.
 4. **`models/` in the repo is a symlink farm** to `/home/kekz/models`. Most Makefile targets mount `$(PWD)/models`, which works because Docker resolves on access — but for custom `docker run`, mount `/home/kekz/models:/models` directly so symlink targets resolve.
-5. **Dependency pins live in TWO places**: `CMakeLists.txt` FetchContent AND the Dockerfile deps-clone. Bump BOTH (current: CUTLASS v4.5.1, GTest v1.17.0, nlohmann/json v3.12.0, httplib v0.46.1).
-6. **CI has no GPU runner.** The `Test` job and perf gate are SKIPPED in CI — GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs the pre-push hook). The required GitHub check is named exactly `Build`; renaming the CI job without updating ruleset "Require CI" (id 14716423) leaves PRs stuck at `mergeState=BLOCKED`.
+5. **Dependency pins are single-sourced in `cmake/imp-deps.cmake`** (current: CUTLASS v4.5.2, GTest v1.17.0, nlohmann/json v3.12.0, httplib v0.48.0). `make build` extracts them and injects Docker `--build-arg`s via `scripts/dep_build_args.sh` — bump ONLY that one file; never re-pin in the Dockerfile or CMakeLists.
+6. **CI has no GPU runner.** The `Test` job is auto-skipped until repo var `HAS_GPU_RUNNER=true` — GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs the pre-push hook). CI jobs: **`Build`** (compile + `ctest -L unit`, the only REQUIRED check — renaming it without updating ruleset "Require CI" id 14716423 leaves PRs stuck at `mergeState=BLOCKED`), `clang-tidy` (advisory), `Mock API contract`, `Lint`, `File size` (`tools/check_filesize.py` — the hard-threshold step BLOCKS; see `codebase-audit`).
 
 ## Command table
 
@@ -38,7 +38,7 @@ docker run --rm --gpus all -v /home/kekz/models:/models \
   imp:test imp-tests --gtest_filter="DegenerationTest.*"
 ```
 
-Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e test-gdn`.
+Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e test-gdn`. Gotcha: `test_ssm.cpp` tests live in **`test-moe-gdn`**, not a binary of their own.
 
 ## Determinism & quality caveats
 
@@ -52,7 +52,8 @@ Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus
 ## When the build fails
 
 - nvcc/arch errors: target is raw gencode `compute_120a/sm_120a` + optional `compute_120f` PTX fallback (`CMakeLists.txt` ~line 31). Don't "fix" by switching to generic `sm_120`/`compute_120` — see `sm120-cuda-expert`.
-- FetchContent mismatch vs Docker deps-clone → see hard rule 5.
+- `std::sort/find/max_element` etc. "not declared": libstdc++ 15 no longer includes `<algorithm>` transitively (#906) — add the missing include, don't downgrade the toolchain.
+- FetchContent mismatch vs Docker deps-clone → see hard rule 5 (bump `cmake/imp-deps.cmake` only).
 - Out-of-space: Docker images are large; prune old `imp:*` images first.
 
 ## PR / merge conventions

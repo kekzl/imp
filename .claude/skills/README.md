@@ -23,7 +23,9 @@ Boundaries (to avoid trigger collisions):
 - *Is this code dead / should we refactor* → codebase-audit · *keep the docs consistent with the code* → docs-sync. Perf-number measurement + `perf_baseline.json` refresh stay with benchmark-cuda (docs-sync only reconciles the surrounding prose).
 - *Open/merge/release a PR, auto-merge, tag a version* → shipping-prs · *build/test mechanics behind that PR* → building-and-testing (it cross-refs shipping-prs for the merge flow).
 
-Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md). Content refresh
-2026-06-10: folded in the post-audit sprint (PRs #608–#651 — IMMA prefill family, TC-rate
-calibration, FA2 bottleneck correction, MoE roofline ceilings, StoragePlanner/ModelProfile,
-ConstrainedPipeline, roofline make targets, bench gotchas). Descriptions/triggers unchanged.
+Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md). Content refreshes:
+2026-06-10 (post-audit sprint, PRs #608–#651); 2026-07-09 (PRs #652–#939 — single-sourced
+dep pins in `cmake/imp-deps.cmake`, C++23/Ubuntu 26.04 toolchain, auto-armed auto-merge
+workflow, spec-ngram default-on bench confound, FA2 hd=256 arc + FP8-tile attention,
+thinking-state reconcile, MXFP4/VRAM-reserve lessons, file-size gate). Descriptions/triggers
+unchanged.
