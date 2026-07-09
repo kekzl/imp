@@ -10,6 +10,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "reasoning_split.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
@@ -630,9 +631,28 @@ bool snapshot_state_and_tokenize_(
     // Window 16 (not 8) so both tags of the adjacent closed block fall inside
     // the same tail — otherwise "<think>" could be in-window while "</think>"
     // just falls off, mis-reading a closed block as an open prefix.
-    if (!ctx.snap.enable_thinking) {
-        if (prompt_tail_contains("<think>", 16) && !prompt_tail_contains("</think>", 16)) {
-            ctx.snap.enable_thinking = true;
+    // Reconcile enable_thinking with what the template actually rendered — the
+    // prompt tail is ground truth. An OPEN prefix (<think>, no </think>) is
+    // mid-reasoning and turns thinking ON; a pre-closed block (<think> AND
+    // </think>) means the template chose answer-directly and turns it OFF, even
+    // if the heuristic defaulted it ON (#934: Qwen3.5-4B mentions enable_thinking
+    // but defaults to a closed block — without this the whole answer is trapped
+    // in reasoning_content). Window 16 so both tags of the adjacent closed block
+    // fall in the same tail (a lone in-window "<think>" would else read as open).
+    {
+        const bool tail_has_think = prompt_tail_contains("<think>", 16);
+        const bool tail_has_close = prompt_tail_contains("</think>", 16);
+        const bool was_thinking = ctx.snap.enable_thinking;
+        ctx.snap.enable_thinking = imp::server::reconcile_thinking_with_prompt_tail(
+            ctx.snap.enable_thinking, ctx.params.enable_thinking_set, tail_has_think, tail_has_close);
+        // If the reconcile turned thinking OFF after the snapshot had removed the
+        // provisional <think> stop token (removed above while it was ON), restore
+        // it: a non-thinking think-model still needs the phantom-"<think>"-turn
+        // guard. (The upgrade direction keeps the prior behavior untouched.)
+        if (was_thinking && !ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
+            auto& ids = ctx.snap.stop_token_ids;
+            if (std::find(ids.begin(), ids.end(), ctx.snap.think_start_id) == ids.end())
+                ids.push_back(ctx.snap.think_start_id);
         }
     }
 

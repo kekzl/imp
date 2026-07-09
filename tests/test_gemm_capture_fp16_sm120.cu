@@ -113,6 +113,33 @@ TEST_F(GemmCaptureSm120, Correctness_128x128x32_alpha1_beta0) {
     EXPECT_LT(m, 5e-2) << "max abs diff " << m;
 }
 
+TEST_F(GemmCaptureSm120, Correctness_NarrowN_2048x32x2560) {
+    // The GDN-projection shape that used to be rejected (N=32 < BN=128) and fell
+    // through to cuBLASLt → status-14 under capture → whole decode graph aborted
+    // (#934 residual). The partial-N tile must be masked correctly.
+    constexpr int M = 2048, N = 32, K = 2560;
+    std::vector<float> A(M * K), B(N * K), D_ref(M * N, 0.0f);
+    std::mt19937 rng(4);
+    std::uniform_real_distribution<float> dist(-0.3f, 0.3f);
+    for (auto& v : A) v = dist(rng);
+    for (auto& v : B) v = dist(rng);
+
+    cpu_gemm_ref(A, B, D_ref, M, N, K, 1.0f, 0.0f);
+
+    DeviceFp16 dA(M * K), dB(N * K), dD(M * N);
+    upload_fp16(dA.data, A);
+    upload_fp16(dB.data, B);
+    cudaMemset(dD.data, 0, M * N * sizeof(__half));
+
+    ASSERT_TRUE(gemm_capture_fp16_sm120(dA.data, dB.data, dD.data, M, N, K, 1.0f, 0.0f, 0));
+    cudaDeviceSynchronize();
+
+    auto got = download_fp16(dD.data, M * N);
+    // K=2560, FP16 accumulation → looser tolerance (matches the VsCublas case).
+    double m = max_abs_diff(got, D_ref);
+    EXPECT_LT(m, 0.5) << "max abs diff " << m;
+}
+
 TEST_F(GemmCaptureSm120, Correctness_256x256x256_alpha_beta) {
     constexpr int M = 256, N = 256, K = 256;
     std::vector<float> A(M * K), B(N * K), D(M * N), D_ref(M * N);
