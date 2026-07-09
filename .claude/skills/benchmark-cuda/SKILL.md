@@ -14,6 +14,7 @@ Pair with `sm120-cuda-expert` for optimization decisions.
 3. **Idle downclock is the dominant cold-start artifact.** Clocks take ~1 s to ramp under load — the first second reads artificially LOW (produced a spurious −42% that re-measured +20% clean). Always precede timed reps with a **discarded warmup run >1 s**; imp's built-in `Warmup...` is too short.
 4. **Decode can read 8–15% low for a whole day** (host/driver state, WSL2 — issue #526). Sample clocks DURING the bench: `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw --format=csv -l 1`. Healthy load ≈ **2850 MHz SM / 13801 MHz mem / ~500 W**. Lower mem clock or power = depressed host day → do NOT trust cross-day deltas or refresh baselines that day.
 5. **Back-to-back sweeps read 6–10% low** vs isolated runs. One model per process, isolated, before trusting cross-model deltas.
+6. **n-gram speculation is default-ON for dense models (PR #781) and `--bench` prompts are self-repetitive → ~99.9% draft accept.** A dense `--bench` run mostly measures the batched *verify* path, not the decode GEMV you changed. For decode-kernel/GEMV A/Bs add `--set speculative.ngram=false` (both arms!) — a real +2–3% GEMV win is invisible under speculation (KPAR lesson, 2026-07-07).
 
 ## Methodology (every A/B)
 
@@ -101,7 +102,7 @@ nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda,nvtx \
 nsys stats timeline.nsys-rep
 ```
 
-**CUDA Graphs hide captured kernels** — profile with imp's `--no-cuda-graphs` flag to see the true decode kernel mix.
+**CUDA Graphs hide captured kernels** — profile with imp's `--no-cuda-graphs` flag to see the true decode kernel mix. If you must profile WITH graphs ON (e.g. capture-only paths like graph-captured spec verify), add `--cuda-graph-trace=node` so nsys attributes per-kernel times inside the replayed graph (PR #856 lesson).
 
 Red flags: gaps between launches >10 µs (CPU-bound) · H2D/D2H during compute without overlap · graph not collapsing launches (silent fallback — see `check-degeneration`).
 
@@ -142,3 +143,5 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 - Comparing against wrong peak → FP16 ≠ FP8 ≠ FP4; pick the kernel's dtype
 - A/B without graphs both ON and OFF → graph replay can hide silent fallback (see `check-degeneration`)
 - Back-to-back multi-model sweep deltas → isolate per process, one model each
+- Decode-kernel A/B on a dense model without `--set speculative.ngram=false` → you measured the spec-verify path (STOP #6)
+- Claiming a compiler/source tweak is "perf-neutral" without a SASS diff → byte-identical SASS is *provably* inert; diff `cuobjdump -sass` before wasting bench trials (`[[assume]]` lesson, 2026-07-08)

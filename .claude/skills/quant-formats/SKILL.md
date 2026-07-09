@@ -39,7 +39,10 @@ Per-expert NVFP4 tensors are copied into one contiguous `[ne, N, K_packed]` buff
 
 - **Q8_0 blocks are 34 bytes, NOT 4-aligned** — `memcpy()`, never `reinterpret_cast`.
 - **FP8 prefill is disabled on sm_120** (cuBLAS `NOT_SUPPORTED` at non-aligned M) — don't build on it.
-- **MXFP4 GGUF default stays `legacy`** (`attention.mxfp4_fp16_cache_policy`); Qwen3.5-27B/4B MXFP4 has an open IMA/incoherence bug family — known, parked.
+- **MXFP4 GGUF status (2026-07-09)**: Qwen3.5-4B MXFP4 **works** (server garbage fixed in PRs #935/#937); Qwen3.5-27B MXFP4 stays blocked (loads OOM on 32 GB, no GGUF source).
+- **MXFP4-on-GDN-hybrids decode falls back MXFP4→FP16 — that fallback MUST be VRAM-budgeted** (PR #935): unbudgeted it silently failed to allocate and produced token-0 `!` garbage. The planner now reserves it at init and fails loud; don't remove the reserve.
+- **MoE expert leak fingerprint** (PR #925): host-resident experts left unpromoted (raw INT8/FP4 handed to cuBLAS → `status 15` / garbage). For any MoE-expert weight bug, check `src/exec/weight_upload.cu` promotion logic FIRST.
+- **VRAM ordering** (PR #926): mandatory NVFP4 caches are reserved BEFORE workspaces/KV (`cudaMemGetInfo` lies after async frees — a balloon reservation holds the floor). Don't reorder allocations "for simplicity".
 - **Dequant correctness is golden-locked**: GGUF dequant is bit-exact vs spec; f16-class cross-path tolerance is strict 1e-2 (measured ~4e-4). If your change moves these, it's a bug, not noise.
 - Quantizing new checkpoints happens OUTSIDE imp (NVIDIA ModelOpt / llm-compressor); imp only loads. Bad community quants exist — a degenerate model can be the file, not the engine (verify with llama.cpp control where possible).
 - NVFP4 lm_head quantization (`gemm.nvfp4_lm_head`, `_gdn` default ON) trades +2.2% PPL for +8–16% decode — owner-accepted; don't "fix" the PPL delta by reverting silently.

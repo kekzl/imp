@@ -23,6 +23,10 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 4. **Verify before you claim.** Docs drift; grep the tree before citing a doc fact.
    (Audit lore can be stale — e.g. the old "GOAL.md still lists H100/H200" flag was
    already fixed; GOAL.md:31 now states sm_120a-exclusive.)
+5. **Never document `IMP_*` env vars as config.** The legacy env surface was retired
+   2026-07-07 — the only live env vars are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2`;
+   everything else is `imp.conf` / `--config` / `--set`. A doc or example suggesting
+   another `IMP_*` var is a bug.
 
 ## The doc set + what each owns
 

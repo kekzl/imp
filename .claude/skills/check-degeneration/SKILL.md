@@ -17,6 +17,8 @@ Models in imp regress in specific, recurring ways. Run the battery whenever you 
 | Multi-turn garble | Turn 1 OK, turn 2 `The I…` | KV not reset; GDN recurrent state leaked; warmup CUDA error |
 | Stuck single token | ` a a a a a` | Logits NaN/Inf; banned mask wrong value; argmax on zeroed buffer |
 | Structurally valid garbage | Grammatical but wrong language mid-stream | Weight-upload bug; quant dequant layout |
+| Token-0 garbage (`!`, `!!!` from the first token) | `!!!!…` immediately, sometimes recovers | Silent VRAM-alloc failure in a decode fallback (#934/#935 — MXFP4→FP16 on GDN hybrids); check init logs for failed reserves |
+| Answer in `reasoning_content`, `content` empty (server only) | API "empty response", CLI fine | Thinking-state ≠ rendered prompt tail (closed `<think></think>` template block) — see `server-api` reconcile bullet, PR #937 |
 
 ## Pass criteria (quantitative)
 
@@ -102,6 +104,8 @@ diff /tmp/no_graph.txt /tmp/graph.txt
 ```
 
 **Pass**: identical output for greedy (`temperature=0`). First ~16 tokens identical is a strong signal; later drift is allowed only if non-degenerate.
+
+**Byte-level A/Bs: do NOT diff CLI stdout** — `imp-cli` interleaves log lines with generated text and stripping is error-prone (burned a 2026-07-09 A/B). Run imp-server and diff the JSON `content` field instead. Qwen3.6-**27B** is byte-deterministic at temp=0 (proven on/off-identical, PR #933) — a good graph-parity model; 35B is NOT (see below).
 
 ## Reading stderr (mandatory even if output looks fine)
 

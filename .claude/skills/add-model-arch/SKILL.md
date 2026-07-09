@@ -24,7 +24,8 @@ description: Use when adding support for a new model architecture to imp, portin
 | Argmax always token 0 | NaN logits upstream (residual overflow, bad scale) | gpt-oss FP16 residual overflow |
 | Coherent until ~1k ctx, then garbage | YaRN/`rope_freq_scale` inverted or fused-rope path missing YaRN | gpt-oss: inverted scale = 1024× error, PR #572 |
 | Long-context wrong only with chunked prefill | continuation-chunk path | PR #553 |
-| Wrong language / valid-but-wrong tokens | weight upload / dequant layout, not the arch code | |
+| Wrong language / valid-but-wrong tokens | weight upload / dequant layout, not the arch code (MoE: check `weight_upload.cu` expert promotion first) | Qwen3.6-35B NVFP4, PR #925 |
+| Garbage from token 0 (`!!!…`) | silent VRAM-alloc failure in a decode fallback, not arch code | MXFP4 GDN hybrids, PR #935 |
 | CLI fine, server broken | not an arch bug — see `server-api` skill |
 
 ## Known traps (each cost a debugging session)
@@ -36,6 +37,9 @@ description: Use when adding support for a new model architecture to imp, portin
 - **Per-layer rope_freqs** (Gemma-4): non-SWA layers need their own freqs, `n_rot=hd`.
 - **h_state precision** (GDN/hybrid): FP32 gate required — FP16 NaNs at depth.
 - **HF tensor-name prefixes**: multimodal checkpoints wrap the LM under e.g. `model.language_model.*` (Qwen3.5-VL, PR #647) — strip the prefix in the loader or every tensor "is missing".
+- **MLA/YaRN `rope_mscale`** (#880): the mscale ratio applied to the wrong base inflated RoPE by 1.261× — coherent-ish output that drifts vs HF. When comparing against a transformers oracle, PIN the transformers version (4.44.2 was the validated MLA oracle).
+- **Draft/MTP heads must share the main model's exact RoPE math** — an MTP head computing plain NeoX while the target uses YaRN drifts the drafter (accept rate collapses, output stays correct). Shared impl: `src/compute/rope_yarn.cuh` (PR #913). Any new RoPE variant goes there, not into per-kernel copies.
+- **Encoder/embedding archs are supported** (nomic-bert, PR #867 — cosine 0.999 vs HF). Gotcha: BERT-family GGUFs use an SPM tokenizer, not WordPiece-as-expected.
 - **`attention_k_eq_v`** (gemma-4-31B-style) is NOT implemented — such archs need real work, not config.
 - Model too big? 32 GB VRAM: ~29 GiB weights is the practical ceiling (gemma-4-31B NVFP4 never fits).
 

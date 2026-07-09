@@ -15,14 +15,15 @@ description: Use when opening, merging, or releasing a PR for imp — branching 
 
 ## The auto-merge race (this lost commit `a5403bd5` in #718 — read it)
 
-**Auto-merge squashes the PR the instant `Build` goes green.** If you enable auto-merge and then push another commit, the merge can fire on the OLD head and your later push never lands on `main`.
+**Auto-merge is armed AUTOMATICALLY the moment you open a non-draft PR** (workflow `auto-merge.yml` runs `gh pr merge --auto --squash` on owner PRs at opened/ready_for_review/reopened). You don't enable it — `gh pr create` IS the arming event. **Auto-merge squashes the PR the instant `Build` goes green**, so a commit pushed after opening can miss the merge and never land on `main`.
 
-- Push **ALL** commits FIRST. Enable `gh pr merge --auto --squash` **last**.
+- Push **ALL** commits BEFORE `gh pr create`. Treat the PR as sealed once opened.
 - After it merges, **verify** the squash on `main` actually contains your final work:
   `git log -1 --stat origin/main` (or diff the merged SHA against your branch head). Don't assume.
 - **Never try to "beat" the race by pushing fast** — if `Build` goes green mid-push, you lose. Disable first.
+- Opening a **draft** PR is the escape hatch when you know more commits are coming — the workflow skips drafts (arming fires on ready_for_review instead).
 
-**Need another commit while auto-merge is already armed** (the common case — do this in order):
+**Need another commit after the PR is open** (the common case — do this in order):
 
 ```bash
 gh pr merge --disable-auto <PR#|branch|url>   # FIRST, before you even write the code — it can fire any second
@@ -42,11 +43,12 @@ git switch -c <topic-branch>                   # never reuse / stack
 make verify-fast                               # ~90s pre-push gate (build + filtered tests + perf + smoke)
 git push -u origin <topic-branch>              # push EVERYTHING you intend to ship
 gh pr create --base main --title "<squash subject>" --body "<what + why + perf note>"
-# wait for `Build` to be the green required check, then:
-gh pr merge --auto --squash
-# after merge:
+# auto-merge is armed automatically on open (auto-merge.yml) — no manual step;
+# it squashes as soon as `Build` is green. After merge:
 git log -1 --stat origin/main                  # confirm your final commit is in the squash
 ```
+
+**Don't branch a new topic off `main` while a previous PR's auto-merge is still in flight** — it squashes onto `main` any moment and your new branch misses it (conflict/rework later). Wait for the merge, `git pull --ff-only`, then branch.
 
 ### `mergeStateStatus=BLOCKED` — triage before assuming
 
@@ -68,13 +70,13 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 1. Bump `project(... VERSION X.Y.Z)` in `CMakeLists.txt`.
 2. `CHANGELOG.md`: rename the `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD` (Keep-a-Changelog format; Added / Changed / Fixed). Leave a fresh empty `[Unreleased]`.
 3. `BENCHMARKS.md`: update the "current: **vX.Y.Z**" line — tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
-4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (current: `v0.11.2`).
+4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (e.g. `v0.18.0`). `scripts/check-release.sh` gates release-touching PRs in CI.
 
 ## Common mistakes → fix
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Last commit missing from `main` | Pushed after enabling auto-merge | Push all first, enable auto-merge last, verify the squash |
+| Last commit missing from `main` | Pushed after opening the PR (auto-merge auto-arms on open) | Push all before `gh pr create`; late additions need `--disable-auto` first; verify the squash |
 | PR stuck `BLOCKED`, `Build` green | Required-check name ≠ `Build` | Realign CI job name or ruleset 14716423 |
 | Recovery-PR cascade | Stacked PRs on a squash repo | One branch per PR, always off fresh `main` |
 | Perf gate red in CI | Intentional perf change, stale baseline | Refresh `perf_baseline.json` in the same PR + note it |
@@ -82,6 +84,7 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 
 ## Red flags — STOP
 
-- About to `gh pr merge --auto` but you still have unpushed/uncommitted work → **push first**.
+- About to `gh pr create` but you still have unpushed/uncommitted work → **push first** (auto-merge arms itself on open).
 - Branched off a feature branch instead of `main` → start over off `main`.
+- Branching off `main` while a prior auto-merge is in flight → wait for it to land, pull, then branch.
 - Releasing but only bumped one of {CMakeLists VERSION, CHANGELOG, BENCHMARKS} → bump all three.
