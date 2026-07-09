@@ -170,8 +170,49 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
+    // Mandatory MXFP4 → FP16 decode-fallback reserve. On GDN hybrids the
+    // native MXFP4 GEMV is disabled (cuBLAS status-14 cascade on the GDN
+    // projections — see pre_dequant_phase3_cutlass.cu and
+    // qwen35_27b_mxfp4_ima_2026_04_25.md), so decode REQUIRES the FP16
+    // dequant cache (~4× the raw MXFP4 bytes, resident alongside it). The
+    // StoragePlanner classifies these tensors at their MXFP4 wire size and
+    // never sees the fallback, so without charging it here the KV clamp ate
+    // the headroom (server default max_seq_len fills VRAM): the fallback
+    // then failed to allocate and decode ran against no valid weights →
+    // uniform logits → token-0 ("!") garbage (#934). Charge it as overhead
+    // so the KV pool sizes down to leave room, mirroring the SWA/SSM
+    // footprints above. Same failure class as the NVFP4 (#926) and Q4_K
+    // (#874) weight-cache reserves; MXFP4-GDN was simply missed.
+    size_t mxfp4_fp16_fallback_bytes = 0;
+    if (mcfg.ssm_inner_size > 0) {
+        auto count_mxfp4 = [&](const Tensor& w, QType qt) {
+            if (w.data && qt == QType::MXFP4)
+                mxfp4_fp16_fallback_bytes += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
+        };
+        count_mxfp4(model.output_proj(), model.out_proj_.qtype);
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            const auto& L = model.layer(i);
+            count_mxfp4(L.wq, L.wq.qtype);
+            count_mxfp4(L.wk, L.wk.qtype);
+            count_mxfp4(L.wv, L.wv.qtype);
+            count_mxfp4(L.wo, L.wo.qtype);
+            count_mxfp4(L.w_gate, L.w_gate.qtype);
+            count_mxfp4(L.w_up, L.w_up.qtype);
+            count_mxfp4(L.w_down, L.w_down.qtype);
+            count_mxfp4(L.w_gate_shared, L.w_gate_shared.qtype);
+            count_mxfp4(L.w_up_shared, L.w_up_shared.qtype);
+            count_mxfp4(L.w_down_shared, L.w_down_shared.qtype);
+            count_mxfp4(L.ssm_in, L.ssm_in.qtype);
+            count_mxfp4(L.ssm_out, L.ssm_out.qtype);
+        }
+        if (mxfp4_fp16_fallback_bytes > 0)
+            IMP_LOG_INFO("VRAM budget: MXFP4-GDN FP16 decode fallback reserve %.1f MiB (mandatory — "
+                         "native MXFP4 GEMV unavailable on GDN weights)",
+                         mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
+    }
+
     size_t available = free_vram;
-    size_t overhead = budget.reserve_bytes + ssm_footprint;
+    size_t overhead = budget.reserve_bytes + ssm_footprint + mxfp4_fp16_fallback_bytes;
     available = (available > overhead) ? (available - overhead) : 0;
 
     // --- 4. Compute KV cache per-block cost ---
