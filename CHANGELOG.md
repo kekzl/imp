@@ -4,6 +4,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Stage-1 HD=256 FA2 port (`attention.fa2_hd256`, default off).** The
+  register-resident FA2 prefill kernel gains head_dim=256 instances (fp16-qk,
+  Bq=64/Bkv=64/TWOSLOT — the double-buffer would need 135 KB smem vs the 99 KB
+  sm_120 opt-in; pv-f16 variant fits in 228 regs with zero spills) and the
+  chunked-prefill router accepts hd=256 behind the flag. Measured on
+  Qwen3.6-35B-A3B-NVFP4 (hd=256, GDN hybrid): kernel 4.3x vs the SMEM-tiled
+  WMMA FMHA; e2e prefill +10.6% pp4096 / +24.8% pp8192; teacher-forced PPL
+  10.44 vs 10.58 baseline (no quality loss). Opt-in until the split-D stage-2
+  port restores hd=128-class occupancy and the route is validated across the
+  gemma-class models.
+
 ### Fixed
 - **Deterministic cuBLAS GEMM now validates its algo choice (intermittent
   status-14 garbage on FP8-KV / head_dim=256 models).** `runtime.deterministic_gemm`

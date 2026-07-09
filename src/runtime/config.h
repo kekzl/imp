@@ -246,6 +246,13 @@ struct RuntimeConfig {
         // 2026-06-11; set false to restore f32 PV accumulate. Requires
         // fa2_f16acc.
         bool fa2_pv_f16acc = true;
+        // Stage-1 HD=256 FA2 port (Qwen3.6 hybrids / gemma-class): route
+        // head_dim=256 prefill through the register-resident FA2 kernel
+        // (fp16-qk, Bq=64/TWOSLOT) instead of the SMEM-tiled WMMA FMHA.
+        // Default off — the HD=256 instances run at ~2x the register
+        // pressure of the tuned hd=128 mainline; enable for A/B only until
+        // the split-D stage-2 port lands.
+        bool fa2_hd256 = false;
         // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
         // raw conversion is the #511 quality cliff; scaling Q and K to the
         // full e4m3 range is the numerics class FlashInfer runs. Only

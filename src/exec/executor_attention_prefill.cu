@@ -45,7 +45,11 @@
             // O(n) family too — only truly heterogeneous shapes (Gemma-4 dual
             // head_dim 256/512) and learned sinks (gpt-oss) require cuBLAS.
             const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
-            const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && hd == 128 &&
+            // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
+            // off): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
+            const bool fa2_hd_ok =
+                hd == 128 || (hd == 256 && runtime_config().attention.fa2_hd256);
+            const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && fa2_hd_ok &&
                                           runtime_config().attention.fa2_fp16qk != "never";
             // Tiled FMHA correctness domain: uniform shapes, no learned sinks.
             const bool chunk_fmha_ok = shapes_uniform && !attn_sinks;

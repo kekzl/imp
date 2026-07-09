@@ -473,5 +473,178 @@ TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude_GQA) {
 }
 TEST_F(FmhaFA2Fp8ScaledTest, Chunked) { run_scaled(1, 64, 512, 24, 8, 128, true, 80.0f, 448); }
 
+// --- Stage-1 HD=256 FA2 port (attention.fa2_hd256) ---
+// The register-resident FA2 kernel instanced at HD=256 (fp16-qk only,
+// Bq=64/Bkv=64/TWOSLOT). Shapes mirror the Qwen3.6 hybrid geometry
+// (head_dim=256, kv_heads=2, GQA 4:1) plus the usual edge cases. The pv-f16
+// variant is the production candidate; the f32/f16-acc variants are pinned
+// for correctness even where they spill registers.
+class FmhaFA2Hd256Test : public FmhaFA2Test {
+protected:
+    void SetUp() override {
+        FmhaFA2Test::SetUp();
+        process_diag_set_fa2_hd256(true);
+    }
+    void TearDown() override {
+        process_diag_set_fa2_hd256(false);
+        process_diag_set_fa2_f16acc(false);
+        process_diag_set_fa2_pv_f16acc(false);
+        FmhaFA2Test::TearDown();
+    }
+    // pv-f16 production variant (2% tol — f16 O accumulation, same bound as
+    // the hd=128 PvF16 suite).
+    void run_pv256(int B, int Sq, int Skv, int NH, int NKV, bool causal, int sw = 0,
+                   float softcap = 0.0f, float amplitude = 1.0f, int q_offset = 0) {
+        process_diag_set_fa2_f16acc(true);
+        process_diag_set_fa2_pv_f16acc(true);
+        run_fa2(B, Sq, Skv, NH, NKV, 256, causal, sw, softcap, amplitude, /*fp16_qk=*/true, q_offset,
+                /*tol_override=*/0.02f);
+    }
+};
+
+TEST_F(FmhaFA2Hd256Test, PvF16_CausalSeq64_GQA8_2) { run_pv256(1, 64, 64, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Test, PvF16_CausalMultiTile) { run_pv256(1, 256, 256, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Test, PvF16_OddSeq51) { run_pv256(1, 51, 51, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Test, PvF16_OddSeq200_GQA16_4) { run_pv256(1, 200, 200, 16, 4, true); }
+TEST_F(FmhaFA2Hd256Test, PvF16_NonCausal) { run_pv256(1, 32, 64, 8, 2, false); }
+TEST_F(FmhaFA2Hd256Test, PvF16_RealisticMagnitude) {
+    run_pv256(1, 64, 64, 8, 2, true, 0, 0.0f, /*amplitude=*/80.0f);
+}
+TEST_F(FmhaFA2Hd256Test, PvF16_SlidingWindow) { run_pv256(1, 128, 128, 8, 2, true, /*sw=*/64); }
+TEST_F(FmhaFA2Hd256Test, PvF16_Softcap) { run_pv256(1, 64, 64, 8, 2, true, 0, /*softcap=*/50.0f); }
+TEST_F(FmhaFA2Hd256Test, PvF16_Chunked) {
+    // chunk continuation: seq_kv = q_offset + Sq, non-tile-multiple lengths
+    run_pv256(1, 51, 371, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
+}
+TEST_F(FmhaFA2Hd256Test, PvF16_LongCtx1536) { run_pv256(1, 1536, 1536, 8, 2, true); }
+
+// f32-acc and f16-acc-QK variants: correctness must hold even where the
+// register footprint spills (they are A/B references, not the fast path).
+TEST_F(FmhaFA2Hd256Test, F32Acc_CausalSeq64) {
+    run_fa2(1, 64, 64, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
+}
+TEST_F(FmhaFA2Hd256Test, F16Acc_CausalMultiTile) {
+    process_diag_set_fa2_f16acc(true);
+    run_fa2(1, 200, 200, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
+}
+
+// fp8-qk mode must keep declining hd=256 (no e4m3 instance in stage 1).
+TEST_F(FmhaFA2Hd256Test, Fp8QkStillDeclines) {
+    float scale = 1.0f / 16.0f;
+    const int elems = 1 * 32 * 8 * 256;
+    void* d;
+    cudaMalloc(&d, elems * sizeof(half) * 4);
+    half* p = static_cast<half*>(d);
+    int64_t q_shape[] = {1, 32, 8, 256};
+    int64_t kv_shape[] = {1, 32, 2, 256};
+    Tensor Qt(p, QType::F16, 4, q_shape, true);
+    Tensor Kt(p + elems, QType::F16, 4, kv_shape, true);
+    Tensor Vt(p + 2 * elems, QType::F16, 4, kv_shape, true);
+    Tensor Ot(p + 3 * elems, QType::F16, 4, q_shape, true);
+    EXPECT_FALSE(fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_, 0,
+                                        /*fp16_qk=*/false));
+    cudaFree(d);
+}
+
+// Micro-benchmark: FA2 HD=256 (pv-f16) vs the SMEM-tiled WMMA FMHA on the
+// Qwen3.6-35B prefill shape (8 Q heads / 2 KV heads, hd=256, 2048 tokens).
+// Reports per-kernel ms + cross-path max relative error. Not a perf gate —
+// the stage-1 decision data (see PR body).
+TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
+    const int B = 1, Sq = 2048, Skv = 2048, NH = 8, NKV = 2, HD = 256;
+    const bool causal = true;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+    process_diag_set_fa2_f16acc(true);
+    process_diag_set_fa2_pv_f16acc(true);
+
+    size_t q_elems = (size_t)B * Sq * NH * HD;
+    size_t kv_elems = (size_t)B * Skv * NKV * HD;
+    std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
+    for (size_t i = 0; i < q_elems; i++)
+        Q_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6));
+    for (size_t i = 0; i < kv_elems; i++) {
+        K_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6));
+        V_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 13 + 7) % 13) - 6));
+    }
+    void *d_q, *d_k, *d_v, *d_o_fa2, *d_o_wmma;
+    cudaMalloc(&d_q, q_elems * sizeof(half));
+    cudaMalloc(&d_k, kv_elems * sizeof(half));
+    cudaMalloc(&d_v, kv_elems * sizeof(half));
+    cudaMalloc(&d_o_fa2, q_elems * sizeof(half));
+    cudaMalloc(&d_o_wmma, q_elems * sizeof(half));
+    cudaMemcpy(d_q, Q_h.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, K_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, V_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    int64_t q_shape[] = {B, Sq, NH, HD};
+    int64_t kv_shape[] = {B, Skv, NKV, HD};
+    Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+    Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+    Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O_fa2(d_o_fa2, QType::F16, 4, q_shape, true);
+    Tensor O_wmma(d_o_wmma, QType::F16, 4, q_shape, true);
+
+    // correctness cross-check first
+    ASSERT_TRUE(fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true));
+    ASSERT_TRUE(fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0));
+    cudaStreamSynchronize(stream_);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+    {
+        std::vector<half> a(q_elems), b(q_elems);
+        cudaMemcpy(a.data(), d_o_fa2, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), d_o_wmma, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+        float max_rel = 0.0f;
+        int nans = 0;
+        for (size_t i = 0; i < q_elems; i++) {
+            float x = __half2float(a[i]), y = __half2float(b[i]);
+            if (std::isnan(x) || std::isnan(y)) {
+                nans++;
+                continue;
+            }
+            max_rel = std::max(max_rel, std::abs(x - y) / std::max(1.0f, std::abs(y)));
+        }
+        EXPECT_EQ(nans, 0);
+        EXPECT_LT(max_rel, 0.03f) << "FA2-hd256 vs WMMA cross-path divergence";
+        printf("[hd256-bench] cross-path max_rel=%.5f\n", max_rel);
+    }
+
+    auto time_kernel = [&](auto&& launch) {
+        for (int w = 0; w < 3; w++)
+            launch();
+        cudaStreamSynchronize(stream_);
+        cudaEvent_t t0, t1;
+        cudaEventCreate(&t0);
+        cudaEventCreate(&t1);
+        constexpr int kIters = 20;
+        cudaEventRecord(t0, stream_);
+        for (int i = 0; i < kIters; i++)
+            launch();
+        cudaEventRecord(t1, stream_);
+        cudaEventSynchronize(t1);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, t0, t1);
+        cudaEventDestroy(t0);
+        cudaEventDestroy(t1);
+        return ms / kIters;
+    };
+    float fa2_ms = time_kernel([&] {
+        fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true);
+    });
+    float wmma_ms = time_kernel([&] {
+        fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0);
+    });
+    printf("[hd256-bench] Qwen3.6 shape (Sq=%d NH=%d NKV=%d): FA2=%.3f ms  WMMA=%.3f ms  "
+           "(FA2/WMMA = %.2fx)\n",
+           Sq, NH, NKV, fa2_ms, wmma_ms, fa2_ms / wmma_ms);
+    RecordProperty("fa2_ms", std::to_string(fa2_ms));
+    RecordProperty("wmma_ms", std::to_string(wmma_ms));
+
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o_fa2);
+    cudaFree(d_o_wmma);
+}
+
 }  // namespace
 }  // namespace imp

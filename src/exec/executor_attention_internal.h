@@ -34,7 +34,11 @@ static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, c
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
                                    cudaStream_t stream, const int* d_kv_len = nullptr) {
-    if (rcfg.attention.fa2_fp16qk == "never" || hd != 128)
+    if (rcfg.attention.fa2_fp16qk == "never")
+        return false;
+    // hd=256: stage-1 FA2 port, opt-in (attention.fa2_hd256). Other head
+    // dims decline as before; the kernel wrapper re-checks the same gate.
+    if (hd != 128 && !(hd == 256 && rcfg.attention.fa2_hd256))
         return false;
     // Chunk CONTINUATION (q_offset > 0, queries attend gathered past KV) is
     // declined: the f16-QK kernel produces wrong attention there on the

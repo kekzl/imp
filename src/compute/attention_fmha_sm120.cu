@@ -1835,7 +1835,13 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         return false;
     if (seq_q == 0 || seq_kv == 0)
         return false;
-    if (head_dim != 128)  // first cut: HD=128 only
+    // HD=128 is the tuned mainline. HD=256 (Qwen3.6 hybrids, gemma-class) is a
+    // stage-1 port behind attention.fa2_hd256 (default off): fp16-qk only,
+    // fixed Bq=64/Bkv=64/TWOSLOT (double-buffer at HD=256 needs 135 KB smem >
+    // the 99 KB opt-in; TWOSLOT fits at 67.6 KB). Register pressure doubles
+    // with HD (a_frag + O accumulator scale linearly), so the HD=256 instances
+    // ride the f16acc/pv_f16 variants where possible — see the launch table.
+    if (head_dim != 128 && !(head_dim == 256 && fp16_qk && imp::process_diag_fa2_hd256()))
         return false;
 
     int device = 0;
@@ -1871,7 +1877,18 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     bool twoslot = false;
     bool fp8_scaled = false;
     decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
-    if (fp16_qk) {
+    if (head_dim == 256) {
+        // Stage-1 HD=256 port (fp16-qk only, gated above): one configuration.
+        // Bq=64 → 4 warps; TWOSLOT keeps the full Bkv=64 tile at 67.6 KB smem
+        // (double-buffer would need 135 KB). Per-thread registers ~2× the
+        // HD=128 profile (a_frag 32→64 regs, O f32 64→128 / pv-f16 32→64), so
+        // pv_f16 is strongly preferred; the f32-acc variant exists for A/B
+        // but is expected to spill.
+        Bq = 64, Bkv = 64, twoslot = true;
+        kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, true>
+               : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true>
+                        : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
+    } else if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;
             kern = pv_f16   ? fmha_sm120_fa2_kernel<128, 128, true, true, 64, false, true>
@@ -1924,9 +1941,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (!logged_once) {
         logged_once = true;
         IMP_LOG_INFO(
-            "FMHA FA2 register-resident kernel ACTIVE (hd=128, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, "
+            "FMHA FA2 register-resident kernel ACTIVE (hd=%d, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, "
             "pv_acc=%s, kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
-            Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
+            head_dim, Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
             twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
     }
     // FP8SCALED: per-chunk operand amaxes for Q and the gathered K (two tiny
