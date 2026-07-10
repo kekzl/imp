@@ -16,7 +16,7 @@ git show <commit>:docs/archive/<path>
 
 Everything here is **historical / superseded / refuted** — it is not the current
 state of the engine. For current docs see [`../architecture.md`](../architecture.md),
-[`../sm120.md`](../sm120.md), [`../../BENCHMARKS.md`](../../BENCHMARKS.md), and the
+[`../sm120.md`](../sm120.md), [`../BENCHMARKS.md`](../BENCHMARKS.md), and the
 live audit memos in [`../audit/`](../audit/).
 
 ---
@@ -199,8 +199,34 @@ PRs. Originals removed; full text in git history.
   matrix is needed.
 - `TEST_AUDIT.md` (was `docs/TEST_AUDIT.md`) — Test-Trustworthiness Phase-1 gap analysis (2026-06-04).
   Superseded by the 2026-06-06 re-audit (`tests/TEST_AUDIT.md`) and the coverage-hardening work
-  (PR #717, server-test stage, CTest unit/gpu split). Kept the newer `tests/TEST_AUDIT.md` live.
+  (PR #717, server-test stage, CTest unit/gpu split). The newer `tests/TEST_AUDIT.md` re-audit was itself retired 2026-07-10 (see below).
 
 ---
 
-*Consolidated 2026-06-13 (housekeeping), 2026-06-20, and 2026-06-29. Originals live in git history.*
+## 2026-07-10 consolidation — root cleanup (docs moved under docs/, stale reports removed)
+
+Root-level project docs moved into `docs/`: `GOAL.md`, `BENCHMARKS.md`, `BENCHMARKING.md`
+(→ `docs/`), `AUDIT_FILESIZE.md`, `PERF_LOG.md` (→ `docs/audit/`). The repo root now holds
+only the standard set (README, CHANGELOG, CONTRIBUTING, AGENTS.md, CLAUDE.md). Removed
+outright (point-in-time reports, superseded; full text in git history):
+
+- `AUDIT.md` (root) — 2026-06-17 whole-repo structural/hardening audit ledger (469 lines,
+  append-only through 06-29). Its confirmed findings shipped via the June/July fix PRs;
+  later passes live in `audit/structural_debt_2026_07_07.md` / `_2026_07_10.md`.
+- `AUDIT/agentic_server_scout.md` — 2026-06-23 phase-0 read-only scout for the agentic
+  server hardening campaign; the campaign shipped (PRs #772–#774 and follow-ups).
+- `BATTERY_REPORT.md` (root) — 2026-06-30 full-architecture prompt-battery run report
+  (green matrix). Point-in-time snapshot; the battery itself is re-runnable.
+- `tests/TEST_AUDIT.md` — 2026-06-06 test-suite re-audit / refactor plan. Implemented:
+  R1–R9 closed (#585–#589), coverage hardening (#717), server-test stage. Test-file
+  docstrings citing "TEST_AUDIT.md §7/§8" refer to this document's tiering decisions.
+- `docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md` — design-only memo for
+  a model that remains blocked (OOM, no GGUF); the pre-dequant machinery that shipped
+  took a different shape.
+- `docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md` was **moved** to
+  `docs/plans/` (still referenced as refutation evidence by `docs/roadmap.md`), and the
+  empty `docs/superpowers/` tree removed.
+
+---
+
+*Consolidated 2026-06-13 (housekeeping), 2026-06-20, 2026-06-29, and 2026-07-10 (root cleanup). Originals live in git history.*

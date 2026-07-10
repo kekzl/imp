@@ -314,7 +314,7 @@ jobs:
   # steps by design: an ADVISORY warn display (never fails) and a BLOCKING hard-
   # review gate (fails only on a NON-allowlisted file over its hard threshold).
   # Thresholds + allowlist live in tools/filesize_thresholds.toml; baseline state
-  # is documented in AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
+  # is documented in docs/audit/AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
   filesize:
     name: File size
     runs-on: ubuntu-24.04

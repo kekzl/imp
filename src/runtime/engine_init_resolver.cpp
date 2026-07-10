@@ -429,7 +429,7 @@ void Engine::init_resolve_quant_flags_() {
             // degenerates output for 8-bit GGUF — that is why mode 2 is reserved
             // for sub-8-bit weights below). Decode uses the NVFP4 cache, which is
             // both fast and coherent. Measures +4% decode over mode 2 on Qwen3-14B
-            // Q6_K @ ctx=2048 (151 vs 145.6 tok/s, PR #364). GOAL.md ranks decode
+            // Q6_K @ ctx=2048 (151 vs 145.6 tok/s, PR #364). docs/GOAL.md ranks decode
             // #1 for the north-star, so dense Q*_K defaults to mode 1.
             config_.use_nvfp4_decode = 1;
             IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");

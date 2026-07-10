@@ -13,7 +13,7 @@ description states when to fire AND when not to — keep that property when edit
 | [add-model-arch](add-model-arch/SKILL.md) | New-architecture integration checklist + wrong-output diagnostic fingerprints | quant-formats, check-degeneration |
 | [quant-formats](quant-formats/SKILL.md) | GGUF/NVFP4/FP8 formats, StorageTier dispatch contract, decode cache, KV dtypes | sm120-cuda-expert |
 | [codebase-audit](codebase-audit/SKILL.md) | Structural-debt / dead-code / god-file / flag audits + the verification discipline that stops fan-out over-flagging; `docs/audit/` convention | building-and-testing, check-degeneration |
-| [docs-sync](docs-sync/SKILL.md) | Keeping architecture.md / README / GOAL.md / supported-models.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule | benchmark-cuda (perf), codebase-audit |
+| [docs-sync](docs-sync/SKILL.md) | Keeping architecture.md / README / docs/GOAL.md / supported-models.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule | benchmark-cuda (perf), codebase-audit |
 | [shipping-prs](shipping-prs/SKILL.md) | PR/merge/release mechanics — branch off main, no stacking, squash + auto-merge race (`Build` required check, ruleset 14716423), version bump + CHANGELOG + tag flow | building-and-testing, docs-sync (CHANGELOG prose) |
 
 Boundaries (to avoid trigger collisions):

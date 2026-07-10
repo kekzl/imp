@@ -15,7 +15,7 @@
 Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
 **Last refreshed**: decode numbers are owned by the SHA-anchored
-[`BENCHMARKS.md`](../BENCHMARKS.md) (see Decode Throughput below — no table is
+[`BENCHMARKS.md`](BENCHMARKS.md) (see Decode Throughput below — no table is
 duplicated here). Prefill + KV-cache tables below are
 **historical** (2026-05-27 era, CUDA 13.2.1) — prefill varies up to 2.6×
 across container restarts and is not maintained as a comparison table.
@@ -27,7 +27,7 @@ llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
 The per-model decode table is **not duplicated here** — it drifts. The canonical,
 SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA · exact
-command) live in [`BENCHMARKS.md`](../BENCHMARKS.md), and the CI gate is
+command) live in [`BENCHMARKS.md`](BENCHMARKS.md), and the CI gate is
 `tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`). Heroes for
 orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 · NVFP4 MoE
 tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 257).

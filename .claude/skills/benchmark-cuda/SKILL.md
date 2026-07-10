@@ -1,6 +1,6 @@
 ---
 name: benchmark-cuda
-description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to BENCHMARKS.md/README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
+description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to docs/BENCHMARKS.md and the README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
 ---
 
 # CUDA Kernel Benchmarking — imp / sm_120 / RTX 5090
@@ -129,7 +129,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 ## Publishing numbers (keep docs from going stale)
 
 - **`tests/perf_baseline.json`** is the canonical CI gate. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. Current Q8 `tg128 = 269.50` (cold-median, 2026-06-12; normal healthy range 266–278). The previous 286.4 baseline (2026-06-07) was sampled on a documented **peak day** — its 3% gate threshold (277.8) sat INSIDE the normal range, so it failed on ordinary days; it was corrected down in #697. A small gate failure can be host drift, not a regression; sample clocks before concluding.
-- **`BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
+- **`docs/BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
 - `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
 ## Red flags — STOP and re-run
