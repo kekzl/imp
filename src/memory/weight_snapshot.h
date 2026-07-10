@@ -73,8 +73,16 @@ struct WeightUploadRecord {
     // (or divergent load config) falls back to the cold path per tensor.
     QType src_qtype = QType::NONE;
     int64_t src_numel = 0;
+    size_t src_nbytes = 0;
     // Source dropped by the pipeline (release_gpu_allocation) — not capturable.
     bool dead = false;
+    // Device bytes are a verbatim copy of the host source (plain h2d, no
+    // conversion/reorder). Derived heuristically in record(): single alloc,
+    // same qtype, same byte count, no scales sidecar (MXFP4 excluded — its
+    // split reorder keeps size + qtype). Only gates what the on-disk warm
+    // cache persists: a false "raw" merely skips caching that tensor, the
+    // cold re-upload is byte-equivalent either way.
+    bool raw_from_source = false;
 };
 
 class WeightUploadLog {
@@ -86,7 +94,7 @@ public:
     // silently (leaving the tensor cold-only) if any size is unknown or the
     // tensor data pointer is not backed by the listed allocations.
     void record(const char* key, const void* const* allocs, size_t n_allocs, const Tensor& post,
-                QType src_qtype, int64_t src_numel);
+                QType src_qtype, int64_t src_numel, size_t src_nbytes);
 
     // Mark every record touching ptr dead (pipeline dropped the source).
     void evict_ptr(void* ptr);
@@ -131,6 +139,20 @@ public:
     // Test hook: drop one captured record so that key takes the cold path at
     // resume — proves warm and cold uploads mix byte-safely.
     bool drop_key(const std::string& key) { return blobs_.erase(key) > 0; }
+
+    // Builder API for the on-disk warm cache (memory/weight_cache_file.cpp):
+    // assembles a snapshot from deserialized records instead of a live capture.
+    void builder_set_identity(int arch_id, int n_layers) {
+        arch_id_ = arch_id;
+        n_layers_ = n_layers;
+    }
+    void builder_add(WeightUploadRecord rec, std::vector<std::unique_ptr<uint8_t[]>> host_data) {
+        for (const auto& a : rec.allocs)
+            total_bytes_ += a.bytes;
+        std::string key = rec.key;
+        blobs_.emplace(std::move(key), Blob{std::move(rec), std::move(host_data)});
+    }
+    size_t record_count() const { return blobs_.size(); }
 
 private:
     struct Blob {

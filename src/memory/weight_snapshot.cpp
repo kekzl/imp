@@ -24,7 +24,8 @@ const char* make_weight_key(char* buf, size_t buf_len, const char* name, int lay
 // ---------------------------------------------------------------------------
 
 void WeightUploadLog::record(const char* key, const void* const* allocs, size_t n_allocs,
-                             const Tensor& post, QType src_qtype, int64_t src_numel) {
+                             const Tensor& post, QType src_qtype, int64_t src_numel,
+                             size_t src_nbytes) {
     if (!key || n_allocs == 0)
         return;
 
@@ -63,6 +64,11 @@ void WeightUploadLog::record(const char* key, const void* const* allocs, size_t 
     rec.tensor = post;
     rec.src_qtype = src_qtype;
     rec.src_numel = src_numel;
+    rec.src_nbytes = src_nbytes;
+    // See the field comment: heuristic only gates warm-cache persistence.
+    rec.raw_from_source = rec.allocs.size() == 1 && post.qtype == src_qtype &&
+                          src_qtype != QType::MXFP4 && post.scales == nullptr &&
+                          rec.allocs[0].bytes == src_nbytes;
 
     auto it = by_key_.find(rec.key);
     if (it != by_key_.end()) {
@@ -252,7 +258,7 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
         // note_alloc happened inside ops.alloc (checked_cuda_malloc); re-record
         // so a subsequent suspend of the resumed model captures this slot again.
         new_log->record(key, const_cast<const void* const*>(new_allocs.data()), new_allocs.size(),
-                        weight, rec.src_qtype, rec.src_numel);
+                        weight, rec.src_qtype, rec.src_numel, rec.src_nbytes);
     }
     hits_++;
     return true;

@@ -598,6 +598,18 @@ struct RuntimeConfig {
         bool green_contexts = false;
     } server;
 
+    struct WarmCache {
+        // On-disk warm weight cache: at the first fully-cold load, persist the
+        // TRANSFORMED weight uploads (BF16->FP16 conversions, dequants, split
+        // layouts) next to the model; later boots restore them instead of
+        // re-converting. Raw-from-source uploads are never stored (the model
+        // file already holds those bytes), so the cache is near-zero for
+        // raw-served GGUF quants / NVFP4-prequant SafeTensors and ~model-size
+        // only for BF16-dense checkpoints. Guarded by a format version and a
+        // model-content fingerprint; any mismatch = normal cold load.
+        bool enabled = true;
+    } warm_cache;
+
     struct Suspend {
         // Suspend-to-RAM (/admin/suspend): after model/engine teardown, also
         // cudaDeviceReset() so the CUDA primary context (+ module code,

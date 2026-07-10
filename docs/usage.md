@@ -242,6 +242,14 @@ non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`,
 Tool/function calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
 
+**Warm weight cache.** The first cold load of a model writes a small cache
+next to it (`<file>.impwcache` for GGUF, `.imp_warm_cache` inside a
+SafeTensors directory) holding the converted weight buffers; subsequent
+starts restore them and skip the conversion work. On by default
+(`[warm_cache] enabled = false` to opt out); stale caches (changed model
+file) are detected and ignored. Delete the cache file at any time — the next
+load is simply cold and rewrites it.
+
 **Suspend to RAM.** `POST /admin/suspend` drains in-flight requests, parks
 the model weights in host RAM, and frees the GPU completely (with
 `[suspend] device_reset` — the default — the CUDA context is reset too, so
