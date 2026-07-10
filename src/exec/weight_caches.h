@@ -17,6 +17,9 @@ struct FP8CacheEntry {
     Tensor weight;     // [N, K] FP8_E4M3 on device
     float host_scale{};  // absmax / 448
     float* d_scale{};    // device-side scale (1 float)
+    // Per-row (output-channel) scales — set by the fp8_ssm_proj sidecar
+    // (points into fp8_ssm_sidecar_row_scales); null = per-tensor scale.
+    const float* d_row_scales{};
 };
 
 // ---------------------------------------------------------------------------
@@ -61,6 +64,12 @@ struct WeightCaches {
     int fp8_overflow_count = 0;
     void* fp8_overflow_data = nullptr;
     size_t fp8_overflow_data_size = 0;
+
+    // FP8 decode sidecar for GDN/SSM projections (gemm.fp8_ssm_proj); entries
+    // carry per-row scales (d_row_scales into the bulk below, d_scale = null).
+    void* fp8_ssm_sidecar_data = nullptr;
+    size_t fp8_ssm_sidecar_data_size = 0;
+    float* fp8_ssm_sidecar_row_scales = nullptr;
 
     // --- NVFP4 decode weight cache ---
     // Mode: 0=off, 1=additive, 2=only

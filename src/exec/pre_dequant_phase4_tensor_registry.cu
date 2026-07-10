@@ -38,6 +38,14 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         if (!t.data)
             return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
+        // FP8 decode SIDECAR on a native-precision weight (gemm.fp8_ssm_proj):
+        // the wcache fp8 entry must not become the primary tier — prefill and
+        // M>1 verify chunks stay on the resident FP16 source (quality), only
+        // the M=1 decode GEMV takes the FP8 copy. Demote BEFORE the payload
+        // borrow below, or the union would carry an fp8 payload into FP16 paths.
+        const bool fp8_decode_sidecar = tier == StorageTier::FP8 && t.qtype == QType::F16;
+        if (fp8_decode_sidecar)
+            tier = StorageTier::FP16;
         TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_->handle(id);
         h.primary_tier = tier;
@@ -64,6 +72,8 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             h.decode_tier = StorageTier::FP8;
         } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->nvfp4.count(t.data)) {
             h.decode_tier = StorageTier::NVFP4;
+        } else if (fp8_decode_sidecar) {
+            h.decode_tier = StorageTier::FP8;
         }
         return id;
     };

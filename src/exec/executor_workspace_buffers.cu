@@ -1177,7 +1177,14 @@ void GraphExecutor::free_buffers() {
                                    reinterpret_cast<uintptr_t>(entry.weight.data) <
                                        reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) +
                                            wcache_.fp8_overflow_data_size;
-                if (!in_migrated && !in_overflow)
+                bool in_ssm_sidecar =
+                    wcache_.fp8_ssm_sidecar_data &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) >=
+                        reinterpret_cast<uintptr_t>(wcache_.fp8_ssm_sidecar_data) &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) <
+                        reinterpret_cast<uintptr_t>(wcache_.fp8_ssm_sidecar_data) +
+                            wcache_.fp8_ssm_sidecar_data_size;
+                if (!in_migrated && !in_overflow && !in_ssm_sidecar)
                     cudaFree(entry.weight.data);
             }
             if (entry.d_scale) {
@@ -1213,6 +1220,15 @@ void GraphExecutor::free_buffers() {
             vram_free(vram_alloc_, wcache_.fp8_overflow_data);
             wcache_.fp8_overflow_data = nullptr;
             wcache_.fp8_overflow_data_size = 0;
+        }
+        if (wcache_.fp8_ssm_sidecar_data) {
+            vram_free(vram_alloc_, wcache_.fp8_ssm_sidecar_data);
+            wcache_.fp8_ssm_sidecar_data = nullptr;
+            wcache_.fp8_ssm_sidecar_data_size = 0;
+        }
+        if (wcache_.fp8_ssm_sidecar_row_scales) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_ssm_sidecar_row_scales));
+            wcache_.fp8_ssm_sidecar_row_scales = nullptr;
         }
     }
 

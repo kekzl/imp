@@ -80,10 +80,16 @@ Decode carries ±5–10 % day-to-day variance (issue #526); clocks logged health
 | Qwen3-14B | 14B | 159 |
 | Qwen3-30B-A3B-Modelopt | 30B (3B) | 305 |
 | Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
-| Qwen3.6-35B-A3B | 35B (3B) | 257 |
+| Qwen3.6-35B-A3B | 35B (3B) | 257 → **320**¹ᵇ |
 | Gemma-4-26B-A4B | 26B (4B) | 266 |
 | Nemotron-3-Nano-30B | 30B (3B) | 128 |
 | gpt-oss-20b¹ | 21B (3.6B) | 325 |
+
+¹ᵇ 2026-07-10, commit `80864b06` + `gemm.fp8_ssm_proj` (default on since that
+PR): FP8 E4M3 per-row-scale decode sidecar for the BF16 GDN in/out projections
+— tg256 268.6 → **320.3** spec-off (+19.2%), 261 → 308 with default
+speculation; PPL flat (8.021 → 8.012 same-session teacher-forced). Same
+command pattern as the table; healthy-host clocks sampled during the run.
 
 ¹ gpt-oss (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
 NVFP4 at load (bit-exact nibbles, power-of-two scales) and registered for the

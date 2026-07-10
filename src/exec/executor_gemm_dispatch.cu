@@ -187,11 +187,17 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             }
             case StorageTier::FP8: {
                 auto fp8_it = wcache_.fp8.find(h.source_data);
-                if (fp8_it != wcache_.fp8.end()) {
+                // gemv_fp8 writes half — decline non-F16 outputs (falls back
+                // to the source-tier GEMV below, matching the FP16 case).
+                if (fp8_it != wcache_.fp8.end() && output.qtype == QType::F16) {
                     int64_t wshape[2] = {h.shape[0],
                         (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
                     Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-                    gemv_fp8(fp8_w, input, output, fp8_it->second.host_scale, ctx.stream);
+                    if (fp8_it->second.d_row_scales)
+                        gemv_fp8_rowscale(fp8_w, input, output, fp8_it->second.d_row_scales,
+                                          ctx.stream);
+                    else
+                        gemv_fp8(fp8_w, input, output, fp8_it->second.host_scale, ctx.stream);
                     return;
                 }
                 break;
@@ -311,6 +317,20 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             auto fp16_it = wcache_.fp16.find(h.source_data);
             if (fp16_it != wcache_.fp16.end()) {
                 gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);
+                return;
+            }
+            // FP16-resident source with no cache entry — the source IS the
+            // FP16 weight (e.g. a weight whose only cache is the fp8_ssm_proj
+            // decode sidecar). Route through the uncached fallback exactly as
+            // the pre-sidecar Undefined tier did; falling further through
+            // would hand a null payload pointer to cuBLAS.
+            if (h.source_data &&
+                (h.source_qtype == QType::F16 || h.source_qtype == QType::BF16)) {
+                Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+                weight.kind = h.kind;
+                weight.scales = h.source_scales;
+                weight.tensor_scale = h.source_tensor_scale;
+                gemm_dispatch_uncached_fallback(input, weight, output, ctx);
                 return;
             }
         }

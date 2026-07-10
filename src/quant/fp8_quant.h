@@ -22,6 +22,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream = nullptr);
 void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, int n_elements, float scale,
                                       cudaStream_t stream = nullptr);
 
+// Per-row (output-channel) E4M3 quantize: writes scale[row] = row_absmax/448
+// to d_row_scales and the quantized rows to output_fp8. Async, init-time.
+void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
+                             float* d_row_scales, cudaStream_t stream = nullptr);
+
 // Fully async calibrate+quantize: no host sync, all on device.
 // Caller provides reusable temp buffers d_block_maxes[max_grid] and d_absmax[1].
 // Scale is written to d_scale_out on device.

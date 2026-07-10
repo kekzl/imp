@@ -247,4 +247,107 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     deduct_budget(remaining_budget, wcache_->fp8_bytes + phase2_fp16_bytes);
 }
 
+// Phase 2b: FP8 E4M3 decode sidecar for the native-precision GDN/Mamba
+// in/out projections (gemm.fp8_ssm_proj). On native-NVFP4 hybrids the
+// producer recipe leaves ssm_in/ssm_out BF16 → they decode as FP16 GEMVs,
+// the single largest decode slice (34.6% on Qwen3.6-35B, 2026-07-10 nsys).
+// NVFP4 on these wide GDN shapes REGRESSES (see config.h note); FP8 halves
+// the bytes with byte-aligned loads instead. The sidecar only serves the
+// M=1 decode GEMV — prefill and verify chunks keep the FP16 source, and
+// the recurrent-scan state stays FP16, so the quality exposure is one
+// 8-bit weight read per token, not error accumulation in the state.
+void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
+                                                         cudaStream_t stream) {
+    if (!runtime_config().gemm.fp8_ssm_proj)
+        return;
+
+    struct Entry {
+        const void* ptr;
+        size_t n_elems;
+        int rows;
+        int cols;
+    };
+    std::vector<Entry> entries;
+    size_t total_bytes = 0;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        // At decode the fused GDN input pack ([ssm_in | gate | alpha | beta]
+        // row-concat) replaces the ssm_in dispatch entirely (run_gdn n==1
+        // fused_input path), so the sidecar must target the pack where it
+        // exists; ssm_in then only serves prefill and stays FP16.
+        const Tensor* in_side = L.gdn_input_packed.data ? &L.gdn_input_packed : &L.ssm_in;
+        for (const Tensor* w : {in_side, &L.ssm_out}) {
+            if (!w->data || !w->on_device)
+                continue;
+            // Native-precision sources only: quantized sources go through the
+            // nvfp4_ssm_proj / dp4a paths, and anything already in a decode
+            // cache keeps its faster tier. F16 strictly — the calibration
+            // kernel reads __half, and post-upload residents are F16 (BF16
+            // checkpoints are converted at upload; a genuine BF16-resident
+            // would already break the FP16 GEMV this replaces).
+            if (w->qtype != QType::F16)
+                continue;
+            if (wcache_->fp8.count(w->data) || wcache_->nvfp4.count(w->data) ||
+                wcache_->cutlass_nvfp4.count(w->data))
+                continue;
+            size_t n = static_cast<size_t>(w->shape[0]) * w->shape[1];
+            if (n == 0 || (w->shape[1] % 16) != 0)
+                continue;
+            entries.push_back({w->data, n, static_cast<int>(w->shape[0]),
+                               static_cast<int>(w->shape[1])});
+            total_bytes += n;
+        }
+    }
+    if (entries.empty())
+        return;
+
+    uint8_t* d_bulk =
+        static_cast<uint8_t*>(vram_alloc(vram_alloc_, total_bytes, "fp8_ssm_sidecar"));
+    if (!d_bulk) {
+        cudaError_t e = cudaGetLastError();
+        IMP_LOG_WARN("fp8_ssm_proj: sidecar alloc failed (%.1f MiB): %s — decode keeps FP16",
+                     total_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
+        return;
+    }
+
+    // Per-ROW scales: one scale per output channel. A single per-tensor scale
+    // measurably hurts PPL here (+4% on Qwen3.6-35B) because the fused GDN
+    // input pack concatenates row blocks with very different magnitudes
+    // (conv | gate | alpha | beta) — one amax wastes e4m3 range on most rows.
+    size_t total_rows = 0;
+    for (const auto& e : entries)
+        total_rows += static_cast<size_t>(e.rows);
+    float* d_row_scales = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_row_scales, total_rows * sizeof(float)));
+    if (!d_row_scales) {
+        vram_free(vram_alloc_, d_bulk);
+        IMP_LOG_WARN("fp8_ssm_proj: row-scale alloc failed — decode keeps FP16");
+        return;
+    }
+
+    size_t offset = 0, row_offset = 0;
+    for (const auto& e : entries) {
+        quantize_fp8_rows_async(e.ptr, d_bulk + offset, e.rows, e.cols,
+                                d_row_scales + row_offset, stream);
+        int64_t fp8_shape[4] = {e.rows, e.cols, 0, 0};
+        Tensor fp8_t(d_bulk + offset, QType::FP8_E4M3, 2, fp8_shape, true);
+        FP8CacheEntry entry{};
+        entry.weight = fp8_t;
+        entry.d_row_scales = d_row_scales + row_offset;
+        wcache_->fp8[e.ptr] = entry;
+        offset += e.n_elems;
+        row_offset += static_cast<size_t>(e.rows);
+    }
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+    wcache_->fp8_bytes += total_bytes;
+    wcache_->fp8_ssm_sidecar_data = d_bulk;
+    wcache_->fp8_ssm_sidecar_data_size = total_bytes;
+    wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
+
+    IMP_LOG_INFO("fp8_ssm_proj: FP8 decode sidecar for %zu GDN/SSM projections "
+                 "(%.1f MiB, %zu per-row scales; FP16 source retained for prefill)",
+                 entries.size(), total_bytes / (1024.0 * 1024.0), total_rows);
+}
+
 }  // namespace imp

@@ -314,6 +314,10 @@ nvfp4_ssm_proj       = false
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false
+# FP8 E4M3 decode sidecar (per-row scales) for the native-precision GDN/Mamba
+# in/out projections on NVFP4 hybrids: halves the dominant FP16-GEMV decode
+# bytes; prefill keeps the FP16 source. Qwen3.6-35B decode +19%, PPL flat.
+fp8_ssm_proj         = true
 # Route native-NVFP4 MoE expert decode (M=1) through per-expert GEMV
 # kernels instead of grouped CUTLASS (+54-80% MoE decode). Default ON.
 nvfp4_moe_decode     = true

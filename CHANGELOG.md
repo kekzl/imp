@@ -4,6 +4,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **`gemm.fp8_ssm_proj` (default ON): FP8 E4M3 decode sidecar for the
+  native-precision GDN/Mamba in/out projections on NVFP4 hybrids — Qwen3.6-35B
+  decode +19%** (tg256 268.6 → 320.3 spec-off, 261 → 308 with default
+  speculation), PPL flat with per-row scales (one per-tensor scale over the
+  heterogeneous fused GDN input pack cost +4% PPL; per-row is 8.021 → 8.012).
+  These projections were the single largest decode slice (34.6% of GPU time as
+  FP16 GEMVs) because the producer recipes exclude them from NVFP4 and 4-bit
+  GEMV on their wide shapes *regresses* (measured 2026-05-30). FP8 halves the
+  bytes with byte-aligned loads instead. Prefill and M>1 verify chunks keep the
+  FP16 source; only the M=1 decode GEMV (`gemv_fp8_rowscale`) takes the sidecar.
+  Nemotron-3-Nano PPL flat (4.184 → 4.117); no-op on GGUF hybrids (see
+  `nvfp4_ssm_proj`) and on checkpoints whose SSM projections are already NVFP4
+  (Qwen3.6-27B).
+
 ### Fixed
 - **Streaming `/v1/responses` requests now update server metrics and send SSE
   keepalives** (#941). The responses token loop never touched `requests_total`,
