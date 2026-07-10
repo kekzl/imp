@@ -22,6 +22,7 @@
 #include "compute/hadamard.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -564,6 +565,15 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 
 static void* s_mxfp4_workspace = nullptr;
 static size_t s_mxfp4_workspace_size = 0;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void gemm_cutlass_mxfp4_reset_static_cuda_state() {
+    if (s_mxfp4_workspace) {
+        (void)cudaFree(s_mxfp4_workspace);
+        s_mxfp4_workspace = nullptr;
+        s_mxfp4_workspace_size = 0;
+    }
+}
 
 size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K) {
     auto stride_A = cutlass::make_cute_packed_stride(MxStrideA{}, {M, K, 1});

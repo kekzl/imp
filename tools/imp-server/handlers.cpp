@@ -64,7 +64,10 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     }
     json body = {{"status", faulted ? "unhealthy" : "ok"},
                  {"model_loaded", loaded},
-                 {"queue_depth", queue}};
+                 {"queue_depth", queue},
+                 // Suspended is HEALTHY (deliberate operator state, HTTP 200):
+                 // the model is parked in host RAM, POST /admin/resume serves again.
+                 {"suspended", state.suspended.load()}};
     if (faulted)
         res.status = 503;  // let orchestrators restart a wedged server (#874)
     res.set_content(dump_safe(body), "application/json");
@@ -253,6 +256,17 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
 // Returns true if the requested model is loaded. Must be called with
 // state.mtx held.
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
+    // Suspended (/admin/suspend): the GPU is deliberately free — do NOT
+    // auto-load a cold copy. Inference waits for POST /admin/resume.
+    if (state.suspended.load()) {
+        res.status = 503;
+        json err = {{"error",
+                     {{"message", "server suspended (weights parked in host RAM); POST /admin/resume "
+                                  "to serve again"},
+                      {"type", "server_error"}}}};
+        res.set_content(dump_safe(err), "application/json");
+        return false;
+    }
     if (!state.model_loaded()) {
         // No model loaded — try to load the requested one
         std::string path = find_model_path(state, requested_model);
@@ -457,6 +471,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         id_path.pop_back();
     size_t slash = id_path.find_last_of('/');
     state.model_name = (slash != std::string::npos) ? id_path.substr(slash + 1) : id_path;
+    state.loaded_model_path = path;  // remembered for /admin/resume
     state.publish_model_status(true, state.model_name);
 
     // Set up tokenizer and chat template

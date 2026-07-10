@@ -253,6 +253,14 @@ int main(int argc, char** argv) {
         handle_detokenize(req, res, state);
     });
 
+    svr.Post("/admin/suspend", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_suspend(req, res, state);
+    });
+
+    svr.Post("/admin/resume", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_resume(req, res, state);
+    });
+
     svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_metrics(req, res, state);
     });
@@ -313,6 +321,8 @@ int main(int argc, char** argv) {
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
+    printf("  POST   /admin/suspend       Park weights in host RAM, free the GPU\n");
+    printf("  POST   /admin/resume        Restore weights, serve again\n");
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
@@ -332,5 +342,6 @@ int main(int argc, char** argv) {
     }
     imp_context_free(state.ctx);
     imp_model_free(state.model);
+    imp_weights_snapshot_free(state.weight_snapshot);  // non-null only when suspended
     return 0;
 }

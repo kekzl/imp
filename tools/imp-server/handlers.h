@@ -146,6 +146,14 @@ struct ServerState {
     // allowing multiple concurrent requests to be processed together.
     std::unique_ptr<BatchingEngine> batching;
 
+    // Suspend-to-RAM (/admin/suspend, /admin/resume): while suspended the
+    // model/engine are torn down (VRAM freed), the weights live in the host
+    // snapshot, and inference endpoints answer 503. Atomic so /health can
+    // read it without state.mtx. All writes happen under state.mtx.
+    std::atomic<bool> suspended{false};
+    std::string loaded_model_path;             // resolved path of the loaded model
+    ImpWeightSnapshot weight_snapshot = nullptr;
+
     // Server limits
     int max_concurrent = 64;
     int request_timeout = 300;
@@ -242,3 +250,10 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// POST /admin/suspend — snapshot weights to host RAM, tear the model/engine
+// down, free (approximately) all VRAM. POST /admin/resume — reload the same
+// model with the snapshot armed (warm weight restore) and serve again.
+// Both idempotent; auth via the standard pre-routing API-key check.
+void handle_suspend(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_resume(const httplib::Request& req, httplib::Response& res, ServerState& state);

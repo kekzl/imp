@@ -167,6 +167,43 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path);
 // Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
+// --- Suspend to RAM (weight snapshot) ---
+//
+// Flow (see imp-server /admin/suspend and /admin/resume):
+//   1. imp_weights_snapshot_capture(model, headroom_mb, &snap)  — D2H copy of
+//      the post-upload weight buffers into pageable host RAM. Model/engine
+//      still fully alive; on failure nothing was torn down.
+//   2. imp_context_free(ctx); imp_model_free(model);            — free VRAM.
+//   3. imp_gpu_release(1);                                      — trim pools,
+//      optional cudaDeviceReset so the process holds ~0 MiB VRAM.
+//   4. later: imp_weights_snapshot_arm(snap); then reload the SAME model file
+//      (imp_model_load + imp_context_create). The weight upload restores
+//      buffer bytes from the snapshot instead of re-reading + re-converting;
+//      any per-tensor mismatch silently falls back to the normal cold path.
+//   5. imp_weights_snapshot_free(snap);
+//
+// Capture errors: IMP_ERROR_UNSUPPORTED for models whose device weight buffers
+// were transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4
+// fused-expert split), IMP_ERROR_OUT_OF_MEMORY when host MemAvailable is
+// insufficient (snapshot bytes + headroom_mb).
+typedef struct ImpWeightSnapshot_T* ImpWeightSnapshot;
+
+ImpError imp_weights_snapshot_capture(ImpModel model, size_t host_ram_headroom_mb,
+                                      ImpWeightSnapshot* out_snap);
+// Arm for the NEXT model load in this process (non-consuming: the snapshot
+// stays owned by the caller and can be re-armed after a failed resume).
+ImpError imp_weights_snapshot_arm(ImpWeightSnapshot snap);
+void imp_weights_snapshot_free(ImpWeightSnapshot snap);
+size_t imp_weights_snapshot_bytes(ImpWeightSnapshot snap);
+// Number of uploads restored from this snapshot by the last armed consume.
+int imp_weights_snapshot_hits(ImpWeightSnapshot snap);
+
+// Release process-held GPU resources after model/context teardown: syncs,
+// trims the async mempool, and (device_reset != 0) resets the CUDA primary
+// context so nvidia-smi shows ~0 MiB for this process. After a reset the next
+// imp_model_load/imp_context_create re-initializes CUDA state from scratch.
+ImpError imp_gpu_release(int device_reset);
+
 // --- Version ---
 const char* imp_version(void);
 

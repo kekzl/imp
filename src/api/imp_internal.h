@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imp/imp.h"
+#include "memory/weight_snapshot.h"
 #include "model/model.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
@@ -13,6 +14,10 @@
 
 struct ImpModel_T {
     std::shared_ptr<imp::Model> model;
+};
+
+struct ImpWeightSnapshot_T {
+    std::unique_ptr<imp::WeightSnapshot> snap;
 };
 
 struct ImpContext_T {

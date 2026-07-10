@@ -4,6 +4,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Suspend to RAM** (`POST /admin/suspend` / `POST /admin/resume`): park the
+  loaded model's weights in host RAM and free the GPU completely (engine +
+  model teardown, mempool trim, and — default on — a CUDA primary-context
+  reset, so the process holds ~0 MiB VRAM for other workloads), then resume
+  serving in seconds. Resume re-runs the normal init path but restores weight
+  buffer bytes from the snapshot instead of re-reading + re-converting (mmap
+  read, host BF16→FP16 loops, GPU dequant all skipped); KV cache, CUDA graphs
+  and GEMM handles are rebuilt fresh. Sessions/KV do not survive — only the
+  weights stay warm. Any per-tensor mismatch falls back to the cold path, so
+  warm and cold uploads mix byte-safely. Unsupported (clean 501): models whose
+  device weight buffers are transformed in place after upload (native MXFP4
+  GGUF, gpt-oss, Gemma-4 fused-expert split). Capture is gated on host
+  `MemAvailable` (507 with a clear message instead of driving the host into
+  swap). Config: `[suspend] device_reset`, `host_ram_headroom_mb`; C API:
+  `imp_weights_snapshot_capture/arm/free/bytes/hits`, `imp_gpu_release`.
+  While suspended, inference endpoints answer 503 and `/health` reports
+  `"suspended": true` with HTTP 200.
+
 ## [0.18.1] - 2026-07-10
 
 ### Changed

@@ -598,6 +598,18 @@ struct RuntimeConfig {
         bool green_contexts = false;
     } server;
 
+    struct Suspend {
+        // Suspend-to-RAM (/admin/suspend): after model/engine teardown, also
+        // cudaDeviceReset() so the CUDA primary context (+ module code,
+        // ~300-600 MiB) is released and the GPU reads ~0 MiB for this process.
+        // Escape hatch: set false if a foreign library holds CUDA state the
+        // reset would orphan (imp itself re-arms everything at the next init).
+        bool device_reset = true;
+        // Host RAM the snapshot must leave free (MemAvailable gate) on top of
+        // the snapshot bytes themselves.
+        int host_ram_headroom_mb = 2048;
+    } suspend;
+
     struct Bench {
         bool generate = false;
     } bench;

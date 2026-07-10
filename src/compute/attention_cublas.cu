@@ -1,4 +1,5 @@
 #include "compute/attention_cublas.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -21,17 +22,18 @@ static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 // ---------------------------------------------------------------------------
 // cuBLAS handle (reuse global — same as gemm.cu)
 // ---------------------------------------------------------------------------
+static cublasHandle_t s_attn_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
+
 static cublasHandle_t get_attn_cublas_handle() {
-    static cublasHandle_t handle = nullptr;
-    if (!handle) {
-        cublasStatus_t st = cublasCreate(&handle);
+    if (!s_attn_cublas_handle) {
+        cublasStatus_t st = cublasCreate(&s_attn_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::attention_cublas: cublasCreate failed (status %d)\n", (int)st);
             abort();
         }
-        cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        cublasSetMathMode(s_attn_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
-    return handle;
+    return s_attn_cublas_handle;
 }
 
 // Forward-decl: definition lower in the file alongside s_attn_d_ptrs.
@@ -378,6 +380,19 @@ static void ensure_attn_ptr_arrays(int n_heads) {
         IMP_CUDA_CHECK_LOG(cudaFree(s_attn_d_ptrs));
     IMP_CUDA_CHECK_LOG(cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*)));
     s_attn_d_ptrs_capacity = needed;
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void attention_cublas_reset_static_cuda_state() {
+    if (s_attn_cublas_handle) {
+        (void)cublasDestroy(s_attn_cublas_handle);
+        s_attn_cublas_handle = nullptr;
+    }
+    if (s_attn_d_ptrs) {
+        (void)cudaFree(s_attn_d_ptrs);
+        s_attn_d_ptrs = nullptr;
+    }
+    s_attn_d_ptrs_capacity = 0;
 }
 
 // Fill s_attn_d_ptrs device-side so the GQA cuBLAS batched path is

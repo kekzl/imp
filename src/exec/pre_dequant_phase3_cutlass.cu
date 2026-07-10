@@ -394,6 +394,9 @@ if (mx_native > 0) {
     // re-run the unpack (it would read the already-compacted layout as raw
     // blocks → illegal access, #830). Engine::init rejects it up front.
     const_cast<Model*>(model_)->mark_sources_consumed();
+    // Also suspend-unsupported: a weight snapshot would capture the compacted
+    // bytes and the resume replay would compact them again.
+    const_cast<Model*>(model_)->mark_device_sources_mutated();
     IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)", mx_native,
                  mx_native_bytes / (1024.0 * 1024.0));
 

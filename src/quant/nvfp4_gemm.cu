@@ -1,6 +1,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm.h"
+#include "core/cuda_static_reset.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
@@ -112,6 +113,17 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
 static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
 static std::mutex s_nvfp4_dequant_mtx;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h). Only the lazily
+// cudaMalloc'd buffer is freed here — s_nvfp4_dequant_ws_buf is caller-owned.
+void nvfp4_gemm_reset_static_cuda_state() {
+    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
+    if (s_nvfp4_dequant_buf) {
+        (void)cudaFree(s_nvfp4_dequant_buf);
+        s_nvfp4_dequant_buf = nullptr;
+    }
+    s_nvfp4_dequant_buf_size = 0;
+}
 
 // FP32 -> FP16 copy for the small-M batched-GEMV path (the batched kernel
 // accumulates and writes FP32; gemm_nvfp4's contract is an FP16 C).
