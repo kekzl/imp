@@ -226,6 +226,12 @@ outright (point-in-time reports, superseded; full text in git history):
 - `docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md` was **moved** to
   `docs/plans/` (still referenced as refutation evidence by `docs/roadmap.md`), and the
   empty `docs/superpowers/` tree removed.
+- `tools/prompt-test.sh`, `tools/benchmark.sh`, `tools/chat.sh`,
+  `tools/download-models.sh` — March-era one-off shell tools (curl smoke prompts,
+  pre-`--bench` timing loop, interactive chat wrapper, HF download helper).
+  Zero references; superseded by `imp-cli --bench`, `bench/`, `scripts/verify.sh`,
+  the server batteries, and manual model staging (the `imp-pull` pipeline was
+  removed in #245).
 
 ---
 

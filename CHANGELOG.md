@@ -24,6 +24,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   is now a shared predicate so the two sites cannot drift.
 
 ### Changed
+- **Directory sweep follow-up**: removed four March-era one-off tools with zero
+  references (`tools/prompt-test.sh`, `tools/benchmark.sh`, `tools/chat.sh`,
+  `tools/download-models.sh` — superseded by `imp-cli --bench`, `bench/`,
+  `scripts/verify.sh`, and the server batteries), and dropped the dead
+  `CUDA_ARCHITECTURES` build-arg from `docker-compose.yml` (the Dockerfile has
+  no such ARG since the sm_120a-only build; the value was silently ignored).
+  Verified live and kept: `bench/` (benchmark-cuda tooling), `monitoring/`
+  (compose Prometheus/Grafana stack), the compose deployment itself
+  (`docker-entrypoint.sh` translates the container-level `IMP_*` interface to
+  live CLI flags), `third_party/stb` (vision image loading), `tools/analysis`,
+  `tools/roofline` (append-only tracked history by design).
 - **Docs consolidated under `docs/`; repo root cleaned up.** `GOAL.md`,
   `BENCHMARKS.md`, `BENCHMARKING.md` moved to `docs/`; `AUDIT_FILESIZE.md` and
   `PERF_LOG.md` to `docs/audit/`; the stray q4k-MMQ design spec from
