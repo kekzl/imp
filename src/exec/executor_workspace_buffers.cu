@@ -722,7 +722,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                            cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
         // SSM dimensions
         if (cfg.ssm_inner_size > 0) {
-            int conv_ch = cfg.ssm_inner_size + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
+            int conv_ch = cfg.ssm_conv_channels();
             int ssm_in_dim = cfg.ssm_inner_size + conv_ch + cfg.ssm_dt_rank;
             int gdn_fused_total = conv_ch + cfg.ssm_inner_size + 2 * cfg.ssm_dt_rank;
             max_dim = std::max(max_dim, ssm_in_dim);

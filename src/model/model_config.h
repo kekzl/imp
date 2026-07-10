@@ -40,6 +40,10 @@ struct ModelConfig {
     int ssm_group_count = 0;  // 8
     int ssm_inner_size = 0;   // 4096
     int ssm_dt_rank = 0;      // 64
+    // Conv1d channel count (xBC width: x plus the B/C group states). Derived,
+    // not stored — the single source for what used to be hand-derived at
+    // every SSM sizing/upload/assign site. 0 on non-SSM models.
+    int ssm_conv_channels() const { return ssm_inner_size + 2 * ssm_group_count * ssm_state_size; }
     // Asymmetric-head GDN (n_v_heads > n_k_heads) head storage layout.
     // false (default): heads in tiled order (h % n_groups gives group_id).
     //                  GGUF Qwen3.5/3.6 converters use this layout.

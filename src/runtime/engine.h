@@ -11,6 +11,7 @@
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
 #include "runtime/suffix_draft.h"
+#include "runtime/vram_budget.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
@@ -306,6 +307,21 @@ private:
     RuntimeConfig runtime_config_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
+
+    // compute_native_cache_demand(*model_) is a pure function of the
+    // checkpoint's tensor shapes (stable pre- and post-upload by contract);
+    // it used to be re-scanned at every init phase that needs it (auto
+    // batch/ctx sizing, VRAM budget planning, balloon reserve). Scan once,
+    // reuse everywhere.
+    const NativeCacheDemand& native_cache_demand() {
+        if (!native_cache_demand_valid_) {
+            native_cache_demand_ = compute_native_cache_demand(*model_);
+            native_cache_demand_valid_ = true;
+        }
+        return native_cache_demand_;
+    }
+    NativeCacheDemand native_cache_demand_{};
+    bool native_cache_demand_valid_ = false;
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<KVCacheManager> kv_manager_;
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)

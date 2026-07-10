@@ -148,7 +148,7 @@ bool Engine::init_weights() {
         expert_reserve += kv_est;
 
         if (mcfg.ssm_inner_size > 0) {
-            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int conv_ch = mcfg.ssm_conv_channels();
             int n_heads = mcfg.ssm_dt_rank;
             int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             int n_ssm = 0;
@@ -283,7 +283,7 @@ bool Engine::init_weights() {
     // caches into the guaranteed space (engine_kv_cache_init.cpp).
     if (mcfg.is_nvfp4_prequant && config_.use_nvfp4_decode == 2 && !experts_on_host_ &&
         runtime_config_.vram.native_cache_reserve) {
-        NativeCacheDemand demand = compute_native_cache_demand(*model_);
+        const NativeCacheDemand& demand = native_cache_demand();
         constexpr size_t kBalloonPad = 64ULL * 1024 * 1024;  // alloc granularity slack
         size_t want = demand.total() + kBalloonPad;
         // The hold must leave room for the ESSENTIAL allocations that run

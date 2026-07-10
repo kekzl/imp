@@ -153,7 +153,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
             int64_t d_model = tensor.shape[1];     // inner dim
 
             // Check if this is a GDN layer (total rows match SSM conv_channels)
-            int ssm_conv_channels = cfg.ssm_inner_size + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
+            int ssm_conv_channels = cfg.ssm_conv_channels();
             if (cfg.ssm_inner_size > 0 && total_rows == ssm_conv_channels) {
                 // GDN layer: treat attn_qkv as ssm_in (fused projection → conv1d input)
                 assign_quant(layer.ssm_in, tensor);

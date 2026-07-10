@@ -306,7 +306,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // (vram.native_cache_reserve balloon) — subtract them too so the
             // auto batch doesn't size workspaces into the reserved bytes.
             if (mcfg.is_nvfp4_prequant)
-                upload_bytes += compute_native_cache_demand(*model_).total();
+                upload_bytes += native_cache_demand().total();
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
@@ -647,7 +647,7 @@ void Engine::init_compute_max_seq_len_() {
         size_t free_for_kv = free_vram;
         if (mcfg.is_nvfp4_prequant) {
             size_t reserved = approx_weight_footprint_bytes(mcfg) +
-                              compute_native_cache_demand(*model_).total();
+                              native_cache_demand().total();
             free_for_kv = (free_vram > reserved) ? (free_vram - reserved) : 0;
         }
         int max_by_vram = (kv_bytes_per_token > 0)

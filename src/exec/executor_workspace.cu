@@ -426,10 +426,8 @@ void Workspace::compute_shared_sizes(int max_tokens) {
     // SSM phase
     if (*has_ssm_) {
         int inner = cfg.ssm_inner_size;
-        int n_groups = cfg.ssm_group_count;
-        int state_size = cfg.ssm_state_size;
         int n_heads = cfg.ssm_dt_rank;
-        int conv_channels = inner + 2 * n_groups * state_size;
+        int conv_channels = cfg.ssm_conv_channels();
         int ssm_in_dim = inner + conv_channels + n_heads;
 
         size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;

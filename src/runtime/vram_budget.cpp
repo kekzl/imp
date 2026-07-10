@@ -102,7 +102,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
 
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens, int n_swa_layers,
-                               size_t mandatory_cache_prealloc) {
+                               size_t mandatory_cache_prealloc,
+                               const NativeCacheDemand* native_demand) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
@@ -159,7 +160,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             if (model.layer(i).ssm_in.data != nullptr)
                 n_ssm++;
         if (n_ssm > 0) {
-            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int conv_ch = mcfg.ssm_conv_channels();
             int n_heads = mcfg.ssm_dt_rank;
             int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_footprint = static_cast<size_t>(n_ssm) * config.max_batch_size *
@@ -321,7 +322,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // compute_native_cache_demand scans the projection tensors
             // directly, no qtype filter: on an NVFP4-prequant checkpoint
             // these are exactly the quantized set.
-            NativeCacheDemand demand = compute_native_cache_demand(model);
+            NativeCacheDemand demand = native_demand ? *native_demand : compute_native_cache_demand(model);
             // Floors are only handed to phase 3 when the balloon physically
             // guaranteed the bytes — an unbacked floor on a genuinely tight
             // card would over-commit the SF slab cudaMalloc. Phase 3b (SF)

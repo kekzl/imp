@@ -173,7 +173,7 @@ bool Engine::init_kv_cache() {
     // keeps the prequant reserve from charging KV for the same demand twice.
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
                                            effective_free_vram(), swa_live_tokens, n_swa_layers,
-                                           native_cache_balloon_bytes_);
+                                           native_cache_balloon_bytes_, &native_cache_demand());
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
@@ -289,7 +289,7 @@ bool Engine::init_kv_cache() {
             if (model_->layer(i).ssm_in.data != nullptr)
                 n_ssm++;
         if (n_ssm > 0) {
-            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int conv_ch = mcfg.ssm_conv_channels();
             int n_heads = mcfg.ssm_dt_rank;
             int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();

@@ -95,10 +95,8 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int inner = cfg.ssm_inner_size;
-    int n_groups = cfg.ssm_group_count;
-    int state_size = cfg.ssm_state_size;
     int n_heads = cfg.ssm_dt_rank;
-    int conv_channels = inner + 2 * n_groups * state_size;
+    int conv_channels = cfg.ssm_conv_channels();
     int ssm_in_dim = inner + conv_channels + n_heads;
     size_t es = dtype_size(compute_dtype_);
 
