@@ -24,6 +24,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   is now a shared predicate so the two sites cannot drift.
 
 ### Changed
+- **Docs consolidated under `docs/`; repo root cleaned up.** `GOAL.md`,
+  `BENCHMARKS.md`, `BENCHMARKING.md` moved to `docs/`; `AUDIT_FILESIZE.md` and
+  `PERF_LOG.md` to `docs/audit/`; the stray q4k-MMQ design spec from
+  `docs/superpowers/specs/` to `docs/plans/`. Superseded point-in-time reports
+  removed (full text in git history, indexed in `docs/archive/README.md`):
+  root `AUDIT.md`, `AUDIT/agentic_server_scout.md`, `BATTERY_REPORT.md`,
+  `tests/TEST_AUDIT.md`, and the stale Qwen3.5-27B host-dequant design memo.
+  All references (README, CLAUDE.md, AGENTS.md, skills, CI, scripts, code
+  comments) updated. The root now holds only README / CHANGELOG / CONTRIBUTING
+  / AGENTS.md / CLAUDE.md.
 - **Structural audit #6** (`docs/audit/structural_debt_2026_07_10.md`): swept the
   ~40 PRs since audit #5. Confirmed findings filed as #941 (responses-stream
   metrics/keepalive drift), #942 (pre-upload KV reserve computes 0 bytes for

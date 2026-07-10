@@ -111,5 +111,5 @@ Quick guidance, not a benchmark:
 - **Q4_K_M** is the most VRAM-efficient GGUF. Sufficient for most chat; can degenerate on long code-gen on Gemma-4 — use Q5_K_M or Q8_0 there.
 - **Q6_K** sits in between. Good MoE pick on Qwen3-Coder-30B.
 - **IQ4_NL / IQ4_XS** (i-quants) load and run since #556 via the dequant path (FP16-cache decode like Q4_K, dequant→cuBLAS prefill). Supported for community-quant compatibility — at equal VRAM prefer Q4_K_M, which has dedicated dp4a/MMVQ kernels. The IQ1/IQ2/IQ3 families remain unsupported.
-- **NVFP4** (SafeTensors prequant) gives the highest decode throughput on prequant-aware models (current per-model numbers in [`BENCHMARKS.md`](../BENCHMARKS.md)). Requires AWQ/SmoothQuant calibration; only Modelopt is fully tested.
+- **NVFP4** (SafeTensors prequant) gives the highest decode throughput on prequant-aware models (current per-model numbers in [`BENCHMARKS.md`](BENCHMARKS.md)). Requires AWQ/SmoothQuant calibration; only Modelopt is fully tested.
 - **MXFP4** is GGUF-native FP4. Smallest footprint (Qwen3-4B at 2.8 GB), but quality lags Q4_K_M without MR-GPTQ calibration.

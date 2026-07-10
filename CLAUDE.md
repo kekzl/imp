@@ -19,7 +19,7 @@ Match the task, invoke that skill first; the skills below are imp-specific and c
 | Structure audit / dead code / god-files | skill **codebase-audit** |
 | Keep docs in sync after a change | skill **docs-sync** |
 
-Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `AGENTS.md` (subagent roles + guardrails), `BENCHMARKING.md` (measurement contract).
+Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `AGENTS.md` (subagent roles + guardrails), `docs/BENCHMARKING.md` (measurement contract).
 
 ## Build & test
 
@@ -39,7 +39,7 @@ make format        # clang-format
 
 - Targets exist for `bench`, `test-perf`, `test-golden`, `test-vision`, `gen-perf-baseline`, `verify-north-star`, `verify-chunked`, `tidy` (clang-tidy, advisory), `sanitize`, and the roofline pipeline (`roofline-measure`, `roofline-pin`, `roofline-regress` — see `tools/roofline/README.md`).
 - Configure presets live in `CMakePresets.json` (`default`/`ci`/`debug`/`relwithdebinfo`); dependency pins are single-sourced in `cmake/imp-deps.cmake` (the Dockerfile takes them as build-args). sm_120a is selected via raw gencode (CMake <3.31 workaround); 120f PTX fallback covers non-5090 SKUs.
-- See also: [`AGENTS.md`](AGENTS.md) (subagent roles + guardrails) and [`BENCHMARKING.md`](BENCHMARKING.md) (measurement methodology contract).
+- See also: [`AGENTS.md`](AGENTS.md) (subagent roles + guardrails) and [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) (measurement methodology contract).
 
 ## Conventions
 
@@ -69,7 +69,7 @@ fat header re-triggers every includer. Optimize for compile-time isolation:
   (advisory warn step + blocking hard step); a hard-review violation fails CI.
 - **A legitimately monolithic file is fine** — add it to `[allow]` in the toml **with a
   reason** (the gate rejects an empty reason). Don't split for splitting's sake. Current
-  baseline + per-file rationale: `AUDIT_FILESIZE.md`.
+  baseline + per-file rationale: `docs/audit/AUDIT_FILESIZE.md`.
 
 ## Benchmarking gotchas
 

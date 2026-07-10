@@ -131,7 +131,7 @@ verify-chunked:
 	 IMP_VERIFY_CHUNK_SIZE=512 \
 	 scripts/verify.sh fast
 
-# verify-north-star: gates the GOAL.md north-star model (Qwen3-14B Q6_K) against
+# verify-north-star: gates the docs/GOAL.md north-star model (Qwen3-14B Q6_K) against
 # tests/perf_baseline_north_star.json. Same 3%/5% thresholds as perf_baseline.json.
 # Requires Qwen3-14B-Q6_K.gguf in $(HOME)/models. Numbers were captured
 # 2026-05-23 under the cold-median methodology (PR #376) — see

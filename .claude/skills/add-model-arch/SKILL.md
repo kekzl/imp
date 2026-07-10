@@ -13,7 +13,7 @@ description: Use when adding support for a new model architecture to imp, portin
 4. **Chat template**: `src/model/chat_template.cpp` (+ `jinja.cpp` if templated); think/reasoning channel handling if applicable.
 5. **Kernels** only if genuinely new ops (sinks, new gating) — check `src/exec/` + `src/compute/` for an existing path first.
 6. **Verify** (in order): loads → coherent greedy output (run `check-degeneration` battery) → **perplexity vs HF reference** (`imp-cli --perplexity`; expect within ~10-20% of HF — often much closer, e.g. gpt-oss imp 4.68 vs HF bf16 4.607, #663: the residual elevation is model-intrinsic) → decode/prefill sanity (`benchmark-cuda`).
-7. **Docs**: row in `docs/supported-models.md` (+ BENCHMARKS.md if hero-class); perf baseline entry if it becomes a gated model.
+7. **Docs**: row in `docs/supported-models.md` (+ docs/BENCHMARKS.md if hero-class); perf baseline entry if it becomes a gated model.
 
 ## Diagnostic fingerprints (wrong-output triage)
 

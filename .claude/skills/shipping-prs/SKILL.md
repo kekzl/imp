@@ -69,7 +69,7 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 
 1. Bump `project(... VERSION X.Y.Z)` in `CMakeLists.txt`.
 2. `CHANGELOG.md`: rename the `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD` (Keep-a-Changelog format; Added / Changed / Fixed). Leave a fresh empty `[Unreleased]`.
-3. `BENCHMARKS.md`: update the "current: **vX.Y.Z**" line — tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
+3. `docs/BENCHMARKS.md`: update the "current: **vX.Y.Z**" line — tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
 4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (e.g. `v0.18.0`). `scripts/check-release.sh` gates release-touching PRs in CI.
 
 ## Common mistakes → fix

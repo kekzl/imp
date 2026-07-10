@@ -38,14 +38,14 @@ compile-time isolation:
   `File size` = advisory warn step + blocking hard step.
 - **Legitimately monolithic files belong in `[allow]` with a reason** (empty reason =
   gate failure). Don't split for splitting's sake. Baseline + per-file rationale:
-  `AUDIT_FILESIZE.md`. This matches the "File Layout & Size" section in CLAUDE.md.
+  `docs/audit/AUDIT_FILESIZE.md`. This matches the "File Layout & Size" section in CLAUDE.md.
 
 ## Roles
 
 ### auditor
 - **Scope:** whole repo, **read-only assessment**.
 - **Allowed tools:** read/search tools, read-only sub-agents.
-- **MUST:** verify each finding against source before reporting; write only `AUDIT.md`; rank by severity+effort.
+- **MUST:** verify each finding against source before reporting; write only a dated report under `docs/audit/`; rank by severity+effort.
 - **MAY NOT:** edit any code or config; act on an unverified sweep result; propose multi-arch or speculative rewrites.
 
 ### build-engineer

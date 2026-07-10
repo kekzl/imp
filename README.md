@@ -40,7 +40,7 @@ inference**: it leads llama.cpp on decode and is at-or-ahead of vLLM on NVFP4
 consumer Blackwell. That single-stream speed is the foundation the agentic
 surface (tool calling, long-context loops, concurrent sub-agents) is built on.
 Every number below is measured, dated, and commit-anchored in
-[BENCHMARKS.md](BENCHMARKS.md) (single 5090, greedy, CUDA 13.3, CUDA Graphs on;
+[BENCHMARKS.md](docs/BENCHMARKS.md) (single 5090, greedy, CUDA 13.3, CUDA Graphs on;
 decode is the reliable A/B signal):
 
 - **GGUF dense decode:** Qwen3-8B Q8_0 at **~270 tok/s** (CI-gated baseline),
@@ -58,7 +58,7 @@ by ~4% (1.04×), and Qwen3.6-35B GGUF decode loses ~31% to llama.cpp, a
 structural FP16 GDN-projection tax, not a tuning gap.
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
-command: **[BENCHMARKS.md](BENCHMARKS.md)**. Methodology details:
+command: **[BENCHMARKS.md](docs/BENCHMARKS.md)**. Methodology details:
 [`docs/performance.md`](docs/performance.md).
 
 ## Should I use this?

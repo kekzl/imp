@@ -38,7 +38,7 @@ verification, not the sweep.
 
 ## File-size gate (god-file findings go through this, not ad-hoc splits)
 
-`tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job `File size`: advisory warn step + **blocking** hard step. The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count — split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. A legitimately monolithic file goes into `[allow]` in the toml **with a reason** (empty reason is rejected). Baseline + per-file rationale: `AUDIT_FILESIZE.md`.
+`tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job `File size`: advisory warn step + **blocking** hard step. The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count — split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. A legitimately monolithic file goes into `[allow]` in the toml **with a reason** (empty reason is rejected). Baseline + per-file rationale: `docs/audit/AUDIT_FILESIZE.md`.
 
 ## Priors — settled, do NOT re-flag
 
