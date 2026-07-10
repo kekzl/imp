@@ -91,6 +91,10 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // --- Phase 2: FP8 cache for uncached weights (extracted) ---
     pre_dequant_phase2_fp8_cache_(cfg, budget, remaining_budget, stream);
 
+    // --- Phase 2b: FP8 decode sidecar for native-precision GDN/SSM
+    // projections (gemm.fp8_ssm_proj) ---
+    pre_dequant_phase2b_fp8_ssm_sidecar_(cfg, stream);
+
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
 

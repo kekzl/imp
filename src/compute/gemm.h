@@ -41,6 +41,9 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream = nul
 // FP8 E4M3 GEMV: y = A_fp8 @ x_fp16 (with per-tensor scale)
 // A: [M, K] FP8_E4M3, x: [K] FP16, y: [M] FP16
 void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStream_t stream = nullptr);
+// Per-row-scale variant (scale[row] = row_absmax/448, e.g. the fp8_ssm_proj sidecar).
+void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float* d_row_scales,
+                       cudaStream_t stream = nullptr);
 
 // Fused quantized GEMV: dequant + dot product in one pass (no intermediate FP16 buffer).
 // W: raw quantized bytes [M rows, K cols], x: [K] FP16, y: [M] FP16.

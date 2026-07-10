@@ -307,6 +307,59 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
                                                                    d_absmax, d_scale_out, n);
 }
 
+// ---- quantize_fp8_rows_async ----------------------------------------------
+// Per-ROW (per-output-channel) E4M3 quantization: one block per row reduces
+// the row absmax, derives scale = absmax/448, records it in d_row_scales[row]
+// and quantizes the row with it. Per-row scales avoid the range waste of one
+// per-tensor scale across heterogeneous row blocks (e.g. the fused GDN input
+// pack [conv | gate | alpha | beta]). Init-time only — the row is read twice
+// from L2, which is irrelevant there.
+
+__global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* __restrict__ out,
+                                         int K, float* __restrict__ d_row_scales) {
+    const int row = blockIdx.x;
+    const half* r = in + static_cast<int64_t>(row) * K;
+    uint8_t* o = out + static_cast<int64_t>(row) * K;
+
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < K; i += blockDim.x)
+        m = fmaxf(m, fabsf(__half2float(r[i])));
+    __shared__ float s_warp[32];
+    for (int off = 16; off; off >>= 1)
+        m = fmaxf(m, __shfl_down_sync(0xffffffffu, m, off));
+    if ((threadIdx.x & 31) == 0)
+        s_warp[threadIdx.x >> 5] = m;
+    __syncthreads();
+    const int n_warps = blockDim.x >> 5;
+    if (threadIdx.x < 32) {
+        m = (threadIdx.x < n_warps) ? s_warp[threadIdx.x] : 0.0f;
+        for (int off = 16; off; off >>= 1)
+            m = fmaxf(m, __shfl_down_sync(0xffffffffu, m, off));
+    }
+    __shared__ float s_scale;
+    if (threadIdx.x == 0) {
+        float sc = (m > 0.0f) ? m / kFP8E4M3Max : 1.0f;
+        s_scale = sc;
+        d_row_scales[row] = sc;
+    }
+    __syncthreads();
+
+    const float inv = 1.0f / s_scale;
+    for (int i = threadIdx.x; i < K; i += blockDim.x) {
+        __nv_fp8_e4m3 q(__half2float(r[i]) * inv);
+        o[i] = *reinterpret_cast<const uint8_t*>(&q);
+    }
+}
+
+void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
+                             float* d_row_scales, cudaStream_t stream) {
+    if (!input_fp16 || !output_fp8 || !d_row_scales || rows <= 0 || K <= 0)
+        return;
+    quantize_fp8_rows_kernel<<<rows, 256, 0, stream>>>(static_cast<const half*>(input_fp16),
+                                                       static_cast<uint8_t*>(output_fp8), K,
+                                                       d_row_scales);
+}
+
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------
 
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_scale_out, cudaStream_t stream,

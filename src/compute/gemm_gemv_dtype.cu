@@ -352,10 +352,15 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
 
 // ---------------------------------------------------------------------------
 // FP8 E4M3 GEMV kernel -- 16 FP8 values per load (16 bytes)
-// Each warp handles one row. Dequant on-the-fly with per-tensor scale.
+// Each warp handles one row. Dequant on-the-fly; ROWSCALE selects a per-row
+// (output-channel) scale lookup instead of the single per-tensor scale (the
+// fp8_ssm_proj sidecar quantizes heterogeneous packed rows, where one tensor
+// scale wastes e4m3 range).
 // ---------------------------------------------------------------------------
+template <bool ROWSCALE>
 __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
-                                     half* __restrict__ y, int M, int K, float scale) {
+                                     half* __restrict__ y, int M, int K, float scale,
+                                     const float* __restrict__ row_scales) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
@@ -363,6 +368,8 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
 
     if (row >= M)
         return;
+    if constexpr (ROWSCALE)
+        scale = row_scales[row];
 
     const uint8_t* A_row = A + (int64_t)row * K;
 
@@ -539,10 +546,22 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStre
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
 
-    gemv_fp8_e4m3_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
-                                                                      static_cast<const half*>(x.data),
-                                                                      static_cast<half*>(y.data), M, K,
-                                                                      scale);
+    gemv_fp8_e4m3_kernel<false>
+        <<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
+                                                      static_cast<const half*>(x.data),
+                                                      static_cast<half*>(y.data), M, K, scale, nullptr);
+}
+
+void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float* d_row_scales,
+                       cudaStream_t stream) {
+    const int M = (int)A.shape[0];
+    const int K = (int)A.shape[1];
+
+    gemv_fp8_e4m3_kernel<true>
+        <<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
+                                                      static_cast<const half*>(x.data),
+                                                      static_cast<half*>(y.data), M, K, 0.0f,
+                                                      d_row_scales);
 }
 
 }  // namespace imp

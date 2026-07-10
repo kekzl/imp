@@ -222,6 +222,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_ssm_proj", cfg.gemm.nvfp4_ssm_proj);
     B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
+    B("gemm.fp8_ssm_proj", cfg.gemm.fp8_ssm_proj);
     B("gemm.nvfp4_moe_decode", cfg.gemm.nvfp4_moe_decode);
 
     // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5

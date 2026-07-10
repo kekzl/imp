@@ -102,6 +102,9 @@ private:
                                         size_t& remaining_budget, cudaStream_t stream);
     void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                        size_t& remaining_budget, cudaStream_t stream);
+    // FP8 E4M3 decode sidecar for native-precision GDN/SSM projections
+    // (gemm.fp8_ssm_proj) — lives in pre_dequant_phase2_fp8_cache.cu.
+    void pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
                                           size_t& remaining_budget, cudaStream_t stream);
     // Sub-phase helpers for pre_dequant_phase3_nvfp4_decode_. Each operates

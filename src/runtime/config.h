@@ -527,6 +527,23 @@ struct RuntimeConfig {
         // those projections FP16 is correct for SPEED (not just quality); no flag
         // is provided for them. (See docs/MTP/SafeTensors profiling notes.)
         bool nvfp4_attn_proj = false;
+        // FP8 (E4M3, per-tensor amax scale) DECODE sidecar for the native-
+        // precision GDN/Mamba in_proj/out_proj that the NVFP4 lever above
+        // regresses on: FP8 halves the FP16 GEMV bytes with byte-aligned dense
+        // loads (none of the 4-bit packing overhead that made NVFP4 lose to the
+        // tuned FP16 GEMV on the wide GDN shapes), and its quality risk into
+        // the recurrent scan is far smaller than 4-bit. Prefill and the M>1
+        // verify chunks keep the resident FP16 source (quality); only the M=1
+        // decode GEMV dispatches the FP8 copy (gemv_fp8_rowscale, per-row
+        // scales — one per-tensor scale over the heterogeneous GDN input pack
+        // cost +4% PPL; per-row is PPL-flat). Costs +0.5 byte/elem VRAM for
+        // the sidecar copies. No-op on models without F16-resident SSM
+        // projections (GGUF hybrids → see nvfp4_ssm_proj; 27B-class checkpoints
+        // whose SSM projections are already native NVFP4).
+        // MEASURED (2026-07-10): Qwen3.6-35B-A3B-NVFP4 decode +19% (268.6→320.3
+        // tok/s spec-off, 261→308 with default spec), PPL flat (8.021→8.012);
+        // Nemotron-3-Nano PPL flat (4.184→4.117). Default ON.
+        bool fp8_ssm_proj = true;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the
         // already-resident contiguous expert data + scales, instead of the
