@@ -133,6 +133,6 @@ findings are now fixed-and-validated** — no parked HIGH remaining.)
   WSL2/WDDM host** — all UB/race findings are reasoned statically. A native-Linux
   GPU runner is required to close dimension A's prescribed dynamic methodology.
 - The GPU model-E2E tests SKIP under the default `$(PWD)/models` symlink mount; the
-  bench + coherence checks ran against the real `/home/kekz/models` mount.
+  bench + coherence checks ran against the real `$HOME/models` mount.
 - F-A3's poison-recovery path is reasoned-correct, not IMA-injected (no
   fault-injection harness here); only its no-op-on-the-normal-path property is tested.

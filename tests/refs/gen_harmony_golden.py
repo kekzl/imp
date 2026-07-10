@@ -13,7 +13,7 @@ weights. It reads them from the local model dir if present, else downloads
 just the tokenizer from the Hub.
 
 Regenerate (host stays clean — run in a container with transformers):
-  docker run --rm -v $PWD:/work -v /home/kekz/models:/models -w /work \\
+  docker run --rm -v $PWD:/work -v $HOME/models:/models -w /work \\
     python:3.12-slim sh -c \\
     "pip install -q transformers jinja2 && \\
      MODEL=/models/gpt-oss-20b python3 tests/refs/gen_harmony_golden.py"

@@ -28,7 +28,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 echo "== starting imp-server (model=$MODEL, max-batch=$CONC, ctx=$CTX) =="
 docker run -d --name "$NAME" --gpus all \
   -p "$PORT:$PORT" \
-  -v /home/kekz/models:/models \
+  -v $HOME/models:/models \
   -v "$OUT_DIR:/audit" \
   -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
   "$IMG" imp-server \

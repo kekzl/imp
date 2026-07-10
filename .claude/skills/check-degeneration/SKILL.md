@@ -42,7 +42,7 @@ channel stripping, stop handling, truncated-think spill, prompt-blindness):
 
 ```bash
 # server must be running, e.g.:
-#   docker run --rm --gpus all -p 8080:8080 -v /home/kekz/models:/models imp:test \
+#   docker run --rm --gpus all -p 8080:8080 -v $HOME/models:/models imp:test \
 #     imp-server --host 0.0.0.0 --model /models/<MODEL>
 # the suite itself is stdlib-only and runs on the host:
 python3 tools/analysis/degen_suite.py --url http://localhost:8080

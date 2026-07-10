@@ -4,6 +4,36 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-10
+
+### Changed
+- **The per-token SSE streaming loop is now a single shared driver**
+  (`tools/imp-server/stream_driver.cpp`, #951): the outer token loop —
+  disconnect/timeout/keepalive, structural-stop filtering, Harmony/Gemma
+  channel filters, reasoning demux, streaming tool-call demux, stop-sequence
+  holdback, metrics/JSONL accounting — was hand-copied per dialect
+  (chat/messages/responses, ~600 LOC each) and kept drifting (#892, #941).
+  The three handlers are now thin wire-format adapters; the OpenAI-params →
+  `imp::Request` mapping is likewise a single `build_imp_request_()` instead
+  of four hand copies. Net −732 LOC.
+- Internal single-sourcing follow-ups from structural audit #6 (#952): the
+  SSM conv-channel count is a derived `ModelConfig::ssm_conv_channels()`
+  (was hand-derived at 9 sites), and the native-NVFP4 cache-demand tensor
+  scan runs once per engine init instead of four times.
+
+### Fixed
+- Drift bugs surfaced by the streaming-loop unification (#951): `/v1/responses`
+  emitted an empty `function_call_arguments.delta` for buffered (non-JSON
+  layout) tool calls (use-after-move; arguments only appeared in the `.done`
+  event) and reported `reasoning_tokens: 0` regardless of actual reasoning;
+  `/v1/messages` streams were missing the `imp_inter_token_seconds` metric,
+  did not record streamed tool-call arguments on a mid-args cutoff, and left
+  the engine request running when a keepalive write failed (now cancelled
+  like a disconnect); `/v1/messages` and `/v1/responses` requests never set
+  `started_in_think`/`in_think_block`, so think-budget enforcement did not
+  engage on those routes, and Predicted-Outputs prediction tokens were
+  dropped.
+
 ### Fixed
 - **The decode CUDA graph now re-derives its launch topology when the context
   high-water mark grows — a long-prompt request after short ones no longer

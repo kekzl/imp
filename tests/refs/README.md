@@ -65,7 +65,7 @@ test renders the committed `tests/fixtures/gpt_oss_chat_template.jinja` through
 imp's own jinja engine and compares EXACTLY (the one strftime_now `Current
 date:` line is normalized in both — documented in the test). Needs
 `transformers`, only the tokenizer/template (no weights):
-`docker run --rm -v $PWD:/work -v /home/kekz/models:/models -w /work
+`docker run --rm -v $PWD:/work -v $HOME/models:/models -w /work
 python:3.12-slim sh -c "pip install -q transformers jinja2 && MODEL=/models/gpt-oss-20b python3 tests/refs/gen_harmony_golden.py"`.
 
 Vision encoder golden (R9 / #583) is the one exception to rule 1's "independent

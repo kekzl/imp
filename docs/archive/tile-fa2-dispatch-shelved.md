@@ -11,7 +11,7 @@ is absolute: no metric regresses, native path is never deleted.
 
 ## Environment (verified 2026-05-29)
 - Toolkit **CUDA 13.3** (nvcc V13.3.33, PTX ISA 9.3); host driver **610.47** (≫ R590). §11 preconditions OK.
-- Build: Docker `imp:builder-133` (cuda-toolkit-13-3). Dev container `impdev` (host `/home/kekz/models` mounted).
+- Build: Docker `imp:builder-133` (cuda-toolkit-13-3). Dev container `impdev` (host `$HOME/models` mounted).
 - imp already switched to 13.3 (Dockerfile builder+runtime); full GPU suite green, PR #477 (hand-written FA2) open.
 
 ## Phase 0 — Investigation (§5) — DONE, decision = GO

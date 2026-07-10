@@ -54,7 +54,7 @@ timed reps (built-in `Warmup...` is too few iters); nsys with CUDA Graphs ON hid
 
 ---
 
-## Model Inventory (verified `/home/kekz/models/` 2026-05-29)
+## Model Inventory (verified `$HOME/models/` 2026-05-29)
 
 GGUF: gemma-3-12b-it-Q4_K_M, gemma-4-26B-A4B-it-{Q8_0,UD-Q4_K_M}, gemma-4-31B-it-Q4_K_M,
   Qwen3-14B-Q6_K, Qwen3-8B-Q8_0, Qwen3.5-4B-mxfp4, qwen3.6-35B-A3B-gguf.

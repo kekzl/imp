@@ -52,7 +52,7 @@ DEFAULT_CTX     = [4096, 16384]
 DEFAULT_DEPTHS  = [0.0, 0.25, 0.50, 0.75, 0.95]
 DEFAULT_SEEDS   = [0, 1, 2]
 DEFAULT_MODEL   = "/m/Qwen3-8B-Q8_0.gguf"  # path inside container
-DEFAULT_HOST_MODELS_DIR = "/home/kekz/models"
+DEFAULT_HOST_MODELS_DIR = str(Path.home() / "models")
 DOCKER_IMAGE    = "imp:test"
 CHARS_PER_TOKEN = 4  # Qwen3 BPE rough approximation; safe upper bound for English prose
 # Qwen3-8B is a reasoning model — it emits <think>...</think> before the

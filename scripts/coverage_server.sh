@@ -10,14 +10,14 @@
 #
 # Usage:   scripts/coverage_server.sh
 # Env:     IMP_COV_MODEL    (default Qwen3-8B-NVFP4-cortecs) — must support /v1/embeddings + tools
-#          IMP_MODELS_DIR   (default /home/kekz/models)      — host dir mounted at /models
+#          IMP_MODELS_DIR   (default $HOME/models)      — host dir mounted at /models
 #          IMP_COV_PORT     (default 8080)
 #          IMP_COV_KEEP     (set to 1 to keep the imp:cov image + container)
 # Output:  prints the gcovr table; writes build/coverage/ (txt + html) if -DIMP_COVERAGE produced data.
 set -euo pipefail
 
 MODEL="${IMP_COV_MODEL:-Qwen3-8B-NVFP4-cortecs}"
-MODELS_DIR="${IMP_MODELS_DIR:-/home/kekz/models}"
+MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 PORT="${IMP_COV_PORT:-8080}"
 IMG=imp:cov
 CTR=imp_cov

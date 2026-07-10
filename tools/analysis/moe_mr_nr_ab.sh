@@ -11,8 +11,8 @@
 set -uo pipefail
 
 IMG=imp:test
-MODELS=/home/kekz/models
-REPO=/home/kekz/github.com/kekzl/imp
+MODELS=$HOME/models
+REPO=$HOME/github.com/kekzl/imp
 MODEL="${1:-/models/Qwen3-30B-A3B-NVFP4-Modelopt}"
 
 run() {  # NR -> decode bench, print tg lines

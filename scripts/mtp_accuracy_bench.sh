@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-MODEL=${MTP_MODEL:-/home/kekz/models/Qwen3.6-35B-A3B-NVFP4}
+MODEL=${MTP_MODEL:-$HOME/models/Qwen3.6-35B-A3B-NVFP4}
 MAX_TOKENS=${MTP_MAX_TOKENS:-128}
 K=${MTP_K:-1}
 
@@ -61,7 +61,7 @@ for class in factual verbose-think code instruction; do
     # line is at the very end of generation, after decoded tokens may have
     # produced many lines of output.
     raw=$(docker run --rm --gpus all \
-        -v /home/kekz/models:/home/kekz/models \
+        -v $HOME/models:$HOME/models \
         imp:test imp-cli \
             --model "$MODEL" \
             --mtp-spec-decode "$K" \
