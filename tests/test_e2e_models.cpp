@@ -473,3 +473,69 @@ TEST_F(Gemma4GraphsTest, LongDecodeStaysCoherent) {
 }
 
 }  // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// #948 regression: decode-graph launch-topology re-derivation on ctx growth.
+//
+// The per-step decode graph bakes launch topology derived from the HOST
+// max_context_len (split-K num_splits / GQA-vs-split-K kernel choice). The
+// intended re-capture trigger — the pow2 max_blocks bucket — never fires
+// because the decode batch pool pads max_blocks_per_seq to the pool stride.
+// Pre-fix, a graph captured during a SHORT request replayed with a stale
+// topology for the next LONG-prompt request (> prefill_chunk_size) and hit an
+// illegal memory access at its first decode step, wedging the engine for the
+// rest of the process. This test is the minimal HTTP repro as a C-API test:
+// short request → >2048-token prompt → another short request.
+// ---------------------------------------------------------------------------
+TEST(DecodeGraphCtxGrowthTest, LongPromptAfterShortRequestStaysAlive) {
+    const char* path = primary_model();
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
+
+    ImpModel model = nullptr;
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 4096;
+    cfg.max_batch_size = 1;
+    cfg.enable_cuda_graphs = 1;  // the bug lives in decode-graph replay
+    ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[8192];
+    size_t len = 0;
+
+    // Request 1: short — captures the decode graph at a tiny context.
+    params.max_tokens = 16;
+    ASSERT_EQ(imp_generate(ctx, "The capital of France is", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+
+    // Request 2: prompt > prefill_chunk_size (2048 tokens) → chunked prefill,
+    // then decode replays the pooled graph at a ~70x larger context.
+    std::string filler;
+    for (int i = 0; i < 300; i++)
+        filler += "The maintenance log notes routine checks of pumps and valves. ";
+    std::string prompt =
+        "Remember this code: ZEBRA-9134.\n\n" + filler + "\nThe code I was asked to remember is";
+    params.max_tokens = 24;
+    ASSERT_EQ(imp_generate(ctx, prompt.c_str(), &params, output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+    std::string text2(output, len);
+    EXPECT_NE(text2.find("ZEBRA"), std::string::npos)
+        << "needle lost after chunked prefill: " << text2;
+
+    // Request 3: the engine must still be alive (pre-fix: every request after
+    // the wedge returned 0 tokens on a poisoned CUDA context).
+    params.max_tokens = 16;
+    ASSERT_EQ(imp_generate(ctx, "The capital of Italy is", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
+    std::string text3(output, len);
+    EXPECT_NE(text3.find("Rome"), std::string::npos) << "engine wedged after ctx growth: " << text3;
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}

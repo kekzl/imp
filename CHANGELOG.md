@@ -4,6 +4,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **The decode CUDA graph now re-derives its launch topology when the context
+  high-water mark grows — a long-prompt request after short ones no longer
+  wedges the engine with an illegal memory access** (#948). The decode-
+  attention launch topology (split-K `num_splits`, GQA-vs-split-K kernel
+  choice) derives from `max_context_len` on the host and is baked into the
+  captured graph. The intended re-capture trigger — the pow2 `max_blocks`
+  bucket — never fires because the decode batch pool pads
+  `max_blocks_per_seq` to the pool stride, so a graph captured at ctx≈35
+  replayed a stale topology at ctx≈2400 and faulted; the engine then never
+  recovered (every subsequent request returned 0 tokens after 300 s,
+  `/health` unhealthy). New trigger: pow2-bucketed context high-water mark
+  (monotonic, ~log2(max ctx) re-captures per process; shrink replays are
+  served by the large-ctx capture via the split-K empty-split sentinels).
+  The full degeneration suite now passes against the Qwen3.6-35B server for
+  the first time (33 checks, 38 s — previously wedged at ~14 requests).
+  Also hardened `resize_workspace` against running while the decode
+  workspace is the active alias (would free the decode-shared buffer and
+  leave it dangling — latent, found during the same investigation).
+
 ### Added
 - **`gemm.fp8_ssm_proj` (default ON): FP8 E4M3 decode sidecar for the
   native-precision GDN/Mamba in/out projections on NVFP4 hybrids — Qwen3.6-35B
