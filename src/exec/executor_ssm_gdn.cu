@@ -51,7 +51,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     int n_groups = cfg.ssm_group_count;
     int ssize = cfg.ssm_state_size;
     int conv_kernel = cfg.ssm_conv_kernel;
-    int conv_channels = inner + 2 * n_groups * ssize;
+    int conv_channels = cfg.ssm_conv_channels();
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = inner / n_heads;
 
@@ -273,7 +273,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int n_groups = cfg.ssm_group_count;
     int ssize = cfg.ssm_state_size;
     int conv_kernel = cfg.ssm_conv_kernel;
-    int conv_channels = inner + 2 * n_groups * ssize;
+    int conv_channels = cfg.ssm_conv_channels();
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 

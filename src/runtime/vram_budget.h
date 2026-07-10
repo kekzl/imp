@@ -70,9 +70,13 @@ struct VRAMBudget {
 // mandatory native-NVFP4 decode caches (Engine's balloon, held while this
 // runs — free_vram excludes it). The prequant reserve then only charges KV
 // for the UNCOVERED remainder, preventing a double-count.
+//
+// native_demand: precomputed NativeCacheDemand (Engine's cached scan) to
+// skip the tensor rescan; nullptr computes it locally (tests, standalone).
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
-                               size_t mandatory_cache_prealloc = 0);
+                               size_t mandatory_cache_prealloc = 0,
+                               const NativeCacheDemand* native_demand = nullptr);
 
 // Bytes of one paged KV block for a single layer, K+V combined (2x),
 // packing- and scale-aware. Single source for every KV-size estimate
