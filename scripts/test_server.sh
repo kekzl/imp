@@ -19,14 +19,14 @@
 #
 # Usage:   make test-server   (or: scripts/test_server.sh)
 # Env:     IMP_SRV_MODEL    (default Qwen3-8B-NVFP4-cortecs) — needs chat+tools+embeddings
-#          IMP_MODELS_DIR   (default /home/kekz/models)      — host dir mounted at /models
+#          IMP_MODELS_DIR   (default $HOME/models)      — host dir mounted at /models
 #          IMP_SRV_PORT     (default 8080)
 #          IMP_TEST_IMG     (default imp:test)               — built by `make build`
 #          IMP_SRV_BUILD    (set to 1 to force a docker build first)
 set -uo pipefail
 
 MODEL="${IMP_SRV_MODEL:-Qwen3-8B-NVFP4-cortecs}"
-MODELS_DIR="${IMP_MODELS_DIR:-/home/kekz/models}"
+MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 PORT="${IMP_SRV_PORT:-8080}"
 IMG="${IMP_TEST_IMG:-imp:test}"
 CTR=imp_test_server

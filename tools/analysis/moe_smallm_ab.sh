@@ -10,7 +10,7 @@
 # regresses (confirms the 2026-05-14 device-args +11-39% A/B). Default is the
 # best available path; 41% roofline is the small-M grouped structural ceiling.
 set -uo pipefail
-IMG=imp:test; MODELS=/home/kekz/models; REPO=/home/kekz/github.com/kekzl/imp
+IMG=imp:test; MODELS=$HOME/models; REPO=$HOME/github.com/kekzl/imp
 MODEL="${1:-/models/Qwen3-30B-A3B-NVFP4-Modelopt}"
 CORPUS=/work/tools/analysis/ppl_corpus.txt
 R() { docker run --rm --gpus all -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \

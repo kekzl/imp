@@ -4,7 +4,7 @@
 #   docker build -f tools/Dockerfile.ncu -t impdev:ncu .
 #
 # Run (source mounted at /src, models at /models):
-#   docker run --rm --gpus all -v $PWD:/src -v /home/kekz/models:/models \
+#   docker run --rm --gpus all -v $PWD:/src -v $HOME/models:/models \
 #     -w /src impdev:ncu ncu --set full ./build/<binary>
 #
 # MUST stay on the ubuntu26.04 (GCC 15.2) base: on the old ubuntu24.04/GCC-13 base

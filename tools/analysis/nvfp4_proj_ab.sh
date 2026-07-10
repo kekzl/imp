@@ -5,9 +5,9 @@
 set -uo pipefail
 
 IMG=imp:test
-MODELS=/home/kekz/models
+MODELS=$HOME/models
 CORPUS=/work/tools/analysis/ppl_corpus.txt
-REPO=/home/kekz/github.com/kekzl/imp
+REPO=$HOME/github.com/kekzl/imp
 PROMPT="Explain why the sky is blue, then say why sunsets are red."
 
 run() {  # $1=model $2=attn $3=gdn  -> extra args

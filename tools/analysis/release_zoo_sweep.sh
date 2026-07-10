@@ -4,7 +4,7 @@
 # (2.6x restart variance). Samples GPU clocks throughout (healthy host =
 # mem 13801 MHz / ~500 W under load). Continues past OOM/load failures.
 set -uo pipefail
-IMG=imp:test; MODELS=/home/kekz/models
+IMG=imp:test; MODELS=$HOME/models
 R() { docker run --rm --gpus all -e CUBLAS_WORKSPACE_CONFIG=:4096:8 -v "$MODELS":/models "$IMG" \
         imp-cli --model "$1" --bench --bench-pp 512 --bench-reps 10 --max-tokens 256 \
         --temperature 0 --seed 42 2>&1; }
@@ -40,7 +40,7 @@ MODELS_LIST=(
 SAMPLER=$!
 trap 'kill $SAMPLER 2>/dev/null' EXIT
 
-echo "######## v0.10.0 zoo sweep ($(git -C /home/kekz/github.com/kekzl/imp rev-parse --short HEAD)) ########"
+echo "######## v0.10.0 zoo sweep ($(git -C $HOME/github.com/kekzl/imp rev-parse --short HEAD)) ########"
 echo "[warmup, discarded]"; R /models/Qwen3-8B-Q8_0.gguf >/dev/null 2>&1
 for entry in "${MODELS_LIST[@]}"; do
   lab="${entry%%|*}"; path="${entry#*|}"

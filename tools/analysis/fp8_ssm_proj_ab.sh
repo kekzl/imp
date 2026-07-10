@@ -6,7 +6,7 @@
 set -uo pipefail
 
 IMG=${IMG:-imp:test}
-MODELS=/home/kekz/models
+MODELS=$HOME/models
 CORPUS=/work/tools/analysis/ppl_corpus.txt
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PROMPT="Explain why the sky is blue, then say why sunsets are red."

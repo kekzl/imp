@@ -10,7 +10,7 @@ Source: `tools/imp-server/` — `main.cpp` (routes) · `args.cpp` (CLI flags + `
 ## Start the server
 
 ```bash
-docker run --rm --gpus all -p 8080:8080 -v /home/kekz/models:/models imp:test \
+docker run --rm --gpus all -p 8080:8080 -v $HOME/models:/models imp:test \
   imp-server --host 0.0.0.0 --model /models/<MODEL> [--set server.prefix_cache=true]
 ```
 

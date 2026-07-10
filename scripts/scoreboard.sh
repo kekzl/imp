@@ -10,7 +10,7 @@ set -uo pipefail
 REPS="${1:-10}"; shift || true
 EXTRA="$*"
 IMG="${DOCKER_IMG:-imp:test}"
-MODELS_HOST="/home/kekz/models"
+MODELS_HOST="$HOME/models"
 OUT="$(cd "$(dirname "$0")/.." && pwd)/docs/scoreboard.tsv"
 PP="${BENCH_PP:-512}"
 TG="${BENCH_TG:-128}"

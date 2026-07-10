@@ -11,7 +11,7 @@
 #
 # Usage (always inside the imp:test container — uses bare `imp-cli`):
 #   docker run --rm --gpus all \
-#     -v /home/kekz/models:/models \
+#     -v $HOME/models:/models \
 #     -v $PWD:/src -w /src \
 #     -u $(id -u):$(id -g) \
 #     -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \

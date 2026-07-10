@@ -7,8 +7,8 @@
 # gate) — run once on the baseline image, once on the f16-acc image.
 set -uo pipefail
 IMG=imp:test
-MODELS=/home/kekz/models
-REPO=/home/kekz/github.com/kekzl/imp
+MODELS=$HOME/models
+REPO=$HOME/github.com/kekzl/imp
 MODEL="${1:-/models/Qwen3-14B-NVFP4}"   # dense hd=128, exercises FP16QK FA2
 CORPUS=/work/tools/analysis/ppl_corpus.txt
 

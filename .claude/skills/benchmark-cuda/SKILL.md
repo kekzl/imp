@@ -22,7 +22,7 @@ Pair with `sm120-cuda-expert` for optimization decisions.
 
 **Before any GPU job: `docker ps -q | wc -l` must be 0.** Detached/`nohup` containers survive session ends and silently depress every number (cost a v0.10.0 re-bench). `make check-gpu` helps but doesn't see a container that isn't currently on the GPU.
 
-The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `/home/kekz/models`, NOT the repo's `models/` symlinks). `imp-cli` has no `--ctx` flag — the context ceiling is `--max-seq-len`.
+The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `$HOME/models`, NOT the repo's `models/` symlinks). `imp-cli` has no `--ctx` flag — the context ceiling is `--max-seq-len`.
 
 ## Pick the right tool
 
@@ -70,7 +70,7 @@ Rules: N_ITER ≥100 for kernels <100 µs, check stddev not just mean, kill conc
 ncu is NOT in the runtime image. Use the **host** install mounted into the container, and call the real binary (not the cuda symlink wrapper):
 
 ```bash
-docker run --rm --gpus all -v /home/kekz/models:/models \
+docker run --rm --gpus all -v $HOME/models:/models \
   -v /opt/nvidia/nsight-compute/2026.2.0:/ncu -v /tmp/out:/out --user root \
   imp:test /ncu/ncu --kernel-name "regex:my_kernel.*" --launch-skip 3 --launch-count 10 \
   -o /out/profile ./build/imp-bench …   # chmod 777 /tmp/out first

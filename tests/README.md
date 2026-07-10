@@ -36,7 +36,7 @@ affected one:
 Run one binary / filter:
 
 ```bash
-docker run --rm --gpus all -v /home/kekz/models:/models imp:test \
+docker run --rm --gpus all -v $HOME/models:/models imp:test \
   test-quant --gtest_filter='GgufDequant/*:GgufRef.*'
 ```
 
