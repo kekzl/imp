@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include <atomic>
 #include "compute/gemm_capture_fp16_sm120.h"
+#include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
@@ -513,6 +514,31 @@ void gemm_cleanup() {
         cublasLtMatmulDescDestroy(entry.opDesc);
     }
     s_gemm_cache.clear();
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h): frees + nulls the
+// lazily-created cuBLAS/cuBLASLt handles and static workspaces so their
+// guards re-arm on the next use after the reset.
+void gemm_reset_static_cuda_state() {
+    gemm_cleanup();  // idempotent: clears the cuBLASLt descriptor/algo cache
+    if (s_cublas_handle) {
+        (void)cublasDestroy(s_cublas_handle);
+        s_cublas_handle = nullptr;
+    }
+    if (s_cublaslt_handle) {
+        (void)cublasLtDestroy(s_cublaslt_handle);
+        s_cublaslt_handle = nullptr;
+    }
+    if (s_workspace) {
+        (void)cudaFree(s_workspace);
+        s_workspace = nullptr;
+        s_workspace_size = 0;
+    }
+    if (s_bench_scratch) {
+        (void)cudaFree(s_bench_scratch);
+        s_bench_scratch = nullptr;
+        s_bench_scratch_size = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------

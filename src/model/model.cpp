@@ -2,6 +2,7 @@
 #include "model/model_arch.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"  // trim_device_mempool
+#include "memory/weight_snapshot.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cctype>
@@ -14,6 +15,8 @@
 #endif
 
 namespace imp {
+
+Model::Model() = default;
 
 Model::~Model() {
     // Free all GPU-side weight buffers (allocated via cudaMallocAsync).
@@ -106,6 +109,10 @@ void Model::release_gpu_allocation(void* ptr) {
     auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
     if (it != gpu_allocations_.end()) {
         gpu_allocations_.erase(it);
+        // Suspend-to-RAM: this source is about to be freed — its snapshot
+        // record is no longer capturable (the tensor re-uploads cold at resume).
+        if (upload_log_)
+            upload_log_->evict_ptr(ptr);
         // Every caller releases a source weight tensor it is about to cudaFree
         // (Phase-3 MoE expert-source drop, Phase-4b redundant-source drop). Once
         // a source is freed the model can no longer rebuild caches for a SECOND

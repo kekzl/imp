@@ -1,4 +1,5 @@
 #include "compute/gemm_grouped.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -20,17 +21,26 @@ static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 // cuBLAS handle (lazily initialized, process-lifetime)
 // Uses cublasGemmEx — the same proven path as gemm.cu's gemm().
 // ---------------------------------------------------------------------------
+static cublasHandle_t s_grouped_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
+
 static cublasHandle_t get_cublas_handle() {
-    static cublasHandle_t handle = nullptr;
-    if (!handle) {
-        cublasStatus_t st = cublasCreate(&handle);
+    if (!s_grouped_cublas_handle) {
+        cublasStatus_t st = cublasCreate(&s_grouped_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::gemm_grouped: cublasCreate failed (status %d)\n", (int)st);
             abort();
         }
-        cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
+        cublasSetMathMode(s_grouped_cublas_handle, CUBLAS_DEFAULT_MATH);
     }
-    return handle;
+    return s_grouped_cublas_handle;
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void gemm_grouped_reset_static_cuda_state() {
+    if (s_grouped_cublas_handle) {
+        (void)cublasDestroy(s_grouped_cublas_handle);
+        s_grouped_cublas_handle = nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------

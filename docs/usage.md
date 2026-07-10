@@ -237,9 +237,23 @@ Endpoints: `/v1/chat/completions`, `/v1/responses` (OpenAI Responses API —
 the Agents SDK / Codex dialect; stateless, so use `store: false` and resend
 the transcript in `input`), `/v1/completions`, `/v1/embeddings`,
 `/v1/models`, `/v1/messages` (Anthropic-compatible, streaming +
-non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`.
+non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`,
+`/admin/suspend`, `/admin/resume`.
 Tool/function calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
+
+**Suspend to RAM.** `POST /admin/suspend` drains in-flight requests, parks
+the model weights in host RAM, and frees the GPU completely (with
+`[suspend] device_reset` — the default — the CUDA context is reset too, so
+`nvidia-smi` shows ~0 MiB for the process). `POST /admin/resume` restores
+the weights from RAM (no mmap re-read, no requantization) and serves again
+in seconds. Sessions/KV do not survive — only the weights stay warm. While
+suspended, inference endpoints answer 503 and `/health` reports
+`"suspended": true` (HTTP 200 — it is a deliberate operator state, not a
+fault). Capture fails cleanly (507) when host `MemAvailable` is below the
+snapshot size + `[suspend] host_ram_headroom_mb`; models whose device
+weight buffers are transformed in place after upload (native MXFP4 GGUF,
+gpt-oss, Gemma-4 fused-expert split) are refused with 501.
 `/v1/models` lists the model the server is serving (OpenAI semantics: the
 server exposes exactly what it can serve). Requests must name that model —
 any other `model` value gets `404 model_not_found`; inference requests never

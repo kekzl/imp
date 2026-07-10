@@ -380,6 +380,18 @@ recurrent_snapshot_mb = 256
 # streams (gemma-3-12b IMA). Set true to enable.
 green_contexts       = false
 
+[suspend]
+# Suspend-to-RAM (POST /admin/suspend): weights are snapshotted to host RAM,
+# all VRAM is freed, and POST /admin/resume restores them in seconds.
+# device_reset additionally resets the CUDA primary context after teardown so
+# the process holds ~0 MiB VRAM (context + module code are ~300-600 MiB
+# otherwise). Set false only if a foreign library in-process holds CUDA state
+# a reset would orphan.
+device_reset         = true
+# Host RAM (MiB) the snapshot must leave free on top of its own size —
+# capture fails with a clear error instead of driving the host into swap.
+host_ram_headroom_mb = 2048
+
 [bench]
 # imp-cli --bench: also run Engine::generate() loop for accurate timing.
 generate             = false

@@ -108,6 +108,7 @@ set(IMP_CORE_SOURCES
     src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
+    src/core/cuda_static_reset.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -116,6 +117,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
     src/memory/recurrent_snapshot_store.cpp
+    src/memory/weight_snapshot.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cu
     src/memory/layer_offload.cu
@@ -343,6 +345,7 @@ set(IMP_VISION_SOURCES
 
 set(IMP_API_SOURCES
     src/api/imp_api.cpp
+    src/api/imp_api_suspend.cpp
 )
 
 # --- Main library target ---
@@ -457,6 +460,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
+        tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
@@ -518,6 +522,7 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
         tests/test_suffix_draft.cpp
@@ -673,6 +678,7 @@ if(IMP_BUILD_TESTS)
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
+        tests/test_suspend_resume.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp

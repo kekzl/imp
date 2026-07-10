@@ -18,6 +18,7 @@
 
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "runtime/process_diag.h"
 
@@ -330,13 +331,41 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
 // cuBLAS handle (separate from gemm.cu to avoid TU coupling)
 // =============================================================================
 
+static cublasHandle_t s_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
+
 static cublasHandle_t get_cublas() {
-    static cublasHandle_t h = nullptr;
-    if (!h) {
-        cublasCreate(&h);
-        cublasSetMathMode(h, CUBLAS_TF32_TENSOR_OP_MATH);
+    if (!s_cublas_handle) {
+        cublasCreate(&s_cublas_handle);
+        cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
-    return h;
+    return s_cublas_handle;
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void attention_mxfp4_prefill_reset_static_cuda_state() {
+    {
+        std::lock_guard<std::mutex> lock(s_ws_mutex);
+        auto safe_free = [](void*& p) {
+            if (p) {
+                (void)cudaFree(p);
+                p = nullptr;
+            }
+        };
+        safe_free(s_ws.q_packed);
+        safe_free(s_ws.q_sf);
+        safe_free(s_ws.k_packed);
+        safe_free(s_ws.k_sf);
+        safe_free(s_ws.s_matrix);
+        safe_free(s_ws.gemm_ws);
+        s_ws.gemm_ws_size = 0;
+        s_ws.alloc_seq_q = 0;
+        s_ws.alloc_seq_kv = 0;
+        s_ws.alloc_hd = 0;
+    }
+    if (s_cublas_handle) {
+        (void)cublasDestroy(s_cublas_handle);
+        s_cublas_handle = nullptr;
+    }
 }
 
 // =============================================================================

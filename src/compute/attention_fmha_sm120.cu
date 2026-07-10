@@ -31,6 +31,7 @@
 
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "runtime/process_diag.h"
 #include <cuda_runtime.h>
@@ -1817,6 +1818,18 @@ static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool
            + slots * Bkv * kvstride * sizeof(half);         // V_buf f16 (padded)
 }
 
+// FP8SCALED per-chunk operand amax buffer (persistent 2-float device buffer,
+// lazily created below; file-scope so the reset hook can free it).
+static float* s_d_amax = nullptr;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void fmha_sm120_reset_static_cuda_state() {
+    if (s_d_amax) {
+        (void)cudaFree(s_d_amax);
+        s_d_amax = nullptr;
+    }
+}
+
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
                             bool fp16_qk, const int* d_kv_len) {
@@ -1947,8 +1960,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
     }
     // FP8SCALED: per-chunk operand amaxes for Q and the gathered K (two tiny
-    // grid-stride passes; persistent 2-float buffer, process lifetime).
-    static float* s_d_amax = nullptr;
+    // grid-stride passes; s_d_amax is the file-scope persistent buffer above).
     if (fp8_scaled) {
         if (!s_d_amax && cudaMalloc(&s_d_amax, 2 * sizeof(float)) != cudaSuccess) {
             s_d_amax = nullptr;

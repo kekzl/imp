@@ -181,6 +181,9 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             // already-compacted layout as raw blocks → illegal access, #830).
             // Mark the model so Engine::init rejects a second engine cleanly.
             const_cast<Model*>(model_)->mark_sources_consumed();
+            // Also suspend-unsupported: a weight snapshot would capture the
+            // compacted bytes and the resume replay would compact them again.
+            const_cast<Model*>(model_)->mark_device_sources_mutated();
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             {
                 cudaError_t e = cudaGetLastError();

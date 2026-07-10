@@ -1,5 +1,6 @@
 // src/compute/gemm_grouped_nvfp4_smallM.cu
 #include "compute/gemm_grouped_nvfp4_smallM.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -753,6 +754,20 @@ bool gemm_grouped_nvfp4_smallM_available() {
 
 void gemm_grouped_nvfp4_smallM_cleanup() {}
 
+// Dummy buffer backing TMA descriptors of inactive experts (lazily created
+// in gemm_grouped_nvfp4_smallM below; file-scope so the reset hook can free it).
+static uint8_t* s_dummy = nullptr;
+static int s_dummy_ready = 0;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void gemm_grouped_nvfp4_smallM_reset_static_cuda_state() {
+    if (s_dummy) {
+        (void)cudaFree(s_dummy);
+        s_dummy = nullptr;
+    }
+    s_dummy_ready = 0;
+}
+
 bool gemm_grouped_nvfp4_smallM(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
@@ -806,8 +821,6 @@ bool gemm_grouped_nvfp4_smallM(
     //   A: gmem (M_e, K/2) bytes, box (TILE_M, TILE_K/2)
     //   B: gmem (N,   K/2) bytes, box (TILE_N, TILE_K/2)
     std::vector<CUtensorMap> h_descs(2 * n_experts);
-    static uint8_t* s_dummy = nullptr;
-    static int s_dummy_ready = 0;
     if (!s_dummy_ready) {
         cudaMalloc(&s_dummy, 256);
         cudaMemset(s_dummy, 0, 256);

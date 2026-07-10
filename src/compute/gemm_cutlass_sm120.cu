@@ -21,6 +21,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -702,6 +703,15 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 // Persistent workspace and GEMM instance
 static void* s_cutlass_workspace = nullptr;
 static size_t s_cutlass_workspace_size = 0;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void gemm_cutlass_sm120_reset_static_cuda_state() {
+    if (s_cutlass_workspace) {
+        (void)cudaFree(s_cutlass_workspace);
+        s_cutlass_workspace = nullptr;
+        s_cutlass_workspace_size = 0;
+    }
+}
 
 template <class GemmT>
 static size_t cutlass_workspace_for(int M, int N, int K) {

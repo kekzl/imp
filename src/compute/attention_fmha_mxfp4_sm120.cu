@@ -22,6 +22,7 @@
 
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged_common.cuh"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "quant/fp8_utils.cuh"
 #include "runtime/process_diag.h"
@@ -1546,6 +1547,44 @@ __global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
 // Host launcher
 // =============================================================================
 
+// Persistent grow-only device scratches, lazily created in the two host
+// launchers below (file-scope so the reset hook can free them).
+// Dense-prefill launcher (fmha_sm120_mxfp4_prefill):
+static float* s_d_kmean = nullptr;    // K-smoothing per-channel means
+static size_t s_kmean_cap = 0;
+static float* s_d_means = nullptr;    // promotion pre-pass: Q̄/K̄ tile means
+static size_t s_means_cap = 0;
+static uint8_t* s_d_promote = nullptr;  // promotion mask
+static size_t s_promote_cap = 0;
+// Paged-KV launcher (fmha_sm120_mxfp4_prefill_paged):
+static float* s_d_means_paged = nullptr;
+static size_t s_means_paged_cap = 0;
+static uint8_t* s_d_promote_paged = nullptr;
+static size_t s_promote_paged_cap = 0;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void fmha_mxfp4_reset_static_cuda_state() {
+    auto free_f = [](float*& p, size_t& cap) {
+        if (p) {
+            (void)cudaFree(p);
+            p = nullptr;
+        }
+        cap = 0;
+    };
+    auto free_u8 = [](uint8_t*& p, size_t& cap) {
+        if (p) {
+            (void)cudaFree(p);
+            p = nullptr;
+        }
+        cap = 0;
+    };
+    free_f(s_d_kmean, s_kmean_cap);
+    free_f(s_d_means, s_means_cap);
+    free_u8(s_d_promote, s_promote_cap);
+    free_f(s_d_means_paged, s_means_paged_cap);
+    free_u8(s_d_promote_paged, s_promote_paged_cap);
+}
+
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
                               bool use_blockscale, int q_offset) {
@@ -1607,8 +1646,6 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     // persistent grow-only scratch (process lifetime, tiny: bh × hd floats).
     const float* d_kmean = nullptr;
     if (ksmooth) {
-        static float* s_d_kmean = nullptr;
-        static size_t s_kmean_cap = 0;
         const size_t need = (size_t)batch_size * n_kv_heads * head_dim;
         if (need > s_kmean_cap) {
             if (s_d_kmean != nullptr)
@@ -1637,10 +1674,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     const int n_kv_tiles = (seq_kv + MX_Bkv - 1) / MX_Bkv;
     const uint8_t* d_promote = nullptr;
     if (promote_budget > 0.0f && (head_dim == 64 || head_dim == 128)) {
-        static float* s_d_means = nullptr;  // Q̄ tile means followed by K̄ tile means
-        static size_t s_means_cap = 0;
-        static uint8_t* s_d_promote = nullptr;
-        static size_t s_promote_cap = 0;
+        // s_d_means: Q̄ tile means followed by K̄ tile means (file-scope above)
         const size_t qmean_elems = (size_t)batch_size * n_heads * num_q_tiles * head_dim;
         const size_t kmean_elems = (size_t)batch_size * n_kv_heads * n_kv_tiles * head_dim;
         const size_t means_need = qmean_elems + kmean_elems;
@@ -1873,37 +1907,34 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
     // Promotion pre-pass: Q̄ from the fresh chunk, K̄ decoded from the cache.
     const uint8_t* d_promote = nullptr;
     if (promote_budget > 0.0f) {
-        static float* s_d_means = nullptr;
-        static size_t s_means_cap = 0;
-        static uint8_t* s_d_promote = nullptr;
-        static size_t s_promote_cap = 0;
+        // s_d_means_paged / s_d_promote_paged are the file-scope scratches above.
         const size_t qmean_elems = (size_t)n_heads * num_q_tiles * head_dim;
         const size_t kmean_elems = (size_t)n_kv_heads * n_kv_tiles * head_dim;
         const size_t means_need = qmean_elems + kmean_elems;
         const size_t mask_need = (size_t)n_heads * num_q_tiles * n_kv_tiles;
-        if (means_need > s_means_cap) {
-            if (s_d_means != nullptr)
-                cudaFree(s_d_means);
-            if (cudaMalloc(&s_d_means, means_need * sizeof(float)) != cudaSuccess) {
-                s_d_means = nullptr;
-                s_means_cap = 0;
+        if (means_need > s_means_paged_cap) {
+            if (s_d_means_paged != nullptr)
+                cudaFree(s_d_means_paged);
+            if (cudaMalloc(&s_d_means_paged, means_need * sizeof(float)) != cudaSuccess) {
+                s_d_means_paged = nullptr;
+                s_means_paged_cap = 0;
             } else {
-                s_means_cap = means_need;
+                s_means_paged_cap = means_need;
             }
         }
-        if (mask_need > s_promote_cap) {
-            if (s_d_promote != nullptr)
-                cudaFree(s_d_promote);
-            if (cudaMalloc(&s_d_promote, mask_need) != cudaSuccess) {
-                s_d_promote = nullptr;
-                s_promote_cap = 0;
+        if (mask_need > s_promote_paged_cap) {
+            if (s_d_promote_paged != nullptr)
+                cudaFree(s_d_promote_paged);
+            if (cudaMalloc(&s_d_promote_paged, mask_need) != cudaSuccess) {
+                s_d_promote_paged = nullptr;
+                s_promote_paged_cap = 0;
             } else {
-                s_promote_cap = mask_need;
+                s_promote_paged_cap = mask_need;
             }
         }
-        if (s_d_means != nullptr && s_d_promote != nullptr) {
-            float* d_qmean = s_d_means;
-            float* d_kmean_tiles = s_d_means + qmean_elems;
+        if (s_d_means_paged != nullptr && s_d_promote_paged != nullptr) {
+            float* d_qmean = s_d_means_paged;
+            float* d_kmean_tiles = s_d_means_paged + qmean_elems;
             dim3 qmg(num_q_tiles, n_heads);
             mxfp4_tile_mean_kernel<<<qmg, 128, 0, stream>>>(reinterpret_cast<const half*>(Q.data), d_qmean,
                                                             seq_q, n_heads, head_dim, Bq);
@@ -1914,9 +1945,9 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
             dim3 sg(num_q_tiles, n_heads);
             const size_t sel_smem = (size_t)(head_dim + n_kv_tiles) * sizeof(float);
             mxfp4_promote_select_kernel<<<sg, 128, sel_smem, stream>>>(
-                d_qmean, d_kmean_tiles, s_d_promote, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq,
+                d_qmean, d_kmean_tiles, s_d_promote_paged, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq,
                 seq_q, q_offset, causal, promote_budget, head_dim);
-            d_promote = s_d_promote;
+            d_promote = s_d_promote_paged;
         }
     }
 

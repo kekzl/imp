@@ -1,5 +1,6 @@
 #include "vision/vision_encoder.h"
 #include "compute/warp_reduce.cuh"
+#include "core/cuda_static_reset.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include "runtime/process_diag.h"
@@ -16,13 +17,22 @@
 namespace imp {
 
 // ---- cuBLAS handle for vision encoder ----
+static cublasHandle_t s_vision_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
+
 static cublasHandle_t get_vision_cublas_handle() {
-    static cublasHandle_t handle = nullptr;
-    if (!handle) {
-        cublasCreate(&handle);
-        cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+    if (!s_vision_cublas_handle) {
+        cublasCreate(&s_vision_cublas_handle);
+        cublasSetMathMode(s_vision_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
-    return handle;
+    return s_vision_cublas_handle;
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void vision_encoder_reset_static_cuda_state() {
+    if (s_vision_cublas_handle) {
+        (void)cublasDestroy(s_vision_cublas_handle);
+        s_vision_cublas_handle = nullptr;
+    }
 }
 
 // ---- Helper: cuBLAS GEMM  C = alpha * A @ B^T ----

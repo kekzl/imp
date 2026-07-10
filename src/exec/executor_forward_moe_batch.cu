@@ -3,6 +3,7 @@
 
 #include "exec/executor.h"
 #include "compute/mmq_q8_imma.h"
+#include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
@@ -514,6 +515,27 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     return true;
 }
 
+// Persistent Q8_1 scratch + FP32 norm scratch for the ggml MMVQ prefill path
+// (lazily resized below; file-scope so the reset hook can free them).
+static void* s_q8_scratch = nullptr;
+static size_t s_q8_scratch_size = 0;
+static float* s_norm_fp32 = nullptr;
+static int s_norm_fp32_d = 0;
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+void moe_batch_reset_static_cuda_state() {
+    if (s_q8_scratch) {
+        (void)cudaFree(s_q8_scratch);
+        s_q8_scratch = nullptr;
+    }
+    s_q8_scratch_size = 0;
+    if (s_norm_fp32) {
+        (void)cudaFree(s_norm_fp32);
+        s_norm_fp32 = nullptr;
+    }
+    s_norm_fp32_d = 0;
+}
+
 bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d,
                                                     int eff, int top_k, QType up_qtype, float eps,
                                                     const MoeRoutingResult& routing,
@@ -535,9 +557,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
     size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
     size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
 
-    // Persistent Q8_1 scratch + FP32 norm scratch (resized lazily).
-    static void* s_q8_scratch = nullptr;
-    static size_t s_q8_scratch_size = 0;
+    // Persistent Q8_1 scratch + FP32 norm scratch (file-scope above, resized lazily).
     size_t q8_needed = std::max(static_cast<size_t>((d + 31) / 32) * 36,
                                 static_cast<size_t>((eff + 31) / 32) * 36);
     if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
@@ -545,8 +565,6 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
         cudaMalloc(&s_q8_scratch, q8_needed);
         s_q8_scratch_size = q8_needed;
     }
-    static float* s_norm_fp32 = nullptr;
-    static int s_norm_fp32_d = 0;
     if (!s_norm_fp32 || s_norm_fp32_d < d) {
         if (s_norm_fp32) cudaFree(s_norm_fp32);
         cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));

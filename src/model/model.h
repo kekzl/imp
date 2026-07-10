@@ -14,9 +14,14 @@
 
 namespace imp {
 
+class WeightUploadLog;
+
 class Model {
 public:
-    Model() = default;
+    // Defined in model.cpp: the unique_ptr<WeightUploadLog> member needs the
+    // complete type for destruction, and weight_snapshot.h stays out of this
+    // widely-included header.
+    Model();
     ~Model();
 
     const ModelConfig& config() const { return config_; }
@@ -71,6 +76,21 @@ public:
     void mark_sources_consumed() { sources_consumed_ = true; }
     bool sources_consumed() const { return sources_consumed_; }
 
+    // True once device weight buffers were transformed IN PLACE after upload
+    // (Phase-3c MXFP4 compaction, native-MXFP4 GGUF unpack, Gemma-4 fused
+    // expert split). A weight snapshot taken afterwards would capture the
+    // transformed bytes and the resume replay would re-transform them —
+    // WeightSnapshot::capture refuses these models (suspend unsupported, v1).
+    // Distinct from sources_consumed_: a DROPPED source only evicts its log
+    // record (that tensor re-uploads cold at resume), it does not poison the
+    // rest of the snapshot.
+    void mark_device_sources_mutated() { device_sources_mutated_ = true; }
+    bool device_sources_mutated() const { return device_sources_mutated_; }
+
+    // Upload log for suspend-to-RAM (memory/weight_snapshot.h). Created by
+    // upload_weights_gpu; null before the first upload.
+    WeightUploadLog* upload_log() const { return upload_log_.get(); }
+
     // Remove a pointer from gpu_allocations_ tracking (does not free).
     void release_gpu_allocation(void* ptr);
 
@@ -120,7 +140,9 @@ public:
     std::vector<std::pair<void*, size_t>> split_mmaps_;  // additional shard mmaps
 
     bool gpu_weights_ready_ = false;
-    bool sources_consumed_ = false;  // Phase-4b freed source tensors (#830)
+    bool sources_consumed_ = false;         // Phase-4b freed source tensors (#830)
+    bool device_sources_mutated_ = false;   // in-place transformed device sources
+    std::unique_ptr<WeightUploadLog> upload_log_;
     std::vector<void*> gpu_allocations_;
     std::vector<void*> host_pinned_;         // mmap regions pinned via cudaHostRegister
     std::vector<void*> host_pinned_allocs_;  // cudaHostAlloc'd expert buffers (WSL2 DMA path)
