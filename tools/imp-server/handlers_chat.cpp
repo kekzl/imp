@@ -40,55 +40,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Save input tokens for potential reuse with n > 1
     std::vector<int32_t> saved_tokens = ctx.snap.tokens;
 
-    // Helper to create an imp::Request with the given completion index
-    auto make_imp_request = [&](int completion_idx) {
-        auto req = std::make_shared<imp::Request>();
-        req->image = ctx.snap.vision_image;  // per-request vision (null for text)
-        req->input_tokens = saved_tokens;
-        req->max_tokens = ctx.params.max_tokens;
-        req->temperature = ctx.params.temperature;
-        req->top_p = ctx.params.top_p;
-        req->top_k = ctx.params.top_k;
-        req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
-        req->pin_kv_prefix = ctx.params.cache_prompt;
-        req->spec_ngram_override = ctx.params.spec_ngram_override;
-        req->prediction_tokens = ctx.snap.prediction_tokens;
-        req->min_p = ctx.params.min_p;
-        req->typical_p = ctx.params.typical_p;
-        req->repetition_penalty = ctx.params.repetition_penalty;
-        req->frequency_penalty = ctx.params.frequency_penalty;
-        req->presence_penalty = ctx.params.presence_penalty;
-        req->repeat_last_n = ctx.params.repeat_last_n;
-        req->dry_multiplier = ctx.params.dry_multiplier;
-        req->dry_base = ctx.params.dry_base;
-        req->dry_allowed_length = ctx.params.dry_allowed_length;
-        req->dry_penalty_last_n = ctx.params.dry_penalty_last_n;
-        req->mirostat = ctx.params.mirostat;
-        req->mirostat_tau = ctx.params.mirostat_tau;
-        req->mirostat_eta = ctx.params.mirostat_eta;
-        req->logprobs = ctx.params.req_logprobs;
-        req->top_logprobs = ctx.params.top_logprobs;
-        req->json_mode = ctx.params.json_mode;
-        req->json_schema = ctx.params.json_schema_str;
-        req->has_tools = ctx.params.has_tools;
-        req->tpl_family = ctx.snap.tpl_family;
-        req->logit_bias = ctx.params.logit_bias;
-        req->think_budget = ctx.params.think_budget;
-        // Generation starts INSIDE the think block when the prompt carries the
-        // <think> prefix (template-injected or server-appended). Without this
-        // the engine's think-budget enforcement never sees an opener in the
-        // output, counts zero reasoning tokens, and lets the model think until
-        // max_tokens (content empty, finish=length).
-        req->started_in_think = ctx.snap.enable_thinking;
-        req->in_think_block = ctx.snap.enable_thinking;
-        // Stream requests stay on per-step decode for real per-token SSE (#754).
-        req->stream = ctx.params.stream;
-        req->status = imp::RequestStatus::PENDING;
-        return req;
-    };
-
     // Create first request
-    auto imp_req = make_imp_request(0);
+    auto imp_req = build_imp_request_(ctx, saved_tokens, /*completion_idx=*/0, ctx.params.stream);
 
     // Create a ServerRequest wrapper and submit to the batching engine
     auto server_req = std::make_shared<ServerRequest>();

@@ -5,7 +5,7 @@ description: Use when working on or testing imp-server and its HTTP APIs — Ope
 
 # Server & API — imp-server
 
-Source: `tools/imp-server/` — `main.cpp` (routes) · `args.cpp` (CLI flags + `--help` text) · `handlers_chat_core.cpp`/`handlers_chat.cpp`/`handlers_chat_stream.cpp` (OpenAI chat: params→render→stream) · `handlers_messages.cpp`+`anthropic.cpp` (Anthropic dialect) · `responses.cpp`/`handlers_responses.cpp` (Responses API) · `reasoning_split.h` (think/content channel split) · `tool_call.cpp`/`tool_stream_filter.h` (tool calling) · `batching_engine.cpp` (scheduler).
+Source: `tools/imp-server/` — `main.cpp` (routes) · `args.cpp` (CLI flags + `--help` text) · `handlers_chat_core.cpp`/`handlers_chat.cpp`/`handlers_chat_stream.cpp` (OpenAI chat: params→render→stream) · `stream_driver.cpp` (shared per-token SSE loop; the three streaming handlers are thin dialect adapters over it) · `handlers_messages.cpp`+`anthropic.cpp` (Anthropic dialect) · `responses.cpp`/`handlers_responses.cpp` (Responses API) · `reasoning_split.h` (think/content channel split) · `tool_call.cpp`/`tool_stream_filter.h` (tool calling) · `batching_engine.cpp` (scheduler).
 
 ## Start the server
 
