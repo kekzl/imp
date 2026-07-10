@@ -122,7 +122,6 @@ bool Engine::init_weights() {
     size_t expert_reserve = executor_->workspace_estimate();
     {
         int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-        size_t elem_sz = dtype_size(config_.kv_cache_dtype);
         int est_bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
         int blocks_per_seq = (config_.max_seq_len + est_bs - 1) / est_bs;
         int n_attn = 0;
@@ -131,9 +130,12 @@ bool Engine::init_weights() {
                 n_attn++;
         if (n_attn == 0)
             n_attn = mcfg.n_layers;
-        size_t kv_block_bytes = static_cast<size_t>(est_bs) * mcfg.n_kv_heads * head_dim_est * elem_sz;
-        size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn *
-                        kv_block_bytes;
+        // Packing- and scale-aware K+V per-layer block bytes (#942): the raw
+        // dtype_size() this used to multiply by returns 0 for NVFP4/MXFP4_KV,
+        // which zeroed the KV headroom out of the expert-offload decision.
+        size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * n_attn *
+                        kv_block_bytes_per_layer(config_.kv_cache_dtype, est_bs, mcfg.n_kv_heads,
+                                                 head_dim_est);
         {
             size_t total_vram = 0, f = 0;
             vram_budget_mem_get_info(&f, &total_vram);

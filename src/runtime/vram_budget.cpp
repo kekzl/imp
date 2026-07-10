@@ -217,27 +217,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
 
     // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
-    size_t single_block_bytes;
-    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed).
-    // NVFP4 was historically missing from this OR-chain — fell through to the
-    // dtype_size() fallback which returns 0 for QType::NVFP4, silently zeroing
-    // out NVFP4's KV-cache budget contribution. Pre-existing pre-MXFP4-KV; the
-    // Slice 2 spec reviewer flagged it during the MXFP4-KV scope review.
-    if (config.kv_cache_dtype == QType::INT4 || config.kv_cache_dtype == QType::NVFP4 ||
-        config.kv_cache_dtype == QType::MXFP4_KV) {
-        single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim / 2;
-    } else {
-        single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
-                             dtype_size(config.kv_cache_dtype);
-    }
-    // Per-token scale overhead folded into the per-layer block bytes.
-    size_t scale_per_block = 0;
-    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4) {
-        scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
-    } else if (config.kv_cache_dtype == QType::NVFP4 || config.kv_cache_dtype == QType::MXFP4_KV) {
-        scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 16);
-    }
-    const size_t per_layer_block_bytes = (single_block_bytes + scale_per_block) * 2;  // K+V
+    const size_t per_layer_block_bytes =
+        kv_block_bytes_per_layer(config.kv_cache_dtype, bs, mcfg.n_kv_heads, head_dim);
 
     // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold a
     // fixed live span (window + slack + burst/chunk peak) per sequence slot —
@@ -570,6 +551,29 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.reserve_bytes / (1024.0 * 1024.0), budget.nvfp4_second_pass ? "yes" : "no");
 
     return budget;
+}
+
+size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, int head_dim) {
+    size_t single_block_bytes;
+    // Packed 4-bit KV dtypes: 2 elements per byte (FP4 nibbles or INT4 packed).
+    // NVFP4 was historically missing from this OR-chain — fell through to the
+    // dtype_size() fallback which returns 0 for QType::NVFP4, silently zeroing
+    // out NVFP4's KV-cache budget contribution. Pre-existing pre-MXFP4-KV; the
+    // Slice 2 spec reviewer flagged it during the MXFP4-KV scope review.
+    if (kv_dtype == QType::INT4 || kv_dtype == QType::NVFP4 || kv_dtype == QType::MXFP4_KV) {
+        single_block_bytes = static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2;
+    } else {
+        single_block_bytes =
+            static_cast<size_t>(block_size) * n_kv_heads * head_dim * dtype_size(kv_dtype);
+    }
+    // Per-token scale overhead folded into the per-layer block bytes.
+    size_t scale_per_block = 0;
+    if (kv_dtype == QType::INT8 || kv_dtype == QType::INT4) {
+        scale_per_block = static_cast<size_t>(block_size) * n_kv_heads * sizeof(half);
+    } else if (kv_dtype == QType::NVFP4 || kv_dtype == QType::MXFP4_KV) {
+        scale_per_block = static_cast<size_t>(block_size) * n_kv_heads * (head_dim / 16);
+    }
+    return (single_block_bytes + scale_per_block) * 2;  // K+V
 }
 
 }  // namespace imp

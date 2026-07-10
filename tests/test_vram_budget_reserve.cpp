@@ -21,6 +21,7 @@
 #include "runtime/vram_budget.h"
 
 #include <algorithm>
+#include <cuda_fp16.h>
 
 #include "test_cuda_skip.h"
 
@@ -344,4 +345,33 @@ TEST(VramBudgetReserve, VramKnobsAreClamped) {
     EXPECT_EQ(a.reserve_bytes, b.reserve_bytes);
     EXPECT_EQ(a.kv_cache_bytes, b.kv_cache_bytes);
     EXPECT_EQ(a.kv_max_blocks, b.kv_max_blocks);
+}
+
+// kv_block_bytes_per_layer (#942): the single source for KV-size estimates.
+// The pre-upload expert-offload reserve used to multiply by raw dtype_size(),
+// which returns 0 for NVFP4/MXFP4_KV (zeroing the KV headroom) and 1 byte/elem
+// for INT4 (2x the packed size), and never counted scale overhead.
+TEST(VramBudgetReserve, KvBlockBytesPerLayerIsPackingAndScaleAware) {
+    constexpr int bs = 16, nkv = 8, hd = 128;
+    const size_t elems = static_cast<size_t>(bs) * nkv * hd;
+
+    // Plain dtypes: elems * elem_size * 2 (K+V), no scale overhead.
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::F16, bs, nkv, hd), elems * 2 * 2);
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::FP8_E4M3, bs, nkv, hd), elems * 1 * 2);
+
+    // INT8: 1 byte/elem + per-token half scale.
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::INT8, bs, nkv, hd),
+              (elems + static_cast<size_t>(bs) * nkv * sizeof(half)) * 2);
+
+    // INT4: packed 2 elems/byte + per-token half scale — NOT dtype_size()'s
+    // 1 byte/elem.
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::INT4, bs, nkv, hd),
+              (elems / 2 + static_cast<size_t>(bs) * nkv * sizeof(half)) * 2);
+
+    // NVFP4 / MXFP4_KV: packed + per-16-element-group scales; raw dtype_size()
+    // returns 0 here, which is exactly the #942 failure mode.
+    const size_t packed4 = (elems / 2 + static_cast<size_t>(bs) * nkv * (hd / 16)) * 2;
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::NVFP4, bs, nkv, hd), packed4);
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::MXFP4_KV, bs, nkv, hd), packed4);
+    EXPECT_GT(kv_block_bytes_per_layer(QType::NVFP4, bs, nkv, hd), 0u);
 }

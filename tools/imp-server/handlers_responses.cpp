@@ -284,6 +284,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     };
 
     int n_output_tokens = 0;
+    double ttft_ms = 0.0;  // Time to first token
     const char* finish = nullptr;
 
     std::string utf8_buf;      // confirmed-UTF8 content buffer
@@ -334,6 +335,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     };
 
     auto request_start = std::chrono::steady_clock::now();
+    auto last_keepalive = request_start;
     for (;;) {
         if (finish)
             break;
@@ -354,8 +356,19 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         }
 
         TokenEvent evt{};
-        if (!server_req->pop_token(evt))
+        if (!server_req->pop_token(evt)) {
+            // No token ready yet (long prefill / queued behind other work).
+            // Emit an SSE comment as keepalive every ~10s so reverse proxies
+            // and SDK idle-timeouts don't kill the connection — same cadence
+            // as the chat stream (#941).
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_keepalive > std::chrono::seconds(10)) {
+                last_keepalive = now;
+                static constexpr char kKeepalive[] = ": keepalive\n\n";
+                sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+            }
             continue;
+        }
 
         if (evt.token_id < 0) {
             finish = evt.finish_reason ? evt.finish_reason : "stop";
@@ -396,6 +409,10 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         }
 
         n_output_tokens++;
+        if (n_output_tokens == 1) {
+            auto t_first = std::chrono::high_resolution_clock::now();
+            ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
+        }
         std::string piece = snap_tok->decode_token(token);
 
         if (harmony) {
@@ -587,16 +604,33 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     response["output"] = std::move(final_output);
     if (incomplete)
         response["incomplete_details"] = {{"reason", "max_output_tokens"}};
-    {
-        int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
-        response["usage"] = {{"input_tokens", n_prompt_tokens},
-                             {"output_tokens", n_output_tokens},
-                             {"total_tokens", n_prompt_tokens + n_output_tokens},
-                             {"input_tokens_details", {{"cached_tokens", cached}}},
-                             {"output_tokens_details", {{"reasoning_tokens", 0}}}};
-    }
+    int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+    response["usage"] = {{"input_tokens", n_prompt_tokens},
+                         {"output_tokens", n_output_tokens},
+                         {"total_tokens", n_prompt_tokens + n_output_tokens},
+                         {"input_tokens_details", {{"cached_tokens", cached}}},
+                         {"output_tokens_details", {{"reasoning_tokens", 0}}}};
     out.emit(incomplete ? "response.incomplete" : "response.completed",
              json{{"response", std::move(response)}});
+
+    // Server metrics — same accounting as the chat/messages streams (#941):
+    // without this every streaming /v1/responses request was invisible to
+    // /metrics (only requests_cancelled was ever touched).
+    {
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        state.metrics.requests_total++;
+        state.metrics.tokens_prompt_total += n_prompt_tokens;
+        state.metrics.tokens_completion_total += n_output_tokens;
+        state.metrics.tokens_cached_total += cached;
+        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+        state.metrics.request_duration.observe(ms / 1000.0);
+        if (n_output_tokens > 0)
+            state.metrics.ttft.observe(ttft_ms / 1000.0);
+        if (n_output_tokens > 1)
+            state.metrics.inter_token.observe((ms - ttft_ms) / 1000.0 / (n_output_tokens - 1));
+    }
 
     // JSONL request log (outer Responses shapes).
     if (!ctx.log_skip) {

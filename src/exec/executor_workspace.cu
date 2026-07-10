@@ -295,12 +295,12 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     // MemAccount per-pool attribution (vram_audit diagnostic). The estimate
     // covers persistent + shared workspace, the dominant executor buffers.
     MemAccount::instance().note("EXEC_WORKSPACES",
-                                static_cast<std::ptrdiff_t>(ws_.workspace_estimate()));
+                                static_cast<std::ptrdiff_t>(workspace_estimate()));
 
     return true;
 }
 
-size_t Workspace::workspace_estimate() const {
+size_t Workspace::workspace_estimate(bool include_attn_scores) const {
     if (!model_)
         return 0;
     const auto& cfg = model_->config();
@@ -314,9 +314,6 @@ size_t Workspace::workspace_estimate() const {
     // Shared: max of phases (already computed in compute_shared_sizes)
     size_t shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
 
-    // S-matrix is NOT included here — it's optional (flash attention fallback works).
-    // This maximizes VRAM available for expert layers during weight upload.
-    // S-matrix is allocated opportunistically from remaining VRAM.
 
     // FP32 accumulator for post-norm models (Gemma-3): 1 × max_tokens × d_model × 4
     bool has_post_norms = (cfg.norm_placement == NormPlacement::POST_NORM);
@@ -348,12 +345,13 @@ size_t Workspace::workspace_estimate() const {
     auxiliary += static_cast<size_t>(*max_logit_tokens_) * nh_est * 32 * (2 + hd_est) *
                  sizeof(float);  // split-K
 
-    // S-matrix for cuBLAS attention fallback — only needed when CUTLASS FMHA
-    // is unavailable or unsupported (e.g., softcap, sliding window).
-    // Skip for MoE-heavy models where VRAM is tight: WMMA/CUTLASS FMHA
-    // doesn't need the S-matrix. This saves up to 256 MiB.
+    // S-matrix for the cuBLAS attention fallback. Skipped for MoE-heavy
+    // models (VRAM is tight; the FMHA family doesn't need it) and whenever
+    // the caller knows the allocator won't build one — FA2-served configs
+    // skip the buffer entirely (#932), so charging it here would hold up to
+    // 256 MiB of phantom headroom (#943).
     bool is_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
-    if (!is_moe) {
+    if (include_attn_scores && !is_moe) {
         auxiliary += std::min(static_cast<size_t>(nh_est) * *max_tokens_ * *max_tokens_ * sizeof(half),
                               static_cast<size_t>(256) << 20);
     }
