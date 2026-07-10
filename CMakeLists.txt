@@ -453,6 +453,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_stream.cpp
+        tools/imp-server/stream_driver.cpp
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp

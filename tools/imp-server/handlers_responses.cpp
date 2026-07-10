@@ -1,8 +1,8 @@
 // OpenAI Responses API (/v1/responses) — the dialect the OpenAI Agents SDK
 // and Codex CLI speak by default. Non-streaming reuses the chat-completions
 // code path via the transform shim (responses.h, same pattern as the
-// Anthropic adapter); streaming drives the same real per-token batching-
-// engine loop the other SSE paths use and emits native Responses events
+// Anthropic adapter); streaming drives the shared token loop
+// (stream_driver.h) and emits native Responses events
 // (response.created … response.output_text.delta …
 // response.function_call_arguments.delta … response.completed) so TTFT is
 // real first-token latency and tool-call arguments stream incrementally
@@ -10,23 +10,18 @@
 
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "stream_driver.h"
 #include "utils.h"
 #include "tool_call.h"
-#include "tool_stream_filter.h"
 #include "responses.h"
-#include "stream_pipeline.h"
-#include "reasoning_split.h"
 
-#include "api/imp_internal.h"
 #include "runtime/request.h"
-#include "runtime/config.h"
 
 #include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <cstring>
-#include <functional>
-#include <vector>
+#include <string>
 
 namespace rsp = imp_server::responses;
 
@@ -65,9 +60,8 @@ json response_skeleton(const std::string& response_id, const std::string& model,
 
 }  // anonymous namespace
 
-// Drives the real token loop and emits native Responses SSE events. Mirrors
-// run_anthropic_stream_ (handlers_messages.cpp) with the Anthropic block
-// model replaced by Responses output items:
+// Responses dialect adapter: maps the shared token loop onto Responses output
+// items:
 //   reasoning -> reasoning item (reasoning_summary_text.delta)
 //   content   -> message item (output_text.delta)
 //   tool call -> function_call item (function_call_arguments.delta,
@@ -78,26 +72,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                                   const std::string& req_model,
                                   const std::string& response_id) {
     ResponsesSSE out{sink};
-
-    const auto& stop_sequences = ctx.params.stop_sequences;
-    size_t max_stop_len = 0;
-    for (const auto& s : stop_sequences)
-        max_stop_len = std::max(max_stop_len, s.size());
-    bool enable_thinking = ctx.snap.enable_thinking;
-    bool has_tools = ctx.params.has_tools;
-    auto tpl_family = ctx.snap.tpl_family;
-    float think_budget = ctx.params.think_budget;
-    auto snap_tok = ctx.snap.tok;
-    bool snap_have_template = ctx.snap.have_template;
-    bool snap_is_think_model = ctx.snap.is_think_model;
-    int snap_think_start_id = ctx.snap.think_start_id;
-    int snap_think_end_id = ctx.snap.think_end_id;
-    int snap_channel_open_id = ctx.snap.channel_open_id;
-    int snap_channel_close_id = ctx.snap.channel_close_id;
-    int snap_channel_newline_id = ctx.snap.channel_newline_id;
-    const auto& snap_stop_token_ids = ctx.snap.stop_token_ids;
     auto active_req = server_req->request;
-    auto t_start = ctx.t_start;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
 
     const std::string model_name = req_model.empty() ? ctx.snap.model_name : req_model;
@@ -115,9 +90,12 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     uint64_t item_counter = 0;
     std::string cur_item_id;
 
+    // Loop result — declared before the item lambdas so stop_item can read the
+    // current tool call (the driver appends to lres.tool_calls live).
+    StreamLoopResult lres;
+
     // Accumulators for the final `response` object.
     std::string acc_text, acc_reasoning;
-    std::vector<ParsedToolCall> stream_tool_calls;
     json final_output = json::array();
 
     auto stop_item = [&]() -> bool {
@@ -161,7 +139,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                                 json{{"output_index", output_index}, {"item", item}});
             final_output.push_back(std::move(item));
         } else if (open_item == RspItem::FUNCTION_CALL) {
-            const auto& tc = stream_tool_calls.back();
+            const auto& tc = lres.tool_calls.back();
             ok = out.emit("response.function_call_arguments.done",
                           json{{"item_id", cur_item_id},
                                {"output_index", output_index},
@@ -267,338 +245,40 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                              {"delta", partial}});
     };
 
-    // gpt-oss Harmony streaming filter (analysis/commentary -> reasoning item,
-    // final -> message item). Markers arrive as atomic special-token pieces.
-    const bool harmony = (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY);
-    std::string hm_channel, hm_name, hm_buf;
-    bool hm_in_msg = false, hm_reading_name = false;
-    auto hm_flush = [&](bool force) -> bool {
-        size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
-        if (complete == 0)
-            return true;
-        std::string chunk = hm_buf.substr(0, complete);
-        hm_buf.erase(0, complete);
-        if (hm_channel == "analysis" || hm_channel == "commentary")
-            return emit_thinking(chunk);
-        return emit_text(chunk);
+    StreamDialect dialect;
+    dialect.emit_text = emit_text;
+    dialect.emit_reasoning = emit_thinking;
+    dialect.emit_content_token = emit_text;
+    dialect.keepalive = [&]() -> bool {
+        // SSE comment lines are spec-compliant and ignored by SSE parsers —
+        // same cadence as the chat stream (#941).
+        static constexpr char kKeepalive[] = ": keepalive\n\n";
+        return sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+    };
+    dialect.on_call_begin = [&](const ParsedToolCall& tc) -> bool {
+        return open_function_call_item(tc);
+    };
+    dialect.on_call_args_delta = emit_args_delta;
+    dialect.on_call_end = [&](ParsedToolCall*) -> bool { return stop_item(); };
+    dialect.on_call_buffered = [&](ParsedToolCall& tc) -> bool {
+        // Buffered call (non-JSON layouts): open the item, emit the whole
+        // arguments as one delta, close (stop_item reads the call the driver
+        // just recorded in lres.tool_calls).
+        if (!open_function_call_item(tc))
+            return false;
+        if (!tc.arguments.empty() && !emit_args_delta(tc.arguments))
+            return false;
+        return stop_item();
     };
 
-    int n_output_tokens = 0;
-    double ttft_ms = 0.0;  // Time to first token
-    const char* finish = nullptr;
-
-    std::string utf8_buf;      // confirmed-UTF8 content buffer
-    std::string pending_text;  // stop-sequence holdback
-    bool text_stop_matched = false;
-
-    imp::server::StreamToolCallFilter tool_filter(tpl_family);
-    bool tool_calls_emitted = false;
-    // parallel_tool_calls=false: a second streamed call was opened by the
-    // filter but is being suppressed (skip its deltas/END too).
-    bool stream_call_suppressed = false;
-
-    const bool use_reasoning = (state.default_args.reasoning_format == "deepseek" &&
-                                (snap_is_think_model || enable_thinking));
-    const bool think_active = use_reasoning || enable_thinking;
-    imp::server::ThinkPhase think_start_phase;
-    if (enable_thinking)
-        think_start_phase = imp::server::ThinkPhase::REASONING;
-    else if (use_reasoning && think_budget > 0.0f)
-        think_start_phase = imp::server::ThinkPhase::SCAN;
-    else
-        think_start_phase = imp::server::ThinkPhase::CONTENT;
-    imp::server::StreamReasoningSplitter think_split(think_start_phase, snap_think_start_id,
-                                                     snap_think_end_id);
-    bool channel_header_active = false;
-
-    auto flush_text = [&](size_t up_to) -> bool {
-        if (up_to == 0)
-            return true;
-        bool ok = emit_text(pending_text.substr(0, up_to));
-        pending_text.erase(0, up_to);
-        return ok;
-    };
-    auto flush_buffered_content = [&]() -> bool {
-        if (stop_sequences.empty()) {
-            size_t complete = utf8_complete_len(utf8_buf);
-            if (complete > 0) {
-                if (!emit_text(utf8_buf.substr(0, complete)))
-                    return false;
-                utf8_buf.erase(0, complete);
-            }
-        } else if (!pending_text.empty()) {
-            auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
-            if (!flush_text(d.flush_len))
-                return false;
-        }
-        return true;
-    };
-
-    auto request_start = std::chrono::steady_clock::now();
-    auto last_keepalive = request_start;
-    for (;;) {
-        if (finish)
-            break;
-
-        if (!sink.is_writable()) {
-            server_req->cancel();
-            state.metrics.requests_cancelled++;
-            finish = "cancelled";
-            break;
-        }
-        if (state.request_timeout > 0) {
-            auto elapsed = std::chrono::steady_clock::now() - request_start;
-            if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                server_req->cancel();
-                finish = "length";
-                break;
-            }
-        }
-
-        TokenEvent evt{};
-        if (!server_req->pop_token(evt)) {
-            // No token ready yet (long prefill / queued behind other work).
-            // Emit an SSE comment as keepalive every ~10s so reverse proxies
-            // and SDK idle-timeouts don't kill the connection — same cadence
-            // as the chat stream (#941).
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_keepalive > std::chrono::seconds(10)) {
-                last_keepalive = now;
-                static constexpr char kKeepalive[] = ": keepalive\n\n";
-                sink.write(kKeepalive, sizeof(kKeepalive) - 1);
-            }
-            continue;
-        }
-
-        if (evt.token_id < 0) {
-            finish = evt.finish_reason ? evt.finish_reason : "stop";
-            break;
-        }
-        int32_t token = evt.token_id;
-
-        if (!evt.is_last) {
-            bool is_structural_stop = (token == snap_tok->eos_id());
-            if (!is_structural_stop && snap_have_template) {
-                for (int32_t stop_id : snap_stop_token_ids)
-                    if (token == stop_id) {
-                        is_structural_stop = true;
-                        break;
-                    }
-            }
-            if (is_structural_stop)
-                continue;
-        }
-        if (evt.is_last) {
-            if (token == snap_tok->eos_id()) {
-                finish = evt.finish_reason ? evt.finish_reason : "stop";
-                break;
-            }
-            bool is_stop = false;
-            if (snap_have_template) {
-                for (int32_t stop_id : snap_stop_token_ids)
-                    if (token == stop_id) {
-                        is_stop = true;
-                        break;
-                    }
-            }
-            if (is_stop) {
-                finish = evt.finish_reason ? evt.finish_reason : "stop";
-                break;
-            }
-            finish = evt.finish_reason ? evt.finish_reason : "length";
-        }
-
-        n_output_tokens++;
-        if (n_output_tokens == 1) {
-            auto t_first = std::chrono::high_resolution_clock::now();
-            ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
-        }
-        std::string piece = snap_tok->decode_token(token);
-
-        if (harmony) {
-            if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
-                piece == "<|return|>" || piece == "<|start|>") {
-                if (hm_in_msg && !hm_flush(/*force=*/true))
-                    return false;
-                if (piece == "<|channel|>") {
-                    hm_reading_name = true;
-                    hm_in_msg = false;
-                    hm_name.clear();
-                } else if (piece == "<|message|>") {
-                    size_t s = hm_name.find_first_not_of("\n\r\t ");
-                    size_t e = hm_name.find_last_not_of("\n\r\t ");
-                    hm_channel =
-                        (s == std::string::npos) ? std::string() : hm_name.substr(s, e - s + 1);
-                    hm_reading_name = false;
-                    hm_in_msg = true;
-                } else {
-                    hm_in_msg = false;
-                    hm_reading_name = false;
-                    hm_channel.clear();
-                }
-                continue;
-            }
-            if (hm_reading_name) {
-                hm_name += piece;
-                continue;
-            }
-            if (!hm_in_msg)
-                continue;
-            hm_buf += piece;
-            if (!hm_flush(/*force=*/false))
-                return false;
-            continue;
-        }
-
-        // Gemma-4 channel filter.
-        if (snap_channel_open_id >= 0) {
-            if (channel_header_active) {
-                if (token == snap_channel_newline_id || (!piece.empty() && piece.back() == '\n'))
-                    channel_header_active = false;
-                continue;
-            }
-            if (token == snap_channel_open_id) {
-                channel_header_active = true;
-                continue;
-            }
-            if (token == snap_channel_close_id)
-                continue;
-        }
-
-        // Reasoning/content demux (reasoning_split.h).
-        if (think_active) {
-            auto rs2 = think_split.feed(std::move(piece), token);
-            if (!rs2.reasoning.empty() && !emit_thinking(rs2.reasoning))
-                return false;
-            if (rs2.content.empty())
-                continue;
-            piece = std::move(rs2.content);
-        }
-
-        // Streaming tool-call demux — incremental argument deltas for JSON
-        // layouts (see the matching block in run_chat_stream_).
-        if (has_tools) {
-            auto segs = tool_filter.feed(std::move(piece));
-            piece.clear();
-            using SegKind = imp::server::StreamToolCallFilter::Segment::Kind;
-            for (size_t si = 0; si < segs.size(); ++si) {
-                auto& seg = segs[si];
-                if (seg.kind == SegKind::TEXT) {
-                    if (si + 1 == segs.size()) {
-                        piece = std::move(seg.text);  // trailing content
-                    } else {
-                        if (!flush_buffered_content())
-                            return false;
-                        if (!emit_text(seg.text))
-                            return false;
-                    }
-                    continue;
-                }
-                // parallel_tool_calls=false: stream at most one tool call.
-                // (For a streamed call the gate fires at CALL_BEGIN, so the
-                // later deltas/END of a suppressed call are skipped too.)
-                if (!ctx.params.parallel_tool_calls &&
-                    ((seg.kind == SegKind::CALL && !stream_tool_calls.empty()) ||
-                     (seg.kind == SegKind::CALL_BEGIN && !stream_tool_calls.empty()) ||
-                     (seg.kind != SegKind::CALL && stream_call_suppressed))) {
-                    if (seg.kind == SegKind::CALL_BEGIN)
-                        stream_call_suppressed = true;
-                    if (seg.kind == SegKind::CALL_END)
-                        stream_call_suppressed = false;
-                    continue;
-                }
-                if (seg.kind == SegKind::CALL_BEGIN) {
-                    ParsedToolCall tc = std::move(seg.call);
-                    tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
-                    if (!flush_buffered_content())
-                        return false;
-                    if (!open_function_call_item(tc))
-                        return false;
-                    stream_tool_calls.push_back(std::move(tc));
-                    tool_calls_emitted = true;
-                    continue;
-                }
-                if (seg.kind == SegKind::CALL_ARGS_DELTA) {
-                    if (!emit_args_delta(seg.text))
-                        return false;
-                    continue;
-                }
-                if (seg.kind == SegKind::CALL_END) {
-                    if (!stream_tool_calls.empty())
-                        stream_tool_calls.back().arguments = std::move(seg.call.arguments);
-                    if (!stop_item())
-                        return false;
-                    continue;
-                }
-                // SegKind::CALL — buffered call (non-JSON layouts): open the
-                // item, emit the whole arguments as one delta, close.
-                ParsedToolCall tc = std::move(seg.call);
-                tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
-                if (!flush_buffered_content())
-                    return false;
-                if (!open_function_call_item(tc))
-                    return false;
-                stream_tool_calls.push_back(std::move(tc));
-                if (!tc.arguments.empty() && !emit_args_delta(tc.arguments))
-                    return false;
-                if (!stop_item())
-                    return false;
-                tool_calls_emitted = true;
-            }
-            if (piece.empty())
-                continue;
-        }
-
-        // Normal content emission.
-        if (stop_sequences.empty()) {
-            utf8_buf += piece;
-            size_t complete = utf8_complete_len(utf8_buf);
-            if (complete > 0) {
-                if (!emit_text(utf8_buf.substr(0, complete)))
-                    return false;
-                utf8_buf.erase(0, complete);
-            }
-        } else {
-            pending_text += piece;
-            auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
-            if (!flush_text(d.flush_len))
-                return false;
-            if (d.complete_match) {
-                text_stop_matched = true;
-                finish = "stop";
-                break;
-            }
-        }
-    }
-
-    // ---- Stream-end flushing (mirrors the Anthropic path) ------------------
-    if (think_active) {
-        auto rs2 = think_split.finish();
-        if (!rs2.reasoning.empty())
-            emit_thinking(rs2.reasoning);
-        if (!rs2.content.empty())
-            utf8_buf += rs2.content;
-    }
-    if (has_tools && tool_filter.mid_tool() && !tool_calls_emitted) {
-        std::string leftover = tool_filter.finish();
-        if (!leftover.empty())
-            utf8_buf += leftover;
-    }
-    if (has_tools && tool_filter.call_open() && !stream_tool_calls.empty() &&
-        stream_tool_calls.back().arguments.empty())
-        stream_tool_calls.back().arguments = tool_filter.streamed_arguments();
-    if (!utf8_buf.empty() && !text_stop_matched && !tool_calls_emitted)
-        emit_text(utf8_buf);
-    if (!pending_text.empty() && !text_stop_matched && !tool_calls_emitted)
-        emit_text(pending_text);
+    if (!run_stream_loop_(sink, ctx, state, server_req, dialect, lres))
+        return false;
 
     stop_item();
 
-    if (!finish)
-        finish = tool_calls_emitted ? "tool_calls" : "length";
-
     // ---- response.completed / response.incomplete --------------------------
-    const bool incomplete = (strcmp(finish, "length") == 0 || strcmp(finish, "cancelled") == 0);
+    const bool incomplete =
+        (strcmp(lres.finish, "length") == 0 || strcmp(lres.finish, "cancelled") == 0);
     json response = response_skeleton(response_id, model_name,
                                       incomplete ? "incomplete" : "completed");
     response["output"] = std::move(final_output);
@@ -606,43 +286,15 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         response["incomplete_details"] = {{"reason", "max_output_tokens"}};
     int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
     response["usage"] = {{"input_tokens", n_prompt_tokens},
-                         {"output_tokens", n_output_tokens},
-                         {"total_tokens", n_prompt_tokens + n_output_tokens},
+                         {"output_tokens", lres.n_output_tokens},
+                         {"total_tokens", n_prompt_tokens + lres.n_output_tokens},
                          {"input_tokens_details", {{"cached_tokens", cached}}},
-                         {"output_tokens_details", {{"reasoning_tokens", 0}}}};
+                         {"output_tokens_details", {{"reasoning_tokens", lres.n_reasoning_tokens}}}};
     out.emit(incomplete ? "response.incomplete" : "response.completed",
              json{{"response", std::move(response)}});
-
-    // Server metrics — same accounting as the chat/messages streams (#941):
-    // without this every streaming /v1/responses request was invisible to
-    // /metrics (only requests_cancelled was ever touched).
-    {
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        state.metrics.requests_total++;
-        state.metrics.tokens_prompt_total += n_prompt_tokens;
-        state.metrics.tokens_completion_total += n_output_tokens;
-        state.metrics.tokens_cached_total += cached;
-        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-        state.metrics.request_duration.observe(ms / 1000.0);
-        if (n_output_tokens > 0)
-            state.metrics.ttft.observe(ttft_ms / 1000.0);
-        if (n_output_tokens > 1)
-            state.metrics.inter_token.observe((ms - ttft_ms) / 1000.0 / (n_output_tokens - 1));
-    }
-
-    // JSONL request log (outer Responses shapes).
-    if (!ctx.log_skip) {
-        auto t_end = std::chrono::system_clock::now();
-        double ms =
-            std::chrono::duration<double, std::milli>(t_end - ctx.t_log_start).count();
-        log_request_jsonl(state, /*skip=*/false, ctx.t_log_start, response_id, ctx.log_endpoint,
-                          ctx.log_client_ip, ctx.log_raw_body, ms, n_prompt_tokens,
-                          n_output_tokens, finish, json());
-    }
-
     sink.done();
+
+    finish_stream_accounting_(state, ctx, active_req, lres, response_id, "responses stream: ");
     return true;
 }
 
@@ -704,39 +356,9 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         ctx.log_raw_body = log_raw_body;
         ctx.t_log_start = t_log_start;
 
-        auto imp_req = std::make_shared<imp::Request>();
-        imp_req->image = ctx.snap.vision_image;
-        imp_req->input_tokens = ctx.snap.tokens;
-        imp_req->max_tokens = ctx.params.max_tokens;
-        imp_req->temperature = ctx.params.temperature;
-        imp_req->top_p = ctx.params.top_p;
-        imp_req->top_k = ctx.params.top_k;
-        imp_req->seed = ctx.params.seed;
-        imp_req->pin_kv_prefix = ctx.params.cache_prompt;
-        imp_req->spec_ngram_override = ctx.params.spec_ngram_override;
-        imp_req->stream = true;
-        imp_req->min_p = ctx.params.min_p;
-        imp_req->typical_p = ctx.params.typical_p;
-        imp_req->repetition_penalty = ctx.params.repetition_penalty;
-        imp_req->frequency_penalty = ctx.params.frequency_penalty;
-        imp_req->presence_penalty = ctx.params.presence_penalty;
-        imp_req->repeat_last_n = ctx.params.repeat_last_n;
-        imp_req->dry_multiplier = ctx.params.dry_multiplier;
-        imp_req->dry_base = ctx.params.dry_base;
-        imp_req->dry_allowed_length = ctx.params.dry_allowed_length;
-        imp_req->dry_penalty_last_n = ctx.params.dry_penalty_last_n;
-        imp_req->mirostat = ctx.params.mirostat;
-        imp_req->mirostat_tau = ctx.params.mirostat_tau;
-        imp_req->mirostat_eta = ctx.params.mirostat_eta;
-        imp_req->logprobs = ctx.params.req_logprobs;
-        imp_req->top_logprobs = ctx.params.top_logprobs;
-        imp_req->json_mode = ctx.params.json_mode;
-        imp_req->json_schema = ctx.params.json_schema_str;
-        imp_req->has_tools = ctx.params.has_tools;
-        imp_req->tpl_family = ctx.snap.tpl_family;
-        imp_req->logit_bias = ctx.params.logit_bias;
-        imp_req->think_budget = ctx.params.think_budget;
-        imp_req->status = imp::RequestStatus::PENDING;
+        // Streaming stays on per-step decode for real per-token SSE (#754).
+        auto imp_req = build_imp_request_(ctx, ctx.snap.tokens, /*completion_idx=*/0,
+                                          /*stream=*/true);
 
         auto server_req = std::make_shared<ServerRequest>();
         server_req->request = imp_req;

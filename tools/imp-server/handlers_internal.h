@@ -151,6 +151,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                                ServerState& state, ChatRequestContext& ctx);
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state,
                                   ChatRequestContext& ctx);
+// Build an imp::Request from a parsed+snapshotted chat request context — the
+// single params->request mapping for all four ctx-based submission sites
+// (chat streaming + non-streaming, /v1/messages streaming, /v1/responses
+// streaming); this was hand-copied per site and drifted (#941).
+// completion_idx offsets the seed for n>1 choice generation; stream keeps the
+// request on per-step decode for real per-token SSE (#754).
+std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
+                                                 const std::vector<int32_t>& input_tokens,
+                                                 int completion_idx, bool stream);
 void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
                              std::shared_ptr<imp::Request>& imp_req,
                              std::shared_ptr<ServerRequest>& server_req,
