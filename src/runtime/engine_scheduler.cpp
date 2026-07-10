@@ -1545,6 +1545,27 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = bucketed_max_blocks;
         }
+        // #948: the decode-attention LAUNCH topology derives from
+        // max_context_len on the host (split-K num_splits / GQA-vs-split-K
+        // kernel choice, scratch clamping) and is baked into the capture. The
+        // max_blocks bucket above was meant to catch context growth but never
+        // trips — the decode batch pool pads max_blocks_per_seq to the pool
+        // stride. Re-derive the graph when the pow2 context bucket GROWS past
+        // the captured one: a graph captured at ctx≈35 replayed at ctx≈2400
+        // dereferences a stale-topology kernel and wedges the engine with an
+        // illegal memory access. Growth-only (monotonic high-water mark,
+        // ~log2(max ctx) captures per process — an on-any-change trigger
+        // re-captured 1-2x per request under short/long ping-pong): replaying
+        // a large-ctx capture for a SHORT request is safe, surplus split-K
+        // splits write their empty-split sentinels and the reduce merges
+        // them; the reverse direction is the crash. cudaGraphExecUpdate
+        // absorbs same-topology re-captures; a kernel-choice change fails
+        // the update and re-instantiates.
+        const int bucketed_max_ctx = bucket_pow2(max_ctx);
+        if (bucketed_max_ctx > last_decode_max_ctx_per_graph_[graph_idx]) {
+            graph_runner.invalidate_for_update();
+            last_decode_max_ctx_per_graph_[graph_idx] = bucketed_max_ctx;
+        }
         // Recurrent (SSM/GDN) state pointers are baked into the capture as
         // kernel params. A replay for a request in a DIFFERENT state slot
         // would read/write the previous sequence's state — possible whenever

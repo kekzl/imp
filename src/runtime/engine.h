@@ -341,6 +341,16 @@ private:
     std::vector<std::unique_ptr<LoraAdapter>> lora_adapters_;
     int active_lora_ = 0;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
+    // pow2-bucketed context HIGH-WATER MARK at the last (re)capture — the
+    // decode-attention launch topology (split-K num_splits, GQA vs split
+    // kernel choice) derives from max_context_len on the HOST, so a graph
+    // captured at a small context replays a stale topology at a much larger
+    // one (#948: IMA when a request with a long prompt follows short ones).
+    // The max_blocks bucket above never trips (the batch pool pads to pool
+    // stride), so this is the trigger that actually fires as context grows.
+    // Monotonic: shrink replays are served by the large-ctx capture (empty
+    // split-K splits write sentinels), only growth forces a re-derivation.
+    int last_decode_max_ctx_per_graph_[kMaxGraphPoolSize] = {};
 
     // Prefill graph runner — captures forward_logits for non-last chunks of
     // chunked prefill. Single runner: in practice chunk_len == prefill_chunk_size

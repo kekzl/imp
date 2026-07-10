@@ -134,6 +134,17 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
 }
 
 bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+    // Resize targets the PREFILL shared arena. While the decode workspace is
+    // active (slot 1), shared_workspace_ aliases the fixed-size decode buffer
+    // — growing through that alias cudaFreeAsync's the decode buffer and
+    // leaves decode_shared_workspace_ dangling; the next use_workspace(1)
+    // re-installs the freed pointer and decode kernels write into freed
+    // memory (#948: server wedged with an illegal memory access whenever a
+    // chunked prefill followed a batch=1 decode, which leaves slot 1 active).
+    // Restore the prefill workspace first, exactly like the decode path does
+    // before its own resize (step_decode_forward).
+    if (active_workspace_ == 1)
+        use_workspace(0);
     if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0)
         return true;
     if (new_max_tokens > *max_tokens_)
