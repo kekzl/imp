@@ -345,6 +345,7 @@ set(IMP_VISION_SOURCES
 
 set(IMP_API_SOURCES
     src/api/imp_api.cpp
+    src/api/imp_api_suspend.cpp
 )
 
 # --- Main library target ---
