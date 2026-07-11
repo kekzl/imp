@@ -95,6 +95,41 @@ TEST(VramBudgetReserve, PlannerDemandKeepsKvPoolFromEatingWeightCacheRoom) {
         << "KV pool ate the weight-cache room again (heuristic-only backstop)";
 }
 
+// #963 follow-up: when KV is cheap (hybrid — few attention layers), the
+// auto floor must cover the full advertised context plus the StreamingLLM
+// headroom, not stop at the flat 16384-token cap. With the old floor a
+// max_seq_len=17408 hybrid got a pool a 16k prompt fills to 94%, tripping
+// the >90% streaming valve (graphs off, windowed attention) on a request
+// that fits outright.
+TEST(VramBudgetReserve, CheapKvFloorCoversFullMaxSeqLen) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::Q6_K, QType::Q6_K);
+    m.config_.n_kv_heads = 2;  // hybrid-class cheap KV (Qwen3.6-35B: 2 heads)
+
+    EngineConfig config;
+    config.max_seq_len = 17408;
+    config.max_batch_size = 1;
+    config.use_nvfp4_decode = 2;
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+
+    const int n_kv_layers = 10;  // 10 attention layers out of 40 (GDN hybrid)
+    const int head_dim = 256;
+    const size_t GiB = 1024ull * 1024 * 1024;
+
+    VRAMBudget budget = compute_vram_budget(m, config, n_kv_layers, head_dim, 8 * GiB);
+
+    // Full coverage + 12.5% streaming headroom ≈ 383 MiB here (well under the
+    // 1 GiB cheap-KV bound) — the pool must hold max_seq_len plus headroom so
+    // a full-length request never trips the >90% streaming valve.
+    const int bs = 16;  // kKVBlockSize (config.kv_block_size unset)
+    const int full_cov_tok = config.max_seq_len + config.max_seq_len / 8;
+    EXPECT_GE(budget.kv_max_blocks * bs, full_cov_tok)
+        << "cheap-KV floor stopped below the advertised context again";
+}
+
 TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
     SKIP_IF_NO_CUDA();
 

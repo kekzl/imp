@@ -31,6 +31,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
 
 ### Fixed
+- **KV floor now covers the full advertised context on cheap-KV models**
+  (#963 follow-up): the auto floor was min(16384, 4×max_seq_len), so a
+  max_seq_len=17408 hybrid (10 attention layers, ~0.3 MiB/block) got a
+  16.4k-token pool that a 16k prompt fills to 94% — tripping the >90%
+  StreamingLLM valve (CUDA graphs off, windowed attention) on a request
+  that fits outright. When full coverage plus 12.5% streaming headroom
+  costs ≤1 GiB, the floor now takes it; expensive-KV models (dense 64k ≈
+  9 GiB) keep the old floor, and the kv_fraction affordability cap keeps
+  protecting the weight-cache budget either way.
 - **Default-on n-gram speculation regressed long-context decode** (#964,
   partial): the chunk verify runs the FA2 prefill tile over the full context
   plus a paged-KV gather, costing ~2.1× a decode step at 2k ctx and ~5.2× at
