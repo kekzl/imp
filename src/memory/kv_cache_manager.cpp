@@ -865,7 +865,16 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
 
     const int sink_end_block = (n_sink_tokens + block_size - 1) / block_size;
     const int window_block_count = (n_window_tokens + block_size - 1) / block_size;
-    const int window_start_block = std::max(0, total_blocks - window_block_count);
+    // Retain ONE extra boundary block beyond the ceil-aligned window (#963):
+    // the paged decode kernels compute their window start as
+    // floor((ctx_len - window) / block_size), which for non-block-aligned
+    // ctx_len (every decode step after an aligned prefill) lands one block
+    // BEFORE ceil-aligned tail retention — the kernels then read a -1
+    // sentinel, and phys_block = -1 is an out-of-bounds KV access (IMA on a
+    // full-VRAM card, silent garbage attention otherwise). One 32-token
+    // block of extra KV is the price of keeping host eviction and device
+    // window math aligned regardless of ctx alignment or call ordering.
+    const int window_start_block = std::max(0, total_blocks - window_block_count - 1);
 
     if (sink_end_block >= window_start_block) {
         // Sinks and window overlap (sequence too short) — nothing to free.

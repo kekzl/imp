@@ -1220,29 +1220,32 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
     // Snapshot the original block IDs so we can verify which survive.
     auto bt_before = mgr->block_table(0);
 
-    // Keep first 4 sink tokens (=> 1 sink block) and last 64 window tokens
-    // (=> 4 window blocks). Middle = 20 - 1 - 4 = 15 blocks should be freed.
+    // Keep first 4 sink tokens (=> 1 sink block), last 64 window tokens
+    // (=> 4 window blocks) plus ONE extra boundary block (#963: the decode
+    // kernels' floor-aligned window start must stay readable for
+    // non-block-aligned ctx). Middle = 20 - 1 - 4 - 1 = 14 blocks freed.
     int freed = mgr->evict_middle_blocks(/*seq_id=*/0,
                                          /*n_sink_tokens=*/4,
                                          /*n_window_tokens=*/64);
-    EXPECT_EQ(freed, 15);
+    EXPECT_EQ(freed, 14);
 
     const auto& bt_after = mgr->block_table(0);
     ASSERT_EQ(static_cast<int>(bt_after.size()), 20);  // unchanged length
     EXPECT_EQ(bt_after[0], bt_before[0]);              // sink survives
     EXPECT_EQ(bt_after[1], -1);                        // first middle slot freed
-    EXPECT_EQ(bt_after[15], -1);                       // last middle slot freed
+    EXPECT_EQ(bt_after[14], -1);                       // last middle slot freed
+    EXPECT_EQ(bt_after[15], bt_before[15]);            // boundary block survives (#963)
     EXPECT_EQ(bt_after[16], bt_before[16]);            // window survives
     EXPECT_EQ(bt_after[19], bt_before[19]);            // last block survives
 
-    // 15 freed back into the pool.
-    EXPECT_EQ(mgr->num_free_blocks(), 12 + 15);
+    // 14 freed back into the pool.
+    EXPECT_EQ(mgr->num_free_blocks(), 12 + 14);
     EXPECT_EQ(mgr->num_pinned_blocks(), 1);  // sink block was pinned
 
     // Idempotent: calling again must not crash and not free more.
     int freed2 = mgr->evict_middle_blocks(0, 4, 64);
     EXPECT_EQ(freed2, 0);
-    EXPECT_EQ(mgr->num_free_blocks(), 12 + 15);
+    EXPECT_EQ(mgr->num_free_blocks(), 12 + 14);
 
     // free_sequence keeps the pinned sink block alive (pin_prefix semantics).
     mgr->free_sequence(0);
@@ -1561,6 +1564,52 @@ TEST(KVCacheManagerTest, SwaRollback) {
     mgr.rollback(0, 80);
     EXPECT_EQ(static_cast<int>(mgr.swa_block_table(0).size()), 5);
     EXPECT_EQ(static_cast<int>(mgr.block_table(0).size()), 5);
+}
+
+// Regression for #963: StreamingLLM middle-block eviction must retain the
+// block containing the decode kernels' window start. The paged decode
+// kernels compute window_start_block = floor((ctx_len - window) /
+// block_size); the eviction retained ceil-aligned from the sequence tail
+// (total_blocks - ceil(window / block_size)). For non-block-aligned
+// ctx_len those differ by one — the kernels' first window block held a -1
+// sentinel, and phys_block = -1 produced an out-of-bounds KV read (an
+// illegal memory access on a full-VRAM card, silent garbage attention
+// otherwise). The eviction must keep one extra boundary block.
+TEST(KVCacheManagerTest, EvictMiddleBlocksRetainsKernelWindowStart) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(64);
+    const int bs = mgr->kv_cache()->block_size();
+    const int n_sinks = 4;            // < bs → sinks live in block 0
+    const int window = 4 * bs;        // 4-block sliding window
+
+    // Non-block-aligned context: one token into the 21st block — exactly the
+    // state of the first decode step after a block-aligned prefill.
+    const int ctx_len = 20 * bs + 1;
+    const int total_blocks = (ctx_len + bs - 1) / bs;  // 21
+    ASSERT_TRUE(mgr->allocate_blocks(0, total_blocks));
+
+    int freed = mgr->evict_middle_blocks(0, n_sinks, window);
+    EXPECT_GT(freed, 0);
+
+    const auto& table = mgr->block_table(0);
+    ASSERT_EQ(static_cast<int>(table.size()), total_blocks);
+
+    // Sink block survives.
+    EXPECT_GE(table[0], 0) << "sink block evicted";
+    // Deep-middle block is really gone (the test is not vacuous).
+    EXPECT_EQ(table[8], -1) << "middle block not evicted";
+
+    // The kernels' window start (floor((ctx - window) / bs) = block 16 here)
+    // must be retained — this is the off-by-one that crashed Qwen3.6-35B at
+    // 16k context (#963).
+    const int kernel_window_start_block = (ctx_len - window) / bs;
+    EXPECT_GE(table[kernel_window_start_block], 0)
+        << "kernels read block " << kernel_window_start_block
+        << " under classical sliding window, but eviction freed it";
+    // Everything from there to the tail is readable.
+    for (int b = kernel_window_start_block; b < total_blocks; ++b)
+        EXPECT_GE(table[b], 0) << "window block " << b << " evicted";
 }
 
 }  // namespace
