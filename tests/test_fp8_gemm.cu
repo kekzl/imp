@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "compute/gemm.h"
 #include "quant/fp8_quant.h"
+#include "quant/dequant_gpu.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -8,6 +9,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace imp {
 namespace {
@@ -200,6 +203,115 @@ TEST_F(FP8GemmTest, GemvFP8NonzeroMatchesReference) {
     cudaFree(d_a);
     cudaFree(d_x);
     cudaFree(d_y);
+}
+
+// The GGUF branch of the fp8_ssm_proj decode sidecar: a Q8_0-source GDN
+// projection is dequanted (dequant_gpu) at init, per-row FP8-quantized
+// (quantize_fp8_rows_async), and decoded via gemv_fp8_rowscale. This chains
+// those three kernels exactly as pre_dequant_phase2b does and checks the GEMV
+// against an fp64 dot over the format-derived Q8_0 dequant reference. The
+// only spread vs that reference is the E4M3 re-quantization (per-row scale =
+// row_absmax/448) plus accumulation order, so a wrong block layout, scale
+// application, or row indexing shows up as O(1) error against the ~1e-2-class
+// rounding floor.
+TEST_F(FP8GemmTest, RowscaleGemvFromQ8SourceMatchesReference) {
+    const int M = 192, K = 2048;  // K % 32 == 0 (Q8_0 blocks), K % 16 == 0 (sidecar gate)
+    constexpr int kQ8BlockBytes = 34;  // [ d:f16 | qs:int8[32] ]
+    const int blocks_per_row = K / 32;
+    const size_t q8_bytes = static_cast<size_t>(M) * blocks_per_row * kQ8BlockBytes;
+
+    // Random Q8_0 blocks (fixed seed) + fp64 dequant reference: val = d * q.
+    std::vector<uint8_t> h_q8(q8_bytes);
+    std::vector<double> wref(static_cast<size_t>(M) * K);
+    std::srand(1234);
+    for (int r = 0; r < M; ++r) {
+        for (int b = 0; b < blocks_per_row; ++b) {
+            uint8_t* blk = h_q8.data() + (static_cast<size_t>(r) * blocks_per_row + b) * kQ8BlockBytes;
+            half d = __float2half(0.001f + 0.05f * (std::rand() / (float)RAND_MAX));
+            std::memcpy(blk, &d, 2);
+            int8_t* qs = reinterpret_cast<int8_t*>(blk + 2);
+            double dd = static_cast<double>(__half2float(d));
+            for (int j = 0; j < 32; ++j) {
+                qs[j] = static_cast<int8_t>(std::rand() % 255 - 127);
+                wref[(static_cast<size_t>(r) * K) + b * 32 + j] = dd * qs[j];
+            }
+        }
+    }
+    std::vector<half> h_x(K);
+    for (int k = 0; k < K; ++k)
+        h_x[k] = __float2half(((std::rand() / (float)RAND_MAX) - 0.5f) * 2.0f);
+
+    void *d_q8 = nullptr, *d_fp16 = nullptr, *d_fp8 = nullptr, *d_x = nullptr, *d_y = nullptr;
+    float* d_row_scales = nullptr;
+    cudaMalloc(&d_q8, q8_bytes);
+    cudaMalloc(&d_fp16, static_cast<size_t>(M) * K * sizeof(half));
+    cudaMalloc(&d_fp8, static_cast<size_t>(M) * K);
+    cudaMalloc(&d_x, K * sizeof(half));
+    cudaMalloc(&d_y, M * sizeof(half));
+    cudaMalloc(&d_row_scales, M * sizeof(float));
+    cudaMemcpy(d_q8, h_q8.data(), q8_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, h_x.data(), K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_y, 0, M * sizeof(half));
+
+    // The sidecar chain: Q8_0 → FP16 scratch → per-row FP8 → rowscale GEMV.
+    dequant_gpu(d_q8, d_fp16, QType::Q8_0, M, K, stream_);
+    quantize_fp8_rows_async(d_fp16, d_fp8, M, K, d_row_scales, stream_);
+    int64_t a_shape[] = {M, K};
+    int64_t x_shape[] = {K};
+    int64_t y_shape[] = {M};
+    Tensor A(d_fp8, QType::FP8_E4M3, 2, a_shape, true);
+    Tensor x(d_x, QType::F16, 1, x_shape, true);
+    Tensor y(d_y, QType::F16, 1, y_shape, true);
+    gemv_fp8_rowscale(A, x, y, d_row_scales, stream_);
+    cudaStreamSynchronize(stream_);
+
+    std::vector<half> h_y(M);
+    cudaMemcpy(h_y.data(), d_y, M * sizeof(half), cudaMemcpyDeviceToHost);
+
+    std::vector<double> yref(M);
+    double sum_sq = 0.0;
+    for (int r = 0; r < M; ++r) {
+        double acc = 0.0;
+        for (int k = 0; k < K; ++k)
+            acc += wref[(static_cast<size_t>(r) * K) + k] * static_cast<double>(__half2float(h_x[k]));
+        yref[r] = acc;
+        sum_sq += acc * acc;
+    }
+    double ref_rms = std::sqrt(sum_sq / M);
+    double inv = ref_rms > 1e-9 ? 1.0 / ref_rms : 0.0;
+    double max_rel = 0.0, sum_rel_sq = 0.0;
+    int worst = 0;
+    bool any_nan_inf = false;
+    for (int r = 0; r < M; ++r) {
+        float gf = __half2float(h_y[r]);
+        if (std::isnan(gf) || std::isinf(gf))
+            any_nan_inf = true;
+        double rel = std::fabs(static_cast<double>(gf) - yref[r]) * inv;
+        sum_rel_sq += rel * rel;
+        if (rel > max_rel) {
+            max_rel = rel;
+            worst = r;
+        }
+    }
+    double rms_rel = std::sqrt(sum_rel_sq / M);
+    printf("[sidecar q8→fp8 rowscale] M=%d K=%d max_rel=%.3e rms_rel=%.3e ref_rms=%.4f "
+           "(row=%d gpu=%.4f ref=%.4f)\n",
+           M, K, max_rel, rms_rel, ref_rms, worst, __half2float(h_y[worst]), yref[worst]);
+    EXPECT_FALSE(any_nan_inf) << "sidecar chain produced NaN/Inf on finite weights";
+    // E4M3 rounding floor for this input: dot error rms ≈ √K·rms(w·x)·2⁻⁴/√3
+    // ≈ 2.0 against ref_rms ≈ 61 (random signs cancel the reference ~25× below
+    // Σ|w·x|, which amplifies the normalized error) → expected rms_rel ≈ 3e-2;
+    // measured 2.5e-2 / max 6.4e-2. Layout/scale/indexing bugs produce O(1)
+    // errors — orders above these gates.
+    EXPECT_LT(max_rel, 1.2e-1) << "rowscale GEMV diverges from Q8_0 dequant reference";
+    EXPECT_LT(rms_rel, 4e-2) << "rowscale GEMV rms error above the E4M3 rounding floor";
+
+    cudaFree(d_q8);
+    cudaFree(d_fp16);
+    cudaFree(d_fp8);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_row_scales);
 }
 
 }  // namespace

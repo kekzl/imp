@@ -27,7 +27,7 @@ The batch=1 *competitive campaigns* are closed as programs -- every lever they l
 
 - **FA2 hd=256 prefill default-on** (#930/#932) -- Qwen3.6/Qwen3.5 hybrids, pp4096 +26% over the WMMA path it replaced.
 - **FP8 tile attention** (#899/#900) -- FP8-KV decode tiles + GQA batching, long-context decode +14%.
-- **FP8 SSM projection sidecar** (#949) -- per-row-scale FP8 for GDN in/out projections; Qwen3.6-35B decode +19% (tg ~320).
+- **FP8 SSM projection sidecar** (#949) -- per-row-scale FP8 for GDN in/out projections; Qwen3.6-35B NVFP4 decode +19% (tg ~320). Extended to GGUF hybrids' Q8_0-kept GDN projections (dequant→FP8 at init): 35B UD-Q4_K_M decode +21% (tg 272, ahead of llama.cpp) -- closed the last decode combo where llama.cpp led.
 - **Speculative decoding economics** (#852/#862-#866) -- hybrid-safe verify + MTP drafts; echo-heavy agent workloads up to +156% on 27B.
 
 Closed competitive records (kept for the record, not active work):

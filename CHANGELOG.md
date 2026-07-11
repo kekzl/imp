@@ -4,6 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **FP8 SSM-projection decode sidecar extended to GGUF hybrids**
+  (`gemm.fp8_ssm_proj`, default on): the Q8_0-kept GDN projections of UD
+  quants (ssm_in / gdn_gate / ssm_out) were in no decode cache at all
+  (Undefined tier, quality-locked out of NVFP4) and paid a full
+  dequant→cuBLAS round-trip per decode token. They are now dequanted once at
+  init and per-row FP8-quantized into the same sidecar the native-NVFP4 path
+  uses; prefill keeps the Q8_0 source. Qwen3.6-35B-A3B UD-Q4_K_M decode
+  224.4 → 272.0 tok/s defaults (+21%, spec-off 219.2 → 265.9) — now ahead of
+  llama.cpp (~229). PPL 4.215 → 4.289 (+1.8% on the 201-token corpus, E4M3
+  stacked on the Q8_0 lattice) — a documented trade in the
+  `nvfp4_lm_head_gdn` class; `--set gemm.fp8_ssm_proj=false` reverts.
+  degen_suite 33/33; native-NVFP4 and dense paths measured unchanged.
+  Sub-8-bit GDN sources (plain Q4_K_M GGUFs) are deliberately excluded (FP8
+  would increase their decode bytes). Adds a kernel-chain regression test
+  (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
+
 ### Fixed
 - **gemma-3-12b GGUF decode illegal-memory-access** (last hard crash in the
   known-issues list): gemma-3's NVFP4 decode cache must be built from an FP16

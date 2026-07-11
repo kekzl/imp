@@ -319,13 +319,15 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);
                 return;
             }
-            // FP16-resident source with no cache entry — the source IS the
-            // FP16 weight (e.g. a weight whose only cache is the fp8_ssm_proj
-            // decode sidecar). Route through the uncached fallback exactly as
-            // the pre-sidecar Undefined tier did; falling further through
-            // would hand a null payload pointer to cuBLAS.
+            // FP16-resident or dequantable source with no cache entry — the
+            // source IS the weight (e.g. one whose only cache is the
+            // fp8_ssm_proj decode sidecar: F16 on native hybrids, Q8_0 on GGUF
+            // hybrids). Route through the uncached fallback exactly as the
+            // pre-sidecar Undefined tier did (block quants dequant→cuBLAS);
+            // falling further through would hand a null payload to cuBLAS.
             if (h.source_data &&
-                (h.source_qtype == QType::F16 || h.source_qtype == QType::BF16)) {
+                (h.source_qtype == QType::F16 || h.source_qtype == QType::BF16 ||
+                 dequant_gpu_supported(h.source_qtype))) {
                 Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
                 weight.kind = h.kind;
                 weight.scales = h.source_scales;
