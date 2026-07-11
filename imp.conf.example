@@ -421,6 +421,11 @@ mmproj               = ""
 # disables the async decode graph loop while on. Wins on repetition-heavy
 # (agent/code/RAG) workloads; ~neutral on free-form prose. Default-ON.
 ngram                = true
+# Context cap for DENSE chunk-verify drafting (#964): the captured verify
+# costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
+# pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
+# ~2k. Per-step gate; MoE-NVFP4 and GDN-hybrid drafts are exempt. 0 = no cap.
+draft_ctx_cap        = 2048
 # Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
 # code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
 # batched verify re-dequants every activated expert per step, measured -22%)

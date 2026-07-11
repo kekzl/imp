@@ -669,6 +669,20 @@ struct RuntimeConfig {
     // concurrent batches, and GGUF-MoE (which the async loop carries).
     struct Speculative {
         bool ngram = true;  // prompt-lookup speculation, default-on (batch-1, greedy, dense)
+        // Context cap for DENSE chunk-verify drafting (#964). The captured
+        // verify runs the FA2 tile + paged-KV gather over the ctx TIER
+        // (pow2, floor 4096, clamped to max_seq_len) — its cost follows the
+        // tier, not the live context, while dense ngram pays out only ~2
+        // tokens per verify. MEASURED (2026-07-11, Qwen3-8B Q8_0): verify ≈
+        // 2.1× a decode step at 2k ctx, ~5.2× at 16k; end-to-end decode −4%
+        // @2k, −15% @8k, −62% @16k at 100% draft accept — net-negative past
+        // ~2k regardless of accept rate. Drafting is gated once a request's
+        // context crosses the cap (checked per step). MoE-NVFP4 and
+        // GDN-hybrid requests are exempt (deep drafts: Coder-30B code-edit
+        // 15.9 tok/verify, MTP chains — the verify pays for itself there).
+        // The structural fix (verify cost following live ctx instead of the
+        // tier) is tracked in #964. 0 = no cap.
+        int draft_ctx_cap = 2048;
         // Speculation on MoE models with NATIVE-NVFP4 experts (the gate
         // additionally requires profile().moe_experts_nvfp4). Measured on
         // Qwen3-Coder-30B-FP4 (2026-07-02): code-edit +49-81% (93% accept,
