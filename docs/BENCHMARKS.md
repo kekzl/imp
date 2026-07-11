@@ -136,6 +136,36 @@ The lone surviving NVFP4-prefill gap is dense pp4096 at ~1.04×. Decode (tg256
 @ctx2048): 14B 159, 30B-A3B ~317. Nemotron-3-Nano is arch-limited (hybrid
 Mamba2 + attention FP16-projection mix).
 
+## Long context (pp8192 / tg512 @ 16k ctx)
+
+First tracked long-context table (the GOAL benchmarking discipline asks for
+pp8192 + tg at 16k; nothing was tabulated before 2026-07-11). All rows
+2026-07-11, commit `e66f24b5`, CUDA 13.3, isolated runs, healthy-host clocks;
+command pattern `imp-cli --model <m> --bench --bench-pp {8192|16384}
+--bench-reps {5|3} --max-tokens {64|512} --max-seq-len {9216|17408}`. pp
+carries the usual restart variance; tg is the signal.
+
+| Model | Quant | pp8192 tok/s | tg512 @16k (defaults) | tg512 @16k (spec off) |
+|---|---|---:|---:|---:|
+| Qwen3-8B | Q8_0 | 13 268 | **58.7** ⚠ | 154.1 (214.9 with `--kv-fp8`) |
+| Qwen3-Coder-30B-A3B | NVFP4 | 35 516 | 269.5 | 274.1 |
+| Qwen3.6-35B-A3B | NVFP4 | 14 887 | **IMA crash** (#963) | **IMA crash** (#963) |
+| Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | 69.6 (tg64) | — |
+
+Two release-bar-relevant findings came out of this first sweep:
+
+- ⚠ **Default-on n-gram speculation regresses dense long-context decode**
+  (#964): −4% @2k, −15% @8k, **−62% @16k** on Qwen3-8B — a M=2 verify step
+  costs ~5.2× an M=1 step at 16k despite 100% draft acceptance. MoE (Coder)
+  shows no cliff.
+- **Qwen3.6-35B-A3B-NVFP4 crashes (illegal memory access) at 16k context**
+  (#963): works ≤14336, dies at 16384 with and without CUDA graphs; the GGUF
+  variant is unaffected (NVFP4-path-specific).
+- FP8-KV is worth **+39%** at 16k on Qwen3-8B but does not auto-engage on
+  GGUF sources (the `kv_cache.dtype=auto` FP8 upgrade is keyed on the
+  checkpoint's `kv_cache_quant_algo` hint, which GGUF files don't carry) —
+  `--kv-fp8` is a manual win for long-context GGUF sessions.
+
 ## Concurrent serving throughput (batched decode)
 
 The VRAM-aware auto `max_batch_size` (#736) made concurrent decode the common
@@ -148,7 +178,8 @@ up to 439 W).
 
 | Date | Commit | Model | Concurrency | Aggregate tok/s | Note |
 |---|---|---|---:|---:|---|
-| 2026-06-23 | `b56e9ae5` | Qwen3-14B-NVFP4 | 16 | **767** | #745 + #746 |
+| 2026-07-11 | `e66f24b5` | Qwen3-14B-NVFP4 | 16 | **864** (822/904/864, median) | re-measure post #941-#943/#951/#957; `gemm.nvfp4_lm_head_cutlass=true` adds ~+8% (932/946) and stays coherent |
+| 2026-06-23 | `b56e9ae5` | Qwen3-14B-NVFP4 | 16 | 767 | #745 + #746 |
 | 2026-06-23 | pre-`#745` | Qwen3-14B-NVFP4 | 16 | 472 | single-block sampler + per-row LM head |
 
 **+62 %** from the two fixes. Drivers (nsys, graphs-off, share of decode GPU

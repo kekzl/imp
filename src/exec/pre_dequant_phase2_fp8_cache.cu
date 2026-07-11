@@ -281,10 +281,6 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     };
     std::vector<Entry> entries;
     size_t total_bytes = 0;
-    // Explicit user opt-in gemm.nvfp4_ssm_proj wins for quantized sources:
-    // phase 3 will force them into the NVFP4 decode cache, and a shadow FP8
-    // copy would just burn VRAM (infer_tier prefers NVFP4 over FP8 anyway).
-    const bool nvfp4_ssm_opt_in = runtime_config().gemm.nvfp4_ssm_proj;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
         // At decode the fused GDN input pack ([ssm_in | gate | alpha | beta]
@@ -304,8 +300,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
             // calibration kernel reads __half. Q8_0 (GGUF) dequants into the
             // shared scratch first; see the byte/quality rationale above.
             const bool f16_src = w->qtype == QType::F16;
-            const bool q8_src = w->qtype == QType::Q8_0 && !nvfp4_ssm_opt_in &&
-                                qscratch_->dequant != nullptr;
+            const bool q8_src = w->qtype == QType::Q8_0 && qscratch_->dequant != nullptr;
             if (!f16_src && !q8_src)
                 continue;
             if (wcache_->fp8.count(w->data) || wcache_->nvfp4.count(w->data) ||

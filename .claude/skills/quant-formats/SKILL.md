@@ -16,7 +16,7 @@ description: Use when working on imp's quantization formats, loaders, or dequant
 | Prefill | cuBLAS on dequanted source (full precision) | CUTLASS NVFP4 GEMM (sm_120 TC) |
 | Priority | legacy/maintenance — esp. community MXFP4 quality bugs: don't sink time | **the strategic path** |
 
-- GGUF→NVFP4 decode cache: weights converted at init; `nvfp4_beneficial` weights skip the FP16 cache. Opt-in extensions: `gemm.nvfp4_ssm_proj` (+53% GGUF hybrid), `gemm.nvfp4_attn_proj`.
+- GGUF→NVFP4 decode cache: weights converted at init; `nvfp4_beneficial` weights skip the FP16 cache. GDN/SSM projections are excluded (quality lock) and served by the `gemm.fp8_ssm_proj` decode sidecar instead (default on; covers native-F16 AND GGUF-Q8_0 sources since #962 — the old `nvfp4_ssm_proj` opt-in was removed 2026-07-11, bit-rotted). `gemm.nvfp4_attn_proj` stays opt-in.
 - gpt-oss: native MXFP4 experts are converted to NVFP4 at load.
 
 ## StorageTier is the dispatch contract (`src/core/storage_tier.h`)

@@ -83,7 +83,7 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 
 - **Generic `compute_120` PTX fallback.** Lacks FP8 MMA + block-scale. Always pin `compute_120a/sm_120a`.
 - **FP8×FP8 cuBLAS prefill on sm_120.** Disabled by default since 2026-05-28: cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell (`engine_init_resolver.cpp:156`, config `attention.fp8_prefill`). Prefill levers are the FA2 family instead.
-- **NVFP4 on GDN in/out projections.** REGRESSES −9 to −20% on wide GDN shapes — FP16 wins there. (`gemm.nvfp4_ssm_proj` for GGUF hybrids and `gemm.nvfp4_attn_proj` are the shipped, measured exceptions.)
+- **NVFP4 on GDN in/out projections.** REGRESSES −9 to −20% on wide GDN shapes — FP16 wins there; the byte-aligned `gemm.fp8_ssm_proj` sidecar is the shipped answer (native +19% #949, GGUF-Q8_0 +21% #962). The old `gemm.nvfp4_ssm_proj` GGUF opt-in was removed 2026-07-11 (bit-rotted to 71 tok/s, superseded); `gemm.nvfp4_attn_proj` remains a measured opt-in exception.
 - **Occupancy raise / KPAR→MR reroute on the NVFP4 decode GEMV path.** Refuted by the 2026-05-30 nsys+ncu roofline sweep — decode plateau is a 4-bit-dequant co-limit (L1TEX 91%), not occupancy.
 - **Batch-1 MoE decode GEMV beyond 30% roofline.** Structural (#600/PR #642): shallow grids (1.5–2 waves) + tiny K (1.5–4 loads/lane); occupancy is already HIGHER than dense. `moe.mr_nr` is saturated — NR=4 +0.9%, NR≥16 regresses. Don't re-pursue.
 - **MoE grouped-GEMM (NVFP4 prefill) beyond 41% roofline.** Structural (#601/PR #644): grid=170 (1 wave), 23% occupancy, per-expert M≈32. `moe.nvfp4_smallM` REGRESSES vs the device-args default (which is +25–32%) — keep it OFF. The NVFP4 prefill lever is attention, not grouped GEMM.
