@@ -145,22 +145,33 @@ command pattern `imp-cli --model <m> --bench --bench-pp {8192|16384}
 --bench-reps {5|3} --max-tokens {64|512} --max-seq-len {9216|17408}`. pp
 carries the usual restart variance; tg is the signal.
 
-| Model | Quant | pp8192 tok/s | tg512 @16k (defaults) | tg512 @16k (spec off) |
+All rows re-measured 2026-07-11 on `905630e2` after the three fixes the
+first sweep triggered (#967 streaming-eviction OOB, #968 dense spec ctx cap,
+#969 cheap-KV floor); the discovery-day numbers are kept for the record.
+
+| Model | Quant | pp8192 tok/s | tg512 @16k (defaults) | discovery-day @16k |
 |---|---|---:|---:|---:|
-| Qwen3-8B | Q8_0 | 13 268 | **58.7** ⚠ | 154.1 (214.9 with `--kv-fp8`) |
-| Qwen3-Coder-30B-A3B | NVFP4 | 35 516 | 269.5 | 274.1 |
-| Qwen3.6-35B-A3B | NVFP4 | 14 887 | **IMA crash** (#963) | **IMA crash** (#963) |
-| Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | 69.6 (tg64) | — |
+| Qwen3-8B | Q8_0 | 13 268 | **151.9** (214.9 with `--kv-fp8`) | 58.7 (spec ungated, #968) |
+| Qwen3-Coder-30B-A3B | NVFP4 | 35 516 | 269.5 | 269.5 |
+| Qwen3.6-35B-A3B | NVFP4 | 14 887 | **264.3** | IMA crash (#963/#967), then 72.7 streaming (#969) |
+| Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | **234.2** | 69.6 under streaming + silent OOB reads (#967/#969) |
 
-Two release-bar-relevant findings came out of this first sweep:
+What the first sweep found and what fixed it:
 
-- ⚠ **Default-on n-gram speculation regresses dense long-context decode**
-  (#964): −4% @2k, −15% @8k, **−62% @16k** on Qwen3-8B — a M=2 verify step
-  costs ~5.2× an M=1 step at 16k despite 100% draft acceptance. MoE (Coder)
-  shows no cliff.
-- **Qwen3.6-35B-A3B-NVFP4 crashes (illegal memory access) at 16k context**
-  (#963): works ≤14336, dies at 16384 with and without CUDA graphs; the GGUF
-  variant is unaffected (NVFP4-path-specific).
+- **#963/#967**: StreamingLLM's middle-block eviction retained the window
+  ceil-aligned while the decode kernels read floor-aligned — one evicted
+  block read per step at non-aligned ctx: an IMA on the VRAM-full NVFP4
+  35B, silent garbage attention on the GGUF variant.
+- **#964/#968**: the graph-captured dense chunk verify is sized to the pow2
+  ctx tier (floor 4096), so default-on n-gram speculation cost −62% @16k
+  despite 100% accept. `speculative.draft_ctx_cap` (default 2048, dense
+  only) gates it; the structural fix (verify cost following live ctx) is
+  still open in #964.
+- **#969**: the auto KV floor stopped at 16384 tokens, so the 35B's 16.4k
+  pool hit the >90% streaming valve on a 16k prompt that fits outright.
+  The floor now covers max_seq_len + 12.5% headroom when that costs ≤1 GiB
+  (hybrids: ~377 MiB) — both 35B variants now run 16k fully streaming-free
+  (graphs on, full attention).
 - FP8-KV is worth **+39%** at 16k on Qwen3-8B but does not auto-engage on
   GGUF sources (the `kv_cache.dtype=auto` FP8 upgrade is keyed on the
   checkpoint's `kv_cache_quant_algo` hint, which GGUF files don't carry) —
