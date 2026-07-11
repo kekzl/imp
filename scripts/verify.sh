@@ -85,7 +85,10 @@ warn()    { echo "${YLW}WARN${RST} $*"; }
 # we degrade FAIL→WARN (clearly labeled) instead of crying false-positive.
 #
 # Healthy under-load signature: ~2850 MHz SM / 13801 MHz mem / ~500 W.
-# Depressed         => mem-clock median < 13801 MHz, OR power max < 400 W.
+# Depressed         => mem-clock median < 13801 MHz, OR power max < 400 W,
+#                       OR SM-clock median < 2000 MHz (healthy decode load is
+#                       ~2850 MHz sustained; the 2026-07-11 episode pinned SM
+#                       at 285-367 MHz with mem partly still at 13801).
 #   - mem-clock is the cleanest tell (GDDR7 either P0-clocks or it doesn't).
 #   - power uses MAX over the run (a robust upper bound) with a conservative
 #     400 W floor so a healthy ~500 W run never trips it.
@@ -97,6 +100,7 @@ warn()    { echo "${YLW}WARN${RST} $*"; }
 # behaves exactly as before (no degradation logic kicks in).
 GPU_DRIFT_MEM_FLOOR=13801   # mem clock (MHz) at/above which the host is healthy
 GPU_DRIFT_POWER_FLOOR=400   # power (W) max below which the host is depressed
+GPU_DRIFT_SM_FLOOR=2000     # SM clock (MHz) median below which the host is depressed
 _SAMPLE_FILE=""
 _SAMPLE_PID=""
 
@@ -127,25 +131,33 @@ gpu_sample_stop() {
     [ -n "$_SAMPLE_FILE" ] && [ -s "$_SAMPLE_FILE" ] || { _cleanup_sample; return 0; }
     # Drop the first 2 samples (clock-ramp cold-start), then aggregate:
     # median mem clock + max power over the steady portion of the run.
-    read -r MEM_MED PWR_MAX N < <(awk -F, '
+    read -r MEM_MED PWR_MAX SM_MED N < <(awk -F, '
         { gsub(/ /,""); n++; sm[n]=$1+0; mem[n]=$2+0; pwr[n]=$3+0 }
         END {
             # n<=2 is too short to drop the ~1s cold-ramp samples: classify as
             # no-data (N=0) so the gate fails open (plain FAIL on regression),
             # never letting cold-ramp low-mem samples force a depressed WARN.
-            if (n <= 2) { print 0, 0, 0; exit }
+            if (n <= 2) { print 0, 0, 0, 0; exit }
             start = 3; cnt = 0; pmax = 0;
-            for (i = start; i <= n; i++) { m[++cnt] = mem[i]; if (pwr[i] > pmax) pmax = pwr[i]; }
-            if (cnt == 0) { print 0, 0, 0; exit }
-            # median of m[1..cnt]
-            for (a = 1; a <= cnt; a++) for (b = a+1; b <= cnt; b++) if (m[b] < m[a]) { t=m[a]; m[a]=m[b]; m[b]=t }
+            for (i = start; i <= n; i++) {
+                m[++cnt] = mem[i]; sm2[cnt] = sm[i];
+                if (pwr[i] > pmax) pmax = pwr[i];
+            }
+            if (cnt == 0) { print 0, 0, 0, 0; exit }
+            # medians of m[1..cnt] and sm2[1..cnt]
+            for (a = 1; a <= cnt; a++) for (b = a+1; b <= cnt; b++) {
+                if (m[b] < m[a]) { t=m[a]; m[a]=m[b]; m[b]=t }
+                if (sm2[b] < sm2[a]) { t=sm2[a]; sm2[a]=sm2[b]; sm2[b]=t }
+            }
             med = (cnt % 2) ? m[(cnt+1)/2] : (m[cnt/2] + m[cnt/2+1]) / 2;
-            printf "%.0f %.0f %d\n", med, pmax, cnt;
+            smmed = (cnt % 2) ? sm2[(cnt+1)/2] : (sm2[cnt/2] + sm2[cnt/2+1]) / 2;
+            printf "%.0f %.0f %.0f %d\n", med, pmax, smmed, cnt;
         }' "$_SAMPLE_FILE")
     _cleanup_sample
     [ "${N:-0}" -gt 0 ] || return 0
-    GPU_DRIFT_DESC="mem=${MEM_MED}MHz(med) power=${PWR_MAX}W(max) n=${N}"
-    if [ "$MEM_MED" -lt "$GPU_DRIFT_MEM_FLOOR" ] || [ "$PWR_MAX" -lt "$GPU_DRIFT_POWER_FLOOR" ]; then
+    GPU_DRIFT_DESC="sm=${SM_MED}MHz(med) mem=${MEM_MED}MHz(med) power=${PWR_MAX}W(max) n=${N}"
+    if [ "$MEM_MED" -lt "$GPU_DRIFT_MEM_FLOOR" ] || [ "$PWR_MAX" -lt "$GPU_DRIFT_POWER_FLOOR" ] ||
+       [ "$SM_MED" -lt "$GPU_DRIFT_SM_FLOOR" ]; then
         GPU_DRIFT_DEPRESSED=1
     fi
 }
@@ -423,10 +435,22 @@ else
         # per-step decode) without rejecting healthy big-model decodes.
         MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.3}"
         ERR_NG=$(mktemp); ERR_G=$(mktemp)
+        # Sample clocks/power across BOTH runs: a depressed host (#526 — SM
+        # pinned low / mem at half / power capped) makes kernels dominate and
+        # compresses the ON/OFF ratio toward 1.0x on ANY build (measured
+        # 0.85-1.0x on main and branches alike, 2 consecutive nights) — the
+        # ratio stops being attributable to code.
+        # NOTE: the power floor (400 W) is calibrated on 8B-class decode; the
+        # 4B gate model can draw less even when healthy, so this gate leans
+        # WARN. That is deliberate: a false WARN costs a re-run on a healthy
+        # host, a false FAIL blocks a push on host noise. The hard FAIL still
+        # fires whenever the signature reads healthy.
+        gpu_sample_start
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
               --max-tokens 256 --temperature 0 --no-cuda-graphs >/dev/null 2>"$ERR_NG"
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
               --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR_G"
+        gpu_sample_stop
         TG_NG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_NG" | head -1)
         TG_G=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_G" | head -1)
         if [ -z "$TG_NG" ] || [ -z "$TG_G" ]; then
@@ -440,8 +464,12 @@ else
             printf "  graphs ON  tg256 = %7.2f tok/s   (%.2fx, threshold %sx)\n" \
                    "$TG_G" "$SPEEDUP" "$MIN_SPEEDUP_X"
             if [ "$BELOW" = "1" ]; then
-                fail "graph capture broken: speedup ${SPEEDUP}x < ${MIN_SPEEDUP_X}x — \
+                if [ "${GPU_DRIFT_DEPRESSED:-0}" = "1" ]; then
+                    warn "graphs speedup ${SPEEDUP}x < ${MIN_SPEEDUP_X}x under depressed-host signature ($GPU_DRIFT_DESC) — ratio not attributable to code, FAIL degraded to WARN (#526). Re-run on a healthy host; if it still fails there, look for new host syncs / cudaMalloc on the decode hot path"
+                else
+                    fail "graph capture broken: speedup ${SPEEDUP}x < ${MIN_SPEEDUP_X}x — \
 look for new host syncs / cudaMalloc on the decode hot path"
+                fi
             else
                 pass "graphs ON delivers ≥${MIN_SPEEDUP_X}x decode speedup"
             fi
