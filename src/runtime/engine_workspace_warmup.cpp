@@ -311,8 +311,15 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
 
-    for (int i = 0; i < kMaxGraphPoolSize; i++)
+    for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();
+        // The eager pre-capture warmup step is per-runner state, but what it
+        // exists for (cuBLAS autotuning, lazy workspace init) is per-process
+        // and just ran via the two warmup requests. Skip it so the first REAL
+        // request executes the same captured-graph kernel mix as every later
+        // one — greedy request-order independence (see docs/determinism.md).
+        decode_graph_pool_[i].mark_process_warm();
+    }
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup())
         async_graph_runner_.cleanup();

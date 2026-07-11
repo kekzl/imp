@@ -27,6 +27,34 @@ The mode is applied engine-side (effective through the C API and server, not
 just the CLI tools). Costs a little throughput; strictly OFF by default —
 the default path runs the exact same kernels as before with zero overhead.
 
+## Default-mode guarantee (since the request-order-independence fix)
+
+Without `[runtime] deterministic`, the DEFAULT path now guarantees greedy
+**request-order independence within a process**: identical greedy requests
+produce identical output no matter how many requests preceded them. Three
+pieces make this hold (all landed together):
+
+- `runtime.warmup` defaults to **true**: engine warmup pre-arms the decode
+  graph pool, so the first real request starts with the same graph state as
+  every later one.
+- `CudaGraphRunner::mark_process_warm()` — warmup's teardown used to reset
+  the per-runner eager pre-capture step, which then executed only in the
+  FIRST real request: one step on a numerically different kernel mix
+  (eager vs captured graph), flipping greedy output on near-tie logits.
+- Scheduler gates use `graph_path_available()` instead of `is_ready()` —
+  gating loop/pipeline entry on `is_captured()` deferred those paths by one
+  step on the first request only.
+
+This was the documented "30B-NVFP4-MoE greedy nondeterministic at temp=0"
+flipper: repro was 1 divergent + N identical runs, always the first request
+of a process. Measured after the fix: 3 fresh server processes x 12 greedy
+requests on Qwen3-30B-A3B-NVFP4 — 36/36 byte-identical (even across
+processes, though cross-process stability additionally depends on cuBLAS
+algo selection; see `deterministic_gemm` for the hard guarantee).
+
+`runtime.warmup=false` restores the old init time and with it the
+first-request asymmetry — acceptable for dev/CI, not for evals.
+
 ## Known limits
 
 These are the documented boundaries of the guarantee. They are deliberate

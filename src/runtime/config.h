@@ -38,7 +38,18 @@ struct RuntimeConfig {
         // (docs/audit/performance_agent_readiness_2026_05_31.md).
         bool deterministic = false;
         std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
-        bool warmup = false;               // opt-in for prod rollout; off in dev/CI
+        // Engine warmup (two tiny BOS requests at init, ~2-4 s on a 30B).
+        // Default ON since the greedy request-order-independence fix: warmup
+        // pre-arms the decode graph pool (mark_process_warm), so the FIRST
+        // real request takes the same graph-kernel path at the same step
+        // indices as every later one. Without it the first request runs one
+        // step on a different kernel mix and greedy output can flip on
+        // near-tie logits (the 30B-NVFP4-MoE temp=0 flipper). Set false to
+        // trade reproducibility for init time (dev/CI). Gemma-4 and MXFP4
+        // models keep their warmup skips (Engine::warmup).
+        bool warmup = true;
+        // NOTE: full run-to-run determinism additionally needs stable cuBLAS
+        // algo selection across processes — see runtime.deterministic_gemm.
         int max_seq_len = 0;               // 0 = use model default
         // Hard VRAM budget for THIS process (MiB, 0 = uncapped). Every sizing
         // decision (weight caches, KV clamp, expert offload, workspaces,

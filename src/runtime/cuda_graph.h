@@ -93,6 +93,17 @@ public:
 
     // Check if graph is ready for replay
     bool is_ready() const { return graph_.is_captured(); }
+    // True when the next execute() runs graph kernels: either captured, or it
+    // will capture immediately (process-warm via mark_process_warm, no eager
+    // warmup steps pending, no prior capture failure). Scheduler gates that
+    // pick the async loop / pipelines by pool readiness must use THIS, not
+    // is_ready(): gating on is_captured() enters those paths one step later
+    // on the process's FIRST request than on every later one — a numerically
+    // different kernel mix for that step, and a greedy flip on near-ties
+    // (the 30B-NVFP4-MoE temp=0 flipper).
+    bool graph_path_available() const {
+        return !capture_failed_ && (graph_.is_captured() || step_count_ >= warmup_steps_);
+    }
 
     // Get stats
     int replay_count() const { return replay_count_; }
@@ -100,6 +111,18 @@ public:
 
     // Configuration
     void set_warmup_steps(int n) { warmup_steps_ = n; }
+    // Mark process-level lazy init (cuBLAS autotuning, workspaces) as already
+    // done: the next execute() captures immediately instead of running the
+    // once-per-runner eager warmup step. Engine::warmup() calls this after
+    // tearing down the warmup graphs — otherwise that eager step lands in the
+    // FIRST real request only, and its kernel mix differs numerically (FP
+    // order) from the captured graph every later request replays: on near-tie
+    // logits greedy output became request-order dependent (the documented
+    // 30B-NVFP4-MoE temp=0 flipper).
+    void mark_process_warm() {
+        if (step_count_ < warmup_steps_)
+            step_count_ = warmup_steps_;
+    }
 
 private:
     DecodeFn decode_fn_;

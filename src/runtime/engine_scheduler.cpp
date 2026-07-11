@@ -1846,7 +1846,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
 
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
-    if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 && !offload_mgr_ &&
+    if (decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 && !offload_mgr_ &&
         config_.use_cuda_graphs &&
         // A PARKED runner (burst-hybrid speculation) is setup but idle — it
         // must be allowed back in here, or bursts only ever fire once. A park
@@ -1961,7 +1961,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // forward, hiding FSM/mask latency under GPU compute. masked_sample_async
     // covers banned tokens + greedy/top-k/top-p only — penalties or any
     // host-side sampling feature stays on the eager path.
-    if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 && !offload_mgr_ &&
+    if (decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 && !offload_mgr_ &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active && !needs_logprobs &&
         (needs_json_mode || needs_schema_mode)) {
         auto& dreq = valid_decode[0];
