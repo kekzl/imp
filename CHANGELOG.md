@@ -4,6 +4,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **Roofline baseline re-pinned** (`cf1b382a_20260711_193211`, config_version
+  4): the old pin predated FA2-hd256 (#932), the FP8 SSM sidecar (#949/#962)
+  and this week's decode fixes. New `nvfp4-hybrid` cell gives Qwen3.6-35B
+  kernel-level coverage for the first time (decode: NVFP4 GEMV 34% of window
+  at 25.9% roofline, FP8 sidecar GEMV 22.7% at 57%, paged attention 14% at
+  1.5%). Kernel classification completed (0 unclassified, was 51-63% of the
+  q4k-moe prefill window). Kernel-level confirmation that #932 removed the
+  hd=256 legacy-attention fallback (0.0% share, was 80% of attention).
+
 ### Removed
 - **`gemm.nvfp4_ssm_proj`** (the 2026-05-30 opt-in forcing GGUF-hybrid GDN
   projections into the NVFP4 decode cache): bit-rotted in the tier refactors
