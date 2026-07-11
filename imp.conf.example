@@ -310,9 +310,6 @@ nvfp4_lm_head_gdn    = true
 # forces NVFP4 activations on the final logits (quality/speed trade). Opt-in
 # until the PPL trade is measured per family; single-stream is unaffected.
 nvfp4_lm_head_cutlass = false
-# Force GGUF-hybrid GDN/SSM in/out projections into the NVFP4 decode cache
-# (Qwen3.6-35B Q4_K_M: +53% decode, PPL flat). Opt-in.
-nvfp4_ssm_proj       = false
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false

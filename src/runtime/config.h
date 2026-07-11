@@ -507,21 +507,15 @@ struct RuntimeConfig {
         // SfAtom scales (FP4 data borrowed from the decode cache). Opt-in until
         // the PPL trade is measured per family. Single-stream (n==1) is unaffected.
         bool nvfp4_lm_head_cutlass = false;
-        // Hybrid GDN/SSM models (Nemotron-3-Nano-30B, Qwen3.6-35B-A3B) keep the
-        // recurrent in_proj/out_proj (ssm_in/ssm_out) OUT of the NVFP4 decode
-        // cache by default: they feed the GDN/SSM recurrent scan, which
-        // accumulates quantization error in the state H across tokens, so 4-bit
-        // was thought to degrade quality on 9B+ models. On GGUF hybrids (e.g.
-        // Qwen3.6-35B-A3B Q4_K_M) that exclusion left them in no decode cache
-        // — dequant→cuBLAS per token, a memory-bound tax. This opt-in forces
-        // them into the NVFP4 decode cache anyway.
-        // MEASURED (2026-05-30): Qwen3.6-35B Q4_K_M **+53% decode** (161→248
-        // tok/s), perplexity flat (−0.01%), coherent — reverses the documented
-        // −31% GGUF-hybrid-decode loss vs llama.cpp. No-op on native-NVFP4 models
-        // (their SSM projections are already NVFP4-cached). Default false —
-        // the default GGUF-hybrid decode path for Q8_0-kept GDN projections is
-        // the fp8_ssm_proj sidecar below; this opt-in takes precedence when set.
-        bool nvfp4_ssm_proj = false;
+        // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
+        // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
+        // it had bit-rotted in the tier refactors (measured 71 tok/s vs its
+        // original 248 on Qwen3.6-35B Q4_K_M) and is superseded by the GGUF
+        // branch of fp8_ssm_proj below, which is faster than the flag ever was
+        // and quality-safer than 4-bit into the recurrent scan. The recurrent
+        // in_proj/out_proj stay OUT of the NVFP4 decode cache unconditionally:
+        // they feed the GDN/SSM scan, which accumulates quantization error in
+        // the state H across tokens.)
         // Native-NVFP4 hybrid models store SOME projections BF16 because the
         // Modelopt/llm-compressor recipe excluded them from NVFP4. At decode these
         // run as FP16 GEMVs (gemv_fp16_kernel). This opt-in quantizes the
@@ -556,9 +550,8 @@ struct RuntimeConfig {
         // paid a full dequant→cuBLAS round-trip; the FP8 copy is byte-neutral
         // vs Q8_0 but runs the tuned rowscale GEMV. Sub-8-bit sources are
         // excluded (FP8 would increase decode bytes and stack rounding on a
-        // coarse lattice); gemm.nvfp4_ssm_proj opt-in takes precedence.
-        // No-op on 27B-class checkpoints whose SSM projections are already
-        // native NVFP4.
+        // coarse lattice). No-op on 27B-class checkpoints whose SSM
+        // projections are already native NVFP4.
         // MEASURED (2026-07-10): Qwen3.6-35B-A3B-NVFP4 decode +19% (268.6→320.3
         // tok/s spec-off, 261→308 with default spec), PPL flat (8.021→8.012);
         // Nemotron-3-Nano PPL flat (4.184→4.117).

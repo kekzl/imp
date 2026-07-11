@@ -51,7 +51,7 @@ Optimal-kernel reference for RTX 5090 (GB202, **sm_120a** — consumer Blackwell
 | cuBLAS f16-accumulate prefill (`gemm.cublas_fp16_acc=auto`) | +17% Q8 pp512 | PR #611 default-on via per-arch auto (denied: Gemma-3/4, gpt-oss — PPL). |
 | Warp-per-row FP16 RMSNorm for batch prefill | shipped | PR #620 (#602). |
 | NVFP4 lm_head (`gemm.nvfp4_lm_head`, `…_gdn` default ON) | +8–16% dense, +11.4% Qwen3.6 decode | BF16 lm_head quantized to NVFP4 at load; costs +2.2% PPL (owner-accepted). |
-| GGUF `gemm.nvfp4_ssm_proj` (opt-in) | +53% GGUF-hybrid decode | reverses the −31% GGUF Qwen3.6 loss vs llama.cpp; `nvfp4_attn_proj` +3.8% Nemotron. **NVFP4 on GDN in/out projections REGRESSES −9 to −20% — dead end.** |
+| FP8 SSM sidecar (`gemm.fp8_ssm_proj`, default ON) | +19% native (#949), +21% GGUF-Q8_0 (#962) Qwen3.6-35B decode | per-row-scale FP8 copy for GDN in/out projections, decode-only; `nvfp4_attn_proj` +3.8% Nemotron. **NVFP4 on GDN in/out projections REGRESSES −9 to −20% — dead end** (the old `nvfp4_ssm_proj` opt-in was removed 2026-07-11). |
 | NVFP4 prmt register LUT | +4.7–16% | `prmt.b32` replaces SMEM LUT |
 | Inline Q8_1 in O-projection | +5–10% | Eliminates 1 launch + 1 DRAM round-trip |
 | `__ldcs` on KV cache reads | +2–4% decode | Bypass L1, evict-first L2. **KV only, NOT weights.** |

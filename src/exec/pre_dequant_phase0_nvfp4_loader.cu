@@ -407,16 +407,16 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
     // CUTLASS fast path for all NVFP4-prequant models uniformly.
     if (cutlass_sm120_nvfp4_available()) {
         int ct_count = 0;
-        // NOTE on the GDN/SSM quality lock and gemm.nvfp4_ssm_proj:
+        // NOTE on the GDN/SSM quality lock:
         // For NATIVE-NVFP4 checkpoints the in_proj/out_proj (ssm_in/ssm_out)
         // weights only EXIST as NVFP4 bytes — there is no FP16 copy and
         // dequant_gpu has no NVFP4 path, so they MUST be registered here or
         // decode produces garbage (the uncached fallback would run cuBLAS on
         // raw NVFP4 bytes). They are therefore ALREADY in the NVFP4 decode
         // cache and already use the fast gemv_nvfp4_kpar path — the "FP16 SSM
-        // tax" does not apply to native-NVFP4 hybrids. The gemm.nvfp4_ssm_proj
-        // opt-in is meaningful only for GGUF-quant hybrids (Qwen3.6-35B Q4_K_M),
-        // gated in pre_dequant_phase3's collect_candidates. Always register.
+        // tax" does not apply to native-NVFP4 hybrids. GGUF-quant hybrids
+        // (Qwen3.6-35B Q4_K_M) are served by the gemm.fp8_ssm_proj sidecar
+        // instead (phase 2b). Always register.
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
                 return;

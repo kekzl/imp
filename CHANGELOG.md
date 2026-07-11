@@ -4,6 +4,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Removed
+- **`gemm.nvfp4_ssm_proj`** (the 2026-05-30 opt-in forcing GGUF-hybrid GDN
+  projections into the NVFP4 decode cache): bit-rotted in the tier refactors
+  (measured 71 tok/s vs its original 248 on Qwen3.6-35B Q4_K_M) and superseded
+  by the GGUF branch of `gemm.fp8_ssm_proj` (#962), which is faster than the
+  flag ever was and quality-safer than 4-bit into the recurrent scan. Stale
+  `imp.conf` entries now log the standard unknown-key warning and are ignored.
+
+
 ### Changed
 - **FP8 SSM-projection decode sidecar extended to GGUF hybrids**
   (`gemm.fp8_ssm_proj`, default on): the Q8_0-kept GDN projections of UD
