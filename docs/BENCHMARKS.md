@@ -189,6 +189,7 @@ up to 439 W).
 
 | Date | Commit | Model | Concurrency | Aggregate tok/s | Note |
 |---|---|---|---:|---:|---|
+| 2026-07-12 | `98cfafe3` | Qwen3-Coder-30B-A3B-FP4 | 16 | **861** (716/874/861, median; ~54 tok/s per stream) | healthy clocks sampled during run (2880/13801, 308 W); single-stream same day: 384 tok/s. Reference point: vLLM serving the same model class (AWQ 4-bit) on an RTX 5090 reports 1 157 aggregate @16 with ~73 tok/s per stream (cloudrift.ai, 2026-07) — imp trades ~26% aggregate for 5.3× single-stream (by design: latency-first, see GOAL) |
 | 2026-07-11 | `e66f24b5` | Qwen3-14B-NVFP4 | 16 | **864** (822/904/864, median) | re-measure post #941-#943/#951/#957; `gemm.nvfp4_lm_head_cutlass=true` adds ~+8% (932/946) and stays coherent |
 | 2026-06-23 | `b56e9ae5` | Qwen3-14B-NVFP4 | 16 | 767 | #745 + #746 |
 | 2026-06-23 | pre-`#745` | Qwen3-14B-NVFP4 | 16 | 472 | single-block sampler + per-row LM head |
