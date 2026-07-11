@@ -480,6 +480,23 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     bool user_requested_min = (min_kv_tok > 0);
     if (!user_requested_min) {
         min_kv_tok = std::min(16384, config.max_seq_len * 4);
+        // Cover the full advertised context when that is CHEAP (#963
+        // follow-up): the 16384-token floor left a max_seq_len=17408 hybrid
+        // with a pool a 16k prompt fills to 94% — tripping the >90%
+        // StreamingLLM valve (block-table mutation, graphs off, windowed
+        // attention) on a request that fits outright. Hybrids price KV at
+        // ~0.02 MiB/token (few attention layers), so full coverage plus the
+        // 12.5% streaming headroom costs ~400 MiB — take it whenever it
+        // stays under 1 GiB. Expensive-KV models (dense 64k ≈ 9 GiB) keep
+        // the old floor and the kv_fraction affordability cap below keeps
+        // protecting the weight-cache budget either way.
+        const int full_cov_tok = config.max_seq_len + config.max_seq_len / 8;
+        if (full_cov_tok > min_kv_tok && per_block_total > 0) {
+            const size_t full_cov_bytes =
+                static_cast<size_t>((full_cov_tok + bs - 1) / bs) * per_block_total;
+            if (full_cov_bytes <= 1024ULL * 1024 * 1024)
+                min_kv_tok = full_cov_tok;
+        }
     }
     int min_kv_blocks = (min_kv_tok + bs - 1) / bs;
     const int min_kv_blocks_wanted = min_kv_blocks;  // pre-cap: what the floor asked for
