@@ -31,6 +31,7 @@ numbers below carry over unchanged.
 | 2026-06-12 | `perf_baseline_north_star.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 156.0 | `… --max-seq-len 2048` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Qwen3-14B | Q6_K | tg128 | 164 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 273 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
+| 2026-07-11 | `6946a6cd` | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | 213 | `imp-cli --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 256` — legacy path; the FP8 SSM-projection sidecar (#949) is a no-op on GGUF, so the FP16 GDN tax remains (cf. the same model NVFP4 at ~320) |
 
 > Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
 > 269.5 (cold-median, 5 trials × 5 reps, 2026-06-12, clocks verified healthy
@@ -42,8 +43,12 @@ numbers below carry over unchanged.
 > `clocks.mem` during the bench (healthy = 13801 MHz / ~500 W under prefill).
 
 Against llama.cpp (b8445+, full offload, flash attention on): imp wins dense
-GGUF decode by **+37–72%** and loses MoE/hybrid GGUF decode on
-Qwen3.6-35B-A3B (~−31%, structural FP16-projection tax on the GDN path).
+GGUF decode by **+37–72%**. The MoE/hybrid FP16 GDN-projection tax that used to
+put Qwen3.6-35B behind was closed on the **NVFP4** path by the #949 FP8
+SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s, now ahead of
+llama.cpp's ~229). The **GGUF Q4_K** hybrid path is a no-op for that sidecar and
+still carries the tax (35B Q4_K decode ~213 tok/s, 2026-07-11); GGUF is the
+legacy path — NVFP4 SafeTensors is the priority.
 
 ## GGUF prefill (pp512, INT8-IMMA family — default on since #617)
 
@@ -82,7 +87,7 @@ Decode carries ±5–10 % day-to-day variance (issue #526); clocks logged health
 | Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
 | Qwen3.6-35B-A3B | 35B (3B) | 257 → **320**¹ᵇ |
 | Gemma-4-26B-A4B | 26B (4B) | 266 |
-| Nemotron-3-Nano-30B | 30B (3B) | 128 |
+| Nemotron-3-Nano-30B | 30B (3B) | 128 → **148**¹ᶜ |
 | gpt-oss-20b¹ | 21B (3.6B) | 325 |
 
 ¹ᵇ 2026-07-10, commit `80864b06` + `gemm.fp8_ssm_proj` (default on since that
@@ -90,6 +95,12 @@ PR): FP8 E4M3 per-row-scale decode sidecar for the BF16 GDN in/out projections
 — tg256 268.6 → **320.3** spec-off (+19.2%), 261 → 308 with default
 speculation; PPL flat (8.021 → 8.012 same-session teacher-forced). Same
 command pattern as the table; healthy-host clocks sampled during the run.
+
+¹ᶜ 2026-07-11, commit `6946a6cd` + `gemm.fp8_ssm_proj`: the same FP8
+SSM-projection sidecar (221 MiB on Nemotron's 12 GDN projections) lifts
+Nemotron-3-Nano-30B decode 128 → **148** tok/s (+16%), PPL flat (4.184 →
+4.117). Still the slowest 30B — the Mamba2 scan + attention-projection share is
+arch-limited — but the GDN-projection part of the FP16 tax is gone.
 
 ¹ gpt-oss (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
 NVFP4 at load (bit-exact nibbles, power-of-two scales) and registered for the

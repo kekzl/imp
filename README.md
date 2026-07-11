@@ -45,8 +45,9 @@ decode is the reliable A/B signal):
 
 - **GGUF dense decode:** Qwen3-8B Q8_0 at **~270 tok/s** (CI-gated baseline),
   **+37–72% over llama.cpp** with full offload and flash attention.
-- **NVFP4 SafeTensors decode:** 30B-class MoE at **~257–338 tok/s**
-  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 257, Gemma-4-26B 266):
+- **NVFP4 SafeTensors decode:** 30B-class MoE at **~266–338 tok/s**
+  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 320, Gemma-4-26B 266;
+  the 35B hybrid was 257 before the #949 FP8 SSM-projection sidecar):
   **uncontested on `sm_120`**: vLLM's NVFP4 path needs `tcgen05` (absent on
   consumer Blackwell) and llama.cpp has no native NVFP4 at all.
 - **NVFP4 long-context prefill:** at-or-ahead of vLLM after #687 (FP16-QK FA2 as
@@ -54,8 +55,10 @@ decode is the reliable A/B signal):
   dense pp2048 a tie, and TTFT wins everywhere.
 
 **Honest losses** (narrow, and documented): NVFP4 dense pp4096 still trails vLLM
-by ~4% (1.04×), and Qwen3.6-35B GGUF decode loses ~31% to llama.cpp, a
-structural FP16 GDN-projection tax, not a tuning gap.
+by ~4% (1.04×). The FP16 GDN-projection tax that used to make Qwen3.6-35B hybrid
+decode a loss was closed on the NVFP4 path by the #949 FP8 SSM-projection
+sidecar (35B NVFP4 decode 257 → ~320 tok/s, now ahead of llama.cpp); the legacy
+GGUF Q4_K hybrid path does not get that sidecar and decodes slower (~213 tok/s).
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
 command: **[BENCHMARKS.md](docs/BENCHMARKS.md)**. Methodology details:
@@ -73,8 +76,8 @@ command: **[BENCHMARKS.md](docs/BENCHMARKS.md)**. Methodology details:
 
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
 - **Consumer Blackwell only.** `sm_120a` SASS + `compute_120f` PTX fallback. No Hopper, Ada, Ampere, datacenter Blackwell. No AMD, Intel, Apple, or CPU paths.
-- **GGUF prefill: largely fixed 2026-06-07.** The INT8-IMMA prefill family (#612–#617) puts Qwen3-30B-A3B and Qwen3-14B-Q6_K AHEAD of llama.cpp; Q8_0 dense and gemma-4 sit at 1.20×, Qwen3.6-35B at 1.55× (GDN share is quality-locked). NVFP4 prefill: imp WINS MoE pp4096 (+4% vs vLLM), MoE pp2048 (+27%), and TTFT everywhere; only dense pp4096 still trails, at ~1.04× (2026-06-13, post #687 FP16-QK FA2 primary hd=128 prefill; see docs/audit/prefill_gap_2026_06_07.md for the kernel-level decomposition).
-- **MoE/hybrid GGUF decode loses on Qwen3.6-35B** (~−31% vs llama.cpp): an FP16-projection tax on the GDN/attention path that NVFP4 can't address.
+- **GGUF prefill: largely fixed 2026-06-07.** The INT8-IMMA prefill family (#612–#617) puts Qwen3-30B-A3B and Qwen3-14B-Q6_K AHEAD of llama.cpp; Q8_0 dense sits at 1.13×, gemma-4 at 1.20×, Qwen3.6-35B at 1.55× (GDN share is quality-locked). NVFP4 prefill: imp WINS MoE pp4096 (+4% vs vLLM), MoE pp2048 (+27%), and TTFT everywhere; only dense pp4096 still trails, at ~1.04× (2026-06-13, post #687 FP16-QK FA2 primary hd=128 prefill; see docs/audit/prefill_gap_2026_06_07.md for the kernel-level decomposition).
+- **Legacy GGUF hybrid decode trails the NVFP4 path.** The FP16 GDN-projection tax on Qwen3.6-35B hybrid decode was closed on the NVFP4 checkpoint path by the #949 FP8 SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s, ahead of llama.cpp). The Q4_K GGUF path is a no-op for that sidecar and decodes slower (~213 tok/s); GGUF is the legacy path — NVFP4 SafeTensors is the priority.
 - **Only tested models work reliably.** Anything not on the [supported list](docs/supported-models.md) may load but hasn't been verified.
 - **Prefill numbers are noisy.** cuBLAS autotuning causes up to 2.6× variance across container restarts.
 - **Moderate concurrency, not datacenter scale.** Concurrent sub-agent fan-out (tens of requests) is a tuned, supported workload; batch=64+ continuous-batching throughput on a rack is not; that's vLLM/SGLang territory.
