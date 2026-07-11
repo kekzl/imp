@@ -242,12 +242,16 @@ non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`,
 Tool/function calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
 
-**Warm weight cache.** The first cold load of a model writes a small cache
-next to it (`<file>.impwcache` for GGUF, `.imp_warm_cache` inside a
-SafeTensors directory) holding the converted weight buffers; subsequent
-starts restore them and skip the conversion work. On by default
-(`[warm_cache] enabled = false` to opt out); stale caches (changed model
-file) are detected and ignored. Delete the cache file at any time — the next
+**Warm weight cache.** The first cold load of a model writes a cache file
+(`<model-name>-<hash>.impwcache`) into `~/.cache/imp/warm` (override with
+`[warm_cache] dir`) holding the converted weight buffers; subsequent starts
+mmap it and skip the conversion work. Raw quant payloads are never
+duplicated, so the cache is small for raw-served GGUF quants and
+NVFP4-prequant models and ~model-size for BF16-dense checkpoints. On by
+default (`[warm_cache] enabled = false` to opt out); stale caches (changed
+model file) are detected and ignored — delete the directory at any time. In
+containers, mount a persistent volume at the cache dir; if it is not
+writable, loads simply stay cold (INFO log). Delete the cache file at any time — the next
 load is simply cold and rewrites it.
 
 **Suspend to RAM.** `POST /admin/suspend` drains in-flight requests, parks

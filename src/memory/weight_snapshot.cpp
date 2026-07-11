@@ -7,6 +7,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 namespace imp {
 
 const char* make_weight_key(char* buf, size_t buf_len, const char* name, int layer) {
@@ -17,6 +21,13 @@ const char* make_weight_key(char* buf, size_t buf_len, const char* name, int lay
     else
         snprintf(buf, buf_len, "%s", name);
     return buf;
+}
+
+WeightSnapshot::~WeightSnapshot() {
+#ifdef __linux__
+    if (mmap_base_ && mmap_size_ > 0)
+        munmap(mmap_base_, mmap_size_);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +193,8 @@ std::unique_ptr<WeightSnapshot> WeightSnapshot::capture(const Model& model,
         }
         Blob blob;
         blob.rec = rec;
-        blob.host_data.reserve(rec.allocs.size());
+        blob.owned.reserve(rec.allocs.size());
+        blob.views.reserve(rec.allocs.size());
         for (const auto& a : rec.allocs) {
             // Default-initialized (no memset) — filled entirely by the D2H copy.
             std::unique_ptr<uint8_t[]> buf(new uint8_t[a.bytes]);
@@ -194,7 +206,8 @@ std::unique_ptr<WeightSnapshot> WeightSnapshot::capture(const Model& model,
                 throw std::runtime_error(msg);
             }
             snap->total_bytes_ += a.bytes;
-            blob.host_data.push_back(std::move(buf));
+            blob.views.push_back(buf.get());
+            blob.owned.push_back(std::move(buf));
         }
         snap->blobs_.emplace(rec.key, std::move(blob));
         captured++;
@@ -237,7 +250,7 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));
             return false;  // out of VRAM — cold path will make its own call
         }
-        if (ops.copy_h2d(p, blob.host_data[i].get(), rec.allocs[i].bytes, stream) != cudaSuccess) {
+        if (ops.copy_h2d(p, blob.views[i], rec.allocs[i].bytes, stream) != cudaSuccess) {
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(p, stream));
             for (void* q : new_allocs)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));

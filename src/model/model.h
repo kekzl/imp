@@ -58,7 +58,8 @@ public:
     // model (memory/weight_cache_file.h) — skipped when a suspend-to-RAM
     // snapshot is armed (that takes precedence).
     bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
-                            size_t expert_reserve_bytes = 1ULL << 30, bool warm_cache = false);
+                            size_t expert_reserve_bytes = 1ULL << 30, bool warm_cache = false,
+                            const std::string& warm_cache_dir = {});
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
 

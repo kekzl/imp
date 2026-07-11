@@ -194,7 +194,8 @@ bool Engine::init_weights() {
     cudaStream_t upload_stream = upload_stream_raii.get();  // may be null
 
     if (!model_->upload_weights_gpu(config_.compute_dtype, upload_stream ? upload_stream : stream_,
-                                    expert_reserve, runtime_config_.warm_cache.enabled)) {
+                                    expert_reserve, runtime_config_.warm_cache.enabled,
+                                    runtime_config_.warm_cache.dir)) {
         IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
         return false;
     }

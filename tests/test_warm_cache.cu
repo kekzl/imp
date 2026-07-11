@@ -4,14 +4,15 @@
 // is ignored (clean cold load). See memory/weight_cache_file.h.
 //
 // Requires a real model on disk: IMP_TEST_MODEL or /models/Qwen3-8B-Q8_0.gguf.
-// The default runtime config has warm_cache.enabled = true, so the plain
-// C-API load path exercises the cache without extra plumbing.
+// The cache is redirected to a scratch [warm_cache] dir (the model mount is
+// read-only for the container user), which also exercises the dir override.
 
 #include <gtest/gtest.h>
 
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "memory/weight_cache_file.h"
+#include "runtime/config.h"
 #include "test_models.h"
 
 #include <cuda_runtime.h>
@@ -42,6 +43,8 @@ static bool model_exists() {
             GTEST_SKIP() << "Model not found: " << get_model_path(); \
     } while (0)
 
+constexpr const char* kCacheDir = "/tmp/imp-warm-cache-test";
+
 struct Cycle {
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
@@ -50,6 +53,12 @@ struct Cycle {
     bool up(const char* path) {
         if (imp_model_load(path, IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
             return false;
+        // Redirect the warm cache into a writable scratch dir. The pending
+        // runtime config is consumed per context create, so re-arm each time.
+        imp::RuntimeConfig rc;
+        rc.warm_cache.enabled = true;
+        rc.warm_cache.dir = kCacheDir;
+        imp::set_pending_runtime_config(rc);
         ImpConfig config = imp_config_default();
         config.max_seq_len = 1024;
         config.max_batch_size = 1;
@@ -96,7 +105,7 @@ struct CacheCleanup {
 
 TEST(WarmCacheTest, ColdLoadWritesCacheWarmBootTokenIdentical) {
     SKIP_IF_NO_MODEL();
-    const std::string cache = imp::weight_cache_path_for(get_model_path());
+    const std::string cache = imp::weight_cache_path_for(get_model_path(), kCacheDir);
     CacheCleanup cleanup(cache);  // start from a guaranteed-cold state
 
     Cycle cold;
@@ -118,7 +127,7 @@ TEST(WarmCacheTest, ColdLoadWritesCacheWarmBootTokenIdentical) {
 
 TEST(WarmCacheTest, CorruptCacheIsIgnored) {
     SKIP_IF_NO_MODEL();
-    const std::string cache = imp::weight_cache_path_for(get_model_path());
+    const std::string cache = imp::weight_cache_path_for(get_model_path(), kCacheDir);
     CacheCleanup cleanup(cache);
 
     {

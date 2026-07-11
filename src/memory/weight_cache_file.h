@@ -6,7 +6,7 @@
 // At the end of a fully-cold weight upload, the TRANSFORMED upload records
 // (host BF16→FP16 conversions, GPU dequants, split layouts — everything whose
 // device bytes differ from the model file) are copied D2H once and persisted
-// next to the model. Raw-from-source records are deliberately NOT stored: a
+// into a dedicated cache directory (~/.cache/imp/warm by default). Raw-from-source records are deliberately NOT stored: a
 // cold re-upload from the model file mmap is byte-equivalent and costs the
 // same, so the cache stays small (near-zero for raw-served GGUF quants and
 // NVFP4-prequant SafeTensors; ~model-size only for BF16-dense checkpoints,
@@ -30,9 +30,11 @@ namespace imp {
 class Model;
 class WeightSnapshot;
 
-// "<file>.impwcache" for a regular file, "<dir>/.imp_warm_cache" for a
-// SafeTensors directory.
-std::string weight_cache_path_for(const std::string& model_path);
+// "<dir>/<model-basename>-<path-hash>.impwcache" where dir is cache_dir
+// ([warm_cache] dir) or, when empty, the default cache directory
+// ($XDG_CACHE_HOME/imp/warm, else ~/.cache/imp/warm, else
+// /tmp/imp-warm-cache). The directory is created best-effort.
+std::string weight_cache_path_for(const std::string& model_path, const std::string& cache_dir = {});
 
 struct WeightCacheFingerprint {
     uint64_t total_bytes = 0;

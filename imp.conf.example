@@ -388,6 +388,10 @@ green_contexts       = false
 # for GGUF quants / NVFP4 SafeTensors and ~model-size only for BF16-dense
 # checkpoints. Stale caches (model file changed) are ignored automatically.
 enabled              = true
+# Cache directory. Empty = default: $XDG_CACHE_HOME/imp/warm (or
+# ~/.cache/imp/warm). In containers, mount a persistent volume there (or set
+# this to one) — an ephemeral cache is rewritten on every start.
+dir                  = ""
 
 [suspend]
 # Suspend-to-RAM (POST /admin/suspend): weights are snapshotted to host RAM,

@@ -7,9 +7,13 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -55,15 +59,36 @@ int64_t mtime_seconds(const fs::directory_entry& e, std::error_code& ec) {
 
 }  // namespace
 
-std::string weight_cache_path_for(const std::string& model_path) {
+// Default cache directory: $XDG_CACHE_HOME/imp/warm, else $HOME/.cache/imp/warm,
+// else /tmp/imp-warm-cache. Deliberately NOT next to the model: model mounts
+// are often read-only for the serving user, and cache files should not clutter
+// (or invalidate tooling checksums of) model directories.
+static std::string default_warm_cache_dir() {
+    if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg)
+        return std::string(xdg) + "/imp/warm";
+    if (const char* home = getenv("HOME"); home && *home)
+        return std::string(home) + "/.cache/imp/warm";
+    return "/tmp/imp-warm-cache";
+}
+
+std::string weight_cache_path_for(const std::string& model_path, const std::string& cache_dir) {
     std::error_code ec;
-    if (fs::is_directory(model_path, ec)) {
-        std::string p = model_path;
-        while (p.size() > 1 && p.back() == '/')
-            p.pop_back();
-        return p + "/.imp_warm_cache";
+    std::string p = model_path;
+    while (p.size() > 1 && p.back() == '/')
+        p.pop_back();
+    std::string dir = cache_dir.empty() ? default_warm_cache_dir() : cache_dir;
+    while (dir.size() > 1 && dir.back() == '/')
+        dir.pop_back();
+    fs::create_directories(dir, ec);      // best-effort; write fails loudly later
+    uint64_t h = 1469598103934665603ull;  // FNV-1a over the full model path
+    for (unsigned char c : p) {
+        h ^= c;
+        h *= 1099511628211ull;
     }
-    return model_path + ".impwcache";
+    char hex[17];
+    snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(h));
+    std::string base = fs::path(p).filename().string();
+    return dir + "/" + base + "-" + hex + ".impwcache";
 }
 
 WeightCacheFingerprint weight_cache_fingerprint(const std::string& model_path) {
@@ -121,7 +146,10 @@ bool weight_cache_write(const Model& model, const std::string& cache_path) {
     const std::string tmp_path = cache_path + ".tmp." + std::to_string(getpid());
     std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
     if (!f) {
-        IMP_LOG_WARN("Warm cache: cannot write %s (directory read-only?) — skipping", tmp_path.c_str());
+        // Expected in containers where the model mount is read-only for the
+        // serving user — point [warm_cache] dir at a writable volume to enable.
+        IMP_LOG_INFO("Warm cache: %s not writable — skipping (set [warm_cache] dir to enable)",
+                     tmp_path.c_str());
         return false;
     }
 
@@ -197,14 +225,40 @@ bool weight_cache_write(const Model& model, const std::string& cache_path) {
 }
 
 std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path, const Model& model) {
-    std::ifstream f(cache_path, std::ios::binary);
-    if (!f)
+    int fd = open(cache_path.c_str(), O_RDONLY);
+    if (fd < 0)
         return nullptr;  // no cache — the normal case on first load
 
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(FileHeader))) {
+        close(fd);
+        return nullptr;
+    }
+    const size_t map_size = static_cast<size_t>(st.st_size);
+    void* base = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);  // mapping keeps the file alive
+    if (base == MAP_FAILED)
+        return nullptr;
+    // Kick off readahead: the blobs are consumed once, sequentially, during
+    // the upload pass — overlap disk with the loader/H2D work.
+    (void)madvise(base, map_size, MADV_WILLNEED);
+
+    auto snap = std::make_unique<WeightSnapshot>();
+    snap->builder_set_mmap(base, map_size);  // snapshot dtor munmaps on ALL exits below
+
+    const uint8_t* cur = static_cast<const uint8_t*>(base);
+    const uint8_t* end = cur + map_size;
+    auto take = [&cur, end](void* dst, size_t n) {
+        if (static_cast<size_t>(end - cur) < n)
+            return false;
+        memcpy(dst, cur, n);
+        cur += n;
+        return true;
+    };
+
     FileHeader hdr{};
-    f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!f || memcmp(hdr.magic, kMagic, sizeof(kMagic)) != 0 || hdr.version != kVersion ||
-        hdr.tensor_pod_size != sizeof(Tensor)) {
+    if (!take(&hdr, sizeof(hdr)) || memcmp(hdr.magic, kMagic, sizeof(kMagic)) != 0 ||
+        hdr.version != kVersion || hdr.tensor_pod_size != sizeof(Tensor)) {
         IMP_LOG_INFO("Warm cache: %s has an incompatible format — ignoring (cold load)",
                      cache_path.c_str());
         return nullptr;
@@ -220,20 +274,20 @@ std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path,
         return nullptr;
     }
 
-    auto snap = std::make_unique<WeightSnapshot>();
-    snap->builder_set_identity(hdr.arch_id, hdr.n_layers);
     for (uint32_t i = 0; i < hdr.record_count; ++i) {
         RecordHeader rh{};
-        f.read(reinterpret_cast<char*>(&rh), sizeof(rh));
-        if (!f || rh.key_len == 0 || rh.key_len > 256 || rh.n_allocs == 0 || rh.n_allocs > 16) {
+        if (!take(&rh, sizeof(rh)) || rh.key_len == 0 || rh.key_len > 256 || rh.n_allocs == 0 ||
+            rh.n_allocs > 16) {
             IMP_LOG_WARN("Warm cache: %s truncated/corrupt at record %u — ignoring (cold load)",
                          cache_path.c_str(), i);
             return nullptr;
         }
         WeightUploadRecord rec;
         rec.key.resize(rh.key_len);
-        f.read(rec.key.data(), rh.key_len);
-        f.read(reinterpret_cast<char*>(&rec.tensor), sizeof(Tensor));
+        if (!take(rec.key.data(), rh.key_len) || !take(&rec.tensor, sizeof(Tensor))) {
+            IMP_LOG_WARN("Warm cache: %s truncated in record %u — ignoring", cache_path.c_str(), i);
+            return nullptr;
+        }
         rec.src_qtype = static_cast<QType>(rh.src_qtype);
         rec.src_numel = rh.src_numel;
         rec.src_nbytes = rh.src_nbytes;
@@ -242,29 +296,24 @@ std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path,
         rec.scales_alloc = rh.scales_alloc;
         rec.scales_off = rh.scales_off;
 
-        std::vector<std::unique_ptr<uint8_t[]>> host_data;
-        host_data.reserve(rh.n_allocs);
+        std::vector<const uint8_t*> views;
+        views.reserve(rh.n_allocs);
         for (uint32_t a = 0; a < rh.n_allocs; ++a) {
             uint64_t bytes = 0;
-            f.read(reinterpret_cast<char*>(&bytes), sizeof(bytes));
-            if (!f || bytes == 0 || bytes > (64ull << 30)) {
-                IMP_LOG_WARN("Warm cache: %s corrupt alloc size at record %u — ignoring", cache_path.c_str(),
-                             i);
+            if (!take(&bytes, sizeof(bytes)) || bytes == 0 ||
+                bytes > static_cast<uint64_t>(end - cur)) {
+                IMP_LOG_WARN("Warm cache: %s corrupt alloc size at record %u — ignoring",
+                             cache_path.c_str(), i);
                 return nullptr;
             }
-            std::unique_ptr<uint8_t[]> buf(new uint8_t[bytes]);
-            f.read(reinterpret_cast<char*>(buf.get()), static_cast<std::streamsize>(bytes));
-            if (!f) {
-                IMP_LOG_WARN("Warm cache: %s truncated in record %u — ignoring", cache_path.c_str(), i);
-                return nullptr;
-            }
+            views.push_back(cur);  // zero-copy: blob stays in the mapping
+            cur += bytes;
             rec.allocs.push_back({nullptr, static_cast<size_t>(bytes)});  // device ptr set at restore
-            host_data.push_back(std::move(buf));
         }
-        snap->builder_add(std::move(rec), std::move(host_data));
+        snap->builder_add_views(std::move(rec), std::move(views));
     }
 
-    IMP_LOG_INFO("Warm cache: loaded %zu transformed uploads (%.2f GiB) from %s", snap->record_count(),
+    IMP_LOG_INFO("Warm cache: mapped %zu transformed uploads (%.2f GiB) from %s", snap->record_count(),
                  snap->total_bytes() / (1024.0 * 1024.0 * 1024.0), cache_path.c_str());
     return snap;
 }

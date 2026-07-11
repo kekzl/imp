@@ -783,7 +783,14 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
                           ? make_weight_key(keybuf, sizeof(keybuf), wname, wlayer)
                           : nullptr;
     const QType src_qtype = weight.qtype;
-    const size_t src_nbytes = weight.nbytes();
+    // True source byte count for the raw-from-source heuristic: the row-based
+    // formula the raw upload branches use. Tensor::nbytes() rounds per-element
+    // for block quants (Q8_0 = 34 bytes / 32 elements) and would never match.
+    size_t src_nbytes = weight.nbytes();
+    if (weight.ndim >= 2 && weight.shape[weight.ndim - 1] > 0) {
+        const int64_t k = weight.shape[weight.ndim - 1];
+        src_nbytes = static_cast<size_t>(weight.numel() / k) * qtype_row_bytes(src_qtype, k);
+    }
 
     if (key && g_warm &&
         g_warm->try_restore(key, weight, stream, gpu_allocs, kWarmOps, g_upload_log))
@@ -2105,7 +2112,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
 // ---------------------------------------------------------------------------
 
 bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes,
-                               bool warm_cache) {
+                               bool warm_cache, const std::string& warm_cache_dir) {
     if (gpu_weights_ready_) {
         IMP_LOG_WARN("Weights already uploaded to GPU");
         return true;
@@ -2147,7 +2154,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // suspend snapshot is armed. Owns its blobs for the duration of this pass.
     std::unique_ptr<WeightSnapshot> disk_cache;
     if (!g_warm && warm_cache && !source_path_.empty()) {
-        disk_cache = weight_cache_load(weight_cache_path_for(source_path_), *this);
+        disk_cache = weight_cache_load(weight_cache_path_for(source_path_, warm_cache_dir), *this);
         if (disk_cache)
             g_warm = disk_cache.get();
     }
@@ -2492,7 +2499,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // the conversion work. Best-effort; skipped for models whose device
     // sources were mutated in place during upload (Gemma-4 fused split).
     if (warm_cache && fully_cold && !device_sources_mutated_ && !source_path_.empty())
-        weight_cache_write(*this, weight_cache_path_for(source_path_));
+        weight_cache_write(*this, weight_cache_path_for(source_path_, warm_cache_dir));
 
     IMP_LOG_INFO("All model weights uploaded to GPU (%zu allocations)", gpu_allocations_.size());
     return true;

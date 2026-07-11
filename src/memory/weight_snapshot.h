@@ -146,20 +146,39 @@ public:
         arch_id_ = arch_id;
         n_layers_ = n_layers;
     }
-    void builder_add(WeightUploadRecord rec, std::vector<std::unique_ptr<uint8_t[]>> host_data) {
+    // Zero-copy variant: blob bytes are VIEWS into an mmap the snapshot takes
+    // ownership of via builder_set_mmap (munmapped in the destructor).
+    void builder_add_views(WeightUploadRecord rec, std::vector<const uint8_t*> views) {
         for (const auto& a : rec.allocs)
             total_bytes_ += a.bytes;
         std::string key = rec.key;
-        blobs_.emplace(std::move(key), Blob{std::move(rec), std::move(host_data)});
+        Blob blob;
+        blob.rec = std::move(rec);
+        blob.views = std::move(views);
+        blobs_.emplace(std::move(key), std::move(blob));
+    }
+    void builder_set_mmap(void* base, size_t size) {
+        mmap_base_ = base;
+        mmap_size_ = size;
     }
     size_t record_count() const { return blobs_.size(); }
 
+    WeightSnapshot() = default;
+    ~WeightSnapshot();
+    WeightSnapshot(const WeightSnapshot&) = delete;
+    WeightSnapshot& operator=(const WeightSnapshot&) = delete;
+
 private:
     struct Blob {
-        WeightUploadRecord rec;                            // pointers inside are STALE (old device)
-        std::vector<std::unique_ptr<uint8_t[]>> host_data;  // one buffer per rec.allocs entry
+        WeightUploadRecord rec;  // pointers inside are STALE (old device)
+        // One view per rec.allocs entry. Points into `owned` (suspend capture)
+        // or into the snapshot's cache-file mmap (warm-cache load).
+        std::vector<const uint8_t*> views;
+        std::vector<std::unique_ptr<uint8_t[]>> owned;
     };
     std::unordered_map<std::string, Blob> blobs_;
+    void* mmap_base_ = nullptr;  // warm-cache file mapping (read-only)
+    size_t mmap_size_ = 0;
     size_t total_bytes_ = 0;
     int arch_id_ = -1;
     int n_layers_ = -1;

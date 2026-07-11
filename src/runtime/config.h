@@ -608,6 +608,12 @@ struct RuntimeConfig {
         // only for BF16-dense checkpoints. Guarded by a format version and a
         // model-content fingerprint; any mismatch = normal cold load.
         bool enabled = true;
+        // Where to store cache files. Empty (default) = next to the model
+        // ("<file>.impwcache" / "<dir>/.imp_warm_cache"). Point this at a
+        // writable volume when the model directory is read-only for the
+        // serving user (the prebuilt container runs as uid 1001): files are
+        // then named "<model-basename>-<path-hash>.impwcache" inside it.
+        std::string dir;
     } warm_cache;
 
     struct Suspend {
