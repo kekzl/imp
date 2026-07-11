@@ -80,8 +80,7 @@ Model::~Model() {
 
     // Free heap-allocated permuted weight buffers (Qwen3.5/3.6 GDN reorder).
     for (void* ptr : host_owned_buffers_) {
-        if (ptr)
-            std::free(ptr);
+        std::free(ptr);
     }
     host_owned_buffers_.clear();
 

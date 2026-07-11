@@ -1283,6 +1283,7 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
 
     while (!pq.empty()) {
         auto [score, pos, s, rs] = pq.top();
+        (void)score;  // ordering key only
         pq.pop();
 
         // Validate: both symbols still exist and haven't been modified since insertion

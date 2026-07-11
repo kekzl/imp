@@ -2192,9 +2192,10 @@ private:
                 if (!call.args.empty())
                     fmt = eval(*call.args[0]).to_string();
                 std::time_t now = std::time(nullptr);
-                std::tm* tm = std::localtime(&now);
+                std::tm tm_buf{};
+                localtime_r(&now, &tm_buf);  // std::localtime's static buffer races across server threads
                 char buf[256];
-                std::strftime(buf, sizeof(buf), fmt.c_str(), tm);
+                std::strftime(buf, sizeof(buf), fmt.c_str(), &tm_buf);
                 return Value(std::string(buf));
             }
         }
