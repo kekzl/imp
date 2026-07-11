@@ -352,6 +352,13 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read (#963). The host-side
+        // eviction keeps the kernels' window range valid — this guard is
+        // defense-in-depth so any future range drift degrades to a skipped
+        // block instead of an illegal access / silent garbage.
+        if (phys_block < 0)
+            continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -506,6 +513,13 @@ __global__ void paged_attention_decode_kernel_generic(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read (#963). The host-side
+        // eviction keeps the kernels' window range valid — this guard is
+        // defense-in-depth so any future range drift degrades to a skipped
+        // block instead of an illegal access / silent garbage.
+        if (phys_block < 0)
+            continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -694,6 +708,13 @@ __global__ void paged_attention_splitk_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read (#963). The host-side
+        // eviction keeps the kernels' window range valid — this guard is
+        // defense-in-depth so any future range drift degrades to a skipped
+        // block instead of an illegal access / silent garbage.
+        if (phys_block < 0)
+            continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -913,6 +934,13 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read (#963). The host-side
+        // eviction keeps the kernels' window range valid — this guard is
+        // defense-in-depth so any future range drift degrades to a skipped
+        // block instead of an illegal access / silent garbage.
+        if (phys_block < 0)
+            continue;
         const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 

@@ -31,6 +31,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
 
 ### Fixed
+- **Qwen3.6-35B illegal memory access / silent garbage at 16k+ context**
+  (#963): when StreamingLLM auto-enabled (KV pool >90% full), the
+  middle-block eviction retained the sliding window ceil-aligned from the
+  sequence tail while the paged decode kernels start reading at
+  floor((ctx − window) / block_size) — for non-block-aligned context (every
+  decode step after an aligned prefill) the kernels read a freed −1
+  sentinel block: an illegal memory access on a VRAM-full card (35B NVFP4),
+  silent out-of-bounds garbage attention otherwise (35B GGUF). Eviction now
+  retains one extra boundary block, and the four plain-loop paged kernels
+  skip negative sentinels outright (defense-in-depth). Adds a host-side
+  KVCacheManager regression test pinning the eviction/kernel window
+  invariant.
 - **gemma-3-12b GGUF decode illegal-memory-access** (last hard crash in the
   known-issues list): gemma-3's NVFP4 decode cache must be built from an FP16
   companion copy — a from-scratch build (Q4_K → dequant → NVFP4) corrupts
