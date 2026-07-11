@@ -31,6 +31,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
 
 ### Fixed
+- **Default-on n-gram speculation regressed long-context decode** (#964,
+  partial): the chunk verify runs the FA2 prefill tile over the full context
+  plus a paged-KV gather, costing ~2.1× a decode step at 2k ctx and ~5.2× at
+  16k (nsys: +2.05 s fmha_sm120_fa2 + 0.32 s paged_kv_gather in a 96-token
+  decode window) while paying out at most k+1 tokens — end-to-end −4% @2k,
+  −15% @8k, −62% @16k on Qwen3-8B Q8_0 even at 100% draft accept. Root
+  cause: the captured verify is sized to the pow2 ctx TIER (floor 4096,
+  clamped to max_seq_len) — its cost follows the tier, not the live context.
+  New `speculative.draft_ctx_cap` (default 2048, 0 = off) gates DENSE
+  drafting once a request's context crosses the cap, checked per step;
+  MoE-NVFP4 and GDN-hybrid drafts are exempt (deep drafts — Coder-30B
+  code-edit 15.9 tok/verify, MTP chains — pay for the verify). Long-context
+  dense decode recovers to the spec-off rate (152 tok/s @16k, was 58.7);
+  short-context is unchanged (pp16 parity). The structural fix (verify cost
+  following live ctx instead of the tier) stays tracked in #964.
 - **Qwen3.6-35B illegal memory access / silent garbage at 16k+ context**
   (#963): when StreamingLLM auto-enabled (KV pool >90% full), the
   middle-block eviction retained the sliding window ceil-aligned from the

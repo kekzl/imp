@@ -235,6 +235,25 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     // handle the budget device-side.
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) return false;
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return false;
+    // Long-context economics on the DENSE path (#964): the captured chunk
+    // verify runs the FA2 tile + paged-KV gather over the ctx TIER (pow2,
+    // floor 4096, clamped to max_seq_len) — its cost follows the tier, not
+    // the live context. Measured 2026-07-11 (Qwen3-8B Q8_0): a verify step
+    // costs ~2.1× a decode step at 2k ctx and ~5.2× at 16k, so with dense
+    // ngram's ~2 tok/verify payout speculation turns net-negative past ~2k
+    // (−62% at 16k). Gate drafting once the request's context crosses the
+    // cap, checked per step. MoE-NVFP4 and GDN-hybrid requests are exempt:
+    // their drafts run much deeper (Coder-30B code-edit 15.9 tok/verify,
+    // MTP chains), which pays for the verify at any measured context.
+    {
+        const int cap = runtime_config_.speculative.draft_ctx_cap;
+        const bool moe_nvfp4_path = model_->profile().is_moe &&
+                                    runtime_config_.speculative.moe &&
+                                    model_->profile().moe_experts_nvfp4;
+        const bool hybrid_path = ssm_state_ != nullptr;  // only reachable with speculative.hybrid
+        if (!moe_nvfp4_path && !hybrid_path && cap > 0 && req.context_len() > cap)
+            return false;
+    }
     // Recurrent state (SSM/GDN) advances on every forwarded token. The
     // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
     // per-sequence slab for snapshot/restore.
