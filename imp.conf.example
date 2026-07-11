@@ -58,11 +58,13 @@ prefill_chunk_decode_cap = 1024
 # slice amortizes (~1-2% at 128). 0 = old head-of-line behavior (the first
 # request runs to completion before the next produces a token).
 hybrid_decode_quantum = 128
-# Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
-# Off by default — opt in for prod rollouts where first-request TTFT
-# matters. In dev / CI / one-shot runs the warmup is pure overhead and can
-# also mask first-request calibration bugs.
-warmup               = false
+# Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
+# handles + L2 AND pre-arms the decode graph pool so the FIRST real request
+# takes the same graph-kernel path as every later one — without it greedy
+# output can flip between the first and later requests on near-tie logits
+# (docs/determinism.md). ON by default; set false in dev/CI where init time
+# matters more than reproducibility.
+warmup               = true
 # Override the model's max_seq_len (0 = use the model default).
 max_seq_len          = 0
 # Hard VRAM budget for this process in MiB (0 = uncapped). Every sizing

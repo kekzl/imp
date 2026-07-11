@@ -4,6 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **Greedy request-order independence in default mode** — the documented
+  "30B-NVFP4-MoE greedy nondeterministic at temp=0" flipper: the FIRST
+  request of a process ran one decode step on a different kernel mix than
+  every later request (eager pre-capture warmup step + `is_ready()`-gated
+  loop entry, both once-per-process), flipping greedy output on near-tie
+  logits. Fixed by pre-arming the decode graph pool in engine warmup
+  (`mark_process_warm`), gating loop/pipeline entry on
+  `graph_path_available()`, and defaulting `runtime.warmup` to **true**
+  (+~2-4 s init on a 30B; `runtime.warmup=false` opts out). Verified: 3
+  fresh processes x 12 greedy requests on Qwen3-30B-A3B-NVFP4 = 36/36
+  byte-identical. See docs/determinism.md.
+
 ### Added
 - **On-disk warm weight cache** (`[warm_cache] enabled`, default on): the
   first fully-cold model load persists its TRANSFORMED weight uploads

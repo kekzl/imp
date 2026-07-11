@@ -187,7 +187,19 @@ int Engine::spec_effective_miss_burst_(const Request& req) const {
 // Whether a bounded async-loop burst may be launched directly from the spec
 // hook (mirrors the launch conditions in step_decode_process_outputs).
 bool Engine::spec_burst_launch_ok_(const Request& req) const {
-    if (!decode_graph_pool_[0].is_ready() || offload_mgr_ || !config_.use_cuda_graphs)
+    // IMP_SPEC_TRACE: dump every term — the launch decision decides WHICH
+    // kernel mix (loop vs pooled/eager) serves the next tokens, so an
+    // asymmetric term here shows up as a greedy flip between requests.
+    if (getenv("IMP_SPEC_TRACE")) {
+        IMP_LOG_INFO("[burst-ok?] req=%d out=%zu pool_avail=%d offload=%d graphs=%d setup=%d parked=%d "
+                     "think=%d think_end=%d status=%d",
+                     req.id, req.output_tokens.size(),
+                     (int)decode_graph_pool_[0].graph_path_available(), (int)(offload_mgr_ != nullptr),
+                     (int)config_.use_cuda_graphs, (int)async_graph_runner_.is_setup(),
+                     (int)async_parked_req_id_, (int)req.in_think_block, (int)think_end_id_,
+                     (int)req.status);
+    }
+    if (!decode_graph_pool_[0].graph_path_available() || offload_mgr_ || !config_.use_cuda_graphs)
         return false;
     // A runner that is setup but NOT parked is in flight — blocked. Parked
     // for a DIFFERENT request is fine: try_launch_async_graph_loop tears the

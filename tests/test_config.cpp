@@ -25,7 +25,7 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
-    EXPECT_FALSE(cfg.runtime.warmup);  // off by default; opt-in for prod rollout
+    EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/determinism.md)
     EXPECT_EQ(cfg.kv_cache.dtype, "auto");
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
     EXPECT_FALSE(cfg.gdn.fp32_scan);
