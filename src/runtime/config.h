@@ -511,15 +511,16 @@ struct RuntimeConfig {
         // recurrent in_proj/out_proj (ssm_in/ssm_out) OUT of the NVFP4 decode
         // cache by default: they feed the GDN/SSM recurrent scan, which
         // accumulates quantization error in the state H across tokens, so 4-bit
-        // was thought to degrade quality on 9B+ models. At decode they therefore
-        // GGUF hybrid models (e.g. Qwen3.6-35B-A3B Q4_K_M): the GDN/SSM
-        // in_proj/out_proj are excluded from the NVFP4 decode cache (Q4_K source
-        // is not nvfp4_beneficial), so decode runs them via Q4_K→FP16→cuBLAS — a
-        // memory-bound tax. This opt-in forces them into the NVFP4 decode cache.
+        // was thought to degrade quality on 9B+ models. On GGUF hybrids (e.g.
+        // Qwen3.6-35B-A3B Q4_K_M) that exclusion left them in no decode cache
+        // — dequant→cuBLAS per token, a memory-bound tax. This opt-in forces
+        // them into the NVFP4 decode cache anyway.
         // MEASURED (2026-05-30): Qwen3.6-35B Q4_K_M **+53% decode** (161→248
         // tok/s), perplexity flat (−0.01%), coherent — reverses the documented
         // −31% GGUF-hybrid-decode loss vs llama.cpp. No-op on native-NVFP4 models
-        // (their SSM projections are already NVFP4-cached). Default false.
+        // (their SSM projections are already NVFP4-cached). Default false —
+        // the default GGUF-hybrid decode path for Q8_0-kept GDN projections is
+        // the fp8_ssm_proj sidecar below; this opt-in takes precedence when set.
         bool nvfp4_ssm_proj = false;
         // Native-NVFP4 hybrid models store SOME projections BF16 because the
         // Modelopt/llm-compressor recipe excluded them from NVFP4. At decode these
@@ -548,12 +549,24 @@ struct RuntimeConfig {
         // decode GEMV dispatches the FP8 copy (gemv_fp8_rowscale, per-row
         // scales — one per-tensor scale over the heterogeneous GDN input pack
         // cost +4% PPL; per-row is PPL-flat). Costs +0.5 byte/elem VRAM for
-        // the sidecar copies. No-op on models without F16-resident SSM
-        // projections (GGUF hybrids → see nvfp4_ssm_proj; 27B-class checkpoints
-        // whose SSM projections are already native NVFP4).
+        // the sidecar copies.
+        // GGUF hybrids: also covers Q8_0-source ssm_in/gdn_gate/ssm_out
+        // (UD-Q4_K_M keeps exactly these at Q8_0). Those handles were in no
+        // decode cache at all (phase-3 quality lock) → every decode token
+        // paid a full dequant→cuBLAS round-trip; the FP8 copy is byte-neutral
+        // vs Q8_0 but runs the tuned rowscale GEMV. Sub-8-bit sources are
+        // excluded (FP8 would increase decode bytes and stack rounding on a
+        // coarse lattice); gemm.nvfp4_ssm_proj opt-in takes precedence.
+        // No-op on 27B-class checkpoints whose SSM projections are already
+        // native NVFP4.
         // MEASURED (2026-07-10): Qwen3.6-35B-A3B-NVFP4 decode +19% (268.6→320.3
         // tok/s spec-off, 261→308 with default spec), PPL flat (8.021→8.012);
-        // Nemotron-3-Nano PPL flat (4.184→4.117). Default ON.
+        // Nemotron-3-Nano PPL flat (4.184→4.117).
+        // MEASURED (2026-07-11, GGUF branch): Qwen3.6-35B UD-Q4_K_M decode +21%
+        // (224.4→272.0 defaults, 219.2→265.9 spec-off), PPL 4.215→4.289 (+1.8%
+        // on the 201-token corpus — E4M3 stacked on the Q8_0 lattice; an
+        // accepted trade like nvfp4_lm_head_gdn, set false to revert),
+        // degen_suite 33/33. Default ON.
         bool fp8_ssm_proj = true;
         // Route native-NVFP4 (Modelopt/llm-compressor) MoE expert DECODE (M=1)
         // through the fast per-expert gemv_nvfp4_moe kernels by borrowing the

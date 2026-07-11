@@ -10,6 +10,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/logging.h"
+#include "quant/dequant_gpu.h"
 #include "runtime/storage_planner.h"
 
 #include <cuda_runtime.h>
@@ -38,12 +39,26 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         if (!t.data)
             return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
-        // FP8 decode SIDECAR on a native-precision weight (gemm.fp8_ssm_proj):
-        // the wcache fp8 entry must not become the primary tier — prefill and
-        // M>1 verify chunks stay on the resident FP16 source (quality), only
-        // the M=1 decode GEMV takes the FP8 copy. Demote BEFORE the payload
-        // borrow below, or the union would carry an fp8 payload into FP16 paths.
-        const bool fp8_decode_sidecar = tier == StorageTier::FP8 && t.qtype == QType::F16;
+        // FP8 decode SIDECAR (gemm.fp8_ssm_proj): the wcache fp8 entry must
+        // not become the primary tier — prefill and M>1 verify chunks stay on
+        // the full-precision source (quality), only the M=1 decode GEMV takes
+        // the FP8 copy. Demote BEFORE the payload borrow below, or the union
+        // would carry an fp8 payload into FP16 paths.
+        // A native F16 resident with an fp8 entry is always the sidecar (the
+        // phase-2 prefill cache never keys F16 sources). A quantized (GGUF)
+        // source is the sidecar only when the entry carries per-row scales —
+        // the sidecar's marker — since the phase-2 FP8 *prefill* cache also
+        // keys quantized sources (per-tensor scale) and must stay primary.
+        bool fp8_decode_sidecar = false;
+        if (tier == StorageTier::FP8) {
+            if (t.qtype == QType::F16) {
+                fp8_decode_sidecar = true;
+            } else if (dequant_gpu_supported(t.qtype)) {
+                auto it = wcache_->fp8.find(t.data);
+                fp8_decode_sidecar =
+                    it != wcache_->fp8.end() && it->second.d_row_scales != nullptr;
+            }
+        }
         if (fp8_decode_sidecar)
             tier = StorageTier::FP16;
         TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);

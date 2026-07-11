@@ -31,7 +31,8 @@ numbers below carry over unchanged.
 | 2026-06-12 | `perf_baseline_north_star.json` | 13.3 | Qwen3-14B | Q6_K | tg128 @ctx2048 | 156.0 | `… --max-seq-len 2048` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Qwen3-14B | Q6_K | tg128 | 164 | `imp-cli --model Qwen3-14B-Q6_K.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
 | 2026-06-09 | `ec9145b3` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 273 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
-| 2026-07-11 | `6946a6cd` | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | 213 | `imp-cli --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 256` — legacy path; the FP8 SSM-projection sidecar (#949) is a no-op on GGUF, so the FP16 GDN tax remains (cf. the same model NVFP4 at ~320) |
+| 2026-07-11 | `6946a6cd` | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | 213 | `imp-cli --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 256` — legacy path; superseded by the row below |
+| 2026-07-11 | fp8-ssm-gguf | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | **272** | same command — `gemm.fp8_ssm_proj` now also covers the Q8_0-kept GDN projections of UD quants (dequant→FP8 sidecar at init): 224.4 → 272.0 defaults (+21%), 219.2 → 265.9 spec-off, same session. PPL 4.215 → 4.289 (+1.8%, 201-token corpus) — documented trade like `nvfp4_lm_head_gdn`; degen_suite 33/33 PASS. Now ahead of llama.cpp (~229) |
 
 > Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
 > 269.5 (cold-median, 5 trials × 5 reps, 2026-06-12, clocks verified healthy
@@ -43,12 +44,12 @@ numbers below carry over unchanged.
 > `clocks.mem` during the bench (healthy = 13801 MHz / ~500 W under prefill).
 
 Against llama.cpp (b8445+, full offload, flash attention on): imp wins dense
-GGUF decode by **+37–72%**. The MoE/hybrid FP16 GDN-projection tax that used to
-put Qwen3.6-35B behind was closed on the **NVFP4** path by the #949 FP8
-SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s, now ahead of
-llama.cpp's ~229). The **GGUF Q4_K** hybrid path is a no-op for that sidecar and
-still carries the tax (35B Q4_K decode ~213 tok/s, 2026-07-11); GGUF is the
-legacy path — NVFP4 SafeTensors is the priority.
+GGUF decode by **+37–72%**. The MoE/hybrid GDN-projection tax that used to put
+Qwen3.6-35B behind was closed on the **NVFP4** path by the #949 FP8
+SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s) and on the **GGUF
+Q4_K** hybrid path by extending that sidecar to the Q8_0-kept GDN projections
+(35B Q4_K decode 224 → 272 tok/s, 2026-07-11) — both now ahead of llama.cpp's
+~229. GGUF remains the legacy path — NVFP4 SafeTensors is the priority.
 
 ## GGUF prefill (pp512, INT8-IMMA family — default on since #617)
 
