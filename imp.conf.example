@@ -380,6 +380,19 @@ recurrent_snapshot_mb = 256
 # streams (gemma-3-12b IMA). Set true to enable.
 green_contexts       = false
 
+[warm_cache]
+# On-disk warm weight cache: the first fully-cold model load persists its
+# converted weight buffers next to the model (".impwcache" / ".imp_warm_cache");
+# later boots restore them and skip the conversion work. Raw quant payloads are
+# never duplicated (the model file already holds them), so the cache is tiny
+# for GGUF quants / NVFP4 SafeTensors and ~model-size only for BF16-dense
+# checkpoints. Stale caches (model file changed) are ignored automatically.
+enabled              = true
+# Cache directory. Empty = default: $XDG_CACHE_HOME/imp/warm (or
+# ~/.cache/imp/warm). In containers, mount a persistent volume there (or set
+# this to one) — an ephemeral cache is rewritten on every start.
+dir                  = ""
+
 [suspend]
 # Suspend-to-RAM (POST /admin/suspend): weights are snapshotted to host RAM,
 # all VRAM is freed, and POST /admin/resume restores them in seconds.

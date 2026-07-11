@@ -1053,6 +1053,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 
     // Create model
     auto model = std::make_unique<Model>();
+    model->source_path_ = path;
     if (mtp_local.has_value()) {
         model->mtp_ = std::move(mtp_local);
         // Retain MTP mmap so Tensor data pointers stay valid for the lifetime

@@ -5,6 +5,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **On-disk warm weight cache** (`[warm_cache] enabled`, default on): the
+  first fully-cold model load persists its TRANSFORMED weight uploads
+  (BF16→FP16 host conversions, GPU dequants, split layouts) into
+  `~/.cache/imp/warm` (override: `[warm_cache] dir`); later boots mmap the
+  cache and skip the conversion work. Raw quant payloads are never duplicated
+  — the model file already holds them — so the cache is near-zero for
+  raw-served GGUF quants and NVFP4-prequant SafeTensors and ~model-size only
+  for BF16-dense checkpoints (where it saves the most startup time). Guarded
+  by a format version and a model-content fingerprint; stale or corrupt
+  caches are ignored (normal cold load). Reuses the suspend-to-RAM restore
+  machinery, including its per-tensor cold fallback.
 - **Suspend to RAM** (`POST /admin/suspend` / `POST /admin/resume`): park the
   loaded model's weights in host RAM and free the GPU completely (engine +
   model teardown, mempool trim, and — default on — a CUDA primary-context

@@ -54,8 +54,12 @@ public:
     // For Q8_0: dequantizes to FP16 on GPU.
     // For F16/BF16: direct upload.
     // For F32: converts to compute_dtype and uploads.
+    // warm_cache: consult/write the on-disk warm weight cache next to the
+    // model (memory/weight_cache_file.h) — skipped when a suspend-to-RAM
+    // snapshot is armed (that takes precedence).
     bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
-                            size_t expert_reserve_bytes = 1ULL << 30);
+                            size_t expert_reserve_bytes = 1ULL << 30, bool warm_cache = false,
+                            const std::string& warm_cache_dir = {});
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
 
@@ -87,9 +91,16 @@ public:
     void mark_device_sources_mutated() { device_sources_mutated_ = true; }
     bool device_sources_mutated() const { return device_sources_mutated_; }
 
+    // Path the loader was invoked with; empty for synthetic models.
+    const std::string& source_path() const { return source_path_; }
+
     // Upload log for suspend-to-RAM (memory/weight_snapshot.h). Created by
     // upload_weights_gpu; null before the first upload.
     WeightUploadLog* upload_log() const { return upload_log_.get(); }
+
+    // Uploads restored from a warm source (suspend snapshot or disk cache)
+    // during the last upload_weights_gpu pass. 0 for a fully-cold load.
+    int last_warm_hits() const { return last_warm_hits_; }
 
     // Remove a pointer from gpu_allocations_ tracking (does not free).
     void release_gpu_allocation(void* ptr);
@@ -143,6 +154,11 @@ public:
     bool sources_consumed_ = false;         // Phase-4b freed source tensors (#830)
     bool device_sources_mutated_ = false;   // in-place transformed device sources
     std::unique_ptr<WeightUploadLog> upload_log_;
+    int last_warm_hits_ = 0;
+    // Path the loader was invoked with (GGUF file or SafeTensors directory).
+    // Used to derive the on-disk warm-cache location and its fingerprint
+    // (memory/weight_cache_file.h). Empty for synthetically-built models.
+    std::string source_path_;
     std::vector<void*> gpu_allocations_;
     std::vector<void*> host_pinned_;         // mmap regions pinned via cudaHostRegister
     std::vector<void*> host_pinned_allocs_;  // cudaHostAlloc'd expert buffers (WSL2 DMA path)

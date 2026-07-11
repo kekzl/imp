@@ -118,6 +118,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache_manager.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
+    src/memory/weight_cache_file.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cu
     src/memory/layer_offload.cu
@@ -679,6 +680,7 @@ if(IMP_BUILD_TESTS)
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
         tests/test_suspend_resume.cu
+        tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp

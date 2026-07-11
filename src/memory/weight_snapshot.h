@@ -73,8 +73,16 @@ struct WeightUploadRecord {
     // (or divergent load config) falls back to the cold path per tensor.
     QType src_qtype = QType::NONE;
     int64_t src_numel = 0;
+    size_t src_nbytes = 0;
     // Source dropped by the pipeline (release_gpu_allocation) — not capturable.
     bool dead = false;
+    // Device bytes are a verbatim copy of the host source (plain h2d, no
+    // conversion/reorder). Derived heuristically in record(): single alloc,
+    // same qtype, same byte count, no scales sidecar (MXFP4 excluded — its
+    // split reorder keeps size + qtype). Only gates what the on-disk warm
+    // cache persists: a false "raw" merely skips caching that tensor, the
+    // cold re-upload is byte-equivalent either way.
+    bool raw_from_source = false;
 };
 
 class WeightUploadLog {
@@ -86,7 +94,7 @@ public:
     // silently (leaving the tensor cold-only) if any size is unknown or the
     // tensor data pointer is not backed by the listed allocations.
     void record(const char* key, const void* const* allocs, size_t n_allocs, const Tensor& post,
-                QType src_qtype, int64_t src_numel);
+                QType src_qtype, int64_t src_numel, size_t src_nbytes);
 
     // Mark every record touching ptr dead (pipeline dropped the source).
     void evict_ptr(void* ptr);
@@ -132,12 +140,45 @@ public:
     // resume — proves warm and cold uploads mix byte-safely.
     bool drop_key(const std::string& key) { return blobs_.erase(key) > 0; }
 
+    // Builder API for the on-disk warm cache (memory/weight_cache_file.cpp):
+    // assembles a snapshot from deserialized records instead of a live capture.
+    void builder_set_identity(int arch_id, int n_layers) {
+        arch_id_ = arch_id;
+        n_layers_ = n_layers;
+    }
+    // Zero-copy variant: blob bytes are VIEWS into an mmap the snapshot takes
+    // ownership of via builder_set_mmap (munmapped in the destructor).
+    void builder_add_views(WeightUploadRecord rec, std::vector<const uint8_t*> views) {
+        for (const auto& a : rec.allocs)
+            total_bytes_ += a.bytes;
+        std::string key = rec.key;
+        Blob blob;
+        blob.rec = std::move(rec);
+        blob.views = std::move(views);
+        blobs_.emplace(std::move(key), std::move(blob));
+    }
+    void builder_set_mmap(void* base, size_t size) {
+        mmap_base_ = base;
+        mmap_size_ = size;
+    }
+    size_t record_count() const { return blobs_.size(); }
+
+    WeightSnapshot() = default;
+    ~WeightSnapshot();
+    WeightSnapshot(const WeightSnapshot&) = delete;
+    WeightSnapshot& operator=(const WeightSnapshot&) = delete;
+
 private:
     struct Blob {
-        WeightUploadRecord rec;                            // pointers inside are STALE (old device)
-        std::vector<std::unique_ptr<uint8_t[]>> host_data;  // one buffer per rec.allocs entry
+        WeightUploadRecord rec;  // pointers inside are STALE (old device)
+        // One view per rec.allocs entry. Points into `owned` (suspend capture)
+        // or into the snapshot's cache-file mmap (warm-cache load).
+        std::vector<const uint8_t*> views;
+        std::vector<std::unique_ptr<uint8_t[]>> owned;
     };
     std::unordered_map<std::string, Blob> blobs_;
+    void* mmap_base_ = nullptr;  // warm-cache file mapping (read-only)
+    size_t mmap_size_ = 0;
     size_t total_bytes_ = 0;
     int arch_id_ = -1;
     int n_layers_ = -1;

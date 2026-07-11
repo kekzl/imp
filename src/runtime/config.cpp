@@ -243,6 +243,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     B("server.green_contexts", cfg.server.green_contexts);
 
+    // [warm_cache]
+    B("warm_cache.enabled", cfg.warm_cache.enabled);
+    S("warm_cache.dir", cfg.warm_cache.dir);
+
     // [suspend]
     B("suspend.device_reset", cfg.suspend.device_reset);
     I("suspend.host_ram_headroom_mb", cfg.suspend.host_ram_headroom_mb);

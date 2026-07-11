@@ -7,6 +7,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 namespace imp {
 
 const char* make_weight_key(char* buf, size_t buf_len, const char* name, int layer) {
@@ -19,12 +23,20 @@ const char* make_weight_key(char* buf, size_t buf_len, const char* name, int lay
     return buf;
 }
 
+WeightSnapshot::~WeightSnapshot() {
+#ifdef __linux__
+    if (mmap_base_ && mmap_size_ > 0)
+        munmap(mmap_base_, mmap_size_);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // WeightUploadLog
 // ---------------------------------------------------------------------------
 
 void WeightUploadLog::record(const char* key, const void* const* allocs, size_t n_allocs,
-                             const Tensor& post, QType src_qtype, int64_t src_numel) {
+                             const Tensor& post, QType src_qtype, int64_t src_numel,
+                             size_t src_nbytes) {
     if (!key || n_allocs == 0)
         return;
 
@@ -63,6 +75,11 @@ void WeightUploadLog::record(const char* key, const void* const* allocs, size_t 
     rec.tensor = post;
     rec.src_qtype = src_qtype;
     rec.src_numel = src_numel;
+    rec.src_nbytes = src_nbytes;
+    // See the field comment: heuristic only gates warm-cache persistence.
+    rec.raw_from_source = rec.allocs.size() == 1 && post.qtype == src_qtype &&
+                          src_qtype != QType::MXFP4 && post.scales == nullptr &&
+                          rec.allocs[0].bytes == src_nbytes;
 
     auto it = by_key_.find(rec.key);
     if (it != by_key_.end()) {
@@ -176,7 +193,8 @@ std::unique_ptr<WeightSnapshot> WeightSnapshot::capture(const Model& model,
         }
         Blob blob;
         blob.rec = rec;
-        blob.host_data.reserve(rec.allocs.size());
+        blob.owned.reserve(rec.allocs.size());
+        blob.views.reserve(rec.allocs.size());
         for (const auto& a : rec.allocs) {
             // Default-initialized (no memset) — filled entirely by the D2H copy.
             std::unique_ptr<uint8_t[]> buf(new uint8_t[a.bytes]);
@@ -188,7 +206,8 @@ std::unique_ptr<WeightSnapshot> WeightSnapshot::capture(const Model& model,
                 throw std::runtime_error(msg);
             }
             snap->total_bytes_ += a.bytes;
-            blob.host_data.push_back(std::move(buf));
+            blob.views.push_back(buf.get());
+            blob.owned.push_back(std::move(buf));
         }
         snap->blobs_.emplace(rec.key, std::move(blob));
         captured++;
@@ -231,7 +250,7 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));
             return false;  // out of VRAM — cold path will make its own call
         }
-        if (ops.copy_h2d(p, blob.host_data[i].get(), rec.allocs[i].bytes, stream) != cudaSuccess) {
+        if (ops.copy_h2d(p, blob.views[i], rec.allocs[i].bytes, stream) != cudaSuccess) {
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(p, stream));
             for (void* q : new_allocs)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));
@@ -252,7 +271,7 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
         // note_alloc happened inside ops.alloc (checked_cuda_malloc); re-record
         // so a subsequent suspend of the resumed model captures this slot again.
         new_log->record(key, const_cast<const void* const*>(new_allocs.data()), new_allocs.size(),
-                        weight, rec.src_qtype, rec.src_numel);
+                        weight, rec.src_qtype, rec.src_numel, rec.src_nbytes);
     }
     hits_++;
     return true;

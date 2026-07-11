@@ -273,6 +273,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // 6. Extract model config from metadata
     auto model = std::make_unique<Model>();
+    model->source_path_ = path;
     model->mmap_base_ = mmap_base;
     model->mmap_size_ = file_size;
     model->split_mmaps_ = std::move(extra_mmaps);

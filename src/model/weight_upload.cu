@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "memory/vram_query.h"
 #include "memory/weight_snapshot.h"
+#include "memory/weight_cache_file.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
@@ -782,6 +783,14 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
                           ? make_weight_key(keybuf, sizeof(keybuf), wname, wlayer)
                           : nullptr;
     const QType src_qtype = weight.qtype;
+    // True source byte count for the raw-from-source heuristic: the row-based
+    // formula the raw upload branches use. Tensor::nbytes() rounds per-element
+    // for block quants (Q8_0 = 34 bytes / 32 elements) and would never match.
+    size_t src_nbytes = weight.nbytes();
+    if (weight.ndim >= 2 && weight.shape[weight.ndim - 1] > 0) {
+        const int64_t k = weight.shape[weight.ndim - 1];
+        src_nbytes = static_cast<size_t>(weight.numel() / k) * qtype_row_bytes(src_qtype, k);
+    }
 
     if (key && g_warm &&
         g_warm->try_restore(key, weight, stream, gpu_allocs, kWarmOps, g_upload_log))
@@ -794,7 +803,8 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
 
     if (key && g_upload_log && gpu_allocs.size() > allocs_before) {
         g_upload_log->record(key, const_cast<const void* const*>(gpu_allocs.data()) + allocs_before,
-                             gpu_allocs.size() - allocs_before, weight, src_qtype, n_elements);
+                             gpu_allocs.size() - allocs_before, weight, src_qtype, n_elements,
+                             src_nbytes);
     }
     return true;
 }
@@ -1803,7 +1813,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                         ctx.gpu_allocs.push_back(gpu_ptr);
                         if (key && g_upload_log) {
                             const void* const rec_allocs[] = {gpu_ptr};
-                            g_upload_log->record(key, rec_allocs, 1, packed, src_qtype, src_numel);
+                            g_upload_log->record(key, rec_allocs, 1, packed, src_qtype, src_numel,
+                                                 total_raw);
                         }
                         IMP_LOG_DEBUG("  %s: %d experts uploaded to GPU (%.2f MiB)", name, n_experts,
                                       total_raw / (1024.0 * 1024.0));
@@ -2100,7 +2111,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
 // Model::upload_weights_gpu
 // ---------------------------------------------------------------------------
 
-bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes) {
+bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes,
+                               bool warm_cache, const std::string& warm_cache_dir) {
     if (gpu_weights_ready_) {
         IMP_LOG_WARN("Weights already uploaded to GPU");
         return true;
@@ -2137,6 +2149,16 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             IMP_LOG_WARN("Armed weight snapshot does not match this model (arch/layers) — ignoring");
         }
     }
+
+    // On-disk warm cache (memory/weight_cache_file.h): consulted only when no
+    // suspend snapshot is armed. Owns its blobs for the duration of this pass.
+    std::unique_ptr<WeightSnapshot> disk_cache;
+    if (!g_warm && warm_cache && !source_path_.empty()) {
+        disk_cache = weight_cache_load(weight_cache_path_for(source_path_, warm_cache_dir), *this);
+        if (disk_cache)
+            g_warm = disk_cache.get();
+    }
+    const bool fully_cold = (g_warm == nullptr);
 
     // Use Engine's computed reserve (workspace + KV cache + SSM state + safety)
     // directly — no additional margin needed here.
@@ -2468,8 +2490,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     }
 
     gpu_weights_ready_ = true;
+    last_warm_hits_ = g_warm ? g_warm->hits() : 0;
     if (g_warm)
-        IMP_LOG_INFO("Warm resume: %d uploads restored from host snapshot", g_warm->hits());
+        IMP_LOG_INFO("Warm restore: %d uploads served from %s", g_warm->hits(),
+                     disk_cache ? "the on-disk warm cache" : "the suspend snapshot");
+
+    // Fully-cold load: persist the transformed records so the NEXT boot skips
+    // the conversion work. Best-effort; skipped for models whose device
+    // sources were mutated in place during upload (Gemma-4 fused split).
+    if (warm_cache && fully_cold && !device_sources_mutated_ && !source_path_.empty())
+        weight_cache_write(*this, weight_cache_path_for(source_path_, warm_cache_dir));
+
     IMP_LOG_INFO("All model weights uploaded to GPU (%zu allocations)", gpu_allocations_.size());
     return true;
 }
