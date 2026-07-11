@@ -110,6 +110,20 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         bool from_scratch = (wcache_->fp16.find(w.data) == wcache_->fp16.end());
         if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
             return;
+        // gemma-3: the NVFP4 decode cache MUST be built from an FP16 companion
+        // (executor_pre_dequant.cu sets fp16_companion on every NVFP4-tier
+        // entry). A from-scratch build corrupts gemma-3 decode — first step
+        // emits token 0 / <pad>, then an illegal access. That companion
+        // guarantee is best-effort: when the FP16 cache hits its VRAM budget
+        // (tight KV budget on a 32 GB card) a weight's companion is absent, so
+        // it silently drops to from-scratch and re-triggers the exact bug the
+        // flag exists to prevent (measured: 35 of 49 cached tensors went
+        // from-scratch, decode emitted <pad> then IMA). Skip those weights —
+        // they stay on the coherent dequant-at-decode path (a bandwidth loss
+        // on the uncached fraction, never garbage; no_nvfp4_decode_cache is
+        // fully coherent, proving that fallback sound).
+        if (from_scratch && model_->profile().is_gemma3)
+            return;
         dctx.entries.push_back({w.data, w, qtype, from_scratch});
     };
 
@@ -434,6 +448,13 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
             fp16_ptr = reinterpret_cast<const half*>(dq_buf);
         } else {
             auto it = wcache_->fp16.find(e.orig_ptr);
+            if (it == wcache_->fp16.end()) {
+                IMP_LOG_ERROR("NVFP4 cache: FP16 companion for %p [%dx%d] VANISHED between "
+                              "collection and quantize (erased by an earlier entry with the same "
+                              "source pointer?) — skipping entry instead of reading a stale iterator",
+                              e.orig_ptr, rows, cols);
+                continue;
+            }
             fp16_ptr = reinterpret_cast<const half*>(it->second.data);
         }
 
@@ -461,6 +482,8 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
             auto it = wcache_->fp16.find(e.orig_ptr);
             if (it != wcache_->fp16.end()) {
                 size_t freed = it->second.nbytes();
+                IMP_LOG_DEBUG("NVFP4 cache: freeing FP16 companion %p (%zu B) after quantize",
+                              e.orig_ptr, freed);
                 vram_free(vram_alloc_, it->second.data);
                 wcache_->fp16.erase(it);
                 wcache_->fp16_bytes -= freed;
@@ -546,6 +569,12 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
             fp16_ptr = reinterpret_cast<const half*>(dq_buf);
         } else {
             auto it = wcache_->fp16.find(e.orig_ptr);
+            if (it == wcache_->fp16.end()) {
+                IMP_LOG_ERROR("NVFP4 cache (batch): FP16 companion for %p [%dx%d] VANISHED between "
+                              "collection and quantize — skipping entry",
+                              e.orig_ptr, rows, cols);
+                continue;
+            }
             fp16_ptr = reinterpret_cast<const half*>(it->second.data);
         }
 
