@@ -46,11 +46,11 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 | [Qwen3-Coder-30B-A3B](https://huggingface.co/NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4) | NVFP4 | 16 GB | 338 | SafeTensors (Modelopt) |
 | [Qwen3-30B-A3B](https://huggingface.co/nvidia/Qwen3-30B-A3B-NVFP4) | NVFP4 | 16 GB | 307 | SafeTensors (Modelopt) |
 | [Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | Q4_K_M | 22 GB | 243 | GGUF |
-| [Qwen3.6-35B-A3B](https://huggingface.co/mmangkad/Qwen3.6-35B-A3B-NVFP4) | NVFP4 | 18 GB | 257 | SafeTensors (Modelopt) |
+| [Qwen3.6-35B-A3B](https://huggingface.co/mmangkad/Qwen3.6-35B-A3B-NVFP4) | NVFP4 | 18 GB | 320 | SafeTensors (Modelopt); 257 → 320 since the #949 FP8 SSM-projection sidecar closed the FP16 GDN tax |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | 14 GB | 273 (tg128) | GGUF |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q5_K_M | 17 GB | 65 | GGUF, recommended for code-gen |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/nvidia/Gemma-4-26B-A4B-NVFP4) | NVFP4 | 14 GB | 266 | SafeTensors (Modelopt) |
-| [Nemotron-3-Nano-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4) | NVFP4 | 18 GB | 126 | SafeTensors (Modelopt), Mamba2+attn+MoE, arch-limited (FP16 GDN/attn-projection tax) |
+| [Nemotron-3-Nano-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4) | NVFP4 | 18 GB | 148 | SafeTensors (Modelopt), Mamba2+attn+MoE; 126 → 148 with the #949 FP8 SSM-projection sidecar. Still the slowest 30B (Mamba2 scan + attn-projection share is arch-limited), but the GDN-projection part of the FP16 tax is gone. |
 | [Nemotron-Labs-3-Elastic-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-3-Elastic-30B-A3B-NVFP4) | NVFP4 | 18 GB | 70 | SafeTensors (QAD), same arch as Nano |
 | [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | MXFP4 (native) | 15 GB | **345** | SafeTensors; experts converted to NVFP4 at load. Also loads the official GGUF (Q8_0- or bf16-dense + MXFP4 experts, e.g. `gpt-oss-20b-mxfp4.gguf` — the Q8_0 residual rescale was fixed in #808). Harmony chat format (analysis/final channels split into `reasoning_content`/`content`). Use temperature 1.0 — greedy loops in the analysis channel (model-intrinsic). Prefill ≈ 16-19k tok/s (CUTLASS grouped GEMM). |
 

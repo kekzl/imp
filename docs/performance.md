@@ -30,7 +30,8 @@ SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA
 command) live in [`BENCHMARKS.md`](BENCHMARKS.md), and the CI gate is
 `tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`). Heroes for
 orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 · NVFP4 MoE
-tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 257).
+tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 320 since the
+#949 FP8 SSM-projection sidecar, was 257).
 
 Decode is measured with CUDA Graphs ON, 10 reps, isolated + clock-warmed. Healthy-host
 sanity check: ~2850 MHz SM / 13801 MHz mem / ~500 W during the bench — decode can read
