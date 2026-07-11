@@ -23,11 +23,34 @@ Optimal-kernel reference for RTX 5090 (GB202, **sm_120a** — consumer Blackwell
 
 **TC-rate calibration (2026-06-07):** datasheet TOPS are NOT what `mma.sync` reaches. Measured FP4 `mma.sync` peak ≈ **2,019 TOPS (~½ datasheet)**, and **f32-accumulate runs at ¼ rate** — accumulate in f16 wherever PPL allows (`gemm.cublas_fp16_acc=auto` since PR #611, per-arch deny for Gemma-3/4 + gpt-oss; FA2 `attention.fa2_f16acc` opt-in). Use measured rates for roofline math, not the datasheet.
 
+## Current roofline baseline (pin `cf1b382a_20260711_193211`, config_version 4)
+
+The measured %-of-roofline per kernel class — calibrate expectations against
+THESE, not theory. Baseline ref: `tools/roofline/history/BASELINE`; full table
+`docs/audit/roofline_2026_07_11.md`; refresh via the roofline pipeline (see
+`benchmark-cuda`). First pin with hybrid-GDN coverage and 0 unclassified kernels.
+
+| Path (cell) | window share | %-roofline | verdict |
+|---|---|---|---|
+| NVFP4 decode GEMV, dense (14B tg256) | ~87% | 66–70% HBM | structural ceiling — 6 levers refuted, don't re-pursue |
+| NVFP4 decode GEMV, MoE (30B tg256) | 61% | ~38% | structural (expert scatter) |
+| **NVFP4 decode GEMV, hybrid (35B tg256)** | 34% | **25.9%** | **OPEN lead — dense runs the same class at 67%; likely the MoE-expert GEMV mix at 3B-active** |
+| FP8 SSM sidecar GEMV (35B tg256) | 23% | 57% | healthy (#949/#962) |
+| paged decode attention (tg256 cells) | 3–30% | 1.5–5% | latency-bound split-K at M=1 — the mechanical "target 70%" is not real headroom |
+| FA2 prefill (pp2048/4096 cells) | 16–37% | ~19–22% of FP16 TC peak | smem/barrier-bound; hd=128 levers all refuted, INT8-QK parked |
+| grouped NVFP4 GEMM, MoE prefill | 24–59% | 43–52% (memory-bound) | #558 occupancy/persistent scheduler is THE open prefill lever |
+| GDN scan/norm (35B tg256) | <2% | — | NOT the hybrid decode bottleneck (that folklore is Nemotron/Mamba2-only) |
+| hd=256 legacy attention | 0.0% | — | #932 removed it — kernel-level confirmed, don't chase |
+
+Reading caveat: `gemm_imma_prefill` at "~12% roofline" on q8-dense is likely a
+counting artifact (INT8-IMMA FLOPs rated against an f32-pipe peak) — verify the
+tooling before treating it as headroom.
+
 ## The three laws
 
 1. **Decode at batch=1 is launch-overhead-bound first, memory-bound second.** With ~80–120 launches per layer, per-launch µs costs dominate once GEMM is fast. Order of operations: (a) make per-launch GEMM fast (CUTLASS sm_120 NVFP4 fast-path, not slow `gemm_nvfp4` dequant→cuBLAS fallback); (b) capture decode in CUDA Graph (the async graph decode loop — `CudaGraphConditionalRunner` in `src/runtime/cuda_graph.h`, launched by `engine_graph_decode.cpp`); (c) only then chase memory traffic. A faster kernel alone shows little tok/s gain — but it *enables* graph capture to win because launches no longer hide behind GEMM. Always re-bench graphs ON after a hot-path patch. **Corollary: any per-token host round-trip silently drops a path out of the conditional loop and costs −27–45% decode** — NVFP4 think models bypassed it until PR #649 (+45%), constrained json/schema decode until the ConstrainedPipeline (PR #651: enqueue forward N+1 before the host FSM advances, json_schema 102→235 tok/s); logprobs still does a 600 KB D2H per token (open lever: device-side top-k).
 
-2. **Occupancy is king — for getting kernels to the roofline, not past it.** Keep registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`** on regular GEMV/attention paths — overrides cost -4.5% to -20%. Two known correct exceptions: HD=128 GDN kernel needs `(HD,1)` to avoid a miscompile; FMHA `(256,1)` is correct on SMEM-limited kernels (~69 KB → 1 block/SM anyway, allows max register allocation). Caveat: the mature NVFP4 decode path already sits at its ceiling — full nsys+ncu sweep (2026-05-30, Qwen3-14B NVFP4) showed decode = 87% NVFP4 GEMVs at 66–70% HBM with the plateau co-limited by 4-bit dequant (L1TEX 91%); **raising occupancy further and KPAR→MR rerouting are refuted levers there** — don't re-pursue.
+2. **Occupancy is king — for getting kernels to the roofline, not past it.** Keep registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`** on regular GEMV/attention paths — overrides cost -4.5% to -20%. Two known correct exceptions: HD=128 GDN kernel needs `(HD,1)` to avoid a miscompile; FMHA `(256,1)` is correct on SMEM-limited kernels (~69 KB → 1 block/SM anyway, allows max register allocation). Caveat: the mature NVFP4 decode path already sits at its ceiling — full nsys+ncu sweep (2026-05-30, Qwen3-14B NVFP4) showed decode = 87% NVFP4 GEMVs at 66–70% HBM with the plateau co-limited by 4-bit dequant (L1TEX 91%), re-confirmed by the 2026-07-11 pin (`cf1b382a`); **raising occupancy further and KPAR→MR rerouting are refuted levers there** — don't re-pursue. The same GEMV class on the 35B hybrid runs at only 25.9% — that gap is an open lead, not a refuted one (see roofline baseline above).
 
 3. **Quantization type determines kernel strategy.** Q8_0 (simple dequant) → bandwidth-bound → row-parallel + smem-cached activations. Q6_K (complex dequant) → compute-influenced → K-parallel + warp-level work division. NVFP4 prequant → must hit `StorageTier::CUTLASS_NVFP4` (SfAtom layout) for the sm_120a fast path; plain `StorageTier::NVFP4` falls through to slow `gemm_nvfp4`. No universal "best" GEMV.
 
