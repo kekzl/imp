@@ -317,7 +317,10 @@ std::string read_file(const std::string& path) {
         return "";
     }
     std::string data(st.st_size, '\0');
-    [[maybe_unused]] auto n = ::read(fd, data.data(), st.st_size);
+    if (::read(fd, data.data(), st.st_size) != st.st_size) {
+        close(fd);
+        return "";
+    }
     close(fd);
     return data;
 }

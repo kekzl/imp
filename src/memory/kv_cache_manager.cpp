@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <fcntl.h>
 #include <functional>
+#include <unistd.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <utility>
@@ -1022,8 +1024,13 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
         return 0;
     }
 
-    FILE* f = fopen(path.c_str(), "wb");
+    // 0600: the snapshot holds raw KV blocks (conversation contents) — keep it
+    // out of reach of other local users.
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE* f = (fd >= 0) ? fdopen(fd, "wb") : nullptr;
     if (!f) {
+        if (fd >= 0)
+            ::close(fd);
         IMP_LOG_ERROR("Failed to open %s for writing", path.c_str());
         return -1;
     }
