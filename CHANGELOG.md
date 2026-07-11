@@ -5,6 +5,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- **gemma-3-12b GGUF decode illegal-memory-access** (last hard crash in the
+  known-issues list): gemma-3's NVFP4 decode cache must be built from an FP16
+  companion copy — a from-scratch build (Q4_K → dequant → NVFP4) corrupts
+  decode (first step emits token 0 `<pad>`, then an IMA). The companion
+  guarantee was best-effort and silently defeated by FP16-cache VRAM-budget
+  starvation on a 32 GB card with a tight KV budget: 35 of 49 cached tensors
+  fell to from-scratch and re-triggered the exact bug the `fp16_companion`
+  flag exists to prevent. The NVFP4 decode-cache collector now skips
+  from-scratch candidates for gemma-3, leaving those weights on the coherent
+  dequant-at-decode path (a bandwidth loss on the uncached fraction, never
+  garbage). Verified: CLI + server decode coherent, 0 IMA, clean
+  `finish_reason: stop`. Adds a standalone GEMV regression test at gemma-3
+  decode dims (`tests/test_nvfp4_gemv_gemma3_dims.cu`).
 - **Greedy request-order independence in default mode** — the documented
   "30B-NVFP4-MoE greedy nondeterministic at temp=0" flipper: the FIRST
   request of a process ran one decode step on a different kernel mix than
