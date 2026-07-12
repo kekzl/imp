@@ -18,7 +18,7 @@ The CI-gated canonical baseline lives in
 [`tests/perf_baseline.json`](../tests/perf_baseline.json) (3% decode / 5%
 prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
 
-**Toolchain (current: `v0.18.1`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.3.
+**Toolchain (current: `v0.19.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.3.
 The C++20→C++23 move in v0.17.0 is perf-neutral — Qwen3-8B-Q8_0 decode re-measured
 `tg128 = 287` (baseline 269.5, within good-host-day range), so the tabulated
 numbers below carry over unchanged.
@@ -50,6 +50,33 @@ SSM-projection sidecar (35B NVFP4 decode 257 → ~320 tok/s) and on the **GGUF
 Q4_K** hybrid path by extending that sidecar to the Q8_0-kept GDN projections
 (35B Q4_K decode 224 → 272 tok/s, 2026-07-11) — both now ahead of llama.cpp's
 ~229. GGUF remains the legacy path — NVFP4 SafeTensors is the priority.
+
+### Competitive re-sweep 2026-07-12 (llama.cpp build 9976 `e3546c794`)
+
+Same-day, same host state, both engines pp512/tg128: imp
+`imp-cli --model <m> --bench --bench-pp 512 --bench-reps 10 --max-tokens 128
+--temperature 0` (commit `7811658a`, defaults) vs llama.cpp
+`llama-bench -m <m> -p 512 -n 128 -r 5 -ngl 99` (image
+`ghcr.io/ggml-org/llama.cpp:full-cuda`, pulled 2026-07-12). Full imp hero
+matrix appended to [`scoreboard.tsv`](scoreboard.tsv).
+
+| Model (shared quant) | imp tg128 | llama.cpp tg128 | imp lead |
+|---|---:|---:|---:|
+| Qwen3-8B Q8_0 | 237.3 | 160.5 ± 1.3 | **+48%** |
+| Qwen3-14B Q6_K | 163.2 | 115.3 ± 0.2 | **+42%** |
+| Qwen3.6-35B-A3B UD-Q4_K_M (hybrid) | 266.8 | 226.5 ± 5.9 | **+18%** |
+| Gemma-4-26B-A4B UD-Q4_K_M (MoE) | 261.3 | 216.0 ± 3.5 | **+21%** |
+| Qwen3-30B-A3B Q4_K_M (MoE, non-hero) | 324.7 | 319.2 ± 7.0 | +1.7% |
+| gpt-oss-20b MXFP4 (imp: SafeTensors, llama: GGUF) | 343.6–344.4 | 328.6–345.4 (run-to-run ±5%) | statistical tie |
+
+llama.cpp's MoE/MXFP4 decode has improved substantially since the 06-07
+reference: the former gpt-oss ≥5% lead is gone (tie), and the non-hero
+Qwen3-30B GGUF margin narrowed to noise — tracked in #984. Dense GGUF, the
+hybrid hero and Gemma-4 remain clear wins; NVFP4 SafeTensors stays uncontested
+(no llama.cpp counterpart). The pp512 column is not tabulated per the prefill
+variance policy above; on this sweep imp led NVFP4 prefill (e.g. 8B NVFP4
+36.4k vs llama Q8 14.1k) while llama led dense GGUF Q8 prefill (14.1k vs
+12.7k, known best-effort surface, release bar 3).
 
 ## GGUF prefill (pp512, INT8-IMMA family — default on since #617)
 

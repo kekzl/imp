@@ -4,6 +4,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-12
+
+Highlights: first cross-engine PPL-parity measurement (release bar 1) with two
+real tokenizer/quant fixes out of it; dense n-gram speculation now wins long
+context (#964); FP8 KV auto-on for hint-less Qwen3 GGUFs (+41% @16k); batched
+serving 861→1173 tok/s @16 (above the published vLLM reference); suspend/resume
+and warm weight cache; competitive re-sweep vs llama.cpp b9976 (dense +42–48%,
+hybrid +18%, Gemma-4 +21%; gpt-oss now a statistical tie — #984).
+
 ### Changed
 - **Depth-aware speculation gate replaces the dense draft context cap**
   (#964 stage 2): the residual long-context loss after stage 1 was never
