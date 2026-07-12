@@ -419,10 +419,14 @@ bool Engine::init_kv_cache() {
     // multi-token verify / spec-decode) run inside CUDA stream capture
     // without crashing on cudaMalloc.
     (void)executor_->allocate_nvfp4_dequant_workspace();
-    // Build the CUTLASS NVFP4 LM head for batched-decode tensor-core GEMM (no-op
-    // unless serving with max_batch>1 and the LM head is NVFP4). Must come AFTER
-    // pre_dequant_weights so the NVFP4 decode cache exists.
-    executor_->build_lm_head_cutlass_(stream_);
+    // Build the CUTLASS NVFP4 LM head for batched-decode tensor-core GEMM. Only
+    // batched decode (n>1) consumes it, so skip the SfAtom-scale VRAM (19-47 MiB
+    // depending on vocab×d_model) when max_batch_size can never reach n>1; the
+    // perplexity harness lazy-builds it for its own measurement path. Must come
+    // AFTER pre_dequant_weights so the NVFP4 decode cache exists, and before
+    // decode-graph capture so the captured topology includes it.
+    if (config_.max_batch_size > 1)
+        executor_->build_lm_head_cutlass_(stream_);
     if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 

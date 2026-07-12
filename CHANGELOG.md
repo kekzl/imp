@@ -5,6 +5,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **`gemm.nvfp4_lm_head_cutlass` is now default ON** — the batched-decode
+  (n>1) LM head runs as one CUTLASS NVFP4 tensor-core GEMM (one LM-head
+  weight read per batch instead of ceil(n/4)), which was the opt-in behind
+  +8% aggregate concurrent decode @16 and the 1 173 tok/s Coder-30B
+  headline. The PPL trade is now measured per family (teacher-forced,
+  13.5k-token corpus): +1.9–2.1% on MoE/hybrid (Coder-30B 10.19→10.38,
+  Modelopt-30B 11.65→11.88, Qwen3.6-35B 13.39→13.66), +0.2–0.5% on dense —
+  within the ±0.3–0.5% run-to-run spread. Batch=1 output is bit-identical
+  either way: the spec-decode verify LM head now explicitly keeps the
+  FP16-activation GEMV (`for_each_lm_head_batch_` gained an
+  `allow_cutlass` switch; only the perplexity harness measures the CUTLASS
+  path), and the SfAtom scale VRAM (19–47 MiB) is only allocated when
+  `max_batch_size > 1`. Set `gemm.nvfp4_lm_head_cutlass = false` for
+  maximum batched-serving coherence.
 - **Pipelined batched decode** (`runtime.decode_pipeline`, default on): at
   n≥2 with CUDA graphs, the engine keeps ONE decode step in flight — step
   N+1 (a device-side chain-advance kernel feeds step N's sampled slot
