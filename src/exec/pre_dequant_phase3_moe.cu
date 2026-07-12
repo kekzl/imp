@@ -150,11 +150,13 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
             int64_t shp[3] = {r.n_experts, r.N, r.K};
             packed_slot = Tensor(r.packed_data, QType::NVFP4, 3, shp, /*on_device=*/true);
+            // wcache_ is the single owner (teardown frees via
+            // free_nvfp4_moe_result, like every other nvfp4_moe insert).
+            // Registering the pointers in Model::gpu_allocations_ as well made
+            // ~Model double-free all 9 per layer ("216/675 weight frees
+            // failed" on gpt-oss-20b) — harmless standalone, SIGSEGV under
+            // nsys's CUDA interception.
             wcache_->nvfp4_moe[r.packed_data] = r;
-            auto* m = const_cast<Model*>(model_);
-            m->gpu_allocations_.push_back(r.packed_data);
-            m->gpu_allocations_.push_back(r.micro_scales);
-            m->gpu_allocations_.push_back(r.tensor_scales);
         };
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);
