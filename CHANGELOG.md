@@ -149,6 +149,22 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
 
 ### Fixed
+- **Qwen3.5/3.6 GGUF tokenization was non-canonical** (`tokenizer.ggml.pre =
+  "qwen35"` fell through to the gpt2 per-char-punct fallback): symbol runs
+  were over-split — +13% tokens on a 95 KB docs corpus (35 807 vs 31 620) and
+  off-distribution splits on every real prompt. "qwen35" (qwen2 rules plus
+  `\p{M}` in the letter run, which the scanner's letter classifier already
+  covers) now routes to the qwen2 scanner; token streams verified IDENTICAL
+  to `llama-tokenize` on the 35B hero. Found by the first release-bar-1
+  PPL-parity sweep (`docs/audit/ppl_parity_2026_07_12.md`).
+- **The NVFP4-LM-head opt-outs were dead on GGUF checkpoints**: the
+  quantized-source decode-cache collector added the LM head unconditionally,
+  so `gemm.nvfp4_lm_head=false` and the GOAL-listed
+  `gemm.nvfp4_lm_head_gdn=false` trade opt-out silently did nothing for GGUF
+  models (the head's NVFP4 quantization costs +1.5…+4.8% teacher-forced PPL,
+  model-size-dependent — the entire cross-engine PPL gap vs llama.cpp, see
+  the audit doc). The collector now applies the same gates as the
+  native-precision paths; defaults (both flags on) are byte-identical.
 - **KV floor now covers the full advertised context on cheap-KV models**
   (#963 follow-up): the auto floor was min(16384, 4×max_seq_len), so a
   max_seq_len=17408 hybrid (10 attention layers, ~0.3 MiB/block) got a
@@ -211,6 +227,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   byte-identical. See docs/determinism.md.
 
 ### Added
+- **`diagnostics.ppl_first` / `diagnostics.ppl_last`**: NLL counting window
+  for `imp-cli --perplexity` (row i predicts token i+1; count rows
+  [first, last]). Matches llama-perplexity's `first = n_ctx/2` convention via
+  `-c C --chunks 1` for exact cross-engine window alignment — the measurement
+  recipe for GOAL release bar 1 (`docs/audit/ppl_parity_2026_07_12.md`:
+  with the LM-head opt-out imp reads at or slightly below llama.cpp
+  (−0.8%…+0.2%) on every comparable GGUF hero; llama.cpp runs need
+  `--no-escape` or the token streams desync on corpora containing `\"`).
 - **On-disk warm weight cache** (`[warm_cache] enabled`, default on): the
   first fully-cold model load persists its TRANSFORMED weight uploads
   (BF16→FP16 host conversions, GPU dequants, split layouts) into

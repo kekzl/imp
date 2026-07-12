@@ -544,6 +544,12 @@ dump_logits_dir      = ""
 dump_routing_dir     = ""
 # Print prefill token IDs to stderr (truncated to 20).
 dump_tokens          = false
+# Teacher-forced perplexity (--perplexity): restrict the NLL sum to logit
+# rows [ppl_first, ppl_last] (row i predicts token i+1; ppl_last=-1 = end).
+# Matches llama-perplexity's counting window (first = n_ctx/2) for the
+# cross-engine PPL-parity bar — see docs/GOAL.md release bar 1.
+ppl_first            = 0
+ppl_last             = -1
 # Stop forward pass after layer N (-1 = run full forward).
 exit_layer           = -1
 profile              = false

@@ -885,6 +885,17 @@ struct RuntimeConfig {
         std::string dump_logits_dir;   // path or empty
         std::string dump_routing_dir;  // path or empty
         bool dump_tokens = false;
+        // Teacher-forced perplexity: restrict the NLL sum to logit rows
+        // i in [ppl_first, ppl_last] (row i predicts token i+1); ppl_last=-1
+        // means "through the end" (n-2). Matches llama-perplexity's window
+        // (`first = n_ctx/2`, rows [first, n_ctx-2]) when llama.cpp runs the
+        // same corpus with `-c C --chunks 1` (llama-perplexity refuses
+        // single-chunk-over-everything: it wants >= 2*n_ctx total tokens):
+        // set ppl_first = C/2, ppl_last = C-2 (+ token-offset if the streams
+        // are BOS-shifted). The cross-engine PPL-parity bar (GOAL release
+        // bar 1) is measured this way.
+        int ppl_first = 0;
+        int ppl_last = -1;
         int exit_layer = -1;
         bool profile = false;
         bool graph_diag = false;

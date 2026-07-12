@@ -370,6 +370,11 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         return false;
     }
     const int n = ppl_capture_.n;
+    // diagnostics.ppl_first/ppl_last: llama-perplexity comparability (see
+    // config.h). Row i predicts token i+1; count rows [first, last].
+    const int first = std::clamp(runtime_config_.diagnostics.ppl_first, 0, n - 2);
+    const int cfg_last = runtime_config_.diagnostics.ppl_last;
+    const int last = (cfg_last < 0) ? n - 2 : std::clamp(cfg_last, first, n - 2);
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
 
     // Fixed-order host reduction over per-position NLLs (bit-reproducible —
@@ -384,7 +389,7 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
                                       static_cast<size_t>(n) * sizeof(int32_t),
                                       cudaMemcpyDeviceToHost));
         match_sum = 0;
-        for (int i = 0; i < n - 1; ++i)
+        for (int i = first; i <= last; ++i)
             match_sum += h_match[i];
         cudaFree(ppl_capture_.d_match);
     }
@@ -406,13 +411,15 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         fprintf(stderr, "\n");
     }
     double h_nll = 0.0;
-    for (int i = 0; i < n - 1; ++i)
+    for (int i = first; i <= last; ++i)
         h_nll += h_nll_pos[i];
-    double ppl = std::exp(h_nll / static_cast<double>(n - 1));
-    IMP_LOG_INFO("perplexity_nll: n=%d  mean_nll=%.4f  PPL=%.4f", n, h_nll / (n - 1), ppl);
+    const int counted = last - first + 1;
+    double ppl = std::exp(h_nll / static_cast<double>(counted));
+    IMP_LOG_INFO("perplexity_nll: n=%d first=%d last=%d counted=%d mean_nll=%.4f  PPL=%.4f", n,
+                 first, last, counted, h_nll / counted, ppl);
     if (match_sum >= 0)
-        IMP_LOG_INFO("greedy top1 match: %ld/%d (%.2f%%)", match_sum, n - 1,
-                     100.0 * static_cast<double>(match_sum) / static_cast<double>(n - 1));
+        IMP_LOG_INFO("greedy top1 match: %ld/%d (%.2f%%)", match_sum, counted,
+                     100.0 * static_cast<double>(match_sum) / static_cast<double>(counted));
     if (out_ppl)
         *out_ppl = ppl;
     return true;

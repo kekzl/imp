@@ -1685,10 +1685,14 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         std::vector<std::string> chunks;
         if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
             chunks = llama3_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "qwen2") {
+        } else if (pre_tokenizer_ == "qwen2" || pre_tokenizer_ == "qwen35") {
             // Qwen2/Qwen3 family: canonical regex incl. symbol RUNS and single
             // digits — the gpt2 fallback's per-char punctuation made canonical
-            // merges ("->", "():") impossible (#657).
+            // merges ("->", "():") impossible (#657). "qwen35" (Qwen3.5/3.6
+            // GGUFs) differs from qwen2 only by adding \p{M} to the letter
+            // run, which is_letter_at already treats as letters — falling
+            // through to gpt2 instead over-split symbol runs (+13% tokens on
+            // the 35B hero corpus).
             chunks = qwen2_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o") {
             // gpt-oss / GPT-4o family (o200k_harmony): case-aware letter runs,

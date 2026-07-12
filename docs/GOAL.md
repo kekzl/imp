@@ -159,6 +159,8 @@ A release is shippable when, on RTX 5090:
 1. All hero models pass correctness tests: perplexity within 0.5% of llama.cpp reference at the same quant **with documented owner-approved speed/quality trades excluded**; each such trade must be opt-out via config and listed here. Current trades:
    - `gemm.nvfp4_lm_head_gdn` default-ON (#483): +2.2% PPL for +11.4% decode on GDN hybrids.
    - `gemm.fp8_ssm_proj` on **GGUF** hybrids default-ON (#962): +1.8% PPL (201-token corpus) for +21% decode on Qwen3.6-35B UD-Q4_K_M — E4M3 stacked on the Q8_0 lattice; the native-NVFP4 branch of the same flag is PPL-flat (#949) and is not a trade.
+
+   First systematic cross-engine measurement 2026-07-12 (`docs/audit/ppl_parity_2026_07_12.md`): with the LM-head opt-out imp is at parity (−0.8%…+0.2%) with llama.cpp on every comparable GGUF hero. **Open owner decision:** `gemm.nvfp4_lm_head` default-ON (the dense LM-head NVFP4 decode cache, ~14% of dense decode) costs +1.5…+4.8% teacher-forced PPL model-size-dependent and is not yet listed above — list it as a trade or revisit the default.
 2. Decode tok/s leads llama.cpp by ≥5% on every hero model.
 3. Prefill tok/s ≥ llama.cpp on every dense **NVFP4/SafeTensors** hero. GGUF prefill is explicitly best-effort: the Q4K-MMQ experiment (2026-05-28) showed imp's GGUF prefill ceiling is architectural (ties cuBLAS at ~4.3% of peak; llama.cpp's MMQ leads 1.3-2.4×) — the old "≥ llama.cpp on every dense GGUF hero" bar was permanently violated as written and is dropped (realignment 2026-06-06, #550).
 4. Prefill tok/s ≥ 70% of vLLM single-seq on every MoE hero (measured ~1.4× gap 2026-05-31; the remaining levers are prefill attention and the grouped-GEMM launch/occupancy scheduler, #558).
