@@ -39,10 +39,15 @@ namespace imp {
 // ============================================================================
 
 // Phase 1: per-block max, sum, and top_k logit candidates over a strided subset.
-__global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
-                                    float inv_temperature, float* __restrict__ block_max_out,
-                                    float* __restrict__ block_sum_out, float* __restrict__ cand_val_out,
-                                    int* __restrict__ cand_idx_out) {
+// Body shared between the single-row kernel and the row-parallel batched
+// wrapper (grid.y = row) — blockIdx.x / gridDim.x usage is identical, so
+// per-row results are bit-identical across the two launch shapes.
+__device__ __forceinline__ void topk_partial_body(const float* __restrict__ logits, int vocab_size,
+                                                  int top_k, float inv_temperature,
+                                                  float* __restrict__ block_max_out,
+                                                  float* __restrict__ block_sum_out,
+                                                  float* __restrict__ cand_val_out,
+                                                  int* __restrict__ cand_idx_out) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     float* s_reduce = reinterpret_cast<float*>(smem_raw);  // BLOCK_SIZE
@@ -138,16 +143,40 @@ __global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_
                       cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
 }
 
+__global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
+                                    float inv_temperature, float* __restrict__ block_max_out,
+                                    float* __restrict__ block_sum_out, float* __restrict__ cand_val_out,
+                                    int* __restrict__ cand_idx_out) {
+    topk_partial_body(logits, vocab_size, top_k, inv_temperature, block_max_out, block_sum_out,
+                      cand_val_out, cand_idx_out);
+}
+
+// Row-parallel wrapper: blockIdx.y selects the row; per-row scratch is carved
+// from the row's SAMPLE_SCRATCH_BYTES slot exactly like
+// launch_topk_topp_multiblock does.
+__global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, int vocab_size) {
+    const TopkRowArgs a = rows[blockIdx.y];
+    char* base = reinterpret_cast<char*>(a.d_result);
+    float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
+    float* block_sum = block_max + SAMPLE_NBLOCKS;
+    float* cand_val = block_sum + SAMPLE_NBLOCKS;
+    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k);
+    topk_partial_body(a.logits, vocab_size, a.top_k, a.inv_temperature, block_max, block_sum, cand_val,
+                      cand_idx);
+}
+
 // Phase 2: merge the per-block candidate lists into the global top_k, apply
 // top-p and sample. All threads cooperate to select the global top_k from the
 // candidate pool (block_reduce_topk over the SAMPLE_NBLOCKS*top_k candidates read
 // straight from global — coalesced, no big smem staging); only the final
 // top-p/sample over top_k entries is serial. Runs inside graph capture.
-__global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
-                                     int n_blocks, const float* __restrict__ block_max_in,
-                                     const float* __restrict__ block_sum_in,
-                                     const float* __restrict__ cand_val_in,
-                                     const int* __restrict__ cand_idx_in, int32_t* __restrict__ d_result) {
+__device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float inv_temperature,
+                                                   unsigned int seed, int n_blocks,
+                                                   const float* __restrict__ block_max_in,
+                                                   const float* __restrict__ block_sum_in,
+                                                   const float* __restrict__ cand_val_in,
+                                                   const int* __restrict__ cand_idx_in,
+                                                   int32_t* __restrict__ d_result) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     float* s_warp_vals = reinterpret_cast<float*>(smem_raw);  // NUM_WARPS * top_k
@@ -248,6 +277,28 @@ __global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperatu
     d_result[0] = static_cast<int32_t>(chosen);
 }
 
+__global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
+                                     int n_blocks, const float* __restrict__ block_max_in,
+                                     const float* __restrict__ block_sum_in,
+                                     const float* __restrict__ cand_val_in,
+                                     const int* __restrict__ cand_idx_in, int32_t* __restrict__ d_result) {
+    topk_finalize_body(top_k, top_p, inv_temperature, seed, n_blocks, block_max_in, block_sum_in,
+                       cand_val_in, cand_idx_in, d_result);
+}
+
+// Row-parallel wrapper: blockIdx.x selects the row (one block per row — the
+// n_rows serialized <<<1>>> finalize launches become one launch).
+__global__ void topk_finalize_rows_kernel(const TopkRowArgs* __restrict__ rows, int n_blocks) {
+    const TopkRowArgs a = rows[blockIdx.x];
+    char* base = reinterpret_cast<char*>(a.d_result);
+    float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
+    float* block_sum = block_max + SAMPLE_NBLOCKS;
+    float* cand_val = block_sum + SAMPLE_NBLOCKS;
+    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k);
+    topk_finalize_body(a.top_k, a.top_p, a.inv_temperature, a.seed, n_blocks, block_max, block_sum,
+                       cand_val, cand_idx, a.d_result);
+}
+
 // Launch the two-phase multi-block sampler. Scratch lives right after d_result
 // (caller guarantees >= SAMPLE_SCRATCH_BYTES). Both kernels are graph-capturable
 // (no allocation, fixed topology for a given vocab_size/top_k).
@@ -273,6 +324,20 @@ static void launch_topk_topp_multiblock(const float* d_logits, int vocab_size, i
     topk_finalize_kernel<<<1, BLOCK_SIZE, smem2, stream>>>(top_k, top_p, inv_temperature, seed,
                                                            SAMPLE_NBLOCKS, block_max, block_sum, cand_val,
                                                            cand_idx, d_result);
+}
+
+void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
+                           cudaStream_t stream) {
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // Shared-memory sizes carved with the batch's max top_k — every block
+    // carves with its OWN row's top_k, which is <= max_top_k.
+    size_t smem1 = static_cast<size_t>(BLOCK_SIZE) * sizeof(float) + 2 * sizeof(float) +
+                   static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int));
+    size_t smem2 = static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int)) +
+                   static_cast<size_t>(max_top_k) * (sizeof(float) + sizeof(int));
+    dim3 grid1(SAMPLE_NBLOCKS, n_rows);
+    topk_partial_rows_kernel<<<grid1, BLOCK_SIZE, smem1, stream>>>(d_rows, vocab_size);
+    topk_finalize_rows_kernel<<<n_rows, BLOCK_SIZE, smem2, stream>>>(d_rows, SAMPLE_NBLOCKS);
 }
 
 // ============================================================================
@@ -656,6 +721,25 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
 
     return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, false,
                                  stream);
+}
+
+bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,
+                            unsigned int seed, int32_t* d_result, cudaStream_t stream) {
+    const int vocab_size = static_cast<int>(logits.shape[0]);
+    const float* d_logits = static_cast<const float*>(logits.data);
+
+    // Same parameter normalization as the synchronous variant (bit-identical
+    // tokens for the same logits/seed).
+    if (top_k <= 0 || top_k > vocab_size)
+        top_k = vocab_size;
+    if (top_k > MAX_TOP_K)
+        return false;  // CUB regime syncs internally — caller uses the sync variant
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
+    float inv_temperature = 1.0f / temperature;
+
+    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
+    return true;
 }
 
 void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,

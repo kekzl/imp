@@ -1,4 +1,5 @@
 #include "exec/executor_kernels.h"
+#include "core/logging.h"
 #include "runtime/pdl.h"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
@@ -404,6 +405,37 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 // ---------------------------------------------------------------------------
 // Host-side helpers
 // ---------------------------------------------------------------------------
+
+// Plain device-to-device buffer copy as a KERNEL. cudaMemcpyAsync D2D goes
+// through the WDDM DMA submission path on this WSL2 host and blocks the
+// calling thread ~165 us per call; per-MoE-layer residual copies made that
+// ~8 ms of blocked host time per decode step at n=16 (nsys 2026-07-12). A
+// kernel launch costs ~10 us and stays fully stream-async. 16-byte
+// vectorized; falls back to the driver copy for unaligned buffers
+// (activation buffers are 256-byte-aligned pool allocations, so the fast
+// path is the norm).
+__global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __restrict__ dst, size_t n4) {
+    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n4)
+        dst[i] = src[i];
+}
+
+void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
+    if (bytes == 0 || dst == src)
+        return;
+    if ((bytes % 16) == 0 && (reinterpret_cast<uintptr_t>(dst) % 16) == 0 &&
+        (reinterpret_cast<uintptr_t>(src) % 16) == 0) {
+        size_t n4 = bytes / 16;
+        int threads = 256;
+        int blocks = static_cast<int>((n4 + threads - 1) / threads);
+        device_copy_v4_kernel<<<blocks, threads, 0, stream>>>(static_cast<const uint4*>(src),
+                                                              static_cast<uint4*>(dst), n4);
+        return;
+    }
+    cudaError_t e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, stream);
+    if (e != cudaSuccess)
+        IMP_LOG_ERROR("device_copy_async fallback memcpy failed: %s", cudaGetErrorString(e));
+}
 
 void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
     int64_t n = a.numel();

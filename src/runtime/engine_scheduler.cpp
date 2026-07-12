@@ -1469,6 +1469,17 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         }
 
         std::vector<int32_t> result(n);
+        // Two-pass batched sampling: pass 1 ENQUEUES every row's filter+
+        // sampler chain into its own scratch slot (stream-ordered, so the
+        // shared d_penalty_tokens_ upload/consume pairs stay correct); pass 2
+        // gathers all tokens with ONE pinned D2H + ONE stream sync. The
+        // previous per-row synchronous readback blocked the engine thread
+        // ~850 us per sequence per step (pageable 4-byte D2H + sync each) —
+        // 29% GPU idle at n=16 sustained serving (nsys, 2026-07-12). Rows
+        // with sync-only sampling modes (mirostat, logit_bias, CUB-regime
+        // top_k) decline untouched in pass 1 and sample synchronously after
+        // the gather.
+        std::vector<int> sync_rows;
         for (int i = 0; i < n; i++) {
             auto& req = valid_decode[i];
             InferenceState per_state = state;
@@ -1491,8 +1502,52 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             }
             // Per-row constraint masks: keeps json_schema/json_mode enforced
             // when the request shares a decode batch (the batch-level state
-            // carries no constrainers at n>1; sample_single_from_logits
-            // applies the mask to this row's logits before sampling).
+            // carries no constrainers at n>1; the row sampler applies the
+            // mask to this row's logits before sampling).
+            if (req->constraints) {
+                per_state.schema_constrainer = req->constraints->schema_constrainer();
+                per_state.json_constrainer = req->constraints->json_constrainer();
+            } else {
+                per_state.schema_constrainer = nullptr;
+                per_state.json_constrainer = nullptr;
+            }
+            per_state.n_sequences = 1;
+            Tensor seq_logits = logits.slice(i, i + 1);
+            if (!executor_->sample_single_from_logits_async(seq_logits, per_state, i, dec_stream))
+                sync_rows.push_back(i);
+        }
+        if (static_cast<int>(sync_rows.size()) < n) {
+            const int32_t* toks = executor_->collect_sampled_tokens(n, dec_stream);
+            if (toks) {
+                for (int i = 0; i < n; i++)
+                    result[i] = toks[i];
+            } else {
+                // Collector unavailable (no slot buffers) — every row falls
+                // back to the synchronous path below.
+                sync_rows.clear();
+                for (int i = 0; i < n; i++)
+                    sync_rows.push_back(i);
+            }
+        }
+        for (int i : sync_rows) {
+            auto& req = valid_decode[i];
+            InferenceState per_state = state;
+            fill_sampling_params(*req, per_state);
+            per_state.seed = compute_step_seed(*req);
+            per_state.penalty_tokens = nullptr;
+            per_state.n_penalty_tokens = 0;
+            bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
+                                  req->presence_penalty != 0.0f);
+            if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
+                size_t rn = req->output_tokens.size();
+                if (rn <= d_penalty_tokens_capacity_) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                                       rn * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                                       dec_stream));
+                    per_state.penalty_tokens = d_penalty_tokens_;
+                    per_state.n_penalty_tokens = static_cast<int>(rn);
+                }
+            }
             if (req->constraints) {
                 per_state.schema_constrainer = req->constraints->schema_constrainer();
                 per_state.json_constrainer = req->constraints->json_constrainer();

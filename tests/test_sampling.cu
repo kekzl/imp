@@ -260,5 +260,81 @@ TEST(SamplingTest, SingleNonNegInf) {
     free_gpu_tensor(d_logits);
 }
 
+// =========================================================================
+// Async (enqueue-only) sampler variants — the batched-decode fast path
+// (executor sample_from_logits) enqueues one sampler per sequence into its
+// own SAMPLE_SCRATCH_BYTES slot and gathers all tokens with one strided
+// pinned D2H + one sync. Tokens must be bit-identical to the synchronous
+// per-sequence variants for the same logits and seeds.
+// =========================================================================
+
+TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
+    const int n_seq = 8;
+    const int vocab = 4096;
+    const int top_k = 50;
+    const float top_p = 0.9f, temperature = 0.7f;
+
+    // Distinct pseudo-random logits per sequence (fixed pattern, no RNG).
+    std::vector<std::vector<float>> h_logits(n_seq, std::vector<float>(vocab));
+    for (int i = 0; i < n_seq; i++)
+        for (int v = 0; v < vocab; v++)
+            h_logits[i][v] = std::sin(0.37f * v + 1.13f * i) * 7.0f + ((v * 31 + i * 17) % 97) * 0.01f;
+
+    std::vector<Tensor> logits(n_seq);
+    for (int i = 0; i < n_seq; i++)
+        logits[i] = make_logits(h_logits[i].data(), vocab);
+
+    // Reference: synchronous per-sequence sampling (pre-allocated d_result).
+    int32_t* d_ref = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ref, SAMPLE_SCRATCH_BYTES), cudaSuccess);
+    std::vector<int32_t> ref(n_seq), ref_greedy(n_seq);
+    for (int i = 0; i < n_seq; i++) {
+        ref[i] = sample_topk_topp(logits[i], top_k, top_p, temperature, 42u + i, d_ref, nullptr);
+        ref_greedy[i] = sample_greedy(logits[i], d_ref, nullptr);
+    }
+
+    // Batched: enqueue all sequences into per-slot scratch, one strided D2H.
+    char* d_slots = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_slots, static_cast<size_t>(n_seq) * SAMPLE_SCRATCH_BYTES), cudaSuccess);
+    int32_t* h_pinned = nullptr;
+    ASSERT_EQ(cudaHostAlloc(&h_pinned, n_seq * sizeof(int32_t), cudaHostAllocDefault), cudaSuccess);
+
+    for (int i = 0; i < n_seq; i++) {
+        auto* slot = reinterpret_cast<int32_t*>(d_slots + static_cast<size_t>(i) * SAMPLE_SCRATCH_BYTES);
+        ASSERT_TRUE(sample_topk_topp_async(logits[i], top_k, top_p, temperature, 42u + i, slot, nullptr));
+    }
+    ASSERT_EQ(cudaMemcpy2DAsync(h_pinned, sizeof(int32_t), d_slots, SAMPLE_SCRATCH_BYTES, sizeof(int32_t),
+                                n_seq, cudaMemcpyDeviceToHost, nullptr),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+    for (int i = 0; i < n_seq; i++)
+        EXPECT_EQ(h_pinned[i], ref[i]) << "topk/topp token diverged for sequence " << i;
+
+    // Greedy async path, same slot mechanics.
+    for (int i = 0; i < n_seq; i++) {
+        auto* slot = reinterpret_cast<int32_t*>(d_slots + static_cast<size_t>(i) * SAMPLE_SCRATCH_BYTES);
+        sample_greedy_async(logits[i], slot, nullptr);
+    }
+    ASSERT_EQ(cudaMemcpy2DAsync(h_pinned, sizeof(int32_t), d_slots, SAMPLE_SCRATCH_BYTES, sizeof(int32_t),
+                                n_seq, cudaMemcpyDeviceToHost, nullptr),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+    for (int i = 0; i < n_seq; i++)
+        EXPECT_EQ(h_pinned[i], ref_greedy[i]) << "greedy token diverged for sequence " << i;
+
+    // The CUB regime (top_k > SAMPLE_MAX_TOP_K) must decline the async path.
+    EXPECT_FALSE(sample_topk_topp_async(logits[0], SAMPLE_MAX_TOP_K + 1, top_p, temperature, 42u,
+                                        reinterpret_cast<int32_t*>(d_slots), nullptr));
+    EXPECT_FALSE(sample_topk_topp_async(logits[0], /*top_k=*/0, top_p, temperature, 42u,
+                                        reinterpret_cast<int32_t*>(d_slots), nullptr))
+        << "top_k<=0 normalizes to vocab and must take the CUB path";
+
+    cudaFreeHost(h_pinned);
+    cudaFree(d_slots);
+    cudaFree(d_ref);
+    for (int i = 0; i < n_seq; i++)
+        free_gpu_tensor(logits[i]);
+}
+
 }  // namespace
 }  // namespace imp

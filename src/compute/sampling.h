@@ -42,6 +42,41 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stre
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
                          int32_t* d_result, cudaStream_t stream = nullptr);
 
+// Enqueue-only variants for the batched decode path: launch the sampler
+// writing the token to d_result[0] (multi-block scratch right after it, so
+// d_result needs SAMPLE_SCRATCH_BYTES like the synchronous variants) with NO
+// readback and NO sync. The caller enqueues one per sequence into its own
+// scratch slot and performs a single pinned D2H + single stream sync for the
+// whole batch — the per-sequence pageable readback serialized batched decode
+// against ~200 us host round-trips each (29% GPU idle at n=16, 2026-07-12).
+// Kernels and parameter normalization are identical to the synchronous
+// variants, so tokens are bit-identical for the same logits and seed.
+// sample_topk_topp_async returns false when top_k (after the <=0 -> vocab
+// normalization) exceeds SAMPLE_MAX_TOP_K -- that regime needs the CUB path,
+// which syncs internally; the caller falls back to the synchronous variant.
+void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream = nullptr);
+bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,
+                            unsigned int seed, int32_t* d_result, cudaStream_t stream = nullptr);
+
+// Row-parallel batched top-k/top-p: ONE partial launch (grid 64 x n_rows) +
+// ONE finalize launch (grid n_rows) sample every row of a decode batch —
+// replacing n_rows serialized <<<64>>> + <<<1>>> launch pairs whose finalize
+// blocks ran one-at-a-time (~10% of GPU time at n=16, nsys 2026-07-12).
+// Per-row reduction geometry (blockIdx.x / gridDim.x) is identical to the
+// per-row variants, so tokens are bit-identical for the same logits/seed.
+// All fields pre-normalized by the caller: top_k in [1, SAMPLE_MAX_TOP_K],
+// temperature > 0 folded into inv_temperature, top_p in (0, 1].
+struct TopkRowArgs {
+    const float* logits;   // this row's [vocab] logits
+    int32_t* d_result;     // this row's SAMPLE_SCRATCH_BYTES slot
+    float inv_temperature;
+    float top_p;
+    unsigned int seed;
+    int top_k;
+};
+void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
+                           cudaStream_t stream = nullptr);
+
 // ---------------------------------------------------------------------------
 // Async (device-side) sampling: writes result to device buffer AND mapped
 // pinned memory. No cudaStreamSynchronize — GPU-side token stays on device.

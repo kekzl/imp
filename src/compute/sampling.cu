@@ -186,6 +186,22 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stre
     return h_result;
 }
 
+void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream) {
+    const int vocab_size = static_cast<int>(logits.shape[0]);
+    const float* d_logits = static_cast<const float*>(logits.data);
+
+    // Same multi-block argmax as sample_greedy(d_result), minus the readback:
+    // the batched decode path gathers all sequences' tokens with one pinned
+    // D2H + one sync (see sampling.h).
+    auto* base = reinterpret_cast<char*>(d_result);
+    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
+                                                                     partial_idxs);
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+}
+
 // ===========================================================================
 // Async (device-side) sampling — no host sync
 // ===========================================================================

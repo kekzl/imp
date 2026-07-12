@@ -185,8 +185,10 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
                                       nullptr;  // must not have shared expert for full residual fusion
 
     if (!ctx.will_skip_residual_copy) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ctx.r.data, ctx.h.data, ctx.h.nbytes(),
-                                           cudaMemcpyDeviceToDevice, stream));
+        // Kernel copy, not cudaMemcpyAsync: the D2D DMA submission blocked
+        // the host ~165 us per call — at one residual copy per MoE layer per
+        // decode step that alone was ~8 ms/step at n=16 (nsys 2026-07-12).
+        device_copy_async(ctx.r.data, ctx.h.data, ctx.h.nbytes(), stream);
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
     // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
