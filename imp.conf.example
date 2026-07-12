@@ -58,6 +58,15 @@ prefill_chunk_decode_cap = 1024
 # slice amortizes (~1-2% at 128). 0 = old head-of-line behavior (the first
 # request runs to completion before the next produces a token).
 hybrid_decode_quantum = 128
+# Pipelined batched decode (concurrent serving, n>=2, CUDA graphs on): keep
+# one decode step in flight — step N+1 (device-side token chain + graph
+# replay) is enqueued before step N's tokens are read back, so host
+# bookkeeping and SSE delivery overlap GPU compute instead of idling it.
+# Engages for async-sampleable requests (greedy / top-k<=128 / top-p,
+# rep/freq/presence penalties included); DRY/mirostat/logit_bias/
+# constraints/logprobs requests use the per-step path. false = always
+# per-step.
+decode_pipeline      = true
 # Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
 # handles + L2 AND pre-arms the decode graph pool so the FIRST real request
 # takes the same graph-kernel path as every later one — without it greedy

@@ -368,6 +368,44 @@ private:
     // split-K splits write sentinels), only growth forces a re-derivation.
     int last_decode_max_ctx_per_graph_[kMaxGraphPoolSize] = {};
 
+    // ── Pipelined batched decode (one step in flight) ────────────────
+    // Step N+1 (device token-chain + forward-graph replay + sampler enqueue
+    // into the other slot-parity half) is enqueued BEFORE step N's tokens
+    // are read back; the host then event-waits on step N's gather only and
+    // does its bookkeeping while the GPU runs N+1. See step_decode_pipeline_.
+    struct BatchedDecodePipeline {
+        bool in_flight = false;
+        int parity = 0;    // slot-set parity of the IN-FLIGHT step
+        int n = 0;
+        int graph_idx = -1;
+        std::vector<std::shared_ptr<Request>> rows;  // batch composition (order fixed)
+        GPUBatch gpu;                                // pool pointers of the entered batch
+        InferenceState base_state;                   // sampling-field template (entry copy)
+        // Rows that host-finished while a chained step was still in flight:
+        // their KV must stay allocated until that step's writes completed
+        // (the chained forward writes their next KV slot), so free_sequence
+        // et al. are deferred to the drain (finish_request_release_).
+        std::vector<std::shared_ptr<Request>> deferred_release;
+    };
+    BatchedDecodePipeline bd_pipe_;
+    // Mapped-pinned block-table patch staging for the chain-advance kernel
+    // (parity-alternated so a set is never rewritten while a kernel may
+    // still read it). Allocated lazily on first pipeline entry.
+    int* h_bt_patch_off_[2] = {nullptr, nullptr};
+    int* h_bt_patch_val_[2] = {nullptr, nullptr};
+    int* d_bt_patch_off_[2] = {nullptr, nullptr};
+    int* d_bt_patch_val_[2] = {nullptr, nullptr};
+    int bt_patch_cap_ = 0;
+    // Per-row device output-token history for penalty rows: the server
+    // defaults to repetition_penalty 1.05, so the common serving row DOES
+    // carry penalties — chained steps sample against this history (host
+    // upload at entry, advance-kernel append per step). Mapped-pinned
+    // per-row append positions, parity-alternated like the patches.
+    int32_t* d_pipe_hist_ = nullptr;
+    int pipe_hist_stride_ = 0;
+    int* h_hist_pos_[2] = {nullptr, nullptr};
+    int* d_hist_pos_[2] = {nullptr, nullptr};
+
     // Prefill graph runner — captures forward_logits for non-last chunks of
     // chunked prefill. Single runner: in practice chunk_len == prefill_chunk_size
     // for all non-last chunks, so per-shape variability collapses to one shape.
@@ -918,6 +956,56 @@ private:
                                      const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
                                      bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
                                      cudaStream_t stream);
+
+    // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
+    // Static per-row / per-batch eligibility for the one-step-in-flight
+    // pipeline (the clean serving case; see runtime.decode_pipeline).
+    bool pipeline_row_eligible_(const Request& r) const;
+    bool pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>>& rows) const;
+    // Build the per-row sampling InferenceState for a CHAINED step (seed one
+    // step ahead of the host-visible output count; rep/freq/presence
+    // penalties read the device-side history including the in-flight token).
+    InferenceState pipeline_row_state_(Request& req, int row_idx) const;
+    // Lazily allocate the mapped-pinned patch/pos staging + the per-row
+    // device history. False = allocation failed (pipeline stays off).
+    bool pipeline_staging_ensure_();
+    // Append KV blocks needed for the chained step (host ctx + 1) and stage
+    // the block-table patches into the mapped-pinned set of `parity`.
+    // Returns -1 on allocation failure / stride overflow, else patch count.
+    int pipeline_prebook_kv_(int parity);
+    // Enqueue the next chained step: advance kernel + graph replay + per-row
+    // sampler enqueue (slot parity `parity`) + async gather. False = could
+    // not enqueue (nothing was put on the stream beyond the advance guard).
+    bool pipeline_enqueue_next_(int parity, cudaStream_t stream);
+    // Entry from step_decode_forward: gather step N async, chain N+1 if
+    // possible, wait N's event and return its tokens. False = caller must
+    // use the legacy synchronous collect path.
+    bool pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const GPUBatch& gpu_batch,
+                         int graph_idx, const InferenceState& state, const Tensor& logits,
+                         cudaStream_t stream, std::vector<int32_t>& tokens_out);
+    // Steady-state handler called at the top of step_decode while a step is
+    // in flight: enqueue N+1 (composition unchanged) or drain, then collect
+    // + process the in-flight step. Always completes one decode step.
+    void step_decode_pipeline_(cudaStream_t stream);
+    // Collect the in-flight step and distribute its tokens (rows no longer
+    // DECODING have their token discarded). Marks newly stopped rows
+    // FINISHED with deferred KV release.
+    void pipeline_collect_process_(cudaStream_t stream);
+    // Run deferred releases once no chained step references those rows' KV.
+    void pipeline_run_deferred_releases_();
+    void finish_request_release_(std::shared_ptr<Request>& req);  // KV/slot half of finish_request
+
+public:
+    // Collect + process an in-flight pipelined step and release deferred KV.
+    // MUST be called before any external KV free while the engine may have a
+    // chained decode step in flight (BatchingEngine cancel path), and runs
+    // implicitly before prefill work and on composition changes.
+    void drain_decode_pipeline();
+    // Exception-path variant: drop the in-flight step without waiting on the
+    // (possibly poisoned) device; still runs deferred KV releases.
+    void abandon_decode_pipeline();
+
+private:
 
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.

@@ -5,6 +5,30 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Pipelined batched decode** (`runtime.decode_pipeline`, default on): at
+  n≥2 with CUDA graphs, the engine keeps ONE decode step in flight — step
+  N+1 (a device-side chain-advance kernel feeds step N's sampled slot
+  tokens as input ids and bumps positions/context lens/block tables, then
+  the forward graph replays and the per-row samplers enqueue into a second
+  slot-parity half) is enqueued BEFORE step N's tokens are read back, and
+  the host waits on an event recorded after step N's gather only. Host
+  bookkeeping, scheduler work and SSE delivery now overlap GPU compute
+  instead of idling it. Measured on Qwen3-Coder-30B-A3B-FP4 @16 sustained
+  closed-loop STREAMING serving (the mode where per-token host work is
+  real): 915 → 970 tok/s aggregate median (+6.0%, 6 trials each, healthy
+  clocks sampled during runs), TPOT 17.0 → 16.1 ms; non-streaming @16 is
+  parity within the harness noise, single-stream (n=1 never pipelines)
+  unchanged.
+  Engages for async-sampleable rows (greedy / top-k ≤ 128 / top-p / min-p /
+  typical-p; rep/freq/presence penalties — the server default — are served
+  via a per-row device-side token history that the chain-advance kernel
+  keeps current) on non-SSM models without SWA/StreamingLLM/residual-KV;
+  DRY/constraints/logprobs/mirostat/logit-bias rows and everything else
+  keep the per-step path unchanged. Rows that stop while
+  a chained step is in flight have their KV release deferred until that
+  step completes (`drain_decode_pipeline`); uniform-composition runs are
+  bit-identical to the per-step path (pinned by
+  `EngineIntegrationTest.PipelinedBatchedDecodeMatchesPerStep`).
 - **Concurrent decode @16 on the hero MoE: 861 → 1 173 tok/s sustained
   (+36%)** — now above the published vLLM reference for the same model class
   on an RTX 5090 (1 157 aggregate / 13.6 ms TPOT, cloudrift.ai) at per-stream

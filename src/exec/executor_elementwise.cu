@@ -420,6 +420,9 @@ __global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __re
         dst[i] = src[i];
 }
 
+// decode_pipeline_advance: own TU (decode_pipeline_advance.cu) — serving-
+// hot-path unit; keeps this grab-bag under the kernel file-size gate.
+
 void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
     if (bytes == 0 || dst == src)
         return;

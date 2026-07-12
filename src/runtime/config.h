@@ -128,6 +128,17 @@ struct RuntimeConfig {
         // (128 ≈ 1-2% at typical hybrid decode rates). 0 restores the old
         // head-of-line behavior (first request runs to completion).
         int hybrid_decode_quantum = 128;
+        // Pipelined batched decode (n>=2, CUDA graphs on): keep ONE decode
+        // step in flight — step N+1 (device-side token chain + graph replay
+        // + sampler enqueue) is enqueued BEFORE step N's tokens are read
+        // back, so host bookkeeping/SSE delivery overlaps GPU compute
+        // instead of idling it (the ~15-20% step tail at n=16, 2026-07-12).
+        // Engages for async-sampleable rows (greedy / top-k<=128 / top-p /
+        // min-p / typical-p; rep/freq/presence penalties served via a
+        // device-side token history) on non-SSM models. Rows with DRY/
+        // mirostat/logit-bias/constraints/logprobs, and SWA/StreamingLLM/
+        // residual-KV configs, keep the per-step path.
+        bool decode_pipeline = true;
     } runtime;
 
     struct KVCache {

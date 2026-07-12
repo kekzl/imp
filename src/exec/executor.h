@@ -39,6 +39,20 @@ namespace imp {
 class LoraAdapter;
 struct LoraWeights;
 
+// Pipelined batched-decode chain advance (decode_pipeline_advance.cu): feed
+// step N's sampled slot tokens as step N+1's input ids, bump positions and
+// context lens, append each token to the per-row device output history
+// (penalty rows sample step N+1 against a history including the token the
+// host has not read yet), scatter freshly appended block-table entries.
+// Patch/pos arrays must be device-readable — the engine passes mapped
+// pinned memory. Declared here (host-safe) instead of executor_kernels.h
+// so host-only TUs (engine_scheduler.cpp) can launch it.
+void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
+                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
+                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
+                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
+                             const int* d_hist_pos, cudaStream_t stream);
+
 // Nvfp4DecodeContext moved to exec/quant_pipeline.h (build-only; consumed by
 // the QuantPipeline phase-3 helpers).
 
@@ -158,6 +172,28 @@ public:
                                          cudaStream_t stream = nullptr);
     const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
     int sample_slots() const { return sample_slots_; }
+
+    // Parity-buffered sampling for the pipelined batched decode (one step in
+    // flight): the slot region, pinned gather buffer, and top-k row-args
+    // staging are allocated x2, and set_sample_parity selects which half the
+    // async enqueue/flush/gather use. This lets step N+1's sampler chains be
+    // enqueued (writing slot set p^1) while step N's tokens (slot set p) are
+    // still in flight to the host. gather_sampled_tokens_async replaces
+    // collect_sampled_tokens' stream sync with an event recorded after the
+    // strided D2H; wait_gathered_tokens syncs that event only — the engine
+    // thread never waits on work enqueued after the gather.
+    // All non-pipelined callers run at parity 0 (identical to the old layout).
+    void set_sample_parity(int parity) { sample_parity_ = parity & 1; }
+    int sample_parity() const { return sample_parity_; }
+    bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
+    const int32_t* wait_gathered_tokens(int parity);
+    // Device pointer of slot 0 of the given parity set (the chain-advance
+    // kernel reads sampled tokens strided by SAMPLE_SCRATCH_BYTES from here).
+    const int32_t* sample_slot_base(int parity) const;
+    bool sample_pipeline_ready() const {
+        return d_sample_result_ && h_sample_pinned_ && h_row_args_ && d_row_args_ &&
+               sample_gather_evt_[0] && sample_gather_evt_[1];
+    }
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
                                       cudaStream_t stream = nullptr);
 
@@ -561,12 +597,13 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
+    void flush_pending_topk_rows_(cudaStream_t stream);
     // Row-batched top-k/top-p staging: sample_single_from_logits_async STASHES
     // eligible rows here instead of launching; collect_sampled_tokens uploads
     // the args (one pinned H2D) and fires ONE partial + ONE finalize launch
     // for the whole batch. Greedy rows launch immediately (2 cheap kernels).
-    TopkRowArgs* h_row_args_ = nullptr;  // pinned, sample_slots_ entries
-    TopkRowArgs* d_row_args_ = nullptr;  // device mirror
+    TopkRowArgs* h_row_args_ = nullptr;  // pinned, 2 x sample_slots_ entries (parity halves)
+    TopkRowArgs* d_row_args_ = nullptr;  // device mirror (same layout)
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
     int pending_topk_vocab_ = 0;
@@ -577,10 +614,13 @@ private:
     int banned_cache_n_ = 0;
     size_t banned_cache_capacity_ = 0;
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
-                                          // (sample_slots_ x SAMPLE_SCRATCH_BYTES; slot 0 = single-seq)
+                                          // (2 x sample_slots_ x SAMPLE_SCRATCH_BYTES parity
+                                          // halves; slot 0 of parity 0 = single-seq)
     int32_t* h_sample_pinned_ = nullptr;  // pinned host buffer for async D2H sample result
-                                          // (sample_slots_ int32s)
-    int sample_slots_ = 0;                // batched sampling slots (= max_batch_size)
+                                          // (2 x sample_slots_ int32s, parity halves)
+    int sample_slots_ = 0;                // batched sampling slots per parity set (= max_batch_size)
+    int sample_parity_ = 0;               // active parity half for async enqueue/flush/gather
+    cudaEvent_t sample_gather_evt_[2] = {nullptr, nullptr};  // per-parity gather-done events
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory

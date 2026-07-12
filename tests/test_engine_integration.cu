@@ -265,5 +265,148 @@ TEST(EngineIntegrationTest, FP8PrefillNVFP4Decode) {
     tm.cleanup();
 }
 
+// ---------------------------------------------------------------------------
+// Test 8: pipelined batched decode (runtime.decode_pipeline) vs per-step.
+//
+// Both variants run four concurrent requests with CUDA graphs ON (the
+// pipeline requires a captured decode graph), mixed greedy + seeded top-k
+// rows, ignore_eos (removes token-dependent early stops), and generations
+// long enough to cross a KV block boundary (exercising the device-side
+// block-table patch of the chain-advance kernel).
+// ---------------------------------------------------------------------------
+namespace {
+
+// Run one concurrent batch on an EXISTING engine and return per-request
+// outputs. Both A/B legs of the pipeline identity tests run on the SAME
+// engine after a warm batch: a fresh engine's graph captures pick cuBLAS
+// algorithms from instance-local autotune state, and cross-instance captures
+// can differ by ±ulp in the logits — enough to flip a top-k draw at a
+// near-tie even though both paths are individually correct (observed as a
+// build-dependent 175↔3 mirror flip at one index). After the warm batch
+// raised the pow2-ctx bucket HWM, both legs replay the SAME captured execs
+// for every step, so tokens must match bit-for-bit.
+std::vector<std::vector<int32_t>> run_pipelined_batch(Engine& engine, bool pipeline,
+                                                      const std::vector<int>& max_tokens) {
+    engine.mutable_runtime_config().runtime.decode_pipeline = pipeline;
+
+    std::vector<std::shared_ptr<Request>> reqs;
+    for (int r = 0; r < static_cast<int>(max_tokens.size()); r++) {
+        auto req = std::make_shared<Request>();
+        req->input_tokens = {int32_t(10 + r), int32_t(20 + r), int32_t(30 + r), int32_t(40 + r)};
+        req->max_tokens = max_tokens[r];
+        req->ignore_eos = true;
+        if (r % 2 == 0) {
+            req->temperature = 0.0f;  // greedy rows
+        } else {
+            req->temperature = 0.8f;  // seeded top-k/top-p rows
+            req->top_k = 40;
+            req->top_p = 0.95f;
+        }
+        // Server-default penalties on every row (imp-server sends
+        // repetition_penalty 1.05 unless overridden) — the pipeline serves
+        // them via the device-side history; row 2 adds freq/presence.
+        req->repetition_penalty = 1.05f;
+        if (r == 2) {
+            req->frequency_penalty = 0.3f;
+            req->presence_penalty = 0.2f;
+        }
+        req->seed = 1234 + r;
+        reqs.push_back(req);
+        engine.add_request(req);
+    }
+
+    int steps = 0;
+    auto all_done = [&] {
+        for (auto& r : reqs)
+            if (r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED)
+                return false;
+        return true;
+    };
+    while (!all_done() && steps < 400) {
+        (void)engine.step();
+        steps++;
+    }
+    EXPECT_TRUE(all_done()) << "batch did not finish after " << steps
+                            << " steps (pipeline=" << pipeline << ")";
+    std::vector<std::vector<int32_t>> outputs;
+    for (auto& r : reqs)
+        outputs.push_back(r->output_tokens);
+    return outputs;
+}
+
+}  // namespace
+
+// Uniform max_tokens: the batch composition never changes mid-run, so every
+// step of both variants runs at the same batch size — tokens must match
+// bit-for-bit (same kernels, same seeds, same filters; the chained steps
+// only move the token/position/ctx feed device-side). A warm batch raises
+// the pow2-ctx graph buckets first so both legs replay identical execs
+// (see run_pipelined_batch).
+TEST(EngineIntegrationTest, PipelinedBatchedDecodeMatchesPerStep) {
+    SKIP_IF_NO_CUDA();
+
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 128);
+    gemm_init();
+    auto cfg = test_engine_config();
+    cfg.max_batch_size = 4;
+    cfg.max_seq_len = 128;
+    cfg.use_cuda_graphs = true;
+    {
+        Engine engine;
+        ASSERT_TRUE(engine.init(tm.model, cfg));
+
+        (void)run_pipelined_batch(engine, false, {26, 26, 26, 26});  // warm captures
+        auto per_step = run_pipelined_batch(engine, false, {24, 24, 24, 24});
+        auto piped = run_pipelined_batch(engine, true, {24, 24, 24, 24});
+
+        ASSERT_EQ(per_step.size(), piped.size());
+        for (size_t r = 0; r < per_step.size(); r++) {
+            EXPECT_EQ(per_step[r], piped[r]) << "token divergence in request " << r;
+        }
+    }
+    tm.cleanup();
+}
+
+// Staggered max_tokens: rows finish while a chained step is in flight —
+// exercises deferred KV release, pipeline drain, and re-entry at n-1.
+// Tokens produced while the composition is identical must match; after the
+// first row leaves, the pipelined run's boundary step legitimately computes
+// at the old batch size (FP reduction order may differ at near-ties), so
+// only lengths are asserted beyond the common prefix.
+TEST(EngineIntegrationTest, PipelinedBatchedDecodeStaggeredFinish) {
+    SKIP_IF_NO_CUDA();
+
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 128);
+    gemm_init();
+    auto cfg = test_engine_config();
+    cfg.max_batch_size = 4;
+    cfg.max_seq_len = 128;
+    cfg.use_cuda_graphs = true;
+    {
+        Engine engine;
+        ASSERT_TRUE(engine.init(tm.model, cfg));
+
+        const std::vector<int> mts = {18, 20, 22, 24};
+        (void)run_pipelined_batch(engine, false, {26, 26, 26, 26});  // warm captures
+        auto per_step = run_pipelined_batch(engine, false, mts);
+        auto piped = run_pipelined_batch(engine, true, mts);
+
+        ASSERT_EQ(per_step.size(), piped.size());
+        for (size_t r = 0; r < per_step.size(); r++) {
+            ASSERT_EQ(per_step[r].size(), static_cast<size_t>(mts[r]))
+                << "per-step length, req " << r;
+            ASSERT_EQ(piped[r].size(), static_cast<size_t>(mts[r]))
+                << "pipelined length, req " << r;
+            const size_t common = std::min<size_t>(mts[0], mts[r]);
+            for (size_t i = 0; i < common; i++) {
+                EXPECT_EQ(per_step[r][i], piped[r][i])
+                    << "token divergence in request " << r << " at index " << i
+                    << " (inside the identical-composition prefix)";
+            }
+        }
+    }
+    tm.cleanup();
+}
+
 }  // namespace
 }  // namespace imp
