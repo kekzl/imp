@@ -752,6 +752,13 @@ private:
     int* d_spec_context_len_ = nullptr;
     int32_t* d_spec_argmax_ = nullptr;
     int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
+    // #964 decode-attention verify route (dense, eager): per-row context lens
+    // [chunk_cap] and row-replicated block tables [chunk_cap * table_cap] so
+    // the chunk's attention runs the batched-decode split-K kernels — row i
+    // becomes a same-KV "sequence" with ctx p0+1+i (causality via lengths).
+    int* d_spec_row_ctx_lens_ = nullptr;
+    int* d_spec_row_block_tables_ = nullptr;
+    std::vector<int32_t> h_spec_row_tables_;  // host staging, reused per step
     int spec_chunk_cap_ = 0;
     int spec_block_table_cap_ = 0;
     // Hybrid (SSM/GDN) verify: device scratch holding the committed

@@ -71,7 +71,12 @@ int Engine::spec_capture_ctx_tier_(int ctx_padded) const {
 
 int Engine::spec_capture_bucket_(int chunk_len) const {
     const int cap = std::max(chunk_len, spec_capture_bucket_max_());
-    for (int b : {9, 17, 33}) {
+    // 3/5 buckets (#964): the decode-attention verify route derives its
+    // split-K count from the PADDED row count at capture time — a 2-row
+    // draft padded to 9 rows baked 5 splits instead of 21 and the per-CTA
+    // KV walk grew 4x (251 vs 65 us/layer at 16k). Finer buckets keep the
+    // baked split geometry close to the real chunk; pad rows attend 1 token.
+    for (int b : {3, 5, 9, 17, 33}) {
         if (chunk_len <= b && b <= cap)
             return b;
     }
