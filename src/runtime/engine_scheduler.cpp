@@ -870,8 +870,22 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // moe_prefill_uncapturable: legacy host-args MoE prefill (GGUF Q*_K
         // MoE) reads routing on the host — its capture guard throws and the
         // aborted capture costs a wasted forward per chunk. Run eager (#874).
+        // Quantized KV append runs a dynamic-scale reduction with a D2H
+        // absmax sync per chunk — illegal under capture (the capture aborts
+        // every chunk, spamming errors and wasting one forward per chunk).
+        // F16 KV is the only append path that captures cleanly; run the rest
+        // eager.
+        const bool kv_append_capturable = (config_.kv_cache_dtype == QType::F16);
+        // Continuation chunks (offset > 0) bake ctx_len/q_offset as host args
+        // into the attention launches, so a replay only fits the exact same
+        // offset — which never repeats within a request. Replaying chunk 1's
+        // graph for chunk 2+ attended with chunk-1 geometry and silently
+        // truncated long-context prefill (#981: teacher-forced PPL
+        // 8.30 -> 15.35 past chunk 2). Capture only the offset-0 chunk, whose
+        // geometry DOES repeat across requests; continuations run eager.
         const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
-                                 !ends_at_snapshot && !executor_->nvfp4_dequant_uncapturable() &&
+                                 kv_append_capturable && offset == 0 && !ends_at_snapshot &&
+                                 !executor_->nvfp4_dequant_uncapturable() &&
                                  !executor_->moe_prefill_uncapturable();
         if (can_capture) {
             const int block_count = static_cast<int>(block_table.size());

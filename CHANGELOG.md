@@ -4,6 +4,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **Prefill CUDA graph replayed stale chunk geometry on continuation chunks**
+  (#981): the captured chunk forward bakes `ctx_len`/`q_offset` as host args
+  into the attention launches, and the graph was only invalidated on
+  (chunk_len, block_count) changes — so chunk 2+ of a multi-chunk prefill
+  replayed chunk 1's graph and attended with chunk-1 geometry, silently
+  truncating long context (teacher-forced PPL 8.30 → 15.35 past the second
+  chunk on Qwen3-4B Q8). The scheduler now captures only offset-0 chunks
+  (whose geometry repeats across requests); continuation chunks run eager.
+  Exposure was narrow — quantized-KV appends abort the capture (see below)
+  and the NVFP4 M>1 dequant fallback marks most GGUF models uncapturable —
+  but any capturable fp16-KV config with prompts past one chunk was silently
+  wrong. Regression test: ChunkedPrefillTest.LongContext_Chunk_Invariance_GraphsOn.
+- **Quantized-KV prefill chunks no longer attempt graph capture**: the
+  dynamic-scale KV append does a D2H absmax sync per chunk, which is illegal
+  under capture — every chunk aborted its capture, spamming CUDA errors and
+  wasting one full forward per chunk (Qwen3 GGUFs have been on FP8-KV-auto
+  since #977, so every >2048-token prompt paid this). F16 KV remains the only
+  capturable append path; the rest run eager without the wasted forward.
+
 ## [0.19.0] - 2026-07-12
 
 Highlights: first cross-engine PPL-parity measurement (release bar 1) with two
