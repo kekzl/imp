@@ -95,7 +95,8 @@ static std::string generate_greedy(const char* model_path, const std::string& pr
 // Teacher-forced perplexity of `prompt` at a given prefill_chunk_size.
 // Returns -1.0 on any API failure.
 static double ppl_for_chunk(const char* model_path, const std::string& prompt,
-                            int chunk_size, bool use_fp8_kv = false) {
+                            int chunk_size, bool use_fp8_kv = false,
+                            bool enable_graphs = false) {
     ImpModel model = nullptr;
     if (imp_model_load(model_path, IMP_FORMAT_GGUF, &model) != IMP_SUCCESS || !model)
         return -1.0;
@@ -112,7 +113,7 @@ static double ppl_for_chunk(const char* model_path, const std::string& prompt,
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 4096;
     cfg.max_batch_size = 1;
-    cfg.enable_cuda_graphs = 0;
+    cfg.enable_cuda_graphs = enable_graphs ? 1 : 0;
     cfg.prefill_chunk_size = chunk_size;
     if (use_fp8_kv)
         cfg.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
@@ -329,6 +330,32 @@ TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance) {
         ASSERT_GT(ppl, 0.0) << "chunk=" << chunk << " perplexity failed";
         EXPECT_NEAR(ppl, base, base * kFp16RelTol)
             << "chunk=" << chunk << " long-context teacher-forced PPL diverges";
+    }
+}
+
+// Same invariance with CUDA graphs ON (FP16 KV). Guards the prefill-graph
+// replay path (#981): the captured chunk forward bakes ctx_len/q_offset as
+// host args, so replaying an earlier chunk's graph for a continuation chunk
+// attends with stale geometry and silently truncates long context — the
+// scheduler must not reuse a prefill graph across chunk offsets. Whether the
+// graph actually captures depends on the model's capturability gates; the
+// invariance must hold either way.
+TEST_F(ChunkedPrefillTest, LongContext_Chunk_Invariance_GraphsOn) {
+    const char* path = llama_3b_path();
+    if (!model_exists(path))
+        GTEST_SKIP() << "model not present: " << path;
+
+    const std::string prompt = long_prompt();  // ~3.1k tokens, >2 non-last chunks at chunk=512
+
+    const double base = ppl_for_chunk(path, prompt, /*chunk=*/0);
+    ASSERT_GT(base, 0.0) << "reference perplexity failed";
+
+    for (int chunk : {512, 1024}) {
+        const double ppl =
+            ppl_for_chunk(path, prompt, chunk, /*use_fp8_kv=*/false, /*enable_graphs=*/true);
+        ASSERT_GT(ppl, 0.0) << "chunk=" << chunk << " perplexity failed";
+        EXPECT_NEAR(ppl, base, base * kFp16RelTol)
+            << "chunk=" << chunk << " graphs-on long-context PPL diverges (#981 class)";
     }
 }
 
