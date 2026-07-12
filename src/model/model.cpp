@@ -253,6 +253,38 @@ bool kv_fp8_hint_default_safe(ModelArch arch) {
     }
 }
 
+// Arch families verified safe for default FP8 KV WITHOUT a checkpoint hint.
+// GGUF exports never declare kv_cache_quant_algo, so the hint gate alone left
+// every GGUF model on FP16 KV — measured −39%..−41% decode at 16k context
+// (Qwen3-8B Q8_0: 150→211 tok/s with FP8 KV, 2026-07-12). Evidence bar is
+// stricter than the hint list (the author did not opt in): teacher-forced PPL
+// over a ~13.5k-token corpus at max_seq_len 16384, FP8 vs FP16 KV, fresh
+// process per run, measured 2026-07-12:
+//   QWEN3     Qwen3-8B Q8_0    11.0906 → 11.0962 (+0.05%, bit-stable ×3 runs)
+//             Qwen3-14B Q6_K    9.4706 →  9.4797 (+0.10%, bit-stable ×2)
+//   QWEN3_MOE Qwen3-30B Q4_K_M  mean 11.506 → 11.489 (−0.15%, 3 runs/arm —
+//             inside the ±0.17% MoE run-to-run spread; neutral)
+// Measured but NOT added (same session):
+//   QWEN36_MOE: GGUF 35B UD-Q4KM is neutral (−0.15%, 3 runs/arm), but the
+//     no-hint list is arch-wide and would also flip Qwen3.6-35B-NVFP4, where
+//     FP8 KV costs a REAL +1.47% PPL (13.746→13.948 mean, arms non-overlapping
+//     across 2 runs each — NVFP4 attention weights compound with FP8 KV).
+//     Hybrids also have a small KV surface (most layers are GDN), so the
+//     long-context decode upside is small; not worth the NVFP4 quality cost.
+//   LLAMA: Llama-3.2-3B Q8_0 reads +0.87%, but its baseline PPL on the gate
+//     corpus is broken-high (252 — same class as the GEMMA4 ~243 exclusion),
+//     so the measurement doesn't clear the evidence bar. Phi-4-style LLAMA
+//     checkpoints that DO declare the hint still upgrade via the hint list.
+bool kv_fp8_no_hint_default_safe(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::QWEN3:
+        case ModelArch::QWEN3_MOE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int model_arch_c_api_id(ModelArch arch) { return lookup_arch(arch).c_api_id; }
 
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {

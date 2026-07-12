@@ -94,8 +94,11 @@ no_vision_graph      = false
 [kv_cache]
 # KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
 # models whose author declares kv_cache_quant_algo=FP8 and whose arch family is
-# verified safe for long-context FP8 KV (currently Qwen3 dense + Qwen3 MoE; ~768
-# MiB saved, +~1% PPL). "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
+# verified safe for long-context FP8 KV (Qwen3 dense/MoE, llama, nemotron_h_moe;
+# ~768 MiB saved, +~1% PPL). Since 2026-07-12 "auto" ALSO upgrades hint-less
+# checkpoints (i.e. every GGUF) for arch families measured PPL-neutral at 16k
+# context (Qwen3 dense + Qwen3 MoE): +41% decode at 16k on Qwen3-8B Q8_0.
+# "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
 dtype                       = "auto"
 # Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
 # but reproducibility is lost.

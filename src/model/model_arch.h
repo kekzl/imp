@@ -31,6 +31,14 @@ const char* model_arch_name(ModelArch arch);
 // model.cpp for the measured per-family evidence. Keep the list conservative.
 bool kv_fp8_hint_default_safe(ModelArch arch);
 
+// True iff this arch family has been empirically verified safe for DEFAULT FP8 KV
+// even when the checkpoint declares NO kv_cache_quant_algo hint (GGUF exports never
+// carry one, so the hint gate alone left GGUF long-context decode on FP16 KV —
+// −39% at 16k on Qwen3-8B Q8_0). Stricter evidence bar than the hint list: the
+// author didn't opt in, so the family must gate ~neutral, not merely ≤1.5%. See
+// model.cpp for the per-family evidence and the measured exclusions.
+bool kv_fp8_no_hint_default_safe(ModelArch arch);
+
 // C API enum value for this architecture.
 int model_arch_c_api_id(ModelArch arch);
 

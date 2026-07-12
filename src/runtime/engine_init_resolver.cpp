@@ -195,6 +195,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
                          "kv_cache_quant_algo=FP8; %s verified safe for long-context FP8 KV; "
                          "set kv_cache.dtype=fp16 to opt out)",
                          model_arch_name(mcfg.arch));
+        } else if (kv_str == "auto" && kv_fp8_no_hint_default_safe(mcfg.arch)) {
+            // No checkpoint hint (GGUF exports never carry one) — upgrade on the
+            // stricter arch-measured no-hint gate. Long-context GGUF decode was
+            // leaving −39% at 16k on the table under the hint-only policy.
+            config_.kv_cache_dtype = QType::FP8_E4M3;
+            IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — %s measured PPL-neutral for "
+                         "long-context FP8 KV without a checkpoint hint; "
+                         "set kv_cache.dtype=fp16 to opt out)",
+                         model_arch_name(mcfg.arch));
         }
     }
 

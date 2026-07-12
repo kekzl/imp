@@ -5,6 +5,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **FP8 KV cache now auto-enables on GGUF Qwen3 dense/MoE**
+  (`kv_cache.dtype = "auto"`): the auto policy previously honored only the
+  checkpoint's `kv_cache_quant_algo=FP8` hint, which GGUF exports never
+  declare — long-context GGUF decode was leaving −39..41% on the table
+  (Qwen3-8B Q8_0 at 16k context: 150 → 211 tok/s with FP8 KV). A new
+  stricter no-hint arch gate (`kv_fp8_no_hint_default_safe`) upgrades
+  hint-less checkpoints for families measured PPL-neutral at 16k
+  (teacher-forced, ~13.5k-token corpus, fresh process per run): QWEN3
+  (Q8_0 +0.05%, Q6_K +0.10%, bit-stable) and QWEN3_MOE (Q4_K_M −0.15%,
+  3 runs/arm). Measured but excluded: QWEN36_MOE (GGUF neutral, but the
+  arch-wide flip would cost the NVFP4 35B a real +1.47% PPL and hybrids
+  have little KV surface to win back) and LLAMA (gate-corpus baseline
+  broken). Short-context decode is not a trade-off either: same-day
+  baseline-method tg128 reads +2.9% with FP8 KV (287.8 vs 279.7 median).
+  The perf baseline is deliberately NOT re-pinned in this PR — it was
+  measured on a top-of-range host day and baking it in would repeat the
+  #697 peak-day false-fail; the existing (FP16-measured) bar stays valid
+  and conservative under the faster FP8 default. Opt out with
+  `kv_cache.dtype = "fp16"`.
 - **`gemm.nvfp4_lm_head_cutlass` is now default ON** — the batched-decode
   (n>1) LM head runs as one CUTLASS NVFP4 tensor-core GEMM (one LM-head
   weight read per batch instead of ceil(n/4)), which was the opt-in behind

@@ -52,6 +52,21 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
+// The NO-HINT FP8-KV gate (kv_cache.dtype=auto on checkpoints without a
+// kv_cache_quant_algo hint — i.e. every GGUF). Stricter bar than the hint list:
+// the family must gate ~PPL-neutral at 16k context. See model.cpp for the
+// 2026-07-12 evidence and the measured exclusions (QWEN36_MOE: +1.47% real on
+// the NVFP4 variant; LLAMA: gate-corpus baseline broken).
+TEST(RuntimeConfigTest, KvFp8NoHintDefaultSafeAllowlist) {
+    EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3));
+    EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3_MOE));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::LLAMA));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::NEMOTRON_H_MOE));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::GEMMA4));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::GENERIC));
+}
+
 TEST(RuntimeConfigTest, ParsesBasicSections) {
     TempFile f(R"(
 [runtime]
