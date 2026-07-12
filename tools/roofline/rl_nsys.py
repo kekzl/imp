@@ -35,7 +35,11 @@ def docker_nsys_cmd(cfg, out_host_dir, out_base_name, imp_cli_args, extra_env=No
         d["image"],
         "profile",
         f"--trace={cfg['nsys']['trace']}",
-        "--cuda-memory-usage=true",
+        # NO --cuda-memory-usage: nothing in the pipeline reads the memory
+        # tables, and on this WSL2 driver the flag makes the nsys injection
+        # SIGSEGV gpt-oss-20b at model teardown (valid cudaFreeAsync burst +
+        # mempool trims; app dies before the CUPTI flush -> rep has no kernel
+        # rows). Kernel/API/NVTX timing is unaffected. Isolated 2026-07-13.
         "--force-overwrite=true",
         "--stats=false",
         "--sample=none", "--cpuctxsw=none", "--backtrace=none",
