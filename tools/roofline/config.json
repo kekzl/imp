@@ -147,6 +147,12 @@
       "family": "nvfp4",
       "arch": "hybrid",
       "comment": "GDN+MoE hybrid hero: FA2 hd=256 attention (#932), FP8 SSM-projection sidecar decode (#949), CUTLASS grouped GEMM prefill"
+    },
+    "gptoss-moe": {
+      "path": "/models/gpt-oss-20b",
+      "family": "nvfp4",
+      "arch": "moe",
+      "comment": "gpt-oss-20b MXFP4 SafeTensors hero (#984 decode-tie vs llama.cpp): BF16 dense + NVFP4-converted experts, attention sinks + alternating SWA. Added additively under config_version 4 — the accompanying regex additions (gpt_oss_glu / bias / moe_add_*_bias) can only match kernels absent from all pre-existing cells (cv4 pin measured 0 unclassified), so cv4 runs stay comparable."
     }
   },
   "shapes": {
@@ -274,7 +280,7 @@
     {
       "name": "moe_routing",
       "group": "misc",
-      "regex": "topk_gating|moe_align|expert_count|gather_expert|gemv_gate_fp32|moe_weighted_sum|moe_scatter_fused|moe_fused_permute|moe_gather|moe_compute_M"
+      "regex": "topk_gating|moe_align|expert_count|gather_expert|gemv_gate_fp32|moe_weighted_sum|moe_scatter_fused|moe_fused_permute|moe_gather|moe_compute_M|moe_add_logit_bias|moe_add_expert_bias"
     },
     {
       "name": "kv_gather",
@@ -334,7 +340,7 @@
     {
       "name": "elementwise",
       "group": "misc",
-      "regex": "silu|swiglu|geglu|gelu|residual_add|add_residual|fp32_to_fp16|fp16_to_fp32|embed|copy_|cast_|elementwise_add|scale_fp16"
+      "regex": "silu|swiglu|geglu|gelu|residual_add|add_residual|fp32_to_fp16|fp16_to_fp32|embed|copy_|cast_|elementwise_add|scale_fp16|gpt_oss_glu|bias"
     }
   ],
   "roofline": {
