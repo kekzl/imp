@@ -39,7 +39,7 @@ namespace imp {
 class LoraAdapter;
 struct LoraWeights;
 
-// Pipelined batched-decode chain advance (executor_elementwise.cu): feed
+// Pipelined batched-decode chain advance (decode_pipeline_advance.cu): feed
 // step N's sampled slot tokens as step N+1's input ids, bump positions and
 // context lens, append each token to the per-row device output history
 // (penalty rows sample step N+1 against a history including the token the

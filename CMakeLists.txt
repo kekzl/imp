@@ -293,6 +293,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/executor_elementwise.cu
+    src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cu
     src/exec/pre_dequant_phase3_cutlass.cu
     src/exec/pre_dequant_phase3_moe.cu
