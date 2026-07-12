@@ -185,6 +185,14 @@ static Tokenizer make_gpt2_tokenizer() {
     (void)llo_id;
     (void)Hello_id;
 
+    // "->" merged token: only reachable when the pre-tokenizer keeps symbol
+    // runs together (qwen2/qwen35 routing test below).
+    std::string dash_tok = codepoint_to_utf8(BYTE_TO_CP['-']);
+    std::string gt_tok = codepoint_to_utf8(BYTE_TO_CP['>']);
+    std::string arrow_tok = dash_tok + gt_tok;
+    tokens.push_back(arrow_tok);
+    scores.push_back(0.0f);
+
     Tokenizer tok;
     tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
     tok.set_type("gpt2");
@@ -196,6 +204,7 @@ static Tokenizer make_gpt2_tokenizer() {
         l_tok + " " + l_tok,     // l + l -> ll (rank 1)
         ll_tok + " " + o_tok,    // ll + o -> llo (rank 2)
         He_tok + " " + llo_tok,  // He + llo -> Hello (rank 3)
+        dash_tok + " " + gt_tok, // - + > -> -> (rank 4)
     };
     tok.load_merges(merges);
 
@@ -672,6 +681,23 @@ TEST(Qwen2PreTokenizeTest, NewlineRuns) {
 
 TEST(Qwen2PreTokenizeTest, TrailingWhitespace) {
     EXPECT_EQ(qwen2_pre_tokenize("abc   "), (Chunks{"abc", "   "}));
+}
+
+// Qwen3.5/3.6 GGUFs declare tokenizer.ggml.pre = "qwen35" (qwen2 rules plus
+// \p{M} in the letter run — identical on ASCII). The routing used to fall
+// through to the gpt2 per-char-punct fallback, over-splitting symbol runs
+// (+13% tokens on the 35B hero corpus) and making canonical merges
+// unreachable.
+TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
+    Tokenizer tok = make_gpt2_tokenizer();
+    tok.set_pre_tokenizer("qwen2");
+    const auto qwen2_ids = tok.encode("x->y", /*no_prefix=*/true);
+    tok.set_pre_tokenizer("qwen35");
+    EXPECT_EQ(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
+    // gpt2 fallback splits "->" per char, so the merged token stays
+    // unreachable — guards against qwen35 regressing to the fallback.
+    tok.set_pre_tokenizer("gpt2");
+    EXPECT_NE(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
 }
 
 // ---- o200k pre-tokenizer (gpt-oss / GPT-4o, #657) ----

@@ -122,8 +122,22 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         dctx.entries.push_back({w.data, w, qtype, from_scratch});
     };
 
-    // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
-    collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
+    // LM head first: largest single weight (vocab × d_model), biggest bandwidth
+    // win. Same gates as the native-precision paths (executor_pre_dequant plan /
+    // nvfp4_decode_cache_fp16_lm_head_): gemm.nvfp4_lm_head opts out entirely,
+    // GDN/SSM hybrids keep the source-precision head unless nvfp4_lm_head_gdn.
+    // This call used to be unconditional, which silently voided both opt-outs
+    // on every quantized-source (GGUF) checkpoint (PPL-parity audit 2026-07-12).
+    {
+        const auto& prof = model_->profile();
+        const bool gdn_head_ok = !(prof.is_gdn || prof.is_ssm) ||
+                                 runtime_config().gemm.nvfp4_lm_head_gdn;
+        if (runtime_config().gemm.nvfp4_lm_head && gdn_head_ok)
+            collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
+        else
+            IMP_LOG_INFO("NVFP4 LM head: skipped (gemm.nvfp4_lm_head%s)",
+                         gdn_head_ok ? "=false" : "_gdn=false, GDN/SSM hybrid");
+    }
 
     // Dense attention + FFN: every tensor benefits every decode step.
     for_each_dense_weight(*model_, cfg, [&](const Tensor& w, QType qtype) {
