@@ -5,7 +5,7 @@
 <p align="center">
   From-scratch CUDA inference engine for the NVIDIA RTX 5090 (<code>sm_120a</code>).<br>
   The best single-GPU backend for <b>agentic AI</b>: tool calling, long-context loops, reasoning and concurrent sub-agents,<br>
-  on top of the fastest single-user inference on the 5090: faster decode than llama.cpp (+37–72% dense GGUF),<br>
+  on top of the fastest single-user inference on the 5090: faster decode than llama.cpp (+42–48% dense GGUF at b9976, 2026-07-12),<br>
   at-or-ahead of vLLM on NVFP4, and the only engine running native NVFP4 on consumer Blackwell.<br>
   ~97k lines, 100% written by <a href="https://claude.ai/claude-code">Claude Code</a>.
 </p>
@@ -44,21 +44,25 @@ Every number below is measured, dated, and commit-anchored in
 decode is the reliable A/B signal):
 
 - **GGUF dense decode:** Qwen3-8B Q8_0 at **~270 tok/s** (CI-gated baseline),
-  **+37–72% over llama.cpp** with full offload and flash attention.
-- **NVFP4 SafeTensors decode:** 30B-class MoE at **~266–338 tok/s**
-  (Qwen3-30B-A3B 305, Qwen3-Coder-30B 338, Qwen3.6-35B 320, Gemma-4-26B 266;
-  the 35B hybrid was 257 before the #949 FP8 SSM-projection sidecar):
-  **uncontested on `sm_120`**: vLLM's NVFP4 path needs `tcgen05` (absent on
-  consumer Blackwell) and llama.cpp has no native NVFP4 at all.
+  **+42–48% over llama.cpp** (re-swept 2026-07-12 vs build 9976 `e3546c794`,
+  full offload, flash attention); hybrid Qwen3.6-35B UD-Q4_K_M **+18%**,
+  Gemma-4-26B MoE **+21%** same sweep.
+- **NVFP4 SafeTensors decode:** 30B-class MoE at **~271–390 tok/s**
+  (2026-07-12 scoreboard: Qwen3-30B-A3B 390, Qwen3-Coder-30B 389, Qwen3.6-35B
+  hybrid 311, Gemma-4-26B 271): **uncontested on `sm_120`**: vLLM's NVFP4 path
+  needs `tcgen05` (absent on consumer Blackwell) and llama.cpp has no native
+  NVFP4 at all.
 - **NVFP4 long-context prefill:** at-or-ahead of vLLM after #687 (FP16-QK FA2 as
   the primary hd=128 prefill): MoE pp4096 **leads vLLM (+4%)**, MoE pp2048 +27%,
   dense pp2048 a tie, and TTFT wins everywhere.
 
-**Honest losses** (narrow, and documented): NVFP4 dense pp4096 still trails vLLM
-by ~4% (1.04×). The FP16 GDN-projection tax that used to make Qwen3.6-35B hybrid
-decode a loss was closed on the NVFP4 path by the #949 FP8 SSM-projection
-sidecar (35B NVFP4 decode 257 → ~320 tok/s, now ahead of llama.cpp); the legacy
-GGUF Q4_K hybrid path does not get that sidecar and decodes slower (~213 tok/s).
+**Honest losses & ties** (narrow, and documented): NVFP4 dense pp4096 still
+trails vLLM by ~4% (1.04×). llama.cpp's MXFP4/MoE-GGUF decode caught up
+substantially by build 9976: gpt-oss-20b is now a statistical tie (imp ~344 vs
+llama 329–345 across runs, #984) and the non-hero Qwen3-30B Q4_K_M margin is
+within noise (+1.7%). The former 35B-hybrid GGUF loss was closed by extending
+the FP8 SSM-projection sidecar to UD quants (#962, 224 → 267–272 tok/s, +18%
+ahead of llama.cpp).
 
 Every number, with date, commit SHA, CUDA version, quant and the exact
 command: **[BENCHMARKS.md](docs/BENCHMARKS.md)**. Methodology details:
