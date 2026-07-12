@@ -112,3 +112,4 @@ tools/roofline/history/raw/**/*.sqlite
 tools/roofline/plots/
 tools/roofline/__pycache__/
 .superpowers/
+tools/analysis/ppl_corpus_45k.txt

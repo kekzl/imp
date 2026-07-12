@@ -420,8 +420,12 @@ private:
     // hidden_[0..n_rows) in batches of max_logit_tokens_ and calls
     // consume(logits_view, row0, csz) after each batch's logits (softcap
     // already applied) land in logits_. Used by perplexity_nll_partial and
-    // greedy_argmax_all.
-    void for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
+    // greedy_argmax_all. allow_cutlass routes NVFP4 LM heads through the
+    // CUTLASS NVFP4-activation GEMM when built — true only for the
+    // perplexity harness (which measures that path's quality trade);
+    // spec-decode verify passes false so batch=1 outputs stay bit-identical
+    // to the FP16-activation GEMV regardless of gemm.nvfp4_lm_head_cutlass.
+    void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                  const std::function<void(const Tensor&, int, int)>& consume);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in

@@ -115,7 +115,7 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
 // applies the tier-aware LM head to hidden_[0..n_rows) in batches of
 // max_logit_tokens_, then hands each batch's logits_ view (softcap already
 // applied — production parity) to `consume`.
-void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
+void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                             const std::function<void(const Tensor&, int, int)>& consume) {
     if (!initialized_ || n_rows <= 0) {
         return;
@@ -166,8 +166,8 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream,
         Tensor hc = hidden_all.slice(c, c + csz);          // [csz, d]
         Tensor lg = view_tokens(logits_, csz);             // [csz, V]
         bool lm_cutlass_done = false;
-        if (lm_is_nvfp4 && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
-            qscratch_.cutlass_act_sf != nullptr) {
+        if (allow_cutlass && lm_is_nvfp4 && lm_head_cutlass_ready_ &&
+            qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr) {
             // Same NVFP4-activation tensor-core path as batched decode — lets the
             // perplexity harness measure its quality (the per-row GEMV below keeps
             // FP16 activations, so toggling gemm.nvfp4_lm_head_cutlass gives the
@@ -257,11 +257,17 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
         return;
     }
     const int V = model_->config().vocab_size;
-    for_each_lm_head_batch_(chunk_len, stream, [&](const Tensor& lg, int row0, int csz) {
-        perplexity_nll_kernel<<<csz, 256, 0, stream>>>(static_cast<const float*>(lg.data), d_tokens,
-                                                       chunk_start + row0, n_total, V, d_nll,
-                                                       d_match);
-    });
+    // Lazy-build the CUTLASS LM head: engine init only builds it when serving
+    // (max_batch_size > 1), but the harness must measure the batched-decode
+    // quality trade even from a batch=1 CLI run. No-op when the flag is off
+    // or the LM head is not in the NVFP4 decode cache.
+    build_lm_head_cutlass_(stream);
+    for_each_lm_head_batch_(chunk_len, stream, /*allow_cutlass=*/true,
+                            [&](const Tensor& lg, int row0, int csz) {
+                                perplexity_nll_kernel<<<csz, 256, 0, stream>>>(
+                                    static_cast<const float*>(lg.data), d_tokens, chunk_start + row0,
+                                    n_total, V, d_nll, d_match);
+                            });
 }
 
 // Two-phase row-wise argmax. A single block per row reads ~600 KB of fp32
@@ -414,7 +420,11 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                                                                       verify_pen_counts_);
     }
 
-    for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
+    // allow_cutlass=false: verify logits decide (and emit) the accepted batch=1
+    // tokens — keep them on the FP16-activation GEMV path bit-identical to the
+    // n==1 decode step, independent of gemm.nvfp4_lm_head_cutlass.
+    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
+                            [&](const Tensor& lg, int row0, int csz) {
         if (penalties) {
             dim3 pgrid((V + 255) / 256, csz);
             verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(
@@ -432,11 +442,14 @@ void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t st
     if (!initialized_ || n_rows <= 0 || d_out == nullptr)
         return;
     const size_t V = static_cast<size_t>(model_->config().vocab_size);
-    for_each_lm_head_batch_(n_rows, stream, [&](const Tensor& lg, int row0, int csz) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_out + static_cast<size_t>(row0) * V, lg.data,
-                                           static_cast<size_t>(csz) * V * sizeof(float),
-                                           cudaMemcpyDeviceToDevice, stream));
-    });
+    // allow_cutlass=false: same batch=1 verify-path reasoning as greedy_argmax_all.
+    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
+                            [&](const Tensor& lg, int row0, int csz) {
+                                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                                    d_out + static_cast<size_t>(row0) * V, lg.data,
+                                    static_cast<size_t>(csz) * V * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream));
+                            });
 }
 
 double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {

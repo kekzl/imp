@@ -515,9 +515,17 @@ struct RuntimeConfig {
         // weight once for the whole batch (vs ceil(n/4)x for the GEMV), but the
         // FP4×FP4 MMA forces NVFP4 activations on the final logits (the GEMV kept
         // FP16 activations) — a quality/speed trade. Costs ~vocab*d_model/16 B of
-        // SfAtom scales (FP4 data borrowed from the decode cache). Opt-in until
-        // the PPL trade is measured per family. Single-stream (n==1) is unaffected.
-        bool nvfp4_lm_head_cutlass = false;
+        // SfAtom scales (FP4 data borrowed from the decode cache; only allocated
+        // when max_batch_size > 1). Default ON since the 2026-07-12 PPL sweep
+        // (teacher-forced, 13.5k-token corpus, imp-cli --perplexity): MoE/hybrid
+        // +1.9-2.1% PPL (Coder-30B 10.19→10.38, Modelopt-30B 11.65→11.88,
+        // Qwen3.6-35B 13.39→13.66), dense +0.2-0.5% (within the ±0.3-0.5%
+        // run-to-run spread), for +8% aggregate concurrent decode @16 — the
+        // 1173-tok/s Coder-30B headline. Single-stream (n==1) output is
+        // bit-identical either way: the n==1 decode GEMV and the spec-verify
+        // LM head (for_each_lm_head_batch_ allow_cutlass=false) never take
+        // this path. Set false for maximum batched-serving coherence.
+        bool nvfp4_lm_head_cutlass = true;
         // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
         // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
         // it had bit-rotted in the tier refactors (measured 71 tok/s vs its

@@ -316,9 +316,10 @@ nvfp4_lm_head        = true
 nvfp4_lm_head_gdn    = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
-# forces NVFP4 activations on the final logits (quality/speed trade). Opt-in
-# until the PPL trade is measured per family; single-stream is unaffected.
-nvfp4_lm_head_cutlass = false
+# forces NVFP4 activations on the final logits. +8% aggregate concurrent decode
+# @16; PPL +1.9-2.1% on MoE/hybrid, +0.2-0.5% (noise-level) on dense. Default ON
+# since 2026-07-12; single-stream and spec-verify are unaffected (bit-identical).
+nvfp4_lm_head_cutlass = true
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false
