@@ -5,6 +5,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Depth-aware speculation gate replaces the dense draft context cap**
+  (#964 stage 2): the residual long-context loss after stage 1 was never
+  a context cost — it was draft depth. A verify step costs ~1.4× a decode
+  step at 512 ctx rising to ~2.6× at 16k, so 1-token drafts stop paying
+  past ~14k while 3-token drafts win +24% at 13k (the bench prompts
+  happen to produce different n-gram depths per length, which is what
+  the "cliff" actually was). New `speculative.shallow_draft_ctx`
+  (default 12288): past that request context, 1-token n-gram/suffix
+  drafts are discarded and the miss-burst path serves the step at plain
+  decode speed; depth ≥ 2 always verifies. `speculative.draft_ctx_cap`
+  now defaults 0 (off). Measured with pure defaults (Qwen3-8B Q8_0,
+  msl 16384, vs speculation off): **+45% @512, +27% @13312 (deep
+  drafts, previously capped away), −0.6% @15872 (shallow drafts,
+  previously −23%)**.
 - **Dense n-gram speculation now WINS on long context** (#964 structural
   fix, stage 1): the verify chunk's attention runs on the batched-decode
   split-K paged kernels — chunk rows become same-KV "sequences" with

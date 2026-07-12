@@ -700,8 +700,23 @@ struct RuntimeConfig {
         // requests are exempt (deep drafts: Coder-30B code-edit 15.9
         // tok/verify, MTP chains — the verify pays for itself there).
         // History: pre-route the FA2-tile verify was net-negative past ~2k
-        // (−62% @16k, 2026-07-11) and the cap defaulted 2048. 0 = no cap.
-        int draft_ctx_cap = 12288;
+        // (−62% @16k, 2026-07-11) and the cap defaulted 2048; the route
+        // (verify_decode_attn) then raised it to 12288. Superseded 2026-07-12
+        // by the DEPTH-aware gate below (shallow_draft_ctx): the residual
+        // long-context loss was never a context cost — it was draft depth
+        // (a verify step costs ~1.4x a decode step @512 rising to ~2.6x
+        // @16k, so 1-token drafts stop paying past ~14k while 3-token
+        // drafts win +24% at 13k). Hard cap now defaults OFF. 0 = no cap.
+        int draft_ctx_cap = 0;
+        // #964 stage 2: past this request context, 1-token n-gram/suffix
+        // drafts are discarded instead of verified (the miss-burst path
+        // serves the step at plain decode speed); drafts of depth >= 2 are
+        // always verified. Bench evidence (Qwen3-8B Q8_0, route+capture):
+        // depth-3 drafts +24% @13312, depth-1 drafts −23% @15872 — the
+        // break-even for depth 1 sits near 14k where verify/decode cost
+        // reaches ~2x. MoE-NVFP4 and hybrid requests are exempt (deep
+        // drafts). 0 = never gate.
+        int shallow_draft_ctx = 12288;
         // #964 structural fix: run the dense verify chunk's ATTENTION through
         // the batched-decode split-K paged kernels (rows become same-KV
         // "sequences" with per-row context lens p0+1+i — causality holds by
