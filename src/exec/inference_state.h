@@ -64,6 +64,12 @@ struct InferenceState {
     // Batching
     int n_sequences = 1;         // number of sequences in the batch
     int max_blocks_per_seq = 0;  // max blocks per sequence (for 2D block_table indexing)
+    // Spec-verify chunk whose ATTENTION runs on the batched-decode split-K
+    // path (#964): the chunk rows are presented as n_sequences same-KV
+    // "sequences" with per-row context_lens (p0+1+i, causality via lengths)
+    // and row-replicated block_tables. is_prefill stays true so everything
+    // outside run_attention keeps the chunk-forward semantics.
+    bool chunk_decode_attn = false;
     const int* seq_offsets =
         nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 

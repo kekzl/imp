@@ -688,20 +688,34 @@ struct RuntimeConfig {
     // concurrent batches, and GGUF-MoE (which the async loop carries).
     struct Speculative {
         bool ngram = true;  // prompt-lookup speculation, default-on (batch-1, greedy, dense)
-        // Context cap for DENSE chunk-verify drafting (#964). The captured
-        // verify runs the FA2 tile + paged-KV gather over the ctx TIER
-        // (pow2, floor 4096, clamped to max_seq_len) — its cost follows the
-        // tier, not the live context, while dense ngram pays out only ~2
-        // tokens per verify. MEASURED (2026-07-11, Qwen3-8B Q8_0): verify ≈
-        // 2.1× a decode step at 2k ctx, ~5.2× at 16k; end-to-end decode −4%
-        // @2k, −15% @8k, −62% @16k at 100% draft accept — net-negative past
-        // ~2k regardless of accept rate. Drafting is gated once a request's
-        // context crosses the cap (checked per step). MoE-NVFP4 and
-        // GDN-hybrid requests are exempt (deep drafts: Coder-30B code-edit
-        // 15.9 tok/verify, MTP chains — the verify pays for itself there).
-        // The structural fix (verify cost following live ctx instead of the
-        // tier) is tracked in #964. 0 = no cap.
-        int draft_ctx_cap = 2048;
+        // Context cap for DENSE chunk-verify drafting (#964). With the
+        // verify_decode_attn route below (2026-07-12), dense n-gram WINS up
+        // to at least 12k context on the captured-verify (server) path:
+        // Qwen3-8B Q8_0 route+capture vs spec-off +44% @512, +43% @2k,
+        // +25% @8k, +29% @12288 — but still −23% at 15872 (the near-msl
+        // band: the capture-ready ceiling ends there and the remaining
+        // verify cost is the weight-bound small-M GEMMs + per-step host
+        // work, not attention). Drafting is gated once a request's context
+        // crosses the cap (checked per step). MoE-NVFP4 and GDN-hybrid
+        // requests are exempt (deep drafts: Coder-30B code-edit 15.9
+        // tok/verify, MTP chains — the verify pays for itself there).
+        // History: pre-route the FA2-tile verify was net-negative past ~2k
+        // (−62% @16k, 2026-07-11) and the cap defaulted 2048. 0 = no cap.
+        int draft_ctx_cap = 12288;
+        // #964 structural fix: run the dense verify chunk's ATTENTION through
+        // the batched-decode split-K paged kernels (rows become same-KV
+        // "sequences" with per-row context lens p0+1+i — causality holds by
+        // construction; pad rows attend 1 token) instead of the small-M
+        // prefill FA2 tile + full-context FP16 KV gather. nsys @16k (Qwen3-8B
+        // Q8_0): 557 us/layer FA2 vs ~65 us/layer split-K — ~20 ms of the
+        // ~30 ms verify step, and the reason FP8 KV never moved the verify
+        // cost (the old path gathered to FP16 first). Composes with the
+        // captured verify; requires the 3/5 capture buckets (the split count
+        // bakes from the PADDED row count). Measured end-to-end (route +
+        // capture vs spec-off, 3 trials): +44% @512, +43% @2k, +25% @8k,
+        // +29% @12288. Dense non-MLA/non-SWA/non-MoE/non-hybrid only;
+        // MoE/hybrid keep the FA2 chunk path. Kill switch for A/B.
+        bool verify_decode_attn = true;
         // Speculation on MoE models with NATIVE-NVFP4 experts (the gate
         // additionally requires profile().moe_experts_nvfp4). Measured on
         // Qwen3-Coder-30B-FP4 (2026-07-02): code-edit +49-81% (93% accept,

@@ -5,6 +5,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Dense n-gram speculation now WINS on long context** (#964 structural
+  fix, stage 1): the verify chunk's attention runs on the batched-decode
+  split-K paged kernels — chunk rows become same-KV "sequences" with
+  per-row context lens (causality by construction), reading quantized KV
+  directly — instead of the small-M prefill FA2 tile plus a full-context
+  FP16 KV gather (557 → ~65 µs/layer at 16k; also why FP8 KV never moved
+  the verify cost). New finer capture buckets {3,5} keep the baked
+  split-K geometry close to the real 2-row draft (a 9-row pad halved the
+  split count 4×). Measured route+capture vs speculation-off (Qwen3-8B
+  Q8_0, 3 trials): **+44% @512, +43% @2k, +25% @8k, +29% @12288** — the
+  pre-fix numbers were −8/−16/−32/−62%. `speculative.draft_ctx_cap`
+  default rises 2048 → 12288; the near-msl band (15872 @ msl 16384)
+  still loses −23% (capture-ready ceiling + weight-bound small-M verify
+  GEMMs + per-step host work — follow-ups in #964). Output stays
+  token-identical to plain greedy. Opt out with
+  `speculative.verify_decode_attn = false`. Note: `imp-cli --bench`
+  pins the verify EAGER (`speculative.capture=false`) by design — the
+  full win shows on the server/captured path; pass
+  `--set speculative.capture=true` to reproduce it in the CLI.
 - **FP8 KV cache now auto-enables on GGUF Qwen3 dense/MoE**
   (`kv_cache.dtype = "auto"`): the auto policy previously honored only the
   checkpoint's `kv_cache_quant_algo=FP8` hint, which GGUF exports never

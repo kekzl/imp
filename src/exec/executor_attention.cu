@@ -481,7 +481,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
     }
 
-    if (state.is_prefill) {
+    if (state.is_prefill && !state.chunk_decode_attn) {
 #include "exec/executor_attention_prefill.cu"
     } else {
 #include "exec/executor_attention_decode.cu"

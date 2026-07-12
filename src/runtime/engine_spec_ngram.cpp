@@ -63,7 +63,11 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
               // flip can't leave it null; tiny (max_blocks ints).
-              cudaMalloc(&d_spec_block_table_swa_, max_blocks * sizeof(int)) == cudaSuccess;
+              cudaMalloc(&d_spec_block_table_swa_, max_blocks * sizeof(int)) == cudaSuccess &&
+              // #964 decode-attention verify route staging (see engine.h).
+              cudaMalloc(&d_spec_row_ctx_lens_, chunk_cap * sizeof(int)) == cudaSuccess &&
+              cudaMalloc(&d_spec_row_block_tables_,
+                         static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int)) == cudaSuccess;
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
         free_spec_buffers_();
@@ -130,6 +134,8 @@ void Engine::free_spec_buffers_() {
     if (d_spec_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_positions_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
     if (d_spec_block_table_swa_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_swa_));
+    if (d_spec_row_ctx_lens_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_ctx_lens_));
+    if (d_spec_row_block_tables_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_block_tables_));
     if (d_spec_context_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_context_len_));
     if (d_spec_past_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_past_len_));
     if (d_spec_chunk_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_chunk_len_));
@@ -139,6 +145,8 @@ void Engine::free_spec_buffers_() {
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
     d_spec_block_table_swa_ = nullptr;
+    d_spec_row_ctx_lens_ = nullptr;
+    d_spec_row_block_tables_ = nullptr;
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
     d_spec_chunk_len_ = nullptr;
@@ -382,6 +390,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // SWA-aware sizing: the verify chunk stays EAGER (captured verify bakes
     // full-context gather grids + a static block-table pointer; the SWA table
     // rewrites every step). Correctness still requires the SWA table below.
+    // #964: dense verify chunks route their attention through the batched-
+    // decode split-K paged kernels (see the route block below). Composes with
+    // capture: the decode kernels pay per-ROW KV traffic, but the per-row
+    // context lens are data — pad rows get ctx_len=1, so the capture bucket
+    // padding (2 real rows -> 9) costs ~nothing in attention while the graph
+    // still swallows the ~200 eager launches per verify step. MoE/hybrid keep
+    // the FA2 chunk path (deep drafts amortize it; the hybrid scan needs the
+    // chunk-forward semantics).
+    const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
+                                   ssm_state_ == nullptr && !model_->profile().is_moe &&
+                                   !model_->config().is_mla() && !swa_sizing_active_;
     const bool capture_on =
         !swa_sizing_active_ && spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
     const int chunk_pad = capture_on ? spec_capture_bucket_(chunk_len) : chunk_len;
@@ -503,6 +522,48 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         state.ctx_capacity = spec_capture_ctx_tier_(ctx_len);
         state.d_past_len = d_spec_past_len_;
         state.d_chunk_len = d_spec_chunk_len_;
+    }
+
+    // #964 decode-attention route: present the chunk rows as n same-KV
+    // "sequences" with per-row context lens (p0+1+i) and row-replicated block
+    // tables — causality holds by construction, and run_attention takes the
+    // batched-decode split-K path (quantized-KV direct reads, context split
+    // across CTAs) instead of the small-M prefill FA2 tile + full-context
+    // FP16 KV gather (557 vs ~44 us/layer at 16k, nsys 2026-07-12).
+    if (decode_attn_route) {
+        std::vector<int> h_row_lens(chunk_pad);
+        // Pad rows (i >= chunk_len, capture-bucket fill) attend a single
+        // token: their output is never read, and a 1-token walk keeps the
+        // per-row KV traffic at real-chunk cost.
+        for (int i = 0; i < chunk_pad; ++i)
+            h_row_lens[i] = (i < chunk_len) ? (p0 + i + 1) : 1;
+        h_spec_row_tables_.assign(
+            static_cast<size_t>(chunk_pad) * spec_block_table_cap_, 0);
+        for (int i = 0; i < chunk_pad; ++i)
+            std::copy(block_table.begin(), block_table.end(),
+                      h_spec_row_tables_.begin() +
+                          static_cast<size_t>(i) * spec_block_table_cap_);
+        if (check(cudaMemcpyAsync(d_spec_row_ctx_lens_, h_row_lens.data(),
+                                  chunk_pad * sizeof(int), cudaMemcpyHostToDevice, stream),
+                  "row ctx lens H2D") &&
+            check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_.data(),
+                                  h_spec_row_tables_.size() * sizeof(int32_t),
+                                  cudaMemcpyHostToDevice, stream),
+                  "row block tables H2D")) {
+            state.chunk_decode_attn = true;
+            state.n_sequences = chunk_pad;
+            state.context_lens = d_spec_row_ctx_lens_;
+            state.block_tables = d_spec_row_block_tables_;
+            state.max_blocks_per_seq = spec_block_table_cap_;
+            // Captured graphs bake the split-K grid from max_context_len at
+            // capture time — bake the tier ceiling so later replays in the
+            // same tier stay covered (per-row device lens bound the real
+            // work; #948/#950 pow2-bucket class).
+            if (capture_on)
+                state.max_context_len = spec_capture_ctx_tier_(ctx_len);
+        }
+        // On H2D failure the state keeps the plain single-sequence chunk
+        // fields and the FA2 prefill path serves the forward (correct, slow).
     }
 
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
