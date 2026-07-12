@@ -148,10 +148,12 @@ carries the usual restart variance; tg is the signal.
 All rows re-measured 2026-07-11 on `905630e2` after the three fixes the
 first sweep triggered (#967 streaming-eviction OOB, #968 dense spec ctx cap,
 #969 cheap-KV floor); the discovery-day numbers are kept for the record.
+The Qwen3-8B defaults cell was re-measured 2026-07-12 on `f3c228a0` after
+#977 made FP8 KV the default on hint-less Qwen3 GGUFs.
 
 | Model | Quant | pp8192 tok/s | tg512 @16k (defaults) | discovery-day @16k |
 |---|---|---:|---:|---:|
-| Qwen3-8B | Q8_0 | 13 268 | **151.9** (214.9 with `--kv-fp8`) | 58.7 (spec ungated, #968) |
+| Qwen3-8B | Q8_0 | 13 268 | **208.9** (FP8 KV auto since #977; 151.9 on FP16 KV) | 58.7 (spec ungated, #968) |
 | Qwen3-Coder-30B-A3B | NVFP4 | 35 516 | 269.5 | 269.5 |
 | Qwen3.6-35B-A3B | NVFP4 | 14 887 | **264.3** | IMA crash (#963/#967), then 72.7 streaming (#969) |
 | Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | **234.2** | 69.6 under streaming + silent OOB reads (#967/#969) |
@@ -172,10 +174,13 @@ What the first sweep found and what fixed it:
   The floor now covers max_seq_len + 12.5% headroom when that costs ≤1 GiB
   (hybrids: ~377 MiB) — both 35B variants now run 16k fully streaming-free
   (graphs on, full attention).
-- FP8-KV is worth **+39%** at 16k on Qwen3-8B but does not auto-engage on
-  GGUF sources (the `kv_cache.dtype=auto` FP8 upgrade is keyed on the
-  checkpoint's `kv_cache_quant_algo` hint, which GGUF files don't carry) —
-  `--kv-fp8` is a manual win for long-context GGUF sessions.
+- FP8-KV is worth **+39..41%** at 16k on Qwen3-8B. It originally did not
+  auto-engage on GGUF sources (the `kv_cache.dtype=auto` upgrade was keyed
+  on the checkpoint's `kv_cache_quant_algo` hint, which GGUF files don't
+  carry) — **fixed in #977**: hint-less Qwen3 dense/MoE checkpoints now
+  default to FP8 KV via the PPL-gated no-hint arch allowlist
+  (`kv_fp8_no_hint_default_safe`). Other GGUF families still need
+  `--kv-fp8` until measured.
 
 ## Concurrent serving throughput (batched decode)
 
