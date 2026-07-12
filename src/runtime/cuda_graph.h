@@ -93,6 +93,15 @@ public:
 
     // Check if graph is ready for replay
     bool is_ready() const { return graph_.is_captured(); }
+
+    // Replay the captured graph WITHOUT the capture/warmup state machine and
+    // WITHOUT needing a decode_fn. Used by the pipelined batched decode to
+    // re-enqueue the forward for step N+1 after the device-side chain
+    // advance — there is nothing new to capture, only a replay is valid.
+    // Returns false (and resets, so the next execute() re-captures) when no
+    // captured graph exists or the replay fails; the caller must then skip
+    // the chained step and fall back to the per-step path.
+    bool replay_only(cudaStream_t stream);
     // True when the next execute() runs graph kernels: either captured, or it
     // will capture immediately (process-warm via mark_process_warm, no eager
     // warmup steps pending, no prior capture failure). Scheduler gates that

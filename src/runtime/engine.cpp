@@ -112,6 +112,28 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
     }
+    abandon_decode_pipeline();
+    for (int p = 0; p < 2; ++p) {
+        if (h_bt_patch_off_[p]) {
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_bt_patch_off_[p]));
+            h_bt_patch_off_[p] = nullptr;
+            d_bt_patch_off_[p] = nullptr;
+        }
+        if (h_bt_patch_val_[p]) {
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_bt_patch_val_[p]));
+            h_bt_patch_val_[p] = nullptr;
+            d_bt_patch_val_[p] = nullptr;
+        }
+        if (h_hist_pos_[p]) {
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_hist_pos_[p]));
+            h_hist_pos_[p] = nullptr;
+            d_hist_pos_[p] = nullptr;
+        }
+    }
+    if (d_pipe_hist_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_pipe_hist_));
+        d_pipe_hist_ = nullptr;
+    }
     log_spec_stats_();
     free_spec_buffers_();
     if (prefill_pool_) {
@@ -394,6 +416,11 @@ void Engine::reset_ssm_state(int seq_id) {
 void Engine::reset_batch_pool_cache() { decode_batch_pool_.reset_upload_cache(); }
 
 void Engine::invalidate_graphs() {
+    // Exception/reset path: an in-flight pipelined decode step must not be
+    // waited on (the context may be poisoned) — drop it and release the
+    // deferred KV so the sequences don't leak blocks.
+    abandon_decode_pipeline();
+
     // Preserve decode_graph_pool_ across context resets — the decode step
     // topology (forward_logits) doesn't change between requests. Inputs
     // (token IDs, positions, block tables) are uploaded fresh each step via
@@ -470,6 +497,14 @@ size_t Engine::effective_free_vram() const {
 
 void Engine::finish_request(std::shared_ptr<Request>& req) {
     req->status = RequestStatus::FINISHED;
+    finish_request_release_(req);
+}
+
+// KV/slot release half of finish_request. Split out so the pipelined batched
+// decode can mark a row FINISHED (stream delivery proceeds) while deferring
+// the KV free until the in-flight chained step — which still WRITES this
+// row's next KV slot — has completed (bd_pipe_.deferred_release).
+void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
     if (kv_manager_->prefix_caching_enabled()) {
         // Register input AND generated tokens — minus the final sampled
         // token, which was never forwarded (its KV entry does not exist; the

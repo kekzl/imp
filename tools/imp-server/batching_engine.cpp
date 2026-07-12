@@ -184,7 +184,17 @@ void BatchingEngine::worker_loop() {
         if (active_requests_.empty())
             continue;
 
-        // 2. Check for cancelled requests before stepping
+        // 2. Check for cancelled requests before stepping. A pipelined
+        // batched-decode step may still be in flight and WRITING these
+        // sequences' KV — collect it before freeing their blocks (engine
+        // invariant; drain is a no-op when nothing is in flight).
+        for (auto& sr : active_requests_) {
+            if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
+                sr->request->status != imp::RequestStatus::CANCELLED) {
+                engine->drain_decode_pipeline();
+                break;
+            }
+        }
         for (auto& sr : active_requests_) {
             if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
                 sr->request->status != imp::RequestStatus::CANCELLED) {

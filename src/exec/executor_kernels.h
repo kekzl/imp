@@ -233,6 +233,18 @@ void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream);
 // hot path; falls back to cudaMemcpyAsync for unaligned buffers.
 void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream);
 
+// Pipelined batched-decode chain advance (see executor_elementwise.cu):
+// token_ids[i] = slot i's sampled token, positions[i]++, context_lens[i]++,
+// per-row history append (penalty rows), plus n_patches block-table scatter
+// writes (offsets are flat indices into the pool block-table region; patch/
+// pos arrays must be device-readable — the engine passes mapped pinned
+// memory). One tiny single-block launch.
+void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
+                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
+                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
+                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
+                             const int* d_hist_pos, cudaStream_t stream);
+
 void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 
 void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream);

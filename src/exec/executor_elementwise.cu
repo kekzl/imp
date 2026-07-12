@@ -420,6 +420,53 @@ __global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __re
         dst[i] = src[i];
 }
 
+// Pipelined batched-decode chain advance: feed step N's sampled tokens (slot
+// array, SAMPLE_SCRATCH_BYTES apart) as step N+1's input token ids and bump
+// positions/context_lens by one — all device-side, so step N+1's forward
+// graph can be replayed BEFORE the host has read step N's tokens. Rows whose
+// context crossed a KV-block boundary get their freshly appended block id
+// scattered into the (pool-resident) block table; the patch arrays live in
+// mapped pinned memory (host-written just before launch, parity-alternated
+// by the engine so a set is never overwritten while a kernel may read it).
+__global__ void decode_pipeline_advance_kernel(int n_rows, const char* __restrict__ slot_base,
+                                               size_t slot_stride_bytes,
+                                               int32_t* __restrict__ token_ids,
+                                               int* __restrict__ positions,
+                                               int* __restrict__ context_lens,
+                                               int* __restrict__ block_tables, int n_patches,
+                                               const int* __restrict__ patch_offsets,
+                                               const int* __restrict__ patch_values,
+                                               int32_t* __restrict__ hist_base, int hist_stride,
+                                               const int* __restrict__ hist_pos) {
+    int i = threadIdx.x;
+    if (i < n_rows) {
+        const int32_t tok = *reinterpret_cast<const int32_t*>(slot_base + i * slot_stride_bytes);
+        token_ids[i] = tok;
+        positions[i] += 1;
+        context_lens[i] += 1;
+        // Per-row output-token history append: penalty rows sample the NEXT
+        // step against a history that includes this (host-unseen) token.
+        if (hist_base != nullptr)
+            hist_base[static_cast<size_t>(i) * hist_stride + hist_pos[i]] = tok;
+    } else if (i < n_rows + n_patches) {
+        block_tables[patch_offsets[i - n_rows]] = patch_values[i - n_rows];
+    }
+}
+
+void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot_stride_bytes,
+                             int32_t* d_token_ids, int* d_positions, int* d_context_lens,
+                             int* d_block_tables, int n_patches, const int* d_patch_offsets,
+                             const int* d_patch_values, int32_t* d_hist_base, int hist_stride,
+                             const int* d_hist_pos, cudaStream_t stream) {
+    int threads = n_rows + n_patches;
+    if (threads <= 0)
+        return;
+    decode_pipeline_advance_kernel<<<1, threads, 0, stream>>>(
+        n_rows, reinterpret_cast<const char*>(slot_tokens), slot_stride_bytes, d_token_ids,
+        d_positions, d_context_lens, d_block_tables, n_patches, d_patch_offsets, d_patch_values,
+        d_hist_base, hist_stride, d_hist_pos);
+}
+
 void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
     if (bytes == 0 || dst == src)
         return;

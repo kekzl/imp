@@ -6,6 +6,7 @@
 
 #include <vector>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 
 namespace imp {
@@ -467,6 +468,113 @@ TEST(ExecutorKernelsTest, RMSNormAddResidual) {
     free_tensor(w);
     free_tensor(r);
     free_tensor(output);
+}
+
+// =========================================================================
+// decode_pipeline_advance: chained-step state advance for the pipelined
+// batched decode — slot tokens → token_ids, positions/context_lens += 1,
+// block-table scatter from mapped pinned patch arrays.
+// =========================================================================
+
+TEST(ExecutorKernelsTest, DecodePipelineAdvance) {
+    constexpr int n = 3;
+    constexpr size_t kSlotStride = 256;  // any multiple of 4 works like SAMPLE_SCRATCH_BYTES
+    constexpr int kStride = 8;           // block-table row stride
+
+    // Slot array: token at the first int32 of each slot, garbage after.
+    std::vector<char> h_slots(n * kSlotStride, char(0xAB));
+    const int32_t slot_tokens[n] = {11, 22, 33};
+    for (int i = 0; i < n; i++)
+        std::memcpy(h_slots.data() + i * kSlotStride, &slot_tokens[i], sizeof(int32_t));
+    char* d_slots = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_slots, h_slots.size()), cudaSuccess);
+    cudaMemcpy(d_slots, h_slots.data(), h_slots.size(), cudaMemcpyHostToDevice);
+
+    std::vector<int32_t> h_tok(n, -1);
+    std::vector<int> h_pos = {4, 15, 31};
+    std::vector<int> h_ctx = {5, 16, 32};
+    std::vector<int> h_bt(n * kStride, 7);
+    int32_t* d_tok = nullptr;
+    int *d_pos = nullptr, *d_ctx = nullptr, *d_bt = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_tok, n * sizeof(int32_t)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_pos, n * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ctx, n * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_bt, h_bt.size() * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_tok, h_tok.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, h_pos.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ctx, h_ctx.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bt, h_bt.data(), h_bt.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Two block-table patches via mapped pinned staging (the engine's setup).
+    int *h_off = nullptr, *h_val = nullptr, *d_off = nullptr, *d_val = nullptr;
+    ASSERT_EQ(cudaHostAlloc(&h_off, 2 * sizeof(int), cudaHostAllocMapped), cudaSuccess);
+    ASSERT_EQ(cudaHostAlloc(&h_val, 2 * sizeof(int), cudaHostAllocMapped), cudaSuccess);
+    ASSERT_EQ(cudaHostGetDevicePointer(&d_off, h_off, 0), cudaSuccess);
+    ASSERT_EQ(cudaHostGetDevicePointer(&d_val, h_val, 0), cudaSuccess);
+    h_off[0] = 1 * kStride + 1;  // row 1, table index 1
+    h_val[0] = 42;
+    h_off[1] = 2 * kStride + 2;  // row 2, table index 2
+    h_val[1] = 99;
+
+    // Per-row history append (penalty rows): positions via mapped pinned.
+    constexpr int kHistStride = 32;
+    std::vector<int32_t> h_hist(n * kHistStride, -1);
+    int32_t* d_hist = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_hist, h_hist.size() * sizeof(int32_t)), cudaSuccess);
+    cudaMemcpy(d_hist, h_hist.data(), h_hist.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+    int *h_hp = nullptr, *d_hp = nullptr;
+    ASSERT_EQ(cudaHostAlloc(&h_hp, n * sizeof(int), cudaHostAllocMapped), cudaSuccess);
+    ASSERT_EQ(cudaHostGetDevicePointer(&d_hp, h_hp, 0), cudaSuccess);
+    h_hp[0] = 0;
+    h_hp[1] = 5;
+    h_hp[2] = 31;
+
+    decode_pipeline_advance(n, reinterpret_cast<const int32_t*>(d_slots), kSlotStride, d_tok, d_pos,
+                            d_ctx, d_bt, /*n_patches=*/2, d_off, d_val, d_hist, kHistStride, d_hp,
+                            /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    cudaMemcpy(h_tok.data(), d_tok, n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pos.data(), d_pos, n * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_ctx.data(), d_ctx, n * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_bt.data(), d_bt, h_bt.size() * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(h_tok[i], slot_tokens[i]) << "row " << i;
+    }
+    EXPECT_EQ(h_pos[0], 5);
+    EXPECT_EQ(h_pos[1], 16);
+    EXPECT_EQ(h_pos[2], 32);
+    EXPECT_EQ(h_ctx[0], 6);
+    EXPECT_EQ(h_ctx[1], 17);
+    EXPECT_EQ(h_ctx[2], 33);
+    EXPECT_EQ(h_bt[1 * kStride + 1], 42);
+    EXPECT_EQ(h_bt[2 * kStride + 2], 99);
+    // Everything else untouched.
+    int untouched = 0;
+    for (size_t i = 0; i < h_bt.size(); i++)
+        if (h_bt[i] == 7) untouched++;
+    EXPECT_EQ(untouched, static_cast<int>(h_bt.size()) - 2);
+
+    // History append landed at each row's position, everything else intact.
+    cudaMemcpy(h_hist.data(), d_hist, h_hist.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(h_hist[0 * kHistStride + 0], 11);
+    EXPECT_EQ(h_hist[1 * kHistStride + 5], 22);
+    EXPECT_EQ(h_hist[2 * kHistStride + 31], 33);
+    int hist_untouched = 0;
+    for (size_t i = 0; i < h_hist.size(); i++)
+        if (h_hist[i] == -1) hist_untouched++;
+    EXPECT_EQ(hist_untouched, static_cast<int>(h_hist.size()) - 3);
+
+    cudaFree(d_slots);
+    cudaFree(d_tok);
+    cudaFree(d_pos);
+    cudaFree(d_ctx);
+    cudaFree(d_bt);
+    cudaFree(d_hist);
+    cudaFreeHost(h_off);
+    cudaFreeHost(h_val);
+    cudaFreeHost(h_hp);
 }
 
 }  // anonymous namespace

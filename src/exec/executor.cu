@@ -477,6 +477,9 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     // (pageable 4-byte D2H + stream sync each, nsys 2026-07-12).
     if (!d_sample_result_ || !h_sample_pinned_ || slot_idx < 0 || slot_idx >= sample_slots_)
         return false;
+    // Parity offset: the pipelined decode enqueues into the half selected by
+    // set_sample_parity while the other half's gather is still in flight.
+    const int abs_slot = sample_parity_ * sample_slots_ + slot_idx;
     // Sync-only sampling modes decline BEFORE any filter is applied, so the
     // caller can re-run this row through sample_single_from_logits untouched:
     // mirostat mutates host-side mu every step; logit_bias does per-entry
@@ -500,7 +503,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     apply_row_filters_(lp, vocab, state, stream);
 
     auto* slot = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(d_sample_result_) +
-                                            static_cast<size_t>(slot_idx) * SAMPLE_SCRATCH_BYTES);
+                                            static_cast<size_t>(abs_slot) * SAMPLE_SCRATCH_BYTES);
     if (greedy) {
         sample_greedy_async(flat, slot, stream);
         return true;
@@ -511,7 +514,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
         // STASH the row for the row-parallel batched launch in
         // collect_sampled_tokens — n serialized <<<64>>>+<<<1>>> launch pairs
         // become ONE partial + ONE finalize launch for the whole batch.
-        TopkRowArgs& a = h_row_args_[n_pending_topk_rows_++];
+        TopkRowArgs& a = h_row_args_[sample_parity_ * sample_slots_ + n_pending_topk_rows_++];
         a.logits = lp;
         a.d_result = slot;
         a.inv_temperature = 1.0f / temperature;
@@ -528,30 +531,75 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     return true;
 }
 
+// Flush the stashed top-k rows of the ACTIVE parity half: one pinned H2D of
+// the args, one partial + one finalize launch covering every row.
+void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
+    if (n_pending_topk_rows_ <= 0)
+        return;
+    TopkRowArgs* h_base = h_row_args_ + sample_parity_ * sample_slots_;
+    TopkRowArgs* d_base = d_row_args_ + sample_parity_ * sample_slots_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(TopkRowArgs) * n_pending_topk_rows_,
+                                       cudaMemcpyHostToDevice, stream));
+    launch_topk_topp_rows(d_base, n_pending_topk_rows_, pending_topk_max_k_, pending_topk_vocab_,
+                          stream);
+    n_pending_topk_rows_ = 0;
+    pending_topk_max_k_ = 0;
+}
+
 const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t stream) {
     if (!d_sample_result_ || !h_sample_pinned_ || n_slots <= 0 || n_slots > sample_slots_) {
         n_pending_topk_rows_ = 0;
         pending_topk_max_k_ = 0;
         return nullptr;
     }
-    if (n_pending_topk_rows_ > 0) {
-        // Flush the stashed rows: one pinned H2D of the args, one partial +
-        // one finalize launch covering every row.
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_row_args_, h_row_args_,
-                                           sizeof(TopkRowArgs) * n_pending_topk_rows_,
-                                           cudaMemcpyHostToDevice, stream));
-        launch_topk_topp_rows(d_row_args_, n_pending_topk_rows_, pending_topk_max_k_,
-                              pending_topk_vocab_, stream);
-        n_pending_topk_rows_ = 0;
-        pending_topk_max_k_ = 0;
-    }
+    flush_pending_topk_rows_(stream);
     // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first int32 of
     // each slot — one strided D2H gathers the whole batch.
-    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_, sizeof(int32_t), d_sample_result_,
+    const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_ + base, sizeof(int32_t),
+                                         reinterpret_cast<char*>(d_sample_result_) +
+                                             base * SAMPLE_SCRATCH_BYTES,
                                          SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
                                          cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    return h_sample_pinned_;
+    return h_sample_pinned_ + base;
+}
+
+// Event-based split of collect_sampled_tokens for the pipelined decode:
+// flush + strided D2H + event record, NO stream sync. The engine enqueues
+// the NEXT step's work after this and only waits on the event — so the wait
+// covers exactly this gather, not the freshly enqueued step.
+bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream) {
+    if (!sample_pipeline_ready() || n_slots <= 0 || n_slots > sample_slots_) {
+        n_pending_topk_rows_ = 0;
+        pending_topk_max_k_ = 0;
+        return false;
+    }
+    flush_pending_topk_rows_(stream);
+    const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_ + base, sizeof(int32_t),
+                                         reinterpret_cast<char*>(d_sample_result_) +
+                                             base * SAMPLE_SCRATCH_BYTES,
+                                         SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
+                                         cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(sample_gather_evt_[sample_parity_], stream));
+    return true;
+}
+
+const int32_t* GraphExecutor::wait_gathered_tokens(int parity) {
+    parity &= 1;
+    if (!h_sample_pinned_ || !sample_gather_evt_[parity])
+        return nullptr;
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(sample_gather_evt_[parity]));
+    return h_sample_pinned_ + static_cast<size_t>(parity) * sample_slots_;
+}
+
+const int32_t* GraphExecutor::sample_slot_base(int parity) const {
+    if (!d_sample_result_)
+        return nullptr;
+    return reinterpret_cast<const int32_t*>(reinterpret_cast<const char*>(d_sample_result_) +
+                                            static_cast<size_t>(parity & 1) * sample_slots_ *
+                                                SAMPLE_SCRATCH_BYTES);
 }
 
 std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state, cudaStream_t stream) {

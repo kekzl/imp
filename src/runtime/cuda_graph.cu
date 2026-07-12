@@ -493,6 +493,20 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
     return true;
 }
 
+bool CudaGraphRunner::replay_only(cudaStream_t stream) {
+    if (!graph_.is_captured())
+        return false;
+    if (!graph_.replay(stream)) {
+        IMP_LOG_ERROR("CudaGraphRunner: pipelined replay failed — invalidating graph.");
+        graph_.reset();
+        step_count_ = 0;
+        return false;
+    }
+    replay_count_++;
+    step_count_++;
+    return true;
+}
+
 void CudaGraphRunner::invalidate() {
     graph_.reset();
     step_count_ = 0;

@@ -138,10 +138,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Slot 0 keeps the historical single-sequence semantics; the batched
     // decode path enqueues each sequence's sampler into its own slot and
     // gathers all tokens with one pinned D2H + one sync (~66 KiB per slot).
+    // All sampling staging is allocated x2 (parity halves) so the pipelined
+    // batched decode can enqueue step N+1's samplers into one half while step
+    // N's gather from the other half is still in flight (engine_scheduler
+    // decode pipeline). Non-pipelined callers stay on parity 0, which is the
+    // exact pre-parity layout.
     {
         sample_slots_ = std::max(1, max_logit_tokens_);
-        cudaError_t err =
-            cudaMalloc(&d_sample_result_, static_cast<size_t>(sample_slots_) * SAMPLE_SCRATCH_BYTES);
+        cudaError_t err = cudaMalloc(&d_sample_result_,
+                                     2 * static_cast<size_t>(sample_slots_) * SAMPLE_SCRATCH_BYTES);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s", cudaGetErrorString(err));
             d_sample_result_ = nullptr;
@@ -152,7 +157,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Pinned host buffer for async sampling D2H copy (avoids stack-variable
     // sync) — one int32 per batched slot.
     if (!h_sample_pinned_ && d_sample_result_) {
-        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t) * sample_slots_,
+        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, 2 * sizeof(int32_t) * sample_slots_,
                                         cudaHostAllocDefault);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("cudaHostAlloc for sample pinned buffer failed: %s", cudaGetErrorString(err));
@@ -163,12 +168,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Row-batched sampler args: pinned staging + device mirror (one H2D per
     // decode step for the whole batch).
     if (!h_row_args_ && d_sample_result_ && sample_slots_ > 0) {
-        if (cudaHostAlloc(&h_row_args_, sizeof(TopkRowArgs) * sample_slots_, cudaHostAllocDefault) !=
-                cudaSuccess ||
-            cudaMalloc(&d_row_args_, sizeof(TopkRowArgs) * sample_slots_) != cudaSuccess) {
+        if (cudaHostAlloc(&h_row_args_, 2 * sizeof(TopkRowArgs) * sample_slots_,
+                          cudaHostAllocDefault) != cudaSuccess ||
+            cudaMalloc(&d_row_args_, 2 * sizeof(TopkRowArgs) * sample_slots_) != cudaSuccess) {
             IMP_LOG_WARN("row-batched sampler args alloc failed — falling back to per-row sampling");
             if (h_row_args_) { cudaFreeHost(h_row_args_); h_row_args_ = nullptr; }
             d_row_args_ = nullptr;
+        }
+    }
+
+    // Per-parity gather-done events for the pipelined split gather/wait.
+    for (int p = 0; p < 2; ++p) {
+        if (!sample_gather_evt_[p] &&
+            cudaEventCreateWithFlags(&sample_gather_evt_[p], cudaEventDisableTiming) != cudaSuccess) {
+            sample_gather_evt_[p] = nullptr;
         }
     }
 
@@ -1301,6 +1314,13 @@ void GraphExecutor::free_buffers() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_row_args_));
         d_row_args_ = nullptr;
     }
+    for (int p = 0; p < 2; ++p) {
+        if (sample_gather_evt_[p]) {
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(sample_gather_evt_[p]));
+            sample_gather_evt_[p] = nullptr;
+        }
+    }
+    sample_parity_ = 0;
     if (h_logits_pinned_) {
         IMP_CUDA_CHECK_LOG(cudaFreeHost(h_logits_pinned_));
         h_logits_pinned_ = nullptr;
