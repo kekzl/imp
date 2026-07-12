@@ -329,6 +329,19 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                             std::max(1, scfg.min_match), scfg.max_match, &draft_start);
     }
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
+    // #964 stage 2 — depth-aware long-context gate: a verify step costs
+    // ~1.4x a decode step at 512 ctx rising to ~2.6x at 16k, so a 1-token
+    // draft (2 emitted tokens) stops paying past ~14k while depth >= 2
+    // keeps winning. Discard shallow drafts at long context and let the
+    // miss/burst path serve the step at plain decode speed. MoE-NVFP4 and
+    // hybrids are exempt (deep drafts pay for the verify at any context).
+    if (!draft.empty() && static_cast<int>(draft.size()) < 2 &&
+        scfg.shallow_draft_ctx > 0 && req->context_len() > scfg.shallow_draft_ctx &&
+        ssm_state_ == nullptr &&
+        !(model_->profile().is_moe && scfg.moe && model_->profile().moe_experts_nvfp4)) {
+        draft.clear();
+        draft_start = -1;
+    }
     // MTP fallback: when the matcher has no draft, the pending MTP chain
     // (drafted at the end of the previous verify step / prefill tail) fills
     // the chunk — the trained head drafts where suffix matching cannot
