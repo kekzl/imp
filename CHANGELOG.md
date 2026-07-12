@@ -5,6 +5,24 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **Concurrent decode @16 on the hero MoE: 861 → 1 173 tok/s sustained
+  (+36%)** — now above the published vLLM reference for the same model class
+  on an RTX 5090 (1 157 aggregate / 13.6 ms TPOT, cloudrift.ai) at per-stream
+  TPOT parity, with single-stream decode unchanged (396 tok/s, 5.4× vLLM).
+  Four batched-serving fixes, each nsys-attributed:
+  (1) batched sampling readback — the per-row pageable 4-byte D2H + stream
+  sync (~850 µs blocked host time per sequence per step, 29% GPU idle @16)
+  becomes one pinned strided D2H + one sync per step;
+  (2) row-parallel top-k/top-p — n serialized `<<<64>>>`+`<<<1>>>` launch
+  pairs (~10% of GPU time) become ONE partial + ONE finalize launch for the
+  whole batch (bit-identical tokens: same per-row reduction geometry/seeds);
+  (3) per-MoE-layer residual copies switch from cudaMemcpyAsync (WSL2 WDDM
+  DMA submission blocks the host ~165 µs per call) to a vectorized copy
+  kernel;
+  (4) the engine-static banned-token list is cached on device instead of
+  cudaMallocAsync+upload+free per row per step.
+  degen_suite 22/22; sampling identity test pins async == sync tokens.
+
 - **Roofline baseline re-pinned** (`cf1b382a_20260711_193211`, config_version
   4): the old pin predated FA2-hd256 (#932), the FP8 SSM sidecar (#949/#962)
   and this week's decode fixes. New `nvfp4-hybrid` cell gives Qwen3.6-35B

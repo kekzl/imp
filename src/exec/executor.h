@@ -12,6 +12,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
+#include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
 #include "exec/expert_cache.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -149,6 +150,14 @@ public:
 
     // Single-token sampling: returns one int32_t directly (avoids vector alloc).
     // Use for single-sequence decode where only one token is sampled.
+    // Enqueue-only per-row sampling into scratch slot `slot_idx` (no readback,
+    // no sync); returns false for sync-only modes (mirostat, logit_bias, CUB
+    // top_k regime) WITHOUT touching the row. Gather all rows afterwards via
+    // collect_sampled_tokens (one pinned D2H + one stream sync).
+    bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
+                                         cudaStream_t stream = nullptr);
+    const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
+    int sample_slots() const { return sample_slots_; }
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
                                       cudaStream_t stream = nullptr);
 
@@ -551,8 +560,27 @@ private:
     bool lm_head_cutlass_ready_ = false;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
+    void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
+    // Row-batched top-k/top-p staging: sample_single_from_logits_async STASHES
+    // eligible rows here instead of launching; collect_sampled_tokens uploads
+    // the args (one pinned H2D) and fires ONE partial + ONE finalize launch
+    // for the whole batch. Greedy rows launch immediately (2 cheap kernels).
+    TopkRowArgs* h_row_args_ = nullptr;  // pinned, sample_slots_ entries
+    TopkRowArgs* d_row_args_ = nullptr;  // device mirror
+    int n_pending_topk_rows_ = 0;
+    int pending_topk_max_k_ = 0;
+    int pending_topk_vocab_ = 0;
+    // Static banned-token list cache (see apply_row_filters_): keyed on the
+    // host pointer + count, freed in free_buffers.
+    int32_t* d_banned_cache_ = nullptr;
+    const int32_t* banned_cache_src_ = nullptr;
+    int banned_cache_n_ = 0;
+    size_t banned_cache_capacity_ = 0;
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
+                                          // (sample_slots_ x SAMPLE_SCRATCH_BYTES; slot 0 = single-seq)
     int32_t* h_sample_pinned_ = nullptr;  // pinned host buffer for async D2H sample result
+                                          // (sample_slots_ int32s)
+    int sample_slots_ = 0;                // batched sampling slots (= max_batch_size)
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory

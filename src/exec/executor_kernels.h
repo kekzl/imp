@@ -227,6 +227,12 @@ void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, cons
 
 void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream);
 
+// Device-to-device copy as a kernel launch (stream-async, ~10 us host cost)
+// instead of cudaMemcpyAsync's WDDM DMA submission (~165 us blocked host
+// time per call on this WSL2 host). Use for per-layer copies on the decode
+// hot path; falls back to cudaMemcpyAsync for unaligned buffers.
+void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t stream);
+
 void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 
 void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream);

@@ -276,41 +276,86 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                                               stream));
         }
     } else {
-        // Batched decode: n_tokens == n_sequences, each row is one sequence's logits
-        for (int i = 0; i < n_seq; i++) {
-            Tensor seq_logits = flatten_logits(logits.slice(i, i + 1));
-            apply_pre_sample(seq_logits, state);
-            tokens[i] =
-                (state.temperature <= 0.0f || state.top_k == 1)
-                    ? (d_sample_result_ ? sample_greedy(seq_logits, d_sample_result_, stream)
-                                        : sample_greedy(seq_logits, stream))
-                    : (d_sample_result_
-                           ? sample_topk_topp(seq_logits, state.top_k > 0 ? state.top_k : 50,
-                                              state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
-                                              state.seed >= 0 ? static_cast<unsigned int>(state.seed + i)
-                                                              : (42u + i),
-                                              d_sample_result_, stream)
-                           : sample_topk_topp(seq_logits, state.top_k > 0 ? state.top_k : 50,
-                                              state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
-                                              state.seed >= 0 ? static_cast<unsigned int>(state.seed + i)
-                                                              : (42u + i),
-                                              stream));
+        // Batched decode: n_tokens == n_sequences, each row is one sequence's
+        // logits. Enqueue every sequence's penalty+sampler chain back-to-back
+        // into per-sequence scratch slots, then gather ALL tokens with ONE
+        // pinned D2H + ONE stream sync. The previous per-sequence readback
+        // (pageable 4-byte D2H + cudaStreamSynchronize each) serialized the
+        // batch against ~200 us host round-trips: at n=16 sustained load that
+        // was ~3 ms host time per decode step = 29% GPU idle (nsys,
+        // 2026-07-12). Kernels, parameter normalization, and per-sequence
+        // seeds are identical to the fallback loop, so tokens are
+        // bit-identical.
+        const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);
+        const int top_k = state.top_k > 0 ? state.top_k : 50;
+        const float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+        // Eligibility is batch-uniform (depends only on shared sampling params
+        // and vocab), so decide BEFORE applying any penalties — no sequence is
+        // ever half-processed across the two paths. top_k <= 0 / > vocab
+        // normalizes to vocab inside the samplers, which lands in the CUB
+        // regime (> SAMPLE_MAX_TOP_K) that syncs internally.
+        const int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
+        const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
+        const bool can_batch = d_sample_result_ && h_sample_pinned_ && n_seq <= sample_slots_ &&
+                               (greedy || eff_top_k <= SAMPLE_MAX_TOP_K);
+        if (can_batch) {
+            for (int i = 0; i < n_seq; i++) {
+                Tensor seq_logits = flatten_logits(logits.slice(i, i + 1));
+                apply_pre_sample(seq_logits, state);
+                auto* slot = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(d_sample_result_) +
+                                                        static_cast<size_t>(i) * SAMPLE_SCRATCH_BYTES);
+                if (greedy) {
+                    sample_greedy_async(seq_logits, slot, stream);
+                } else {
+                    unsigned int seed =
+                        state.seed >= 0 ? static_cast<unsigned int>(state.seed + i) : (42u + i);
+                    bool ok = sample_topk_topp_async(seq_logits, top_k, top_p, state.temperature, seed,
+                                                     slot, stream);
+                    (void)ok;  // eligibility pre-checked above; cannot decline here
+                }
+            }
+            // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first
+            // int32 of each slot — one strided D2H gathers the whole batch.
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_, sizeof(int32_t), d_sample_result_,
+                                                 SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_seq,
+                                                 cudaMemcpyDeviceToHost, stream));
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            for (int i = 0; i < n_seq; i++)
+                tokens[i] = h_sample_pinned_[i];
+        } else {
+            // Fallback: per-sequence synchronous sampling (no slot buffers, or
+            // top_k in the CUB regime).
+            for (int i = 0; i < n_seq; i++) {
+                Tensor seq_logits = flatten_logits(logits.slice(i, i + 1));
+                apply_pre_sample(seq_logits, state);
+                tokens[i] =
+                    greedy ? (d_sample_result_ ? sample_greedy(seq_logits, d_sample_result_, stream)
+                                               : sample_greedy(seq_logits, stream))
+                           : (d_sample_result_
+                                  ? sample_topk_topp(seq_logits, top_k, top_p, state.temperature,
+                                                     state.seed >= 0
+                                                         ? static_cast<unsigned int>(state.seed + i)
+                                                         : (42u + i),
+                                                     d_sample_result_, stream)
+                                  : sample_topk_topp(seq_logits, top_k, top_p, state.temperature,
+                                                     state.seed >= 0
+                                                         ? static_cast<unsigned int>(state.seed + i)
+                                                         : (42u + i),
+                                                     stream));
+            }
         }
     }
 
     return tokens;
 }
 
-int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const InferenceState& state,
-                                                 cudaStream_t stream) {
-    // Flatten [1, V] to [V]
-    int64_t vocab_shape[1] = {logits.shape[logits.ndim - 1]};
-    Tensor flat = logits.slice(0, 1).reshape(1, vocab_shape);
-
-    // Apply penalties + filters
-    float* lp = static_cast<float*>(flat.data);
-    int vocab = static_cast<int>(flat.shape[0]);
-
+// Shared per-row logits filter chain (penalties, DRY, token bans, logit
+// bias, forced token, schema/json masks, min-p, typical-p) — used by both
+// the synchronous sample_single_from_logits and the enqueue-only
+// sample_single_from_logits_async (which declines the host-blocking
+// logit-bias mode before calling this).
+void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceState& state,
+                                       cudaStream_t stream) {
     if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
         const int32_t* pen_ptr = state.penalty_tokens;
         int pen_n = state.n_penalty_tokens;
@@ -325,17 +370,38 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const Inf
         apply_dry_penalty(lp, vocab, state.host_penalty_tokens, state.n_penalty_tokens, state.dry_multiplier,
                           state.dry_base, state.dry_allowed_length, state.dry_penalty_last_n, stream);
     }
-    // Ban special tokens — upload list to device and apply via kernel.
+    // Ban special tokens. The list is engine-static (same host array every
+    // step), so cache the device copy instead of re-allocating + re-uploading
+    // it per row per step — at n=16 that was 16 cudaMallocAsync/H2D/FreeAsync
+    // triplets per decode step for identical bytes.
     if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
-        int32_t* d_banned = nullptr;
-        size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
-        if (cudaMallocAsync(&d_banned, ban_bytes, stream) == cudaSuccess && d_banned) {
-            cudaMemcpyAsync(d_banned, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice, stream);
+        const bool cache_hit = d_banned_cache_ != nullptr &&
+                               banned_cache_src_ == state.banned_tokens &&
+                               banned_cache_n_ == state.n_banned_tokens;
+        if (!cache_hit) {
+            size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
+            if (banned_cache_capacity_ < static_cast<size_t>(state.n_banned_tokens)) {
+                if (d_banned_cache_)
+                    IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
+                d_banned_cache_ = nullptr;
+                if (cudaMalloc(&d_banned_cache_, ban_bytes) != cudaSuccess) {
+                    d_banned_cache_ = nullptr;
+                    banned_cache_capacity_ = 0;
+                }
+                banned_cache_capacity_ = d_banned_cache_ ? state.n_banned_tokens : 0;
+            }
+            if (d_banned_cache_) {
+                cudaMemcpyAsync(d_banned_cache_, state.banned_tokens, ban_bytes,
+                                cudaMemcpyHostToDevice, stream);
+                banned_cache_src_ = state.banned_tokens;
+                banned_cache_n_ = state.n_banned_tokens;
+            }
+        }
+        if (d_banned_cache_) {
             constexpr int kBanThreads = 256;
             int blocks = (state.n_banned_tokens + kBanThreads - 1) / kBanThreads;
-            ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, d_banned, state.n_banned_tokens,
-                                                                   vocab);
-            cudaFreeAsync(d_banned, stream);
+            ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, d_banned_cache_,
+                                                                  state.n_banned_tokens, vocab);
         }
     }
     // Apply logit bias
@@ -366,6 +432,17 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const Inf
         apply_min_p(lp, vocab, state.min_p, stream);
     if (state.typical_p > 0.0f && state.typical_p < 1.0f)
         apply_typical_p(lp, vocab, state.typical_p, stream);
+}
+
+int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const InferenceState& state,
+                                                 cudaStream_t stream) {
+    // Flatten [1, V] to [V]
+    int64_t vocab_shape[1] = {logits.shape[logits.ndim - 1]};
+    Tensor flat = logits.slice(0, 1).reshape(1, vocab_shape);
+
+    float* lp = static_cast<float*>(flat.data);
+    int vocab = static_cast<int>(flat.shape[0]);
+    apply_row_filters_(lp, vocab, state, stream);
 
     // Sample
     if (state.mirostat == 2) {
@@ -388,6 +465,93 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits, const Inf
                                          state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
                                          state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
                                          stream));
+}
+
+bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const InferenceState& state,
+                                                    int slot_idx, cudaStream_t stream) {
+    // Enqueue-only per-row sampling for the batched decode loop: filters +
+    // sampler land on the stream writing into scratch slot `slot_idx`; the
+    // caller gathers ALL rows' tokens with collect_sampled_tokens (one pinned
+    // D2H + one sync). The synchronous per-row readback cost ~850 us of
+    // blocked host time per sequence per step at n=16 sustained serving
+    // (pageable 4-byte D2H + stream sync each, nsys 2026-07-12).
+    if (!d_sample_result_ || !h_sample_pinned_ || slot_idx < 0 || slot_idx >= sample_slots_)
+        return false;
+    // Sync-only sampling modes decline BEFORE any filter is applied, so the
+    // caller can re-run this row through sample_single_from_logits untouched:
+    // mirostat mutates host-side mu every step; logit_bias does per-entry
+    // host read-modify-write on the logits.
+    if (state.mirostat == 2)
+        return false;
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
+        return false;
+
+    int64_t vocab_shape[1] = {logits.shape[logits.ndim - 1]};
+    Tensor flat = logits.slice(0, 1).reshape(1, vocab_shape);
+    float* lp = static_cast<float*>(flat.data);
+    const int vocab = static_cast<int>(flat.shape[0]);
+
+    const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);
+    const int top_k = state.top_k > 0 ? state.top_k : 50;
+    const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
+    if (!greedy && eff_top_k > SAMPLE_MAX_TOP_K)
+        return false;  // CUB regime syncs internally
+
+    apply_row_filters_(lp, vocab, state, stream);
+
+    auto* slot = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(d_sample_result_) +
+                                            static_cast<size_t>(slot_idx) * SAMPLE_SCRATCH_BYTES);
+    if (greedy) {
+        sample_greedy_async(flat, slot, stream);
+        return true;
+    }
+    unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
+    float temperature = state.temperature <= 0.0f ? 1.0f : state.temperature;
+    if (h_row_args_ && d_row_args_) {
+        // STASH the row for the row-parallel batched launch in
+        // collect_sampled_tokens — n serialized <<<64>>>+<<<1>>> launch pairs
+        // become ONE partial + ONE finalize launch for the whole batch.
+        TopkRowArgs& a = h_row_args_[n_pending_topk_rows_++];
+        a.logits = lp;
+        a.d_result = slot;
+        a.inv_temperature = 1.0f / temperature;
+        a.top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+        a.seed = seed;
+        a.top_k = eff_top_k;
+        pending_topk_max_k_ = std::max(pending_topk_max_k_, eff_top_k);
+        pending_topk_vocab_ = vocab;
+        return true;
+    }
+    bool ok = sample_topk_topp_async(flat, top_k, state.top_p > 0.0f ? state.top_p : 1.0f,
+                                     state.temperature, seed, slot, stream);
+    (void)ok;  // eligibility pre-checked above
+    return true;
+}
+
+const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t stream) {
+    if (!d_sample_result_ || !h_sample_pinned_ || n_slots <= 0 || n_slots > sample_slots_) {
+        n_pending_topk_rows_ = 0;
+        pending_topk_max_k_ = 0;
+        return nullptr;
+    }
+    if (n_pending_topk_rows_ > 0) {
+        // Flush the stashed rows: one pinned H2D of the args, one partial +
+        // one finalize launch covering every row.
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_row_args_, h_row_args_,
+                                           sizeof(TopkRowArgs) * n_pending_topk_rows_,
+                                           cudaMemcpyHostToDevice, stream));
+        launch_topk_topp_rows(d_row_args_, n_pending_topk_rows_, pending_topk_max_k_,
+                              pending_topk_vocab_, stream);
+        n_pending_topk_rows_ = 0;
+        pending_topk_max_k_ = 0;
+    }
+    // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first int32 of
+    // each slot — one strided D2H gathers the whole batch.
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_, sizeof(int32_t), d_sample_result_,
+                                         SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
+                                         cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    return h_sample_pinned_;
 }
 
 std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state, cudaStream_t stream) {

@@ -109,7 +109,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                          dequant_gpu_supported(ly.w_down.qtype));
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
         !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !using_fp32_accum) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+        device_copy_async(r.data, h.data, h.nbytes(), stream);  // kernel copy — see device_copy_async
     }
 
     // GemmContext for all weight GEMM dispatches in this function.
