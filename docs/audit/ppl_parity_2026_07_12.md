@@ -157,3 +157,26 @@ Conclusions:
    number is unaffected, but its quality headroom vs the GGUF deserves its
    own look (quant recipe or ST-path config, e.g. per-layer scales) before
    any Gemma-4 NVFP4 quality claim.
+
+### Follow-up (same day): the NVFP4-ST deficit is checkpoint-intrinsic
+
+Discrimination on the prose corpus (sane regime, deterministic):
+
+| Arm | PPL |
+|---|---:|
+| UD-Q4_K_M GGUF (reference) | 16.20 |
+| NVFP4-ST defaults | 26.14 |
+| NVFP4-ST + `gemm.nvfp4_lm_head=off` | 24.03 |
+| NVFP4-ST + `diagnostics.nvfp4_force_dequant` | 26.14 (bit-identical — prefill dense already runs the FP16 cache) |
+| NVFP4-ST + `moe.no_cutlass3x` (expert dequant fallback) | 29.10 |
+
+The LM-head cache explains ~9%; the remaining ~+48% survives BOTH expert
+compute paths (CUTLASS grouped and the chunked-dequant fallback — the
+fallback is even worse), and the dense weights never touch NVFP4 math at
+prefill (FP16 cache). The loss therefore lives in the **NVFP4-quantized
+expert weights themselves** (Modelopt recipe), not in an imp compute path.
+Unsloth-Dynamic Q4_K_M allocates bits non-uniformly across experts/layers
+and handles Gemma-4's experts much better. Practical consequence: at
+near-equal decode speed (271 NVFP4 vs 261 GGUF tok/s), **UD-Q4_K_M is the
+better Gemma-4 checkpoint recommendation for quality**; the NVFP4 hero
+number stays valid as a perf datapoint.
