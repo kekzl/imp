@@ -30,6 +30,7 @@
 
 #include "core/tensor.h"
 #include "compute/attention_cublas.h"
+#include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
 
 #include <vector>
@@ -182,6 +183,56 @@ std::vector<double> run_kernel(const std::vector<half>& Qh, const std::vector<ha
     return Od;
 }
 
+// Run the WMMA FMHA prefill (#992 sink support) with optional per-head sink
+// logits. Same memory layout as run_kernel ([seq, nh, hd] row-major); the
+// FMHA entry point takes 4D [batch, seq, nh, hd] views of the same buffers.
+std::vector<double> run_kernel_fmha(const std::vector<half>& Qh, const std::vector<half>& Kh,
+                                    const std::vector<half>& Vh, const std::vector<double>& sink_logit,
+                                    int q_len, int kv_len, int n_heads, int n_kv_heads, int head_dim,
+                                    bool causal, int sliding_window) {
+    AttnDevBufs b;
+    const size_t qn = static_cast<size_t>(q_len) * n_heads * head_dim;
+    const size_t kn = static_cast<size_t>(kv_len) * n_kv_heads * head_dim;
+
+    EXPECT_EQ(cudaMalloc(&b.Q, qn * sizeof(half)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&b.K, kn * sizeof(half)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&b.V, kn * sizeof(half)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&b.O, qn * sizeof(half)), cudaSuccess);
+    cudaMemcpy(b.Q, Qh.data(), qn * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(b.K, Kh.data(), kn * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(b.V, Vh.data(), kn * sizeof(half), cudaMemcpyHostToDevice);
+
+    const half* sinks_ptr = nullptr;
+    if (!sink_logit.empty()) {
+        std::vector<half> sh(n_heads);
+        for (int h = 0; h < n_heads; h++) sh[h] = __float2half(static_cast<float>(sink_logit[h]));
+        EXPECT_EQ(cudaMalloc(&b.sinks, n_heads * sizeof(half)), cudaSuccess);
+        cudaMemcpy(b.sinks, sh.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
+        sinks_ptr = b.sinks;
+    }
+
+    int64_t qshape[4] = {1, q_len, n_heads, head_dim};
+    int64_t kshape[4] = {1, kv_len, n_kv_heads, head_dim};
+    Tensor Q(b.Q, QType::F16, 4, qshape, true);
+    Tensor K(b.K, QType::F16, 4, kshape, true);
+    Tensor V(b.V, QType::F16, 4, kshape, true);
+    Tensor O(b.O, QType::F16, 4, qshape, true);
+
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    bool ok = fmha_sm120_prefill(Q, K, V, O, scale, causal, /*sliding_window=*/sliding_window,
+                                 /*softcap=*/0.0f, /*stream=*/nullptr, /*q_offset=*/0, sinks_ptr);
+    EXPECT_TRUE(ok) << "fmha_sm120_prefill declined the config";
+    cudaDeviceSynchronize();
+
+    std::vector<half> Oh(qn);
+    cudaMemcpy(Oh.data(), b.O, qn * sizeof(half), cudaMemcpyDeviceToHost);
+    b.free();
+
+    std::vector<double> Od(qn);
+    for (size_t i = 0; i < qn; i++) Od[i] = __half2float(Oh[i]);
+    return Od;
+}
+
 double max_rel_err(const std::vector<double>& got, const std::vector<double>& ref) {
     // Normalize by the RMS magnitude of the reference output, not per-element
     // |ref[i]|. Diffuse-softmax attention outputs are V-averages clustered
@@ -257,6 +308,49 @@ TEST(GptOssSinkRef, SinkLogitShiftMatchesReference) {
         double e = max_rel_err(got, ref);
         EXPECT_LT(e, kRelTol) << c.name << " sink rel err " << e;
         printf("[sink] %-18s with-sink rel=%.2e\n", c.name, e);
+    }
+}
+
+TEST(GptOssSinkRef, FmhaSinkMatchesReference) {
+    // #992: the WMMA FMHA folds the sink into its online-softmax init
+    // (m = sink, l = 1). Same fp64 reference and tolerance class as the
+    // cuBLAS test above — full-attention AND sliding-window configs (gpt-oss
+    // alternates SWA=128 layers, so the SWA×sink interaction is load-bearing).
+    for (const auto& c : kCfgs) {
+        auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
+        auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        auto V = lcg_fill_f16(0x6003u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+
+        std::vector<double> sink(c.n_heads);
+        for (int h = 0; h < c.n_heads; h++)
+            sink[h] = -1.5 + 0.5 * (h % 7);
+
+        auto ref = ref_attention_sink(Q, K, V, sink, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads,
+                                       c.head_dim, c.causal, c.sliding_window);
+        auto got = run_kernel_fmha(Q, K, V, sink, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads,
+                                   c.head_dim, c.causal, c.sliding_window);
+        double e = max_rel_err(got, ref);
+        EXPECT_LT(e, kRelTol) << c.name << " FMHA sink rel err " << e;
+        printf("[sink] %-18s FMHA with-sink rel=%.2e\n", c.name, e);
+    }
+}
+
+TEST(GptOssSinkRef, FmhaNoSinkUnchanged) {
+    // sinks=nullptr must leave the FMHA's plain-softmax path bit-compatible
+    // with its pre-#992 behavior (init still -FLT_MAX/0): compare against the
+    // fp64 no-sink reference.
+    for (const auto& c : kCfgs) {
+        auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
+        auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        auto V = lcg_fill_f16(0x6003u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        std::vector<double> no_sink(c.n_heads, -INFINITY);
+        auto ref = ref_attention_sink(Q, K, V, no_sink, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads,
+                                       c.head_dim, c.causal, c.sliding_window);
+        auto got = run_kernel_fmha(Q, K, V, {}, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads, c.head_dim,
+                                   c.causal, c.sliding_window);
+        double e = max_rel_err(got, ref);
+        EXPECT_LT(e, kRelTol) << c.name << " FMHA no-sink rel err " << e;
+        printf("[sink] %-18s FMHA no-sink rel=%.2e\n", c.name, e);
     }
 }
 
