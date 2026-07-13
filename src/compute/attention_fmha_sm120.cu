@@ -70,7 +70,7 @@ template <int Bq, int HD>
 __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset) {
+    int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks) {
     constexpr int Bkv = SM120_Bkv;
     constexpr int head_dim = HD;
 
@@ -144,8 +144,19 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
         }
     }
     if (tid < Bq) {
-        row_m[tid] = -FLT_MAX;
-        row_l[tid] = 0.0f;
+        if (sinks != nullptr) {
+            // gpt-oss learned sink (#547/#992): a virtual extra logit column
+            // with no V contribution. Seeding the online-softmax state with it
+            // (m = sink, l = exp(sink - sink) = 1) keeps the sink term
+            // correctly rescaled by every subsequent l *= exp(m_old - m_new)
+            // — identical math to the cuBLAS softmax's max/denominator join
+            // (attention_cublas.cu), just in running form.
+            row_m[tid] = __half2float(sinks[head_idx]);
+            row_l[tid] = 1.0f;
+        } else {
+            row_m[tid] = -FLT_MAX;
+            row_l[tid] = 0.0f;
+        }
     }
     __syncthreads();
 
@@ -414,7 +425,8 @@ static size_t compute_smem_sm120(int Bq, int Bkv, int head_dim) {
 // =============================================================================
 
 bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                        bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset) {
+                        bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
+                        const half* sinks) {
     if (Q.qtype != QType::F16)
         return false;
 
@@ -496,7 +508,7 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
         fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>(                                        \
             reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                \
             reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,   \
-            seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset);              \
+            seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset, sinks);       \
     } while (0)
 
     if (Bq == 128) {

@@ -37,7 +37,25 @@ int get_device_sm_version() {
 // change MUST be reflected in that header or the unit test will diverge.
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                                const RuntimeConfig& rcfg, int q_offset) {
+                                const RuntimeConfig& rcfg, int q_offset, const half* attn_sinks) {
+    // Learned attention sinks (gpt-oss #547/#992): only the FP16 WMMA FMHA
+    // tier folds them into its online softmax. Route straight there and fail
+    // loudly on decline — falling through to a sink-blind kernel produces
+    // silently wrong output (the pre-#992 executor WARN case).
+    if (attn_sinks != nullptr) {
+        if (rcfg.attention.fmha_sm120 != "never" &&
+            fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
+                               attn_sinks)) {
+            return;
+        }
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "attention_prefill_dispatch: learned sinks set but the FP16 WMMA FMHA "
+                 "declined head_dim=%d (or fmha_sm120=never) — no sink-capable kernel (#992)",
+                 static_cast<int>(Q.shape[3]));
+        throw std::runtime_error(msg);
+    }
+
     // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
     // Enabled with [attention] mxfp4 = "always". Blockscale/ksmooth/pv_fp4

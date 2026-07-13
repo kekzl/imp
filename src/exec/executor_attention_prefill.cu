@@ -51,8 +51,10 @@
                 hd == 128 || (hd == 256 && runtime_config().attention.fa2_hd256);
             const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && fa2_hd_ok &&
                                           runtime_config().attention.fa2_fp16qk != "never";
-            // Tiled FMHA correctness domain: uniform shapes, no learned sinks.
-            const bool chunk_fmha_ok = shapes_uniform && !attn_sinks;
+            // Tiled FMHA correctness domain: uniform shapes. Learned sinks are
+            // servable since #992 (the WMMA FMHA folds them into its online
+            // softmax init); only heterogeneous shapes still require cuBLAS.
+            const bool chunk_fmha_ok = shapes_uniform;
             // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked cuBLAS stores
             // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The
             // capacity constraint is `n * ctx_len <= s_cap²`, NOT `ctx_len <= s_cap`
@@ -291,8 +293,9 @@
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
             } else if (smatrix_fits && !prefer_fmha) {
                 // cuBLAS: reference path below the FMHA threshold; also the only
-                // chunked path that honors learned sinks (attn_sinks → gpt-oss)
-                // and heterogeneous per-layer shapes (Gemma-4).
+                // chunked path that honors heterogeneous per-layer shapes
+                // (Gemma-4); it also serves learned sinks below the FMHA
+                // threshold (both softmaxes understand sinks since #992).
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window, attn_sinks);
@@ -300,8 +303,8 @@
                 // Tiled FMHA dispatch: no S-matrix needed, O(n) memory. Serves
                 // uniform-shape chunks above the FMHA threshold, any chunk the
                 // S-matrix cannot hold, and fa2-declined chunks on models whose
-                // S-matrix was deliberately skipped (guarded unservable above:
-                // sinks/heterogeneous shapes never reach this branch).
+                // S-matrix was deliberately skipped. Learned sinks ride along
+                // since #992 (heterogeneous shapes still never reach here).
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
                 int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
@@ -310,7 +313,8 @@
                 Tensor v4 = v_full_t.reshape(4, kv4s);
                 Tensor o4 = ao.reshape(4, o4s);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset);
+                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset,
+                                           attn_sinks);
             }
 
             if (!cap_replay && !used_eager_scratch) {
@@ -335,8 +339,13 @@
         // single-shot FA2 at any head_dim, and the FP8-KV deterministic skip
         // ("FA2 serves all attention") would be a lie for prompts below the
         // chunk size.
-        const bool force_cublas_attn =
-            (per_layer_shapes && !attn_shapes_uniform()) || attn_sinks != nullptr;
+        // Heterogeneous per-layer shapes (Gemma-4 dual head_dim) are the only
+        // remaining cuBLAS-exclusive config; learned sinks (gpt-oss) are FMHA-
+        // servable since #992 and follow the same threshold policy as every
+        // other non-FA2 model — FA2 itself still declines sinks (kept out of
+        // the try below).
+        const bool hetero_shapes = per_layer_shapes && !attn_shapes_uniform();
+        const bool force_cublas_attn = hetero_shapes;
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold — see the chunked path above
@@ -367,7 +376,7 @@
         // stays the fallback for the configs f16-QK declines (hd ∉ {128, 256},
         // or hd=256 with fa2_hd256 off) and for force_cublas_attn (learned
         // sinks / heterogeneous per-layer shapes).
-        if (!force_cublas_attn &&
+        if (!force_cublas_attn && attn_sinks == nullptr &&
             try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
                                    layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
                                    stream)) {
@@ -377,16 +386,9 @@
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
         } else {
-            if (attn_sinks) {
-                static bool warned_sinks_fmha = false;
-                if (!warned_sinks_fmha) {
-                    warned_sinks_fmha = true;
-                    IMP_LOG_WARN("attention sinks: S-matrix too small (n=%d) — FMHA fallback IGNORES "
-                                 "sinks; output will be wrong. Lower the prefill chunk size.",
-                                 n);
-                }
-            }
-            // FMHA fallback: tiled O(n) memory chain.
+            // FMHA fallback: tiled O(n) memory chain. Sink-capable since #992
+            // (the dispatch routes sinks to the WMMA FMHA and throws instead
+            // of falling through to a sink-blind kernel).
             int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
             int64_t kv4s[4] = {1, (int64_t)n, (int64_t)nkv, (int64_t)hd};
             int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
@@ -395,7 +397,8 @@
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0);
+                                       cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0,
+                                       attn_sinks);
         }
 
         // Persist K, V into cache for later decode steps

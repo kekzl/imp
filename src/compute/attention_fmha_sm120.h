@@ -20,9 +20,12 @@ namespace imp {
 // O: [batch, seq_q, n_heads, head_dim]
 //
 // Returns true on success, false if config unsupported (caller falls back).
+// sinks: optional per-head learned attention sinks ([n_heads] FP16, gpt-oss
+// #547) — a virtual extra logit column with no V contribution, folded into
+// the online-softmax init (m = sink, l = 1). nullptr = no sinks.
 bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                         bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                        int q_offset = 0);
+                        int q_offset = 0, const half* sinks = nullptr);
 
 // FP8 variant: QK^T computed in FP8 E4M3 (m16n8k32) for 2x score throughput.
 // Q,K converted to FP8 on-the-fly in shared memory. PV stays FP16.
