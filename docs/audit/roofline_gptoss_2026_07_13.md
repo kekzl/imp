@@ -91,3 +91,25 @@ Report lever estimate ~4.4% pp window; worth a separate issue.
 *(Raw: `tools/roofline/history/raw/1d7bbf5a_20260713_011911/` — ncu CSV +
 nsys extracts committed, binaries local-only. Every number traceable to the
 run id.)*
+
+## Re-measure after PR #990 + #993 — run `6a30cb7e_20260713_165954` (same day)
+
+Lever 1 landed (`gemm.fp8_attn_proj`) and the sink-capable FMHA merged;
+the cell was re-measured on identical methodology for the audit trail.
+
+**Decode (tg256):** the 33.5% FP16 q/k/v/o class is gone. Per launch:
+q-proj 21.5 → 12.3 µs, o-proj 21.2 → 12.7 µs (−40–43%, FP8 at 945–962 GB/s);
+k/v stay at their ~6 µs latency floor (247 GB/s — small rows, as predicted).
+Class view: `gemv_fp` 33.5% → 24.4% of the window (now FP8, 40.6% roofline
+med — the k/v floor drags the class average; q/o individually sit at ~53%),
+`gemv_nvfp4` experts unchanged (47.0% share, 59.4% roofline, 1128/968 GB/s).
+Consistent with the shipped +12.1% e2e.
+
+**Module 2 (legacy coverage):** gpt-oss pp512 legacy attention share dropped
+92.4% → **79.3%** — the small/tail chunks now ride the sink-capable FMHA,
+while the bulk pp512 chunk stays on cuBLAS below the default
+`fmha_prefill_threshold` (deliberate: pp512 e2e showed no resolvable FMHA
+win, only pp2048 +6.7% — see PR #993). The #992 close-comment's "0.0% on
+the next sweep" was too optimistic; 79.3%-by-policy is the accurate
+steady state at pp512, and it is cuBLAS-by-choice, not a coverage hole.
+Decode legacy share is 0.0%.
