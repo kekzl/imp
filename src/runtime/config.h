@@ -480,7 +480,13 @@ struct RuntimeConfig {
         // extends the same win to native-NVFP4 dense models. Excluded for
         // GDN/SSM-hybrid models (LM-head NVFP4 degrades recurrent-state
         // quality — see memory lm_head_only_nvfp4_qwen3_6_refuted).
-        bool nvfp4_lm_head = true;
+        // "auto" (#982 net rule) | "on" | "off" (legacy true/false accepted).
+        // auto = ON for native BF16/F16 heads (4x byte win, +8-16% decode,
+        // +2.2% PPL, GOAL-listed trade) and for small dense GGUF heads
+        // (d_model <= 4096: 4B/8B measured net-positive); OFF for larger or
+        // MoE GGUF heads where the 2026-07-12 parity sweep measured the PPL
+        // cost above the decode win (14B +1.9%/+2.1%, 30B-A3B +3.7%/+5.0%).
+        std::string nvfp4_lm_head = "auto";
         // FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F instead of
         // 32F). GeForce sm_120 runs FP16 tensor cores with FP32 accumulate at
         // 1/4 rate (measured 2026-06-07: 253 vs 1956 TFLOPS saturated

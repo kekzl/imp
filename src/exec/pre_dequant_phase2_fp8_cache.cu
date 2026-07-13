@@ -274,9 +274,15 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // the FULL-PRECISION attention projections. "auto" = gpt-oss only — its
     // BF16 dense q/k/v/o get no NVFP4 decode cache (nvfp4_beneficial is
     // GGUF-only) and decode as 2 B/elem FP16 GEMVs, 33.5% of the decode
-    // window (docs/audit/roofline_gptoss_2026_07_13.md).
+    // window (docs/audit/roofline_gptoss_2026_07_13.md). "qo" restricts the
+    // sidecar to the q/o projections: k/v hold only ~24% of the eligible
+    // bytes (512-row GEMVs) but stacking FP8 onto the RoPE'd K path is the
+    // measured PPL-sensitive part (deterministic A/B 2026-07-13: full q/k/v/o
+    // +2.6% PPL vs qo — see the PR).
     const std::string& ap = runtime_config().gemm.fp8_attn_proj;
-    const bool attn_on = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
+    const bool attn_qo = ap == "qo" || ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
+    const bool attn_kv = ap == "on";
+    const bool attn_on = attn_qo || attn_kv;
     if (!ssm_on && !attn_on)
         return;
 
@@ -304,10 +310,10 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         const Tensor* gate_side =
             (ssm_on && !L.gdn_input_packed.data) ? &L.gdn_gate : nullptr;
         const Tensor* ssm_out_side = ssm_on ? &L.ssm_out : nullptr;
-        const Tensor* q_side = attn_on ? &L.wq : nullptr;
-        const Tensor* k_side = attn_on ? &L.wk : nullptr;
-        const Tensor* v_side = attn_on ? &L.wv : nullptr;
-        const Tensor* o_side = attn_on ? &L.wo : nullptr;
+        const Tensor* q_side = attn_qo ? &L.wq : nullptr;
+        const Tensor* k_side = attn_kv ? &L.wk : nullptr;
+        const Tensor* v_side = attn_kv ? &L.wv : nullptr;
+        const Tensor* o_side = attn_qo ? &L.wo : nullptr;
         for (const Tensor* w :
              {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
             if (!w || !w->data || !w->on_device)

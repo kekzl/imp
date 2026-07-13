@@ -311,9 +311,12 @@ no_mmvq_q8_0         = false
 nvfp4_decode_all     = false
 # Q4_K HMMA tensor-core GEMM scaffold (experimental, default off).
 q4k_hmma_enabled     = false
-# Quantize a native FP16/BF16 LM head to an NVFP4 decode cache (dense
-# models; ~+8-16% decode). Default ON.
-nvfp4_lm_head        = true
+# NVFP4 LM-head decode cache: "auto" | "on" | "off" (#982 net rule).
+# auto = ON for native BF16/F16 heads (~+8-16% decode, +2.2% PPL, GOAL-listed
+# trade) and small dense GGUF heads (d_model <= 4096, e.g. 4B/8B: decode win
+# exceeds the PPL cost); OFF for larger/MoE GGUF heads where the 2026-07-12
+# parity sweep measured the PPL cost above the decode win (14B, 30B-A3B).
+nvfp4_lm_head        = "auto"
 # Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
@@ -330,11 +333,12 @@ nvfp4_attn_proj      = false
 # in/out projections on NVFP4 hybrids: halves the dominant FP16-GEMV decode
 # bytes; prefill keeps the FP16 source. Qwen3.6-35B decode +19%, PPL flat.
 fp8_ssm_proj         = true
-# FP8 E4M3 decode sidecar for FULL-PRECISION attention projections
-# (wq/wk/wv/wo), same per-row-scale mechanism as fp8_ssm_proj, decode-only.
-# "auto" = on for gpt-oss only (#984: BF16 dense q/k/v/o have no NVFP4 decode
-# cache and were 33.5% of the decode window as FP16 GEMVs); "on" forces it
-# for any full-precision attention weights, "off" disables.
+# FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
+# per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
+# "auto" = q/o-projections on gpt-oss only (BF16 dense q/k/v/o have no NVFP4
+# decode cache and were 33.5% of the decode window as FP16 GEMVs; q/o hold
+# ~76% of those bytes). "qo" forces q/o for any full-precision attention,
+# "on" additionally includes k/v (PPL-sensitive), "off" disables.
 fp8_attn_proj        = "auto"
 # Route native-NVFP4 MoE expert decode (M=1) through per-expert GEMV
 # kernels instead of grouped CUTLASS (+54-80% MoE decode). Default ON.
