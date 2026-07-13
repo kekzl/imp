@@ -335,10 +335,11 @@ nvfp4_attn_proj      = false
 fp8_ssm_proj         = true
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
 # per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
-# "auto" = q/o-projections on gpt-oss only (BF16 dense q/k/v/o have no NVFP4
-# decode cache and were 33.5% of the decode window as FP16 GEMVs; q/o hold
-# ~76% of those bytes). "qo" forces q/o for any full-precision attention,
-# "on" additionally includes k/v (PPL-sensitive), "off" disables.
+# "auto" = full q/k/v/o on gpt-oss only (BF16 dense projections have no NVFP4
+# decode cache and were 33.5% of the decode window as FP16 GEMVs; measured
+# +12.1% decode, teacher-forced PPL unaffected by construction). "qo" = only
+# the q/o projections (~76% of the bytes, conservative middle mode), "on" =
+# full q/k/v/o for any full-precision attention weights, "off" disables.
 fp8_attn_proj        = "auto"
 # Route native-NVFP4 MoE expert decode (M=1) through per-expert GEMV
 # kernels instead of grouped CUTLASS (+54-80% MoE decode). Default ON.

@@ -271,17 +271,21 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     const bool ssm_on = runtime_config().gemm.fp8_ssm_proj;
     // gemm.fp8_attn_proj (#984): same decode-only per-row-scale sidecar for
-    // the FULL-PRECISION attention projections. "auto" = gpt-oss only — its
-    // BF16 dense q/k/v/o get no NVFP4 decode cache (nvfp4_beneficial is
-    // GGUF-only) and decode as 2 B/elem FP16 GEMVs, 33.5% of the decode
-    // window (docs/audit/roofline_gptoss_2026_07_13.md). "qo" restricts the
-    // sidecar to the q/o projections: k/v hold only ~24% of the eligible
-    // bytes (512-row GEMVs) but stacking FP8 onto the RoPE'd K path is the
-    // measured PPL-sensitive part (deterministic A/B 2026-07-13: full q/k/v/o
-    // +2.6% PPL vs qo — see the PR).
+    // the FULL-PRECISION attention projections. "auto" = full q/k/v/o on
+    // gpt-oss only — its BF16 dense projections get no NVFP4 decode cache
+    // (nvfp4_beneficial is GGUF-only) and decode as 2 B/elem FP16 GEMVs,
+    // 33.5% of the decode window (docs/audit/roofline_gptoss_2026_07_13.md);
+    // measured +12.1% decode. Teacher-forced PPL is UNAFFECTED by
+    // construction (nsys-verified: zero FP8 GEMV kernels in a --perplexity
+    // run — the apparent +2.6% in a naive PPL A/B was cuBLAS algo re-selection
+    // from the ~600 MiB VRAM shift, not the sidecar). "qo" restricts the
+    // sidecar to the q/o projections (~76% of the eligible bytes) as a
+    // conservative middle mode for future arches; "on" forces full q/k/v/o
+    // for any full-precision attention weights.
     const std::string& ap = runtime_config().gemm.fp8_attn_proj;
-    const bool attn_qo = ap == "qo" || ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
-    const bool attn_kv = ap == "on";
+    const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
+    const bool attn_qo = attn_full || ap == "qo";
+    const bool attn_kv = attn_full;
     const bool attn_on = attn_qo || attn_kv;
     if (!ssm_on && !attn_on)
         return;
