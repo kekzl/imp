@@ -210,7 +210,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.q4k_imma_prefill", cfg.gemm.q4k_imma_prefill);
     B("gemm.moe_imma_prefill", cfg.gemm.moe_imma_prefill);
     B("gemm.nvfp4_decode_all", cfg.gemm.nvfp4_decode_all);
-    B("gemm.nvfp4_lm_head", cfg.gemm.nvfp4_lm_head);
+    S("gemm.nvfp4_lm_head", cfg.gemm.nvfp4_lm_head);
     if (!matched && dotted_key == "gemm.cublas_fp16_acc") {
         // tri-state auto|on|off; legacy bool spellings stay valid
         if (val == "auto" || val == "on" || val == "off")
@@ -223,6 +223,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
     B("gemm.fp8_ssm_proj", cfg.gemm.fp8_ssm_proj);
+    S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);
     B("gemm.nvfp4_moe_decode", cfg.gemm.nvfp4_moe_decode);
 
     // [gemma4] section moved to ModelConfig::Overrides::Gemma4 in Phase 5

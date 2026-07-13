@@ -10,6 +10,7 @@
 #include "exec/executor.h"
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
+#include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
 #include "core/logging.h"
 #include "runtime/storage_planner.h"
@@ -171,12 +172,15 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
                 e.tier = StorageTier::FP16;
     }
 
-    // LM head → NVFP4 when nvfp4_lm_head (default on): the kind table caps
-    // LM_HEAD at FP16, so the plan can't pick NVFP4 itself, but the legacy path
-    // quantizes the BF16/Q*_K lm_head to an NVFP4 decode cache (+8-16% decode,
-    // +2.2% PPL — owner-accepted). GDN/SSM-hybrid models keep the FP16 lm_head
-    // unless nvfp4_lm_head_gdn (mirrors nvfp4_decode_cache_fp16_lm_head_).
-    if (runtime_config().gemm.nvfp4_lm_head) {
+    // LM head → NVFP4 per the #982 net rule (nvfp4_lm_head_enabled): the kind
+    // table caps LM_HEAD at FP16, so the plan can't pick NVFP4 itself, but the
+    // legacy path quantizes the lm_head to an NVFP4 decode cache. This plan
+    // site only serves NATIVE (BF16/F16) heads (+8-16% decode, +2.2% PPL —
+    // owner-accepted, GOAL-listed); quantized GGUF heads route through the
+    // phase-3 collector, which applies the size/arch-gated auto rule.
+    // GDN/SSM hybrids keep the FP16 lm_head unless nvfp4_lm_head_gdn.
+    if (pre_dequant_internal::nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/false,
+                                                    model_->profile().is_dense, cfg.d_model)) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
