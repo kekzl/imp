@@ -58,9 +58,10 @@ decode is the reliable A/B signal):
 
 **Honest losses & ties** (narrow, and documented): NVFP4 dense pp4096 still
 trails vLLM by ~4% (1.04×). llama.cpp's MXFP4/MoE-GGUF decode caught up
-substantially by build 9976: gpt-oss-20b is now a statistical tie (imp ~344 vs
-llama 329–345 across runs, #984) and the non-hero Qwen3-30B Q4_K_M margin is
-within noise (+1.7%). The former 35B-hybrid GGUF loss was closed by extending
+substantially by build 9976: the non-hero Qwen3-30B Q4_K_M margin is within
+noise (+1.7%). The brief gpt-oss-20b tie from that sweep was reversed by the
+FP8 attention-projection decode sidecar (#984/PR #990: imp ~391 vs llama
+329–345, +13–19%). The former 35B-hybrid GGUF loss was closed by extending
 the FP8 SSM-projection sidecar to UD quants (#962, 224 → 267–272 tok/s, +18%
 ahead of llama.cpp).
 

@@ -559,3 +559,20 @@ across chunk sizes). NVFP4 KV Δnll vs FP16: −0.12% @2048 → +0.58% @64 → *
 fully coherent). FP8 (auto default) clean at every granularity. Methodology rule: any nvfp4-KV
 quality claim needs a small-chunk (≤64) PPL arm — standard chunked PPL understates the cost by
 ~1 percentage point. Closes the last open measurement of the FP4-attention program.
+
+### 2026-07-13 — gpt-oss decode tie reversed: FP8 attention-projection sidecar (+12%), lm_head net rule
+
+The b9976 competitive sweep had reduced gpt-oss-20b to a statistical tie (#984). A dedicated
+roofline cell (PR #987, after fixing a gpt-oss teardown double-free that SIGSEGV'd nsys and an
+unused nsys flag that killed profiling) attributed 33.5% of the decode window to BF16 q/k/v/o
+running as 2 B/elem FP16 GEMVs — `nvfp4_beneficial()` is GGUF-only, so SafeTensors dense weights
+never got a decode cache. `gemm.fp8_attn_proj` (PR #990) extends the #949 per-row FP8 sidecar to
+those projections: 349.7 → 391.2 tok/s (+12%), llama.cpp lead restored to +13–19%. Quality gates:
+teacher-forced PPL untouched by construction (nsys shows zero FP8 kernels in --perplexity — an
+apparent +2.6% PPL shift was cuBLAS algo re-selection from the 600 MiB VRAM move, a measurement
+lesson now in the skills), degen_suite 33/33. Same PR resolves #982: `nvfp4_lm_head="auto"` net
+rule (native + small-dense-GGUF heads ON, ≥14B/MoE GGUF heads OFF → default PPL parity, north-star
+−1.9% accepted). A parallel Qwen-30B+ campaign refuted the launch-latency lever class wholesale
+(PR #988): under graphs+PDL, no-graphs kernel-time shares overstate tiny-kernel classes ~1.8× —
+router-chain fusion measured 0% e2e despite bit-identical outputs, split-K caps regressed −21…−35%.
+Only bytes-on-critical-path levers transfer.

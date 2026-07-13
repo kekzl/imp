@@ -4,6 +4,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **`gemm.fp8_attn_proj` — FP8 decode sidecar for full-precision attention
+  projections** (#984, PR #990): per-row-scale FP8 E4M3 copies of BF16/F16
+  wq/wk/wv/wo, decode-only (prefill keeps the full-precision source).
+  Default "auto" = full q/k/v/o on gpt-oss, whose BF16 dense projections had
+  no decode cache and ran as 2 B/elem FP16 GEMVs (33.5% of the decode
+  window). gpt-oss-20b decode 349.7 → 391.2 tok/s (+12%), turning the
+  llama.cpp b9976 statistical tie into a +13–19% lead. Teacher-forced PPL
+  unaffected by construction (nsys-verified); degen_suite 33/33. Modes:
+  `auto` / `qo` (q+o only) / `on` / `off`.
+
+### Changed
+- **`gemm.nvfp4_lm_head` is now `"auto"` with a per-model net rule** (#982,
+  PR #990): ON for native BF16/F16 LM heads (+8-16% decode, +2.2% PPL — the
+  long-standing documented trade) and for small dense GGUF heads
+  (d_model ≤ 4096, where the measured decode win exceeds the PPL cost);
+  OFF for larger or MoE GGUF heads (14B/30B-A3B measured net-negative in the
+  2026-07-12 parity sweep — those now return to default PPL parity at the
+  cost of −1.9%/−3.4% decode). Legacy `true`/`false` values still parse.
+
 ### Fixed
 - **Prefill CUDA graph replayed stale chunk geometry on continuation chunks**
   (#981): the captured chunk forward bakes `ctx_len`/`q_offset` as host args
