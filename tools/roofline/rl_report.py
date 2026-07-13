@@ -218,6 +218,15 @@ def render(run, cfg, ab_results=None):
         md.append("```json\n" + json.dumps(ab_results, indent=1) + "\n```\n")
     md.append("\n## Lever list (prioritized, **all gains = estimate** via Amdahl "
               "from measured time share × roofline headroom)\n")
+    md.append("\n> **Graphs caveat (2026-07-13):** these shares come from "
+              "`--no-cuda-graphs` profiles; under the shipped graphs+PDL decode "
+              "loop, grid-(1,1,1)/launch-latency classes (moe_routing, rmsnorm, "
+              "rope, kv_write, elementwise, split-K reduce) largely overlap away "
+              "— on Qwen3-30B the no-graphs kernel-time sum is ~1.8× the real "
+              "graphs-ON step. Fusing the router chain (6.9% share) moved e2e 0%; "
+              "capping decode split-K regressed −21…−35%. Validate any lever from "
+              "these classes with a graphs-ON e2e A/B before building it; only "
+              "byte-holding / critical-path classes translate.\n")
     for i, l in enumerate(lv[:15], 1):
         md.append(f"{i}. **{l['class']}** @ {l['cell']} — est. window gain "
                   f"~{l['est_gain_pct']:.1f}% (time share {l['time_share_pct']:.1f}%, "
