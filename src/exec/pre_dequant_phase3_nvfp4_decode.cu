@@ -133,16 +133,23 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         const auto& prof = model_->profile();
         const bool gdn_head_ok = !(prof.is_gdn || prof.is_ssm) ||
                                  runtime_config().gemm.nvfp4_lm_head_gdn;
-        // Quantized-source head here (this collector only sees GGUF sources):
-        // the #982 net rule applies — see nvfp4_lm_head_enabled().
+        // This collector only serves QUANTIZED (GGUF) heads — a native
+        // BF16/F16 head routes through nvfp4_decode_cache_fp16_lm_head_
+        // instead, so gate (and log) only for quantized sources to avoid a
+        // misleading "skipped" line on SafeTensors models.
+        const QType head_qtype = model_->out_proj_.qtype;
+        const bool quantized_head = head_qtype != QType::F16 && head_qtype != QType::BF16;
+        // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
         const bool head_on = nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/true,
                                                    prof.is_dense, cfg.d_model);
-        if (head_on && gdn_head_ok)
-            collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
-        else
-            IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
-                         !gdn_head_ok ? "nvfp4_lm_head_gdn=false, GDN/SSM hybrid"
-                                      : "gemm.nvfp4_lm_head off/auto net rule (#982)");
+        if (quantized_head) {
+            if (head_on && gdn_head_ok)
+                collect_weight_nvfp4(model_->output_proj(), head_qtype);
+            else
+                IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
+                             !gdn_head_ok ? "nvfp4_lm_head_gdn=false, GDN/SSM hybrid"
+                                          : "gemm.nvfp4_lm_head off/auto net rule (#982)");
+        }
     }
 
     // Dense attention + FFN: every tensor benefits every decode step.
