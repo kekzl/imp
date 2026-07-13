@@ -10,11 +10,15 @@ updates:
         patterns:
           - "*"
 
-  # Docker base images (root + analysis/roofline tools)
+  # Docker base images (root + roofline plot tool).
+  # /tools/analysis is deliberately NOT scanned: its Dockerfiles build FROM
+  # local-only stages (imp:ciq, imp:builder-133), which Dependabot resolves
+  # as docker.io/library/imp and fails the whole docker update run with
+  # private_source_authentication_failure (run 29214173834, 2026-07-12).
+  # There is no external base image in that directory to update.
   - package-ecosystem: "docker"
     directories:
       - "/"
-      - "/tools/analysis"
       - "/tools/roofline"
     schedule:
       interval: "weekly"
