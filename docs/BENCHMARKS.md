@@ -67,11 +67,18 @@ matrix appended to [`scoreboard.tsv`](scoreboard.tsv).
 | Qwen3.6-35B-A3B UD-Q4_K_M (hybrid) | 266.8 | 226.5 ± 5.9 | **+18%** |
 | Gemma-4-26B-A4B UD-Q4_K_M (MoE) | 261.3 | 216.0 ± 3.5 | **+21%** |
 | Qwen3-30B-A3B Q4_K_M (MoE, non-hero) | 324.7 | 319.2 ± 7.0 | +1.7% |
-| gpt-oss-20b MXFP4 (imp: SafeTensors, llama: GGUF) | 343.6–344.4 | 328.6–345.4 (run-to-run ±5%) | statistical tie |
+| gpt-oss-20b MXFP4 (imp: SafeTensors, llama: GGUF) | 389.7–391.2¹ᵍ | 328.6–345.4 (run-to-run ±5%) | **+13–19%** |
 
-llama.cpp's MoE/MXFP4 decode has improved substantially since the 06-07
-reference: the former gpt-oss ≥5% lead is gone (tie), and the non-hero
-Qwen3-30B GGUF margin narrowed to noise — tracked in #984. Dense GGUF, the
+¹ᵍ imp re-measured 2026-07-13 at commit `63df2d30` (PR #990,
+`gemm.fp8_attn_proj` FP8 decode sidecar for the BF16 q/k/v/o projections,
+default auto): tg128 391.2 median of 3 isolated trials, same command as the
+sweep, healthy clocks sampled. The llama.cpp column is the unchanged
+2026-07-12 b9976 measurement. Pre-sidecar imp measured 343.6–350.3 — a
+statistical tie, formerly tracked in #984 (resolved by PR #990).
+
+llama.cpp's MoE/MXFP4 decode improved substantially at b9976 (the 07-12 sweep
+measured a gpt-oss tie); the FP8 attention-projection sidecar restored the
+lead. The non-hero Qwen3-30B GGUF margin remains noise-level. Dense GGUF, the
 hybrid hero and Gemma-4 remain clear wins; NVFP4 SafeTensors stays uncontested
 (no llama.cpp counterpart). The pp512 column is not tabulated per the prefill
 variance policy above; on this sweep imp led NVFP4 prefill (e.g. 8B NVFP4
@@ -116,7 +123,7 @@ Decode carries ±5–10 % day-to-day variance (issue #526); clocks logged health
 | Qwen3.6-35B-A3B | 35B (3B) | 257 → **320**¹ᵇ |
 | Gemma-4-26B-A4B | 26B (4B) | 266 |
 | Nemotron-3-Nano-30B | 30B (3B) | 128 → **148**¹ᶜ |
-| gpt-oss-20b¹ | 21B (3.6B) | 325 |
+| gpt-oss-20b¹ | 21B (3.6B) | 325 → **391**¹ᵈ |
 
 ¹ᵇ 2026-07-10, commit `80864b06` + `gemm.fp8_ssm_proj` (default on since that
 PR): FP8 E4M3 per-row-scale decode sidecar for the BF16 GDN in/out projections
@@ -129,6 +136,14 @@ SSM-projection sidecar (221 MiB on Nemotron's 12 GDN projections) lifts
 Nemotron-3-Nano-30B decode 128 → **148** tok/s (+16%), PPL flat (4.184 →
 4.117). Still the slowest 30B — the Mamba2 scan + attention-projection share is
 arch-limited — but the GDN-projection part of the FP16 tax is gone.
+
+¹ᵈ 2026-07-13, commit `63df2d30` (PR #990) + `gemm.fp8_attn_proj` (default
+auto since that PR): FP8 E4M3 per-row-scale decode sidecar for the BF16
+q/k/v/o attention projections — the roofline cell
+(`docs/audit/roofline_gptoss_2026_07_13.md`) showed them at 33.5% of the
+decode window as 2 B/elem FP16 GEMVs. tg128 ~350 → **391.2** (+12%).
+Teacher-forced PPL unaffected by construction (decode-only sidecar;
+nsys-verified zero FP8 kernels in a `--perplexity` run); degen_suite 33/33.
 
 ¹ gpt-oss (PRs #572/#574): SafeTensors MXFP4 source, experts converted to
 NVFP4 at load (bit-exact nibbles, power-of-two scales) and registered for the
