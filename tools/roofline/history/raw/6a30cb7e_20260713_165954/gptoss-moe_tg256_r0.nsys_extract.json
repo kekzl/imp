@@ -1,0 +1,980 @@
+{
+ "first_attn_ts": 14062603214,
+ "last_attn_end_ts": 16279741361,
+ "n_attn_gemm_attributed": 195,
+ "n_causal_softmax": 96,
+ "n_kernels_total": 289711,
+ "per_kernel": {
+  "ban_logits_kernel(float *, const int *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "sampling",
+   "count": 514,
+   "group": "sampling",
+   "phase_time_ns": {
+    "post_prefill": 216062,
+    "prefill_window": 218207
+   },
+   "time_ns": 434269
+  },
+  "imp::absmax_kernel(const __half *, long, float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 1,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 18497565
+   },
+   "time_ns": 18497565
+  },
+  "imp::add_bias_3way_kernel(__half *, const __half *, int, __half *, const __half *, int, __half *, const __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "init": 1184,
+    "post_prefill": 6202783,
+    "prefill_window": 6490361
+   },
+   "time_ns": 12694328
+  },
+  "imp::argmax_partial_kernel(const float *, int, float *, int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "sampling",
+   "count": 519,
+   "group": "sampling",
+   "phase_time_ns": {
+    "post_prefill": 1223292,
+    "prefill_window": 1273399
+   },
+   "time_ns": 2496691
+  },
+  "imp::argmax_reduce_kernel(const float *, const int *, int, int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "sampling",
+   "count": 519,
+   "group": "sampling",
+   "phase_time_ns": {
+    "post_prefill": 321595,
+    "prefill_window": 330238
+   },
+   "time_ns": 651833
+  },
+  "imp::broadcast_add_bias_fp16_kernel(__half *, const __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 5699683,
+    "prefill_window": 5913379
+   },
+   "time_ns": 11613062
+  },
+  "imp::build_attn_ptr_arrays_kernel(const void **, const void **, void **, const char *, long, const char *, long, char *, long, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_legacy_softmax",
+   "count": 192,
+   "group": "attention_legacy",
+   "phase_time_ns": {
+    "prefill_window": 113632
+   },
+   "time_ns": 113632
+  },
+  "imp::causal_softmax_fp32_to_fp16_kernel(const float *, __half *, int, int, int, bool, int, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_legacy_softmax",
+   "count": 96,
+   "group": "attention_legacy",
+   "phase_time_ns": {
+    "prefill_window": 295357
+   },
+   "time_ns": 295357
+  },
+  "imp::convert_scales_sfatom_kernel(const unsigned char *, unsigned char *, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 1,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 696732
+   },
+   "time_ns": 696732
+  },
+  "imp::convert_scales_sfatom_moe_kernel(const unsigned char *, unsigned char *, int, int, int, unsigned long, unsigned long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 72,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 4419904
+   },
+   "time_ns": 4419904
+  },
+  "imp::device_copy_v4_kernel(const uint4 *, uint4 *, unsigned long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 768,
+    "prefill_window": 77792
+   },
+   "time_ns": 78560
+  },
+  "imp::elementwise_add_store_fp16_kernel(const __half *, const __half *, __half *, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 12360,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 3646445,
+    "prefill_window": 3687567
+   },
+   "time_ns": 7334012
+  },
+  "imp::fp16_to_fp32_kernel(const __half *, float *, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 704,
+    "prefill_window": 73344
+   },
+   "time_ns": 74048
+  },
+  "imp::gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 12360,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 22600714,
+    "prefill_window": 23001233
+   },
+   "time_ns": 45601947
+  },
+  "imp::gpt_oss_glu_fp16_kernel(const __half *, const __half *, __half *, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 4301317,
+    "prefill_window": 4470544
+   },
+   "time_ns": 8771861
+  },
+  "imp::moe_add_expert_bias_indexed_kernel(__half *, const __half *, const int *, long, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 37080,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 20380124,
+    "prefill_window": 20698076
+   },
+   "time_ns": 41078200
+  },
+  "imp::moe_add_expert_bias_sorted_kernel(__half *, const __half *, const int *, int, long, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 288,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 12864,
+    "prefill_window": 992951
+   },
+   "time_ns": 1005815
+  },
+  "imp::moe_add_logit_bias_kernel(float *, const __half *, long, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 5392935,
+    "prefill_window": 5595938
+   },
+   "time_ns": 10988873
+  },
+  "imp::moe_compute_M_per_kernel(const int *, int *, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 704,
+    "prefill_window": 76704
+   },
+   "time_ns": 77408
+  },
+  "imp::moe_fused_permute_kernel(const int *, int, int, int, int *, int *, int *, int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 1152,
+    "prefill_window": 114655
+   },
+   "time_ns": 115807
+  },
+  "imp::moe_scatter_fused_residual_kernel(const __half *, const int *, const float *, const __half *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 8832,
+    "prefill_window": 817531
+   },
+   "time_ns": 826363
+  },
+  "imp::moe_weighted_sum_residual_kernel(const __half *, const float *, const __half *, __half *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 12360,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 5641893,
+    "prefill_window": 5801125
+   },
+   "time_ns": 11443018
+  },
+  "imp::paged_attention_gqa_kernel(const __half *, const __half *, const __half *, __half *, const int *, const int *, int, int, int, int, int, float, int, int, int, int, int, int, float, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_decode_paged",
+   "count": 2352,
+   "group": "attention",
+   "phase_time_ns": {
+    "post_prefill": 16954889,
+    "prefill_window": 17274508
+   },
+   "time_ns": 34229397
+  },
+  "imp::paged_attention_reduce_kernel(const float *, __half *, int, int, int, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_decode_paged",
+   "count": 9984,
+   "group": "attention",
+   "phase_time_ns": {
+    "post_prefill": 8077562,
+    "prefill_window": 8075771
+   },
+   "time_ns": 16153333
+  },
+  "imp::paged_kv_gather_fp16_kernel(__half *, const __half *, const int *, int, int, int, int, const int *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "kv_gather",
+   "count": 48,
+   "group": "misc",
+   "phase_time_ns": {
+    "prefill_window": 71519
+   },
+   "time_ns": 71519
+  },
+  "imp::quantize_fp16_nvfp4_cutlass_moe_kernel(const __half *, const int *, unsigned char *, unsigned char *const *, const int *, int, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 192,
+   "group": "dequant",
+   "phase_time_ns": {
+    "post_prefill": 4384,
+    "prefill_window": 390366
+   },
+   "time_ns": 394750
+  },
+  "imp::quantize_fp8_rows_kernel(const __half *, unsigned char *, int, float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "unclassified",
+   "count": 96,
+   "group": "unclassified",
+   "phase_time_ns": {
+    "init": 22243880
+   },
+   "time_ns": 22243880
+  },
+  "imp::quantize_nvfp4_from_absmax_kernel(const __half *, unsigned char *, unsigned char *, const float *, float *, long, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "quant_cvt_nvfp4",
+   "count": 1,
+   "group": "dequant",
+   "phase_time_ns": {
+    "init": 17163044
+   },
+   "time_ns": 17163044
+  },
+  "imp::rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 25239,
+   "group": "norm",
+   "phase_time_ns": {
+    "post_prefill": 18545372,
+    "prefill_window": 18806016
+   },
+   "time_ns": 37351388
+  },
+  "imp::rmsnorm_fp16_warp_kernel(const __half *, const __half *, __half *, int, int, float, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rmsnorm",
+   "count": 192,
+   "group": "norm",
+   "phase_time_ns": {
+    "init": 7200,
+    "post_prefill": 5888,
+    "prefill_window": 1219897
+   },
+   "time_ns": 1232985
+  },
+  "imp::scale_fp16_kernel(__half *, __half, long)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 519,
+   "group": "misc",
+   "phase_time_ns": {
+    "init": 608,
+    "post_prefill": 184832,
+    "prefill_window": 190110
+   },
+   "time_ns": 375550
+  },
+  "imp::topk_gating_kernel(const float *, int, int, int *, float *, bool, bool, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 12991057,
+    "prefill_window": 13371834
+   },
+   "time_ns": 26362891
+  },
+  "imp::write_kv_cache_fused_kernel(const __half *, const __half *, const int *, const int *, __half *, __half *, int, int, int, int, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "kv_write",
+   "count": 12456,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 6166813,
+    "prefill_window": 6368488
+   },
+   "time_ns": 12535301
+  },
+  "nvjet_sm120_hsh_mma_128x16x128_2_32x16x128_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 83935
+   },
+   "time_ns": 83935
+  },
+  "nvjet_sm120_hsh_mma_128x16x64_5_32x16x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 106559
+   },
+   "time_ns": 106559
+  },
+  "nvjet_sm120_hsh_mma_128x16x64_5_64x8x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 16,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 87775
+   },
+   "time_ns": 87775
+  },
+  "nvjet_sm120_hsh_mma_128x8x64_5_32x8x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 74528
+   },
+   "time_ns": 74528
+  },
+  "nvjet_sm120_hsh_mma_256x16x64_2_64x16x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 16,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 52832,
+    "prefill_window": 70624
+   },
+   "time_ns": 123456
+  },
+  "nvjet_sm120_hsh_mma_256x16x64_2_64x8x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 32,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 107168,
+    "prefill_window": 135808
+   },
+   "time_ns": 242976
+  },
+  "nvjet_sm120_hsh_mma_256x8x64_2_64x8x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 178560,
+    "prefill_window": 102943
+   },
+   "time_ns": 281503
+  },
+  "nvjet_sm120_hsh_mma_320x16x64_2_80x16x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 76383
+   },
+   "time_ns": 76383
+  },
+  "nvjet_sm120_hsh_mma_32x16x128_8_16x8x128_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 64,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 43167,
+    "prefill_window": 239774
+   },
+   "time_ns": 282941
+  },
+  "nvjet_sm120_hsh_mma_32x16x64_16_16x8x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 16,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 31520
+   },
+   "time_ns": 31520
+  },
+  "nvjet_sm120_hsh_mma_32x32x32_16_16x16x32_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "post_prefill": 2272,
+    "prefill_window": 154943
+   },
+   "attn_gemm_time_ns": 157215,
+   "class": "gemm_cublas",
+   "count": 87,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 2272,
+    "prefill_window": 218495
+   },
+   "time_ns": 220767
+  },
+  "nvjet_sm120_hsh_mma_64x16x128_4_16x16x128_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 104,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 74624,
+    "prefill_window": 2948974
+   },
+   "time_ns": 3023598
+  },
+  "nvjet_sm120_hsh_mma_64x16x64_9_16x16x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 15,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 69952
+   },
+   "time_ns": 69952
+  },
+  "nvjet_sm120_hsh_mma_64x24x128_4_16x24x128_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 3808
+   },
+   "attn_gemm_time_ns": 3808,
+   "class": "gemm_cublas",
+   "count": 30,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 154304
+   },
+   "time_ns": 154304
+  },
+  "nvjet_sm120_hsh_mma_64x24x64_8_16x24x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 59488
+   },
+   "attn_gemm_time_ns": 59488,
+   "class": "gemm_cublas",
+   "count": 39,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 130079
+   },
+   "time_ns": 130079
+  },
+  "nvjet_sm120_hsh_mma_64x32x128_4_16x32x128_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 15,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 72448
+   },
+   "time_ns": 72448
+  },
+  "nvjet_sm120_hsh_mma_64x32x128_4_16x32x128_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 48,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 275678
+   },
+   "time_ns": 275678
+  },
+  "nvjet_sm120_hsh_mma_64x32x64_8_16x32x64_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 96,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 462621
+   },
+   "time_ns": 462621
+  },
+  "nvjet_sm120_hsh_mma_64x32x64_8_32x16x64_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 12864
+   },
+   "attn_gemm_time_ns": 12864,
+   "class": "gemm_cublas",
+   "count": 15,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 69951
+   },
+   "time_ns": 69951
+  },
+  "nvjet_sm120_hsh_mma_64x48x32_14_16x48x32_tmaAB_alignCD4_ptrBatch_bz_NNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 15,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 66592
+   },
+   "time_ns": 66592
+  },
+  "nvjet_sm120_hsh_mma_64x8x128_5_16x8x128_tmaAB_alignCD4_splitK_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 24,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 62624
+   },
+   "time_ns": 62624
+  },
+  "nvjet_sm120_hsh_mma_64x8x64_10_16x8x64_tmaAB_alignCD4_bx_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 96,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 39744,
+    "prefill_window": 3550448
+   },
+   "time_ns": 3590192
+  },
+  "nvjet_sm120_hsh_mma_64x8x64_10_16x8x64_tmaAB_alignCD4_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 8,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 83456
+   },
+   "time_ns": 83456
+  },
+  "nvjet_sm120_hss_mma_16x192x32_7_16x48x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 45120
+   },
+   "time_ns": 45120
+  },
+  "nvjet_sm120_hss_mma_16x32x128_8_16x8x128_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 43296
+   },
+   "time_ns": 43296
+  },
+  "nvjet_sm120_hss_mma_16x32x256_4_16x8x256_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 45504
+   },
+   "time_ns": 45504
+  },
+  "nvjet_sm120_hss_mma_16x32x32_16_16x8x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 4128
+   },
+   "attn_gemm_time_ns": 4128,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 46144
+   },
+   "time_ns": 46144
+  },
+  "nvjet_sm120_hss_mma_16x32x64_16_16x8x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 4960
+   },
+   "attn_gemm_time_ns": 4960,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 41216
+   },
+   "time_ns": 41216
+  },
+  "nvjet_sm120_hss_mma_32x32x32_16_16x16x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 109248
+   },
+   "attn_gemm_time_ns": 109248,
+   "class": "gemm_cublas",
+   "count": 53,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 129664
+   },
+   "time_ns": 129664
+  },
+  "nvjet_sm120_hss_mma_64x16x64_9_16x16x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 28992
+   },
+   "time_ns": 28992
+  },
+  "nvjet_sm120_hss_mma_64x24x128_4_16x24x128_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 10,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 52671
+   },
+   "time_ns": 52671
+  },
+  "nvjet_sm120_hss_mma_64x24x64_8_16x24x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 15,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 69823
+   },
+   "time_ns": 69823
+  },
+  "nvjet_sm120_hss_mma_64x32x128_4_16x32x128_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 24224
+   },
+   "time_ns": 24224
+  },
+  "nvjet_sm120_hss_mma_64x32x64_8_32x16x64_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 3808
+   },
+   "attn_gemm_time_ns": 3808,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 23264
+   },
+   "time_ns": 23264
+  },
+  "nvjet_sm120_hss_mma_64x40x128_3_16x40x128_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 63966
+   },
+   "attn_gemm_time_ns": 63966,
+   "class": "gemm_cublas",
+   "count": 34,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 111390
+   },
+   "time_ns": 111390
+  },
+  "nvjet_sm120_hss_mma_64x48x32_14_16x48x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 5,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 23424
+   },
+   "time_ns": 23424
+  },
+  "nvjet_sm120_hss_mma_64x8x32_16_16x8x32_tmaAB_alignCD4_ptrBatch_bz_TNNN": {
+   "attn_gemm_phase_time_ns": {
+    "prefill_window": 61055
+   },
+   "attn_gemm_time_ns": 61055,
+   "class": "gemm_cublas",
+   "count": 34,
+   "group": "gemm",
+   "phase_time_ns": {
+    "prefill_window": 108671
+   },
+   "time_ns": 108671
+  },
+  "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __half, float, __half, (bool)0, float, __half, __half, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 360,
+   "group": "gemm",
+   "phase_time_ns": {
+    "init": 143583,
+    "prefill_window": 315136
+   },
+   "time_ns": 458719
+  },
+  "void cutlass::Kernel2<cutlass_80_wmma_tensorop_f16_s161616gemm_f16_16x16_128x2_tn_align8>(T1::Params)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_cublas",
+   "count": 96,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 12511,
+    "prefill_window": 1407801
+   },
+   "time_ns": 1420312
+  },
+  "void cutlass::device_kernel<cutlass::gemm::kernel::GemmUniversal<cutlass::gemm::GroupProblemShape<cute::tuple<int, int, int>>, cutlass::gemm::collective::CollectiveMma<cutlass::gemm::MainloopSm120ArrayTmaWarpSpecializedBlockScaled<(int)4, (int)3, cute::tuple<cute::C<(int)1>, cute::C<(int)1>, cute::C<(int)1>>, cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeBlockScaledSm120<(int)3>>, cute::tuple<cute::C<(int)128>, cute::C<(int)128>, cute::C<(int)128>>, cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue4m3_t>, cute::tuple<cute::tuple<long, cute::C<(int)1>, cute::C<(int)0>> *, cute::Layout<cute::tuple<cute::tuple<cute::tuple<cute::C<(int)32>, cute::C<(int)4>>, int>, cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, int>, cute::tuple<cute::C<(int)1>, int>>, cute::tuple<cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, int>, cute::tuple<cute::tuple<cute::C<(int)0>, cute::C<(int)1>>, cute::C<(int)512>>, cute::tuple<cute::C<(int)0>, int>>> *>, cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue4m3_t>, cute::tuple<cute::tuple<long, cute::C<(int)1>, cute::C<(int)0>> *, cute::Layout<cute::tuple<cute::tuple<cute::tuple<cute::C<(int)32>, cute::C<(int)4>>, int>, cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, int>, cute::tuple<cute::C<(int)1>, int>>, cute::tuple<cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, int>, cute::tuple<cute::tuple<cute::C<(int)0>, cute::C<(int)1>>, cute::C<(int)512>>, cute::tuple<cute::C<(int)0>, int>>> *>, cute::TiledMMA<cute::MMA_Atom<cute::SM120::BLOCKSCALED::SM120_16x8x64_TN_VS<cutlass::float_e2m1_t, cutlass::float_e2m1_t, float, cutlass::float_ue4m3_t, (int)16>>, cute::Layout<cute::tuple<cute::C<(int)4>, cute::C<(int)2>, cute::C<(int)1>>, cute::tuple<cute::C<(int)1>, cute::C<(int)4>, cute::C<(int)0>>>, cute::tuple<cute::C<(int)128>, cute::Layout<cute::tuple<cute::C<(int)8>, cute::C<(int)2>, cute::C<(int)2>>, cute::tuple<cute::C<(int)1>, cute::C<(int)16>, cute::C<(int)8>>>, cute::C<(int)64>>>, cute::tuple<cute::SM90_TMA_LOAD, cute::SM90_TMA_LOAD>, cute::tuple<cute::ComposedLayout<cute::Swizzle<(int)2, (int)4, (int)3>, cute::smem_ptr_flag_bits<(int)4>, cute::Layout<cute::tuple<cute::C<(int)8>, cute::C<(int)128>>, cute::tuple<cute::C<(int)128>, cute::C<(int)1>>>>, cute::Layout<cute::tuple<cute::tuple<cute::tuple<cute::C<(int)32>, cute::C<(int)4>>, cute::C<(int)1>>, cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, cute::C<(int)1>, cute::C<(int)2>>>, cute::tuple<cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, cute::C<(int)512>>, cute::tuple<cute::tuple<cute::C<(int)0>, cute::C<(int)1>>, cute::C<(int)4>, cute::C<(int)512>>>>>, cute::tuple<cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, cutlass::integer_subbyte<(int)4, (bool)0>>, cute::Copy_Atom<cute::UniversalCopy<cutlass::float_ue4m3_t, cutlass::float_ue4m3_t>, cutlass::float_ue4m3_t>>, cute::identity, cute::tuple<cute::SM90_TMA_LOAD, cute::SM90_TMA_LOAD>, cute::tuple<cute::ComposedLayout<cute::Swizzle<(int)2, (int)4, (int)3>, cute::smem_ptr_flag_bits<(int)4>, cute::Layout<cute::tuple<cute::C<(int)8>, cute::C<(int)128>>, cute::tuple<cute::C<(int)128>, cute::C<(int)1>>>>, cute::Layout<cute::tuple<cute::tuple<cute::tuple<cute::C<(int)32>, cute::C<(int)4>>, cute::C<(int)1>>, cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, cute::C<(int)1>, cute::C<(int)2>>>, cute::tuple<cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, cute::C<(int)512>>, cute::tuple<cute::tuple<cute::C<(int)0>, cute::C<(int)1>>, cute::C<(int)4>, cute::C<(int)512>>>>>, cute::tuple<cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, cutlass::integer_subbyte<(int)4, (bool)0>>, cute::Copy_Atom<cute::UniversalCopy<cutlass::float_ue4m3_t, cutlass::float_ue4m3_t>, cutlass::float_ue4m3_t>>, cute::identity>, cutlass::epilogue::collective::CollectiveEpilogue<cutlass::epilogue::Sm90PtrArrayTmaWarpSpecialized<(int)3, (int)2, (int)4, (bool)1, (bool)0, (int)2>, cute::tuple<cute::C<(int)128>, cute::C<(int)128>, cute::C<(int)128>>, cute::tuple<cute::C<(int)64>, cute::C<(int)32>>, cutlass::half_t, cute::tuple<long, cute::C<(int)1>, cute::C<(int)0>> *, cutlass::half_t, cute::tuple<long, cute::C<(int)1>, cute::C<(int)0>> *, cutlass::epilogue::fusion::FusionCallbacks<cutlass::epilogue::Sm120PtrArrayTmaWarpSpecialized<(int)3, (int)2, (int)4, (bool)1, (bool)0, (int)2>, cutlass::epilogue::fusion::LinearCombination<cutlass::half_t, float, cutlass::half_t, float, (cutlass::FloatRoundStyle)2>, cute::tuple<cute::C<(int)128>, cute::C<(int)128>, cute::C<(int)128>>, cute::tuple<cute::C<(int)64>, cute::C<(int)32>>, >, cute::SM90_TMA_LOAD, cute::ComposedLayout<cute::Swizzle<(int)2, (int)4, (int)3>, cute::smem_ptr_flag_bits<(int)16>, cute::Layout<cute::tuple<cute::C<(int)8>, cute::C<(int)32>>, cute::tuple<cute::C<(int)32>, cute::C<(int)1>>>>, cute::SM75_U32x2_LDSM_N, cute::SM90_TMA_STORE, cute::ComposedLayout<cute::Swizzle<(int)2, (int)4, (int)3>, cute::smem_ptr_flag_bits<(int)16>, cute::Layout<cute::tuple<cute::C<(int)8>, cute::C<(int)32>>, cute::tuple<cute::C<(int)32>, cute::C<(int)1>>>>, cute::SM90_U32x2_STSM_N, cute::Copy_Atom<cute::SM90_U32x2_STSM_N, cutlass::half_t>, void>, void, void>>(T1::Params)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemm_grouped_nvfp4",
+   "count": 288,
+   "group": "gemm",
+   "phase_time_ns": {
+    "post_prefill": 154879,
+    "prefill_window": 19003246
+   },
+   "time_ns": 19158125
+  },
+  "void imp::embedding_lookup_vec_kernel<__half>(const T1 *, const int *, T1 *, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "elementwise",
+   "count": 519,
+   "group": "misc",
+   "phase_time_ns": {
+    "init": 3584,
+    "post_prefill": 546649,
+    "prefill_window": 562077
+   },
+   "time_ns": 1112310
+  },
+  "void imp::fmha_sm120_kernel<(int)64, (int)64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_fmha_wmma",
+   "count": 24,
+   "group": "attention",
+   "phase_time_ns": {
+    "prefill_window": 164159
+   },
+   "time_ns": 164159
+  },
+  "void imp::gemv_fp8_e4m3_kernel<(bool)1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_fp",
+   "count": 49440,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 144060831,
+    "prefill_window": 148157675
+   },
+   "time_ns": 292218506
+  },
+  "void imp::gemv_nvfp4_moe_decode_mr_kernel<(int)8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_nvfp4",
+   "count": 12360,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 80654240,
+    "prefill_window": 83066291
+   },
+   "time_ns": 163720531
+  },
+  "void imp::gemv_nvfp4_moe_gate_up_mr_kernel<(int)8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_nvfp4",
+   "count": 12360,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 147489911,
+    "prefill_window": 152153867
+   },
+   "time_ns": 299643778
+  },
+  "void imp::gemv_nvfp4_multirow_fp32_kernel<(int)8>(const unsigned char *, const unsigned char *, float, const __half *, float *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "gemv_nvfp4",
+   "count": 519,
+   "group": "gemv",
+   "phase_time_ns": {
+    "post_prefill": 49803712,
+    "prefill_window": 52323402
+   },
+   "time_ns": 102127114
+  },
+  "void imp::moe_gather_kernel_impl<__half>(const T1 *, const int *, T1 *, int, int)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "moe_routing",
+   "count": 96,
+   "group": "misc",
+   "phase_time_ns": {
+    "post_prefill": 2688,
+    "prefill_window": 262143
+   },
+   "time_ns": 264831
+  },
+  "void imp::paged_attention_splitk_pipeline_kernel<(int)64>(const __half *, const __half *, const __half *, float *, const int *, const int *, int, int, int, int, float, int, int, int, int, float)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "attn_decode_paged",
+   "count": 9984,
+   "group": "attention",
+   "phase_time_ns": {
+    "post_prefill": 23232226,
+    "prefill_window": 23135902
+   },
+   "time_ns": 46368128
+  },
+  "void imp::rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+   "attn_gemm_phase_time_ns": {},
+   "attn_gemm_time_ns": 0,
+   "class": "rope",
+   "count": 12456,
+   "group": "rope",
+   "phase_time_ns": {
+    "init": 1152,
+    "post_prefill": 6291174,
+    "prefill_window": 6580033
+   },
+   "time_ns": 12872359
+  }
+ }
+}

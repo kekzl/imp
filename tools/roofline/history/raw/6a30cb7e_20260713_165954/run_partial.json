@@ -1,0 +1,1155 @@
+{
+ "cells": {
+  "gptoss-moe|pp512": [
+   {
+    "bench_tps_under_nsys": {
+     "pp512": 27212.88
+    },
+    "model": "gptoss-moe",
+    "ncu_groups": {
+     "base": {
+      "csv": "gptoss-moe_pp512_r0_base.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2179840.0,
+        "gpc__cycles_elapsed.avg.per_second": 1997776892.8205123,
+        "gpu__time_duration.sum": 6.24e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 43.87119100000001,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.105676127179485
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 701184.0,
+        "gpc__cycles_elapsed.avg.per_second": 1984470878.5276074,
+        "gpu__time_duration.sum": 7.823999999999997e-05,
+        "group": "norm",
+        "l1tex__t_sector_hit_rate.pct": 25.0,
+        "n_launches": 22,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 29.22194302699386
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 10897408.0,
+        "gpc__cycles_elapsed.avg.per_second": 2014194714.5952451,
+        "gpu__time_duration.sum": 0.0005316800000000001,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 0.03814267752031297,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.663061298344868
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293167360.0,
+        "gpc__cycles_elapsed.avg.per_second": 1994884843.457944,
+        "gpu__time_duration.sum": 0.00038348799999999986,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 77.12672095802739,
+        "n_launches": 44,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 33.27635893649867
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 187629824.0,
+        "gpc__cycles_elapsed.avg.per_second": 1974208103.7527597,
+        "gpu__time_duration.sum": 0.000188448,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 85.47882223586349,
+        "n_launches": 10,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 80.70138538970963
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 412215808.0,
+        "gpc__cycles_elapsed.avg.per_second": 1980338817.6884065,
+        "gpu__time_duration.sum": 0.000359648,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 87.56822977969571,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 89.12975351988612
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 206336.0,
+        "gpc__cycles_elapsed.avg.per_second": 1986403388.2575755,
+        "gpu__time_duration.sum": 3.3792e-05,
+        "group": "rope",
+        "l1tex__t_sector_hit_rate.pct": 44.99999999999999,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 2.0833329999999997
+       }
+      },
+      "wall_s": 20.2
+     },
+     "sass": {
+      "csv": "gptoss-moe_pp512_r0_sass.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "group": "misc",
+        "n_launches": 11,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 45408.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 1013760.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 2027520.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 11264.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "group": "norm",
+        "n_launches": 22,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 131120.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 55462.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 134640.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 190080.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 22528.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "group": "attention",
+        "n_launches": 11,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 4276224.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 2865664.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 45056.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "group": "gemv",
+        "n_launches": 44,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 11352000.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 291962880.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 291962880.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 583925760.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 2816000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "group": "gemv",
+        "n_launches": 10,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 14860800.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 352512000.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 20736000.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 663552000.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 14860800.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "group": "gemv",
+        "n_launches": 11,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 32693760.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 775526400.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 45619200.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1459814400.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 50688000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "group": "rope",
+        "n_launches": 11,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 67584.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 140800.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 298496.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 50688.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 47872.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0
+       }
+      },
+      "wall_s": 20.3
+     },
+     "tc_fp16_dst_fp16": {
+      "csv": "gptoss-moe_pp512_r0_tc_fp16_dst_fp16.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2354432.0,
+        "gpu__time_duration.sum": 6.2528e-05,
+        "group": "misc",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 517632.0,
+        "gpu__time_duration.sum": 7.743999999999999e-05,
+        "group": "norm",
+        "n_launches": 22,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 7933952.0,
+        "gpu__time_duration.sum": 0.000532416,
+        "group": "attention",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293482752.0,
+        "gpu__time_duration.sum": 0.000386464,
+        "group": "gemv",
+        "n_launches": 44,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 187804672.0,
+        "gpu__time_duration.sum": 0.00018790399999999997,
+        "group": "gemv",
+        "n_launches": 10,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 410761728.0,
+        "gpu__time_duration.sum": 0.000361344,
+        "group": "gemv",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 208896.0,
+        "gpu__time_duration.sum": 3.3152e-05,
+        "group": "rope",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0
+       }
+      },
+      "wall_s": 19.2
+     },
+     "tc_fp16_dst_fp32": {
+      "csv": "gptoss-moe_pp512_r0_tc_fp16_dst_fp32.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2163456.0,
+        "gpu__time_duration.sum": 6.4928e-05,
+        "group": "misc",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 654336.0,
+        "gpu__time_duration.sum": 7.769600000000001e-05,
+        "group": "norm",
+        "n_launches": 22,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 10986240.0,
+        "gpu__time_duration.sum": 0.000539072,
+        "group": "attention",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 3892314112.0
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293690624.0,
+        "gpu__time_duration.sum": 0.00038239999999999997,
+        "group": "gemv",
+        "n_launches": 44,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 186961152.0,
+        "gpu__time_duration.sum": 0.00018774399999999997,
+        "group": "gemv",
+        "n_launches": 10,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 411942144.0,
+        "gpu__time_duration.sum": 0.00035996799999999995,
+        "group": "gemv",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 359168.0,
+        "gpu__time_duration.sum": 3.36e-05,
+        "group": "rope",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0
+       }
+      },
+      "wall_s": 19.0
+     },
+     "tc_fp8_dst_fp32": {
+      "csv": "gptoss-moe_pp512_r0_tc_fp8_dst_fp32.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2168320.0,
+        "gpu__time_duration.sum": 6.2752e-05,
+        "group": "misc",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 1451008.0,
+        "gpu__time_duration.sum": 7.6992e-05,
+        "group": "norm",
+        "n_launches": 22,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 7891456.0,
+        "gpu__time_duration.sum": 0.0005417279999999999,
+        "group": "attention",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293518080.0,
+        "gpu__time_duration.sum": 0.000397088,
+        "group": "gemv",
+        "n_launches": 44,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 186954496.0,
+        "gpu__time_duration.sum": 0.00018783999999999996,
+        "group": "gemv",
+        "n_launches": 10,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 411974144.0,
+        "gpu__time_duration.sum": 0.00035951999999999995,
+        "group": "gemv",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 163840.0,
+        "gpu__time_duration.sum": 3.6543999999999994e-05,
+        "group": "rope",
+        "n_launches": 11,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0
+       }
+      },
+      "wall_s": 19.8
+     },
+     "tc_pipe": {
+      "csv": "gptoss-moe_pp512_r0_tc_pipe.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2555392.0,
+        "gpu__time_duration.sum": 6.8128e-05,
+        "group": "misc",
+        "n_launches": 11,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 747264.0,
+        "gpu__time_duration.sum": 7.8144e-05,
+        "group": "norm",
+        "n_launches": 22,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 7931648.0,
+        "gpu__time_duration.sum": 0.000532352,
+        "group": "attention",
+        "n_launches": 11,
+        "smsp__inst_executed_pipe_tensor.sum": 950272.0
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293478656.0,
+        "gpu__time_duration.sum": 0.000383456,
+        "group": "gemv",
+        "n_launches": 44,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 187252992.0,
+        "gpu__time_duration.sum": 0.00018950399999999995,
+        "group": "gemv",
+        "n_launches": 10,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 410776320.0,
+        "gpu__time_duration.sum": 0.000359648,
+        "group": "gemv",
+        "n_launches": 11,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 157440.0,
+        "gpu__time_duration.sum": 3.3568e-05,
+        "group": "rope",
+        "n_launches": 11,
+        "smsp__inst_executed_pipe_tensor.sum": 0.0
+       }
+      },
+      "wall_s": 18.8
+     }
+    },
+    "ncu_launch_count": 120,
+    "ncu_launch_skip": 2436,
+    "nsys_extract_file": "gptoss-moe_pp512_r0.nsys_extract.json",
+    "nsys_wall_s": 25.8,
+    "restart": 0,
+    "shape": "pp512"
+   },
+   {
+    "bench_tps_under_nsys": {
+     "pp512": 27039.73
+    },
+    "model": "gptoss-moe",
+    "ncu_groups": {
+     "base": {
+      "csv": "gptoss-moe_pp512_r1_base.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 2773760.0,
+        "gpc__cycles_elapsed.avg.per_second": 2002222421.875,
+        "gpu__time_duration.sum": 6.144e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 43.87119100000001,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.139949646875003
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 520960.0,
+        "gpc__cycles_elapsed.avg.per_second": 1985855350.5367467,
+        "gpu__time_duration.sum": 7.7504e-05,
+        "group": "norm",
+        "l1tex__t_sector_hit_rate.pct": 25.000000000000004,
+        "n_launches": 22,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 29.055518405862927
+       },
+       "void fmha_sm120_kernel<64, 64>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const __half *)": {
+        "class": "attn_fmha_wmma",
+        "dram__bytes.sum": 6876672.0,
+        "gpc__cycles_elapsed.avg.per_second": 2013456971.4503503,
+        "gpu__time_duration.sum": 0.000461792,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 0.04034463848659137,
+        "n_launches": 10,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.66287613983785
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 293902848.0,
+        "gpc__cycles_elapsed.avg.per_second": 1991907178.0371528,
+        "gpu__time_duration.sum": 0.0003893119999999999,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 77.1078796412132,
+        "n_launches": 44,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 33.01543546810784
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 205650944.0,
+        "gpc__cycles_elapsed.avg.per_second": 1995150039.1519651,
+        "gpu__time_duration.sum": 0.00020678399999999995,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 85.4751592912411,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 80.35825547802538
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 410789120.0,
+        "gpc__cycles_elapsed.avg.per_second": 1993040818.1089745,
+        "gpu__time_duration.sum": 0.000359424,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 87.56839724367877,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 89.13912662918447
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 163072.0,
+        "gpc__cycles_elapsed.avg.per_second": 2013464903.9385207,
+        "gpu__time_duration.sum": 3.3311999999999995e-05,
+        "group": "rope",
+        "l1tex__t_sector_hit_rate.pct": 45.00000000000001,
+        "n_launches": 11,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 2.0833330000000005
+       }
+      },
+      "wall_s": 18.1
+     }
+    },
+    "ncu_launch_count": 120,
+    "ncu_launch_skip": 2442,
+    "nsys_extract_file": "gptoss-moe_pp512_r1.nsys_extract.json",
+    "nsys_wall_s": 20.2,
+    "restart": 1,
+    "shape": "pp512"
+   }
+  ],
+  "gptoss-moe|tg256": [
+   {
+    "bench_tps_under_nsys": {
+     "pp64": 10578.08
+    },
+    "model": "gptoss-moe",
+    "ncu_groups": {
+     "full": {
+      "csv": "gptoss-moe_tg256_r0_full.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 1817856.0,
+        "gpc__cycles_elapsed.avg.per_second": 1999520417.9202092,
+        "gpu__time_duration.sum": 4.8928e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 43.871191,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 33024.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 737280.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1474560.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 8192.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.260457568999346
+       },
+       "moe_weighted_sum_residual_kernel(const __half *, const float *, const __half *, __half *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 421376.0,
+        "gpc__cycles_elapsed.avg.per_second": 1988984151.0297484,
+        "gpu__time_duration.sum": 2.7967999999999997e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 35.557939178489704,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 23040.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 92160.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 115200.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 23040.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 15.532108974828377
+       },
+       "paged_attention_reduce_kernel(const float *, __half *, int, int, int, const __half *)": {
+        "class": "attn_decode_paged",
+        "dram__bytes.sum": 786432.0,
+        "gpc__cycles_elapsed.avg.per_second": 1998466482.7031374,
+        "gpu__time_duration.sum": 3.977599999999999e-05,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 43.75,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 134144.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 133120.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 166400.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1024.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 33792.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 7.4023570925181
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 571136.0,
+        "gpc__cycles_elapsed.avg.per_second": 1990492106.9053707,
+        "gpu__time_duration.sum": 6.256e-05,
+        "group": "norm",
+        "l1tex__t_sector_hit_rate.pct": 25.0,
+        "n_launches": 16,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 95360.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 40336.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 97920.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 138240.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 16384.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 28.91833479948849
+       },
+       "topk_gating_kernel(const float *, int, int, int *, float *, bool, bool, const __half *)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 275712.0,
+        "gpc__cycles_elapsed.avg.per_second": 2001459477.39066,
+        "gpu__time_duration.sum": 4.3168e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 70.0,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 12320.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 800.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 2080.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 15.19938999036323
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 215139584.0,
+        "gpc__cycles_elapsed.avg.per_second": 1996602171.8615644,
+        "gpu__time_duration.sum": 0.0002977279999999999,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 77.05008833372742,
+        "n_launches": 32,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 8256000.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 212336640.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 212336640.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 424673280.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 2048000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 32.45437594529235
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 150654720.0,
+        "gpc__cycles_elapsed.avg.per_second": 1990069339.230611,
+        "gpu__time_duration.sum": 0.000155552,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 85.49483188685456,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 11888640.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 282009600.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 16588800.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 530841600.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 11888640.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 80.97474792799835
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 298760960.0,
+        "gpc__cycles_elapsed.avg.per_second": 1989121203.021148,
+        "gpu__time_duration.sum": 0.0002648,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 87.5641201854985,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 23777280.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 564019200.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 33177600.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1061683200.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 36864000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 89.2743190681571
+       },
+       "void paged_attention_splitk_pipeline_kernel<64>(const __half *, const __half *, const __half *, float *, const int *, const int *, int, int, int, int, float, int, int, int, int, float)": {
+        "class": "attn_decode_paged",
+        "dram__bytes.sum": 3667968.0,
+        "gpc__cycles_elapsed.avg.per_second": 2003238336.3142772,
+        "gpu__time_duration.sum": 0.00010019199999999999,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 14.120577886937081,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 28508160.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 14712832.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 28508160.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 14712832.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 5185536.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 22.25274185563718
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 304384.0,
+        "gpc__cycles_elapsed.avg.per_second": 1986101886.6666667,
+        "gpu__time_duration.sum": 2.8800000000000002e-05,
+        "group": "rope",
+        "l1tex__t_sector_hit_rate.pct": 45.00000000000001,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 49152.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 102400.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 217088.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 36864.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 34816.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 2.083333
+       },
+       "write_kv_cache_fused_kernel(const __half *, const __half *, const int *, const int *, __half *, __half *, int, int, int, int, int, int)": {
+        "class": "kv_write",
+        "dram__bytes.sum": 207872.0,
+        "gpc__cycles_elapsed.avg.per_second": 1993683699.672668,
+        "gpu__time_duration.sum": 3.9104e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 17.5,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 5120.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 13.917247704582655
+       }
+      },
+      "wall_s": 357.1
+     }
+    },
+    "ncu_launch_count": 120,
+    "ncu_launch_skip": 84233,
+    "nsys_extract_file": "gptoss-moe_tg256_r0.nsys_extract.json",
+    "nsys_wall_s": 23.3,
+    "restart": 0,
+    "shape": "tg256"
+   },
+   {
+    "bench_tps_under_nsys": {
+     "pp64": 7529.7
+    },
+    "model": "gptoss-moe",
+    "ncu_groups": {
+     "full": {
+      "csv": "gptoss-moe_tg256_r1_full.ncu_raw.csv.gz",
+      "kernels": {
+       "gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 1791232.0,
+        "gpc__cycles_elapsed.avg.per_second": 2002330231.357553,
+        "gpu__time_duration.sum": 5.0208e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 43.871191,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 33024.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 737280.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1474560.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 8192.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 16.09552414531549
+       },
+       "moe_weighted_sum_residual_kernel(const __half *, const float *, const __half *, __half *, int, int)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 395520.0,
+        "gpc__cycles_elapsed.avg.per_second": 1981522405.847953,
+        "gpu__time_duration.sum": 2.7360000000000002e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 35.74252757777778,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 23040.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 92160.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 115200.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 23040.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 15.580126405847952
+       },
+       "paged_attention_reduce_kernel(const float *, __half *, int, int, int, const __half *)": {
+        "class": "attn_decode_paged",
+        "dram__bytes.sum": 630784.0,
+        "gpc__cycles_elapsed.avg.per_second": 1994315709.562109,
+        "gpu__time_duration.sum": 3.580799999999999e-05,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 43.74999999999999,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 134144.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 133120.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 166400.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1024.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 33792.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 7.3721257059874885
+       },
+       "rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, float, float)": {
+        "class": "rmsnorm",
+        "dram__bytes.sum": 641024.0,
+        "gpc__cycles_elapsed.avg.per_second": 1990491052.9767911,
+        "gpu__time_duration.sum": 6.342400000000001e-05,
+        "group": "norm",
+        "l1tex__t_sector_hit_rate.pct": 25.0,
+        "n_launches": 16,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 95360.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 40336.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 97920.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 138240.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 16384.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 28.911992330474273
+       },
+       "topk_gating_kernel(const float *, int, int, int *, float *, bool, bool, const __half *)": {
+        "class": "moe_routing",
+        "dram__bytes.sum": 131840.0,
+        "gpc__cycles_elapsed.avg.per_second": 1992117398.0263157,
+        "gpu__time_duration.sum": 3.8911999999999996e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 70.0,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 12320.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 800.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 2080.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 15.133149218750003
+       },
+       "void gemv_fp8_e4m3_kernel<1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)": {
+        "class": "gemv_fp",
+        "dram__bytes.sum": 213838080.0,
+        "gpc__cycles_elapsed.avg.per_second": 1997155570.9110866,
+        "gpu__time_duration.sum": 0.0002915199999999999,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 77.05914553183314,
+        "n_launches": 32,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 8256000.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 212336640.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 212336640.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 424673280.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 2048000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 32.61261675905599
+       },
+       "void gemv_nvfp4_moe_decode_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 150354944.0,
+        "gpc__cycles_elapsed.avg.per_second": 1989464878.207739,
+        "gpu__time_duration.sum": 0.00015711999999999996,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 85.48827874663952,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 11888640.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 282009600.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 16588800.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 530841600.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 11888640.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 81.1057977731161
+       },
+       "void gemv_nvfp4_moe_gate_up_mr_kernel<8>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, __half *, int, int, unsigned long, unsigned long, int)": {
+        "class": "gemv_nvfp4",
+        "dram__bytes.sum": 298777088.0,
+        "gpc__cycles_elapsed.avg.per_second": 1982890578.379674,
+        "gpu__time_duration.sum": 0.000267008,
+        "group": "gemv",
+        "l1tex__t_sector_hit_rate.pct": 87.56184036816872,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 23777280.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 564019200.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 33177600.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 1061683200.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 36864000.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 89.25883472147652
+       },
+       "void paged_attention_splitk_pipeline_kernel<64>(const __half *, const __half *, const __half *, float *, const int *, const int *, int, int, int, int, float, int, int, int, int, float)": {
+        "class": "attn_decode_paged",
+        "dram__bytes.sum": 3650304.0,
+        "gpc__cycles_elapsed.avg.per_second": 2001672526.9194012,
+        "gpu__time_duration.sum": 0.00010044799999999998,
+        "group": "attention",
+        "l1tex__t_sector_hit_rate.pct": 14.00663876744186,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 28508160.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 14712832.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 28508160.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 14712832.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 5185536.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 22.312996092704683
+       },
+       "void rope_forward_kernel<__half>(T1 *, T1 *, const int *, int, int, int, int, int, float, float, int, bool, float, float, float, float, const float *)": {
+        "class": "rope",
+        "dram__bytes.sum": 121856.0,
+        "gpc__cycles_elapsed.avg.per_second": 1983885861.1111114,
+        "gpu__time_duration.sum": 2.88e-05,
+        "group": "rope",
+        "l1tex__t_sector_hit_rate.pct": 45.0,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 49152.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 102400.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 217088.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 36864.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 34816.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 2.0833329999999997
+       },
+       "write_kv_cache_fused_kernel(const __half *, const __half *, const int *, const int *, __half *, __half *, int, int, int, int, int, int)": {
+        "class": "kv_write",
+        "dram__bytes.sum": 214528.0,
+        "gpc__cycles_elapsed.avg.per_second": 1993995634.263715,
+        "gpu__time_duration.sum": 3.3248e-05,
+        "group": "misc",
+        "l1tex__t_sector_hit_rate.pct": 17.500000000000004,
+        "n_launches": 8,
+        "sm__ops_path_tensor_src_fp16_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp16_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp16.sum": 0.0,
+        "sm__ops_path_tensor_src_fp8_dst_fp32.sum": 0.0,
+        "sm__ops_path_tensor_src_int8.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum": 0.0,
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum": 5120.0,
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum": 0.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 14.008061010587104
+       }
+      },
+      "wall_s": 350.5
+     }
+    },
+    "ncu_launch_count": 120,
+    "ncu_launch_skip": 84252,
+    "nsys_extract_file": "gptoss-moe_tg256_r1.nsys_extract.json",
+    "nsys_wall_s": 23.3,
+    "restart": 1,
+    "shape": "tg256"
+   }
+  ]
+ },
+ "meta": {
+  "config_version": 4,
+  "env": {
+   "cuda": "13.3 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]",
+   "driver": "610.62",
+   "gpu": "NVIDIA GeForce RTX 5090",
+   "ncu": "Version 2026.2.0.0 (build 37790515) (public-release)"
+  },
+  "git": {
+   "commit": "6a30cb7e",
+   "dirty": false
+  },
+  "ncu_config": {
+   "clock_control": "base",
+   "decode_metrics": [
+    "gpu__time_duration.sum",
+    "dram__bytes.sum",
+    "gpc__cycles_elapsed.avg.per_second",
+    "sm__warps_active.avg.pct_of_peak_sustained_active",
+    "l1tex__t_sector_hit_rate.pct",
+    "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum",
+    "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum",
+    "sm__ops_path_tensor_src_fp8_dst_fp16.sum",
+    "sm__ops_path_tensor_src_fp8_dst_fp32.sum",
+    "sm__ops_path_tensor_src_fp16_dst_fp16.sum",
+    "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
+    "sm__ops_path_tensor_src_int8.sum",
+    "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+    "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+    "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+    "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+    "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+    "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
+   ],
+   "fp4_flops_per_tensor_inst": 16384,
+   "fp4_pipe_classes": [
+    "gemm_cutlass_nvfp4",
+    "gemm_grouped_nvfp4"
+   ],
+   "fp4_pipe_comment": "sm__ops_path_tensor_src_fp4* counts NOTHING for the sm_120 mxf4nvf4 mma.sync path (verified 2026-06-07: CUTLASS NVFP4 GEMM = 0 on all ops_path counters; the QMMA instructions appear under pipe_tensor/subpipe_hmma instead). FP4 FLOPs therefore come from smsp__inst_executed_pipe_tensor.sum x 16384 (m16n8k64: 16*8*64 MACs * 2), applied ONLY to the fp4_pipe_classes. CALIBRATED: 5,570,560 insts x 16384 = 9.13e10 == 2*512*17408*5120 (Qwen3-14B FFN gate GEMM, exact).",
+   "launch_count": 120,
+   "prefill_groups": {
+    "base": [
+     "gpu__time_duration.sum",
+     "dram__bytes.sum",
+     "gpc__cycles_elapsed.avg.per_second",
+     "sm__warps_active.avg.pct_of_peak_sustained_active",
+     "l1tex__t_sector_hit_rate.pct"
+    ],
+    "sass": [
+     "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+     "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+     "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+     "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+     "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+     "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
+    ],
+    "sass_comment": "SASS counters tolerate no companion counter (even gpu__time_duration flips the pass count and TMA kernels die on multi-pass replay) \u2014 the group carries no time; class time comes from the base group (identical --launch-skip/--launch-count window)."
+   },
+   "replay_comment": "Multi-pass kernel replay needs a device-memory backup, and on this WSL2 consumer driver that dies with a driver-resource error the moment a TMA-using kernel (cuBLAS nvjet_*, CUTLASS sm120) is profiled. Application replay is no alternative for prefill: cuBLAS re-autotunes per process, kernel sequences differ across passes -> ncu 'Skipped'. PREFILL therefore runs several SINGLE-PASS ncu invocations per cell (prefill_groups; max ~6 plain counters per pass, only ONE sm__ops_path_* per pass). DECODE has no TMA kernels in the hot path and keeps one multi-pass kernel-replay invocation with the full decode_metrics set.",
+   "skip_fraction": 0.45,
+   "tc_group_base": [
+    "gpu__time_duration.sum",
+    "dram__bytes.sum"
+   ],
+   "tc_groups_by_family": {
+    "gguf-q4k": [
+     "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
+     "sm__ops_path_tensor_src_fp16_dst_fp16.sum",
+     "sm__ops_path_tensor_src_fp8_dst_fp32.sum"
+    ],
+    "gguf-q8": [
+     "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
+     "sm__ops_path_tensor_src_fp16_dst_fp16.sum",
+     "sm__ops_path_tensor_src_fp8_dst_fp32.sum"
+    ],
+    "nvfp4": [
+     "smsp__inst_executed_pipe_tensor.sum",
+     "sm__ops_path_tensor_src_fp8_dst_fp32.sum",
+     "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
+     "sm__ops_path_tensor_src_fp16_dst_fp16.sum"
+    ]
+   },
+   "tc_groups_comment": "One sm__ops_path counter per single-pass invocation (each rides with time+bytes so the invocation yields a self-contained FLOP rate). Per model family only the dtypes that can occur in imp's hot path are measured; FLOP counts are workload-deterministic, so TC + SASS groups run on restart 0 only \u2014 restarts 1/2 re-measure only the base group (time/bytes variance)."
+  },
+  "note": "post-#990 fp8_attn_proj + post-#993 sink-FMHA re-measure",
+  "restarts": 2,
+  "timestamp": "20260713_165954"
+ },
+ "run_id": "6a30cb7e_20260713_165954"
+}
