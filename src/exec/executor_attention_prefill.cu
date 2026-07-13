@@ -314,7 +314,7 @@
                 Tensor o4 = ao.reshape(4, o4s);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset,
-                                           attn_sinks);
+                                           static_cast<const half*>(attn_sinks));
             }
 
             if (!cap_replay && !used_eager_scratch) {
@@ -398,7 +398,7 @@
             Tensor o4 = ao.reshape(4, o4s);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0,
-                                       attn_sinks);
+                                       static_cast<const half*>(attn_sinks));
         }
 
         // Persist K, V into cache for later decode steps
