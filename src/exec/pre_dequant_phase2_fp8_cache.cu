@@ -269,7 +269,15 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 // phase-3 exclusion exists for.
 void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
-    if (!runtime_config().gemm.fp8_ssm_proj)
+    const bool ssm_on = runtime_config().gemm.fp8_ssm_proj;
+    // gemm.fp8_attn_proj (#984): same decode-only per-row-scale sidecar for
+    // the FULL-PRECISION attention projections. "auto" = gpt-oss only — its
+    // BF16 dense q/k/v/o get no NVFP4 decode cache (nvfp4_beneficial is
+    // GGUF-only) and decode as 2 B/elem FP16 GEMVs, 33.5% of the decode
+    // window (docs/audit/roofline_gptoss_2026_07_13.md).
+    const std::string& ap = runtime_config().gemm.fp8_attn_proj;
+    const bool attn_on = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
+    if (!ssm_on && !attn_on)
         return;
 
     struct Entry {
@@ -290,9 +298,18 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         // Without a pack (quantized GGUF sources never build one) decode runs
         // the 4-call path — ssm_in AND gdn_gate GEMVs every token, so both
         // are sidecar targets there.
-        const Tensor* in_side = L.gdn_input_packed.data ? &L.gdn_input_packed : &L.ssm_in;
-        const Tensor* gate_side = L.gdn_input_packed.data ? nullptr : &L.gdn_gate;
-        for (const Tensor* w : {in_side, gate_side, &L.ssm_out}) {
+        const Tensor* in_side = (ssm_on && L.gdn_input_packed.data) ? &L.gdn_input_packed
+                                : ssm_on                            ? &L.ssm_in
+                                                                    : nullptr;
+        const Tensor* gate_side =
+            (ssm_on && !L.gdn_input_packed.data) ? &L.gdn_gate : nullptr;
+        const Tensor* ssm_out_side = ssm_on ? &L.ssm_out : nullptr;
+        const Tensor* q_side = attn_on ? &L.wq : nullptr;
+        const Tensor* k_side = attn_on ? &L.wk : nullptr;
+        const Tensor* v_side = attn_on ? &L.wv : nullptr;
+        const Tensor* o_side = attn_on ? &L.wo : nullptr;
+        for (const Tensor* w :
+             {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
             if (!w || !w->data || !w->on_device)
                 continue;
             // F16 (native residents; BF16 checkpoints are converted at
@@ -370,9 +387,10 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
 
-    IMP_LOG_INFO("fp8_ssm_proj: FP8 decode sidecar for %zu GDN/SSM projections "
-                 "(%.1f MiB, %zu per-row scales; full-precision source retained for prefill)",
-                 entries.size(), total_bytes / (1024.0 * 1024.0), total_rows);
+    IMP_LOG_INFO("fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
+                 "full-precision source retained for prefill)",
+                 entries.size(), ssm_on ? " [ssm]" : "", attn_on ? " [attn]" : "",
+                 total_bytes / (1024.0 * 1024.0), total_rows);
 }
 
 }  // namespace imp
