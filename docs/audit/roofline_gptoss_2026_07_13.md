@@ -51,6 +51,16 @@ hero decodes its dense projections at ≤1 B/elem.
 
 ## Lever list (decode, prioritized; window share × byte/latency headroom)
 
+> **ADDENDUM 2026-07-13 (same day, Qwen 30B+ campaign):** levers 2, 4 and 5
+> below are the launch/latency class and are now REFUTED-by-class — under the
+> shipped graphs+PDL decode loop these no-graphs shares largely overlap away
+> (router-chain fusion measured 0% e2e on Qwen3-30B despite bit-identical
+> outputs and −2 launches/layer; the split-K cap regressed −21…−35%). Lever 1
+> (FP8/NVFP4 sidecar for the FP16 dense projections — a BYTES lever) stands
+> unchanged as the #984 play; lever 3 (qkv fusion) is bytes-neutral but raises
+> achieved bandwidth on the k/v rows and needs a graphs-ON e2e A/B before any
+> further investment. See tools/roofline/README.md lever-list caveat.
+
 1. **FP8 sidecar for dense q/k/v/o (33.5% share).** q/o run at 1.12–1.15 TB/s —
    bandwidth-bound, so bytes ≈ time. FP8-per-row (reuse the #949/#962 SSM
    sidecar infra) halves the bytes → est. **+17–20% decode**. NVFP4 (÷3.6 bytes)

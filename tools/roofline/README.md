@@ -37,6 +37,11 @@ tools/roofline/roofline ab --knob fa2           # unprofiled A/B (FA2 on vs neve
   (Dockerfile.plot, host stays clean) — renders exclusively from history.
 - **Report** (`report`): Markdown with the Module-1 table, the Module-2 coverage
   matrix and a prioritized lever list; every number references the run (commit+ts).
+  **Lever-list caveat:** shares are measured with `--no-cuda-graphs`; under the
+  shipped graphs+PDL decode loop, launch-latency classes (moe_routing, rmsnorm,
+  rope, kv_write, elementwise, split-K reduce) largely overlap away (2026-07-13:
+  no-graphs kernel-time sum ≈1.8× the real graphs-ON step on Qwen3-30B; router
+  fusion 0% e2e, split-K cap −21…−35%). Validate those levers graphs-ON first.
 - **Gate** (`regress`): exit≠0 when a kernel class (time share ≥0.5%) drops in
   the median by more than the threshold below the baseline AND the restart
   ranges are disjoint (otherwise variance, no fail).
