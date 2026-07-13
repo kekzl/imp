@@ -235,3 +235,28 @@ TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
     EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, all_ready()),
               MoePrefillPath::LEGACY);
 }
+
+// ---- #992: learned-sink pre-gate ------------------------------------------
+
+TEST(AttnDispatchTable, SinksRouteToFMHAEvenWhenFA2Accepts) {
+    // gpt-oss learned sinks: only the FP16 WMMA FMHA folds them into its
+    // online softmax — FA2/MXFP4/FP8 must not serve sink configs.
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept(), /*has_sinks=*/true),
+              AttnPrefillPath::FMHA_SM120);
+}
+
+TEST(AttnDispatchTable, SinksWithFMHADeclineIsNoneNotBlackwell) {
+    // A sink-blind fallback would produce silently wrong output — the
+    // dispatcher throws (NONE), it must NOT fall through to Blackwell.
+    auto sup = all_accept();
+    sup.fmha_sm120_accepts = false;
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true),
+              AttnPrefillPath::NONE);
+}
+
+TEST(AttnDispatchTable, SinksWithFMHANeverIsNone) {
+    auto cfg = default_cfg();
+    cfg.attention.fmha_sm120 = "never";
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true),
+              AttnPrefillPath::NONE);
+}

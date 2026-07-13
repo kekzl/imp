@@ -51,8 +51,19 @@ struct AttnKernelSupport {
 
 // Reproduces attention_prefill_dispatch()'s path selection (config gates +
 // fall-through on kernel decline). Returns the path that would actually run.
+// has_sinks mirrors the #992 pre-gate: learned sinks (gpt-oss) route straight
+// to the FP16 WMMA FMHA (the only sink-capable tier) and the dispatch THROWS
+// on decline instead of falling through to a sink-blind kernel.
 inline AttnPrefillPath select_attn_prefill_path(const RuntimeConfig& rcfg,
-                                                const AttnKernelSupport& sup) {
+                                                const AttnKernelSupport& sup,
+                                                bool has_sinks = false) {
+    // 0. Learned sinks (#992): FP16 WMMA FMHA or nothing.
+    if (has_sinks) {
+        if (rcfg.attention.fmha_sm120 != "never" && sup.fmha_sm120_accepts)
+            return AttnPrefillPath::FMHA_SM120;
+        return AttnPrefillPath::NONE;  // dispatcher throws (silent-wrong guard)
+    }
+
     // 1. MXFP4 Flash Attention (opt-in, outer availability + per-config accept).
     if (sup.mxfp4_available && sup.mxfp4_accepts)
         return AttnPrefillPath::MXFP4;
