@@ -125,3 +125,58 @@ as expected for an lm_head effect.
    some fallback path in that combination is broken.
 3. Gemma-4 quality regime (PPL ~300 on raw docs in BOTH engines' ballpark)
    deserves its own investigation before any Gemma parity claim.
+
+## Addendum 2026-07-13 — the Gemma-4 PPL~300 regime, root-caused (open point 3)
+
+Five-cell discrimination (imp at `39df257f`, deterministic mode, 5.5 KB
+corpora, full-corpus teacher forcing):
+
+| Cell | Model | Corpus | PPL |
+|---|---|---|---:|
+| E3 (family control) | gemma-3-12b Q4_K_M | repo docs | **13.6** |
+| E2 | Gemma-4-26B-A4B UD-Q4_K_M | repo docs | **221.5** |
+| E1 | Gemma-4-26B-A4B NVFP4-ST | repo docs | **492.8** |
+| E4 | Gemma-4-26B-A4B UD-Q4_K_M | plain prose | **16.2** |
+| E5 | Gemma-4-26B-A4B NVFP4-ST | plain prose | **26.1** |
+
+Conclusions:
+
+1. **The ~300 regime is a Gemma-4 MODEL property on technical-markdown
+   content, not an engine or tokenizer artifact.** gemma-3 reads the same
+   corpus at 13.6 with an IDENTICAL token count (n=1714 both — same tokenizer
+   family behavior), and gemma-4 itself is sane (16.2) on plain prose. This
+   matches the cross-engine observation (llama.cpp 309/330 on the same GGUF):
+   every engine/format combination agrees because the distribution itself is
+   out-of-domain for this heavily instruction-tuned MoE.
+2. **Consequence for parity measurement:** the repo-docs corpus carries no
+   parity signal for Gemma-4 (already excluded above); any future Gemma-4
+   quality gate should use a prose corpus, where trial spread is normal.
+3. **New secondary finding:** the NVFP4-ST checkpoint reads +61% PPL vs the
+   UD-Q4_K_M GGUF even in the sane prose regime (26.1 vs 16.2; the gap
+   amplifies to 2.2x in the OOD regime). The Gemma-4 NVFP4 hero's decode
+   number is unaffected, but its quality headroom vs the GGUF deserves its
+   own look (quant recipe or ST-path config, e.g. per-layer scales) before
+   any Gemma-4 NVFP4 quality claim.
+
+### Follow-up (same day): the NVFP4-ST deficit is checkpoint-intrinsic
+
+Discrimination on the prose corpus (sane regime, deterministic):
+
+| Arm | PPL |
+|---|---:|
+| UD-Q4_K_M GGUF (reference) | 16.20 |
+| NVFP4-ST defaults | 26.14 |
+| NVFP4-ST + `gemm.nvfp4_lm_head=off` | 24.03 |
+| NVFP4-ST + `diagnostics.nvfp4_force_dequant` | 26.14 (bit-identical — prefill dense already runs the FP16 cache) |
+| NVFP4-ST + `moe.no_cutlass3x` (expert dequant fallback) | 29.10 |
+
+The LM-head cache explains ~9%; the remaining ~+48% survives BOTH expert
+compute paths (CUTLASS grouped and the chunked-dequant fallback — the
+fallback is even worse), and the dense weights never touch NVFP4 math at
+prefill (FP16 cache). The loss therefore lives in the **NVFP4-quantized
+expert weights themselves** (Modelopt recipe), not in an imp compute path.
+Unsloth-Dynamic Q4_K_M allocates bits non-uniformly across experts/layers
+and handles Gemma-4's experts much better. Practical consequence: at
+near-equal decode speed (271 NVFP4 vs 261 GGUF tok/s), **UD-Q4_K_M is the
+better Gemma-4 checkpoint recommendation for quality**; the NVFP4 hero
+number stays valid as a perf datapoint.
