@@ -33,6 +33,10 @@ REPS=5
 OUTPUT="tests/perf_baseline.json"
 CLI="imp-cli"
 COOLDOWN_SEC=15
+# Chunk size for the gated pp512+tg128 invocation. Must match what verify.sh
+# benches against this baseline (verify-fast legacy path: 0 = single-chunk;
+# set 512 when regenerating tests/perf_baseline_chunked.json).
+CHUNK_SIZE="${IMP_BASELINE_CHUNK_SIZE:-0}"
 
 echo "Generating performance baseline..."
 echo "Model: $MODEL"
@@ -49,8 +53,9 @@ median() {
     sort -g | awk '{a[NR]=$1} END {if (NR%2) print a[(NR+1)/2]; else printf "%.4f\n", (a[NR/2]+a[NR/2+1])/2}'
 }
 
-# Run one full trial: pp128 + pp512 + tg128 measurements. Each is its own
+# Run one standalone bench invocation (pp128 / pp4096). Each is its own
 # `imp-cli --bench` invocation so cuBLAS algo selection resets between.
+# (pp512 + tg128 are measured together in the loop below, gate-matched.)
 run_trial() {
     local pp_size="$1"
     local prefix="$2"      # "pp" or "tg"
@@ -70,12 +75,20 @@ trap 'rm -f "$pp128_samples" "$pp512_samples" "$pp4096_samples" "$tg128_samples"
 for trial in $(seq 1 "$N_TRIALS"); do
     echo "  trial $trial/$N_TRIALS..."
     run_trial 128 pp >> "$pp128_samples"
-    run_trial 512 pp >> "$pp512_samples"
+    # pp512 AND tg128 come from ONE invocation, exactly how verify.sh measures
+    # the gate (tg128 = decode at ctx≈512 after the pp512 prefill, single-chunk).
+    # The old behaviour measured tg after a pp128 prefill, which pins a
+    # systematically HIGHER decode rate (KV depth cost ~2.5% on 8B, ~5% on 14B)
+    # that verify.sh can never reproduce — the gate then fails without any
+    # regression (found 2026-07-13 re-pinning the north star).
+    gate_out=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" \
+        --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 2>&1)
+    echo "$gate_out" | extract_tps '^pp' >> "$pp512_samples"
+    echo "$gate_out" | extract_tps '^tg' >> "$tg128_samples"
     # pp4096 with single-chunk (--prefill-chunk-size 0) so it crosses the
     # cuBLAS→FMHA threshold and exercises the register-resident FA2 kernel
     # (attention.fmha_fa2=on default). verify.sh benches it the same way.
     run_trial 4096 pp 0 >> "$pp4096_samples"
-    run_trial 128 tg >> "$tg128_samples"
     if [ "$trial" -lt "$N_TRIALS" ]; then
         sleep "$COOLDOWN_SEC"
     fi
@@ -113,7 +126,7 @@ cat > "$OUTPUT" << EOF
   "cuda": "$CUDA",
   "vram_total_mb": $VRAM_TOTAL,
   "timestamp": "$TIMESTAMP",
-  "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant)",
+  "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=$CHUNK_SIZE)",
   "reps": $REPS,
   "n_trials": $N_TRIALS,
   "metrics": {
