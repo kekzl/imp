@@ -38,6 +38,15 @@ void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y, in
 void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, float* y, int N_out, int K,
                                   int n_act, cudaStream_t stream);
 
+// Batched-M FP16 GEMM for small-M chunk forwards (spec-verify, #998):
+// y[n_act, N_out] = x[n_act, K] @ A^T, reading each NVFP4 weight row once per
+// MR<=4 activation tile instead of dequantizing the source (the M>1 prefill
+// fallback costs a full FP16 materialization of the weight per call — 52% of
+// the decode window on Qwen3-14B Q6_K verify chunks). Same tiling as the
+// FP32 LM-head variant above.
+void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
+                        int n_act, cudaStream_t stream);
+
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk, const NvFP4QuantResult& wv,
                           const half* x, half* yq, half* yk, half* yv, int q_rows, int k_rows, int v_rows,

@@ -203,7 +203,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     // GemmContext for all weight GEMM dispatches in this function.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq);
+                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
     //    For decode (n=1) with matching quant types: fused RMSNorm→Q8_1→QKV GEMV.

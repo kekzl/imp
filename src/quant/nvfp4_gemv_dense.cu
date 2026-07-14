@@ -448,6 +448,102 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
     }
 }
 
+// FP16-output twin of gemv_nvfp4_kpar_mb_fp32_kernel for spec-verify chunk
+// GEMMs (#998): one block per weight row n, the row decoded once and reused
+// across the MR activation rows of this launch.
+template <int MR>
+__global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
+    const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
+    const half* __restrict__ x, half* __restrict__ y, int N_out, int K) {
+    const int n = blockIdx.x;
+    if (n >= N_out)
+        return;
+    const int tid = threadIdx.x;
+    const int n_mb = K / kMicroBlockSize;
+    const uint8_t* row_packed = packed_data + (int64_t)n * (K / 2);
+    const uint8_t* row_ms = micro_scales + (int64_t)n * n_mb;
+
+    float acc[MR];
+#pragma unroll
+    for (int m = 0; m < MR; ++m)
+        acc[m] = 0.0f;
+
+    for (int mi = tid; mi < n_mb; mi += kKparThreads) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);  // weight read once
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float wf[16];
+#pragma unroll
+        for (int b = 0; b < 8; ++b) {
+            uint32_t w_fp16x2;
+            asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+                : "=r"(w_fp16x2)
+                : "r"(static_cast<uint32_t>(pb[b])));
+            float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
+            wf[b * 2] = wf2.x;
+            wf[b * 2 + 1] = wf2.y;
+        }
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        const int elem_base = byte_off * 2;
+#pragma unroll
+        for (int m = 0; m < MR; ++m) {
+            const half* xm = x + (int64_t)m * K + elem_base;
+            const uint4 xv0 = *reinterpret_cast<const uint4*>(xm);
+            const uint4 xv1 = *reinterpret_cast<const uint4*>(xm + 8);
+            half2 xh[8];
+            *reinterpret_cast<uint4*>(&xh[0]) = xv0;
+            *reinterpret_cast<uint4*>(&xh[4]) = xv1;
+            float d = 0.0f;
+#pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                float2 xf = __half22float2(xh[b]);
+                d = __fmaf_rn(wf[b * 2], xf.x, d);
+                d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
+            }
+            acc[m] = __fmaf_rn(d, cs, acc[m]);
+        }
+    }
+
+    __shared__ float warp_sums[kKparWarps];
+#pragma unroll
+    for (int m = 0; m < MR; ++m) {
+        float total = reduce_kpar(acc[m], tid, warp_sums);
+        if (tid == 0)
+            y[(int64_t)m * N_out + n] = __float2half(total);
+        __syncthreads();  // reuse warp_sums for the next activation row
+    }
+}
+
+// Batched-M FP16 GEMM for spec-verify chunks (#998). MR cap of 4 mirrors the
+// FP32 LM-head launcher: larger MR spills registers and loses to tiling.
+void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
+                        int n_act, cudaStream_t stream) {
+    const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
+    const auto* ms = reinterpret_cast<const uint8_t*>(A.micro_scales);
+    const float ts = A.tensor_scale;
+    int done = 0;
+    while (done < n_act) {
+        const int rem = n_act - done;
+        const half* xm = x + (int64_t)done * K;
+        half* ym = y + (int64_t)done * N_out;
+        int used;
+        if (rem >= 4) {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
+                        pd, ms, ts, xm, ym, N_out, K);
+            used = 4;
+        } else if (rem >= 2) {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<2>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
+                        pd, ms, ts, xm, ym, N_out, K);
+            used = 2;
+        } else {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<1>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
+                        pd, ms, ts, xm, ym, N_out, K);
+            used = 1;
+        }
+        done += used;
+    }
+}
+
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y, const half* residual, int M,
                          int K, cudaStream_t stream) {
     const int n_mb = K / kMicroBlockSize;
