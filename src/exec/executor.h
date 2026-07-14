@@ -446,6 +446,7 @@ private:
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
+    bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL

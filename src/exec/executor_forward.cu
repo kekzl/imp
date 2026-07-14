@@ -201,6 +201,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     const int decode_step = (n == 1) ? s_decode_step : 0;
     cur_decode_step_ = decode_step;
     cur_force_fp16_ = state.force_fp16_gemm;
+    cur_spec_verify_ = state.spec_verify_chunk;
     cur_per_row_lm_ = state.per_row_lm_head;
 
     // Clear any stale CUDA error state before starting the forward pass.

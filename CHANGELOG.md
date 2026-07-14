@@ -33,6 +33,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   cost of −1.9%/−3.4% decode). Legacy `true`/`false` values still parse.
 
 ### Fixed
+- **#998 — n-gram spec decode −39% at moderate context on GGUF K-quants**:
+  the verify-chunk forward (M = 2..33) took the M>1 prefill dispatch, which
+  dequantizes the full quantized source per GEMM — on Qwen3-14B Q6_K a
+  verify step cost ~7x a decode step (`dequant_q6k` alone was 52% of the tg
+  window at ctx 2048), so speculation lost even at 100% accept and 4
+  tok/verify. Verify-chunk GEMMs now read the NVFP4 decode overlay in one
+  weight pass per MR≤4 tile (`gemm_nvfp4_batched`, same tiling as the
+  batched LM head; kill switch `speculative.verify_nvfp4_gemm`). 14B Q6_K
+  tg128 at ctx 2048: 91.9 → 153.2 tok/s (+67%, now ahead of spec-off
+  150.6); ctx 4096: 89.7 → 138.0. Qwen3-8B Q8_0 at ctx 2048: 209.8 → 312.6
+  (+49% — the single weight pass also beats the M-independent mmq_imma
+  path). Real prefills never take the branch; greedy output is
+  byte-identical to spec-off and to the previous dequant verify.
 - **Prefill CUDA graph replayed stale chunk geometry on continuation chunks**
   (#981): the captured chunk forward bakes `ctx_len`/`q_offset` as host args
   into the attention launches, and the graph was only invalidated on

@@ -70,6 +70,12 @@ struct InferenceState {
     // and row-replicated block_tables. is_prefill stays true so everything
     // outside run_attention keeps the chunk-forward semantics.
     bool chunk_decode_attn = false;
+    // Spec-verify chunk forward (#998): small-M GEMMs may read the NVFP4
+    // decode overlay (one weight pass per MR tile) instead of the M>1
+    // prefill dequant path — on GGUF K-quants the per-chunk source dequant
+    // cost ~7x a decode step and made speculation net-negative. Set for
+    // every verify chunk regardless of the attention route.
+    bool spec_verify_chunk = false;
     const int* seq_offsets =
         nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 

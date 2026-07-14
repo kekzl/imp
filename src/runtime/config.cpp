@@ -294,6 +294,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.draft_ctx_cap", cfg.speculative.draft_ctx_cap);
     I("speculative.shallow_draft_ctx", cfg.speculative.shallow_draft_ctx);
     B("speculative.verify_decode_attn", cfg.speculative.verify_decode_attn);
+    B("speculative.verify_nvfp4_gemm", cfg.speculative.verify_nvfp4_gemm);
     B("speculative.moe", cfg.speculative.moe);
     I("speculative.k", cfg.speculative.k);
     B("speculative.suffix", cfg.speculative.suffix);

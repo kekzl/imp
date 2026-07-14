@@ -619,6 +619,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_compressed_tensors_ref.cu
         tests/test_nvfp4_outlier_ref.cu
         tests/test_nvfp4_gemv_kpar_loop.cu
+        tests/test_nvfp4_gemm_batched.cu
         tests/test_nvfp4_gemv_gemma3_dims.cu
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)

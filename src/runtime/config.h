@@ -748,6 +748,15 @@ struct RuntimeConfig {
         // +29% @12288. Dense non-MLA/non-SWA/non-MoE/non-hybrid only;
         // MoE/hybrid keep the FA2 chunk path. Kill switch for A/B.
         bool verify_decode_attn = true;
+        // #998: verify-chunk GEMMs (M <= largest capture bucket) read the
+        // NVFP4 decode overlay in one weight pass per MR tile instead of the
+        // M>1 prefill dequant path. On GGUF K-quants without a direct
+        // small-M kernel (Q6_K) the per-chunk source dequant cost ~7x a
+        // decode step (dequant = 52% of the tg window at ctx 2048 on
+        // Qwen3-14B Q6_K, tg -39% vs spec-off). Also aligns verify argmax
+        // with the decode path (same weights). Real prefills are never
+        // affected. Kill switch for A/B.
+        bool verify_nvfp4_gemm = true;
         // Speculation on MoE models with NATIVE-NVFP4 experts (the gate
         // additionally requires profile().moe_experts_nvfp4). Measured on
         // Qwen3-Coder-30B-FP4 (2026-07-02): code-edit +49-81% (93% accept,

@@ -264,6 +264,30 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
 
+        // Spec-verify chunk (#998): read the NVFP4 decode overlay in one
+        // weight pass per MR<=4 tile instead of dequantizing the source. On
+        // GGUF K-quants (no direct small-M kernel, e.g. Q6_K) the per-chunk
+        // dequant made a verify step cost ~7x a decode step (dequant_q6k =
+        // 52% of the tg window at ctx 2048, tg −39% vs spec-off). Reading
+        // the same weights as decode also aligns verify argmax with what
+        // the decode path would emit. M cap = largest capture bucket (33).
+        // Scoped to dequantable GGUF sources: native-ST NVFP4 weights already
+        // read NVFP4 directly via the CUTLASS prefill block below (and the
+        // prefill_routes_cutlass_nvfp4_ mirror above must stay in sync with
+        // every earlier return here — dequantable sources answer false there).
+        if (ctx.spec_verify_small_m && ctx.beta == 0.0f && M <= 33 &&
+            input.qtype == QType::F16 && output.qtype == QType::F16 &&
+            h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
+            auto it = ctx.wcache->nvfp4.find(h.source_data);
+            if (it != ctx.wcache->nvfp4.end()) {
+                gemm_nvfp4_batched(it->second, reinterpret_cast<const half*>(input.data),
+                                   reinterpret_cast<half*>(output.data),
+                                   static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]),
+                                   M, ctx.stream);
+                return;
+            }
+        }
+
         // Q4_K HMMA GEMM: in-SMEM dequant + FP16 HMMA m16n8k16 tile kernel.
         // Config-gated (gemm.q4k_hmma_enabled, default false). Bypasses
         // dequant-to-FP16 + cuBLAS by decoding Q4_K nibbles directly in SMEM.
