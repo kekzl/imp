@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check tidy sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench bench-agentic check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check tidy sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -110,6 +110,26 @@ bench: build check-gpu
 # Single model benchmark (quick check)
 test-perf: build check-gpu
 	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+
+# Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
+# harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript
+# per-turn TTFT with prefix cache on/off (agent_replay_bench.py). The metrics a
+# coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
+# model with MODEL=<name-under-$HOME/models>.
+AGENTIC_MODEL ?= Qwen3-8B-Q8_0.gguf
+bench-agentic: build check-gpu
+	@echo "=== imp agentic bench (RTX 5090) — model=$(AGENTIC_MODEL) ==="
+	@docker rm -f imp-agentic-bench >/dev/null 2>&1 || true
+	@docker run -d --name imp-agentic-bench --gpus all -p 8080:8080 \
+		-v $(HOME)/models:/models $(DOCKER_IMG) \
+		imp-server --host 0.0.0.0 --model /models/$(AGENTIC_MODEL) >/dev/null
+	@echo "waiting for server..."; \
+	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+	trap 'docker rm -f imp-agentic-bench >/dev/null 2>&1' EXIT; \
+	echo "--- concurrency TTFT/ITL ---"; \
+	python3 tools/agent_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --concurrency 1,4,16; \
+	echo "--- multi-turn replay ---"; \
+	python3 tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
 
 # Golden output comparison (greedy, temp=0)
 test-golden: build

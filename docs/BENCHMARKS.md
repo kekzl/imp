@@ -284,6 +284,31 @@ Anthropic `cache_read_input_tokens`) report the hybrid hits. Nemotron-3-Nano-30B
 (turn 1: 0.34 s). Snapshot store on the 35B: 4 × 63.8 MiB slots (default
 `server.recurrent_snapshot_mb` = 256).
 
+### Attention-model replay (prefix cache, `tools/agent_replay_bench.py`)
+
+The same growing-transcript shape on the standard attention path (paged prefix
+cache, default-on). Harness replays a scripted coding-agent session (system +
+tool spec, then per turn: user ask → assistant tool call → tool result), timing
+per-turn TTFT (`max_tokens=1` `time_total`) as the transcript grows; the
+cache-OFF arm defeats the cache with a per-turn-novel prefix (note:
+`cache_prompt=false` does **not** disable the server-global prefix cache — only
+prefix novelty does). `make bench-agentic MODEL=<name>` boots the server and
+runs this plus the concurrency harness. Numbers 2026-07-15, CUDA 13.3, healthy
+clocks; TTFT to first content token.
+
+| Model | Turn 0 (≈360 tok) | Turn 15 (≈5.2 k tok) cache-ON | Turn 15 cache-OFF | Deepest-turn speedup |
+|---|---:|---:|---:|---:|
+| Qwen3-8B Q8_0 (dense) | 32 ms | **19–35 ms flat** | 439 ms | **23×** |
+| Qwen3-Coder-30B-A3B-FP4 (MoE) | 20 ms | **33 ms** | 168 ms | **5.2×** |
+
+cache-ON TTFT stays flat as the prompt grows to ~5 k tokens (only the ~320-token
+new suffix is prefilled each turn; `cached_tokens` tracks `prompt_tokens` within
+~30); cache-OFF grows ~linearly with depth (8.6× / 7.1× turn0→turn15). The MoE's
+smaller cache-OFF slope reflects its 3 B active params (cheaper full re-prefill).
+Concurrency TTFT/ITL on the same models via `tools/agent_bench.py`: Coder-30B
+single-stream ITL 3.3 ms (269 tok/s, matches the hero decode baseline), aggregate
+363 tok/s at 16 concurrent; Qwen3-8B 143 → 293 tok/s (1 → 16).
+
 ## Output-quality gate
 
 Throughput numbers say nothing about correctness — that lesson is paid for
