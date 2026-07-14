@@ -139,9 +139,14 @@ def main():
             continue
         itls = [(t - ttft1[c]) / (K - 1) for t in ts if t > ttft1[c]]
         if itls:
+            # Aggregate decode throughput = all tokens emitted / wall time of the
+            # batch. Wall time ~= slowest request's time_total (they run
+            # concurrently); tokens = c requests * K tokens each.
+            wall = max(ts)
+            aggregate = (c * K / wall) if wall > 0 else 0.0
             print(f"  c={c:3d}  ITL p50={percentile(itls,0.5)*1000:6.1f}  "
                   f"p90={percentile(itls,0.9)*1000:6.1f}  "
-                  f"aggregate={c/percentile(ts,0.5):6.1f} tok/s")
+                  f"aggregate={aggregate:7.1f} tok/s")
     print()
 
 
