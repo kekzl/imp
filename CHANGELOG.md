@@ -16,6 +16,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   `auto` / `qo` (q+o only) / `on` / `off`.
 
 ### Changed
+- **Dependency bumps**: CUTLASS v4.5.3 → v4.6.0 (upstream changes are
+  CuTe-DSL/Python-centric; measured perf-neutral on sm_120 decode A/B —
+  Qwen3-8B Q8_0 +0.8%, Qwen3-14B NVFP4 −0.5%, within trial spread) and
+  cpp-httplib v0.48.0 → v0.50.1 (picks up three security fixes: multipart
+  `Content-Disposition` header injection, CRLF injection in chunked
+  trailers, TLS use-after-free in `SSLClient`/WebSocket teardown — imp-server
+  uses `SSLClient` for image-URL fetches). Dockerfile ARG defaults re-synced
+  with `cmake/imp-deps.cmake` (CUTLASS default had drifted at v4.5.2).
 - **`gemm.nvfp4_lm_head` is now `"auto"` with a per-model net rule** (#982,
   PR #990): ON for native BF16/F16 LM heads (+8-16% decode, +2.2% PPL — the
   long-standing documented trade) and for small dense GGUF heads
