@@ -458,20 +458,10 @@ TEST(SoftmaxTest, NumericalStability) {
     free_gpu_tensor(d_out);
 }
 
-TEST(SoftmaxTest, SingleElement) {
-    std::vector<float> h_x = {5.0f};
-    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {1, 1});
-    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, 1});
-
-    softmax(d_x, d_out);
-    cudaDeviceSynchronize();
-
-    auto h_out = read_gpu_tensor(d_out);
-    EXPECT_NEAR(h_out[0], 1.0f, 1e-6f);
-
-    free_gpu_tensor(d_x);
-    free_gpu_tensor(d_out);
-}
+// NOTE: SoftmaxTest.SingleElement lives in test_softmax.cu — the copy that was
+// here collided with it (same suite.test name in the same test-compute binary)
+// and asserted the identical single-element→1.0 property. Removed to keep one
+// registration.
 
 TEST(SoftmaxTest, FP16) {
     constexpr int rows = 1;
