@@ -1,10 +1,10 @@
 {
-  "comment": "Chunked-prefill perf baseline (chunk=512). Looser gates than perf_baseline.json (5% decode / 8% prefill) to account for gather + rect-attn overhead per chunk. Measured 2026-05-08 on RTX 5090, CUDA 13.2, 5 reps each with --prefill-chunk-size 512.",
+  "comment": "Chunked-prefill perf baseline (chunk=512). Looser gates than perf_baseline.json (5% decode / 8% prefill) to account for gather + rect-attn overhead per chunk. Re-pinned 2026-07-15 on the spec-OFF gate metric (--set speculative.ngram=false, see PR #1011) — the previous 2026-05-08 pins predate two months of decode gains (+90% headroom made the gate meaningless). Cold-median of 5 trials x 5 reps, 15s cooldown. Llama-3.2-3B was dropped: the model is no longer present locally (its entry had been silently skipped for months) and a re-download would be a different quant.",
   "schema_version": "multi-model-v1",
   "version": 1,
   "gpu": "NVIDIA GeForce RTX 5090",
-  "cuda": "13.2.78",
-  "timestamp": "2026-05-08T22:00:00Z",
+  "cuda": "13.3",
+  "timestamp": "2026-07-15T16:47:04Z",
   "reps": 5,
   "prefill_chunk_size": 512,
   "regression_thresholds": {
@@ -13,22 +13,17 @@
   },
   "models": {
     "Qwen3-4B-Instruct-2507-Q8_0.gguf": {
-      "tg256": 233.7,
-      "pp512": 21492.4
+      "tg256": 447.59,
+      "pp512": 23612.89
     },
     "Qwen3-8B-Q8_0.gguf": {
-      "tg256": 146.2,
-      "pp512": 13668.2
-    },
-    "Llama-3.2-3B-Instruct-Q8_0.gguf": {
-      "tg256": 287.7,
-      "pp512": 19879.2
+      "tg256": 287.49,
+      "pp512": 15056.61
     }
   },
   "_chunk0_reference": {
-    "Qwen3-4B-Instruct-2507-Q8_0.gguf": {"tg256": 232.6, "pp512": 18467.1},
-    "Qwen3-8B-Q8_0.gguf": {"tg256": 150.3, "pp512": 13740.4},
-    "Llama-3.2-3B-Instruct-Q8_0.gguf": {"tg256": 302.1, "pp512": 15415.4}
+    "Qwen3-4B-Instruct-2507-Q8_0.gguf": {"tg256": 447.54, "pp512": 21751.91},
+    "Qwen3-8B-Q8_0.gguf": {"tg256": 287.32, "pp512": 15043.31}
   },
-  "_refresh_note": "Re-measure with: docker run --rm --gpus all -v $PWD/models:/models imp:test imp-cli --model /models/<model>.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0 --prefill-chunk-size 512"
+  "_refresh_note": "Re-measure with: docker run --rm --gpus all -v $HOME/models:/models imp:test imp-cli --model /models/<model>.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0 --prefill-chunk-size 512 --set speculative.ngram=false (5 trials, 15s cooldown, take median)"
 }
