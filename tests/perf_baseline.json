@@ -4,18 +4,18 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "unknown",
   "vram_total_mb": 32607,
-  "timestamp": "2026-06-11T22:37:49Z",
-  "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
+  "timestamp": "2026-07-15T16:09:03Z",
+  "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=0); speculative.ngram=false",
   "reps": 5,
   "n_trials": 5,
   "metrics": {
     "prefill_tps": {
-      "pp128": 4796.74,
-      "pp512": 11936.04,
-      "pp4096": 13188.83
+      "pp128": 5730.34,
+      "pp512": 14514.73,
+      "pp4096": 19278.75
     },
     "decode_tps": {
-      "tg128": 269.50
+      "tg128": 288.02
     },
     "memory_mb": {
       "model_weights": 8320

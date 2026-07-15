@@ -21,8 +21,12 @@
 # states the intended deltas (north star −~1.9% from the #982 net rule).
 set -euo pipefail
 
-BAND_LO="${BAND_LO:-266}"
-BAND_HI="${BAND_HI:-278}"
+# Band re-derived 2026-07-15 for the spec-OFF gate metric: three healthy-clock
+# probes read 281.6/282.4/283.1 (0.5% spread). The old band [266,278] belonged
+# to the spec-ON metric, whose verify-path volatility (11% across restarts)
+# caused the 07-12/07-13 refusals in the first place.
+BAND_LO="${BAND_LO:-275}"
+BAND_HI="${BAND_HI:-290}"
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 IMG="${IMG:-imp:test}"
 
@@ -35,7 +39,8 @@ probe() {
         -v "$MODELS_DIR":/models -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
         --entrypoint /usr/local/bin/imp-cli "$IMG" \
         --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 \
-        --bench-reps 10 --max-tokens 128 --temperature 0 2>&1 |
+        --bench-reps 10 --max-tokens 128 --temperature 0 \
+        --set speculative.ngram=false 2>&1 |
         sed -n 's/^tg .*( *\([0-9.]*\) tok\/s.*/\1/p'
 }
 

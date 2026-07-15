@@ -63,7 +63,8 @@ run_trial() {
     local chunk_arg=()
     [ -n "$chunk" ] && chunk_arg=(--prefill-chunk-size "$chunk")
     $CLI --model "$MODEL" --bench --bench-pp "$pp_size" --bench-reps "$REPS" \
-        "${chunk_arg[@]}" --max-tokens 128 --temperature 0 2>&1 | extract_tps "^$prefix"
+        "${chunk_arg[@]}" --max-tokens 128 --temperature 0 \
+        --set speculative.ngram=false 2>&1 | extract_tps "^$prefix"
 }
 
 pp128_samples=$(mktemp)
@@ -81,8 +82,12 @@ for trial in $(seq 1 "$N_TRIALS"); do
     # systematically HIGHER decode rate (KV depth cost ~2.5% on 8B, ~5% on 14B)
     # that verify.sh can never reproduce — the gate then fails without any
     # regression (found 2026-07-13 re-pinning the north star).
+    # speculative.ngram=false: matches verify.sh — the self-repetitive bench
+    # prompt (~99.9% accept) makes spec-ON tg measure the batched verify GEMMs,
+    # which are restart-volatile (11% swing on healthy clocks, 2026-07-15).
     gate_out=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" \
-        --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 2>&1)
+        --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 \
+        --set speculative.ngram=false 2>&1)
     echo "$gate_out" | extract_tps '^pp' >> "$pp512_samples"
     echo "$gate_out" | extract_tps '^tg' >> "$tg128_samples"
     # pp4096 with single-chunk (--prefill-chunk-size 0) so it crosses the
@@ -126,7 +131,7 @@ cat > "$OUTPUT" << EOF
   "cuda": "$CUDA",
   "vram_total_mb": $VRAM_TOTAL,
   "timestamp": "$TIMESTAMP",
-  "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=$CHUNK_SIZE)",
+  "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=$CHUNK_SIZE); speculative.ngram=false",
   "reps": $REPS,
   "n_trials": $N_TRIALS,
   "metrics": {

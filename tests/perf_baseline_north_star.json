@@ -4,22 +4,24 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-06-12T00:10:00Z",
-  "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant)",
+  "timestamp": "2026-07-15T16:12:25Z",
+  "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=0); speculative.ngram=false",
   "reps": 5,
   "n_trials": 5,
-  "_note": "This is the docs/GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric is the actual headline north-star number from docs/GOAL.md (historic cold-median 157.71, 2026-05-23; re-measured 156.02 on 2026-06-12 — unchanged within host-day noise). Refreshed 2026-06-12 after the IMMA prefill family (#612-#617) and the FA2 full-rate accumulate (#673/#674) moved prefill +12% (pp512) / +77% (pp2048); the previous decode value (165.72) was a peak-day sample whose 3% gate threshold sat above ordinary healthy days (issue #526) — 157.58 is an ordinary-healthy-day cold median, clocks verified during the bench (2880 MHz SM / 13801 MHz mem / ~487 W).",
+  "_note": "This is the docs/GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric is the actual headline north-star number from docs/GOAL.md. Re-pinned 2026-07-15 on the spec-OFF gate metric (--set speculative.ngram=false): the self-repetitive bench prompt (~99.9% draft accept) made spec-ON tg measure the batched spec-verify GEMMs, which are restart-volatile (11% swing across healthy-clock restarts) — the gate now measures the stable decode GEMV hot path (<1% spread). Values are NOT comparable to the previous spec-ON pins (157.58 @512 / 156.02 @2048, 2026-06-12). Cold median, clocks verified during the bench (13801 MHz mem; band guard [275,290] passed on the Q8 companion pin).",
   "metrics": {
     "prefill_tps": {
-      "pp512": 6652.95,
-      "pp2048": 9336.35
+      "pp128": 3285.86,
+      "pp512": 8435.03,
+      "pp2048": 10731.51,
+      "pp4096": 12974.85
     },
     "decode_tps": {
-      "tg128": 157.58,
-      "tg128_at_ctx_2048": 156.02
+      "tg128": 166.00,
+      "tg128_at_ctx_2048": 149.54
     },
     "memory_mb": {
-      "model_weights": 11860
+      "model_weights": 11584
     }
   },
   "thresholds": {
