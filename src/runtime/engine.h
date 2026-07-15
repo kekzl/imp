@@ -386,6 +386,9 @@ private:
         // (the chained forward writes their next KV slot), so free_sequence
         // et al. are deferred to the drain (finish_request_release_).
         std::vector<std::shared_ptr<Request>> deferred_release;
+        // #1003: chained steps since the last spec-yield probe — the chain
+        // breaks every N steps so the plain path's round-robin verify can run.
+        int steps_since_spec_yield = 0;
     };
     BatchedDecodePipeline bd_pipe_;
     // Mapped-pinned block-table patch staging for the chain-advance kernel
@@ -585,6 +588,10 @@ private:
     cudaEvent_t pf_staging_evt_ = nullptr;
 
     // ── Penalty token buffer ─────────────────────────────────────────
+    // #1003: round-robin cursor for batched spec verify — id of the request
+    // that ran the last verify turn at batch > 1 (cyclic id order).
+    int spec_rr_last_id_ = -1;
+
     int32_t* d_penalty_tokens_ = nullptr;
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
     // consumed synchronously per chunk (host accumulation on the request) so
@@ -687,7 +694,10 @@ private:
     // matching prefix. Implemented in engine_spec_ngram.cpp.
     // Returns true when it handled this decode step (tokens emitted);
     // false → caller falls through to the normal decode path.
-    bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream);
+    // min_draft > 0 (#1003 batch-RR): soft-decline (return false, no miss
+    // accounting) when the draft is shallower — at batch > 1 the whole batch
+    // pays for the verify, so only deep drafts are worth a turn.
+    bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft = 0);
     // #847 capturability census for the verify chunk forward (see
     // diagnostics.spec_capture_probe). Runs the forward via stream capture +
     // graph launch when possible, eagerly otherwise.

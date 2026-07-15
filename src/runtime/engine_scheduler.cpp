@@ -1163,6 +1163,51 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         }
     }
 
+    // #1003 stage 1: at batch > 1 (dense, non-recurrent), ONE request per
+    // step may run its spec verify while the rest decode batched below —
+    // round-robin in cyclic id order (the hybrid-rotation pattern), so every
+    // eligible request gets verify turns under sub-agent fan-out instead of
+    // silently losing speculation to the batch-size-1 dispatch gate above.
+    // The verify emits that request's tokens for this step; it is removed
+    // from this step's batched decode and rejoins next step.
+    if (decode_batch.size() > 1 && !ssm_state_ && runtime_config_.speculative.batch_rr &&
+        runtime_config_.speculative.ngram) {
+        int cand = -1;
+        int best_id = INT_MAX, wrap_id = INT_MAX, wrap_idx = -1;
+        for (size_t i = 0; i < decode_batch.size(); ++i) {
+            auto& r = decode_batch[i];
+            if (!spec_ngram_enabled_(*r))
+                continue;
+            spec_maybe_rearm_(*r);
+            if (!spec_ngram_gates_ok_(*r))
+                continue;
+            const int id = r->id;
+            if (id > spec_rr_last_id_ && id < best_id) {
+                best_id = id;
+                cand = static_cast<int>(i);
+            }
+            if (id < wrap_id) {
+                wrap_id = id;
+                wrap_idx = static_cast<int>(i);
+            }
+        }
+        if (cand < 0)
+            cand = wrap_idx;  // wrap around (or stay -1: none eligible)
+        if (cand >= 0) {
+            auto holder = decode_batch[cand];
+            // Depth floor ~2x batch: the verify must plausibly emit more
+            // tokens than the batch-wide stall it costs (see min_draft).
+            const int min_draft = 2 * static_cast<int>(decode_batch.size());
+            if (step_spec_verify_(holder, dec_stream, min_draft)) {
+                spec_rr_last_id_ = holder->id;
+                decode_batch.erase(decode_batch.begin() + cand);
+                if (decode_batch.empty())
+                    return;
+                // fall through: the remaining rows decode batched this step
+            }
+        }
+    }
+
     // SSM/GDN: the recurrent scan kernels are single-sequence, so decode one
     // sequence per step. The old resize(1) kept the OLDEST active request
     // every step — concurrent sessions serialized head-of-line (the first
@@ -2413,6 +2458,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
     bd_pipe_.base_state = state;
     bd_pipe_.parity = 0;
     bd_pipe_.in_flight = false;
+    bd_pipe_.steps_since_spec_yield = 0;
     if (pipeline_enqueue_next_(1, stream)) {
         bd_pipe_.in_flight = true;
         bd_pipe_.parity = 1;
@@ -2464,6 +2510,24 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     }
     if (cont)
         cont = pipeline_batch_eligible_(bd_pipe_.rows);
+
+    // #1003: yield the chain periodically so the plain path's round-robin
+    // spec verify gets a turn — once in flight the pipeline otherwise chains
+    // until the composition changes, and batch>1 speculation never fires
+    // (observed verify_steps=1 per request). Fields-only candidate check;
+    // the draft-depth economics (min_draft) run in the RR branch. The chain
+    // re-engages on the following step via the normal plain-path entry.
+    if (cont && runtime_config_.speculative.batch_rr && runtime_config_.speculative.ngram &&
+        !ssm_state_ && ++bd_pipe_.steps_since_spec_yield >= 8) {
+        bd_pipe_.steps_since_spec_yield = 0;
+        for (const auto& r : bd_pipe_.rows) {
+            if (r->status == RequestStatus::DECODING && spec_ngram_enabled_(*r) &&
+                !r->spec_ngram_given_up) {
+                cont = false;
+                break;
+            }
+        }
+    }
 
     const int next_parity = bd_pipe_.parity ^ 1;
     const bool chained = cont && pipeline_enqueue_next_(next_parity, stream);

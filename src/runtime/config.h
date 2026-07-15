@@ -767,6 +767,19 @@ struct RuntimeConfig {
         // perf-baseline decode signal stays raw (verify inherits grouped-GEMM
         // restart variance).
         bool moe = true;
+        // #1003 stage 1 (EXPERIMENTAL, default off): at decode batch > 1, ONE
+        // request per step may run its spec verify (round-robin, cyclic id
+        // order) while the remaining rows decode batched; the pipelined
+        // batched decode yields its chain every 8 steps so turns can fire.
+        // Verified mechanics (2026-07-15, Qwen3-8B echo workload at batch 4):
+        // 9-12 verify turns/request, 85-98% accept, 54-62 tok/verify, outputs
+        // coherent. Measured NET: ~0 — the verify gains were offset by the
+        // yield breaks + pipeline re-entries on that workload, and shallow
+        // drafts are guarded by a depth floor (min_draft = 2x batch) because
+        // the whole batch pays for the verify (~-10% unguarded). Flip on for
+        // deep-draft fan-out workloads (code-edit suffix echo, Coder-30B
+        // class); the healthy-host bench matrix decides the default.
+        bool batch_rr = false;
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
