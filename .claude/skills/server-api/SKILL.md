@@ -55,7 +55,7 @@ pytest tests/api/        # or tests/api/run_mock_tests.sh
 python3 scripts/validate_safetensors.py --help
 ```
 
-**degen_suite has NO json_mode/json_schema category** (categories: repetition, think-leak, special-tokens, adherence, long-context, multi-turn, stream, anthropic-thinking). Constrained-decoding changes need explicit validation: `tests/api/` schema cases + live `response_format: json_schema` requests against a real model.
+**degen_suite `constrained` category** (added 2026-07-15) covers json_object, json_schema validity under three sampler states (greedy / temp=1.3 / min_p — the last forces the eager path, so it guards constrained-pipeline↔eager parity), and forced-`tool_choice` tool-call emission + argument JSON validity. The required-args check is informational (tool-arg *enforcement* is prompt-hint-only today — issue #1002). Categories now: repetition, think-leak, special-tokens, adherence, long-context, multi-turn, stream, **constrained**, anthropic-thinking. For deeper constrained-decoding changes also run `tests/api/` schema cases.
 
 ## Diagnostic fingerprints
 
