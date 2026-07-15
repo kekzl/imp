@@ -542,6 +542,50 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     return c;
 }
 
+std::unique_ptr<SchemaNode> build_tool_call_schema(
+    const std::vector<std::pair<std::string, std::string>>& tools) {
+    if (tools.empty())
+        return nullptr;
+
+    auto root = std::make_unique<SchemaNode>();
+    root->type = SchemaType::TOOL_CALL;
+    root->required = {"name", "arguments"};
+    root->additional_properties = false;
+
+    auto name_enum = std::make_unique<SchemaNode>();
+    name_enum->type = SchemaType::ENUM;
+
+    for (auto& [name, params_json] : tools) {
+        if (name.empty())
+            return nullptr;
+        auto params = parse_json_schema(params_json);
+        const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
+        // Enforceable structure only: a free-form object dead-ends the key
+        // phase (see the free_form route in ConstraintManager::prepare).
+        const bool enforceable =
+            res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
+                    (res->type == SchemaType::ENUM && !res->enum_values.empty()));
+        if (!enforceable)
+            return nullptr;
+        // $defs inside a parameter schema would resolve against the TOOL_CALL
+        // root (whose defs hold the per-tool schemas, not the nested models) —
+        // decline instead of enforcing a wrong grammar. Stage-2 candidate:
+        // hoist per-tool defs under a prefixed namespace.
+        if (!params->defs.empty())
+            return nullptr;
+        name_enum->enum_values.push_back(name);
+        root->defs.emplace_back(name, std::move(params));
+    }
+
+    root->properties.emplace_back("name", std::move(name_enum));
+    // "arguments" placeholder — resolved dynamically against defs via the
+    // frame's chosen_tool (schema_constrain.cu, SchemaType::TOOL_CALL).
+    auto args_placeholder = std::make_unique<SchemaNode>();
+    args_placeholder->type = SchemaType::OBJECT;
+    root->properties.emplace_back("arguments", std::move(args_placeholder));
+    return root;
+}
+
 // ===========================================================================
 // RegexNfa — Thompson-construction NFA over bytes for the supported subset.
 // All host-side; never compiled into device code.

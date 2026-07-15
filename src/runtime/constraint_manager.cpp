@@ -194,6 +194,49 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     }
 }
 
+bool ConstraintManager::prepare_tool_call(
+    const std::vector<std::pair<std::string, std::string>>& tools, const std::string& envelope_open,
+    const std::string& envelope_close, Tokenizer* tokenizer, bool thinking_open) {
+    active_json_ = false;
+    active_schema_ = false;
+
+    auto schema = build_tool_call_schema(tools);
+    if (!schema) {
+        IMP_LOG_INFO("ConstraintManager: tool schemas not enforceable — keeping prompt-hint tool choice");
+        return false;
+    }
+
+    // Cache key: envelope + per-tool (name, schema) — distinct from any
+    // response_format schema string by the envelope prefix.
+    const std::string key = tool_call_key(tools, envelope_open, envelope_close);
+
+    const int32_t think_close = detect_think_close(tokenizer);
+    // Thinking models deliberate inside <think>; the envelope is enforced
+    // right after the close. Non-thinking requests are enforced from token 1 —
+    // the deliberation slack of the transparent tool gate (#840) does not
+    // apply, because here the tool call is mandatory, not optional.
+    const int preamble_budget = (thinking_open && think_close >= 0) ? 8192 : 0;
+
+    if (!(schema_constrainer_ && schema_constrainer_->is_initialized() &&
+          key == cached_schema_string_)) {
+        schema_constrainer_ = std::make_unique<SchemaConstrainer>();
+        if (!tokenizer || !schema_constrainer_->init(*tokenizer, std::move(schema))) {
+            IMP_LOG_ERROR("Failed to initialize tool-call schema constrainer");
+            schema_constrainer_.reset();
+            cached_schema_string_.clear();
+            return false;
+        }
+        cached_schema_string_ = key;
+    }
+    schema_constrainer_->set_envelope(envelope_open, envelope_close);
+    schema_constrainer_->set_preamble(think_close, preamble_budget, thinking_open);
+    schema_constrainer_->reset();
+    active_schema_ = true;
+    IMP_LOG_INFO("ConstraintManager: enforcing tool call (%zu tool(s), envelope %zu+%zu chars)",
+                 tools.size(), envelope_open.size(), envelope_close.size());
+    return true;
+}
+
 void ConstraintManager::update(int32_t token) {
     if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->update(token);

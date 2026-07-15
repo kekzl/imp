@@ -804,12 +804,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // <think> block (e.g. /no_think emits an empty <think></think> in the
     // prompt), no </think> is ever generated — the preamble gate must enforce
     // immediately instead of absorbing prose until the budget.
-    if ((req->json_mode || !req->json_schema.empty()) && !req->constraints) {
-        req->constraints = constraints_checkout_(req->json_schema);
-        req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(),
-                                  req->has_tools, req->tpl_family,
-                                  /*thinking_open=*/req->in_think_block);
-    }
+    ensure_constraints_(req);
     if (req->constraints) {
         state.json_constrainer = req->constraints->json_constrainer();
         state.schema_constrainer = req->constraints->schema_constrainer();
@@ -1398,9 +1393,9 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     for (const auto& r : valid_decode) {
         if (r->logprobs)
             needs_logprobs = true;
-        if (r->json_mode && r->json_schema.empty())
+        if (r->json_mode && r->json_schema.empty() && r->tool_constraint_tools.empty())
             needs_json_mode = true;
-        if (!r->json_schema.empty())
+        if (!r->json_schema.empty() || !r->tool_constraint_tools.empty())
             needs_schema_mode = true;
     }
 
@@ -1411,13 +1406,8 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     // batched decode attaches them per row in sample_per_request, so
     // constraints stay enforced at batch>1 (previously they were silently
     // dropped whenever a constrained request shared a decode batch).
-    for (auto& r : valid_decode) {
-        if ((r->json_mode || !r->json_schema.empty()) && !r->constraints) {
-            r->constraints = constraints_checkout_(r->json_schema);
-            r->constraints->prepare(r->json_mode, r->json_schema, model_->tokenizer(), r->has_tools,
-                                    r->tpl_family, /*thinking_open=*/r->in_think_block);
-        }
-    }
+    for (auto& r : valid_decode)
+        ensure_constraints_(r);
     if (valid_decode.size() == 1 && valid_decode[0]->constraints) {
         state.schema_constrainer = valid_decode[0]->constraints->schema_constrainer();
         state.json_constrainer = valid_decode[0]->constraints->json_constrainer();

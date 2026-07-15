@@ -108,6 +108,13 @@ enum class SchemaType {
     ENUM,
     ANY_OF,
     REF,  // $ref to a $defs/definitions entry (or "#" = schema root)
+    // Tool-call body `{"name":"<tool>","arguments":{...}}` (#1002). An
+    // OBJECT-like node with ORDERED keys (name before arguments) whose
+    // "arguments" schema resolves dynamically to the chosen tool's parameter
+    // schema. properties = [("name", ENUM over tool names), ("arguments",
+    // free placeholder)]; defs = [(tool name, parameter schema)]. Built
+    // programmatically via build_tool_call_schema(), never parsed from JSON.
+    TOOL_CALL,
 };
 
 struct SchemaNode {
@@ -165,6 +172,14 @@ std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json);
 // ref->ref cycle (parse_json_schema validates both, so runtime hits are
 // defensive only).
 const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* node);
+
+// Build a TOOL_CALL root node (#1002) from (tool name, parameter-schema JSON)
+// pairs. Every parameter schema must parse AND carry enforceable structure
+// (an object with at least one property, or an enum) — a free-form/opaque
+// parameter schema would dead-end the key phase, so the builder returns
+// nullptr and the caller falls back to prompt-hint-only tool choice.
+std::unique_ptr<SchemaNode> build_tool_call_schema(
+    const std::vector<std::pair<std::string, std::string>>& tools);
 
 // ---------------------------------------------------------------------------
 // GBNF-style grammar loader (Part B — PARTIAL / non-recursive subset).

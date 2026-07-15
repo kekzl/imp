@@ -67,6 +67,11 @@ struct ChatRequestParams {
     nlohmann::json tool_choice;
     bool has_tools = false;
     bool parallel_tool_calls = true;  // OpenAI: false → emit at most one tool call
+    // Enforced tool calling (#1002): filled for tool_choice=required / forced
+    // function on the <tool_call>-JSON dialect; empty = prompt hint only.
+    std::vector<std::pair<std::string, std::string>> tool_constraint_tools;
+    std::string tool_envelope_open;
+    std::string tool_envelope_close;
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;

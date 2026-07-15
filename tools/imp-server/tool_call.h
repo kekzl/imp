@@ -30,6 +30,14 @@ void validate_tool_call(ParsedToolCall& tc, const json& tools);
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
 
+// Enforced tool calling (#1002): collect (name, parameter-schema JSON) pairs
+// for the FSM-constrained tool-call path. Non-empty only when tool_choice is
+// "required" or a forced function AND the family speaks the ChatML
+// `<tool_call>` JSON envelope. Tools with missing/free-form parameters yield
+// an empty result (the engine-side builder re-validates and falls back too).
+std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
+    imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 
