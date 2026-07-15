@@ -140,8 +140,11 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         const QType head_qtype = model_->out_proj_.qtype;
         const bool quantized_head = head_qtype != QType::F16 && head_qtype != QType::BF16;
         // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
+        // GDN/SSM hybrids defer to the gdn_head_ok gate above instead of the
+        // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
         const bool head_on = nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/true,
-                                                   prof.is_dense, cfg.d_model);
+                                                   prof.is_dense, cfg.d_model,
+                                                   /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm);
         if (quantized_head) {
             if (head_on && gdn_head_ok)
                 collect_weight_nvfp4(model_->output_proj(), head_qtype);

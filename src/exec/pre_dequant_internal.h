@@ -31,12 +31,18 @@ namespace imp::pre_dequant_internal {
 //    dense models (4B +6.6% decode/+3.8% PPL, 8B +5.8%/+2.6%); net-NEGATIVE at
 //    14B Q6_K (+1.9%/+2.1%) and 30B-A3B Q4_K_M (+3.7%/+5.0%), 35B a wash.
 //    auto → ON iff dense && d_model <= 4096 (the measured net-positive set).
+//    EXCEPTION — GDN/SSM hybrids: their head trade is owned by
+//    gemm.nvfp4_lm_head_gdn (GOAL-listed, default ON: +5.3% decode / +1.4% PPL
+//    on the Qwen3.6-35B UD-Q4_K_M hero, re-measured 2026-07-15). The dense/MoE
+//    net rule's is_dense=false arm silently voided that flag on quantized
+//    hybrids and cost the hero −5% decode — pass is_gdn_hybrid so auto defers
+//    to the callers' nvfp4_lm_head_gdn gate instead.
 //  - NATIVE (F16/BF16) heads: 2 B/elem cuBLAS GEMV is the alternative, the
 //    cache is a 4x byte win (+8-16% decode, +2.2% PPL, owner-accepted trade,
 //    GOAL-listed). auto → ON (unchanged).
 // GDN/SSM hybrids remain additionally gated by gemm.nvfp4_lm_head_gdn.
 inline bool nvfp4_lm_head_enabled(const RuntimeConfig& rc, bool quantized_source, bool is_dense,
-                                  int d_model) {
+                                  int d_model, bool is_gdn_hybrid = false) {
     const std::string& v = rc.gemm.nvfp4_lm_head;
     if (v == "on" || v == "true" || v == "1")
         return true;
@@ -44,6 +50,8 @@ inline bool nvfp4_lm_head_enabled(const RuntimeConfig& rc, bool quantized_source
         return false;
     if (!quantized_source)
         return true;
+    if (is_gdn_hybrid)
+        return true;  // decided by the callers' gemm.nvfp4_lm_head_gdn gate
     return is_dense && d_model <= 4096;
 }
 
