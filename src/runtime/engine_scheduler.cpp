@@ -1193,19 +1193,25 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         }
         if (cand < 0)
             cand = wrap_idx;  // wrap around (or stay -1: none eligible)
+        bool verified = false;
         if (cand >= 0) {
             auto holder = decode_batch[cand];
             // Depth floor ~2x batch: the verify must plausibly emit more
             // tokens than the batch-wide stall it costs (see min_draft).
             const int min_draft = 2 * static_cast<int>(decode_batch.size());
             if (step_spec_verify_(holder, dec_stream, min_draft)) {
+                verified = true;
                 spec_rr_last_id_ = holder->id;
                 decode_batch.erase(decode_batch.begin() + cand);
-                if (decode_batch.empty())
-                    return;
-                // fall through: the remaining rows decode batched this step
             }
         }
+        // Adaptive yield cadence: empty turns (shallow drafts / no candidate)
+        // back the pipeline-break interval off exponentially — a draft-poor
+        // batch measured -1.5..-2.7% from fruitless chain breaks alone.
+        spec_rr_yield_interval_ = verified ? 8 : std::min(spec_rr_yield_interval_ * 2, 64);
+        if (verified && decode_batch.empty())
+            return;
+        // fall through: the remaining rows decode batched this step
     }
 
     // SSM/GDN: the recurrent scan kernels are single-sequence, so decode one
@@ -2518,7 +2524,7 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     // the draft-depth economics (min_draft) run in the RR branch. The chain
     // re-engages on the following step via the normal plain-path entry.
     if (cont && runtime_config_.speculative.batch_rr && runtime_config_.speculative.ngram &&
-        !ssm_state_ && ++bd_pipe_.steps_since_spec_yield >= 8) {
+        !ssm_state_ && ++bd_pipe_.steps_since_spec_yield >= spec_rr_yield_interval_) {
         bd_pipe_.steps_since_spec_yield = 0;
         for (const auto& r : bd_pipe_.rows) {
             if (r->status == RequestStatus::DECODING && spec_ngram_enabled_(*r) &&

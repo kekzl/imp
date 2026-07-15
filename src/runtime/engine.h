@@ -591,6 +591,11 @@ private:
     // #1003: round-robin cursor for batched spec verify — id of the request
     // that ran the last verify turn at batch > 1 (cyclic id order).
     int spec_rr_last_id_ = -1;
+    // Adaptive yield cadence: the pipeline breaks its chain every this many
+    // steps to offer a verify turn. Doubles (up to 64) whenever a turn comes
+    // up empty (soft-decline / no candidate) so draft-poor batches pay ~no
+    // break overhead; resets to 8 on a successful verify.
+    int spec_rr_yield_interval_ = 8;
 
     int32_t* d_penalty_tokens_ = nullptr;
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
