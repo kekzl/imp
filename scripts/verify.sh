@@ -299,7 +299,8 @@ else
             ERR=$(mktemp)
             gpu_sample_start
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR"
+                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 \
+                  --set speculative.ngram=false >/dev/null 2>"$ERR"
             gpu_sample_stop
             PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
             TG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
@@ -344,9 +345,15 @@ else
             ERR=$(mktemp)
             # --prefill-chunk-size 0 forces single-chunk prefill so the baseline
             # remains apples-to-apples with the pre-chunked-prefill measurements.
+            # speculative.ngram=false: the bench prompt is self-repetitive
+            # (~99.9% draft accept), so with speculation ON tg measures the
+            # batched spec-verify GEMMs — restart-volatile like cuBLAS prefill
+            # (observed 11% swing across healthy-clock restarts, 2026-07-15).
+            # The gate guards the decode GEMV hot path, which is stable (<1%).
             gpu_sample_start
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                  --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 >/dev/null 2>"$ERR"
+                  --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 \
+                  --set speculative.ngram=false >/dev/null 2>"$ERR"
             gpu_sample_stop
             # Bench lines (stderr) have variable spacing inside parens for short numbers:
             #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
@@ -448,9 +455,11 @@ else
         # fires whenever the signature reads healthy.
         gpu_sample_start
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
-              --max-tokens 256 --temperature 0 --no-cuda-graphs >/dev/null 2>"$ERR_NG"
+              --max-tokens 256 --temperature 0 --no-cuda-graphs \
+              --set speculative.ngram=false >/dev/null 2>"$ERR_NG"
         "$BIN" --model "$GRAPHS_MODEL_PATH" --bench --bench-pp 256 --bench-reps 2 \
-              --max-tokens 256 --temperature 0 >/dev/null 2>"$ERR_G"
+              --max-tokens 256 --temperature 0 \
+              --set speculative.ngram=false >/dev/null 2>"$ERR_G"
         gpu_sample_stop
         TG_NG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_NG" | head -1)
         TG_G=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR_G" | head -1)
