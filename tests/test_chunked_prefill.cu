@@ -217,8 +217,8 @@ protected:
     // BIT-IDENTICAL across chunk={64,128,512,1024}; Llama-3.2-3B is within
     // 0.01% (continuation chunks route through cuBLAS, first chunk through
     // FA2-f16qk). Above ~2.5k context the late chunks route through the
-    // fp8/e4m3 FMHA family and drift up to ~25% NLL — that open issue is
-    // tracked by the DISABLED_ long-context test below.
+    // fp8/e4m3 FMHA family and drift up to ~25% NLL — that remains an open
+    // issue (no dedicated regression test exists in this file yet).
     static std::string probe_prompt() {
         std::string p = "Summarize the following list:\n";
         for (int i = 0; i < 54; i++) {
