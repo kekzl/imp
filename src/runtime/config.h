@@ -767,19 +767,20 @@ struct RuntimeConfig {
         // perf-baseline decode signal stays raw (verify inherits grouped-GEMM
         // restart variance).
         bool moe = true;
-        // #1003 stage 1 (EXPERIMENTAL, default off): at decode batch > 1, ONE
-        // request per step may run its spec verify (round-robin, cyclic id
-        // order) while the remaining rows decode batched; the pipelined
-        // batched decode yields its chain every 8 steps so turns can fire.
-        // Verified mechanics (2026-07-15, Qwen3-8B echo workload at batch 4):
-        // 9-12 verify turns/request, 85-98% accept, 54-62 tok/verify, outputs
-        // coherent. Measured NET: ~0 — the verify gains were offset by the
-        // yield breaks + pipeline re-entries on that workload, and shallow
-        // drafts are guarded by a depth floor (min_draft = 2x batch) because
-        // the whole batch pays for the verify (~-10% unguarded). Flip on for
-        // deep-draft fan-out workloads (code-edit suffix echo, Coder-30B
-        // class); the healthy-host bench matrix decides the default.
-        bool batch_rr = false;
+        // #1003 stage 1: at decode batch > 1, ONE request per step may run
+        // its spec verify (round-robin, cyclic id order) while the remaining
+        // rows decode batched. Three guards make it pay: a draft-depth floor
+        // (min_draft = 2x batch — the whole batch stalls for the verify, so
+        // shallow drafts measured -10% unguarded), a pipeline yield (the
+        // chained batched decode otherwise never gives a turn), and an
+        // ADAPTIVE yield cadence (8 -> 64 steps exponential backoff on empty
+        // turns; fruitless chain breaks alone cost -1.5..-2.7% before it).
+        // Default-ON matrix (Coder-30B NVFP4, 2026-07-15, 2 trials/cell,
+        // stream-free host): code-edit +7.9/+11.0% at batch 8 (twice,
+        // non-overlapping trials), +2.6/+4.4% at 16; diverse chat neutral
+        // (+2.2/+3.5% at 4/8, remaining negatives inside the +-6% intra-arm
+        // trial spread). Batch-1 behavior unchanged. Kill switch for A/B.
+        bool batch_rr = true;
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
