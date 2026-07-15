@@ -372,6 +372,132 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     if (!ensure_model_loaded(state, requested_model, res))
         return;
 
+    // Decoder models with a running batching worker take the SCHEDULED path
+    // (#1005): embeddings ride the normal request queue as prefill-only
+    // requests (engine-side pooling), batching WITH concurrent decodes
+    // instead of pausing them. Encoder models (dedicated bidirectional
+    // forward) and worker-less setups keep the legacy exclusive path below.
+    const bool is_encoder =
+        state.ctx && state.ctx->engine && state.ctx->engine->is_encoder_model();
+    if (!is_encoder && state.batching && state.batching->is_running()) {
+        state.metrics.requests_total++;
+        auto t0b = std::chrono::steady_clock::now();
+        const int d_model = imp_model_d_model(state.model);
+        if (has_dimensions && requested_dims != d_model) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "This server does not support Matryoshka dimension truncation; "
+                            "\"dimensions\" must equal the model width (" +
+                                std::to_string(d_model) + ")");
+            return;
+        }
+        auto embedding_field_b = [&](const std::vector<float>& v) -> json {
+            if (encoding_format == "base64")
+                return base64_encode(reinterpret_cast<const uint8_t*>(v.data()),
+                                     v.size() * sizeof(float));
+            return json(v);
+        };
+
+        // Tokenize + submit every input while the lock is held (submission
+        // order == queue order), then release and await completions.
+        std::vector<std::shared_ptr<ServerRequest>> submitted;
+        int total_prompt_tokens = 0;
+        const int tok_cap = std::max(state.max_seq_len, 262144);
+        for (const auto& text : inputs) {
+            std::vector<int32_t> tokens(tok_cap);
+            int n_tokens = 0;
+            ImpError terr = imp_tokenize(state.model, text.c_str(), tokens.data(), &n_tokens, tok_cap);
+            if (terr != IMP_SUCCESS) {
+                send_json_error(res, 500, "server_error",
+                                std::string("Tokenize failed: ") + imp_error_string(terr));
+                return;
+            }
+            if (n_tokens == 0) {
+                send_json_error(res, 400, "invalid_request_error", "Input tokenizes to zero tokens");
+                return;
+            }
+            if (state.max_input_tokens > 0 && n_tokens > state.max_input_tokens) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) +
+                                    " > " + std::to_string(state.max_input_tokens) + ")");
+                return;
+            }
+            // Chunked prefill pools per chunk (#1005), so the only hard bound
+            // is the engine context.
+            if (state.max_seq_len > 0 && n_tokens > state.max_seq_len) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "Input exceeds the model context (" + std::to_string(n_tokens) +
+                                    " tokens > " + std::to_string(state.max_seq_len) + " max)");
+                return;
+            }
+            tokens.resize(n_tokens);
+            total_prompt_tokens += n_tokens;
+
+            auto req = std::make_shared<imp::Request>();
+            req->input_tokens = std::move(tokens);
+            req->max_tokens = 1;
+            req->temperature = 0.0f;
+            req->stream = false;
+            req->embedding_request = true;
+            req->status = imp::RequestStatus::PENDING;
+            auto sr = std::make_shared<ServerRequest>();
+            sr->request = req;
+            state.batching->submit(sr);
+            submitted.push_back(std::move(sr));
+        }
+        lock.unlock();
+
+        json data = json::array();
+        for (size_t i = 0; i < submitted.size(); i++) {
+            auto& sr = submitted[i];
+            bool finished = false;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+            while (!finished) {
+                std::unique_lock<std::mutex> ql(sr->token_mutex);
+                if (!sr->token_cv.wait_until(ql, deadline,
+                                             [&] { return !sr->token_queue.empty(); })) {
+                    sr->cancelled = true;
+                    send_json_error(res, 503, "server_error", "Embedding request timed out");
+                    return;
+                }
+                while (!sr->token_queue.empty()) {
+                    auto ev = sr->token_queue.front();
+                    sr->token_queue.pop_front();
+                    if (ev.is_last)
+                        finished = true;
+                }
+            }
+            auto& ereq = sr->request;
+            if (ereq->status != imp::RequestStatus::FINISHED || ereq->embedding_out.empty()) {
+                send_json_error(res, 500, "server_error",
+                                "Embedding forward failed (request cancelled or empty result)");
+                return;
+            }
+            std::vector<float> embedding = ereq->embedding_out;  // mean-pooled engine-side
+            float norm_sq = 0.0f;
+            for (float v : embedding)
+                norm_sq += v * v;
+            const float inv_norm = 1.0f / std::sqrt(norm_sq + 1e-12f);
+            for (float& v : embedding)
+                v *= inv_norm;
+            data.push_back({{"object", "embedding"},
+                            {"embedding", embedding_field_b(embedding)},
+                            {"index", i}});
+        }
+
+        auto t1b = std::chrono::steady_clock::now();
+        state.metrics.last_request_duration_ms.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1b - t0b).count());
+        state.metrics.tokens_prompt_total += total_prompt_tokens;
+        json response = {{"object", "list"},
+                         {"data", data},
+                         {"model", body.value("model", state.model_name)},
+                         {"usage",
+                          {{"prompt_tokens", total_prompt_tokens},
+                           {"total_tokens", total_prompt_tokens}}}};
+        res.set_content(dump_safe(response), "application/json");
+        return;
+    }
+
     // Pause the batching engine for exclusive C-API access (imp_prefill drives
     // engine->step() directly, which must not race the worker). pause() lets
     // in-flight generations FINISH before parking the worker — stop() would

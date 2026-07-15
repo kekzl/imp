@@ -100,6 +100,10 @@ Engine::~Engine() {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
+    if (d_embed_pool_scratch_) {
+        vram_alloc_.free(d_embed_pool_scratch_);
+        d_embed_pool_scratch_ = nullptr;
+    }
     if (d_token_is_whitespace_) {
         vram_alloc_.free(d_token_is_whitespace_);
         d_token_is_whitespace_ = nullptr;
@@ -543,6 +547,28 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
     // speculation telemetry is logged per request end (no-op when idle).
     if (spec_ngram_enabled_(*req))
         log_spec_stats_();
+}
+
+void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream) {
+    const int d_model = static_cast<int>(model_->config().d_model);
+    if (!d_embed_pool_scratch_) {
+        d_embed_pool_scratch_ = static_cast<float*>(
+            vram_alloc_.allocate(static_cast<size_t>(d_model) * sizeof(float), "embed_pool_scratch"));
+        if (!d_embed_pool_scratch_) {
+            IMP_LOG_ERROR("VRAMAllocator failed for embed pool scratch (%d floats)", d_model);
+            return;
+        }
+    }
+    executor_->pool_hidden_sum(chunk_len, d_embed_pool_scratch_, stream);
+    std::vector<float> partial(d_model);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(partial.data(), d_embed_pool_scratch_,
+                                       static_cast<size_t>(d_model) * sizeof(float),
+                                       cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    if (req.embedding_out.empty())
+        req.embedding_out.assign(d_model, 0.0f);
+    for (int d = 0; d < d_model; d++)
+        req.embedding_out[d] += partial[d];
 }
 
 void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {

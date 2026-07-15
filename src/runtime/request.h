@@ -142,6 +142,13 @@ struct Request {
     int top_logprobs = 0;                           // 0-20, number of top alternatives
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
 
+    // Embedding request (#1005): prefill-only. Hidden states are mean-pooled
+    // across ALL prefill chunks (device partial sums, host accumulation) and
+    // land in `embedding_out`; the request finishes without sampling a single
+    // token, so it batches with concurrent decodes instead of pausing them.
+    bool embedding_request = false;
+    std::vector<float> embedding_out;
+
     // JSON mode
     bool json_mode = false;   // Constrain output to valid JSON
     std::string json_schema;  // JSON Schema string (empty = disabled)

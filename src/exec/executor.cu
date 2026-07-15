@@ -14,6 +14,21 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+// Column-wise partial sum of the hidden-state buffer: out[d] = sum_t h[t][d].
+// Embedding requests (#1005) mean-pool every token's hidden state; this runs
+// once per prefill chunk so chunked inputs pool correctly (the old
+// /v1/embeddings path could only pool single-pass prefills).
+__global__ void hidden_pool_sum_kernel(const __half* __restrict__ hidden, int n_tokens, int d_model,
+                                       float* __restrict__ out) {
+    int d = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d >= d_model)
+        return;
+    float acc = 0.0f;
+    for (int t = 0; t < n_tokens; t++)
+        acc += __half2float(hidden[(size_t)t * d_model + d]);
+    out[d] = acc;
+}
+
 // Ban specific token IDs by setting their logits to -inf.
 // Used in the CUDA graph decode path where host-side logit manipulation
 // (cudaMemcpyAsync per token) is not possible during graph replay.
@@ -28,6 +43,15 @@ __global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ log
 }
 
 namespace imp {
+
+void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream) {
+    Tensor hidden = view_hidden(n_tokens);
+    const int d_model = static_cast<int>(hidden.shape[hidden.ndim - 1]);
+    const int threads = 256;
+    const int blocks = (d_model + threads - 1) / threads;
+    hidden_pool_sum_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __half*>(hidden.data), n_tokens, d_model, d_out);
+}
 
 int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream) {
     Tensor logits;

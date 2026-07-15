@@ -133,6 +133,12 @@ public:
                                 int chunk_len, double* d_nll, cudaStream_t stream,
                                 int32_t* d_match = nullptr);
 
+    // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
+    // d_out[d_model] (fp32, overwritten). Runs after a chunk's forward while
+    // hidden_ still holds that chunk; the engine accumulates chunk sums
+    // host-side so chunked prefills pool the full input.
+    void pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream);
+
     // Greedy verify for n-gram speculative decoding: applies the tier-aware
     // LM head to hidden_[0..n_rows-1] (the verify chunk that forward_logits
     // just ran) and writes argmax token ids to d_out[0..n_rows-1]. Same
