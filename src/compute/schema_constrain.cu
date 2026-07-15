@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <float.h>
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <utility>
 
@@ -16,6 +17,24 @@ namespace imp {
 // reachable via recursive $ref schemas; hitting the cap forces closure (still
 // schema-valid — any finite nesting satisfies a recursive schema).
 static constexpr size_t kMaxSchemaStackDepth = 192;
+
+// Effective item ceiling for an array frame: explicit "maxItems" wins; an
+// enum-items array without one is capped at the enum's cardinality — a list
+// that repeats an enum member more often than the enum has members carries no
+// information, and an unbounded enum array is the observed degeneration loop
+// of a reasoning model whose think block was budget-force-closed (#1014:
+// `["tech","tech","tech",...` until max_tokens). Same anti-runaway class as
+// the number-digit cap (#751). INT_MAX = unbounded.
+static int effective_max_items(const SchemaNode* root, const SchemaNode* array_node) {
+    if (!array_node)
+        return INT_MAX;
+    if (array_node->max_items >= 0)
+        return array_node->max_items;
+    const SchemaNode* items = resolve_schema_ref(root, array_node->items.get());
+    if (items && items->type == SchemaType::ENUM && !items->enum_values.empty())
+        return static_cast<int>(items->enum_values.size());
+    return INT_MAX;
+}
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -249,7 +268,8 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         }
 
         case SchemaPhase::ARRAY_OPEN: {
-            uint16_t mask = CAT_CLOSE_BRACKET;
+            // minItems > 0: the empty array may not close yet.
+            uint16_t mask = (f.node && f.node->min_items > 0) ? 0 : CAT_CLOSE_BRACKET;
             // Allow value start for first item ($ref items resolve first)
             const SchemaNode* items =
                 f.node ? resolve_schema_ref(schema_.get(), f.node->items.get()) : nullptr;
@@ -281,8 +301,18 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return mask;
         }
 
-        case SchemaPhase::ARRAY_AFTER_ITEM:
-            return CAT_COMMA | CAT_CLOSE_BRACKET;
+        case SchemaPhase::ARRAY_AFTER_ITEM: {
+            uint16_t mask = 0;
+            if (f.item_count < effective_max_items(schema_.get(), f.node))
+                mask |= CAT_COMMA;
+            if (!f.node || f.node->min_items < 0 || f.item_count >= f.node->min_items)
+                mask |= CAT_CLOSE_BRACKET;
+            // Contradictory bounds (maxItems < minItems): let the array close
+            // rather than deadlock the mask.
+            if (mask == 0)
+                mask = CAT_CLOSE_BRACKET;
+            return mask;
+        }
 
         case SchemaPhase::STRING_VALUE:
             return CAT_STRING_CHAR | CAT_QUOTE;
@@ -610,8 +640,10 @@ static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {
     if (parent.phase == SchemaPhase::OBJECT_COLON)
         parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
     else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM)
+             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM) {
         parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
+        parent.item_count++;  // one completed item per child-frame pop
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +863,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (space)
                 return true;
             if (c == ']') {
+                if (f.node && f.node->min_items > 0)
+                    return false;  // empty array below minItems
                 stk.pop_back();
                 sim_fixup_parent(stk);
                 return true;
@@ -845,12 +879,22 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
         case SchemaPhase::ARRAY_AFTER_ITEM: {
             if (space)
                 return true;
+            const int max_items = effective_max_items(schema_.get(), f.node);
+            const bool can_close =
+                !f.node || f.node->min_items < 0 || f.item_count >= f.node->min_items;
             if (c == ',') {
+                // At the item ceiling the array must close (unless closing is
+                // itself illegal via contradictory minItems — then allow the
+                // comma rather than deadlock; the mask mirrors this).
+                if (f.item_count >= max_items && can_close)
+                    return false;
                 if (f.node && f.node->items)
                     push_value(f.node->items.get());
                 return true;
             }
             if (c == ']') {
+                if (!can_close && f.item_count < max_items)
+                    return false;  // below minItems and comma is still legal
                 stk.pop_back();
                 sim_fixup_parent(stk);
                 return true;

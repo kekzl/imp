@@ -120,6 +120,9 @@ struct SchemaNode {
 
     // ARRAY
     std::unique_ptr<SchemaNode> items;
+    // ARRAY constraints (JSON Schema "minItems" / "maxItems"). -1 = unset.
+    int min_items = -1;
+    int max_items = -1;
 
     // ENUM
     std::vector<std::string> enum_values;
