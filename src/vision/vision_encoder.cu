@@ -61,37 +61,6 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
                  CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 }
 
-// ---- Helper: Batched strided GEMM for attention ----
-// scores = Q @ K^T: [B, M, K] @ [B, K, N]^T -> [B, M, N]
-// where B = num_heads, M = N = num_patches, K = head_dim
-static void vision_batched_gemm(const half* A, const half* B, half* C, int batch, int M, int N, int K,
-                                float alpha, float beta, long long strideA, long long strideB,
-                                long long strideC, cublasOperation_t transB, cudaStream_t stream) {
-    auto handle = get_vision_cublas_handle();
-    cublasSetStream(handle, stream);
-
-    half h_alpha = __float2half(alpha);
-    half h_beta = __float2half(beta);
-
-    // Row-major: C [M, N] = A [M, K] @ B^T [K, N] or similar
-    // In col-major: C^T [N, M] = B_col @ A_col^T
-    // For Q@K^T: A=[M,K], B=[N,K], want [M,N] = A @ B^T
-    //   Col-major: [N,M] = B[N,K] @ A[M,K]^T  => op(B)=N, op(A)=T
-    if (transB == CUBLAS_OP_T) {
-        // C = A @ B^T:  A [M, K], B [N, K], C [M, N]
-        // Col-major: C^T[N,M] = B[N,K] @ A^T[K,M]
-        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &h_alpha, B, CUDA_R_16F, K,
-                                   strideB, A, CUDA_R_16F, K, strideA, &h_beta, C, CUDA_R_16F, N, strideC,
-                                   batch, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT);
-    } else {
-        // C = A @ B:  A [M, K], B [K, N], C [M, N]
-        // Col-major: C^T[N,M] = B^T[N,K] @ A^T[K,M]
-        cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &h_alpha, B, CUDA_R_16F, N,
-                                   strideB, A, CUDA_R_16F, K, strideA, &h_beta, C, CUDA_R_16F, N, strideC,
-                                   batch, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT);
-    }
-}
-
 // ======================================================================
 //  CUDA Kernels
 // ======================================================================
@@ -381,34 +350,6 @@ __global__ void mul_tensors_kernel(const half* __restrict__ a, const half* __res
     if (idx >= N)
         return;
     out[idx] = __float2half(__half2float(a[idx]) * __half2float(b[idx]));
-}
-
-// Replace vision token embeddings in the hidden state
-__global__ void replace_vision_embeddings_kernel(
-    half* __restrict__ hidden,              // [n_tokens, d_model]
-    const int32_t* __restrict__ token_ids,  // [n_tokens]
-    const half* __restrict__ vision_emb,    // [n_vision_tokens, d_model]
-    int vision_token_id, int n_tokens, int d_model, int n_vision_tokens) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n_tokens * d_model)
-        return;
-
-    int token_pos = tid / d_model;
-    int dim = tid % d_model;
-
-    if (token_ids[token_pos] != vision_token_id)
-        return;
-
-    // Count how many vision tokens precede this position
-    int vision_idx = 0;
-    for (int i = 0; i < token_pos; i++) {
-        if (token_ids[i] == vision_token_id)
-            vision_idx++;
-    }
-
-    if (vision_idx < n_vision_tokens) {
-        hidden[token_pos * d_model + dim] = vision_emb[vision_idx * d_model + dim];
-    }
 }
 
 // Optimized version: one block per vision token position

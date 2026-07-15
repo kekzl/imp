@@ -137,9 +137,14 @@ __device__ __forceinline__ float reduce_kpar(float acc, int tid, float* warp_sum
     return 0.0f;
 }
 
+// TU-local: same layout as the identically-named struct in
+// nvfp4_gemm_internal.cuh; kept internal-linkage to avoid an ODR clash in the
+// single core lib (both are namespace-scope in namespace imp).
+namespace {
 struct SmemKpar {
     float warp_sums[kKparWarps];
 };
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Basic GEMV: y[row] = W_mxfp4[row,:] @ x

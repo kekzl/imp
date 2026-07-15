@@ -181,39 +181,6 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__
 }
 
 // ---------------------------------------------------------------------------
-// Quantize + write-scale kernel (for the Tensor-based API)
-// ---------------------------------------------------------------------------
-
-__global__ void quantize_fp16_to_fp8_with_scale_kernel(
-    const half* __restrict__ input, uint8_t* __restrict__ output,
-    const float* __restrict__ d_scale,  // device-side scale
-    float* __restrict__ d_scale_out,    // copy scale to output
-    int n) {
-    // Read the scale computed by calibration.
-    float scale = d_scale[0];
-    if (threadIdx.x == 0 && blockIdx.x == 0 && d_scale_out != nullptr) {
-        d_scale_out[0] = scale;
-    }
-
-    float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
-
-    const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n)
-        return;
-
-#pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n) {
-            float val = __half2float(input[idx]) * inv_scale;
-            val = fminf(fmaxf(val, -kFP8E4M3Max), kFP8E4M3Max);
-            __nv_fp8_e4m3 fp8_val = __nv_fp8_e4m3(val);
-            memcpy(&output[idx], &fp8_val, 1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Host-side launch wrappers
 // ---------------------------------------------------------------------------
 

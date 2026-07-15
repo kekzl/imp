@@ -34,15 +34,6 @@ namespace imp {
 // Tiny kernels
 // ---------------------------------------------------------------------------
 
-// Gather one row of an FP16 embedding matrix [vocab, hidden] into a flat output
-// [hidden]. One CTA, hidden_dim threads (rounded up).
-__global__ void mtp_emb_gather_kernel(int token_id, const __half* __restrict__ emb,
-                                       __half* __restrict__ out, int hidden_dim) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= hidden_dim) return;
-    out[t] = emb[static_cast<int64_t>(token_id) * hidden_dim + t];
-}
-
 // Concatenate two [hidden_dim] FP16 vectors into [2*hidden_dim].
 // out[0..hidden_dim-1]   = a
 // out[hidden_dim..2hd-1] = b
