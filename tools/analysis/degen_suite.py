@@ -290,6 +290,79 @@ def parses_as_json(text):
 
 
 # ---------------------------------------------------------------------------
+# Minimal JSON-Schema validator for the bounded shapes the constrained category
+# uses (object with typed/enum/required properties, arrays of enum strings).
+# Stdlib-only — no jsonschema dependency. Returns (ok, reason).
+
+def _extract_json(text):
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        s = s[4:] if s[:4].lower() == "json" else s
+        s = s.strip()
+    try:
+        return json.loads(s), None
+    except (json.JSONDecodeError, ValueError):
+        i, j = s.find("{"), s.rfind("}")
+        if 0 <= i < j:
+            try:
+                return json.loads(s[i:j + 1]), None
+            except (json.JSONDecodeError, ValueError) as e:
+                return None, f"not JSON ({e})"
+        return None, "not JSON"
+
+
+def _type_ok(val, t):
+    return {
+        "string": isinstance(val, str),
+        "number": isinstance(val, (int, float)) and not isinstance(val, bool),
+        "integer": isinstance(val, int) and not isinstance(val, bool),
+        "array": isinstance(val, list),
+        "object": isinstance(val, dict),
+        "boolean": isinstance(val, bool),
+    }.get(t, True)
+
+
+def schema_valid(text, schema):
+    """True iff `text` (fence/prose-tolerant) is a JSON value matching `schema`.
+    Supports type, enum, required, properties, additionalProperties:false, and
+    array items — the subset the constrained category exercises."""
+    obj, err = _extract_json(text)
+    if err:
+        return False, err
+
+    def check(val, sch):
+        t = sch.get("type")
+        if t and not _type_ok(val, t):
+            return f"expected type {t}, got {type(val).__name__}"
+        if "enum" in sch and val not in sch["enum"]:
+            return f"value {val!r} not in enum {sch['enum']}"
+        if t == "object":
+            props = sch.get("properties", {})
+            for key in sch.get("required", []):
+                if key not in val:
+                    return f"missing required key {key!r}"
+            if sch.get("additionalProperties") is False:
+                extra = [k for k in val if k not in props]
+                if extra:
+                    return f"unexpected keys {extra}"
+            for key, subval in val.items():
+                if key in props:
+                    e = check(subval, props[key])
+                    if e:
+                        return f"{key}: {e}"
+        if t == "array" and "items" in sch:
+            for idx, item in enumerate(val):
+                e = check(item, sch["items"])
+                if e:
+                    return f"[{idx}]: {e}"
+        return None
+
+    reason = check(obj, schema)
+    return (reason is None), (reason or "ok")
+
+
+# ---------------------------------------------------------------------------
 # Check registry
 
 class Suite:
@@ -509,6 +582,95 @@ class Suite:
     # -- anthropic-thinking ---------------------------------------------------
     # /v1/messages DEFAULT path (audit 2026-05-31 T8: thinking blocks were only
     # ever confirmed WITH --reasoning-format; the default path was unconfirmed).
+    # -- constrained decoding: json_object / json_schema / tool calls --------
+    # Guards the "never breaks the JSON/schema contract" commitment (GOAL.md
+    # Agentic surface). imp's schema FSM is sampler-independent by construction,
+    # so the schema arms must hold under adversarial sampler state too — the
+    # high-temp and min_p arms guard the constrained-pipeline vs eager-path
+    # parity (min_p forces the eager path, per the server-api skill).
+    def cat_constrained(self):
+        # A bounded schema (enum + typed fields + required) — the shape the
+        # FSM can actually enforce (free-form object would degrade to
+        # json_object). additionalProperties:false so extra keys are illegal.
+        schema = {
+            "type": "object",
+            "properties": {
+                "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]},
+                "confidence": {"type": "number"},
+                "topics": {"type": "array", "items": {"type": "string",
+                                                      "enum": ["tech", "sports", "politics", "other"]}},
+            },
+            "required": ["sentiment", "confidence", "topics"],
+            "additionalProperties": False,
+        }
+        prompt = ("Classify the sentiment and topics of this review: "
+                  "'The new phone is fast and the camera is amazing, best upgrade in years.' "
+                  "Respond as a JSON object.")
+
+        def rf_schema():
+            return {"type": "json_schema",
+                    "json_schema": {"name": "classification", "schema": schema}}
+
+        # 1. json_object: output must parse as JSON.
+        r = self.srv.chat([{"role": "user", "content": prompt}],
+                          max_tokens=200, response_format={"type": "json_object"})
+        self.record("constrained", "json_object: parses as JSON",
+                    parses_as_json(r["content"]), f"content={r['content'][:140]!r}")
+
+        # 2-4. json_schema under three sampler states — all must be schema-valid.
+        for label, kw in (("greedy", {}),
+                          ("temp=1.3", {"temperature": 1.3}),
+                          ("min_p (eager path)", {"temperature": 1.0, "min_p": 0.05})):
+            r = self.srv.chat([{"role": "user", "content": prompt}],
+                              max_tokens=200, response_format=rf_schema(), **kw)
+            ok, why = schema_valid(r["content"], schema)
+            self.record("constrained", f"json_schema {label}: schema-valid", ok,
+                        f"{why} content={r['content'][:140]!r}")
+
+        # 5. Tool calling: force a specific function, check the emitted call.
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "set_reminder",
+                "description": "Create a reminder.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "minutes_from_now": {"type": "integer"},
+                    },
+                    "required": ["title", "minutes_from_now"],
+                },
+            },
+        }
+        try:
+            r = self.srv.chat(
+                [{"role": "user", "content": "Remind me to call the dentist in 30 minutes."}],
+                max_tokens=200, tools=[tool],
+                tool_choice={"type": "function", "function": {"name": "set_reminder"}})
+        except urllib.error.HTTPError as e:
+            self.skip("constrained", "forced tool call", f"server rejected: {e}")
+            return
+        calls = (r["raw"]["choices"][0]["message"] or {}).get("tool_calls") or []
+        self.record("constrained", "forced tool_choice: emits a tool_call",
+                    len(calls) >= 1, f"finish={r['finish']} content={r['content'][:80]!r}")
+        if calls:
+            fn = calls[0].get("function", {})
+            args_str = fn.get("arguments", "")
+            try:
+                args = json.loads(args_str)
+                args_ok = True
+            except (json.JSONDecodeError, ValueError):
+                args, args_ok = None, False
+            self.record("constrained", "tool_call: arguments parse as JSON", args_ok,
+                        f"name={fn.get('name')!r} arguments={args_str[:140]!r}")
+            # Required-key presence is the #1002 target (prompt-hint-only today,
+            # so this is informational — a model may still omit a key).
+            if args_ok:
+                missing = [k for k in ("title", "minutes_from_now") if k not in args]
+                self.record("constrained", "tool_call: required args present (informational)",
+                            not missing, f"missing={missing} args={args}")
+
     def cat_anthropic_thinking(self):
         q = [{"role": "user", "content": "What is the capital of France? One word."}]
         n = 400 if self.quick else 800
@@ -648,6 +810,7 @@ CATEGORIES = {
     "long-context": Suite.cat_long_context,
     "multi-turn": Suite.cat_multi_turn,
     "stream": Suite.cat_stream,
+    "constrained": Suite.cat_constrained,
     "anthropic-thinking": Suite.cat_anthropic_thinking,
 }
 
