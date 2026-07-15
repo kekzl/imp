@@ -229,36 +229,14 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
         if (bs != std::string::npos && be != std::string::npos)
             body = body.substr(bs, be - bs + 1);
 
-        // Two flavours: classic ChatML JSON ({"name": ..., "arguments": ...})
-        // and Qwen3.6's XML-styled <function=...><parameter=...>... layout.
-        bool parsed = false;
-        if (!body.empty() && body[0] == '{') {
-            try {
-                json j = json::parse(body);
-                ParsedToolCall tc;
-                tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
-                tc.name = j.value("name", "");
-                if (j.contains("arguments")) {
-                    tc.arguments = dump_safe(j["arguments"]);
-                } else {
-                    json args = j;
-                    args.erase("name");
-                    tc.arguments = dump_safe(args);
-                }
-                if (!tc.name.empty()) {
-                    calls.push_back(std::move(tc));
-                    parsed = true;
-                }
-            } catch (...) {
-                // Not valid JSON tool-call syntax — fall through to other formats
-            }
-        }
-        if (!parsed && body.find("<function=") != std::string::npos) {
-            ParsedToolCall tc;
+        // Decode the body through the shared streaming body-parser — classic
+        // ChatML JSON ({"name":..., "arguments":...}) then Qwen3.6's XML-styled
+        // <function=...><parameter=...>... fallback — so the streaming and
+        // non-streaming paths cannot drift. id is assigned only on success.
+        ParsedToolCall tc;
+        if (parse_stream_tool_body(body, /*gemma_body=*/false, /*fn_name=*/"", tc)) {
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
-            if (parse_qwen36_xml_call(body, tc)) {
-                calls.push_back(std::move(tc));
-            }
+            calls.push_back(std::move(tc));
         }
 
         pos = end + skip_len;
@@ -308,16 +286,12 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
         if (bs != std::string::npos && be != std::string::npos)
             body = body.substr(bs, be - bs + 1);
 
-        try {
-            // Validate it's valid JSON
-            json j = json::parse(body);
-            ParsedToolCall tc;
+        // Same shared body-parser: with fn_name set it takes the Llama3 branch
+        // (name from the open tag, body is the bare JSON args). id on success.
+        ParsedToolCall tc;
+        if (parse_stream_tool_body(body, /*gemma_body=*/false, /*fn_name=*/name, tc)) {
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
-            tc.name = name;
-            tc.arguments = dump_safe(j);
             calls.push_back(std::move(tc));
-        } catch (...) {
-            // Malformed JSON — skip
         }
 
         pos = end + 11;  // skip "</function>"
