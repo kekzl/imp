@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden bench bench-agentic check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check tidy sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-vision test-perf test-golden test-agents bench bench-agentic check-gpu verify verify-fast verify-chunked gen-perf-baseline install-hooks format format-check tidy sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -130,6 +130,22 @@ bench-agentic: build check-gpu
 	python3 tools/agent_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --concurrency 1,4,16; \
 	echo "--- multi-turn replay ---"; \
 	python3 tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
+
+# Agent-harness E2E battery (#1007): boots a real imp-server and drives the
+# wire patterns real agent harnesses generate — multi-turn tool loops in the
+# Anthropic (/v1/messages), OpenAI chat and /v1/responses dialects, with
+# cache_control reuse, FSM-enforced tool_choice and streaming delta assembly.
+# Gates on every check (exit 1 on failure). GPU + local model, like test-server.
+test-agents: build check-gpu
+	@echo "=== imp agent-loop battery — model=$(AGENTIC_MODEL) ==="
+	@docker rm -f imp-agent-suite >/dev/null 2>&1 || true
+	@docker run -d --name imp-agent-suite --gpus all -p 8080:8080 \
+		-v $(HOME)/models:/models $(DOCKER_IMG) \
+		imp-server --host 0.0.0.0 --model /models/$(AGENTIC_MODEL) >/dev/null
+	@echo "waiting for server..."; \
+	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+	trap 'docker rm -f imp-agent-suite >/dev/null 2>&1' EXIT; \
+	python3 tools/analysis/agent_loop_suite.py --url http://localhost:8080
 
 # Golden output comparison (greedy, temp=0)
 test-golden: build
