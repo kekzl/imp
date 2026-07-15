@@ -295,7 +295,7 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
     return it->second;
 }
 
-bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream) {
+bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft) {
     const auto& scfg = runtime_config_.speculative;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
@@ -355,6 +355,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         draft = mtp_take_draft_(*req);
         draft_from_mtp = !draft.empty();
     }
+    // #1003 batch-RR economics: at batch > 1 the WHOLE batch waits for the
+    // verify forward (~1.4-2.6x a decode step) while only this request
+    // benefits — a shallow draft is net-negative (measured -10% aggregate at
+    // batch 4 on shallow drafts). Soft-decline below the caller's depth
+    // floor: no miss accounting, no give-up pressure — the request decodes
+    // batched this step and gets its next turn with a hopefully deeper draft.
+    if (min_draft > 0 && static_cast<int>(draft.size()) < min_draft)
+        return false;
     if (draft.empty()) {
         spec_stats_.miss_steps++;
         if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 &&
