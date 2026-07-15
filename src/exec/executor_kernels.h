@@ -127,16 +127,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
 // engine path serialized small transfers and dominated decode tg/s
 // (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
 //
-// Single-seq form (n_tokens == 1): pass the resolved (slot, ring_slot)
-// destination pointers directly via residual_k_dst / residual_v_dst.
 // Multi-seq form: pass n_tokens > 1 with the device pointer arrays.
-__global__ void residual_kv_write_single_kernel(
-    const half* __restrict__ k_in,         // single token's K row
-    const half* __restrict__ v_in,
-    half* __restrict__ residual_k_dst,     // (slot, layer, ring_slot) destination
-    half* __restrict__ residual_v_dst,
-    int slot_elems);
-
 __global__ void residual_kv_write_multi_kernel(
     const half* __restrict__ k_in,                  // [n_tokens, slot_elems]
     const half* __restrict__ v_in,                  // [n_tokens, slot_elems]

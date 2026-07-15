@@ -64,16 +64,6 @@ public:
         return true;
     }
 
-    bool read_fixed64(uint64_t* out) {
-        if (data_ + 8 > end_) {
-            fail("truncated fixed64");
-            return false;
-        }
-        std::memcpy(out, data_, 8);
-        data_ += 8;
-        return true;
-    }
-
     // Returns a view into the underlying buffer (length-delimited block).
     bool read_length_delim(const uint8_t** out_data, size_t* out_size) {
         uint64_t len = 0;

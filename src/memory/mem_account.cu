@@ -11,13 +11,6 @@ namespace imp {
 namespace {
 constexpr double kMiB = 1024.0 * 1024.0;
 
-size_t query_free() {
-    size_t free_b = 0, total_b = 0;
-    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess)
-        return 0;
-    return free_b;
-}
-
 void query_free_total(size_t& free_b, size_t& total_b) {
     free_b = 0;
     total_b = 0;

@@ -511,22 +511,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
 // to serialize on the copy engine and dominate decode tg/s when residual
 // was enabled (-3× regression on Qwen3-4B Q8 NVFP4-KV bench at 4K ctx).
 // ---------------------------------------------------------------------------
-__global__ void residual_kv_write_single_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    half* __restrict__ residual_k_dst,
-    half* __restrict__ residual_v_dst,
-    int slot_elems) {
-    const bool is_v = (blockIdx.x == 1);
-    half* dst = is_v ? residual_v_dst : residual_k_dst;
-    if (dst == nullptr) return;
-    const half* src = is_v ? v_in : k_in;
-    const int i = threadIdx.x + blockIdx.y * blockDim.x;
-    if (i < slot_elems) {
-        dst[i] = src[i];
-    }
-}
-
 __global__ void residual_kv_write_multi_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
