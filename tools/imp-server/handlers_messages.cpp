@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 
 // ===========================================================================
 // Anthropic /v1/messages — native SSE streaming
@@ -63,6 +64,23 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
 
     // ---- message_start ----------------------------------------------------
     {
+        // Cache accounting (#1006): harnesses read cache_read/creation from
+        // message_start to display live hit rates. cached_tokens is set at
+        // ADMISSION (before prefill compute), which happens within a scheduler
+        // step of submit — a short bounded poll for the PENDING→PREFILLING
+        // transition makes the values authoritative here without measurable
+        // TTFT cost. On timeout the fields ride at their initial values and
+        // the final message_delta (below) stays the corrective source.
+        if (active_req) {
+            for (int i = 0; i < 50 && active_req->status == imp::RequestStatus::PENDING; i++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+        const int creation = active_req ? cache_creation_tokens_(active_req, n_prompt_tokens) : 0;
+        json usage = {{"input_tokens", n_prompt_tokens - cached},
+                      {"output_tokens", 0},
+                      {"cache_read_input_tokens", cached},
+                      {"cache_creation_input_tokens", creation}};
         json msg = {
             {"id", msg_id},
             {"type", "message"},
@@ -71,7 +89,7 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             {"model", anth_model},
             {"stop_reason", nullptr},
             {"stop_sequence", nullptr},
-            {"usage", {{"input_tokens", n_prompt_tokens}, {"output_tokens", 0}}},
+            {"usage", std::move(usage)},
         };
         if (!out.emit("message_start", json{{"type", "message_start"}, {"message", std::move(msg)}}))
             return false;
