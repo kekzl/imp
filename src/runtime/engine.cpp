@@ -545,6 +545,30 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         log_spec_stats_();
 }
 
+void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
+    const bool tool_enforced = !req->tool_constraint_tools.empty();
+    if (!(req->json_mode || !req->json_schema.empty() || tool_enforced) || req->constraints)
+        return;
+
+    // Pool key: tool-enforced requests key by their tool-call signature so a
+    // pooled manager with the same classified tables is reused (#1002).
+    const std::string pool_key =
+        tool_enforced ? ConstraintManager::tool_call_key(req->tool_constraint_tools,
+                                                         req->tool_envelope_open,
+                                                         req->tool_envelope_close)
+                      : req->json_schema;
+    req->constraints = constraints_checkout_(pool_key);
+
+    bool enforced = false;
+    if (tool_enforced)
+        enforced = req->constraints->prepare_tool_call(
+            req->tool_constraint_tools, req->tool_envelope_open, req->tool_envelope_close,
+            model_->tokenizer(), /*thinking_open=*/req->in_think_block);
+    if (!enforced && (req->json_mode || !req->json_schema.empty()))
+        req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
+                                  req->tpl_family, /*thinking_open=*/req->in_think_block);
+}
+
 std::shared_ptr<ConstraintManager> Engine::constraints_checkout_(const std::string& json_schema) {
     // Prefer a pooled manager that already classified this schema.
     if (!json_schema.empty()) {

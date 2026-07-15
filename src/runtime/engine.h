@@ -557,6 +557,10 @@ private:
     std::vector<std::shared_ptr<ConstraintManager>> constraint_pool_;
     std::shared_ptr<ConstraintManager> constraints_checkout_(const std::string& json_schema);
     void constraints_return_(std::shared_ptr<ConstraintManager> cm);
+    // Lazily check out + prepare the request's constraint manager (json_mode,
+    // json_schema or enforced tool call — #1002). No-op when none apply or
+    // the request already holds one.
+    void ensure_constraints_(const std::shared_ptr<Request>& req);
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
     void* prefill_pool_ = nullptr;

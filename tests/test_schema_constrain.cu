@@ -462,6 +462,96 @@ TEST(SchemaConstrainTest, MinItemsBlocksPrematureClose) {
 }
 
 // ---------------------------------------------------------------------------
+// TOOL_CALL enforcement (#1002): envelope literals forced, "name" before
+// "arguments", name enum restricted to the tool set, arguments bound to the
+// CHOSEN tool's parameter schema, EOS forced after the close literal.
+// ---------------------------------------------------------------------------
+TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
+    SKIP_IF_NO_CUDA();
+    // Single-char vocab over the emission corpus + a negative probe 'x'.
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    std::string chars = "<>tol_ca\n{\"nme:usrgd,1}/x";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    // Two tools: add / sub, both {"a" hm... use params with property "d" ...
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"add", R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})"},
+        {"sub", R"({"type":"object","properties":{"u":{"type":"number"}},"required":["u"]})"},
+    };
+    auto schema = build_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    // 1. Envelope first: '<' legal, '{' not.
+    auto at_start = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_start[id('<')]) << "envelope open must be legal";
+    EXPECT_FALSE(at_start[id('{')]) << "the body may not start before the envelope";
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+    feed("<tool_call>\n{\"");
+    // 2. Key order: only "name" may open.
+    auto at_key = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_key[id('n')]) << "'name' must be available first";
+    EXPECT_FALSE(at_key[id('a')]) << "'arguments' may not precede 'name'";
+
+    feed("name\":\"");
+    // 3. Name enum: 'a'(add)/'s'(sub) legal, 'x' not.
+    auto at_enum = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_enum[id('a')]);
+    EXPECT_TRUE(at_enum[id('s')]);
+    EXPECT_FALSE(at_enum[id('x')]) << "non-tool names must be masked";
+
+    feed("add\",\"arguments\":{\"");
+    // 4. Binding: only add's parameter 'd' is a legal key — not sub's 'u'.
+    auto at_args = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_args[id('d')]) << "chosen tool's parameter must be legal";
+    EXPECT_FALSE(at_args[id('u')]) << "the OTHER tool's parameter must be masked";
+
+    feed("d\":1}}");
+    // 5. Close literal forced.
+    auto at_close = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_close[id('\n')]) << "close literal must be legal after the body";
+    EXPECT_FALSE(at_close[id('{')]);
+
+    feed("\n</tool_call>");
+    // 6. Stack drained: EOS forced.
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "EOS must be allowed after the envelope closes";
+    EXPECT_FALSE(at_done[id('<')]) << "no trailing text after the close literal";
+}
+
+TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
+    // Free-form parameters (no properties) → decline.
+    EXPECT_TRUE(build_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
+    // $defs inside a parameter schema → decline (would resolve wrongly).
+    EXPECT_TRUE(build_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/I"}},)"
+                           R"("$defs":{"I":{"type":"integer"}}})"}}) == nullptr);
+    // Empty tool list → decline.
+    EXPECT_TRUE(build_tool_call_schema({}) == nullptr);
+    // Well-formed → builds.
+    EXPECT_TRUE(build_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"type":"integer"}}})"}}) != nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
 // model, so this is the agent-framework path, not an exotic corner.
 // ---------------------------------------------------------------------------

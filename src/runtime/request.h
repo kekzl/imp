@@ -158,6 +158,17 @@ struct Request {
     bool has_tools = false;
     ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML;
 
+    // Enforced tool calling (#1002, tool_choice=required / forced function):
+    // when non-empty, generation is constrained to ONE tool-call envelope
+    // (`tool_envelope_open` + `{"name":...,"arguments":{...}}` +
+    // `tool_envelope_close`) via a TOOL_CALL schema FSM. Each entry is
+    // (tool name, parameter-schema JSON). Takes precedence over
+    // json_mode/json_schema; falls back to the prompt hint when the schemas
+    // are not enforceable (see build_tool_call_schema).
+    std::vector<std::pair<std::string, std::string>> tool_constraint_tools;
+    std::string tool_envelope_open;
+    std::string tool_envelope_close;
+
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;
 

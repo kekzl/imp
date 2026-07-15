@@ -32,6 +32,26 @@ public:
                  ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML,
                  bool thinking_open = true);
 
+    // Enforced tool calling (#1002): constrain generation to one tool-call
+    // envelope with a TOOL_CALL schema FSM (see build_tool_call_schema).
+    // tools: (name, parameter-schema JSON) per callable tool.
+    // Returns false when the schemas are not enforceable — caller keeps the
+    // prompt-hint behavior (optionally calling prepare() for json fallback).
+    bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
+                           const std::string& envelope_open, const std::string& envelope_close,
+                           Tokenizer* tokenizer, bool thinking_open);
+
+    // Cache/pool key for a tool-call constraint — shared by the engine's
+    // constraint pool lookup and the internal classified-table cache.
+    static std::string tool_call_key(const std::vector<std::pair<std::string, std::string>>& tools,
+                                     const std::string& envelope_open,
+                                     const std::string& envelope_close) {
+        std::string key = "tool-call:" + envelope_open + "\x1f" + envelope_close;
+        for (auto& [name, params] : tools)
+            key += "\x1f" + name + "\x1e" + params;
+        return key;
+    }
+
     // Get current constrainer pointers (nullptr if not active).
     JsonConstrainer* json_constrainer() const noexcept {
         return active_json_ ? json_constrainer_.get() : nullptr;

@@ -62,6 +62,46 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
     return prompt;
 }
 
+std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
+    imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (tools.empty())
+        return out;
+    // Stage 1 (#1002): only the ChatML `<tool_call>` JSON envelope — the
+    // dialect build_tool_prompt instructs for this family. Llama3/Gemma
+    // envelopes and the Qwen3.6 XML flavor keep the prompt-hint path.
+    if (family != imp::ChatTemplateFamily::CHATML)
+        return out;
+
+    std::string forced_name;
+    if (tool_choice.is_object() && tool_choice.contains("function"))
+        forced_name = tool_choice["function"].value("name", "");
+    const bool required =
+        tool_choice.is_string() && tool_choice.get<std::string>() == "required";
+    if (forced_name.empty() && !required)
+        return out;
+
+    for (const auto& tool : tools) {
+        if (!tool.contains("function"))
+            continue;
+        const auto& fn = tool["function"];
+        std::string name = fn.value("name", "");
+        if (name.empty() || (!forced_name.empty() && name != forced_name))
+            continue;
+        // Enforceable parameters only — an absent/free-form schema would
+        // dead-end the FSM's key phase (engine-side builder re-checks).
+        if (!fn.contains("parameters") || !fn["parameters"].is_object() ||
+            !fn["parameters"].contains("properties") || fn["parameters"]["properties"].empty()) {
+            out.clear();
+            return out;  // one unenforceable tool → whole request falls back
+        }
+        out.emplace_back(std::move(name), dump_safe(fn["parameters"]));
+    }
+    if (!forced_name.empty() && out.size() != 1)
+        out.clear();  // forced function not found — fall back to the hint
+    return out;
+}
+
 // Parse Qwen3.6's XML-flavored tool-call body:
 //   <function=NAME>
 //   <parameter=KEY1>

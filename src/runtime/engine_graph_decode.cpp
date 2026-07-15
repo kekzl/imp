@@ -217,6 +217,15 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
                                          cudaStream_t stream, int step_limit) {
+    // Constrained requests (json_mode / json_schema / enforced tool call) can
+    // NEVER run here: the loop samples device-side and applies no FSM mask.
+    // The step_decode flags block them, but the spec-ngram burst hooks call
+    // this directly — without this guard a tool-enforced request decoded a
+    // full unmasked generation (#1002).
+    if (req->constraints || req->json_mode || !req->json_schema.empty() ||
+        !req->tool_constraint_tools.empty())
+        return false;
+
     int remaining = prepare_graph_loop(req);
     if (remaining <= 0)
         return false;

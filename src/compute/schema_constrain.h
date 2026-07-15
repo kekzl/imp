@@ -34,6 +34,8 @@ enum class SchemaPhase : uint8_t {
     NUMBER_VALUE,        // Inside a number
     LITERAL_VALUE,       // Generating true/false/null
     ENUM_VALUE,          // Inside an enum string (constrained to exact matches)
+    ENVELOPE_OPEN,       // Forcing the tool-call open literal (e.g. "<tool_call>\n")
+    ENVELOPE_CLOSE,      // Forcing the tool-call close literal (e.g. "\n</tool_call>")
     DONE
 };
 
@@ -61,6 +63,10 @@ struct SchemaFrame {
 
     // Array item count
     int item_count = 0;
+
+    // TOOL_CALL frames: the tool name chosen by the completed "name" enum —
+    // "arguments" resolves against the root defs entry of this name.
+    std::string chosen_tool;
 
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents
@@ -101,6 +107,14 @@ public:
 
     // Reset for a new generation with the same schema.
     void reset();
+
+    // Tool-call envelope (#1002): when set, generation is framed by forced
+    // literals (open before the root value, close after it) — e.g.
+    // "<tool_call>\n" ... "\n</tool_call>". Configure BEFORE reset().
+    void set_envelope(std::string open, std::string close) {
+        envelope_open_ = std::move(open);
+        envelope_close_ = std::move(close);
+    }
 
     bool is_initialized() const { return initialized_; }
 
@@ -154,6 +168,10 @@ private:
 
     // Preamble pass-through (reasoning models emit <think>...</think> first)
     PreambleGate preamble_;
+
+    // Tool-call envelope literals (empty = no envelope).
+    std::string envelope_open_;
+    std::string envelope_close_;
 
     // Helpers
     // C++23 deducing this: one overload serves const and non-const callers.

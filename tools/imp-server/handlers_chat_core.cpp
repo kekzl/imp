@@ -287,6 +287,18 @@ bool parse_chat_request_params(
         ctx.snap.tpl_family = state.have_template ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
     }
 
+    // Enforced tool calling (#1002): tool_choice=required / forced function on
+    // the ChatML <tool_call> dialect constrains generation to one tool-call
+    // envelope via the schema FSM. Empty result = prompt-hint fallback.
+    if (ctx.params.has_tools) {
+        ctx.params.tool_constraint_tools =
+            collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools, ctx.params.tool_choice);
+        if (!ctx.params.tool_constraint_tools.empty()) {
+            ctx.params.tool_envelope_open = "<tool_call>\n";
+            ctx.params.tool_envelope_close = "\n</tool_call>";
+        }
+    }
+
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     for (const auto& msg : messages) {
         std::string role = msg.value("role", "user");
@@ -793,6 +805,9 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->has_tools = ctx.params.has_tools;
+    req->tool_constraint_tools = ctx.params.tool_constraint_tools;
+    req->tool_envelope_open = ctx.params.tool_envelope_open;
+    req->tool_envelope_close = ctx.params.tool_envelope_close;
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
     req->think_budget = ctx.params.think_budget;

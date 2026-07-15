@@ -90,7 +90,18 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
 
 void SchemaConstrainer::reset() {
     stack_.clear();
-    push_value_frame(schema_.get());
+    if (!envelope_open_.empty()) {
+        // Envelope wrapper frame: forces the open literal, then hosts the root
+        // value; when the value pops it flips to ENVELOPE_CLOSE (#1002).
+        SchemaFrame env;
+        env.node = schema_.get();
+        env.phase = SchemaPhase::ENVELOPE_OPEN;
+        env.literal_target = envelope_open_;
+        env.literal_pos = 0;
+        stack_.push_back(std::move(env));
+    } else {
+        push_value_frame(schema_.get());
+    }
     need_token_allow_ = false;
     std::fill(token_allow_.begin(), token_allow_.end(), (uint8_t)1);
     preamble_.reset();
@@ -117,10 +128,20 @@ const SchemaNode* SchemaConstrainer::find_property(const SchemaNode* obj, const 
     return nullptr;
 }
 
+// TOOL_CALL keys are ORDERED: "name" must be emitted before "arguments" so the
+// argument schema is bound before any argument content is generated (#1002).
+static bool tool_call_key_available(const std::string& key, const std::set<std::string>& emitted) {
+    if (!emitted.count("name"))
+        return key == "name";
+    return key == "arguments" && !emitted.count("arguments");
+}
+
 bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::string& prefix,
                                             const std::set<std::string>& emitted) const {
     for (auto& [name, _] : obj->properties) {
         if (emitted.count(name))
+            continue;
+        if (obj->type == SchemaType::TOOL_CALL && !tool_call_key_available(name, emitted))
             continue;
         if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0)
             return true;
@@ -194,6 +215,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
                 return mask | CAT_VALUE_START;
             switch (f.node->type) {
                 case SchemaType::OBJECT:
+                case SchemaType::TOOL_CALL:
                     mask |= CAT_OPEN_BRACE;
                     break;
                 case SchemaType::ARRAY:
@@ -344,6 +366,12 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 
         case SchemaPhase::ENUM_VALUE:
             return CAT_STRING_CHAR | CAT_QUOTE;
+
+        case SchemaPhase::ENVELOPE_OPEN:
+        case SchemaPhase::ENVELOPE_CLOSE:
+            // Envelope chars ('<', '/', letters, newline) span categories —
+            // legality is fully decided by the per-token simulation.
+            return 0xFFFF;
 
         case SchemaPhase::DONE:
             return CAT_WHITESPACE;
@@ -543,6 +571,7 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                     return static_cast<int>(out.size());
                 switch (f.node->type) {
                     case SchemaType::OBJECT: cands = "{"; break;
+                    case SchemaType::TOOL_CALL: cands = "{"; break;
                     case SchemaType::ARRAY: cands = "["; break;
                     case SchemaType::STRING: cands = "\""; break;  // opening quote; interior is free
                     case SchemaType::ENUM: cands = "\""; break;
@@ -569,6 +598,9 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 for (const auto& [name, prop] : f.node->properties) {
                     (void)prop;
                     if (f.emitted_keys.count(name))
+                        continue;
+                    if (f.node->type == SchemaType::TOOL_CALL &&
+                        !tool_call_key_available(name, f.emitted_keys))
                         continue;
                     if (name.size() > f.key_buffer.size() &&
                         name.compare(0, f.key_buffer.size(), f.key_buffer) == 0)
@@ -600,6 +632,12 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 break;
             }
             case SchemaPhase::LITERAL_VALUE:
+                if (f.literal_pos < static_cast<int>(f.literal_target.size()))
+                    cands = f.literal_target[f.literal_pos];
+                break;
+            case SchemaPhase::ENVELOPE_OPEN:
+            case SchemaPhase::ENVELOPE_CLOSE:
+                // Envelope literals are fully forced (jump-ahead drafts them).
                 if (f.literal_pos < static_cast<int>(f.literal_target.size()))
                     cands = f.literal_target[f.literal_pos];
                 break;
@@ -750,6 +788,15 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     // anyOf is hard to constrain precisely — accept as free string.
                     f.phase = SchemaPhase::STRING_VALUE;
                     return true;
+                case SchemaType::TOOL_CALL:
+                    // Tool-call body — an object with ordered keys (#1002).
+                    if (c == '{') {
+                        if (stk.size() >= kMaxSchemaStackDepth)
+                            return false;
+                        f.phase = SchemaPhase::OBJECT_OPEN;
+                        return true;
+                    }
+                    return false;
                 default:
                     return false;
             }
@@ -782,6 +829,9 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 bool complete = false;
                 if (f.node) {
                     for (auto& [name, _] : f.node->properties) {
+                        if (f.node->type == SchemaType::TOOL_CALL &&
+                            !tool_call_key_available(name, f.emitted_keys))
+                            continue;
                         if (!f.emitted_keys.count(name) && name == f.key_buffer) { complete = true; break; }
                     }
                 }
@@ -811,6 +861,17 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (c == ':') {
                 f.phase = SchemaPhase::OBJECT_COLON;
                 const SchemaNode* prop = f.node ? find_property(f.node, f.current_key) : nullptr;
+                // TOOL_CALL "arguments" resolves to the parameter schema of
+                // the tool chosen by the completed "name" enum (#1002).
+                if (f.node && f.node->type == SchemaType::TOOL_CALL && f.current_key == "arguments") {
+                    prop = nullptr;
+                    for (auto& [tool_name, params] : schema_->defs) {
+                        if (tool_name == f.chosen_tool) {
+                            prop = params.get();
+                            break;
+                        }
+                    }
+                }
                 push_value(prop);
                 return true;
             }
@@ -995,6 +1056,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 }
                 if (!exact)
                     return false;  // close only on an exact enum value
+                // TOOL_CALL name binding (#1002): the completed "name" enum
+                // selects which parameter schema "arguments" resolves to.
+                if (stk.size() >= 2) {
+                    SchemaFrame& parent = stk[stk.size() - 2];
+                    if (parent.node && parent.node->type == SchemaType::TOOL_CALL &&
+                        parent.current_key == "name")
+                        parent.chosen_tool = f.enum_buffer;
+                }
                 stk.pop_back();
                 sim_fixup_parent(stk);
                 return true;
@@ -1003,6 +1072,40 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 return false;
             f.enum_buffer += c;
             return true;
+        }
+
+        case SchemaPhase::ENVELOPE_OPEN: {
+            // Optional whitespace before the open literal (models emit "\n\n"
+            // after </think>); inside the literal every char is forced.
+            if (f.literal_pos == 0 && space)
+                return true;
+            if (f.literal_pos < static_cast<int>(f.literal_target.size()) &&
+                c == f.literal_target[f.literal_pos]) {
+                f.literal_pos++;
+                if (f.literal_pos == static_cast<int>(f.literal_target.size())) {
+                    // Open literal complete: arm the close literal on this
+                    // frame and host the root value on top of it.
+                    f.phase = SchemaPhase::ENVELOPE_CLOSE;
+                    f.literal_target = envelope_close_;
+                    f.literal_pos = 0;
+                    push_value(f.node);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        case SchemaPhase::ENVELOPE_CLOSE: {
+            if (f.literal_pos < static_cast<int>(f.literal_target.size()) &&
+                c == f.literal_target[f.literal_pos]) {
+                f.literal_pos++;
+                if (f.literal_pos == static_cast<int>(f.literal_target.size())) {
+                    stk.pop_back();  // envelope done — stack drains, EOS is forced
+                    sim_fixup_parent(stk);
+                }
+                return true;
+            }
+            return false;
         }
 
         case SchemaPhase::DONE:
