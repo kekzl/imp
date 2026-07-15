@@ -340,6 +340,32 @@ TEST(AnthropicMessages, ToolResultArrayContentFlattened) {
     EXPECT_EQ(msgs[0]["content"], "a\nb");
 }
 
+// #1006: images inside tool_result blocks (screenshot-returning tools) must
+// not be dropped — they are re-homed onto a trailing user turn (the
+// multimodal path the engine serves) with a marker in the tool body.
+TEST(AnthropicMessages, ToolResultImageRehomedToUserTurn) {
+    json img = json{{"type", "image"},
+                    {"source", json{{"type", "base64"},
+                                    {"media_type", "image/png"},
+                                    {"data", "aGk="}}}};
+    json tr = json{{"type", "tool_result"},
+                   {"tool_use_id", "tu_img"},
+                   {"content", json::array({tblk("screenshot taken"), img})}};
+    json msgs = anthropic_to_openai_body(one_user(json::array({tr})))["messages"];
+    ASSERT_EQ(msgs.size(), 2u);
+    EXPECT_EQ(msgs[0]["role"], "tool");
+    const std::string body = msgs[0]["content"].get<std::string>();
+    EXPECT_NE(body.find("screenshot taken"), std::string::npos);
+    EXPECT_NE(body.find("1 image(s)"), std::string::npos) << "marker must tie image to result";
+    EXPECT_EQ(msgs[1]["role"], "user");
+    ASSERT_TRUE(msgs[1]["content"].is_array());
+    bool has_image = false;
+    for (const auto& part : msgs[1]["content"])
+        if (part.value("type", "") == "image_url")
+            has_image = true;
+    EXPECT_TRUE(has_image) << "the image must survive on the user turn";
+}
+
 // ---- openai_to_anthropic_response (reverse transform) ----------------------
 
 // Wrap an OpenAI assistant message + finish_reason into a chat.completion.

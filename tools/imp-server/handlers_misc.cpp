@@ -154,6 +154,12 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_failed_total Failed inference requests\n";
     out += "# TYPE imp_requests_failed_total counter\n";
     out += "imp_requests_failed_total " + std::to_string(m.requests_failed.load()) + "\n";
+
+    out += "# HELP imp_constrained_eager_fallback_total Constrained requests that requested "
+           "logprobs and fell back from the ConstrainedPipeline to eager decode\n";
+    out += "# TYPE imp_constrained_eager_fallback_total counter\n";
+    out += "imp_constrained_eager_fallback_total " +
+           std::to_string(m.constrained_eager_fallback.load()) + "\n";
     out += "# HELP imp_tokens_prompt_total Total prompt tokens processed\n";
     out += "# TYPE imp_tokens_prompt_total counter\n";
     out += "imp_tokens_prompt_total " + std::to_string(m.tokens_prompt_total.load()) + "\n";

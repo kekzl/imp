@@ -96,6 +96,11 @@ struct ServerMetrics {
     std::atomic<int64_t> tokens_completion_total{0};
     std::atomic<int64_t> tokens_cached_total{0};  // Prefix cache hits
     std::atomic<int64_t> requests_cancelled{0};   // Client-disconnect cancellations
+    // Constrained requests (json_schema/json_mode/enforced tools) that ALSO
+    // request logprobs: they silently leave the ConstrainedPipeline fast path
+    // for eager decode (~102 vs ~235 tok/s on the 8B reference) — surfaced
+    // here so the slowdown is diagnosable (#1006).
+    std::atomic<int64_t> constrained_eager_fallback{0};
     std::atomic<int64_t> last_request_duration_ms{0};
     std::atomic<int64_t> last_ttft_ms{0};  // Time to first token (ms)
     std::atomic<int64_t> model_loads_total{0};

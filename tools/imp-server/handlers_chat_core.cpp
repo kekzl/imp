@@ -287,6 +287,16 @@ bool parse_chat_request_params(
         ctx.snap.tpl_family = state.have_template ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
     }
 
+    // logprobs on a constrained request drops it out of the ConstrainedPipeline
+    // fast path to eager decode (~102 vs ~235 tok/s) — silent until now.
+    // Surface it: one WARN per request + a /metrics counter (#1006).
+    if (ctx.params.req_logprobs &&
+        (ctx.params.json_mode || !ctx.params.json_schema_str.empty())) {
+        state.metrics.constrained_eager_fallback++;
+        IMP_LOG_WARN("constrained request with logprobs: leaving the ConstrainedPipeline "
+                     "fast path for eager decode (expect ~2x slower decode)");
+    }
+
     // Enforced tool calling (#1002): tool_choice=required / forced function on
     // the ChatML <tool_call> dialect constrains generation to one tool-call
     // envelope via the schema FSM. Empty result = prompt-hint fallback.

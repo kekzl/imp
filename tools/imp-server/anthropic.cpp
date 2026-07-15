@@ -145,21 +145,43 @@ void push_user_turn(json& out, const json& anth_msg) {
         std::string type = block.value("type", "");
         if (type == "tool_result") {
             // Anthropic tool_result.content can be string OR array of blocks
-            // (mostly text). Collapse to a string for the OpenAI tool turn.
+            // (text and/or images — screenshot-returning tools). Text collapses
+            // to a string for the OpenAI tool turn; IMAGE blocks cannot ride a
+            // role:"tool" message, so they are re-homed onto the trailing user
+            // turn (the multimodal path the engine already serves) with a
+            // marker in the tool body tying them back to this result (#1006 —
+            // previously they were silently dropped).
             std::string body;
+            int n_images = 0;
             if (block.contains("content")) {
                 const auto& c = block["content"];
                 if (c.is_string())
                     body = c.get<std::string>();
                 else if (c.is_array()) {
                     for (const auto& p : c) {
-                        if (p.is_object() && p.value("type", "") == "text") {
+                        if (!p.is_object())
+                            continue;
+                        const std::string ptype = p.value("type", "");
+                        if (ptype == "text") {
                             if (!body.empty())
                                 body += "\n";
                             body += p.value("text", "");
+                        } else if (ptype == "image" && p.contains("source")) {
+                            json tmp = json::array({p});
+                            auto converted = convert_message_content(tmp);
+                            if (converted.is_array())
+                                for (const auto& img : converted)
+                                    other_parts.push_back(img);
+                            n_images++;
                         }
                     }
                 }
+            }
+            if (n_images > 0) {
+                if (!body.empty())
+                    body += "\n";
+                body += "[" + std::to_string(n_images) +
+                        " image(s) from this tool result follow in the next user message]";
             }
             tool_results.push_back({
                 {"role", "tool"},
