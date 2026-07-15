@@ -48,6 +48,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
     echo "verify: host cmake unavailable — re-executing in imp:test container"
     exec docker run --rm --gpus all \
         -v "$ROOT":/src -w /src \
+        -v "$HOME/models":"$HOME/models":ro \
         -e IMP_VERIFY_IN_DOCKER=1 \
         -e IMP_VERIFY_BIN=/usr/local/bin/imp-cli \
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
