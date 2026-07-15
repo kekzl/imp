@@ -250,20 +250,6 @@ bool CudaGraphCapture::replay(cudaStream_t stream) {
     return true;
 }
 
-bool CudaGraphCapture::try_update(cudaGraph_t new_graph) {
-    if (!graph_exec_ || !new_graph) {
-        return false;
-    }
-
-    cudaGraphExecUpdateResultInfo update_info;
-    cudaError_t err = cudaGraphExecUpdate(graph_exec_, new_graph, &update_info);
-    if (err != cudaSuccess || update_info.result != cudaGraphExecUpdateSuccess) {
-        // Topology changed or update failed -- need full re-instantiation
-        return false;
-    }
-    return true;
-}
-
 void CudaGraphCapture::drop_graph_keep_exec() {
     if (graph_) {
         cudaGraphDestroy(graph_);
