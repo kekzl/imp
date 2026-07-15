@@ -614,13 +614,6 @@ void gemm_q4k_fused_moe_prefill(const void* packed_weights, const void* activati
                                 expert_stride_bytes, n_experts, stream);
 }
 
-void gemm_q5k_fused_moe_prefill(const void* packed_weights, const void* activations, void* output,
-                                const int32_t* d_offsets, int N, int K, size_t expert_stride_bytes,
-                                int n_experts, cudaStream_t stream) {
-    launch_scalar<QKType::Q5_K>(packed_weights, activations, output, d_offsets, N, K,
-                                expert_stride_bytes, n_experts, stream);
-}
-
 void gemm_q4k_dp4a_moe_fused(const void* packed_weight, const block_q8_1* q8_base,
                               const float* d8_base, void* c_base, const int32_t* offsets,
                               int K, int N, int n_experts, size_t weight_stride,

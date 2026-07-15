@@ -181,34 +181,4 @@ const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* n
 std::unique_ptr<SchemaNode> build_tool_call_schema(
     const std::vector<std::pair<std::string, std::string>>& tools);
 
-// ---------------------------------------------------------------------------
-// GBNF-style grammar loader (Part B — PARTIAL / non-recursive subset).
-//
-// Compiles a llama.cpp-flavoured GBNF grammar into a single byte-level NFA
-// (the same RegexNfa engine used for "pattern"), so the existing token-mask
-// FSM machinery applies unchanged. Because an NFA cannot represent unbounded
-// recursion, the supported subset is the *non-recursive* fragment:
-//
-//   Supported:
-//     root ::= <expr>                rule definition (root rule must be "root")
-//     "literal"                      double-quoted literal strings
-//     [a-z0-9_] / [^...]             character classes (RegexNfa [...] subset)
-//     seq                            space-separated concatenation
-//     a | b                          alternation
-//     x* x+ x?                       repetition
-//     ( ... )                        grouping
-//     rulename                       reference to another (non-recursive) rule
-//     # comment                      line comments
-//
-//   NOT supported (rejected with a clear error; see TODO in .cpp):
-//     - recursive / mutually-recursive rules (e.g. JSON value ::= object ...)
-//     - {n,m} repetition counts
-//     - char-class escapes beyond what RegexNfa's [...] handles
-//
-// compile_gbnf_grammar() returns a compiled RegexNfa on success, or nullptr
-// (with a logged error naming the unsupported construct) on failure. Callers
-// should fall back to unconstrained generation when it returns nullptr.
-// ---------------------------------------------------------------------------
-std::shared_ptr<RegexNfa> compile_gbnf_grammar(const std::string& gbnf);
-
 }  // namespace imp

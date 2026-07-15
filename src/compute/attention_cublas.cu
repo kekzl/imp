@@ -92,8 +92,8 @@ void attention_cublas_prewarm() {
 
 // ---------------------------------------------------------------------------
 // Fused causal softmax FP32 → FP16: reads FP32 S matrix, writes FP16 probs
-// to a separate output buffer. Replaces causal_softmax_fp32_inplace_kernel
-// + fp32_to_fp16_kernel for the cuBLAS prefill path. Saves one full pass
+// to a separate output buffer. Fuses the FP32 softmax with the FP16 cast for
+// the cuBLAS prefill path. Saves one full pass
 // over the [n_heads × q_len × kv_len] tensor (~36% memory traffic on the
 // softmax+cast block, ~6-8% prefill on dense Q8). FP32 reduction internal,
 // only the final normalized value is downcast.
@@ -166,65 +166,6 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
         float v = masked(j) ? 0.0f : expf(row_in[j] - max_val) * inv_sum;
         row_out[j] = __float2half(v);
     }
-}
-
-// ---------------------------------------------------------------------------
-// FP32 causal softmax: reads/writes FP32 S matrix.
-// Used when QK^T scores are stored as FP32 (Gemma-4 with scale=1.0).
-// ---------------------------------------------------------------------------
-__global__ void causal_softmax_fp32_inplace_kernel(float* __restrict__ S, int q_len, int kv_len,
-                                                    int q_offset, bool causal, int sliding_window) {
-    int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
-    int warp_id = tid / 32, lane_id = tid % 32;
-    int n_warps = (blockDim.x + 31) / 32;
-    float* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
-    int abs_row = q_offset + row;
-    auto masked = [abs_row, causal, sliding_window](int j) {
-        if (causal && j > abs_row) return true;
-        if (sliding_window > 0 && (abs_row - j) >= sliding_window) return true;
-        return false;
-    };
-
-    float max_val = -FLT_MAX;
-    for (int j = tid; j < kv_len; j += blockDim.x)
-        max_val = fmaxf(max_val, masked(j) ? -FLT_MAX : row_ptr[j]);
-
-    __shared__ float s_max[32];
-    for (int m = 16; m > 0; m >>= 1)
-        max_val = fmaxf(max_val, __shfl_xor_sync(0xffffffff, max_val, m));
-    if (lane_id == 0)
-        s_max[warp_id] = max_val;
-    __syncthreads();
-    if (tid < 32) {
-        float v = (tid < n_warps) ? s_max[tid] : -FLT_MAX;
-        for (int m = 16; m > 0; m >>= 1)
-            v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, m));
-        s_max[0] = v;
-    }
-    __syncthreads();
-    max_val = s_max[0];
-
-    float sum_val = 0.0f;
-    for (int j = tid; j < kv_len; j += blockDim.x)
-        sum_val += masked(j) ? 0.0f : expf(row_ptr[j] - max_val);
-
-    __shared__ float s_sum[32];
-    for (int m = 16; m > 0; m >>= 1)
-        sum_val += __shfl_xor_sync(0xffffffff, sum_val, m);
-    if (lane_id == 0)
-        s_sum[warp_id] = sum_val;
-    __syncthreads();
-    if (tid < 32) {
-        float v = (tid < n_warps) ? s_sum[tid] : 0.0f;
-        for (int m = 16; m > 0; m >>= 1)
-            v += __shfl_xor_sync(0xffffffff, v, m);
-        s_sum[0] = v;
-    }
-    __syncthreads();
-    float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
-
-    for (int j = tid; j < kv_len; j += blockDim.x)
-        row_ptr[j] = masked(j) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
 }
 
 // ---------------------------------------------------------------------------

@@ -26,10 +26,6 @@ public:
     bool is_captured() const { return captured_; }
     void reset();
 
-    // Try to update an existing graph exec with a new graph.
-    // Returns true if the update succeeded (topology unchanged).
-    bool try_update(cudaGraph_t new_graph);
-
     // End capture and update the existing exec in-place if possible.
     // Falls back to full re-instantiate if topology changed or no exec
     // exists. Skips cudaDeviceGraphMemTrim on fast path to avoid churn
@@ -37,7 +33,7 @@ public:
     bool end_capture_and_update();
 
     // Release graph_ only (keep graph_exec_ alive for in-place update).
-    // Called between a successful try_update and the next capture.
+    // Called between reusing an exec and the next capture.
     void drop_graph_keep_exec();
 
     // Mark captured_ as false (but keep exec / graph alive if held).

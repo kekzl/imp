@@ -189,20 +189,4 @@ __global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Grammar mask kernel: pure per-token allow mask (no category gating).
-// Used by GrammarConstrainer where the NFA-derived allow list is the full
-// constraint. Tokens with token_allow[idx]==0 are masked to -FLT_MAX.
-// ---------------------------------------------------------------------------
-
-__global__ inline void grammar_mask_kernel(float* __restrict__ logits,
-                                           const uint8_t* __restrict__ token_allow, int vocab_size,
-                                           int n_classified) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size)
-        return;
-    if (idx >= n_classified || token_allow[idx] == 0)
-        logits[idx] = -FLT_MAX;
-}
-
 }  // namespace imp

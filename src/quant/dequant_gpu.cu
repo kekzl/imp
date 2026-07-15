@@ -48,44 +48,6 @@ bool dequant_gpu_supported(QType qtype) {
 // Second group (vals 128..255) offsets: ql+=64, qh+=32, sc+=8.
 // ---------------------------------------------------------------------------
 
-// Original scalar kernel (fallback)
-__global__ void dequant_q6k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
-                                   int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t total = static_cast<int64_t>(rows) * cols;
-    if (idx >= total)
-        return;
-
-    int row = static_cast<int>(idx / cols);
-    int col = static_cast<int>(idx % cols);
-    int blk = col / 256;
-    int i = col % 256;
-    int blocks_per_row = cols / 256;
-
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 210;
-    const uint8_t* ql = block_ptr;                                            // 128 bytes
-    const uint8_t* qh = block_ptr + 128;                                      // 64 bytes
-    const int8_t* scales = reinterpret_cast<const int8_t*>(block_ptr + 192);  // 16 bytes
-    half d_val = *reinterpret_cast<const half*>(block_ptr + 208);
-
-    // GGML interleaved layout
-    int group = i >> 7;      // i / 128 → 0 or 1
-    int within = i & 127;    // i % 128 → 0..127
-    int quad = within >> 5;  // within / 32 → 0..3
-    int l = within & 31;     // within % 32 → 0..31
-
-    int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
-    int qh_idx = (group << 5) + l;
-
-    uint8_t ql_byte = ql[ql_idx];
-    uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
-    uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3u;
-    int q6 = static_cast<int>((high2 << 4) | low4) - 32;
-
-    float val = __half2float(d_val) * static_cast<float>(scales[i >> 4]) * static_cast<float>(q6);
-    dst[idx] = __float2half(val);
-}
-
 // ---------------------------------------------------------------------------
 // Optimized Q6_K dequant kernel — block-centric indexing
 //
@@ -144,72 +106,6 @@ __global__ void dequant_q6k_v2_kernel(const uint8_t* __restrict__ src, half* __r
     result.y = __float2half(d_w * sc1 * static_cast<float>(q1));
 
     out[threadIdx.x] = result;
-}
-
-// ---------------------------------------------------------------------------
-// High-throughput Q6_K dequant kernel — grid-stride, no shared memory
-//
-// v2 launches one CTA per Q6_K super-block (256 elements), creating ~786K
-// CTAs for a typical MoE projection. CTA scheduling overhead can limit
-// bandwidth utilization on large GPUs (192 SMs).
-//
-// v3 uses a grid-stride loop: each CTA processes many Q6_K blocks,
-// reducing the CTA count. No shared memory or sync barriers needed —
-// each thread independently dequants its 2 elements from L1-cached
-// global memory reads (the 210-byte Q6K block fits in 2 cache lines,
-// broadcast to all threads in the warp).
-// ---------------------------------------------------------------------------
-
-__global__ void dequant_q6k_v3_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst,
-                                      int total_blocks) {
-    const int tid = threadIdx.x;  // 0..127
-    // Pre-compute element indices (constant across loop iterations)
-    const int i0 = tid * 2;
-    const int i1 = i0 + 1;
-
-    // Pre-compute Q6K decode indices for both elements
-    const int group0 = i0 >> 7;
-    const int within0 = i0 & 127;
-    const int quad0 = within0 >> 5;
-    const int l0 = within0 & 31;
-    const int ql_idx0 = (group0 << 6) + ((quad0 & 1) << 5) + l0;
-    const int qh_idx0 = (group0 << 5) + l0;
-
-    const int group1 = i1 >> 7;
-    const int within1 = i1 & 127;
-    const int quad1 = within1 >> 5;
-    const int l1 = within1 & 31;
-    const int ql_idx1 = (group1 << 6) + ((quad1 & 1) << 5) + l1;
-    const int qh_idx1 = (group1 << 5) + l1;
-
-    for (int blk_id = blockIdx.x; blk_id < total_blocks; blk_id += gridDim.x) {
-        const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
-
-        // Super-block scale — broadcast via L1 cache to all 128 threads
-        float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
-        const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
-
-        // Dequant element 0
-        uint8_t ql_byte0 = bp[ql_idx0];
-        uint8_t low4_0 = (quad0 >= 2) ? ((ql_byte0 >> 4) & 0xFu) : (ql_byte0 & 0xFu);
-        uint8_t high2_0 = (bp[128 + qh_idx0] >> (quad0 * 2)) & 0x3u;
-        int q0 = static_cast<int>((high2_0 << 4) | low4_0) - 32;
-
-        // Dequant element 1
-        uint8_t ql_byte1 = bp[ql_idx1];
-        uint8_t low4_1 = (quad1 >= 2) ? ((ql_byte1 >> 4) & 0xFu) : (ql_byte1 & 0xFu);
-        uint8_t high2_1 = (bp[128 + qh_idx1] >> (quad1 * 2)) & 0x3u;
-        int q1 = static_cast<int>((high2_1 << 4) | low4_1) - 32;
-
-        float sc0 = static_cast<float>(scales[i0 >> 4]);
-        float sc1 = static_cast<float>(scales[i1 >> 4]);
-
-        half2* out = reinterpret_cast<half2*>(dst + static_cast<int64_t>(blk_id) * 256);
-        half2 result;
-        result.x = __float2half(d_w * sc0 * static_cast<float>(q0));
-        result.y = __float2half(d_w * sc1 * static_cast<float>(q1));
-        out[tid] = result;
-    }
 }
 
 // ---------------------------------------------------------------------------
