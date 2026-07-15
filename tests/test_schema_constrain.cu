@@ -363,6 +363,105 @@ TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
 }
 
 // ---------------------------------------------------------------------------
+// minItems / maxItems (#1014) — the degeneration guard: a budget-force-closed
+// reasoning model loops enum array items (`["tech","tech",...`) to max_tokens.
+// Explicit maxItems must hard-stop the array; an enum-items array without one
+// is capped at the enum's cardinality; minItems blocks premature close.
+// ---------------------------------------------------------------------------
+
+namespace {
+// Shared vocab for the array-bounds tests:
+//  0        1      2       3    4     5    6    7    8    9    10   11
+std::vector<std::string> array_vocab() {
+    return {"<unk>", "<s>", "</s>", "{", "\"", "t", ":", "[", "]", ",", "a", "}"};
+}
+constexpr int kTokOpenBrace = 3, kTokQuote = 4, kTokKey = 5, kTokColon = 6;
+constexpr int kTokOpenBracket = 7, kTokCloseBracket = 8, kTokComma = 9, kTokItemA = 10;
+
+// Drive `{"t":[` then `n` complete items ("a"), leaving the FSM in
+// ARRAY_AFTER_ITEM (or ARRAY_OPEN for n=0).
+void drive_array(SchemaConstrainer& sc, int n_items) {
+    for (int t : {kTokOpenBrace, kTokQuote, kTokKey, kTokQuote, kTokColon, kTokOpenBracket})
+        sc.update(t);
+    for (int i = 0; i < n_items; i++) {
+        if (i > 0)
+            sc.update(kTokComma);
+        sc.update(kTokQuote);
+        sc.update(kTokItemA);
+        sc.update(kTokQuote);
+    }
+}
+}  // namespace
+
+TEST(SchemaConstrainTest, MaxItemsMasksCommaAtCap) {
+    SKIP_IF_NO_CUDA();
+    auto toks = array_vocab();
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"t":{"type":"array","maxItems":2,)"
+        R"("items":{"type":"string"}}},"required":["t"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    drive_array(sc, 1);
+    auto one = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(one[kTokComma]) << "below maxItems the array may continue";
+    EXPECT_TRUE(one[kTokCloseBracket]) << "no minItems — close always legal";
+    // Item 2 on the same FSM: `,"a"` — now at the cap.
+    sc.update(kTokComma), sc.update(kTokQuote), sc.update(kTokItemA), sc.update(kTokQuote);
+    auto capped = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(capped[kTokComma]) << "at maxItems the comma must be masked";
+    EXPECT_TRUE(capped[kTokCloseBracket]) << "']' must stay legal at the cap";
+}
+
+TEST(SchemaConstrainTest, EnumItemsArrayCappedAtCardinality) {
+    SKIP_IF_NO_CUDA();
+    auto toks = array_vocab();
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    // Two-member enum, NO maxItems: effective cap = 2 (see effective_max_items).
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"t":{"type":"array",)"
+        R"("items":{"type":"string","enum":["a","aa"]}}},"required":["t"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    drive_array(sc, 2);
+    auto capped = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(capped[kTokComma])
+        << "enum-items array without maxItems must cap at the enum cardinality";
+    EXPECT_TRUE(capped[kTokCloseBracket]) << "']' must stay legal at the cap";
+}
+
+TEST(SchemaConstrainTest, MinItemsBlocksPrematureClose) {
+    SKIP_IF_NO_CUDA();
+    auto toks = array_vocab();
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"t":{"type":"array","minItems":2,)"
+        R"("items":{"type":"string"}}},"required":["t"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    drive_array(sc, 0);
+    auto empty = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(empty[kTokCloseBracket]) << "empty array below minItems may not close";
+    // First item on the same FSM: `"a"`.
+    sc.update(kTokQuote), sc.update(kTokItemA), sc.update(kTokQuote);
+    auto one = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_FALSE(one[kTokCloseBracket]) << "one item below minItems=2 may not close";
+    EXPECT_TRUE(one[kTokComma]) << "the array must be allowed to continue";
+    sc.update(kTokComma), sc.update(kTokQuote), sc.update(kTokItemA), sc.update(kTokQuote);
+    auto two = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(two[kTokCloseBracket]) << "minItems satisfied — close must be legal";
+}
+
+// ---------------------------------------------------------------------------
 // $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
 // model, so this is the agent-framework path, not an exotic corner.
 // ---------------------------------------------------------------------------

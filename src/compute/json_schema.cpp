@@ -310,6 +310,14 @@ private:
                 node->items = parse_schema_object();
                 if (!has_type)
                     node->type = SchemaType::ARRAY;
+            } else if (key == "minItems") {
+                long v = 0;
+                if (parse_int(v))
+                    node->min_items = static_cast<int>(v);
+            } else if (key == "maxItems") {
+                long v = 0;
+                if (parse_int(v))
+                    node->max_items = static_cast<int>(v);
             } else if (key == "enum") {
                 skip_ws();
                 if (expect('[')) {
@@ -520,6 +528,8 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->min_length = min_length;
     c->max_length = max_length;
     c->pattern_nfa = pattern_nfa;  // shared; compiled NFA is immutable
+    c->min_items = min_items;
+    c->max_items = max_items;
     c->ref_name = ref_name;
     for (auto& [name, def] : defs)
         c->defs.emplace_back(name, def->clone());
