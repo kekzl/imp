@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "reasoning_split.h"
+#include "utils.h"  // extract_reasoning, strip_think_block
 
 using imp::server::reconcile_thinking_with_prompt_tail;
 
@@ -55,4 +56,31 @@ TEST(ThinkingReconcile, StrayCloseWithoutOpenKeepsCurrent) {
     // </think> with no <think> in-window is not a closed block — keep current.
     EXPECT_TRUE(reconcile_thinking_with_prompt_tail(/*current=*/true, kNotExplicit,
                                                     /*think=*/false, /*close=*/true));
+}
+
+// ---------------------------------------------------------------------------
+// strip_think_block edge cases exercised by the shared split_last_think helper.
+// extract_reasoning + the strip_think_block happy path are already covered in
+// test_sse_stream_utils.cpp (issue #557, which also uses extract_reasoning as
+// the oracle for the streaming splitter). These pin the strip-only edge paths
+// that the shared-helper refactor restructured — an unclosed trailing/leading
+// <think> is discarded (the model never finished the block).
+// ---------------------------------------------------------------------------
+
+TEST(StripThinkBlock, DiscardsUnclosedTrailingThink) {
+    std::string text = "<think>reasoning</think><think>unclosed";
+    strip_think_block(text);
+    EXPECT_EQ(text, "");
+}
+
+TEST(StripThinkBlock, EmptyContentAfterCloseClears) {
+    std::string text = "<think>a</think>";
+    strip_think_block(text);
+    EXPECT_EQ(text, "");
+}
+
+TEST(StripThinkBlock, UnclosedLeadingThinkClears) {
+    std::string text = "<think>never finished thinking";
+    strip_think_block(text);
+    EXPECT_EQ(text, "");
 }

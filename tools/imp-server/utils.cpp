@@ -199,40 +199,44 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
     return out;
 }
 
-void strip_think_block(std::string& text) {
-    // Find the last </think> — everything after it is the actual response
+// Split `text` at the LAST "</think>". On success fills `reasoning` (the text
+// before it, a leading "<think>" stripped, trimmed both ends) and `content`
+// (the text after it, leading whitespace trimmed) and returns true; returns
+// false (out-params untouched) when there is no "</think>". Shared by the two
+// non-streaming reasoning demuxers below so their split point cannot drift.
+static bool split_last_think(const std::string& text, std::string& reasoning, std::string& content) {
     auto last_end = text.rfind("</think>");
-    if (last_end != std::string::npos) {
-        std::string after = text.substr(last_end + 8);
-        auto start = after.find_first_not_of("\n\r\t ");
-        if (start != std::string::npos) {
-            after = after.substr(start);
-            // If remaining text starts with another unclosed <think>, strip it
-            if (after.compare(0, 7, "<think>") == 0) {
-                auto next_end = after.find("</think>", 7);
-                if (next_end == std::string::npos) {
-                    // Unclosed trailing <think> block — discard
-                    text.clear();
-                    return;
-                }
-                // Recursive case: more think blocks after the last </think>
-                text = after;
-                strip_think_block(text);
-                return;
-            }
-            text = after;
-        } else {
-            text.clear();
-        }
+    if (last_end == std::string::npos)
+        return false;
+
+    reasoning = text.substr(0, last_end);
+    auto think_start = reasoning.find("<think>");
+    if (think_start != std::string::npos)
+        reasoning = reasoning.substr(think_start + 7);
+    auto rs = reasoning.find_first_not_of("\n\r\t ");
+    auto re = reasoning.find_last_not_of("\n\r\t ");
+    reasoning =
+        (rs != std::string::npos && re != std::string::npos) ? reasoning.substr(rs, re - rs + 1) : std::string();
+
+    content = text.substr(last_end + 8);
+    auto cs = content.find_first_not_of("\n\r\t ");
+    content = (cs != std::string::npos) ? content.substr(cs) : std::string();
+    return true;
+}
+
+void strip_think_block(std::string& text) {
+    std::string reasoning, content;
+    if (split_last_think(text, reasoning, content)) {
+        // Content after the last </think>. If it re-opens an (unclosed) <think>,
+        // the model never finished that block — discard it.
+        text = (content.compare(0, 7, "<think>") == 0) ? std::string() : content;
         return;
     }
 
-    // No </think> found — check if there's an opening <think>
+    // No </think> — an unclosed leading <think> means thinking never finished.
     auto first = text.find_first_not_of("\n\r\t ");
-    if (first != std::string::npos && text.compare(first, 7, "<think>") == 0) {
-        // Unclosed <think> block — model didn't finish thinking, clear output
+    if (first != std::string::npos && text.compare(first, 7, "<think>") == 0)
         text.clear();
-    }
 }
 
 ChannelSegments split_channel_segments(const std::string& text) {
@@ -453,48 +457,21 @@ void strip_channel_headers(std::string& text) {
 }
 
 std::pair<std::string, std::string> extract_reasoning(const std::string& text) {
-    // Find the last </think>
-    auto last_end = text.rfind("</think>");
-    if (last_end != std::string::npos) {
-        std::string reasoning = text.substr(0, last_end);
-        // Strip leading <think> tag
-        auto think_start = reasoning.find("<think>");
-        if (think_start != std::string::npos) {
-            reasoning = reasoning.substr(think_start + 7);
-        }
-        // Trim leading/trailing whitespace from reasoning
-        auto rs = reasoning.find_first_not_of("\n\r\t ");
-        auto re = reasoning.find_last_not_of("\n\r\t ");
-        if (rs != std::string::npos && re != std::string::npos) {
-            reasoning = reasoning.substr(rs, re - rs + 1);
-        } else {
-            reasoning.clear();
-        }
-
-        std::string content = text.substr(last_end + 8);
-        auto cs = content.find_first_not_of("\n\r\t ");
-        content = (cs != std::string::npos) ? content.substr(cs) : "";
-
+    std::string reasoning, content;
+    if (split_last_think(text, reasoning, content))
         return {reasoning, content};
-    }
 
-    // No </think> — check for unclosed <think>
+    // No </think> — an unclosed <think> makes everything after it reasoning.
     auto think_start = text.find("<think>");
     if (think_start != std::string::npos) {
-        std::string reasoning = text.substr(think_start + 7);
-        auto rs = reasoning.find_first_not_of("\n\r\t ");
-        auto re = reasoning.find_last_not_of("\n\r\t ");
-        if (rs != std::string::npos && re != std::string::npos) {
-            reasoning = reasoning.substr(rs, re - rs + 1);
-        } else {
-            reasoning.clear();
-        }
-        return {reasoning, ""};
+        std::string reasoning_only = text.substr(think_start + 7);
+        auto rs = reasoning_only.find_first_not_of("\n\r\t ");
+        auto re = reasoning_only.find_last_not_of("\n\r\t ");
+        reasoning_only = (rs != std::string::npos && re != std::string::npos)
+                             ? reasoning_only.substr(rs, re - rs + 1)
+                             : std::string();
+        return {reasoning_only, ""};
     }
-
-    // Check for </think> without opening (special token was skipped)
-    // — text before </think> is reasoning
-    // (This case shouldn't happen since we checked rfind above, but handle gracefully)
 
     return {"", text};
 }
