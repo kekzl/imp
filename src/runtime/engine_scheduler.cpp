@@ -492,8 +492,11 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
 
     // Perplexity capture must forward EVERY position — a prefix-cache hit
     // skips the reused prefix's forward, leaving those NLL slots at 0.
+    // Embedding requests mean-pool EVERY position's hidden state — a
+    // prefix-cache hit would skip the reused prefix's forward and silently
+    // bias the pooled vector (#1005). Same class as the ppl_capture guard.
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 &&
-        !ppl_capture_.active) {
+        !ppl_capture_.active && !req->embedding_request) {
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback
@@ -909,6 +912,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                               ppl_capture_.d_match);
         }
 
+        // Embedding pooling for this chunk (#1005) — hidden_ still holds it.
+        if (req->embedding_request)
+            embed_accumulate_chunk_(*req, chunk_len, pf_stream);
+
         if (!pf_pool_used) {
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
         }
@@ -925,6 +932,24 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // recurrent state now, before the next chunk advances it.
         if (snap_end > 0 && req->prefill_offset == snap_end)
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
+    } else if (req->embedding_request) {
+        // Embedding request (#1005): last chunk — forward, pool, finish.
+        // No sampling, no DECODING transition; the request rides the normal
+        // finish path (KV free + prefix-hash registration, so re-embedding
+        // the same document becomes a prefix-cache hit for OTHER requests).
+        Tensor logits_unused;
+        executor_->forward_logits(state, logits_unused, pf_stream);
+        if (!pf_pool_used) {
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+        }
+        embed_accumulate_chunk_(*req, chunk_len, pf_stream);
+        const size_t total = req->input_tokens.size();
+        if (total > 0 && !req->embedding_out.empty()) {
+            const float inv = 1.0f / static_cast<float>(total);
+            for (float& v : req->embedding_out)
+                v *= inv;
+        }
+        finish_request(req);
     } else {
         // Last chunk: forward + sample
         int32_t next_token;

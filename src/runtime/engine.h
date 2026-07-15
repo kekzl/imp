@@ -561,6 +561,10 @@ private:
     // json_schema or enforced tool call — #1002). No-op when none apply or
     // the request already holds one.
     void ensure_constraints_(const std::shared_ptr<Request>& req);
+    // Embedding requests (#1005): pool the chunk that hidden_ currently holds
+    // and accumulate into req.embedding_out (host, fp32). Synchronizes the
+    // stream (one ~20KB D2H per chunk).
+    void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream);
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
     void* prefill_pool_ = nullptr;
@@ -582,6 +586,10 @@ private:
 
     // ── Penalty token buffer ─────────────────────────────────────────
     int32_t* d_penalty_tokens_ = nullptr;
+    // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
+    // consumed synchronously per chunk (host accumulation on the request) so
+    // interleaved chunks of concurrent embedding requests can share it.
+    float* d_embed_pool_scratch_ = nullptr;
     size_t d_penalty_tokens_capacity_ = 0;
 
     // ── BitDecoding Phase 3 residual metadata (per-step) ─────────────
