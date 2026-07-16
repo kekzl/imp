@@ -2,7 +2,7 @@
 """
 Diff per-layer hidden-state tensors between imp and llama.cpp.
 
-imp side: .npy dumps from IMP_DUMP_HIDDEN=<dir> runs.
+imp side: .npy dumps from `--set diagnostics.dump_hidden_dir=<dir>` runs.
 llama.cpp side: log output from llama-eval-callback (per-tensor sum + 3+3 slice).
 
 Computes relative sum divergence per (layer, snapshot) and identifies the
