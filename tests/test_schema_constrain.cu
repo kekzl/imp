@@ -617,6 +617,91 @@ TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
     EXPECT_TRUE(at_done[2]) << "EOS must be allowed after the envelope closes";
 }
 
+// Strict OPTIONAL tool call (#1002, OpenAI strict:true + tool_choice auto): the
+// envelope is NOT forced — the model may emit free text (mask off), but once it
+// opens the tool tag the preamble gate hands off to the body FSM, which enforces
+// the arguments, then forces the close literal + EOS.
+TEST(SchemaConstrainTest, ToolCallStrictOptionalEnforced) {
+    SKIP_IF_NO_CUDA();
+    // Single-char body/close vocab, then the opener + a free-text token last so
+    // the single-char id() lookup never collides with the multi-char tokens.
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    std::string chars = "{\"name:d,rgus1}\n</tol_c>x";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    const int opener_id = static_cast<int>(toks.size());
+    toks.push_back("<tool_call>");
+    const int free_id = static_cast<int>(toks.size());
+    toks.push_back("FREE");
+    auto id = [&](char c) {
+        for (size_t i = 3; i < 3 + chars.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"add", R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})"},
+    };
+    auto schema = build_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.set_strict_optional_envelope(true);
+    sc.set_preamble_with_tools(/*close_token=*/-1, /*max_tokens=*/512, /*open_tokens=*/{opener_id},
+                               /*close_tokens=*/{}, /*open_prefix=*/"<tool_call>",
+                               /*close_suffix=*/"</tool_call>", /*thinking_open=*/false,
+                               /*strict_tool=*/true);
+    sc.reset();
+
+    // 1. Free generation: the gate is ACTIVE, mask bypassed — a plain-text token
+    // and even a non-structural char pass. The model is NOT forced to call.
+    auto at_free = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_free[free_id]) << "free text must pass — no tool call is forced";
+    EXPECT_TRUE(at_free[id('x')]) << "arbitrary chars pass during free generation";
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    // 2. Model opens the tool tag → gate hands off to the body FSM.
+    sc.update(opener_id);
+    sc.update(id('\n'));  // the \n after <tool_call> (VALUE_START tolerates ws)
+    auto at_body = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_body[id('{')]) << "the tool-call body must open with '{'";
+    EXPECT_FALSE(at_body[free_id]) << "free text is masked once the body FSM engaged";
+    EXPECT_FALSE(at_body[id('x')]) << "non-structural chars masked inside the body";
+
+    // 3. Key order + name binding, exactly as the forced path.
+    feed("{\"");
+    auto at_key = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_key[id('n')]) << "'name' first";
+    EXPECT_FALSE(at_key[id('a')]) << "'arguments' may not precede 'name'";
+
+    feed("name\":\"add\",\"arguments\":{\"");
+    auto at_args = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_args[id('d')]) << "chosen tool's parameter must be legal";
+
+    feed("d\":1}}");
+    // 4. Body complete → the close literal is FORCED (model emitted the open tag
+    // freely, but the close is enforced so the tool call parses).
+    auto at_close = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_close[id('\n')]) << "close literal '\\n</tool_call>' forced";
+    EXPECT_FALSE(at_close[id('{')]);
+
+    feed("\n</tool_call>");
+    // 5. Envelope closed → EOS forced.
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "EOS forced after the tool call closes";
+    EXPECT_FALSE(at_done[free_id]) << "no trailing free text after the close literal";
+}
+
 // ---------------------------------------------------------------------------
 // $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
 // model, so this is the agent-framework path, not an exotic corner.

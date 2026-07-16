@@ -28,18 +28,25 @@ namespace imp {
 //
 //   ACTIVE        — preamble running; mask off; transitions:
 //                     · `{`/`[`/close-token/budget → OFF (mask kicks in)
-//                     · tool-opener (token or char-prefix) → TOOL_BODY
+//                     · tool-opener (token or char-prefix) → TOOL_BODY (legacy)
+//                       or TOOL_ARGS (strict_tool mode)
 //   TOOL_BODY     — inside a tool call; mask off; transitions:
 //                     · tool-close (token or char-suffix) → TERMINAL_OFF
+//   TOOL_ARGS     — inside a tool call, strict_tool mode; mask ENGAGED so the
+//                   TOOL_CALL body FSM constrains the arguments (#1002 strict:
+//                   the envelope is emitted freely, only the body is enforced).
+//                   The gate absorbs the opener token, then forwards every body
+//                   token to the FSM (which drives body + close literal + EOS).
 //   TERMINAL_OFF  — tool call closed; mask off forever (parallel calls,
 //                   trailing text, EOS all pass through).
 //   OFF           — preamble exited normally; FSM mask now applies.
 //
 // External API stays binary:
 //   active() = true  → mask is bypassed (ACTIVE / TOOL_BODY / TERMINAL_OFF)
-//   active() = false → mask is enforced by FSM (OFF only)
+//   active() = false → mask is enforced by FSM (OFF / TOOL_ARGS)
 //   absorb() returns true if the token was consumed by the gate, false
-//   only on the ACTIVE → OFF transition via `{`/`[` (forwarded to FSM).
+//   on the ACTIVE → OFF transition via `{`/`[` (forwarded to FSM) and for
+//   every body token once in TOOL_ARGS (the FSM drives the tool-call body).
 class PreambleGate {
 public:
     // Existing two-arg overload — preserved for non-tool callers.
@@ -58,12 +65,13 @@ public:
     //
     // Empty open_tokens AND empty open_prefix means "tool detection
     // disabled" — gate behaves exactly like the legacy two-arg configure.
-    void configure_with_tools(int32_t close_token, int max_tokens,
-                              std::vector<int32_t> open_tokens,
-                              std::vector<int32_t> close_tokens,
-                              std::string open_prefix,
-                              std::string close_suffix,
-                              bool thinking_open = true) {
+    //
+    // strict_tool: on the tool opener, enter TOOL_ARGS (mask ENGAGED) instead
+    // of TOOL_BODY (mask off) so the TOOL_CALL body FSM constrains the arguments
+    // of an OPTIONAL (model-chosen) tool call — OpenAI `strict: true` (#1002).
+    void configure_with_tools(int32_t close_token, int max_tokens, std::vector<int32_t> open_tokens,
+                              std::vector<int32_t> close_tokens, std::string open_prefix,
+                              std::string close_suffix, bool thinking_open = true, bool strict_tool = false) {
         max_tokens_ = max_tokens > 0 ? max_tokens : 0;
         close_token_ = close_token;
         open_tokens_ = std::move(open_tokens);
@@ -71,6 +79,7 @@ public:
         open_prefix_ = std::move(open_prefix);
         close_suffix_ = std::move(close_suffix);
         thinking_open_ = thinking_open;
+        strict_tool_ = strict_tool;
         configured_ = (close_token >= 0) || (max_tokens_ > 0);
         reset();
     }
@@ -84,19 +93,25 @@ public:
         // the structural mask enforces immediately. Tool-aware mode keeps ACTIVE
         // (tool openers may still appear post-think) and budget-only mode is
         // unaffected (close_token_ < 0).
-        const bool reasoning_already_closed =
-            (close_token_ >= 0) && !thinking_open_ && !tool_detection_active();
+        const bool reasoning_already_closed = (close_token_ >= 0) && !thinking_open_ &&
+                                              !tool_detection_active();
         state_ = (configured_ && !reasoning_already_closed) ? State::ACTIVE : State::OFF;
         seen_ = 0;
         char_buf_.clear();
     }
 
-    // active() returns true whenever the FSM mask should be skipped.
-    // That's three of the four internal states: ACTIVE (preamble),
-    // TOOL_BODY (inside a tool call), TERMINAL_OFF (after a tool call
-    // closed). Only OFF — reached via {/[/think-close/budget — lets
-    // the FSM mask through.
-    bool active() const noexcept { return state_ != State::OFF; }
+    // active() returns true whenever the FSM mask should be skipped:
+    // ACTIVE (preamble), TOOL_BODY (unconstrained tool call), TERMINAL_OFF
+    // (after a tool call closed). OFF (via {/[/think-close/budget) and
+    // TOOL_ARGS (strict tool-call body) let the FSM mask through.
+    bool active() const noexcept {
+        return state_ == State::ACTIVE || state_ == State::TOOL_BODY || state_ == State::TERMINAL_OFF;
+    }
+
+    // True once a strict optional tool call opened and its body is now
+    // FSM-constrained (#1002) — the constrainer engages its TOOL_CALL body
+    // frame on the ACTIVE → TOOL_ARGS transition.
+    bool in_tool_args() const noexcept { return state_ == State::TOOL_ARGS; }
 
     // Returns true if the token was fully consumed by the gate (FSM should
     // NOT process it). Returns false only for the one transition where
@@ -109,6 +124,8 @@ public:
                 return absorb_tool_body(token, text);
             case State::TERMINAL_OFF:
                 return true;  // permanently absorbing
+            case State::TOOL_ARGS:
+                return false;  // strict body: every token is driven by the FSM
             case State::OFF:
                 return false;
         }
@@ -116,7 +133,7 @@ public:
     }
 
 private:
-    enum class State : uint8_t { ACTIVE, TOOL_BODY, TERMINAL_OFF, OFF };
+    enum class State : uint8_t { ACTIVE, TOOL_BODY, TOOL_ARGS, TERMINAL_OFF, OFF };
 
     bool absorb_active(int32_t token, const std::string& text) {
         seen_++;
@@ -136,9 +153,10 @@ private:
             return true;
         }
 
-        // Tool-opener detection (token-set fast-path).
+        // Tool-opener detection (token-set fast-path). strict_tool → TOOL_ARGS
+        // (mask engaged, FSM constrains the body); legacy → TOOL_BODY (mask off).
         if (is_tool_open_token(token)) {
-            state_ = State::TOOL_BODY;
+            state_ = strict_tool_ ? State::TOOL_ARGS : State::TOOL_BODY;
             char_buf_.clear();
             return true;
         }
@@ -147,7 +165,7 @@ private:
         if (!open_prefix_.empty()) {
             append_char_buf(text);
             if (char_buf_.find(open_prefix_) != std::string::npos) {
-                state_ = State::TOOL_BODY;
+                state_ = strict_tool_ ? State::TOOL_ARGS : State::TOOL_BODY;
                 char_buf_.clear();
                 return true;
             }
@@ -191,9 +209,7 @@ private:
         return true;  // body content is always absorbed
     }
 
-    bool tool_detection_active() const {
-        return !open_tokens_.empty() || !open_prefix_.empty();
-    }
+    bool tool_detection_active() const { return !open_tokens_.empty() || !open_prefix_.empty(); }
 
     bool is_tool_open_token(int32_t token) const {
         if (token < 0)
@@ -224,6 +240,7 @@ private:
 
     bool configured_ = false;
     bool thinking_open_ = true;  // false = thinking already closed at gen start (e.g. /no_think)
+    bool strict_tool_ = false;   // true = opener enters TOOL_ARGS (FSM constrains body)
     State state_ = State::OFF;
     int32_t close_token_ = -1;
     int max_tokens_ = 0;

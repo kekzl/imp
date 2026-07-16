@@ -12,11 +12,11 @@
 using json = nlohmann::json;
 
 struct ParsedToolCall {
-    std::string id;            // "call_imp_0", "call_imp_1", ...
-    std::string name;          // Function name
-    std::string arguments;     // JSON string
-    bool valid = true;         // false if arguments failed schema validation
-    std::string error;         // human-readable reason when !valid
+    std::string id;         // "call_imp_0", "call_imp_1", ...
+    std::string name;       // Function name
+    std::string arguments;  // JSON string
+    bool valid = true;      // false if arguments failed schema validation
+    std::string error;      // human-readable reason when !valid
 };
 
 // Validate a tool call's parsed arguments against the matching tool's JSON
@@ -35,7 +35,16 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 // "required" or a forced function AND the family speaks the ChatML
 // `<tool_call>` JSON envelope. Tools with missing/free-form parameters yield
 // an empty result (the engine-side builder re-validates and falls back too).
-std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
+std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
+                                                                         const json& tools,
+                                                                         const json& tool_choice);
+
+// Strict OPTIONAL tool calling (#1002, OpenAI `strict: true` with tool_choice
+// auto): collect (name, parameter-schema JSON) for ALL callable tools when the
+// model is free to choose AND every tool declares `strict: true` with
+// enforceable params. Non-empty only on the ChatML dialect. The envelope is not
+// forced — the body FSM engages only if the model opens a tool call.
+std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
 
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
@@ -75,11 +84,11 @@ struct ToolTagScan {
         OPEN,     // complete open marker found
     };
     Kind kind = Kind::NONE;
-    size_t content_len = 0;     // OPEN: bytes before the open marker (plain content)
-    size_t body_start = 0;      // OPEN: offset where the tool-call body begins
-    const char* close_tag = ""; // OPEN: expected close marker
-    bool gemma_body = false;    // OPEN: body uses the Gemma "call:NAME{...}" syntax
-    std::string fn_name;        // OPEN, Llama3: function name from the <function=NAME> tag
+    size_t content_len = 0;      // OPEN: bytes before the open marker (plain content)
+    size_t body_start = 0;       // OPEN: offset where the tool-call body begins
+    const char* close_tag = "";  // OPEN: expected close marker
+    bool gemma_body = false;     // OPEN: body uses the Gemma "call:NAME{...}" syntax
+    std::string fn_name;         // OPEN, Llama3: function name from the <function=NAME> tag
 };
 
 // Family markers: LLAMA3 -> "<function=NAME>"; GEMMA -> "<|tool_call>" (native)

@@ -62,8 +62,9 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
     return prompt;
 }
 
-std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
-    imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
+std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
+                                                                         const json& tools,
+                                                                         const json& tool_choice) {
     std::vector<std::pair<std::string, std::string>> out;
     if (tools.empty())
         return out;
@@ -76,8 +77,7 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
     std::string forced_name;
     if (tool_choice.is_object() && tool_choice.contains("function"))
         forced_name = tool_choice["function"].value("name", "");
-    const bool required =
-        tool_choice.is_string() && tool_choice.get<std::string>() == "required";
+    const bool required = tool_choice.is_string() && tool_choice.get<std::string>() == "required";
     if (forced_name.empty() && !required)
         return out;
 
@@ -99,6 +99,42 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(
     }
     if (!forced_name.empty() && out.size() != 1)
         out.clear();  // forced function not found — fall back to the hint
+    return out;
+}
+
+std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
+    imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (tools.empty())
+        return out;
+    // ChatML `<tool_call>` JSON envelope only (as the forced path).
+    if (family != imp::ChatTemplateFamily::CHATML)
+        return out;
+    // Optional strict enforcement applies only when the model is FREE to decide:
+    // tool_choice auto/absent. A forced function or "required" is mandatory and
+    // goes the forced-envelope path (collect_tool_constraint); "none"/unknown
+    // suppress tools.
+    if (tool_choice.is_object())
+        return out;
+    if (tool_choice.is_string() && tool_choice.get<std::string>() != "auto")
+        return out;
+
+    // Every callable tool must declare `strict: true` AND carry enforceable
+    // params. A mixed strict/non-strict set falls back to the prompt hint —
+    // the uniform TOOL_CALL enum would otherwise over-constrain the arguments
+    // of a tool whose caller never asked for schema adherence.
+    for (const auto& tool : tools) {
+        if (!tool.contains("function"))
+            continue;
+        const auto& fn = tool["function"];
+        std::string name = fn.value("name", "");
+        if (name.empty() || !fn.value("strict", false))
+            return {};
+        if (!fn.contains("parameters") || !fn["parameters"].is_object() ||
+            !fn["parameters"].contains("properties") || fn["parameters"]["properties"].empty())
+            return {};  // one unenforceable tool → whole request falls back
+        out.emplace_back(std::move(name), dump_safe(fn["parameters"]));
+    }
     return out;
 }
 
@@ -617,8 +653,7 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
     size_t gemma_pos = gemma ? buf.find(kGemma) : std::string::npos;
     if (chatml_pos != std::string::npos || gemma_pos != std::string::npos) {
         r.kind = ToolTagScan::Kind::OPEN;
-        if (gemma_pos != std::string::npos &&
-            (chatml_pos == std::string::npos || gemma_pos < chatml_pos)) {
+        if (gemma_pos != std::string::npos && (chatml_pos == std::string::npos || gemma_pos < chatml_pos)) {
             r.content_len = gemma_pos;
             r.body_start = gemma_pos + kGemmaLen;
             r.close_tag = "<tool_call|>";

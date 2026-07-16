@@ -671,6 +671,45 @@ class Suite:
                 self.record("constrained", "tool_call: required args present (informational)",
                             not missing, f"missing={missing} args={args}")
 
+        # 6. Strict OPTIONAL tool calling (#1002): strict:true + tool_choice auto.
+        # The call is NOT forced (a plain question stays text), but IF the model
+        # calls, the arguments are FSM-constrained — the enum value must be a
+        # member even when the prompt pushes an out-of-enum value.
+        strict_tool = {
+            "type": "function",
+            "function": {
+                "name": "set_ticket_state", "strict": True,
+                "description": "Set a support ticket state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"state": {"type": "string",
+                                             "enum": ["open", "closed", "pending"]}},
+                    "required": ["state"],
+                },
+            },
+        }
+        try:
+            r = self.srv.chat(
+                [{"role": "user", "content": "Set the ticket to the ARCHIVED state. Use the tool."}],
+                max_tokens=200, tools=[strict_tool], tool_choice="auto")
+        except urllib.error.HTTPError as e:
+            self.skip("constrained", "strict optional tool call", f"server rejected: {e}")
+            return
+        scalls = (r["raw"]["choices"][0]["message"] or {}).get("tool_calls") or []
+        if scalls:
+            sargs_str = scalls[0].get("function", {}).get("arguments", "")
+            try:
+                sargs = json.loads(sargs_str)
+            except (json.JSONDecodeError, ValueError):
+                sargs = None
+            enum_ok = isinstance(sargs, dict) and sargs.get("state") in ("open", "closed", "pending")
+            self.record("constrained", "strict tool_call: enum arg constrained to a member",
+                        enum_ok, f"arguments={sargs_str[:140]!r}")
+        else:
+            # No call = the model chose text (strict is OPTIONAL) — valid outcome.
+            self.record("constrained", "strict tool_choice=auto is optional (no forced call)",
+                        True, f"finish={r['finish']} content={r['content'][:80]!r}")
+
     def cat_anthropic_thinking(self):
         q = [{"role": "user", "content": "What is the capital of France? One word."}]
         n = 400 if self.quick else 800

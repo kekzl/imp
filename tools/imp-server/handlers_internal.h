@@ -72,6 +72,9 @@ struct ChatRequestParams {
     std::vector<std::pair<std::string, std::string>> tool_constraint_tools;
     std::string tool_envelope_open;
     std::string tool_envelope_close;
+    // Strict OPTIONAL tool call (OpenAI strict:true, tool_choice=auto): the
+    // envelope is not forced; the body FSM engages only if the model calls.
+    bool tool_constraint_optional = false;
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;
@@ -141,21 +144,17 @@ extern thread_local bool g_in_anthropic_shim;
 // ---------------------------------------------------------------------------
 
 // Defined in handlers.cpp.
-bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
-                         httplib::Response& res);
+bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res);
 bool validate_sampling_params(const json& body, httplib::Response& res);
 
 // Defined in handlers_chat_core.cpp.
-void log_request_jsonl(ServerState& state, bool skip,
-                       const std::chrono::system_clock::time_point& t_start,
-                       const std::string& req_id, const std::string& endpoint,
-                       const std::string& client_ip, const std::string& raw_body,
-                       double latency_ms, int prompt_tokens, int completion_tokens,
-                       const char* finish_reason, const json& response_body);
-bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res,
-                               ServerState& state, ChatRequestContext& ctx);
-bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state,
-                                  ChatRequestContext& ctx);
+void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
+                       const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
+                       const std::string& raw_body, double latency_ms, int prompt_tokens,
+                       int completion_tokens, const char* finish_reason, const json& response_body);
+bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                               ChatRequestContext& ctx);
+bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx);
 // Build an imp::Request from a parsed+snapshotted chat request context — the
 // single params->request mapping for all four ctx-based submission sites
 // (chat streaming + non-streaming, /v1/messages streaming, /v1/responses
@@ -163,13 +162,13 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state,
 // completion_idx offsets the seed for n>1 choice generation; stream keeps the
 // request on per-step decode for real per-token SSE (#754).
 std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
-                                                 const std::vector<int32_t>& input_tokens,
-                                                 int completion_idx, bool stream);
+                                                 const std::vector<int32_t>& input_tokens, int completion_idx,
+                                                 bool stream);
 void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
-                             std::shared_ptr<imp::Request>& imp_req,
-                             std::shared_ptr<ServerRequest>& server_req,
-                             const std::vector<int32_t>& saved_tokens, const std::string& comp_id,
-                             int64_t created);
+                              std::shared_ptr<imp::Request>& imp_req,
+                              std::shared_ptr<ServerRequest>& server_req,
+                              const std::vector<int32_t>& saved_tokens, const std::string& comp_id,
+                              int64_t created);
 
 // Defined in handlers_chat_stream.cpp.
 void stream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
@@ -179,5 +178,5 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
 // Defined in handlers_messages.cpp.
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                           const std::shared_ptr<ServerRequest>& server_req,
-                           const std::string& anth_model, const std::string& msg_id);
+                           const std::shared_ptr<ServerRequest>& server_req, const std::string& anth_model,
+                           const std::string& msg_id);

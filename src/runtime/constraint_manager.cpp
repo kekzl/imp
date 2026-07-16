@@ -23,8 +23,7 @@ struct ToolDialect {
     std::string close_suffix;
 
     bool empty() const {
-        return open_tokens.empty() && close_tokens.empty() && open_prefix.empty() &&
-               close_suffix.empty();
+        return open_tokens.empty() && close_tokens.empty() && open_prefix.empty() && close_suffix.empty();
     }
 };
 
@@ -118,18 +117,17 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         if (dialect.empty()) {
             // Tokenizer surfaced none of the dialect tags AND the family had
             // no char fallback — degrade to current "drop schema" behaviour.
-            IMP_LOG_INFO(
-                "ConstraintManager: no tool-tag dialect for family %d, dropping schema/json_mode",
-                std::to_underlying(tpl_family));
+            IMP_LOG_INFO("ConstraintManager: no tool-tag dialect for family %d, dropping schema/json_mode",
+                         std::to_underlying(tpl_family));
             return;
         }
     }
 
     auto configure_gate = [&](auto* constrainer) {
         if (has_tools) {
-            constrainer->set_preamble_with_tools(think_close, preamble_budget,
-                                                 dialect.open_tokens, dialect.close_tokens,
-                                                 dialect.open_prefix, dialect.close_suffix, thinking_open);
+            constrainer->set_preamble_with_tools(think_close, preamble_budget, dialect.open_tokens,
+                                                 dialect.close_tokens, dialect.open_prefix,
+                                                 dialect.close_suffix, thinking_open);
         } else {
             constrainer->set_preamble(think_close, preamble_budget, thinking_open);
         }
@@ -194,11 +192,27 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     }
 }
 
-bool ConstraintManager::prepare_tool_call(
-    const std::vector<std::pair<std::string, std::string>>& tools, const std::string& envelope_open,
-    const std::string& envelope_close, Tokenizer* tokenizer, bool thinking_open) {
+bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
+                                          const std::string& envelope_open, const std::string& envelope_close,
+                                          Tokenizer* tokenizer, bool thinking_open, bool optional,
+                                          ChatTemplateFamily tpl_family) {
     active_json_ = false;
     active_schema_ = false;
+
+    // Strict OPTIONAL mode needs a tool-tag dialect the gate can watch for — the
+    // model emits the envelope freely. Only the ChatML `<tool_call>` dialect is
+    // supported for now; other families fall back to the prompt hint.
+    ToolDialect dialect;
+    if (optional) {
+        dialect = resolve_tool_dialect(tokenizer, tpl_family);
+        if (dialect.open_prefix != "<tool_call>") {
+            IMP_LOG_INFO(
+                "ConstraintManager: strict optional tool call only on the ChatML "
+                "dialect (family %d) — keeping prompt-hint tool choice",
+                std::to_underlying(tpl_family));
+            return false;
+        }
+    }
 
     auto schema = build_tool_call_schema(tools);
     if (!schema) {
@@ -206,19 +220,26 @@ bool ConstraintManager::prepare_tool_call(
         return false;
     }
 
-    // Cache key: envelope + per-tool (name, schema) — distinct from any
-    // response_format schema string by the envelope prefix.
+    // Cache key: envelope + per-tool (name, schema). The mode (forced vs
+    // optional) is NOT keyed — it only changes the envelope/gate config applied
+    // by the setters below, not the expensive vocab classification, so a forced
+    // and an optional request over the same tools share the classified tables.
     const std::string key = tool_call_key(tools, envelope_open, envelope_close);
 
     const int32_t think_close = detect_think_close(tokenizer);
-    // Thinking models deliberate inside <think>; the envelope is enforced
-    // right after the close. Non-thinking requests are enforced from token 1 —
-    // the deliberation slack of the transparent tool gate (#840) does not
-    // apply, because here the tool call is mandatory, not optional.
-    const int preamble_budget = (thinking_open && think_close >= 0) ? 8192 : 0;
+    // Thinking models deliberate inside <think>; the envelope is enforced right
+    // after the close. Forced (mandatory) calls are enforced from token 1.
+    // Optional calls keep the tool-deliberation slack (#840): the model spends
+    // tokens of prose deciding whether to call before opening the tag.
+    int preamble_budget;
+    if (thinking_open && think_close >= 0)
+        preamble_budget = 8192;
+    else if (optional)
+        preamble_budget = 512;
+    else
+        preamble_budget = 0;
 
-    if (!(schema_constrainer_ && schema_constrainer_->is_initialized() &&
-          key == cached_schema_string_)) {
+    if (!(schema_constrainer_ && schema_constrainer_->is_initialized() && key == cached_schema_string_)) {
         schema_constrainer_ = std::make_unique<SchemaConstrainer>();
         if (!tokenizer || !schema_constrainer_->init(*tokenizer, std::move(schema))) {
             IMP_LOG_ERROR("Failed to initialize tool-call schema constrainer");
@@ -229,11 +250,20 @@ bool ConstraintManager::prepare_tool_call(
         cached_schema_string_ = key;
     }
     schema_constrainer_->set_envelope(envelope_open, envelope_close);
-    schema_constrainer_->set_preamble(think_close, preamble_budget, thinking_open);
+    schema_constrainer_->set_strict_optional_envelope(optional);
+    if (optional) {
+        schema_constrainer_->set_preamble_with_tools(think_close, preamble_budget, dialect.open_tokens,
+                                                     dialect.close_tokens, dialect.open_prefix,
+                                                     dialect.close_suffix, thinking_open,
+                                                     /*strict_tool=*/true);
+    } else {
+        schema_constrainer_->set_preamble(think_close, preamble_budget, thinking_open);
+    }
     schema_constrainer_->reset();
     active_schema_ = true;
-    IMP_LOG_INFO("ConstraintManager: enforcing tool call (%zu tool(s), envelope %zu+%zu chars)",
-                 tools.size(), envelope_open.size(), envelope_close.size());
+    IMP_LOG_INFO("ConstraintManager: enforcing %s tool call (%zu tool(s), envelope %zu+%zu chars)",
+                 optional ? "optional (strict)" : "forced", tools.size(), envelope_open.size(),
+                 envelope_close.size());
     return true;
 }
 

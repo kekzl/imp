@@ -90,7 +90,14 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
 
 void SchemaConstrainer::reset() {
     stack_.clear();
-    if (!envelope_open_.empty()) {
+    if (strict_optional_envelope_) {
+        // Strict OPTIONAL tool call: the model may or may not call. Leave the
+        // stack EMPTY — the tool-aware preamble gate is ACTIVE (mask bypassed),
+        // so free text / a plain answer passes through unconstrained. update()
+        // installs the body frame (engage_tool_body) only if the gate detects
+        // the opener; until then apply_mask/forced_text no-op on the empty stack
+        // behind the active gate.
+    } else if (!envelope_open_.empty()) {
         // Envelope wrapper frame: forces the open literal, then hosts the root
         // value; when the value pops it flips to ENVELOPE_CLOSE (#1002).
         SchemaFrame env;
@@ -105,6 +112,21 @@ void SchemaConstrainer::reset() {
     need_token_allow_ = false;
     std::fill(token_allow_.begin(), token_allow_.end(), (uint8_t)1);
     preamble_.reset();
+}
+
+void SchemaConstrainer::engage_tool_body() {
+    // Install the post-ENVELOPE_OPEN state: an envelope frame armed to force the
+    // close literal after the body pops (mirrors ENVELOPE_OPEN's completion at
+    // sim_advance), plus the TOOL_CALL body value-frame on top. The model has
+    // already emitted the open tag (absorbed by the gate); the body FSM enforces
+    // the arguments, then the close literal is forced, then EOS.
+    SchemaFrame env;
+    env.node = schema_.get();
+    env.phase = SchemaPhase::ENVELOPE_CLOSE;
+    env.literal_target = envelope_close_;
+    env.literal_pos = 0;
+    stack_.push_back(std::move(env));
+    push_value_frame(schema_.get());
 }
 
 void SchemaConstrainer::push_value_frame(const SchemaNode* node) {
@@ -293,8 +315,8 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             // minItems > 0: the empty array may not close yet.
             uint16_t mask = (f.node && f.node->min_items > 0) ? 0 : CAT_CLOSE_BRACKET;
             // Allow value start for first item ($ref items resolve first)
-            const SchemaNode* items =
-                f.node ? resolve_schema_ref(schema_.get(), f.node->items.get()) : nullptr;
+            const SchemaNode* items = f.node ? resolve_schema_ref(schema_.get(), f.node->items.get())
+                                             : nullptr;
             if (items) {
                 switch (items->type) {
                     case SchemaType::STRING:
@@ -458,10 +480,10 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
             if (e >= 0 && e < vocab_size_)
                 token_allow_[e] = 1;
         uint16_t all_cats = 0xFFFF;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &all_cats, sizeof(uint16_t),
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(d_allowed_mask_, &all_cats, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size_ * sizeof(uint8_t),
                                            cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(),
-                                           vocab_size_ * sizeof(uint8_t), cudaMemcpyHostToDevice, stream));
         int t = 256, b = (vocab_size + t - 1) / t;
         constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
                                                          d_allowed_mask_, vocab_size,
@@ -524,11 +546,21 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 // ---------------------------------------------------------------------------
 
 void SchemaConstrainer::update(int32_t token) {
-    if (token < 0 || token >= vocab_size_ || stack_.empty())
+    if (token < 0 || token >= vocab_size_)
         return;
 
     const auto& text = token_texts_[token];
-    if (preamble_.absorb(token, text))
+    // Feed the gate BEFORE the empty-stack guard: in strict optional mode the
+    // stack is empty during free generation, and the gate must still see every
+    // token to detect the tool-call opener.
+    if (preamble_.absorb(token, text)) {
+        // Opener just seen in strict mode → install the body FSM (once: the
+        // push makes the stack non-empty so this cannot re-fire).
+        if (strict_optional_envelope_ && preamble_.in_tool_args() && stack_.empty())
+            engage_tool_body();
+        return;
+    }
+    if (stack_.empty())
         return;
     SchemaPhase before = top().phase;
     for (char c : text) {
@@ -570,13 +602,27 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 if (!f.node)
                     return static_cast<int>(out.size());
                 switch (f.node->type) {
-                    case SchemaType::OBJECT: cands = "{"; break;
-                    case SchemaType::TOOL_CALL: cands = "{"; break;
-                    case SchemaType::ARRAY: cands = "["; break;
-                    case SchemaType::STRING: cands = "\""; break;  // opening quote; interior is free
-                    case SchemaType::ENUM: cands = "\""; break;
-                    case SchemaType::NULL_TYPE: cands = "n"; break;
-                    case SchemaType::BOOLEAN: cands = "tf"; break;  // two legal starts — stops below
+                    case SchemaType::OBJECT:
+                        cands = "{";
+                        break;
+                    case SchemaType::TOOL_CALL:
+                        cands = "{";
+                        break;
+                    case SchemaType::ARRAY:
+                        cands = "[";
+                        break;
+                    case SchemaType::STRING:
+                        cands = "\"";
+                        break;  // opening quote; interior is free
+                    case SchemaType::ENUM:
+                        cands = "\"";
+                        break;
+                    case SchemaType::NULL_TYPE:
+                        cands = "n";
+                        break;
+                    case SchemaType::BOOLEAN:
+                        cands = "tf";
+                        break;  // two legal starts — stops below
                     default:
                         // number/integer/anyOf/unknown: first char is a real choice
                         return static_cast<int>(out.size());
@@ -677,8 +723,7 @@ static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {
     SchemaFrame& parent = stk.back();
     if (parent.phase == SchemaPhase::OBJECT_COLON)
         parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-    else if (parent.phase == SchemaPhase::ARRAY_OPEN ||
-             parent.phase == SchemaPhase::ARRAY_AFTER_ITEM) {
+    else if (parent.phase == SchemaPhase::ARRAY_OPEN || parent.phase == SchemaPhase::ARRAY_AFTER_ITEM) {
         parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
         parent.item_count++;  // one completed item per child-frame pop
     }
@@ -770,19 +815,38 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     if (c == '-' || (c >= '0' && c <= '9')) {
                         f.phase = SchemaPhase::NUMBER_VALUE;
                         f.string_len = (c >= '0' && c <= '9') ? 1 : 0;  // digit count
-                        f.num_leading_zero = (c == '0');  // "0..." forbids more int digits
+                        f.num_leading_zero = (c == '0');                // "0..." forbids more int digits
                         return true;
                     }
                     return false;
                 case SchemaType::BOOLEAN:
-                    if (c == 't') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "true"; f.literal_pos = 1; return true; }
-                    if (c == 'f') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "false"; f.literal_pos = 1; return true; }
+                    if (c == 't') {
+                        f.phase = SchemaPhase::LITERAL_VALUE;
+                        f.literal_target = "true";
+                        f.literal_pos = 1;
+                        return true;
+                    }
+                    if (c == 'f') {
+                        f.phase = SchemaPhase::LITERAL_VALUE;
+                        f.literal_target = "false";
+                        f.literal_pos = 1;
+                        return true;
+                    }
                     return false;
                 case SchemaType::NULL_TYPE:
-                    if (c == 'n') { f.phase = SchemaPhase::LITERAL_VALUE; f.literal_target = "null"; f.literal_pos = 1; return true; }
+                    if (c == 'n') {
+                        f.phase = SchemaPhase::LITERAL_VALUE;
+                        f.literal_target = "null";
+                        f.literal_pos = 1;
+                        return true;
+                    }
                     return false;
                 case SchemaType::ENUM:
-                    if (c == '"') { f.phase = SchemaPhase::ENUM_VALUE; f.enum_buffer.clear(); return true; }
+                    if (c == '"') {
+                        f.phase = SchemaPhase::ENUM_VALUE;
+                        f.enum_buffer.clear();
+                        return true;
+                    }
                     return false;
                 case SchemaType::ANY_OF:
                     // anyOf is hard to constrain precisely — accept as free string.
@@ -832,7 +896,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         if (f.node->type == SchemaType::TOOL_CALL &&
                             !tool_call_key_available(name, f.emitted_keys))
                             continue;
-                        if (!f.emitted_keys.count(name) && name == f.key_buffer) { complete = true; break; }
+                        if (!f.emitted_keys.count(name) && name == f.key_buffer) {
+                            complete = true;
+                            break;
+                        }
                     }
                 }
                 if (!complete)
@@ -941,8 +1008,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (space)
                 return true;
             const int max_items = effective_max_items(schema_.get(), f.node);
-            const bool can_close =
-                !f.node || f.node->min_items < 0 || f.item_count >= f.node->min_items;
+            const bool can_close = !f.node || f.node->min_items < 0 || f.item_count >= f.node->min_items;
             if (c == ',') {
                 // At the item ceiling the array must close (unless closing is
                 // itself illegal via contradictory minItems — then allow the
@@ -964,7 +1030,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
         }
 
         case SchemaPhase::STRING_VALUE: {
-            if (c == '\\') { f.phase = SchemaPhase::STRING_ESCAPE; return true; }
+            if (c == '\\') {
+                f.phase = SchemaPhase::STRING_ESCAPE;
+                return true;
+            }
             if (c == '"') {
                 stk.pop_back();
                 sim_fixup_parent(stk);
@@ -992,8 +1061,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (f.node && f.node->max_length >= 0 && f.string_len + 1 > f.node->max_length)
                 return false;
             if (f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled()) {
-                std::vector<int> next =
-                    f.node->pattern_nfa->step(f.regex_states, static_cast<unsigned char>(c));
+                std::vector<int> next = f.node->pattern_nfa->step(f.regex_states,
+                                                                  static_cast<unsigned char>(c));
                 if (next.empty())
                     return false;  // pattern prefix died
                 f.regex_states = std::move(next);
@@ -1052,7 +1121,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 bool exact = false;
                 if (f.node) {
                     for (auto& v : f.node->enum_values)
-                        if (v == f.enum_buffer) { exact = true; break; }
+                        if (v == f.enum_buffer) {
+                            exact = true;
+                            break;
+                        }
                 }
                 if (!exact)
                     return false;  // close only on an exact enum value
@@ -1116,7 +1188,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
 
 bool SchemaConstrainer::token_legal(const std::string& text) const {
     if (text.empty())
-        return true;  // EOS / special tokens — governed by the category mask
+        return true;                        // EOS / special tokens — governed by the category mask
     std::vector<SchemaFrame> sim = stack_;  // deep copy of the frame stack
     for (char c : text) {
         if (!sim_advance(sim, c))

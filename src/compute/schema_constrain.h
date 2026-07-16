@@ -116,6 +116,16 @@ public:
         envelope_close_ = std::move(close);
     }
 
+    // Strict OPTIONAL tool call (#1002, OpenAI `strict: true` with a model-chosen
+    // call): the envelope is emitted freely by the model — the preamble gate
+    // detects the opener and hands off to the TOOL_CALL body FSM (which enforces
+    // the arguments, then forces the close literal + EOS). Unlike set_envelope's
+    // forced mode, no tool call is forced: if the model answers in text, the
+    // constraint never engages. Requires set_envelope (for the close literal)
+    // and a tool-aware preamble configured with strict_tool=true. Configure
+    // BEFORE reset().
+    void set_strict_optional_envelope(bool v) { strict_optional_envelope_ = v; }
+
     bool is_initialized() const { return initialized_; }
 
     // See JsonConstrainer::set_preamble for semantics — close-token mode for
@@ -128,17 +138,13 @@ public:
     // a tool-call body (delimited by open_tokens/close_tokens or the
     // open_prefix/close_suffix char fallback) and never re-enables the mask
     // after the tool closes. See PreambleGate::configure_with_tools.
-    void set_preamble_with_tools(int32_t close_token, int max_tokens,
-                                 std::vector<int32_t> open_tokens,
-                                 std::vector<int32_t> close_tokens,
-                                 std::string open_prefix,
-                                 std::string close_suffix,
-                                 bool thinking_open = true) {
-        preamble_.configure_with_tools(close_token, max_tokens,
-                                       std::move(open_tokens),
-                                       std::move(close_tokens),
-                                       std::move(open_prefix),
-                                       std::move(close_suffix), thinking_open);
+    void set_preamble_with_tools(int32_t close_token, int max_tokens, std::vector<int32_t> open_tokens,
+                                 std::vector<int32_t> close_tokens, std::string open_prefix,
+                                 std::string close_suffix, bool thinking_open = true,
+                                 bool strict_tool = false) {
+        preamble_.configure_with_tools(close_token, max_tokens, std::move(open_tokens),
+                                       std::move(close_tokens), std::move(open_prefix),
+                                       std::move(close_suffix), thinking_open, strict_tool);
     }
 
 private:
@@ -173,6 +179,10 @@ private:
     std::string envelope_open_;
     std::string envelope_close_;
 
+    // Strict OPTIONAL tool call: the open literal is NOT forced (the model emits
+    // it freely); the preamble gate hands off to the body FSM on the opener.
+    bool strict_optional_envelope_ = false;
+
     // Helpers
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
@@ -181,6 +191,12 @@ private:
     }
 
     void push_value_frame(const SchemaNode* node);
+
+    // Strict optional tool call (#1002): the preamble gate has just seen the
+    // opener, so install the TOOL_CALL body frame with the close literal armed
+    // (the post-ENVELOPE_OPEN state) — the FSM now enforces the body, then the
+    // forced close literal, then EOS.
+    void engage_tool_body();
 
     uint16_t compute_category_mask() const;
     // cat_mask: the current category mask — tokens failing it are masked by

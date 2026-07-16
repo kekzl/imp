@@ -10,7 +10,7 @@ namespace imp {
 
 // Forward declares to keep CUDA / buffer headers out of this widely-included file.
 struct ImageData;  // src/vision/image_processor.h
-class Buffer;       // src/core/buffer.h
+class Buffer;      // src/core/buffer.h
 
 // Per-token log probability information (for logprobs output)
 struct TokenLogprob {
@@ -86,7 +86,7 @@ struct Request {
     // verify steps whose draft was sourced from the prediction region.
     long long pred_accepted = 0;
     long long pred_rejected = 0;
-    bool in_think_block = false;      // Currently inside <think>...</think> (suppress stop tokens)
+    bool in_think_block = false;  // Currently inside <think>...</think> (suppress stop tokens)
     // Generation began inside an injected <think> prefix (the opener lives in
     // the PROMPT, not the output) — seeds the think-budget recount loop and
     // the CUDA-graph decode config so the budget engages from token 0.
@@ -116,8 +116,8 @@ struct Request {
     // opener so the model commits to the final (answer) channel. Index into
     // Engine::harmony_force_seq_ for the in-flight forced opener (-1 = idle).
     int harmony_force_idx = -1;
-    int prefill_offset = 0;     // Chunked prefill: tokens processed so far
-    int cached_tokens = 0;      // Tokens served from prefix cache (skipped in prefill)
+    int prefill_offset = 0;  // Chunked prefill: tokens processed so far
+    int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
     // Hybrid (SSM/GDN) prefix caching: snapshot of the recurrent state at
     // exactly `cached_tokens` tokens, set at admission when the prompt prefix
     // matches a stored snapshot. Restored into the request's recurrent slot
@@ -175,6 +175,10 @@ struct Request {
     std::vector<std::pair<std::string, std::string>> tool_constraint_tools;
     std::string tool_envelope_open;
     std::string tool_envelope_close;
+    // Strict OPTIONAL tool call (OpenAI `strict: true`, tool_choice=auto): the
+    // envelope is NOT forced — the model may answer in text, but IF it opens the
+    // tool tag the body FSM enforces the arguments. false = forced (mandatory).
+    bool tool_constraint_optional = false;
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;

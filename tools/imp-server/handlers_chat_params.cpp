@@ -39,12 +39,8 @@ extern thread_local bool g_in_anthropic_shim;
 // effort snapshot used to format tool-role messages in the conversion loop).
 // On parse/validation failure: sets res with 400 + error JSON and returns false.
 // On success: returns true; caller proceeds to state snapshot + tokenize.
-bool parse_chat_request_params(
-    const httplib::Request& req,
-    httplib::Response& res,
-    ServerState& state,
-    ChatRequestContext& ctx)
-{
+bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                               ChatRequestContext& ctx) {
     // Capture inputs for opt-in JSONL request logging. Only used when
     // state.request_logger.enabled and the call is not an inner shim.
     ctx.t_log_start = std::chrono::system_clock::now();
@@ -177,8 +173,7 @@ bool parse_chat_request_params(
                     // json_schema_str empty so the whole request (scheduler
                     // included) takes the any-JSON constrainer path.
                     const bool free_form = sch.value("type", "") == "object" &&
-                                           (!sch.contains("properties") ||
-                                            sch["properties"].empty()) &&
+                                           (!sch.contains("properties") || sch["properties"].empty()) &&
                                            !sch.contains("enum");
                     if (!free_form) {
                         ctx.params.json_schema_str = dump_safe(sch);
@@ -227,8 +222,8 @@ bool parse_chat_request_params(
                 ctx.params.prediction_text = content.get<std::string>();
             } else if (content.is_array()) {
                 for (const auto& part : content) {
-                    if (part.is_object() && part.value("type", "text") == "text" &&
-                        part.contains("text") && part["text"].is_string())
+                    if (part.is_object() && part.value("type", "text") == "text" && part.contains("text") &&
+                        part["text"].is_string())
                         ctx.params.prediction_text += part["text"].get<std::string>();
                 }
             }
@@ -258,22 +253,34 @@ bool parse_chat_request_params(
     // logprobs on a constrained request drops it out of the ConstrainedPipeline
     // fast path to eager decode (~102 vs ~235 tok/s) — silent until now.
     // Surface it: one WARN per request + a /metrics counter (#1006).
-    if (ctx.params.req_logprobs &&
-        (ctx.params.json_mode || !ctx.params.json_schema_str.empty())) {
+    if (ctx.params.req_logprobs && (ctx.params.json_mode || !ctx.params.json_schema_str.empty())) {
         state.metrics.constrained_eager_fallback++;
-        IMP_LOG_WARN("constrained request with logprobs: leaving the ConstrainedPipeline "
-                     "fast path for eager decode (expect ~2x slower decode)");
+        IMP_LOG_WARN(
+            "constrained request with logprobs: leaving the ConstrainedPipeline "
+            "fast path for eager decode (expect ~2x slower decode)");
     }
 
     // Enforced tool calling (#1002): tool_choice=required / forced function on
     // the ChatML <tool_call> dialect constrains generation to one tool-call
     // envelope via the schema FSM. Empty result = prompt-hint fallback.
     if (ctx.params.has_tools) {
-        ctx.params.tool_constraint_tools =
-            collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools, ctx.params.tool_choice);
+        ctx.params.tool_constraint_tools = collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools,
+                                                                   ctx.params.tool_choice);
         if (!ctx.params.tool_constraint_tools.empty()) {
             ctx.params.tool_envelope_open = "<tool_call>\n";
             ctx.params.tool_envelope_close = "\n</tool_call>";
+        } else {
+            // No forced/required constraint — try strict optional (OpenAI
+            // strict:true with a model-chosen call): the envelope is not forced,
+            // the body FSM engages only if the model opens a tool call (#1002).
+            ctx.params.tool_constraint_tools = collect_strict_tool_constraint(ctx.snap.tpl_family,
+                                                                              ctx.params.tools,
+                                                                              ctx.params.tool_choice);
+            if (!ctx.params.tool_constraint_tools.empty()) {
+                ctx.params.tool_constraint_optional = true;
+                ctx.params.tool_envelope_open = "<tool_call>\n";
+                ctx.params.tool_envelope_close = "\n</tool_call>";
+            }
         }
     }
 
@@ -364,8 +371,8 @@ bool parse_chat_request_params(
     // Log request received (structured)
     ctx.req_id = make_completion_id(state);
     fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
-            ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false",
-            ctx.params.max_tokens, ctx.params.temperature);
+            ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false", ctx.params.max_tokens,
+            ctx.params.temperature);
 
     // Validate model field (required per OpenAI spec)
     ctx.params.requested_model = body.value("model", "");
@@ -385,4 +392,3 @@ bool parse_chat_request_params(
 
     return true;
 }
-
