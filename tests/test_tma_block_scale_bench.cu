@@ -23,7 +23,11 @@
 // — TMA bulk on sm_120 is empirically equivalent or slower than cp.async for
 // our workload sizes; the perceived advantage of fused descriptors over
 // separate doesn't materialise either.
-TEST(TmaBlockScaleBench, FusedFasterThanSeparate) {
+//
+// Renamed from FusedFasterThanSeparate: that property was refuted (above), and
+// the test's actual gate is that both descriptor variants launch — the name now
+// says so instead of asserting a speedup the code deliberately does not check.
+TEST(TmaBlockScaleBench, BothDescriptorsLaunch) {
     int dev = 0;
     cudaGetDevice(&dev);
     int major = 0, minor = 0;
