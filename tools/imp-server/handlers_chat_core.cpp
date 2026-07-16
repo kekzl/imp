@@ -472,6 +472,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_envelope_close = ctx.params.tool_envelope_close;
     req->tool_constraint_optional = ctx.params.tool_constraint_optional;
     req->tool_constraint_parallel = ctx.params.parallel_tool_calls;
+    req->tool_constraint_bare_args = ctx.params.tool_constraint_bare_args;
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
     req->think_budget = ctx.params.think_budget;

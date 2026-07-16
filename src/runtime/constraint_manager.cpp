@@ -195,7 +195,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                                           const std::string& envelope_open, const std::string& envelope_close,
                                           Tokenizer* tokenizer, bool thinking_open, bool optional,
-                                          ChatTemplateFamily tpl_family, bool parallel) {
+                                          ChatTemplateFamily tpl_family, bool parallel, bool bare_args) {
     active_json_ = false;
     active_schema_ = false;
 
@@ -214,7 +214,26 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
         }
     }
 
-    auto schema = build_tool_call_schema(tools);
+    // Llama3 bare-args: the `<function=NAME>{args}</function>` body IS the
+    // arguments object, so the constraint root is the tool's parameter schema
+    // directly (the per-tool envelope carries the name). Otherwise the ChatML
+    // TOOL_CALL {"name","arguments"} wrapper.
+    std::unique_ptr<SchemaNode> schema;
+    if (bare_args) {
+        if (tools.size() != 1) {
+            IMP_LOG_INFO("ConstraintManager: bare-args tool call needs exactly one tool");
+            return false;
+        }
+        auto parsed = parse_json_schema(tools[0].second);
+        const SchemaNode* res = parsed ? resolve_schema_ref(parsed.get(), parsed.get()) : nullptr;
+        if (!res || res->type != SchemaType::OBJECT || res->properties.empty()) {
+            IMP_LOG_INFO("ConstraintManager: bare-args parameter schema not enforceable");
+            return false;
+        }
+        schema = std::move(parsed);
+    } else {
+        schema = build_tool_call_schema(tools);
+    }
     if (!schema) {
         IMP_LOG_INFO("ConstraintManager: tool schemas not enforceable — keeping prompt-hint tool choice");
         return false;

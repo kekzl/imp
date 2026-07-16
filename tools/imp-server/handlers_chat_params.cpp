@@ -282,6 +282,19 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.tool_envelope_close = "\n</tool_call>";
             }
         }
+        // Llama3 `<function=NAME>{args}</function>` forced function: constrain the
+        // bare parameter schema with a per-tool envelope (#1002). Only when the
+        // ChatML paths above found nothing (different family).
+        if (ctx.params.tool_constraint_tools.empty()) {
+            auto [ln, lparams] = collect_llama3_forced_tool(ctx.snap.tpl_family, ctx.params.tools,
+                                                            ctx.params.tool_choice);
+            if (!ln.empty()) {
+                ctx.params.tool_constraint_tools = {{ln, lparams}};
+                ctx.params.tool_constraint_bare_args = true;
+                ctx.params.tool_envelope_open = "<function=" + ln + ">";
+                ctx.params.tool_envelope_close = "</function>";
+            }
+        }
     }
 
     // Convert JSON messages to ChatMessage vector, extracting image data if present

@@ -344,5 +344,61 @@ TEST(SchemaConstrainTest, ToolCallStrictParallelReArms) {
     EXPECT_TRUE(at_end[2]) << "EOS legal after the second call";
 }
 
+// Llama3 forced tool call (#1002): `<function=NAME>{args}</function>` — the body
+// is the bare arguments object, so the constraint root is the parameter schema
+// directly (per-tool envelope), not a TOOL_CALL wrapper.
+TEST(SchemaConstrainTest, Llama3BareArgsForcedEnvelope) {
+    SKIP_IF_NO_CUDA();
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    std::string chars = "<functio=ad>/{\":1}x";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    // Bare parameter schema (NOT a TOOL_CALL wrapper).
+    auto schema = parse_json_schema(
+        R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})");
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<function=add>", "</function>");  // forced (no strict flag)
+    sc.reset();
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    // 1. Envelope open forced: '<' legal, the body '{' is not yet.
+    auto at_start = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_start[id('<')]) << "the <function=...> envelope must open first";
+    EXPECT_FALSE(at_start[id('{')]) << "the args body may not start before the envelope";
+
+    feed("<function=add>{\"");
+    // 2. Inside the bare args object: the parameter 'd' is a legal key, 'x' not.
+    auto at_key = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_key[id('d')]) << "the tool parameter must be legal";
+    EXPECT_FALSE(at_key[id('x')]) << "a non-parameter key must be masked";
+
+    feed("d\":1}");
+    // 3. Body complete → the close literal '</function>' is forced.
+    auto at_close = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_close[id('<')]) << "close literal must be legal after the body";
+    EXPECT_FALSE(at_close[id('{')]);
+
+    feed("</function>");
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "EOS forced after the envelope closes";
+}
+
 }  // namespace
 }  // namespace imp

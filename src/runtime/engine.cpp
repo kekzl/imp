@@ -583,7 +583,8 @@ void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
                                                        req->tool_envelope_close, model_->tokenizer(),
                                                        /*thinking_open=*/req->in_think_block,
                                                        req->tool_constraint_optional, req->tpl_family,
-                                                       req->tool_constraint_parallel);
+                                                       req->tool_constraint_parallel,
+                                                       req->tool_constraint_bare_args);
     if (!enforced && (req->json_mode || !req->json_schema.empty()))
         req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
                                   req->tpl_family, /*thinking_open=*/req->in_think_block);
