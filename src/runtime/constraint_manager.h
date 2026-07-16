@@ -46,10 +46,14 @@ public:
     // prompt-hint behavior (optionally calling prepare() for json fallback).
     // parallel (strict optional mode only): true = the model may emit several
     // tool calls (each body enforced); false = at most one, then EOS.
+    // bare_args (Llama3 `<function=NAME>{args}</function>`): the constraint root
+    // is the single tool's bare parameter schema (the body is the arguments
+    // object), not a TOOL_CALL {"name","arguments"} wrapper.
     bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                            const std::string& envelope_open, const std::string& envelope_close,
                            Tokenizer* tokenizer, bool thinking_open, bool optional = false,
-                           ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool parallel = true);
+                           ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool parallel = true,
+                           bool bare_args = false);
 
     // Cache/pool key for a tool-call constraint — shared by the engine's
     // constraint pool lookup and the internal classified-table cache.

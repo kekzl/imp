@@ -47,6 +47,14 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::Ch
 std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
 
+// Llama3 forced tool calling (#1002): `<function=NAME>{JSON args}</function>` —
+// the body IS the arguments object, so a forced single function constrains the
+// bare parameter schema (per-tool `<function=NAME>` envelope), not a TOOL_CALL
+// wrapper. Returns {name, params-JSON} for a forced enforceable Llama3 function,
+// or {} otherwise. Gemma / Qwen3.6-XML bodies are non-JSON (separate grammar).
+std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplateFamily family,
+                                                               const json& tools, const json& tool_choice);
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 

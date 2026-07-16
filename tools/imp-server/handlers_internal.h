@@ -75,6 +75,10 @@ struct ChatRequestParams {
     // Strict OPTIONAL tool call (OpenAI strict:true, tool_choice=auto): the
     // envelope is not forced; the body FSM engages only if the model calls.
     bool tool_constraint_optional = false;
+    // Llama3 `<function=NAME>{args}</function>` forced call: the constraint root
+    // is the bare parameter schema (the body is the arguments object), not a
+    // TOOL_CALL {"name","arguments"} wrapper.
+    bool tool_constraint_bare_args = false;
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;

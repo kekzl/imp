@@ -182,6 +182,10 @@ struct Request {
     // parallel_tool_calls (strict optional only): true = the gate re-arms after
     // each enforced call so the model may emit several; false = at most one.
     bool tool_constraint_parallel = true;
+    // Llama3 forced call: the constraint root is the bare parameter schema (the
+    // `<function=NAME>{args}</function>` body is the arguments object), not a
+    // TOOL_CALL {"name","arguments"} wrapper.
+    bool tool_constraint_bare_args = false;
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;

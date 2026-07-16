@@ -102,6 +102,37 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::Ch
     return out;
 }
 
+std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplateFamily family,
+                                                               const json& tools, const json& tool_choice) {
+    // Llama3 tool calls are `<function=NAME>{JSON args}</function>` — the body
+    // IS the arguments object (name is in the tag), so a forced single function
+    // maps onto the plain parameter schema with a per-tool envelope. Only the
+    // forced-function case is enforceable here: "required"/auto would need a
+    // name-in-tag enum binding (follow-up); Gemma/Qwen3.6-XML bodies are
+    // non-JSON and need a separate grammar (out of scope for the JSON FSM).
+    if (family != imp::ChatTemplateFamily::LLAMA3 || tools.empty())
+        return {};
+    if (!tool_choice.is_object() || !tool_choice.contains("function"))
+        return {};
+    std::string forced = tool_choice["function"].value("name", "");
+    if (forced.empty())
+        return {};
+    for (const auto& tool : tools) {
+        if (!tool.contains("function"))
+            continue;
+        const auto& fn = tool["function"];
+        if (fn.value("name", "") != forced)
+            continue;
+        // Enforceable parameters only (an absent/free-form schema dead-ends the
+        // FSM's key phase — the engine-side parser re-checks).
+        if (!fn.contains("parameters") || !fn["parameters"].is_object() ||
+            !fn["parameters"].contains("properties") || fn["parameters"]["properties"].empty())
+            return {};
+        return {forced, dump_safe(fn["parameters"])};
+    }
+    return {};
+}
+
 std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
     std::vector<std::pair<std::string, std::string>> out;
