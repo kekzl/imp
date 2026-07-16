@@ -49,12 +49,20 @@
             // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
             const bool fa2_hd_ok =
                 hd == 128 || (hd == 256 && runtime_config().attention.fa2_hd256);
-            const bool chunk_fa2_serves = shapes_uniform && !attn_sinks && fa2_hd_ok &&
+            // FA2 is chosen per-layer: heterogeneous Gemma-4 SWA layers (hd=256)
+            // qualify even though the model is not uniform — the gather and the
+            // attention are per-layer, so only THIS layer's head_dim matters.
+            // (Previously gated on shapes_uniform, which forced all Gemma-4
+            // layers onto cuBLAS.)
+            const bool chunk_fa2_serves = !attn_sinks && fa2_hd_ok &&
                                           runtime_config().attention.fa2_fp16qk != "never";
-            // Tiled FMHA correctness domain: uniform shapes. Learned sinks are
-            // servable since #992 (the WMMA FMHA folds them into its online
-            // softmax init); only heterogeneous shapes still require cuBLAS.
-            const bool chunk_fmha_ok = shapes_uniform;
+            // The tiled WMMA FMHA serves any fused head_dim (incl. hd=512 since
+            // this dispatch), per-layer — so Gemma-4 global layers (hd=512)
+            // qualify too. Only learned sinks below the threshold still require
+            // cuBLAS (folded into the WMMA FMHA above the threshold, #992).
+            const bool fmha_hd_ok =
+                (hd == 64 || hd == 96 || hd == 128 || hd == 256 || hd == 512);
+            const bool chunk_fmha_ok = fmha_hd_ok;
             // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked cuBLAS stores
             // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The
             // capacity constraint is `n * ctx_len <= s_cap²`, NOT `ctx_len <= s_cap`
@@ -81,8 +89,12 @@
             // learned sinks / heterogeneous shapes are excluded by
             // chunk_fmha_ok and keep cuBLAS.
             const bool small_growing_chunk = n <= 32 && hd != 128;
+            // hd=512 never prefers the fused path — the SMEM-capped WMMA FMHA is
+            // 2.8-4.6x slower than cuBLAS there (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). It stays on cuBLAS
+            // while the S-matrix fits; the fused hd=512 kernel is used only when
+            // the S-matrix would overflow (the else branch below = O(n) fallback).
             const bool prefer_fmha =
-                chunk_fmha_ok &&
+                chunk_fmha_ok && hd != 512 &&
                 ((runtime_config().attention.fmha_prefill_threshold > 0 &&
                   ctx_len >= runtime_config().attention.fmha_prefill_threshold) ||
                  small_growing_chunk);
@@ -292,19 +304,31 @@
                                        q_offset, stream)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
             } else if (smatrix_fits && !prefer_fmha) {
-                // cuBLAS: reference path below the FMHA threshold; also the only
-                // chunked path that honors heterogeneous per-layer shapes
-                // (Gemma-4); it also serves learned sinks below the FMHA
-                // threshold (both softmaxes understand sinks since #992).
+                // cuBLAS: below-threshold reference for uniform models, learned
+                // sinks, AND the hd=512 Gemma-4 global layers whenever their
+                // S-matrix fits (measured faster than the SMEM-capped fused
+                // hd=512 kernel — docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). The hd=256 SWA layers took FA2
+                // above; only the hd=512 layers land here.
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window, attn_sinks);
+            } else if (hd == 512 && !prefer_fmha && s_cap > 0 &&
+                       attention_cublas_prefill_sliced(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv,
+                                                       hd, scale, /*causal=*/true, cfg.attn_logit_softcap,
+                                                       q_offset, stream, layer_sliding_window,
+                                                       attn_sinks)) {
+                // hd=512 S-matrix overflow (long ctx): cuBLAS in workspace-sized
+                // q-row slices — 3.4-3.9× faster than the whole-chunk FMHA hd=512
+                // fallback at Skv 8k/16k (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md entry 4; the FMHA's Bq=16
+                // tile re-reads K/V ~Sq/16 times = KV-bandwidth-amplified).
+                // Returns false only when even a 16-row slice overflows the
+                // workspace; then the FMHA below still serves.
             } else {
                 // Tiled FMHA dispatch: no S-matrix needed, O(n) memory. Serves
                 // uniform-shape chunks above the FMHA threshold, any chunk the
-                // S-matrix cannot hold, and fa2-declined chunks on models whose
-                // S-matrix was deliberately skipped. Learned sinks ride along
-                // since #992 (heterogeneous shapes still never reach here).
+                // S-matrix cannot hold (fa2-declined chunks on S-matrix-skipped
+                // models, hd=512 only when the workspace is too degraded even
+                // for 16-row cuBLAS slices). Learned sinks ride along (#992).
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
                 int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
@@ -344,14 +368,21 @@
         // servable since #992 and follow the same threshold policy as every
         // other non-FA2 model — FA2 itself still declines sinks (kept out of
         // the try below).
-        const bool hetero_shapes = per_layer_shapes && !attn_shapes_uniform();
-        const bool force_cublas_attn = hetero_shapes;
+        // Heterogeneous models (Gemma-4 dual head_dim 256/512): the hd=256 SWA
+        // layers (5/6 of layers in the 5:1 pattern) now take FA2 f16-QK per-layer
+        // — a real speed win, previously blocked only by the coarse model-level
+        // force_cublas gate. The hd=512 global layers stay on the materialized
+        // cuBLAS path, which is 2.8-4.6x FASTER than the SMEM-capped fused hd=512
+        // kernel (Bq=16 forced by the 99 KB opt-in — docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md entry 1). The
+        // fused hd=512 kernel exists only as the O(n)-memory capacity fallback
+        // for when cuBLAS's S-matrix would overflow the workspace (long context).
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
                                    n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold — see the chunked path above
         // for why the #493 prefer-FA2-at-every-length override was reverted.
-        const bool prefer_fmha = !force_cublas_attn &&
-                                 (n >= runtime_config().attention.fmha_prefill_threshold);
+        // hd=512 never prefers the fused path (it is slower than cuBLAS); it
+        // stays on cuBLAS until the S-matrix no longer fits.
+        const bool prefer_fmha = (n >= runtime_config().attention.fmha_prefill_threshold) && hd != 512;
 
         // NOTE (#566→#511): sliding-window prefill used to be routed AWAY
         // from the cuBLAS path here (`non_gemma4_sliding`) into the tiled
@@ -373,22 +404,39 @@
         // fast path does not depend on the attn_scores buffer being allocated or
         // large enough for n: a too-small buffer used to make s_matrix_fits false
         // and drop n≈512 chunks into the slow tiled dispatch (−93% pp512). cuBLAS
-        // stays the fallback for the configs f16-QK declines (hd ∉ {128, 256},
-        // or hd=256 with fa2_hd256 off) and for force_cublas_attn (learned
-        // sinks / heterogeneous per-layer shapes).
-        if (!force_cublas_attn && attn_sinks == nullptr &&
+        // stays the below-threshold fallback for models the f16-QK kernel
+        // declines (hd ∉ {128, 256}, or hd=256 with fa2_hd256 off) and for
+        // learned sinks. Gemma-4's hd=256 SWA layers now take FA2 per-layer (the
+        // win); its hd=512 global layers stay on cuBLAS (faster than the fused
+        // hd=512 kernel), with the FMHA dispatch as their O(n) overflow fallback.
+        if (attn_sinks == nullptr &&
             try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
                                    layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
                                    stream)) {
-            // handled by FA2 f16 — no S-matrix needed
+            // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
         } else if (s_matrix_fits && !prefer_fmha) {
+            // Materialized cuBLAS: below-threshold reference for uniform models
+            // and learned sinks, AND the hd=512 Gemma-4 global layers whenever
+            // the S-matrix fits (faster than the SMEM-capped fused hd=512 kernel
+            // — docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). The hd=256 SWA layers took FA2 above.
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
+        } else if (hd == 512 && !prefer_fmha && attn_scores_buf_ != nullptr &&
+                   attention_cublas_prefill_sliced(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                                                   /*causal=*/true, cfg.attn_logit_softcap,
+                                                   /*q_offset=*/0, stream, layer_sliding_window,
+                                                   attn_sinks)) {
+            // hd=512 S-matrix overflow: cuBLAS in workspace-sized q-row slices —
+            // 3.4-3.9× faster than the whole-prompt FMHA hd=512 fallback
+            // (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md entry 4). False only when even a 16-row slice
+            // overflows; then the FMHA below still serves.
         } else {
             // FMHA fallback: tiled O(n) memory chain. Sink-capable since #992
-            // (the dispatch routes sinks to the WMMA FMHA and throws instead
-            // of falling through to a sink-blind kernel).
+            // (the dispatch routes sinks to the WMMA FMHA and throws instead of
+            // falling through to a sink-blind kernel). Reached by uniform models
+            // above the FMHA threshold, and by hd=512 layers only when the
+            // workspace is too degraded even for 16-row cuBLAS slices.
             int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
             int64_t kv4s[4] = {1, (int64_t)n, (int64_t)nkv, (int64_t)hd};
             int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};

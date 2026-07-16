@@ -71,7 +71,17 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks) {
-    constexpr int Bkv = SM120_Bkv;
+    // KV tile columns. hd=512 (Gemma-4 global / Qwen3.5-27B) uses a narrow tile
+    // so the SMEM-resident Q/KV/O_acc footprint fits the 99 KB opt-in: at Bq=16,
+    // Bkv=32, HD=512 the block needs ~82 KB. Bkv=32 (vs 16) engages 2 warps in the
+    // QK WMMA (s_col_tiles=Bkv/16) and halves the KV-tile iteration count: measured
+    // +40% at pp2048 (0.22x -> 0.36x of cuBLAS) at a small accuracy cost (2.24e-2
+    // vs 1.36e-2 rel on a rect+offset shape, both within the f16 class). This path
+    // is the O(n) fallback for long-context S-matrix overflow where cuBLAS can't
+    // run, so favoring its speed there is correct. The long-context gap to cuBLAS
+    // is fundamental (Bq=16 -> O(n) KV re-reads, no TMEM on sm_120 to widen Bq —
+    // docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). The WMMA loops are parametric in Bkv.
+    constexpr int Bkv = (HD >= 512) ? 32 : SM120_Bkv;
     constexpr int head_dim = HD;
 
     // Threads-per-row for parallel softmax
@@ -136,7 +146,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     // ---- zero output accumulator + init running softmax state ---------------
     {
         // float4 = 4 FP32 zeros per store. Bq*HD is always a multiple of 4
-        // (HD ∈ {64,96,128,256}, Bq ∈ {32,64,128}).
+        // (HD ∈ {64,96,128,256,512}, Bq ∈ {16,32,64,128}).
         const int total_vec4 = (Bq * head_dim) / 4;
         const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
@@ -334,8 +344,8 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 
         // ---- Load V tile (vectorized: float4 = 8 halves per iter) ----
         {
-            // All supported head_dims (64, 96, 128, 256) are multiples of 8,
-            // so float4 loads are always aligned and in-bounds per row.
+            // All supported head_dims (64, 96, 128, 256, 512) are multiples of
+            // 8, so float4 loads are always aligned and in-bounds per row.
             const int total_vec8 = (Bkv * head_dim) / 8;
             for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
                 int i = vi * 8;
@@ -450,16 +460,23 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
     int max_smem = 0;
     cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
 
+    // KV tile columns — must match the kernel's compile-time `Bkv` (which
+    // derives from HD): hd=512 uses Bkv=32 (~82 KB at Bq=16, fits the 99 KB
+    // opt-in; +40% at long context — see the kernel-side comment).
+    const int Bkv = (head_dim >= 512) ? 32 : SM120_Bkv;
+
     // Select Bq based on head_dim and shared memory fit.
     // Prefer Bq=128 for higher throughput, fall back to 64 for larger HD.
     // K and V share a single buffer, so smem = Q + KV + S + O_acc + row state.
     //   HD=64:  Bq=128 -> 89 KB     HD=96:  Bq=64 -> 65 KB
-    //   HD=128: Bq=64  -> 81 KB     HD=256: Bq=64 -> 145 KB
+    //   HD=128: Bq=64  -> 81 KB     HD=256: Bq=32 -> 90 KB
+    //   HD=512: Bq=16  -> 82 KB (Bkv=32; only Bq that fits under the 99 KB opt-in)
     int Bq;
     {
-        size_t smem_128 = compute_smem_sm120(128, SM120_Bkv, head_dim);
-        size_t smem_64 = compute_smem_sm120(64, SM120_Bkv, head_dim);
-        size_t smem_32 = compute_smem_sm120(32, SM120_Bkv, head_dim);
+        size_t smem_128 = compute_smem_sm120(128, Bkv, head_dim);
+        size_t smem_64 = compute_smem_sm120(64, Bkv, head_dim);
+        size_t smem_32 = compute_smem_sm120(32, Bkv, head_dim);
+        size_t smem_16 = compute_smem_sm120(16, Bkv, head_dim);
         size_t occ2_cap = static_cast<size_t>(max_smem) / 2;
         if (smem_128 <= occ2_cap) {
             Bq = 128;
@@ -469,13 +486,14 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
             Bq = 32;
         } else if (smem_32 <= (size_t)max_smem) {
             Bq = 32;
+        } else if (smem_16 <= (size_t)max_smem) {
+            Bq = 16;  // hd=512: the only Bq whose SMEM fits
         } else {
-            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)", head_dim, smem_32,
+            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_16=%zu, max=%d)", head_dim, smem_16,
                           max_smem);
             return false;
         }
     }
-    const int Bkv = SM120_Bkv;
 
     const size_t smem = compute_smem_sm120(Bq, Bkv, head_dim);
     if (smem > (size_t)max_smem) {
@@ -545,7 +563,7 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
             default:
                 break;
         }
-    } else {
+    } else if (Bq == 32) {
         // Bq=32: for large head_dim (256) where Bq=64 exceeds smem
         switch (head_dim) {
             case 64:
@@ -559,6 +577,17 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
                 return true;
             case 256:
                 LAUNCH_FMHA_SM120(32, 256);
+                return true;
+            default:
+                break;
+        }
+    } else {
+        // Bq=16: only head_dim=512 (Gemma-4 global layers) lands here — the
+        // narrow Bkv=16 tile keeps SMEM under the 99 KB opt-in. Smaller head
+        // dims always fit at Bq>=32, so no other case is instantiated here.
+        switch (head_dim) {
+            case 512:
+                LAUNCH_FMHA_SM120(16, 512);
                 return true;
             default:
                 break;

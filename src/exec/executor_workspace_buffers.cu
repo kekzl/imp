@@ -1412,6 +1412,29 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     if (uniform && !sinks && att.fmha_prefill_threshold > 0 &&
         offset + desired >= att.fmha_prefill_threshold)
         return desired;
+    // Heterogeneous per-layer shapes (Gemma-4 dual head_dim 256/512): every
+    // layer is served at ANY chunk×ctx — hd 128/256 ride FA2 per-layer, hd=512
+    // runs cuBLAS in workspace-sized q-row slices at S-overflow
+    // (attention_cublas_prefill_sliced), and the tiled FMHA covers the rest —
+    // so no global clamp is needed. The quadratic clamp below used to shrink
+    // EVERY layer's chunk to the hd=512 S-matrix capacity (~190 rows at 64k
+    // ctx), multiplying per-chunk cost (MoE dequant, launches) across the
+    // whole model.
+    if (!uniform && !sinks) {
+        bool all_served = true;
+        for (int x : cfg.head_dim_per_layer) {
+            if (x <= 0)
+                continue;  // non-attention layers (GDN/Mamba2 hybrids)
+            const bool fa2 = (x == 128 || (x == 256 && att.fa2_hd256)) && att.fa2_fp16qk != "never";
+            const bool fmha = x == 64 || x == 96 || x == 128 || x == 256 || x == 512;
+            if (!fa2 && !fmha) {
+                all_served = false;
+                break;
+            }
+        }
+        if (all_served)
+            return desired;
+    }
     // cuBLAS serves this chunk: n × (offset + n) ≤ s_cap² and n ≤ s_cap.
     // Solve the quadratic for n; floor to a KV-block multiple.
     const double cap2 = static_cast<double>(s_cap) * s_cap;

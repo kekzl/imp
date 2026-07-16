@@ -5,6 +5,9 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cfloat>
@@ -18,6 +21,19 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 namespace imp {
 
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
+
+// Coverage instrumentation (FA2-coverage dispatch): counts materialized-cuBLAS
+// prefill launches. A test resets this, runs a target-model (Gemma-4) prefill,
+// and asserts it stays 0 — proving the legacy path is unreachable for the
+// target set (the dispatch's executed-kernel coverage gate). Relaxed atomic,
+// diagnostic only; never gates behaviour.
+static std::atomic<uint64_t> s_cublas_prefill_calls{0};
+uint64_t attention_cublas_prefill_call_count() {
+    return s_cublas_prefill_calls.load(std::memory_order_relaxed);
+}
+void attention_cublas_prefill_reset_count() {
+    s_cublas_prefill_calls.store(0, std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // cuBLAS handle (reuse global — same as gemm.cu)
@@ -388,6 +404,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap, int q_offset, cudaStream_t stream, int sliding_window,
                               const void* sinks) {
+    s_cublas_prefill_calls.fetch_add(1, std::memory_order_relaxed);
     const half* sinks_h = static_cast<const half*>(sinks);
     int q_len = static_cast<int>(Q.shape[0]);
     int kv_len = static_cast<int>(K.shape[0]);
@@ -566,6 +583,40 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                             (void**)(s_attn_d_ptrs + 2 * n_heads), CUDA_R_16F, ld_o, n_heads,
                             CUBLAS_COMPUTE_32F, kGemmAlgo);
     }
+}
+
+bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
+                                     Tensor& S, int n_heads, int n_kv_heads, int head_dim, float scale,
+                                     bool causal, float softcap, int q_offset, cudaStream_t stream,
+                                     int sliding_window, const void* sinks) {
+    const int n = static_cast<int>(Q.shape[0]);
+    const int kv_len = static_cast<int>(K.shape[0]);
+    if (n == 0)
+        return true;
+    int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
+    if (S.ndim >= 3)
+        s_buf_fp16_elems *= S.shape[2];
+    // Largest slice that keeps every call on the FP32-S path (3× elements —
+    // the use_fp32_s gate above). kv_len is fixed across slices (K/V already
+    // hold the full context incl. this chunk's rows; causal masking bounds
+    // each row), so the solve is linear, not quadratic.
+    int64_t ns64 = s_buf_fp16_elems / (3LL * n_heads * kv_len);
+    int ns = static_cast<int>(std::min<int64_t>(ns64, n));
+    ns = (ns / 16) * 16;
+    if (ns < 16)
+        return false;  // workspace too degraded — caller picks the O(n) FMHA fallback
+    const half* Q_base = static_cast<const half*>(Q.data);
+    half* O_base = static_cast<half*>(O.data);
+    const int64_t row = static_cast<int64_t>(n_heads) * head_dim;
+    for (int off = 0; off < n; off += ns) {
+        const int m = std::min(ns, n - off);
+        int64_t q2[2] = {m, row};
+        Tensor Qs(const_cast<half*>(Q_base) + off * row, QType::F16, 2, q2, true);
+        Tensor Os(O_base + off * row, QType::F16, 2, q2, true);
+        attention_cublas_prefill(Qs, K, V, Os, S, n_heads, n_kv_heads, head_dim, scale, causal, softcap,
+                                 q_offset + off, stream, sliding_window, sinks);
+    }
+    return true;
 }
 
 }  // namespace imp
