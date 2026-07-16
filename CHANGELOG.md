@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-17
+
 ### Added
 - **Per-layer attention routing for heterogeneous models (Gemma-4 dual
   head_dim 256/512)** (PR #1042): the coarse model-level `force_cublas`
