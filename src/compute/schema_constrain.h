@@ -126,6 +126,13 @@ public:
     // BEFORE reset().
     void set_strict_optional_envelope(bool v) { strict_optional_envelope_ = v; }
 
+    // parallel_tool_calls (#1002, strict optional mode only): when true, the gate
+    // re-arms after each tool-call body completes instead of forcing EOS, so the
+    // model may emit several tool calls (each body FSM-enforced) or stop. When
+    // false, EOS is forced after the first call (at most one). Configure BEFORE
+    // reset().
+    void set_allow_parallel(bool v) { allow_parallel_ = v; }
+
     bool is_initialized() const { return initialized_; }
 
     // See JsonConstrainer::set_preamble for semantics — close-token mode for
@@ -182,6 +189,10 @@ private:
     // Strict OPTIONAL tool call: the open literal is NOT forced (the model emits
     // it freely); the preamble gate hands off to the body FSM on the opener.
     bool strict_optional_envelope_ = false;
+
+    // parallel_tool_calls: re-arm the gate after each strict tool-call body so
+    // the model may emit several calls (strict mode only).
+    bool allow_parallel_ = false;
 
     // Helpers
     // C++23 deducing this: one overload serves const and non-const callers.
