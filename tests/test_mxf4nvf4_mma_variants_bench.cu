@@ -26,10 +26,15 @@ TEST(MmaVariantsBench, Compare) {
     }
     std::printf("\n");
 
-    // Diagnostic — none of the variants are required to launch successfully.
-    // The test PASSES regardless. The output reveals which variants are
-    // viable and their relative throughput.
-    SUCCEED();
+    // The throughput ranking is diagnostic, but at least one variant must be
+    // viable: on sm_120a the mxf4/nvf4 mma.sync path is imp's core FP4 kernel,
+    // so if EVERY variant fails to launch the FP4 tensor-core path is broken,
+    // not merely "some datacenter-only variants got rejected".
+    ASSERT_GT(r.count, 0) << "bench_mma_variants produced no entries";
+    bool any_viable = false;
+    for (int i = 0; i < r.count; ++i)
+        if (r.entries[i].tops >= 0) any_viable = true;
+    EXPECT_TRUE(any_viable) << "no mxf4/nvf4 MMA variant launched on this GPU";
 
     cudaStreamDestroy(stream);
 }
