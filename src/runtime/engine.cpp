@@ -9,7 +9,7 @@
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
-#include "compute/rope.h"           // rope_yarn_corr_dims (MTP rope-scaling parity)
+#include "compute/rope.h"  // rope_yarn_corr_dims (MTP rope-scaling parity)
 #include "compute/encoder_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
@@ -53,9 +53,10 @@ Engine::~Engine() {
     // model garbled Gemma-4 ("own own else else"), while a dense or MoE
     // predecessor did not. Drain it here so it cannot cross the model boundary.
     if (cudaError_t leaked = cudaGetLastError(); leaked != cudaSuccess) {
-        IMP_LOG_WARN("Engine teardown: cleared a leaked CUDA error (%s) so it cannot "
-                     "corrupt the next model loaded in this process",
-                     cudaGetErrorString(leaked));
+        IMP_LOG_WARN(
+            "Engine teardown: cleared a leaked CUDA error (%s) so it cannot "
+            "corrupt the next model loaded in this process",
+            cudaGetErrorString(leaked));
     }
 
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table
@@ -194,23 +195,20 @@ bool Engine::enable_mtp_spec_decode(int k) {
         mtp_spec_k_ = k;
         return true;
     }
-    const int hidden_dim   = model_->config_.d_model;
-    const int vocab_size   = model_->config_.vocab_size;
+    const int hidden_dim = model_->config_.d_model;
+    const int vocab_size = model_->config_.vocab_size;
     // MLP dims come from the HEAD tensors, not the main-model config: the
     // dense 27B checkpoint pairs a MoE-free MTP head with a plain SwiGLU MLP
     // (mapped onto the shared_expert fields), and the 35B head's expert d_ff
     // differs from the main model's.
-    const auto& head       = *model_->mtp_;
-    const bool head_moe    = head.router.data != nullptr &&
-                             head.experts_gate_up_packed.data != nullptr;
-    const int n_experts    = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
-    const int top_k        = head_moe ? model_->config_.n_experts_active : 0;
-    const int expert_d_ff  = head_moe
-                                 ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
-                                 : 0;
-    const int shared_d_ff  = head.shared_expert_gate_proj.data != nullptr
-                                 ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
-                                 : 0;
+    const auto& head = *model_->mtp_;
+    const bool head_moe = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
+    const int n_experts = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
+    const int top_k = head_moe ? model_->config_.n_experts_active : 0;
+    const int expert_d_ff = head_moe ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2 : 0;
+    const int shared_d_ff = head.shared_expert_gate_proj.data != nullptr
+                                ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
+                                : 0;
 
     // MTP attention dims: derived from the MTP head's q_proj / v_proj shapes
     // because the MTP attention head config differs from the main model
@@ -219,14 +217,14 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // [num_kv_heads * head_dim, hidden_dim]. We use main model's head_dim
     // as the per-head attention dim and back-compute the MTP head counts.
     int mtp_num_heads = 0, mtp_num_kv_heads = 0, mtp_head_dim = 0;
-    if (model_->mtp_.has_value() && model_->mtp_->loaded &&
-        model_->mtp_->q_proj.data != nullptr && model_->mtp_->v_proj.data != nullptr) {
+    if (model_->mtp_.has_value() && model_->mtp_->loaded && model_->mtp_->q_proj.data != nullptr &&
+        model_->mtp_->v_proj.data != nullptr) {
         const int q_out = static_cast<int>(model_->mtp_->q_proj.shape[0]);
         const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
-        mtp_head_dim     = model_->config_.head_dim;
+        mtp_head_dim = model_->config_.head_dim;
         if (mtp_head_dim > 0) {
             // q_proj outputs 2 × num_heads × head_dim (attn_output_gate=True).
-            mtp_num_heads    = q_out / (2 * mtp_head_dim);
+            mtp_num_heads = q_out / (2 * mtp_head_dim);
             mtp_num_kv_heads = v_out / mtp_head_dim;
         }
     }
@@ -235,13 +233,12 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // (Phase 2.2.Attn+KV budget — ~16 MiB each for K and V at Qwen3.6 dims).
     constexpr int kMtpKvCap = 16384;
     int mtp_kv_max = std::min(model_->config_.max_seq_len, kMtpKvCap);
-    if (mtp_kv_max <= 0) mtp_kv_max = kMtpKvCap;
+    if (mtp_kv_max <= 0)
+        mtp_kv_max = kMtpKvCap;
 
     auto* ws = new imp::MtpDraftWorkspace();
-    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size,
-                                      n_experts, top_k, expert_d_ff, shared_d_ff,
-                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim,
-                                      mtp_kv_max)) {
+    if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
+                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max)) {
         delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
@@ -249,10 +246,10 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // Configure RoPE for the MTP attention (Phase 2.2.Attn+RoPE).
     // Qwen3.5/3.6 uses partial rope (factor 0.25 → rope_dim=64 of head_dim=256),
     // theta from config (10M for long-context), NeoX-style.
-    ws->rope_theta       = model_->config_.rope_theta;
-    ws->rope_neox        = model_->config_.rope_neox;
-    ws->rms_norm_eps     = model_->config_.rms_norm_eps;
-    ws->rope_dim         = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
+    ws->rope_theta = model_->config_.rope_theta;
+    ws->rope_neox = model_->config_.rope_neox;
+    ws->rms_norm_eps = model_->config_.rms_norm_eps;
+    ws->rope_dim = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
     // mrope section split. Qwen3.6 ships mrope_section = [11, 11, 10]
     // (half-counts; full rope_dim = 64 = 2*(11+11+10)). imp doesn't load
     // this from config yet — hardcoded here based on the on-disk spec.
@@ -273,8 +270,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // same way as the verifier at extended positions (issue #897). Without
     // this a rope-scaled model's draft head diverges and acceptance silently
     // degrades with position.
-    ws->rope_freq_scale  = model_->config_.rope_freq_scale;
-    ws->yarn_ext_factor  = model_->config_.yarn_ext_factor;
+    ws->rope_freq_scale = model_->config_.rope_freq_scale;
+    ws->yarn_ext_factor = model_->config_.yarn_ext_factor;
     ws->yarn_attn_factor = model_->config_.yarn_attn_factor;
     if (model_->config_.yarn_ext_factor > 0.0f) {
         int hd = model_->config_.head_dim > 0 ? model_->config_.head_dim
@@ -288,15 +285,16 @@ bool Engine::enable_mtp_spec_decode(int k) {
         ws->yarn_corr_dim_0 = corr[0];
         ws->yarn_corr_dim_1 = corr[1];
         IMP_LOG_INFO("MTP YaRN: ext=%.2f attn=%.3f freq_scale=%.4f corr_dims=[%.1f, %.1f]",
-                     ws->yarn_ext_factor, ws->yarn_attn_factor, ws->rope_freq_scale,
-                     ws->yarn_corr_dim_0, ws->yarn_corr_dim_1);
+                     ws->yarn_ext_factor, ws->yarn_attn_factor, ws->rope_freq_scale, ws->yarn_corr_dim_0,
+                     ws->yarn_corr_dim_1);
     }
     // LongRoPE (Phi-family) isn't plumbed into the single-token MTP kernel — no
     // MTP model ships it today (Qwen uses YaRN/linear). Warn rather than silently
     // diverge if that ever changes.
     if (!model_->config_.rope_short_factor.empty() || !model_->config_.rope_long_factor.empty()) {
-        IMP_LOG_WARN("MTP spec-decode: model uses LongRoPE scaling, which the draft head does not apply "
-                     "— draft rope will diverge from the verifier; expect degraded acceptance");
+        IMP_LOG_WARN(
+            "MTP spec-decode: model uses LongRoPE scaling, which the draft head does not apply "
+            "— draft rope will diverge from the verifier; expect degraded acceptance");
     }
 
     // Diagnostic: generation.mtp_no_rope disables RoPE entirely.
@@ -312,13 +310,13 @@ bool Engine::enable_mtp_spec_decode(int k) {
 
     mtp_ws_storage_ = ws;
     mtp_spec_k_ = k;
-    IMP_LOG_INFO("MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-                 "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s, "
-                 "mrope=[%d,%d,%d])",
-                 k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                 mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
-                 ws->rope_theta, ws->rope_dim, ws->rope_neox ? "neox" : "interleaved",
-                 ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
+    IMP_LOG_INFO(
+        "MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
+        "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d, rope=%g/%d/%s, "
+        "mrope=[%d,%d,%d])",
+        k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff, mtp_num_heads,
+        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, ws->rope_theta, ws->rope_dim,
+        ws->rope_neox ? "neox" : "interleaved", ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
     return true;
 }
 
@@ -354,10 +352,9 @@ bool Engine::encoder_embed(const int32_t* tokens, int n, std::vector<float>& out
     return imp::encoder_embed(*model_, *ews, tokens, n, out.data(), stream_);
 }
 
-bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
-                           int hidden_dim, int vocab_size, int* out_token_id,
-                           int* out_topk_ids, int top_w,
-                           const int32_t* d_prev_token, int32_t* d_out_token) {
+bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_dim, int vocab_size,
+                           int* out_token_id, int* out_topk_ids, int top_w, const int32_t* d_prev_token,
+                           int32_t* d_out_token) {
     if (mtp_ws_storage_ == nullptr) {
         IMP_LOG_ERROR("mtp_draft_one: spec-decode not enabled");
         return false;
@@ -373,8 +370,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
     // cache entry exists (nvfp4_lm_head/_gdn off, or FP8 LM head).
     imp::NvFP4QuantResult lm_nvfp4;
     const imp::NvFP4QuantResult* lm_nvfp4_p = nullptr;
-    if (runtime_config_.speculative.mtp_nvfp4_head && executor_ &&
-        executor_->lm_head_nvfp4_view(lm_nvfp4)) {
+    if (runtime_config_.speculative.mtp_nvfp4_head && executor_ && executor_->lm_head_nvfp4_view(lm_nvfp4)) {
         lm_nvfp4_p = &lm_nvfp4;
         static bool logged = false;  // once-per-process path attribution
         if (!logged) {
@@ -383,11 +379,9 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev,
                          static_cast<long long>(lm_nvfp4.N), static_cast<long long>(lm_nvfp4.K));
         }
     }
-    return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_,
-                                model_->tok_emb_, model_->out_proj_,
-                                *ws, hidden_dim, vocab_size, out_token_id,
-                                decode_stream(), out_topk_ids, top_w, lm_nvfp4_p,
-                                d_prev_token, d_out_token);
+    return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_, model_->tok_emb_, model_->out_proj_,
+                               *ws, hidden_dim, vocab_size, out_token_id, decode_stream(), out_topk_ids,
+                               top_w, lm_nvfp4_p, d_prev_token, d_out_token);
 }
 
 // =====================================================================
@@ -521,8 +515,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             std::vector<int32_t> forwarded;
             forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - 1);
             forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
-            forwarded.insert(forwarded.end(), req->output_tokens.begin(),
-                             req->output_tokens.end() - 1);
+            forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - 1);
             kv_manager_->register_block_hashes(req->id, forwarded);
         } else {
             kv_manager_->register_block_hashes(req->id, req->input_tokens);
@@ -531,8 +524,8 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         // from eviction (must happen before free_sequence — pinning needs
         // the live block table).
         if (req->pin_kv_prefix) {
-            int full_blocks =
-                static_cast<int>(req->input_tokens.size()) / kv_manager_->kv_cache()->block_size();
+            int full_blocks = static_cast<int>(req->input_tokens.size()) /
+                              kv_manager_->kv_cache()->block_size();
             if (full_blocks > 0)
                 kv_manager_->pin_prefix(req->id, full_blocks);
         }
@@ -562,8 +555,8 @@ void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t s
     executor_->pool_hidden_sum(chunk_len, d_embed_pool_scratch_, stream);
     std::vector<float> partial(d_model);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(partial.data(), d_embed_pool_scratch_,
-                                       static_cast<size_t>(d_model) * sizeof(float),
-                                       cudaMemcpyDeviceToHost, stream));
+                                       static_cast<size_t>(d_model) * sizeof(float), cudaMemcpyDeviceToHost,
+                                       stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     if (req.embedding_out.empty())
         req.embedding_out.assign(d_model, 0.0f);
@@ -578,18 +571,18 @@ void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
 
     // Pool key: tool-enforced requests key by their tool-call signature so a
     // pooled manager with the same classified tables is reused (#1002).
-    const std::string pool_key =
-        tool_enforced ? ConstraintManager::tool_call_key(req->tool_constraint_tools,
-                                                         req->tool_envelope_open,
-                                                         req->tool_envelope_close)
-                      : req->json_schema;
+    const std::string pool_key = tool_enforced ? ConstraintManager::tool_call_key(req->tool_constraint_tools,
+                                                                                  req->tool_envelope_open,
+                                                                                  req->tool_envelope_close)
+                                               : req->json_schema;
     req->constraints = constraints_checkout_(pool_key);
 
     bool enforced = false;
     if (tool_enforced)
-        enforced = req->constraints->prepare_tool_call(
-            req->tool_constraint_tools, req->tool_envelope_open, req->tool_envelope_close,
-            model_->tokenizer(), /*thinking_open=*/req->in_think_block);
+        enforced = req->constraints->prepare_tool_call(req->tool_constraint_tools, req->tool_envelope_open,
+                                                       req->tool_envelope_close, model_->tokenizer(),
+                                                       /*thinking_open=*/req->in_think_block,
+                                                       req->tool_constraint_optional, req->tpl_family);
     if (!enforced && (req->json_mode || !req->json_schema.empty()))
         req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
                                   req->tpl_family, /*thinking_open=*/req->in_think_block);
@@ -739,14 +732,24 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         const auto& mp = model_->profile();
         const char* av = nullptr;
         switch (mp.attn_variant) {
-            case ModelProfile::AttnVariant::GEMMA4_SWA: av = "gemma4_swa"; break;
-            case ModelProfile::AttnVariant::GPTOSS_SWA: av = "gptoss_swa"; break;
-            case ModelProfile::AttnVariant::NOPE:       av = "nope";       break;
-            case ModelProfile::AttnVariant::MLA:        av = "mla";        break;
-            case ModelProfile::AttnVariant::STANDARD:   av = "standard";   break;
+            case ModelProfile::AttnVariant::GEMMA4_SWA:
+                av = "gemma4_swa";
+                break;
+            case ModelProfile::AttnVariant::GPTOSS_SWA:
+                av = "gptoss_swa";
+                break;
+            case ModelProfile::AttnVariant::NOPE:
+                av = "nope";
+                break;
+            case ModelProfile::AttnVariant::MLA:
+                av = "mla";
+                break;
+            case ModelProfile::AttnVariant::STANDARD:
+                av = "standard";
+                break;
         }
-        IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s",
-                     mp.is_moe, mp.is_gdn, mp.is_ssm, mp.is_hybrid, mp.is_dense, av);
+        IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s", mp.is_moe, mp.is_gdn,
+                     mp.is_ssm, mp.is_hybrid, mp.is_dense, av);
     }
 
     init_apply_debug_raw_overrides_();
@@ -831,7 +834,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     return true;
 }
-
 
 // =====================================================================
 // generate()

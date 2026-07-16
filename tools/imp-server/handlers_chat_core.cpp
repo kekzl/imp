@@ -40,12 +40,10 @@ thread_local bool g_in_anthropic_shim = false;
 // body, token counts, finish reason, and (for non-streaming) the response.
 // Streaming responses pass an empty `response_body` since per-chunk text is
 // not accumulated.
-void log_request_jsonl(ServerState& state, bool skip,
-                              const std::chrono::system_clock::time_point& t_start,
-                              const std::string& req_id, const std::string& endpoint,
-                              const std::string& client_ip, const std::string& raw_body,
-                              double latency_ms, int prompt_tokens, int completion_tokens,
-                              const char* finish_reason, const json& response_body) {
+void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
+                       const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
+                       const std::string& raw_body, double latency_ms, int prompt_tokens,
+                       int completion_tokens, const char* finish_reason, const json& response_body) {
     if (skip || !state.request_logger.enabled)
         return;
     json record;
@@ -74,11 +72,7 @@ void log_request_jsonl(ServerState& state, bool skip,
 // context, and starts timing. Returns true if OK; sets res with 400/503 and
 // returns false on failure (model not loaded, prompt too long, vision lock
 // timeout, image processing failure).
-bool snapshot_state_and_tokenize_(
-    httplib::Response& res,
-    ServerState& state,
-    ChatRequestContext& ctx)
-{
+bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx) {
     // Snapshot all state fields needed for request processing under lock.
     // This protects against concurrent model load/unload invalidating pointers.
     {
@@ -96,7 +90,8 @@ bool snapshot_state_and_tokenize_(
         ctx.snap.channel_close_id = state.channel_close_id;
         ctx.snap.channel_newline_id = state.channel_newline_id;
         ctx.snap.max_seq_len = state.max_seq_len;
-        ctx.snap.tpl_family = ctx.snap.have_template ? ctx.snap.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        ctx.snap.tpl_family = ctx.snap.have_template ? ctx.snap.chat_tpl.family()
+                                                     : imp::ChatTemplateFamily::CHATML;
         if (ctx.snap.have_template)
             ctx.snap.stop_token_ids = ctx.snap.chat_tpl.stop_token_ids();
         // Provisionally add <think> as a stop token. Removed below if the
@@ -105,7 +100,8 @@ bool snapshot_state_and_tokenize_(
         if (state.think_start_id >= 0) {
             ctx.snap.stop_token_ids.push_back(state.think_start_id);
         }
-        ctx.snap.has_vision_request = !ctx.params.image_data.empty() && state.ctx && state.ctx->engine->has_vision();
+        ctx.snap.has_vision_request = !ctx.params.image_data.empty() && state.ctx &&
+                                      state.ctx->engine->has_vision();
     }
 
     // Channel models (Gemma-4) are more susceptible to sampling-driven
@@ -146,8 +142,8 @@ bool snapshot_state_and_tokenize_(
     // Soft-token placeholders are injected by apply_with_image() below.
     if (ctx.snap.has_vision_request) {
         auto img = std::make_shared<imp::ImageData>();
-        if (!state.ctx->engine->preprocess_image(ctx.params.image_data.data(),
-                                                  ctx.params.image_data.size(), *img)) {
+        if (!state.ctx->engine->preprocess_image(ctx.params.image_data.data(), ctx.params.image_data.size(),
+                                                 *img)) {
             res.status = 400;
             json error = {
                 {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
@@ -174,14 +170,12 @@ bool snapshot_state_and_tokenize_(
     // either way); an explicit "enable_thinking" still wins in both cases.
     // Only a present-but-silent Jinja template counts as evidence AGAINST
     // thinking; hardcoded families / templateless runs keep the old default.
-    const bool template_think_evidence = !ctx.snap.have_template ||
-                                         !ctx.snap.chat_tpl.has_jinja() ||
+    const bool template_think_evidence = !ctx.snap.have_template || !ctx.snap.chat_tpl.has_jinja() ||
                                          ctx.snap.chat_tpl.mentions_thinking();
     const bool thinking_default = ctx.snap.is_think_model && template_think_evidence &&
                                   !ctx.params.json_mode && !ctx.params.has_tools;
-    const bool want_thinking = ctx.params.enable_thinking_set
-                                   ? ctx.params.enable_thinking_requested
-                                   : thinking_default;
+    const bool want_thinking = ctx.params.enable_thinking_set ? ctx.params.enable_thinking_requested
+                                                              : thinking_default;
     // think_budget is the fraction of max_tokens reserved for reasoning;
     // think_budget <= 0 means "no reasoning headroom" → disable thinking entirely
     // (documented "0 = disabled"). Folding it into enable_thinking keeps the two
@@ -189,10 +183,10 @@ bool snapshot_state_and_tokenize_(
     // the force-close, so the model reasoned to max_tokens and returned empty
     // content (#752). The Anthropic "disabled" path already zeroes the budget.
     const bool budget_disables_thinking = ctx.params.think_budget <= 0.0f;
-    ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 &&
-                               want_thinking && !budget_disables_thinking;
-    ctx.snap.suppress_thinking =
-        ctx.snap.is_think_model && !ctx.snap.enable_thinking && budget_disables_thinking;
+    ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 && want_thinking &&
+                               !budget_disables_thinking;
+    ctx.snap.suppress_thinking = ctx.snap.is_think_model && !ctx.snap.enable_thinking &&
+                                 budget_disables_thinking;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
     if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
@@ -213,19 +207,24 @@ bool snapshot_state_and_tokenize_(
     // thinking — otherwise `enable_thinking:true` was a silent no-op on such
     // templates. Only for an explicit request: the default case stays undefined
     // so each template author's own default wins (Qwen3 open vs Gemma-4 closed).
-    const bool force_thinking = ctx.params.enable_thinking_set &&
-                                ctx.params.enable_thinking_requested && ctx.snap.enable_thinking;
+    const bool force_thinking = ctx.params.enable_thinking_set && ctx.params.enable_thinking_requested &&
+                                ctx.snap.enable_thinking;
 
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && ctx.snap.has_vision_request) {
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256, ctx.snap.suppress_thinking, force_thinking);
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256,
+                                                             ctx.snap.suppress_thinking, force_thinking);
     } else if (ctx.snap.have_template && ctx.snap.tools_via_jinja) {
-        std::string tc_str = ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>() : "auto";
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.tool_defs, tc_str, ctx.snap.suppress_thinking, force_thinking);
+        std::string tc_str = ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>()
+                                                                : "auto";
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(*ctx.snap.tok, ctx.params.chat_msgs,
+                                                             ctx.snap.tool_defs, tc_str,
+                                                             ctx.snap.suppress_thinking, force_thinking);
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
-            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools, ctx.params.tool_choice);
+            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
+                                                        ctx.params.tool_choice);
             if (!tool_prompt.empty()) {
                 bool found_system = false;
                 for (auto& m : ctx.params.chat_msgs) {
@@ -243,12 +242,14 @@ bool snapshot_state_and_tokenize_(
                     ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
                 }
             }
-            ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking, force_thinking);
+            ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
+                                                      ctx.snap.suppress_thinking, force_thinking);
         }
     } else if (ctx.snap.have_template) {
         // No tools, or no Jinja2 support — inject text-based tool prompt if tools present
         if (ctx.params.has_tools) {
-            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools, ctx.params.tool_choice);
+            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
+                                                        ctx.params.tool_choice);
             if (!tool_prompt.empty()) {
                 bool found_system = false;
                 for (auto& m : ctx.params.chat_msgs) {
@@ -267,7 +268,8 @@ bool snapshot_state_and_tokenize_(
                 }
             }
         }
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs, ctx.snap.suppress_thinking, force_thinking);
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
+                                                  ctx.snap.suppress_thinking, force_thinking);
     } else {
         // Concatenate all message content as raw text
         std::string raw;
@@ -376,11 +378,11 @@ bool snapshot_state_and_tokenize_(
     // prefill so an oversized prompt never reaches the engine.
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
         res.status = 400;
-        json error = {{"error",
-                       {{"message", "Prompt exceeds max input tokens (" +
-                                        std::to_string(ctx.snap.n_prompt_tokens) + " > " +
-                                        std::to_string(state.max_input_tokens) + ")"},
-                        {"type", "invalid_request_error"}}}};
+        json error = {
+            {"error",
+             {{"message", "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                              " > " + std::to_string(state.max_input_tokens) + ")"},
+              {"type", "invalid_request_error"}}}};
         res.set_content(dump_safe(error), "application/json");
         return false;
     }
@@ -388,10 +390,11 @@ bool snapshot_state_and_tokenize_(
     // Validate prompt length against context window
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
         res.status = 400;
-        json error = {{"error",
-                       {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                                        " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
-                        {"type", "invalid_request_error"}}}};
+        json error = {
+            {"error",
+             {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                              " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
+              {"type", "invalid_request_error"}}}};
         res.set_content(dump_safe(error), "application/json");
         return false;
     }
@@ -430,12 +433,11 @@ bool snapshot_state_and_tokenize_(
     return true;
 }
 
-
 // Single params->request mapping for the ctx-based submission sites (see
 // handlers_internal.h).
 std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
-                                                 const std::vector<int32_t>& input_tokens,
-                                                 int completion_idx, bool stream) {
+                                                 const std::vector<int32_t>& input_tokens, int completion_idx,
+                                                 bool stream) {
     auto req = std::make_shared<imp::Request>();
     req->image = ctx.snap.vision_image;  // per-request vision (null for text)
     req->input_tokens = input_tokens;
@@ -468,6 +470,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_tools = ctx.params.tool_constraint_tools;
     req->tool_envelope_open = ctx.params.tool_envelope_open;
     req->tool_envelope_close = ctx.params.tool_envelope_close;
+    req->tool_constraint_optional = ctx.params.tool_constraint_optional;
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
     req->think_budget = ctx.params.think_budget;
@@ -488,16 +491,11 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
 // sequentially via the batching engine, build the choices array with
 // reasoning_content / tool_calls / logprobs as appropriate, send a single
 // JSON response. Caller has already submitted server_req via state.batching.
-void nonstream_chat_response_(
-    httplib::Response& res,
-    ServerState& state,
-    ChatRequestContext& ctx,
-    std::shared_ptr<imp::Request>& imp_req,
-    std::shared_ptr<ServerRequest>& server_req,
-    const std::vector<int32_t>& saved_tokens,
-    const std::string& comp_id,
-    int64_t created)
-{
+void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx,
+                              std::shared_ptr<imp::Request>& imp_req,
+                              std::shared_ptr<ServerRequest>& server_req,
+                              const std::vector<int32_t>& saved_tokens, const std::string& comp_id,
+                              int64_t created) {
     // Non-streaming: decode all tokens, return complete response
     // For n > 1, run multiple independent generations sequentially
     json choices = json::array();
@@ -618,7 +616,8 @@ void nonstream_chat_response_(
 
         int n_output_tokens = static_cast<int>(output_ids.size());
         total_output_tokens += n_output_tokens;
-        std::string content = !ctx.params.stop_sequences.empty() ? output_text : ctx.snap.tok->decode(output_ids);
+        std::string content = !ctx.params.stop_sequences.empty() ? output_text
+                                                                 : ctx.snap.tok->decode(output_ids);
 
         // Extract reasoning content (DeepSeek format) or strip think blocks.
         // enable_thinking also covers text-level thinkers (Nemotron) whose
@@ -790,9 +789,8 @@ void nonstream_chat_response_(
     // prediction): accepted/rejected draft tokens whose draft came from the
     // prediction region of the n-gram corpus.
     if (imp_req && !imp_req->prediction_tokens.empty()) {
-        usage["completion_tokens_details"] = {
-            {"accepted_prediction_tokens", imp_req->pred_accepted},
-            {"rejected_prediction_tokens", imp_req->pred_rejected}};
+        usage["completion_tokens_details"] = {{"accepted_prediction_tokens", imp_req->pred_accepted},
+                                              {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
 
     json response = {{"id", comp_id},      {"object", "chat.completion"},
@@ -802,13 +800,12 @@ void nonstream_chat_response_(
     // Pull the final finish_reason from choice 0 for log correlation;
     // multi-completion requests still record only the aggregate.
     const char* nonstream_finish = nullptr;
-    if (!choices.empty() && choices[0].contains("finish_reason") &&
-        choices[0]["finish_reason"].is_string()) {
+    if (!choices.empty() && choices[0].contains("finish_reason") && choices[0]["finish_reason"].is_string()) {
         nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
     }
-    log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint,
-                      ctx.log_client_ip, ctx.log_raw_body,
-                      ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish, response);
+    log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint, ctx.log_client_ip,
+                      ctx.log_raw_body, ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish,
+                      response);
 
     res.set_content(dump_safe(response), "application/json");
 }
