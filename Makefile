@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -149,6 +149,23 @@ test-agents: build check-gpu
 	python3 tools/analysis/agent_loop_suite.py --url http://localhost:8080; \
 	echo "--- stage 2: real model-driven loop (auto tool_choice, real tools) ---"; \
 	python3 tools/analysis/agent_task_loop.py --url http://localhost:8080 --model $(AGENTIC_MODEL)
+
+# Needle-in-a-haystack retrieval gate past 16K (#1022): boots a model that fits
+# a long context and asserts a planted needle is retrieved at 16K and 32K across
+# depths. A CORRECTNESS gate (retrieval success), independent of timing — safe on
+# any host. The TTFT timing gates at 32K-64K need a verified-healthy host to pin
+# their numbers (benchmarking contract) and are run separately.
+NIAH_MODEL ?= Qwen3-14B-Q6_K.gguf
+test-niah: build check-gpu
+	@docker rm -f imp-niah >/dev/null 2>&1 || true
+	@docker run -d --name imp-niah --gpus all -p 8080:8080 \
+		-v $(HOME)/models:/models $(DOCKER_IMG) \
+		imp-server --host 0.0.0.0 --model /models/$(NIAH_MODEL) --set runtime.max_seq_len=40000 >/dev/null
+	@echo "waiting for server..."; \
+	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+	trap 'docker rm -f imp-niah >/dev/null 2>&1' EXIT; \
+	python3 tools/analysis/niah_check.py --url http://localhost:8080 --model $(NIAH_MODEL) \
+		--lengths 16000,32000 --depths 0.1,0.5,0.9
 
 # #1007 stage-2 EXTERNAL gate (opt-in): a real third-party coding agent (aider)
 # driving imp-server through a genuine edit loop — proves the whole loop survives
