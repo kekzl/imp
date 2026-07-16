@@ -386,28 +386,34 @@ else
                     pass "prefill within ${PRE_THR}% threshold"
                 fi
 
-                # ---- long-context prefill (pp4096, single-chunk) ----
+                # ---- long-context prefill (single-chunk FA2): pp4096..pp65536 ----
                 # Crosses the cuBLAS→FMHA threshold so it exercises the
                 # register-resident FA2 kernel (attention.fmha_fa2=on default).
-                # Guards the FA2 prefill win; warn-only like pp512 (prefill noise).
-                BL_PP4096=$(jq -r '.metrics.prefill_tps.pp4096 // empty' "$BASELINE")
-                if [ -n "$BL_PP4096" ]; then
+                # Guards the FA2 prefill win AND the #1022 32K-64K TTFT band.
+                # Warn-only (prefill-noise convention) — though large-context
+                # prefill is actually stable (<0.5% cross-restart at 32K, measured
+                # 2026-07-16, unlike pp512's cuBLAS-algo jitter). Lengths past the
+                # model ctx or the 70K bench ceiling simply have no baseline key
+                # and are skipped. TTFT ms ≈ pp_len / pp_tps.
+                for PPLEN in 4096 8192 16384 32768 65536; do
+                    BL_PP=$(jq -r ".metrics.prefill_tps.pp${PPLEN} // empty" "$BASELINE")
+                    [ -z "$BL_PP" ] && continue
                     ERR2=$(mktemp)
-                    "$BIN" --model "$MODEL_PATH" --bench --bench-pp 4096 --bench-reps $REPS \
-                          --prefill-chunk-size 0 --max-tokens 1 --temperature 0 >/dev/null 2>"$ERR2"
-                    PP4096=$(grep -oP '^pp\s+4096\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR2" | head -1)
+                    "$BIN" --model "$MODEL_PATH" --bench --bench-pp "$PPLEN" --bench-reps $REPS \
+                          --prefill-chunk-size 0 --max-tokens 1 --temperature 0 --max-seq-len 70000 \
+                          >/dev/null 2>"$ERR2"
+                    PPTPS=$(grep -oP "^pp\s+${PPLEN}\s.*\(\s*\K[0-9.]+(?=\s+tok/s)" "$ERR2" | head -1)
                     rm -f "$ERR2"
-                    if [ -n "$PP4096" ]; then
-                        P4_DELTA=$(awk -v cur="$PP4096" -v base="$BL_PP4096" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
-                        P4_REG=$(awk -v d="$P4_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
-                        printf "  prefill pp4096= %7.2f tok/s  (baseline %7.2f, delta %+s%%, FA2)\n" "$PP4096" "$BL_PP4096" "$P4_DELTA"
-                        if [ "$P4_REG" = "1" ]; then
-                            echo "${YLW}WARN${RST} long-ctx prefill (pp4096/FA2) regression > ${PRE_THR}% — check attention.fmha_fa2"
-                        else
-                            pass "long-ctx prefill (pp4096/FA2) within ${PRE_THR}% threshold"
-                        fi
+                    [ -z "$PPTPS" ] && continue
+                    PP_DELTA=$(awk -v cur="$PPTPS" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
+                    PP_REG=$(awk -v d="$PP_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
+                    printf "  prefill pp%-5s= %7.2f tok/s  (baseline %7.2f, delta %+s%%, FA2)\n" "$PPLEN" "$PPTPS" "$BL_PP" "$PP_DELTA"
+                    if [ "$PP_REG" = "1" ]; then
+                        echo "${YLW}WARN${RST} long-ctx prefill (pp${PPLEN}/FA2) regression > ${PRE_THR}% — check attention.fmha_fa2"
+                    else
+                        pass "long-ctx prefill (pp${PPLEN}/FA2) within ${PRE_THR}% threshold"
                     fi
-                fi
+                done
             fi
         fi
     fi
