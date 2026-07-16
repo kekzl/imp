@@ -567,6 +567,30 @@ __global__ void advance_residual_state_kernel(
     }
 }
 
+// Linear-mode RoPE cos/sin for one pair, shared by the two decode KV-write RoPE
+// kernels below (write_kv_cache_rope_fused / rope_q_only). These fuse RoPE only
+// when the model is linear-scaled (the can_fuse_rope_kv gate requires
+// yarn_ext_factor <= 0), so this needs no YaRN blend and stays bit-exact with
+// the previous inline copies — kept separate from the general rope_yarn() helper
+// (rope_yarn.cuh), whose interpolate-then-scale grouping would shift the decode
+// KV cache by an ULP for no functional gain.
+static __device__ __forceinline__ void rope_linear_cos_sin(int pos, int pair_idx, float theta,
+                                                           float inv_scaling, int rope_pairs,
+                                                           const float* __restrict__ longrope_inv_freqs,
+                                                           float& cos_val, float& sin_val) {
+    float freq;
+    if (longrope_inv_freqs) {
+        // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
+        freq = longrope_inv_freqs[pair_idx];
+    } else {
+        freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
+        freq *= inv_scaling;
+    }
+    float angle = static_cast<float>(pos) * freq;
+    cos_val = __cosf(angle);
+    sin_val = __sinf(angle);
+}
+
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.
@@ -616,17 +640,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
                 idx1 = head_offset + 2 * pair_idx + 1;
             }
 
-            float freq;
-            if (longrope_inv_freqs) {
-                // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
-                freq = longrope_inv_freqs[pair_idx];
-            } else {
-                freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
-                freq *= inv_scaling;
-            }
-            float angle = static_cast<float>(pos) * freq;
-            float cos_val = __cosf(angle);
-            float sin_val = __sinf(angle);
+            float cos_val, sin_val;
+            rope_linear_cos_sin(pos, pair_idx, theta, inv_scaling, rope_pairs, longrope_inv_freqs, cos_val,
+                                sin_val);
 
             float k0 = __half2float(k_src[idx0]);
             float k1 = __half2float(k_src[idx1]);
@@ -726,16 +742,8 @@ __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict_
 
     int pos = positions[0];  // decode: single token
 
-    float freq;
-    if (longrope_inv_freqs) {
-        freq = longrope_inv_freqs[pair_idx];
-    } else {
-        freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
-        freq *= inv_scaling;
-    }
-    float angle = static_cast<float>(pos) * freq;
-    float cos_val = __cosf(angle);
-    float sin_val = __sinf(angle);
+    float cos_val, sin_val;
+    rope_linear_cos_sin(pos, pair_idx, theta, inv_scaling, rope_pairs, longrope_inv_freqs, cos_val, sin_val);
 
     int64_t base = static_cast<int64_t>(head_idx) * head_dim;
     int idx0 = neox ? pair_idx : (2 * pair_idx);
