@@ -14,8 +14,13 @@
       "pp128": 3285.86,
       "pp512": 8435.03,
       "pp2048": 10731.51,
-      "pp4096": 12974.85
+      "pp4096": 12974.85,
+      "pp8192": 11421.11,
+      "pp16384": 10040.13,
+      "pp32768": 8053.95,
+      "pp65536": 5790.49
     },
+    "_ttft_note": "pp8192..pp65536 pinned 2026-07-16 (#1022 long-context TTFT gate), Qwen3-14B Q6_K single-chunk prefill (--prefill-chunk-size 0), 5 reps, verified-healthy host (mem 13801 MHz / ~570 W); cross-restart spread <0.5% at 32k (large-context prefill is compute/bandwidth-bound, not cuBLAS-algo-volatile like pp512). TTFT ms: 8k=717 / 16k=1632 / 32k=4069 / 64k=11318.",
     "decode_tps": {
       "tg128": 166.00,
       "tg128_at_ctx_2048": 149.54
