@@ -841,10 +841,16 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
             return IMP_SUCCESS;
         }
 
-        // Check if already finished
+        // Check if already finished. FINISHED keeps returning INTERNAL — the
+        // imp_generate loop relies on "INTERNAL + cleared active_request" as
+        // its natural end-of-stream signal. CANCELLED is reported as such:
+        // the engine cancels requests it cannot serve (KV pool exhausted at
+        // decode — the scheduler logs the reason), and surfacing that as a
+        // bare "internal error" hid the cause.
         if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED) {
+            bool cancelled = req->status == imp::RequestStatus::CANCELLED;
             ctx->active_request = nullptr;
-            return IMP_ERROR_INTERNAL;
+            return cancelled ? IMP_ERROR_CANCELLED : IMP_ERROR_INTERNAL;
         }
 
         // Update sampling params on the request for this step
@@ -869,6 +875,15 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         }
 
         if (req->output_tokens.size() <= prev_output_size) {
+            // The engine cancelled the request mid-step (KV pool exhausted at
+            // decode — reject-newest; the scheduler already logged the reason
+            // and freed the sequence). Report CANCELLED, not INTERNAL.
+            if (req->status == imp::RequestStatus::CANCELLED) {
+                ctx->active_request = nullptr;
+                return IMP_ERROR_CANCELLED;
+            }
+            IMP_LOG_ERROR("imp_decode_step: engine produced no token in 8 steps (status=%s, %zu outputs)",
+                          imp::request_status_name(req->status), req->output_tokens.size());
             return IMP_ERROR_INTERNAL;
         }
         ctx->consumed_output = prev_output_size;

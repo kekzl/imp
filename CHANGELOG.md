@@ -5,6 +5,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **Per-layer attention routing for heterogeneous models (Gemma-4 dual
+  head_dim 256/512)** (PR #1042): the coarse model-level `force_cublas`
+  gate is replaced by per-layer dispatch — the hd=256 SWA majority (5:1)
+  rides FA2 f16-QK, hd=512 global layers stay on the faster materialized
+  cuBLAS path, with a new fused WMMA FMHA hd=512 instantiation (Bq=16,
+  Bkv=32, ~82 KB SMEM) as the O(n)-memory terminal fallback. New
+  `attention_cublas_prefill_sliced` serves hd=512 at S-matrix overflow in
+  workspace-sized q-row slices (FP32-S accuracy preserved) — measured
+  3.4–3.9× faster than the whole-chunk fused kernel at Skv 8k/16k — and
+  `max_safe_prefill_chunk` no longer clamps the global chunk size on
+  fused-servable heterogeneous models (Gemma-4 keeps full 2048-row chunks
+  at any context; was ~190-row chunks at 64k). Gemma-4-12B pp16384 +5.3%
+  end-to-end; audit trail in `docs/audit/gemma4_attn_routing_2026_07_16/`.
 - **`gemm.fp8_attn_proj` — FP8 decode sidecar for full-precision attention
   projections** (#984, PR #990): per-row-scale FP8 E4M3 copies of BF16/F16
   wq/wk/wv/wo, decode-only (prefill keeps the full-precision source).
@@ -18,7 +31,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - **Dependency bumps**: CUTLASS v4.5.3 → v4.6.0 (upstream changes are
   CuTe-DSL/Python-centric; measured perf-neutral on sm_120 decode A/B —
-  Qwen3-8B Q8_0 +0.8%, Qwen3-14B NVFP4 −0.5%, within trial spread) and
+  Qwen3-8B Q8_0 +0.8%, Qwen3-14B NVFP4 −0.5%, within trial spread), then
+  v4.6.0 → v4.6.1 (PR #1010: upstream patch release with CuTe-DSL fixes
+  only — no changes to the C++ GEMM collectives imp uses) and
   cpp-httplib v0.48.0 → v0.50.1 (picks up three security fixes: multipart
   `Content-Disposition` header injection, CRLF injection in chunked
   trailers, TLS use-after-free in `SSLClient`/WebSocket teardown — imp-server
@@ -33,6 +48,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   cost of −1.9%/−3.4% decode). Legacy `true`/`false` values still parse.
 
 ### Fixed
+- **KV-pool exhaustion at decode is now diagnosable** (PR #1042): the
+  reject-newest cancel used to be completely silent and surfaced as a bare
+  "internal error" (Gemma-4-12B-NVFP4 at ctx 16384 on a VRAM-clamped
+  16384-token FP16-KV pool). The scheduler now logs the exhaustion (block
+  numbers + remedies) and warns at admission when a prompt leaves less
+  than one KV block of decode headroom; `imp_decode_step` returns
+  `IMP_ERROR_CANCELLED` for engine-cancelled requests instead of
+  `IMP_ERROR_INTERNAL` (natural FINISH keeps the INTERNAL end-of-stream
+  contract).
 - **#998 — n-gram spec decode −39% at moderate context on GGUF K-quants**:
   the verify-chunk forward (M = 2..33) took the M>1 prefill dispatch, which
   dequantizes the full quantized source per GEMM — on Qwen3-14B Q6_K a

@@ -692,6 +692,24 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         return;
     }
 
+    // Admission heads-up: the KV pool is often VRAM-clamped below the requested
+    // max_seq_len. A prompt that fills the pool prefills fine and is then
+    // cancelled on its first block append mid-decode (reject-newest) — flag it
+    // here once, at submit time, where it is actionable. req->max_tokens is NOT
+    // usable here (imp_prefill seeds a 4096 placeholder; decode_step drives the
+    // real stop), so gate on the prompt leaving less than one block of headroom.
+    if (offset == 0 && kv_cache_raw_) {
+        int64_t pool_tokens = static_cast<int64_t>(kv_cache_raw_->total_blocks()) * kv_bs;
+        if (pool_tokens > 0 && total_input > pool_tokens - kv_bs) {
+            IMP_LOG_WARN(
+                "Request %d: prompt (%d tokens) leaves <1 KV block of decode headroom in the "
+                "%lld-token pool (VRAM-clamped) — decode will be cancelled almost immediately. "
+                "Lower max_seq_len, shorten the prompt, or halve KV with kv_cache.dtype=fp8 "
+                "(--kv-fp8).",
+                req->id, total_input, (long long)pool_tokens);
+        }
+    }
+
     // Clamp effective_chunk so the chunked-attention S-matrix cannot overflow
     // (cuBLAS stores an [nh, n, ctx_len] score matrix; n × ctx_len ≤ s_cap²).
     // max_safe_prefill_chunk mirrors the executor dispatch and only clamps
@@ -1295,6 +1313,16 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                 // ran). Reject-newest instead: cancel THIS sequence and leave the
                 // others' KV intact. StreamingLLM auto-enable (above) already
                 // handles the graceful FP16 case before we reach here.
+                // Log loudly: this used to be a silent cancel that surfaced as a
+                // bare "internal error" at the API (Gemma-4-12B at ctx 16384 on a
+                // 1024-block FP16-KV pool cost a debugging session to attribute).
+                int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
+                IMP_LOG_ERROR(
+                    "KV pool exhausted at decode: seq %d needs block %d but the %d-block pool has "
+                    "0 free/reclaimable — cancelling this sequence (others keep their KV). The "
+                    "pool was VRAM-clamped below the requested context; free VRAM, lower "
+                    "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
+                    req->id, blocks_needed, pool_blocks);
                 kv_manager_->free_sequence(req->id);
                 req->status = RequestStatus::CANCELLED;
                 continue;
@@ -1306,6 +1334,10 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         if (swa_sizing_active_) {
             kv_manager_->swa_trim(req->id, ctx_len);
             if (!kv_manager_->swa_prepare(req->id, ctx_len)) {
+                IMP_LOG_ERROR(
+                    "SWA KV sizing failed at decode: seq %d could not prepare its window at "
+                    "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
+                    req->id, ctx_len);
                 kv_manager_->free_sequence(req->id);
                 req->status = RequestStatus::CANCELLED;
                 continue;

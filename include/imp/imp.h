@@ -138,7 +138,11 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens);
 ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
                                  const ImpGenerateParams* params);
 
-// Decode: generate one token
+// Decode: generate one token.
+// Returns IMP_ERROR_CANCELLED when the engine had to cancel the request —
+// e.g. the KV pool is exhausted mid-decode (reject-newest; the engine log
+// names the cause and remedy). IMP_ERROR_INTERNAL after natural FINISH is
+// the end-of-stream signal for callers that keep stepping.
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token);
 
 // Teacher-forced perplexity over tokens[0..n_tokens-1] (eval/bench).

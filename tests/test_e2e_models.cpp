@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "test_models.h"
+#include "compute/attention_cublas.h"  // executed-kernel coverage counter
 
 #include <cstdlib>
 #include <cstring>
@@ -349,6 +350,35 @@ TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
     ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params, output, sizeof(output), &len),
               IMP_SUCCESS);
     EXPECT_GT(len, 0u);
+}
+
+TEST_F(Gemma4ModelTest, PrefillFusesSwaLayers_Hd512StaysCublas) {
+    // Executed-kernel gate (FA2-coverage dispatch): Gemma-4 has a 5:1 SWA:global
+    // layer pattern — ~24 hd=256 SWA layers + ~6 hd=512 global layers (30 total).
+    // After this dispatch the hd=256 SWA layers route to FA2 f16-QK per-layer
+    // (the win — previously the coarse model-level force_cublas gate sent EVERY
+    // layer to cuBLAS). The hd=512 global layers deliberately STAY on the
+    // materialized cuBLAS path: the SMEM-capped fused hd=512 kernel is 2.8-4.6x
+    // slower (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md), so fusing them would regress. So a short prefill must
+    // execute cuBLAS for ONLY the handful of hd=512 layers, not all 30. Checks
+    // the executed kernel (a launch counter), not just the dispatch branch.
+    imp::attention_cublas_prefill_reset_count();
+
+    int32_t tokens[128];
+    int n_tokens = 0;
+    ASSERT_EQ(imp_tokenize(model_, "What is the capital of France?", tokens, &n_tokens, 128), IMP_SUCCESS);
+    ASSERT_GT(n_tokens, 0);
+    ASSERT_EQ(imp_prefill(ctx_, tokens, n_tokens), IMP_SUCCESS);
+
+    uint64_t cublas_calls = imp::attention_cublas_prefill_call_count();
+    // > 0: the hd=512 global layers DO use cuBLAS (the deliberate hybrid).
+    EXPECT_GT(cublas_calls, 0u) << "expected the hd=512 global layers to use cuBLAS";
+    // << 30: the hd=256 SWA layers (the majority) moved OFF cuBLAS to FA2. If the
+    // SWA layers still used cuBLAS (routing regression) this would be ~30.
+    EXPECT_LT(cublas_calls, 15u)
+        << "Gemma-4 prefill used cuBLAS attention " << cublas_calls << " times — expected only the ~6 "
+        << "hd=512 global layers (<15). A value near 30 means the hd=256 SWA layers regressed back "
+        << "onto cuBLAS instead of FA2.";
 }
 
 TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
