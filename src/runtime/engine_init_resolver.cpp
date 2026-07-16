@@ -593,8 +593,11 @@ void Engine::init_resolve_quant_flags_() {
 
 // Auto-detect max_seq_len. Runs AFTER model-specific overrides (Gemma-4
 // forces FP16 KV etc.) so the per-token cost reflects the actual dtype
-// that will be allocated. Conservative cap at 16K; the user can override
-// via runtime.max_seq_len.
+// that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (64K) — bounded
+// further by what VRAM affords and what the model declares. A model that
+// declares MORE than 64K needs an explicit `--max-seq-len` / runtime.max_seq_len
+// override to exceed the auto cap (documented in imp.conf.example); the manual
+// path bypasses the auto resolver entirely (short-circuit below).
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {

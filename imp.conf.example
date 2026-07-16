@@ -74,7 +74,12 @@ decode_pipeline      = true
 # (docs/determinism.md). ON by default; set false in dev/CI where init time
 # matters more than reproducibility.
 warmup               = true
-# Override the model's max_seq_len (0 = use the model default).
+# Override the model's max_seq_len (0 = auto-detect). Auto-detection caps at 64K
+# (bounded further by VRAM and the model's declared context). A model that
+# declares MORE than 64K needs this set explicitly to run past 64K — the auto
+# path never selects above the 64K ceiling. Long-context TTFT grows with the
+# attention math (Qwen3-14B Q6_K measured ~3.7s at 32K, ~10s at 64K), so raise
+# it deliberately for long-transcript / agentic workloads.
 max_seq_len          = 0
 # Hard VRAM budget for this process in MiB (0 = uncapped). Every sizing
 # decision (weight caches, KV clamp, expert offload, workspaces, upload
@@ -111,12 +116,20 @@ bitdecoding_qk              = false
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0
 # SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
-# other layer, gemma-3 5:1 pattern) allocate only the trailing window in a
-# small dedicated block group instead of full-length KV — ~2x more KV tokens
-# on gpt-oss, ~5-6x on gemma-3. Auto-disabled (logged) for models without
-# SWA layers, INT8/INT4 KV, hybrids, MLA, StreamingLLM, green contexts, and
-# deterministic mode; prefix caching is forced off while active (freed
-# window blocks can't back prefix reuse). Default off until validated.
+# other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
+# small dedicated block group instead of full-length KV. The saving grows with
+# the max_seq_len : window ratio — modest at 16K, large at 64K-128K where the
+# fixed window is a small fraction of the context. VALIDATED on Gemma-4-26B
+# (2026-07-16): windowed layers size to the window while the global layers keep
+# full context, so retrieval is intact — a needle placed early in a 3.2K context
+# is still retrieved (the 5 global layers carry it), output stays coherent, and
+# the full max_seq_len fits in VRAM that otherwise capped short.
+# Auto-disabled (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
+# MLA, StreamingLLM, green contexts, and deterministic mode.
+# TRADEOFF — kept OPT-IN: prefix caching is forced off while active (freed
+# window blocks can't back prefix reuse), which costs agentic TTFT on repeated
+# prompts. Enable it for long single-sequence contexts where KV VRAM is the
+# bottleneck; leave it off when the prefix cache earns its keep.
 swa_sizing                  = false
 
 [rope]
