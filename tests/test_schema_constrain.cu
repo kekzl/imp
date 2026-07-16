@@ -702,6 +702,73 @@ TEST(SchemaConstrainTest, ToolCallStrictOptionalEnforced) {
     EXPECT_FALSE(at_done[free_id]) << "no trailing free text after the close literal";
 }
 
+// parallel_tool_calls (#1002): in strict optional mode with allow_parallel, the
+// gate RE-ARMS after each tool-call body instead of forcing EOS — the model may
+// emit a second `<tool_call>` (fresh body FSM) or stop.
+TEST(SchemaConstrainTest, ToolCallStrictParallelReArms) {
+    SKIP_IF_NO_CUDA();
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    std::string chars = "{\"name:d,rgus1}\n</tol_c>x";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    const int opener_id = static_cast<int>(toks.size());
+    toks.push_back("<tool_call>");
+    const int free_id = static_cast<int>(toks.size());
+    toks.push_back("FREE");
+    auto id = [&](char c) {
+        for (size_t i = 3; i < 3 + chars.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"add", R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})"},
+    };
+    auto schema = build_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.set_strict_optional_envelope(true);
+    sc.set_allow_parallel(true);
+    sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
+                               /*thinking_open=*/false, /*strict_tool=*/true);
+    sc.reset();
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    // First call: open → body → close literal.
+    sc.update(opener_id);
+    feed("\n{\"name\":\"add\",\"arguments\":{\"d\":1}}\n</tool_call>");
+
+    // Re-armed: the gate is ACTIVE again (mask off) — NOT a forced EOS. Free
+    // text, EOS, and another opener are all legal now.
+    auto at_between = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_between[free_id]) << "after a call the model may emit more (parallel)";
+    EXPECT_TRUE(at_between[2]) << "EOS is also legal — the model may stop";
+
+    // Second call opens → the body FSM engages a fresh frame.
+    sc.update(opener_id);
+    sc.update(id('\n'));
+    auto at_body2 = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_body2[id('{')]) << "second tool-call body must open with '{'";
+    EXPECT_FALSE(at_body2[id('x')]) << "second body is FSM-constrained too";
+    EXPECT_FALSE(at_body2[free_id]) << "free text masked inside the second body";
+
+    feed("{\"name\":\"add\",\"arguments\":{\"d\":1}}\n</tool_call>");
+    // Re-armed once more → EOS still legal to finish.
+    auto at_end = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_end[2]) << "EOS legal after the second call";
+}
+
 // ---------------------------------------------------------------------------
 // $ref / $defs (issue #555) — pydantic/zod emit $defs+$ref for EVERY nested
 // model, so this is the agent-framework path, not an exotic corner.

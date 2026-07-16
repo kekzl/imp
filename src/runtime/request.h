@@ -179,6 +179,9 @@ struct Request {
     // envelope is NOT forced — the model may answer in text, but IF it opens the
     // tool tag the body FSM enforces the arguments. false = forced (mandatory).
     bool tool_constraint_optional = false;
+    // parallel_tool_calls (strict optional only): true = the gate re-arms after
+    // each enforced call so the model may emit several; false = at most one.
+    bool tool_constraint_parallel = true;
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;

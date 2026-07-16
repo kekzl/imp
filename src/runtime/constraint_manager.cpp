@@ -195,7 +195,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                                           const std::string& envelope_open, const std::string& envelope_close,
                                           Tokenizer* tokenizer, bool thinking_open, bool optional,
-                                          ChatTemplateFamily tpl_family) {
+                                          ChatTemplateFamily tpl_family, bool parallel) {
     active_json_ = false;
     active_schema_ = false;
 
@@ -251,6 +251,9 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     }
     schema_constrainer_->set_envelope(envelope_open, envelope_close);
     schema_constrainer_->set_strict_optional_envelope(optional);
+    // parallel_tool_calls only re-arms in strict optional mode; forced calls
+    // remain single (their gate is not tool-aware, so re-arm never fires).
+    schema_constrainer_->set_allow_parallel(optional && parallel);
     if (optional) {
         schema_constrainer_->set_preamble_with_tools(think_close, preamble_budget, dialect.open_tokens,
                                                      dialect.close_tokens, dialect.open_prefix,

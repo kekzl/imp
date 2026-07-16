@@ -567,6 +567,13 @@ void SchemaConstrainer::update(int32_t token) {
         if (!sim_advance(stack_, c))
             break;  // illegal char (mask should have prevented this) — stop early
     }
+    // parallel_tool_calls (#1002): a strict tool-call body just drained the
+    // stack (envelope close consumed). Instead of forcing EOS, re-arm the gate
+    // so the model may open another `<tool_call>` (fresh body FSM) or stop.
+    if (strict_optional_envelope_ && allow_parallel_ && stack_.empty() && preamble_.in_tool_args()) {
+        preamble_.rearm_after_call();
+        return;
+    }
     if (!stack_.empty()) {
         IMP_LOG_DEBUG("SchemaConstrainer::update token=%d [%s] phase %d->%d stack=%zu", token, text.c_str(),
                       std::to_underlying(before), std::to_underlying(top().phase), stack_.size());

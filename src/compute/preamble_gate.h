@@ -113,6 +113,16 @@ public:
     // frame on the ACTIVE → TOOL_ARGS transition.
     bool in_tool_args() const noexcept { return state_ == State::TOOL_ARGS; }
 
+    // Re-arm after a strict tool-call body completed, for parallel_tool_calls
+    // (#1002): TOOL_ARGS → ACTIVE so free text / EOS / another tool opener all
+    // pass again, and a following `<tool_call>` engages a fresh body FSM. The
+    // preamble budget restarts (a fresh slack window for the inter-call gap).
+    void rearm_after_call() noexcept {
+        state_ = State::ACTIVE;
+        seen_ = 0;
+        char_buf_.clear();
+    }
+
     // Returns true if the token was fully consumed by the gate (FSM should
     // NOT process it). Returns false only for the one transition where
     // the token must be forwarded to the FSM: ACTIVE → OFF via `{` or `[`.
