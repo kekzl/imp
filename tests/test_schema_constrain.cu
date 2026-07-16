@@ -725,65 +725,6 @@ TEST(SchemaConstrainTest, RawControlCharInStringMasked) {
     EXPECT_FALSE(a[8]) << "'\"<newline>' must be masked — raw control char inside a string";
 }
 
-TEST(JsonConstrainTest, RawControlCharInStringMasked) {
-    SKIP_IF_NO_CUDA();
-
-    //          0        1      2       3    4     5      6
-    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "\"\n", "\"ok"};
-    std::vector<float> scores(toks.size(), 0.0f);
-    Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
-
-    JsonConstrainer jc;
-    ASSERT_TRUE(jc.init(tok));
-    jc.update(3);  // '{' → OBJECT_START, next token may open a key string
-
-    const int vocab = static_cast<int>(toks.size());
-    std::vector<float> h(vocab, 1.0f);
-    float* d = nullptr;
-    cudaMalloc(&d, vocab * sizeof(float));
-    cudaMemcpy(d, h.data(), vocab * sizeof(float), cudaMemcpyHostToDevice);
-    jc.apply_mask(d, vocab, 0);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h.data(), d, vocab * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d);
-
-    EXPECT_GT(h[6], -1e30f) << "'\"ok' (quote + printable key chars) must be allowed";
-    EXPECT_FLOAT_EQ(h[5], -FLT_MAX) << "'\"<newline>' must be masked — raw control char in string";
-}
-
-TEST(JsonConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
-    SKIP_IF_NO_CUDA();
-
-    //          0        1      2       3    4     5    6
-    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "}", "0"};
-    std::vector<float> scores(toks.size(), 0.0f);
-    Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
-
-    JsonConstrainer jc;
-    ASSERT_TRUE(jc.init(tok));
-
-    const int tok_vocab = static_cast<int>(toks.size());
-    const int model_vocab = tok_vocab + 9;  // simulated lm_head padding rows
-
-    std::vector<float> h(model_vocab, 1.0f);
-    float* d = nullptr;
-    cudaMalloc(&d, model_vocab * sizeof(float));
-    cudaMemcpy(d, h.data(), model_vocab * sizeof(float), cudaMemcpyHostToDevice);
-    jc.apply_mask(d, model_vocab, 0);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h.data(), d, model_vocab * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaFree(d);
-
-    // '{' starts a JSON document — must stay alive.
-    EXPECT_GT(h[3], -1e30f) << "'{' must be allowed at document start";
-    // Every padding id (no tokenizer entry) must be masked.
-    for (int i = tok_vocab; i < model_vocab; i++) {
-        EXPECT_FLOAT_EQ(h[i], -FLT_MAX) << "padding id " << i << " leaked through the json mask";
-    }
-}
-
 TEST(SchemaConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     SKIP_IF_NO_CUDA();
 

@@ -347,12 +347,12 @@ TEST(CudaGraphRunnerTest, NoDecodeFn) {
 // PDL Tests
 // ============================================================================
 
-// 14. PDL is_available check (doesn't crash)
+// 14. PDL is_available check: must not crash and must be deterministic
 TEST(PDLTest, IsAvailableCheck) {
-    // Just check it doesn't crash; result depends on hardware
+    // Result depends on hardware/CUDA, but repeated calls must agree — a
+    // non-deterministic capability probe would make PDL dispatch flaky.
     bool avail = pdl::is_available();
-    (void)avail;
-    EXPECT_TRUE(true);
+    EXPECT_EQ(avail, pdl::is_available()) << "is_available() must be deterministic";
 }
 
 // 15. PDL enable/disable on kernel (doesn't crash)
@@ -383,11 +383,13 @@ TEST(PDLTest, EnableDisableKernel) {
     cudaFree(d_data);
 }
 
-// 16. PDL enable with null is safe
+// 16. PDL enable with null is safe: a no-op that must not corrupt PDL state
 TEST(PDLTest, EnableNullSafe) {
+    const bool before = pdl::is_available();
     pdl::enable(nullptr);
     pdl::disable(nullptr);
-    EXPECT_TRUE(true);
+    EXPECT_FALSE(pdl::is_enabled(nullptr)) << "null kernel must never register as PDL-enabled";
+    EXPECT_EQ(pdl::is_available(), before) << "null enable/disable must not change PDL availability";
 }
 
 // 17. ScopedPDL RAII
