@@ -664,6 +664,7 @@ if(IMP_BUILD_TESTS)
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu
+        tests/test_tool_call_constrain.cu
     )
 
     imp_add_test_module(test-e2e WITH_STUB SOURCES
