@@ -1,0 +1,16 @@
+# Harness image for the #1007 stage-2 EXTERNAL agent gate: a real third-party
+# coding agent (aider) driving imp-server over the OpenAI dialect. Kept separate
+# from the runtime image (which ships no Python) so the gate is self-contained;
+# deps are baked at build time (network available then) so the test run is offline.
+#
+# Build:  docker build -f tools/Dockerfile.agents -t imp:agents tools/
+# Usage:  see the `test-agents-external` Makefile target.
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# aider-chat speaks OpenAI-compatible bases via litellm. Pin a known-good line.
+RUN pip install --no-cache-dir "aider-chat==0.86.1"
+
+WORKDIR /work

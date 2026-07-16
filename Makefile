@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -145,7 +145,18 @@ test-agents: build check-gpu
 	@echo "waiting for server..."; \
 	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
 	trap 'docker rm -f imp-agent-suite >/dev/null 2>&1' EXIT; \
-	python3 tools/analysis/agent_loop_suite.py --url http://localhost:8080
+	echo "--- stage 1: wire-conformance (forced flows, 3 dialects) ---"; \
+	python3 tools/analysis/agent_loop_suite.py --url http://localhost:8080; \
+	echo "--- stage 2: real model-driven loop (auto tool_choice, real tools) ---"; \
+	python3 tools/analysis/agent_task_loop.py --url http://localhost:8080 --model $(AGENTIC_MODEL)
+
+# #1007 stage-2 EXTERNAL gate (opt-in): a real third-party coding agent (aider)
+# driving imp-server through a genuine edit loop — proves the whole loop survives
+# an ACTUAL agent binary. Heavier than `test-agents` (builds a harness image with
+# aider baked in, uses --network host), so it is a separate opt-in target rather
+# than part of the default agent battery. GPU + local model.
+test-agents-external: build check-gpu
+	bash tools/analysis/agent_external_smoke.sh $(AGENTIC_MODEL) 8080
 
 # Golden output comparison (greedy, temp=0)
 test-golden: build
